@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 mod e2e_support;
 mod keychain_support;
 
+#[path = "snapshot_v242/caseless.rs"]
+mod caseless;
 #[path = "snapshot_v242/check.rs"]
 mod check;
 #[path = "snapshot_v242/harness.rs"]
@@ -196,9 +198,10 @@ const OWNER_HOME_NAMES: [&str; 20] = [
 ];
 
 /// The placeholders the normalisation writes; `<path-` and `<id-` take a number and `>`.
-const PLACEHOLDERS: [&str; 8] = [
+const PLACEHOLDERS: [&str; 9] = [
     "<owner-home>",
     "<temp>",
+    "<keychain-lock>",
     "<t>",
     "<pid>",
     "<port>",
@@ -322,8 +325,9 @@ impl Masks {
         }
     }
 
-    /// Masks one string: line endings to LF, then temp paths, the owner home, RFC 3339 times,
-    /// ids, ports and tmux pane ids. Input: the raw string. Output: the masked string.
+    /// Masks one string: line endings to LF, then temp paths, the owner home, the same in a
+    /// Seatbelt rule's caseless spelling, keychain lock files, RFC 3339 times, ids, ports and
+    /// tmux pane ids. Input: the raw string. Output: the masked string.
     fn text(&mut self, raw: &str) -> String {
         let lf = raw.replace("\r\n", "\n").replace('\r', "\n");
         let groups = &self.temp_groups;
@@ -335,7 +339,10 @@ impl Masks {
                 return (0, "<temp>".to_owned());
             }
             let entry = format!("{}/{}", groups[which], &tail[..entry_len]);
-            (1 + entry_len, format!("<path-{}>", number(paths, &entry)))
+            (
+                1 + entry_len,
+                format!("<path-{}>", number(paths, &entry.to_ascii_lowercase())),
+            )
         });
         let marks = &self.parent_marks;
         let parented = replace_folders(&pathed, &self.parent_spellings, |which, _| {
@@ -344,7 +351,9 @@ impl Masks {
         let homed = replace_folders(&parented, &self.homes, |_, _| {
             (0, "<owner-home>".to_owned())
         });
-        let timed = replace_matches(&homed, |rest| {
+        let folded = self.caseless(&homed);
+        let locked = replace_matches(&folded, keychain_lock_len);
+        let timed = replace_matches(&locked, |rest| {
             rfc3339_len(rest.as_bytes()).map(|len| (len, "<t>".to_owned()))
         });
         let ids = &mut self.ids;
@@ -360,6 +369,83 @@ impl Masks {
         let ported = replace_matches(&named, port_len);
         replace_matches(&ported, pane_len)
     }
+
+    /// Masks the temp folders, their per-user parents and the owner home where a Seatbelt
+    /// rule spells them in any letter case ([`caseless::unspell`]), with the placeholders the
+    /// plain spellings get, a temp entry numbered as its plain spelling is. Input: text the
+    /// plain passes masked. Output: the text with each caseless spelling masked.
+    fn caseless(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut index = 0;
+        while index < text.len() {
+            let rest = &text[index..];
+            let start = rest.starts_with('/')
+                && !out.chars().next_back().is_some_and(caseless::inside_path);
+            if let Some((taken, placeholder)) = start.then(|| self.caseless_at(rest)).flatten() {
+                assert!(taken > 0 && rest.is_char_boundary(taken));
+                out.push_str(&placeholder);
+                index += taken;
+                continue;
+            }
+            let next = rest.chars().next().expect("index is on a char boundary");
+            out.push(next);
+            index += next.len_utf8();
+        }
+        out
+    }
+
+    /// Reads a caseless spelling of a masked folder at the start of `rest`, longest first:
+    /// a temp folder with its entry, a temp parent, then the owner home. Input: text starting
+    /// with `/`. Output: the bytes it takes and its placeholder, or none.
+    fn caseless_at(&mut self, rest: &str) -> Option<(usize, String)> {
+        let read = caseless::unspell(rest);
+        if !read.folded {
+            return None;
+        }
+        let plain: String = read.plain.iter().collect();
+        let names = |spelling: &str| {
+            let spelling = spelling.to_ascii_lowercase();
+            let tail = plain.strip_prefix(spelling.as_str())?;
+            (tail.is_empty() || tail.starts_with('/')).then_some(spelling.len())
+        };
+        let taken = |chars: usize| read.ends[chars - 1];
+        for (which, spelling) in self.temp_spellings.iter().enumerate() {
+            let Some(len) = names(spelling) else {
+                continue;
+            };
+            assert!(plain.is_char_boundary(len) && plain[..len].is_ascii());
+            let tail = plain[len..].strip_prefix('/').unwrap_or("");
+            let entry_len = tail.find(|c: char| !path_char(c)).unwrap_or(tail.len());
+            if entry_len == 0 {
+                return Some((taken(len), "<temp>".to_owned()));
+            }
+            let entry = format!("{}/{}", self.temp_groups[which], &tail[..entry_len]);
+            let number = number(&mut self.paths, &entry.to_ascii_lowercase());
+            return Some((taken(len + 1 + entry_len), format!("<path-{number}>")));
+        }
+        for (spelling, mark) in self.parent_spellings.iter().zip(&self.parent_marks) {
+            if let Some(len) = names(spelling) {
+                return Some((taken(len), mark.clone()));
+            }
+        }
+        let home = self.homes.iter().find_map(|home| names(home))?;
+        Some((taken(home), "<owner-home>".to_owned()))
+    }
+}
+
+/// Reads a keychain lock file below `Library/Keychains/`, `.fl` and 8 hex digits that differ
+/// on every run, at the start of a string. Input: the rest of the string. Output: the matched
+/// length and the folder with `<keychain-lock>` for the file, or none.
+fn keychain_lock_len(rest: &str) -> Option<(usize, String)> {
+    const FOLDER: &str = "Library/Keychains/";
+    let name = rest.strip_prefix(FOLDER)?.strip_prefix(".fl")?;
+    let digits = name.bytes().take_while(u8::is_ascii_hexdigit).count();
+    (digits == 8 && !name[digits..].starts_with(path_char)).then(|| {
+        (
+            FOLDER.len() + 3 + digits,
+            format!("{FOLDER}<keychain-lock>"),
+        )
+    })
 }
 
 /// The per-user folders above the temp folder that differ on every Mac and user: each parent
@@ -708,6 +794,9 @@ fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<
         {
             return Err("holds a user path".to_owned());
         }
+    }
+    if let Some(kind) = caseless::private(text) {
+        return Err(kind);
     }
     for (start, _) in text.match_indices("<owner-home>/") {
         let below = &text[start + "<owner-home>/".len()..];
@@ -1179,6 +1268,38 @@ fn engine_temp_paths_the_owner_home_and_pane_ids_are_masked() {
         normalise(&capture).unwrap(),
         "{\n  \"deny\": [\n    \"<owner-home>/.ssh\"\n  ],\n  \"engine\": \"<path-1>/projects/app\",\n  \"pane\": \"<pane>\",\n  \"percent\": \"50%12 and 100%\",\n  \"short\": \"<path-1>/projects\",\n  \"tmp_whole\": \"<temp>\"\n}\n"
     );
+}
+
+#[test]
+fn a_keychain_lock_file_reads_as_one_mark_and_other_keychain_files_stay() {
+    let files = |lock: &str| {
+        normalise(&json!({"files": [
+            format!("Library/Keychains/.fl{lock}"),
+            "Library/Keychains/login.keychain-db",
+            "Library/Keychains/.flAB69C6F5x",
+            "Library/Keychains/.flAB69C6F",
+        ]}))
+        .unwrap()
+    };
+    let first = files("AB69C6F5");
+    assert!(
+        first.contains("\"Library/Keychains/<keychain-lock>\""),
+        "{first}"
+    );
+    assert!(
+        first.contains("\"Library/Keychains/login.keychain-db\""),
+        "{first}"
+    );
+    assert!(
+        first.contains("\"Library/Keychains/.flAB69C6F5x\""),
+        "{first}"
+    );
+    assert!(
+        first.contains("\"Library/Keychains/.flAB69C6F\""),
+        "{first}"
+    );
+    assert_eq!(compare(first.as_bytes(), &files("1217E02B")), Ok(()));
+    assert_eq!(without_placeholders("<keychain-lock>"), " ");
 }
 
 #[test]

@@ -406,29 +406,40 @@ fn agent_change(
 
 /// Commits what is staged in an agent's clone the way the engine's agents commit, under the
 /// owner's identity the engine gives them, which Landing Merge requires of every carried
-/// commit, with the same git isolation as `e2e_support::git`. Inputs: the clone and the
-/// message. Output: nothing, or how git failed.
+/// commit. Inputs: the clone and the message. Output: nothing, or how git failed.
 fn agent_commit(worktree: &Path, message: &str) -> Result<(), String> {
+    owner_git(worktree, &["commit", "--quiet", "-m", message], None)
+        .map_err(|error| format!("the agent commit failed: {error}"))
+}
+
+/// Runs git under the owner's identity the engine gives its agents, with the same git
+/// isolation as `e2e_support::git`, and at a fixed author and commit date when one is given.
+/// Inputs: the folder, the git arguments and the date. Output: nothing, or how git failed.
+fn owner_git(folder: &Path, args: &[&str], date: Option<&str>) -> Result<(), String> {
     assert!(OWNER_GIT.contains(OWNER_NAME) && OWNER_GIT.contains(OWNER_EMAIL));
-    let output = crazyagent::spawn_gate::output(
-        std::process::Command::new("git")
-            .args(["commit", "--quiet", "-m", message])
-            .current_dir(worktree)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_AUTHOR_NAME", OWNER_NAME)
-            .env("GIT_AUTHOR_EMAIL", OWNER_EMAIL)
-            .env("GIT_COMMITTER_NAME", OWNER_NAME)
-            .env("GIT_COMMITTER_EMAIL", OWNER_EMAIL)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .map_err(text)?;
+    let mut command = std::process::Command::new("git");
+    command
+        .args(args)
+        .current_dir(folder)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", OWNER_NAME)
+        .env("GIT_AUTHOR_EMAIL", OWNER_EMAIL)
+        .env("GIT_COMMITTER_NAME", OWNER_NAME)
+        .env("GIT_COMMITTER_EMAIL", OWNER_EMAIL)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(date) = date {
+        command
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date);
+    }
+    let output = crazyagent::spawn_gate::output(&mut command).map_err(text)?;
     match output.status.success() {
         true => Ok(()),
-        false => Err(format!("the agent commit failed: {}", output.status)),
+        false => Err(format!("git {} gave {}", args[0], output.status)),
     }
 }
 
@@ -445,6 +456,30 @@ fn the_fixture_agent_commits_under_the_owner_identity_the_engine_reads() {
     );
     let owner = format!("{OWNER_NAME} <{OWNER_EMAIL}>");
     assert_eq!(shown.trim_end(), format!("{owner}|{owner}"));
+}
+
+#[test]
+fn a_merge_whose_parents_share_a_second_lists_the_agent_commit_before_the_base() {
+    let checkout = e2e_support::scratch("ca-p4-order-");
+    let folder = checkout.path();
+    let git = |args: &[&str]| owner_git(folder, args, Some("2026-01-01T00:00:00Z")).unwrap();
+    git(&["init", "--quiet", "-b", "main"]);
+    fs::write(folder.join("README"), README).unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "first"]);
+    git(&["checkout", "--quiet", "-b", "agent"]);
+    fs::write(folder.join("README"), "one\ntwo tides\nthree\n").unwrap();
+    git(&["commit", "--quiet", "-am", "Agent: tide fix"]);
+    git(&["checkout", "--quiet", "main"]);
+    git(&["merge", "--quiet", "--no-ff", "-m", "Merge agent", "agent"]);
+    let view = branch_view(folder, "main");
+    let subjects: Vec<&str> = view["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|commit| commit["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(subjects, ["Merge agent", "Agent: tide fix", "first"]);
 }
 
 /// Records one agent change set on the stopped engine's store, closing the store before the
@@ -466,12 +501,18 @@ fn decision(outcome: &AcceptOutcome) -> Value {
 }
 
 /// Reads a branch as git keeps it: each commit's parents, author, subject and body, newest
-/// first, and every file at its tip with its text. Inputs: the checkout and the branch.
-/// Output: the branch view.
+/// first in topological order, so no commit is listed before one that descends from it
+/// whatever second each was made in, and every file at its tip with its text. Inputs: the
+/// checkout and the branch. Output: the branch view.
 fn branch_view(checkout: &Path, branch: &str) -> Value {
     let log = stdout(
         checkout,
-        &["log", "--format=%P%x1f%an <%ae>%x1f%s%x1f%b%x1e", branch],
+        &[
+            "log",
+            "--topo-order",
+            "--format=%P%x1f%an <%ae>%x1f%s%x1f%b%x1e",
+            branch,
+        ],
     );
     let commits: Vec<Value> = log
         .split('\x1e')

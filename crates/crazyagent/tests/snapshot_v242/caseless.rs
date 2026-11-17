@@ -1,0 +1,269 @@
+use super::normalise;
+use serde_json::json;
+
+/// One run of Seatbelt caseless pattern text read back as the plain path it spells, the way
+/// 2.4.2's `any_case` (sandbox.rs) writes one: the lowercase characters, and for each the byte
+/// length of pattern read up to the end of the token that spelled it.
+pub(super) struct Unspelled {
+    pub(super) plain: Vec<char>,
+    pub(super) ends: Vec<usize>,
+    pub(super) folded: bool,
+}
+
+/// Reads the caseless pattern at the start of `text` back to plain lowercase text, token by
+/// token: a letter class `[sS]`, a group whose first alternative spells it letter by letter
+/// (`(s|S|ſ)`, `((s|S|ſ)[tT]|ﬅ|ﬆ)`), an escaped character or a plain path character. It
+/// stops before a token it cannot read or one a quantifier follows, so the superset form and
+/// `(/.*)?` end a run. Input: the pattern text. Output: what it read; `folded` is true when a
+/// class or a group was among it.
+pub(super) fn unspell(text: &str) -> Unspelled {
+    let mut read = Unspelled {
+        plain: Vec::new(),
+        ends: Vec::new(),
+        folded: false,
+    };
+    let mut at = 0;
+    while let Some((plain, end, folded)) = token(text, at) {
+        if text[end..].starts_with(['?', '*', '+', '{']) {
+            break;
+        }
+        read.ends.extend(std::iter::repeat_n(end, plain.len()));
+        read.plain.extend(plain);
+        read.folded |= folded;
+        at = end;
+    }
+    assert_eq!(read.plain.len(), read.ends.len());
+    assert!(read.ends.windows(2).all(|pair| pair[0] <= pair[1]));
+    read
+}
+
+/// Reads one token of caseless pattern text at byte `at`. Inputs: the text and the place.
+/// Output: the plain lowercase characters it spells, where it ends and whether it was a class
+/// or a group, or none when no readable token starts there.
+fn token(text: &str, at: usize) -> Option<(Vec<char>, usize, bool)> {
+    let rest = &text[at..];
+    match rest.chars().next()? {
+        '[' => {
+            let close = rest.find(']')?;
+            let class = &rest[1..close];
+            let letter = class.chars().next()?;
+            let same = class
+                .chars()
+                .all(|c| c.is_ascii_alphabetic() && c.eq_ignore_ascii_case(&letter));
+            (class.len() >= 2 && same)
+                .then(|| (vec![letter.to_ascii_lowercase()], at + close + 1, true))
+        }
+        '(' => {
+            let close = group_end(rest)?;
+            let first = first_alternative(&rest[1..close]);
+            let read = unspell(first);
+            let whole = !read.plain.is_empty() && read.ends.last() == Some(&first.len());
+            whole.then(|| (read.plain, at + close + 1, true))
+        }
+        '\\' => {
+            let next = rest[1..].chars().next()?;
+            Some((
+                vec![next.to_ascii_lowercase()],
+                at + 1 + next.len_utf8(),
+                false,
+            ))
+        }
+        c if c.is_ascii_alphanumeric() || "/_-~@".contains(c) => {
+            Some((vec![c.to_ascii_lowercase()], at + 1, false))
+        }
+        _ => None,
+    }
+}
+
+/// Finds the `)` that closes the group a string starts with, skipping escapes and letter
+/// classes. Input: text starting with `(`. Output: the closing byte offset, or none.
+fn group_end(text: &str) -> Option<usize> {
+    assert!(text.starts_with('('));
+    let mut depth = 0usize;
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next()?;
+            }
+            '[' => {
+                chars.find(|(_, c)| *c == ']')?;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The first top-level alternative inside a group. Input: the text between the parentheses.
+/// Output: the text before the first `|` no nested group or class holds.
+fn first_alternative(inner: &str) -> &str {
+    let mut depth = 0usize;
+    let mut chars = inner.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '[' => {
+                chars.find(|(_, c)| *c == ']');
+            }
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => return &inner[..at],
+            _ => {}
+        }
+    }
+    inner
+}
+
+/// Says whether a character ends a token inside a caseless run or a placeholder, so a `/`
+/// after it continues a path rather than starting one. Input: the character before the `/`.
+/// Output: true when the `/` is inside a path.
+pub(super) fn inside_path(before: char) -> bool {
+    super::path_char(before) || matches!(before, ']' | ')' | '>')
+}
+
+/// Finds a caseless spelling that still names a user folder or a path below a temp folder
+/// once read back, the per-user temp parents below /var/folders included, which the plain
+/// checks cannot see. Input: the text. Output: the kind of path it holds, never the path,
+/// or none.
+pub(super) fn private(text: &str) -> Option<String> {
+    for (at, _) in text.match_indices('/') {
+        if text[..at].chars().next_back().is_some_and(inside_path) {
+            continue;
+        }
+        let read = unspell(&text[at..]);
+        if !read.folded {
+            continue;
+        }
+        let plain: String = read.plain.iter().collect();
+        if ["/users/", "/home/"]
+            .iter()
+            .any(|folder| plain.starts_with(folder))
+        {
+            return Some("holds a user path in caseless spelling".to_owned());
+        }
+        if [
+            "/private/var/folders/",
+            "/var/folders/",
+            "/private/tmp/",
+            "/tmp/",
+        ]
+        .iter()
+        .any(|folder| plain.len() > folder.len() && plain.starts_with(folder))
+        {
+            return Some("holds a temp path in caseless spelling".to_owned());
+        }
+    }
+    None
+}
+
+/// Spells a plain path as 2.4.2's `any_case` does for the letters these rows use: a letter
+/// class, `s`, `k` and `i` as their groups, `st` as its fold group and `.` escaped.
+/// Input: the path. Output: the pattern.
+fn spell(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    let mut pattern = String::new();
+    let mut at = 0;
+    while at < path.len() {
+        let c = path.as_bytes()[at] as char;
+        if lower[at..].starts_with("st") {
+            pattern.push_str("((s|S|ſ)[tT]|ﬅ|ﬆ)");
+            at += 2;
+            continue;
+        }
+        match c.to_ascii_lowercase() {
+            's' => pattern.push_str("(s|S|ſ)"),
+            'k' => pattern.push_str("(k|K|K)"),
+            'i' => pattern.push_str("(i|I|ı)"),
+            '.' => pattern.push_str("\\."),
+            l if l.is_ascii_alphabetic() => {
+                pattern.push_str(&format!("[{l}{}]", l.to_ascii_uppercase()))
+            }
+            other => pattern.push(other),
+        }
+        at += 1;
+    }
+    pattern
+}
+
+#[test]
+fn a_caseless_rule_reads_back_and_stops_at_a_quantified_group() {
+    let read = unspell("((s|S|ſ)[tT]|ﬅ|ﬆ)[aA]\\.[kK]9(/.*)?$");
+    assert_eq!(read.plain.iter().collect::<String>(), "sta.k9");
+    assert!(read.folded);
+    assert_eq!(
+        read.ends.last(),
+        Some(&"((s|S|ſ)[tT]|ﬅ|ﬆ)[aA]\\.[kK]9".len())
+    );
+    let superset = "/[aA]((s|S|ſ)|ß)((s|S|ſ)|ß)?";
+    assert_eq!(unspell(superset).plain.iter().collect::<String>(), "/as");
+    assert!(!unspell("/plain/path").folded);
+    assert_eq!(spell("/Ab.st"), "/[aA][bB]\\.((s|S|ſ)[tT]|ﬅ|ﬆ)");
+}
+
+#[test]
+fn the_temp_folder_in_caseless_spelling_reads_as_its_plain_placeholders() {
+    let real = std::env::temp_dir().canonicalize().unwrap();
+    let real = real.to_string_lossy();
+    let entry = ".tmpAb12st";
+    let rule = format!(
+        "(regex #\"^({})?{}/{}/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)/.+\")",
+        spell("/System/Volumes/Data"),
+        spell(&real),
+        spell(entry)
+    );
+    let text = normalise(&json!({
+        "a_plain": format!("{real}/{entry}/projects"),
+        "b_rule": rule,
+    }))
+    .unwrap();
+    assert!(text.contains("\"<path-1>/projects\""), "{text}");
+    assert!(
+        text.contains("<path-1>/[pP][rR][oO][jJ][eE][cC][tT](s|S|ſ)/.+"),
+        "{text}"
+    );
+    assert!(!text.contains("[fF][oO][lL][dD]"), "{text}");
+    assert_eq!(private(&text), None);
+    assert_eq!(
+        private(&rule).is_some(),
+        real.starts_with("/private/var/folders/")
+    );
+}
+
+#[test]
+fn a_caseless_user_or_per_user_temp_path_is_refused_and_a_masked_one_is_not() {
+    let names = (Some("/Users/owner"), Some("owner"));
+    for leak in [
+        format!("\"^{}/x\"", spell("/Users/someone")),
+        format!(
+            "\"^({})?{}\"",
+            spell("/System/Volumes/Data"),
+            spell("/private/var/folders/_c/ab12/T")
+        ),
+        format!("\"{}((s|S|ſ)|ß)?\"", spell("/var/folders/ab")),
+        format!("\"^{}/.+\"", spell("/private/tmp/ca-p5-home-Ab12")),
+    ] {
+        assert!(private(&leak).is_some(), "{leak}");
+        assert!(
+            super::refuse_private(&leak, names.0, names.1).is_err(),
+            "{leak}"
+        );
+    }
+    for clean in [
+        format!("\"<path-1>{}\"", spell("/home/x")),
+        format!("\"{}\"", spell("/private/var/folders")),
+        format!("\"{}\"", spell("/Applications/Xcode.app")),
+        "\"/Users-like plain text\"".to_owned(),
+    ] {
+        assert_eq!(private(&clean), None, "{clean}");
+    }
+}
