@@ -1,6 +1,6 @@
 use super::settings::draw_page;
 use super::settings_accounts::{Accounts, plain, provider_word, send, settings_event};
-use super::settings_harnesses::{last_line, plain_update, refusal};
+use super::settings_harnesses::{last_line, plain_update, refusal, running_line};
 use super::{Flow, Screen, SettingsSection};
 use crate::accounts::{
     AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry,
@@ -1963,26 +1963,35 @@ pub(super) enum UpdateOffer {
     Nothing,
 }
 
+/// What the too-old panel says while the harness's update runs: the harness whose job it
+/// waits behind, named from the catalog as Settings, Harnesses names it, else that it updates.
+/// Inputs: the harness name and its versions row. Output: the sentence.
+pub(super) fn update_running_line(harness: &str, versions: Option<&HarnessVersions>) -> String {
+    let waits = versions
+        .and_then(|versions| versions.waiting.as_deref())
+        .map(|id| crate::harnesses::spec(id).map_or(id, |spec| spec.name));
+    running_line(waits, &format!("Updating {harness}..."))
+}
+
+/// The reads of a running update the too-old panel has used after a fresh read: none once the
+/// job it waits behind changed, so each wait and the update's own run get their own reads.
+/// Inputs: the reads used, the row before and the fresh row. Output: the reads used.
+pub(super) fn follow_polls(
+    polls: u32,
+    before: Option<&HarnessVersions>,
+    after: &HarnessVersions,
+) -> u32 {
+    if before.is_some_and(|before| before.waiting != after.waiting) {
+        0
+    } else {
+        polls
+    }
+}
+
 /// Picks the too-old panel's update offer as Settings, Harnesses would: Update where updates
 /// may run and the harness has an update line, else that line to run in Terminal, else why it
 /// can't be updated here. Inputs: the versions row and update mode, None until read.
 /// Output: the offer.
-/// What the too-old panel says while the harness's update runs. Inputs: the harness name and
-/// its versions row. Output: the sentence.
-pub(super) fn update_running_line(harness: &str, _versions: Option<&HarnessVersions>) -> String {
-    format!("Updating {harness}...")
-}
-
-/// The reads of a running update the too-old panel has used after a fresh read. Inputs: the
-/// reads used, the row before and the fresh row. Output: the reads used.
-pub(super) fn follow_polls(
-    polls: u32,
-    _before: Option<&HarnessVersions>,
-    _after: &HarnessVersions,
-) -> u32 {
-    polls
-}
-
 pub(super) fn update_offer(
     versions: Option<&HarnessVersions>,
     mode: Option<UpdateMode>,

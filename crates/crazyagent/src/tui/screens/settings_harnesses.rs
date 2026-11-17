@@ -330,7 +330,7 @@ pub(super) fn last_line(versions: &HarnessVersions, name: &str) -> Option<String
 
 /// What a running job's row says: the harness whose job it waits behind, else the given
 /// word. Inputs: the waited-for harness's name and the word. Output: the sentence.
-fn running_line(waits: Option<&str>, word: &str) -> String {
+pub(super) fn running_line(waits: Option<&str>, word: &str) -> String {
     waits.map_or_else(
         || word.to_owned(),
         |name| format!("Waiting for {name} to finish..."),
