@@ -131,7 +131,7 @@
   "crates/crazyagent/src/tui/screens/process.rs": 2260,
   "crates/crazyagent/src/tui/screens/process/tests.rs": 2598,
   "crates/crazyagent/src/tui/screens/project_master.rs": 1595,
-  "crates/crazyagent/src/tui/screens/project_page_tests.rs": 8733,
+  "crates/crazyagent/src/tui/screens/project_page_tests.rs": 8267,
   "crates/crazyagent/src/tui/screens/project_plugins/tests.rs": 2164,
   "crates/crazyagent/src/tui/screens/project_team/tests.rs": 5464,
   "crates/crazyagent/src/tui/screens/project_tests.rs": 5461,
