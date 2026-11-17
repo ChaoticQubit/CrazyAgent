@@ -428,7 +428,7 @@ fn the_harness_picker_lists_everything_but_picks_only_installed_harnesses() {
             .map(|h| (h.name.as_str(), h.state))
             .collect::<Vec<_>>(),
         [
-            ("rcli", HarnessState::Unknown),
+            ("RCLI", HarnessState::Unknown),
             ("Claude Code", HarnessState::Unknown),
             ("Codex", HarnessState::Unknown)
         ]

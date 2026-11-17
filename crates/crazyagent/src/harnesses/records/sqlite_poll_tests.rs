@@ -17,6 +17,20 @@ fn root() -> tempfile::TempDir {
     tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
 }
 
+/// Whether a row reads on the SQLite library this binary uses: 3.39 or newer reads as the
+/// row says. On an older library, as the Ubuntu 22.04 system one, the product refuses every
+/// read with [`OLD_LIBRARY`] before the path is looked at, so this asserts that refusal for
+/// the row's record path and the row reads no further. Input: the path. Output: whether the
+/// row goes on to read.
+fn reads(path: &Path) -> bool {
+    let supported = library_supported(rusqlite::version_number());
+    if !supported {
+        let read = SqlitePoll::new(path.to_path_buf(), &SCHEMA, 0).read();
+        assert_eq!(read, Err(failure(OLD_LIBRARY)));
+    }
+    supported
+}
+
 fn database(path: &Path, version: i64) -> Connection {
     let connection = Connection::open(path).unwrap();
     connection
@@ -86,6 +100,9 @@ fn a_database_is_read_without_being_written() {
     let writer = database(&path, 3);
     add(&writer, &turn());
     drop(writer);
+    if !reads(&path) {
+        return;
+    }
     let before = folder(tmp.path());
 
     let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
@@ -112,6 +129,9 @@ fn a_wal_database_is_read_live_and_closed_without_side_files_made() {
     let wal = tmp.path().join("record.db-wal");
     let database_bytes = std::fs::read(&path).unwrap();
     let wal_bytes = std::fs::read(&wal).unwrap();
+    if !reads(&path) {
+        return;
+    }
 
     let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
     let live = reader.read().unwrap();
@@ -140,6 +160,9 @@ fn a_locked_database_is_retried_then_refused_past_the_bound() {
     let path = tmp.path().join("record.db");
     let writer = database(&path, 3);
     add(&writer, &turn());
+    if !reads(&path) {
+        return;
+    }
     let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
     writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
 
@@ -178,11 +201,12 @@ fn an_unknown_schema_version_is_refused_in_plain_words() {
         .unwrap();
     drop(connection);
 
-    let refused = SqlitePoll::new(newer, &SCHEMA, 0).read().unwrap_err();
-    let viewed = SqlitePoll::new(viewed, &SCHEMA, 0).read().unwrap_err();
-
-    assert_eq!(refused.0, VERSION_UNKNOWN);
-    assert_eq!(viewed.0, VERSION_UNKNOWN);
+    if reads(&newer) {
+        let refused = SqlitePoll::new(newer, &SCHEMA, 0).read().unwrap_err();
+        let viewed = SqlitePoll::new(viewed, &SCHEMA, 0).read().unwrap_err();
+        assert_eq!(refused.0, VERSION_UNKNOWN);
+        assert_eq!(viewed.0, VERSION_UNKNOWN);
+    }
     for code in [
         UNSAFE,
         BUSY,
@@ -213,6 +237,9 @@ fn only_a_plain_database_file_at_the_record_path_is_read() {
     std::fs::write(&text, b"not a database\n").unwrap();
     let linked = tmp.path().join("linked");
     std::os::unix::fs::symlink(tmp.path(), &linked).unwrap();
+    if !reads(&linked.join("real.db")) {
+        return;
+    }
 
     let read = |path: PathBuf| SqlitePoll::new(path, &SCHEMA, 0).read();
 
@@ -235,6 +262,9 @@ fn a_read_keeps_to_its_row_and_text_bounds() {
     add(&writer, &[("text", Some(long.as_str()))]);
     let rows = vec![("waiting", None); ROWS_PER_READ_MAX + 4];
     add(&writer, &rows);
+    if !reads(&path) {
+        return;
+    }
     let mut reader = SqlitePoll::new(path, &SCHEMA, 0);
 
     let first = reader.read().unwrap();
@@ -269,6 +299,9 @@ fn a_resumed_reader_reads_only_rows_past_its_position() {
             ("turn_error", None),
         ],
     );
+    if !reads(&path) {
+        return;
+    }
 
     let events = SqlitePoll::new(path, &SCHEMA, 4).read().unwrap();
 
@@ -298,6 +331,9 @@ fn a_journal_that_is_not_a_plain_file_is_refused_without_waiting() {
         .status()
         .unwrap();
     assert!(made.success());
+    if !reads(&path) {
+        return;
+    }
     let (sender, answer) = std::sync::mpsc::channel();
     let reading = path.clone();
     std::thread::spawn(move || {
@@ -321,6 +357,9 @@ fn a_journal_that_is_not_a_plain_file_is_refused_without_waiting() {
 #[test]
 fn a_table_with_a_generated_column_is_refused_before_any_row_is_read() {
     let tmp = root();
+    if !reads(&tmp.path().join("virtual.db")) {
+        return;
+    }
     let read = |name: &str, column: &str| {
         let path = tmp.path().join(name);
         let connection = Connection::open(&path).unwrap();
@@ -359,6 +398,9 @@ fn a_value_past_the_value_bound_is_refused_not_built() {
     let long = "x".repeat(VALUE_BYTES_MAX + 1);
     add(&writer, &[("text", Some(long.as_str()))]);
     drop(writer);
+    if !reads(&path) {
+        return;
+    }
 
     let read = SqlitePoll::new(path, &SCHEMA, 0).read();
 
@@ -381,6 +423,9 @@ fn a_virtual_table_under_a_schema_name_is_refused() {
         )
         .unwrap();
     drop(connection);
+    if !reads(&path) {
+        return;
+    }
 
     let read = SqlitePoll::new(path, &SCHEMA, 0).read();
 
@@ -398,6 +443,9 @@ fn the_row_past_the_read_text_bound_waits_for_the_next_read() {
     let rows = vec![("text", Some(long.as_str())); READ_TEXT_BYTES_MAX / ROW_TEXT_BYTES_MAX + 1];
     add(&writer, &rows);
     drop(writer);
+    if !reads(&path) {
+        return;
+    }
     let mut reader = SqlitePoll::new(path, &SCHEMA, 0);
 
     let first = reader.read().unwrap();
@@ -434,6 +482,9 @@ fn a_schema_too_large_to_load_in_the_read_budget_is_refused() {
         )
         .unwrap();
     drop(writer);
+    if !reads(&path) {
+        return;
+    }
     let started = Instant::now();
 
     let read = SqlitePoll::new(path, &SCHEMA, 0).read();
@@ -444,12 +495,16 @@ fn a_schema_too_large_to_load_in_the_read_budget_is_refused() {
 }
 
 /// Review t15-r2 code F1 and sec N2: a SQLite library before 3.39.0 does not refuse a link in
-/// a folder part of the path, so the reader refuses to read on one, with its own sentence;
-/// the library this binary uses passes.
+/// a folder part of the path, so the reader refuses to read on one, with its own sentence,
+/// before it looks at the path; on 3.39 or newer a record not written yet reads as no facts.
 #[test]
 fn a_sqlite_library_older_than_3_39_is_refused_with_its_own_sentence() {
     assert!(!library_supported(3_038_999));
     assert!(library_supported(3_039_000));
-    assert!(library_supported(rusqlite::version_number()));
     assert!(sentence(OLD_LIBRARY).is_some());
+    let tmp = root();
+    let missing = tmp.path().join("missing.db");
+    if reads(&missing) {
+        assert_eq!(SqlitePoll::new(missing, &SCHEMA, 0).read(), Ok(Vec::new()));
+    }
 }
