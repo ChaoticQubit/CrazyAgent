@@ -6,6 +6,7 @@ use crazyagent::protocol::{CredentialRef, RequestId};
 
 pub(super) struct Selection {
     generation: u64,
+    query: OwnerRead,
     state: OwnerReadReply,
     attempt: Option<RequestId>,
 }
@@ -172,13 +173,12 @@ impl NativeBridge {
             self.model_access_next = None;
             None
         };
-        let state = self
-            .read_model_access(OwnerRead::ModelAccessPage {
-                collection,
-                cursor,
-                limit: PAGE_SIZE,
-            })
-            .await?;
+        let query = OwnerRead::ModelAccessPage {
+            collection,
+            cursor,
+            limit: PAGE_SIZE,
+        };
+        let state = self.read_model_access(query.clone()).await?;
         let OwnerData::ModelAccessPage {
             collection: actual,
             source_hash,
@@ -211,6 +211,7 @@ impl NativeBridge {
         self.model_access_next = next.clone();
         self.model_access = Some(Selection {
             generation: self.generation,
+            query,
             state,
             attempt: None,
         });
@@ -227,12 +228,11 @@ impl NativeBridge {
         self.selected = None;
         self.model_access = None;
         let id = CredentialRef::new(id).map_err(|_| failure("invalid_model_access"))?;
-        let state = self
-            .read_model_access(OwnerRead::ModelAccessRecord {
-                collection,
-                id: id.clone(),
-            })
-            .await?;
+        let query = OwnerRead::ModelAccessRecord {
+            collection,
+            id: id.clone(),
+        };
+        let state = self.read_model_access(query.clone()).await?;
         let OwnerData::ModelAccessRecord {
             source_hash,
             writable,
@@ -260,6 +260,7 @@ impl NativeBridge {
         };
         self.model_access = Some(Selection {
             generation: self.generation,
+            query,
             state,
             attempt,
         });
@@ -374,8 +375,9 @@ impl NativeBridge {
             expected_source_hash: source_hash.clone(),
             edit,
         };
+        let basis = (selected.query.clone(), selected.state.clone());
         self.controller()?
-            .begin_mutation(mutation, generation)
+            .begin_mutation_on(mutation, generation, basis)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.model_access = None;
         self.model_access_next = None;
@@ -518,5 +520,92 @@ mod tests {
                 1,
             )
             .await;
+    }
+
+    /// V250-OWN-REVISION-RETRY desktop red row: an account added from the Accounts page lands
+    /// though another window saved an unrelated setting after the page was read, and the
+    /// receipt names the resent request, which the engine recorded as applied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_add_after_an_unrelated_change_lands_and_its_receipt_names_the_resend() {
+        use crazyagent::cleanup_settings::{CleanupMode, CleanupSettings};
+        use crazyagent::engine::owner::OwnerRequest;
+        use crazyagent::protocol::{Cursor, PROTOCOL_VERSION};
+        let root = tempfile::Builder::new()
+            .prefix("ca-dma-retry-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("g"),
+            &root.path().join("p"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+        bridge.connect().await.unwrap();
+        let page = bridge
+            .model_access_page(ModelAccessCollection::Accounts, false)
+            .await
+            .unwrap();
+        let mut other =
+            OwnerController::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .unwrap();
+        let changed = other
+            .set_cleanup_settings(
+                CleanupSettings {
+                    mode: CleanupMode::Manual,
+                    days: 30,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(&changed, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+            "{changed:?}"
+        );
+        let receipt = bridge
+            .edit_model_access(
+                &page.ticket,
+                ModelAccessEdit::AddAccount {
+                    account_ref: CredentialRef::new("spare-account").unwrap(),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome, ActionOutcome::Applied, "{receipt:?}");
+        assert!(receipt.rejection.is_none());
+        let check = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("retry-receipt-check").unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Reconcile {
+                operation_id: RequestId::new(receipt.intent.operation_id.clone()).unwrap(),
+                expected_hash: None,
+            },
+        };
+        let recorded = bridge
+            .controller
+            .as_ref()
+            .unwrap()
+            .owner_client()
+            .unwrap()
+            .request(check)
+            .await
+            .unwrap()
+            .response;
+        assert!(
+            matches!(&recorded, OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                if operation.result == OwnerResult::Applied
+                    && operation.provenance.operation_id.as_str() == receipt.intent.operation_id),
+            "the receipt names the request the engine applied: {recorded:?}"
+        );
+        service.shutdown().await.unwrap();
     }
 }

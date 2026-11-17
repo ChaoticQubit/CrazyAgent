@@ -27,7 +27,8 @@ const AREAS: [(&str, &str); 13] = [
 ];
 
 /// The tables the engine's own open writes in these areas (activity `initialize`, GitHub
-/// `start_store`, usage `initialize` with its row counts), which stay off the log.
+/// `start_store`, usage `initialize` with its row counts), which stay off the log, so the
+/// open row compares them after both stores are opened as the engine opens.
 const OPENED: [&str; 7] = [
     "project_activity",
     "project_activity_backfill",
@@ -39,7 +40,8 @@ const OPENED: [&str; 7] = [
 ];
 
 /// A live store after a Remove from dashboard of [`REMOVED`], with the copies taken just
-/// before it and what [`OTHER`] and the schedule held then.
+/// before it and what [`OTHER`] and the schedule held then. Fields: the store, the copy to
+/// replay into, the copy a replay skipping the removal uses, OTHER's rows, the version.
 struct Removed {
     store: Store,
     copy: PathBuf,
@@ -106,7 +108,8 @@ fn seed_areas(db: &Connection, project: &str, first: i64) {
         "an ended and told proposal leaves the apply pass no work"
     );
     db.execute(
-        "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,told,created_ms)
+        "INSERT INTO github_rule_requests
+            (project,asker,rule,turn_on,why,repo,status,told,created_ms)
          VALUES (?1,'agent:1','require_review',1,'safer','owner/repo','refused',1,1)",
         [project],
     )
@@ -168,7 +171,8 @@ fn held_areas(db: &Connection, project: &str, first: i64) -> Vec<(&'static str, 
 }
 
 /// The schedule's version, which a removal that drops a schedule override moves once.
-/// Input: the store. Output: the version.
+/// Input: the store.
+/// Output: the version.
 fn schedule_version(db: &Connection) -> u64 {
     versioned::current(db, &versioned::account_schedule_item())
         .unwrap()
@@ -214,13 +218,11 @@ fn removed_store() -> Removed {
     }
 }
 
-/// v2.5 L14b: the removal's projection also clears the project's activity, coordination,
-/// GitHub rule proposals, IDE Run setting and schedule override, and moves its usage to
-/// `<removed>`, so replaying the log into a copy taken before the removal rebuilds every
-/// such table equal to the live store, the schedule version included; the other project
-/// keeps all of its rows, and a projection that skips the removal does not rebuild equal.
-/// The coordination counts of the stopped agent rebuild equal only when coordination is
-/// forgotten before the projection deletes that agent.
+/// v2.5 L14b: the removal's projection also clears the project's activity, coordination, rule
+/// proposals, Run setting and schedule override and moves its usage to `<removed>`; a replay
+/// into a pre-removal copy rebuilds each table and the schedule version equal, OTHER keeps its
+/// rows, and a replay skipping the removal differs. The live all-zero `held_areas` assert
+/// fails if coordination is forgotten only after its stopped agent is deleted.
 #[test]
 fn a_replayed_removal_leaves_the_project_no_row_in_activity_coord_github_ide_schedule_or_usage() {
     let r = removed_store();
