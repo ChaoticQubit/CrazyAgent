@@ -835,7 +835,7 @@ impl AppSetup {
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
         if let Some(name) = self.fixing {
             self.fixed(name, status, ctx);
-            if !self.started {
+            if self.fixing.is_some() || !self.started {
                 return Flow::Handled;
             }
         }
