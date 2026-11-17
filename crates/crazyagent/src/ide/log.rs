@@ -23,6 +23,15 @@ pub const FILE_UNLOCKED: &str = "FileUnlocked";
 pub const WORKSPACE_WRITTEN: &str = "WorkspaceWritten";
 /// The kind of a workspace no longer followed, its project gone.
 pub const WORKSPACE_FORGOTTEN: &str = "WorkspaceForgotten";
+/// Every ide event kind, the list a project removal redacts that project's events by
+/// (rv-sec2 #309 N1); a snapshot chunk is not one, since redact refuses a snapshot.
+pub const KINDS: [&str; 5] = [
+    IDE_ASKED,
+    RUN_MODE_SET,
+    FILE_UNLOCKED,
+    WORKSPACE_WRITTEN,
+    WORKSPACE_FORGOTTEN,
+];
 /// The most rows one ide table may hand a snapshot run.
 pub const SNAPSHOT_ROWS_MAX: usize = 1 << 20;
 /// The bytes a snapshot chunk keeps for its envelope (aggregate, table, seq) beside its rows.
