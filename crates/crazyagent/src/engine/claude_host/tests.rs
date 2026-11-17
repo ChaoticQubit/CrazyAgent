@@ -2526,3 +2526,45 @@ async fn a_claude_master_takes_a_turn_up_to_its_frame_size_limit() {
         let _ = claude.close().await;
     }
 }
+
+/// A stand-in Claude Code master whose turn writes its first stream line, marks the `run`
+/// folder, then stays quiet with its stdout and stderr open until a group kill ends it.
+const WAKE_IDLE_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session",'
+printf '%s\n' '"model":"observed-model","capabilities":[]}'
+: > run/quiet
+exec /bin/sleep 120
+"#;
+
+/// Measurement row for V243-WAKEUP-MEASURE B, run alone: holds a Claude master host's drive
+/// loop in a turn that stays quiet for 60 s, after printing `wake-row ready pid=<pid>` for a
+/// sampler. Asserts only that the turn was still running when the host was stopped.
+#[tokio::test]
+#[ignore = "measurement row: run alone for V243-WAKEUP-MEASURE"]
+async fn wake_idle_claude_drive() {
+    use crate::adapters::events::EventKind;
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let clock = Some(Duration::from_secs(300));
+    let mut claude = stand_in_master_under(&mut fixture, WAKE_IDLE_HARNESS, false, clock).await;
+    let turn = RequestId::new("wake-idle-turn").unwrap();
+    claude.start_turn(turn, "Stay quiet.").await.unwrap();
+    let quiet = fixture.project.join("run/quiet");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !quiet.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never went quiet"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    eprintln!("wake-row ready pid={}", std::process::id());
+    let end = tokio::time::Instant::now() + Duration::from_secs(60);
+    while let Ok(event) = tokio::time::timeout_at(end, claude.next_event()).await {
+        let finished = matches!(event.unwrap().kind, EventKind::TurnFinished { .. });
+        assert!(!finished, "the turn finished before the stop");
+    }
+    claude.cancel().await.unwrap();
+}

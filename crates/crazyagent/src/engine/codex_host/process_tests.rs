@@ -1172,3 +1172,43 @@ async fn every_master_backend_maps_the_master_step_limit_to_one_stop() {
     }
     assert_eq!(steps_of_cause(&cause), Some(50));
 }
+
+/// Measurement row for V243-WAKEUP-MEASURE B, run alone: a stand-in app-server answers its
+/// turn request with one line, then stays quiet for 60 s with its pipes open, so custody and
+/// the waiting reader hold a running turn. Prints `wake-row ready pid=<pid>` for a sampler and
+/// asserts only that the turn was still running when the process was closed.
+#[tokio::test]
+#[ignore = "measurement row: run alone for V243-WAKEUP-MEASURE"]
+async fn wake_idle_codex_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = selected_command("/bin/sh", root.path());
+    command.arg("-c").arg(
+        "IFS= read -r turn; printf '%s\\n' '{\"method\":\"turn/started\"}'; exec /bin/sleep 120",
+    );
+    let limits = ResourceBudget {
+        wall_time_ms: 300_000,
+        ..budget()
+    };
+    let mut process = CodexHostProcess::spawn(command, &limits).await.unwrap();
+    process
+        .send(b"{\"method\":\"turn/start\"}\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    while !answer.ends_with(b"\n") {
+        let output = tokio::time::timeout(Duration::from_secs(10), process.next_output())
+            .await
+            .expect("the stand-in never answered its turn")
+            .unwrap();
+        let CodexHostOutput::Stdout(bytes) = output else {
+            panic!("the stand-in ended before its turn went quiet");
+        };
+        answer.extend(bytes);
+    }
+    assert_eq!(answer, b"{\"method\":\"turn/started\"}\n");
+    eprintln!("wake-row ready pid={}", std::process::id());
+    let quiet = tokio::time::timeout(Duration::from_secs(60), process.next_output()).await;
+    assert!(quiet.is_err(), "the turn ended before the close");
+    let status = process.close().await.unwrap();
+    assert!(!status.success());
+}
