@@ -82,6 +82,8 @@ fn a_restore_is_refused_while_an_agent_runs() {
     let start = SystemTime::now();
     let (root, _) = upgraded(start);
     let db = root.connection();
+    crate::team::initialize(&db).unwrap();
+    drop(crate::research::jobs::ResearchJobs::open(&root.database()).unwrap());
     db.execute(
         "INSERT INTO team_agents (project, role, harness, tools, status, created_ms, \
          heartbeat_ms) VALUES ('restore-project', 'sub', 'claude', 0, 'running', 1, 1)",
