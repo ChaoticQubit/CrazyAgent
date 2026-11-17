@@ -1135,8 +1135,8 @@ fn empty_app_plugin_tables(db: &Connection) {
 }
 
 /// Step 12 (V250-H2): an upgrade from 2.4.2's version 11 adds the app plugin store's three
-/// tables, empty, and a new database gets the same three at its first open, so both shapes
-/// match.
+/// tables, empty, under the backup the rotation pins, and a new database gets the same three
+/// at its first open, so both shapes match.
 #[tokio::test]
 async fn step_12_and_a_new_database_both_hold_the_empty_app_plugin_store_tables() {
     let old = Root::new();
@@ -1146,6 +1146,16 @@ async fn step_12_and_a_new_database_both_hold_the_empty_app_plugin_store_tables(
     upgrade(&mut db, &old.database(), None, STEPS).unwrap();
     assert_eq!(version(&db).unwrap(), latest(STEPS));
     empty_app_plugin_tables(&db);
+    let backups = old.backups();
+    assert_eq!(backups.len(), 1);
+    let name = backups[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with(&format!("11-to-{}-", latest(STEPS))),
+        "{name}"
+    );
+    let found = backups_in(&old.path().join(BACKUPS)).unwrap();
+    let held = pinned(&old.path().join(BACKUPS), &found, SystemTime::now());
+    assert_eq!(held.map(|index| found[index].1.as_str()), Some(name));
 
     let root = Root::new();
     close(root.open().await.unwrap()).await;
