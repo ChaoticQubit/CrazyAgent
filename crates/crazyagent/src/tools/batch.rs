@@ -195,7 +195,7 @@ pub(super) mod tests {
     }
 
     /// Any text but the generator's exact layout names nothing: line ends changed, a line
-    /// added, a setting, arguments, the layout for a native target, a program given by path,
+    /// added or changed inside the layout, another program, a setting, arguments, the layout for a native target, a program given by path,
     /// or a target that climbs, has a `%`, a quote, a drive or a part Windows trims.
     #[test]
     fn every_other_batch_text_names_nothing() {
@@ -208,6 +208,8 @@ pub(super) mod tests {
                 "CALL :find_dp0\r\n@SET \"A=1\"\r\n\r\n",
             ),
             CODEX.replace("\"%_prog%\"  ", "\"%_prog%\" --flag "),
+            CODEX.replace("  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n", "  calc.exe\r\n"),
+            CODEX.replace("SET \"_prog=node\"", "SET \"_prog=calc\""),
             CODEX.replace(" %*\r\n", " %*\r\ncalc.exe\r\n"),
             format!("{CODEX}calc.exe\r\n"),
             NATIVE.to_owned(),
