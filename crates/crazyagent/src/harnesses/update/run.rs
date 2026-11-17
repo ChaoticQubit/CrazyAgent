@@ -536,11 +536,6 @@ pub(super) fn read_pointer(
 mod windows_tests {
     use super::*;
     use std::ffi::OsString;
-    use std::path::PathBuf;
-
-    const GRANDCHILD: &str = "$p = Start-Process -FilePath ping.exe -ArgumentList \
-        '-n','120','127.0.0.1' -NoNewWindow -PassThru; Set-Content -LiteralPath grandchild.pid \
-        -Value $p.Id; Start-Sleep -Seconds 120";
 
     /// Whether a process id still runs, as `tasklist` lists it. Input: the id. Output: the
     /// answer.
@@ -553,23 +548,21 @@ mod windows_tests {
 
     /// V243-W1-VERSION-READ: a version run that passes its limit ends as timed out, and the
     /// process it started ends with its job, so no child of a harness outlives a version read.
+    /// The version command is the test binary as a grandchild holder
+    /// ([`crate::plugins::check::windows_tests::grandchild_holder`]), asked through a request
+    /// file in the run's home, its working folder, since the run keeps no other environment.
     #[test]
     fn a_version_run_past_its_limit_ends_with_every_process_it_started() {
+        use crate::plugins::check::windows_tests::{HOLDER_REQUEST, grandchild_holder};
         let folder = tempfile::tempdir().unwrap();
         let home = crate::sandbox::canonical(folder.path()).unwrap();
-        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32")
-            .join("WindowsPowerShell")
-            .join("v1.0");
-        let words: Vec<OsString> = [
-            shell.join("powershell.exe").into_os_string(),
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-Command".into(),
-            GRANDCHILD.into(),
-        ]
-        .into();
-        let ran = version_raw(&words, &[shell], &home, Duration::from_secs(20));
+        std::fs::write(home.join(HOLDER_REQUEST), "").unwrap();
+        let (holder, args) = grandchild_holder();
+        let search = [holder.parent().unwrap().to_path_buf()];
+        let words: Vec<OsString> = std::iter::once(holder.into_os_string())
+            .chain(args.map(OsString::from))
+            .collect();
+        let ran = version_raw(&words, &search, &home, Duration::from_secs(20));
         assert_eq!(ran.err(), Some(TIMEOUT));
         let pid: u32 = std::fs::read_to_string(home.join("grandchild.pid"))
             .unwrap()
