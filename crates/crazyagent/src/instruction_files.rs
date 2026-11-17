@@ -1173,9 +1173,10 @@ pub fn carried_in(folder: &Path) -> bool {
 /// `.crazyagent/imported/` first when the heading leaves it no room or a line is demoted.
 /// Input: the project folder. Output: the text the file holds once labelled, which the start
 /// records as the engine's own without reading the file again, or a plain code so the start
-/// is refused rather than giving agents the text unlabelled: the save's code, or
-/// `onboarding_instructions_unreadable` for a file that cannot be read (a link, over the limit
-/// or not UTF-8), left as it is so it never passes as the owner's once readable (RV-DS241-202).
+/// is refused rather than giving agents the text unlabelled: the save's code,
+/// `process_folder_unsafe` for a link, which the layout check refuses before any read, or
+/// `onboarding_instructions_unreadable` for a file over the limit or not UTF-8, each left as it
+/// is so it never passes as the owner's once readable (RV-DS241-202).
 pub fn label_arrived(folder: &Path) -> Result<String, EngineError> {
     assert_eq!(
         CARRIED_PATH,

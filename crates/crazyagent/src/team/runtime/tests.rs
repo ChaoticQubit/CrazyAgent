@@ -32080,7 +32080,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
-             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config'\"\n\
+             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config' && test -e '{home}/.config/git/config'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
              try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
              try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
