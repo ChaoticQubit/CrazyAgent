@@ -32,7 +32,7 @@
   "apps/desktop/test/overview-tabs.test.mjs": 874,
   "apps/desktop/test/process.test.mjs": 1008,
   "apps/desktop/test/project-page.test.mjs": 1290,
-  "crates/crazyagent/src/adapters/codex.rs": 2104,
+  "crates/crazyagent/src/adapters/codex.rs": 1934,
   "crates/crazyagent/src/agent_home.rs": 2108,
   "crates/crazyagent/src/agent_home/tests.rs": 3096,
   "crates/crazyagent/src/agents.rs": 1887,
