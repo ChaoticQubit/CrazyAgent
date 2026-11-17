@@ -375,13 +375,12 @@ fn granted(bin: &Path, npm: &Path) -> String {
 }
 
 /// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
-/// package into a fresh staging folder once its `node_modules` is there, so only the pin
-/// refuses the unpinned tarball, by hand and through `fill`. The same install into a staging
-/// folder without `node_modules` is refused, since its root lets npm add entries only inside
-/// folders already there, so the row fails if `fill` stops making it.
+/// package into a fresh staging folder, a job folder with no project guards, so npm adds
+/// `node_modules` at its top and only the pin refuses the unpinned tarball, by hand and
+/// through `fill`. A failed hand install shows npm's output and the Node folder's grants.
 #[test]
 #[ignore = "V243-WIN-NPM-BOUNDARY-ACL"]
-fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first() {
+fn npm_installs_into_a_fresh_staging_folder() {
     let bin = system_bin();
     let case = case();
     let npm = case.root.join("setup").join("npm");
@@ -390,20 +389,22 @@ fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first(
     let packing = work.join("tmp");
     private_folder(&packing).unwrap();
     let tarball = local_tarball(&packing);
-    let made = staging_folder(&npm, &prefix).unwrap();
-    fs::create_dir(made.join(MODULES)).unwrap();
-    let installed = install_output(&case, &made, &work, &bin, &tarball);
+    let bare = staging_folder(&npm, &prefix).unwrap();
+    assert!(!bare.join(MODULES).exists());
+    let installed = install_output(&case, &bare, &work, &bin, &tarball);
     assert!(
         installed.status.success(),
         "{}\n{}",
         shown(&installed),
         granted(&bin, &npm)
     );
+    assert!(bare.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
     assert_eq!(
-        checked(&made, VERSION),
+        checked(&bare, VERSION),
         Err("context_mode_integrity_mismatch")
     );
     let staged = staging_folder(&npm, &prefix).unwrap();
+    assert!(!staged.join(MODULES).exists());
     assert_eq!(
         fill(
             &case.root,
@@ -414,11 +415,7 @@ fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first(
             tarball.as_os_str()
         ),
         Err(InstallError("context_mode_integrity_mismatch")),
-        "fill makes node_modules and npm installs; only the pin refuses the tarball"
+        "npm installs; only the pin refuses the tarball"
     );
     assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
-    let bare = staging_folder(&npm, &prefix).unwrap();
-    let refused = install_output(&case, &bare, &work, &bin, &tarball);
-    assert!(!refused.status.success(), "{}", shown(&refused));
-    assert!(!bare.join(MODULES).exists());
 }
