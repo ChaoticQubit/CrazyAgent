@@ -383,6 +383,10 @@ fn adding(db: &Connection) -> Result<bool, EngineError> {
 /// `JOBS_RUNNING_MAX` adds at once, and the bound holds for any other rows the table has.
 const ADDS_MAX: usize = 64;
 
+/// The most ended adds kept for the owner to read: what one engine stop can cut, as the engine
+/// runs at most `JOBS_RUNNING_MAX` (3) adds at once (DEC-197). Past it the oldest end goes.
+const ADD_ENDS_KEPT: usize = 3;
+
 /// How an add a record never reached is settled. With a request (after its exchange
 /// replied, its disk work already settled there) and whether that add placed its folder: a
 /// running row whose add placed its folder in the home, as when the grant was found stale
@@ -391,7 +395,7 @@ const ADDS_MAX: usize = 64;
 /// folder took its destination after the plan (rv-sec2 b9 F1), or whose folder is gone, is
 /// forgotten. With none (engine start, before any add plans, so no staging is live): each
 /// running row gets its staging folders removed and the end its disk shows. Nothing else is
-/// deleted either way, and only the newest ended row is kept for the owner to read. Inputs:
+/// deleted either way, and the newest `ADD_ENDS_KEPT` ended rows are kept for the owner. Inputs:
 /// the connection, and the request with whether its add placed its folder. Output: how many
 /// running rows were settled.
 pub(super) fn add_settle(
@@ -439,7 +443,7 @@ fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
         )
         .map_err(error)?;
     }
-    keep_newest_end(tx)?;
+    keep_newest_ends(tx)?;
     assert!(rows.len() <= ADDS_MAX);
     Ok(rows.len())
 }
@@ -485,17 +489,18 @@ fn settle_add(
             .map_err(error)?,
     };
     assert_eq!(changed, 1, "the running row read above is settled once");
-    keep_newest_end(tx)?;
+    keep_newest_ends(tx)?;
     Ok(changed)
 }
 
-/// Keeps only the newest ended add for the owner to read. Input: the transaction.
-/// Output: Ok.
-fn keep_newest_end(tx: &Transaction<'_>) -> Result<(), EngineError> {
+/// Keeps the newest `ADD_ENDS_KEPT` ended adds for the owner to read, each until it is
+/// forgotten (DEC-197). Input: the transaction. Output: Ok.
+fn keep_newest_ends(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute(
-        "DELETE FROM projects_home_add WHERE ended IS NOT NULL AND rowid <>
-         (SELECT max(rowid) FROM projects_home_add WHERE ended IS NOT NULL)",
-        [],
+        "DELETE FROM projects_home_add WHERE ended IS NOT NULL AND rowid NOT IN
+         (SELECT rowid FROM projects_home_add WHERE ended IS NOT NULL
+          ORDER BY rowid DESC LIMIT ?1)",
+        [ADD_ENDS_KEPT as i64],
     )
     .map_err(error)?;
     Ok(())
@@ -511,31 +516,41 @@ pub(crate) struct AddEnded {
     pub ended: String,
 }
 
-/// The newest add an engine stop cut short and the owner has not dismissed. Input: the
-/// connection. Output: it, or None.
-pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError> {
-    let row: Option<(String, String, String, String)> = db
-        .query_row(
+/// The adds an engine stop cut short, or whose record never came, that the owner has not
+/// dismissed, in start order (DEC-197). Input: the connection. Output: at most
+/// `ADD_ENDS_KEPT` of them.
+pub(super) fn add_ended(db: &Connection) -> Result<Vec<AddEnded>, EngineError> {
+    let mut statement = db
+        .prepare(
             "SELECT request, source, mode, ended FROM projects_home_add
-             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT ?1",
         )
-        .optional()
         .map_err(error)?;
-    row.map(|(request, source, mode, ended)| {
-        let mode = match mode.as_str() {
-            "move" => AddMode::Move,
-            _ => AddMode::Copy,
-        };
-        Ok(AddEnded {
-            request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
-            source,
-            mode,
-            ended,
+    let rows: Vec<(String, String, String, String)> = statement
+        .query_map([ADD_ENDS_KEPT as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
-    })
-    .transpose()
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let mut ended = rows
+        .into_iter()
+        .map(|(request, source, mode, ended)| {
+            let mode = match mode.as_str() {
+                "move" => AddMode::Move,
+                _ => AddMode::Copy,
+            };
+            Ok(AddEnded {
+                request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
+                source,
+                mode,
+                ended,
+            })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    ended.reverse();
+    assert!(ended.len() <= ADD_ENDS_KEPT);
+    Ok(ended)
 }
 
 /// Forgets an ended job the owner dismissed or a new job replaced: an ended add or a project

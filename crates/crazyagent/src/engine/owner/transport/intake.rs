@@ -185,15 +185,17 @@ fn admit(held: &mut [Held]) {
 }
 
 impl Intake {
-    /// Starts a job that runs apart from any client, or attaches to the job already running
-    /// for the same subject or with the same id. A project move is checked before it starts,
-    /// as far as it can be without reading inside the folder, a delete as its plan checks
-    /// it before its mark (the exact name included) and a New Project as its plan checks it
-    /// before it builds anything, so a change the engine refuses is answered at once and the
-    /// held job stays as it was. Inputs: the engine, the
-    /// authority, the client packet, its admission and what to do. Output: the job's view,
-    /// `job_busy` while another job, a direct client add or project move, or the id as a
-    /// client change runs, or the folder, override or move check's code.
+    /// Starts a job that runs apart from any client, beside the running jobs or waiting its
+    /// turn (DEC-197), or attaches to the job with the same id or moving, deleting or building
+    /// the same project. A project move is checked before it starts, as far as it can be
+    /// without reading inside the folder, a delete as its plan checks it before its mark (the
+    /// exact name included) and a New Project as its plan checks it before it builds anything,
+    /// so a change the engine refuses is answered at once and the held jobs stay as they were.
+    /// Inputs: the engine, the authority, the client packet, its admission and what to do.
+    /// Output: the job's view; `job_same_folder` while a live job holds the folder or one
+    /// inside or around it; `job_busy` while a direct client add or project move runs, the id
+    /// runs as a client change, or the waiting list is full; or the folder, override or move
+    /// check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -382,21 +384,27 @@ impl Intake {
         Ok(true)
     }
 
-    /// Reads the job an engine stop cut short, a project move first, then a delete, then the
-    /// newest add, else a New Project, so status shows how it ended until the owner dismisses
-    /// it or a new job starts. The New Project read comes first whatever is shown, since it
-    /// ends every New Project mark an earlier engine process left. Runs at server start, after
-    /// the storage start finished any cut move from disk; a job a client started first wins.
+    /// Reads the jobs an engine stop cut short: a project move first, then a delete, then every
+    /// add, which ran side by side (DEC-197), else a New Project, so status shows how each
+    /// ended until the owner dismisses it or a new job starts. The New Project read comes first
+    /// whatever is shown, since it ends every New Project mark an earlier engine process left.
+    /// Runs at server start, after the storage start finished any cut move from disk; a job a
+    /// client started first wins. Jobs that only waited had not started, so none comes back.
     /// Inputs: the engine and the wait. Output: none; a failed read is logged and shows
     /// nothing.
     pub(super) async fn restore(&self, engine: &Engine, wait: Duration) {
         let setup = setup_restored(engine, wait).await;
-        let Some((job, real)) = restored(engine, wait).await.or(setup) else {
-            return;
-        };
-        assert!(job.ended());
+        let mut jobs = restored(engine, wait).await;
+        if jobs.is_empty() {
+            jobs.extend(setup);
+        }
+        assert!(jobs.len() <= JOBS_RUNNING_MAX);
         let mut held = self.lock();
-        if held.is_empty() {
+        if !held.is_empty() {
+            return;
+        }
+        for (job, real) in jobs {
+            assert!(job.ended());
             held.push(Held {
                 job: Arc::new(job),
                 real,
@@ -404,6 +412,7 @@ impl Intake {
                 turn: None,
             });
         }
+        assert!(!held.iter().any(Held::live));
     }
 
     /// Forgets an ended job, so status no longer shows it. Input: its id. Output: the kind of
@@ -515,11 +524,11 @@ async fn setup_restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, P
     }
 }
 
-/// The job an engine stop cut short, as the storage start kept it: a project move, else a
-/// Delete everything (whose real folder is never compared, so it is left empty), else the
-/// newest add. Inputs: the engine and the wait for each read. Output: the ended job and its
-/// real folder, or None when there is none or a read failed, which is logged.
-async fn restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf)> {
+/// The jobs an engine stop cut short, as the storage start kept them: a project move, else a
+/// Delete everything (whose real folder is never compared, so it is left empty), else each
+/// add in start order. Inputs: the engine and the wait for each read. Output: the ended jobs
+/// and their real folders, none when there is none or a read failed, which is logged.
+async fn restored(engine: &Engine, wait: Duration) -> Vec<(IntakeJob, PathBuf)> {
     let moved = engine.owner_job(Job::HomeProjectMoveEnded);
     match tokio::time::timeout(wait, moved).await {
         Ok(Ok(Some(ended))) => {
@@ -532,7 +541,7 @@ async fn restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf
                 ended.mode,
                 &ended.ended,
             );
-            return Some((job, real));
+            return vec![(job, real)];
         }
         Ok(Ok(None)) => {}
         Ok(Err(e)) => eprintln!("move_project_not_restored cause={}", e.0),
@@ -548,7 +557,7 @@ async fn restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf
                 trashed,
                 found.total,
             );
-            return Some((job, PathBuf::new()));
+            return vec![(job, PathBuf::new())];
         }
         Ok(Ok(None)) => {}
         Ok(Err(e)) => eprintln!("project_delete_not_restored cause={}", e.0),
@@ -556,27 +565,31 @@ async fn restored(engine: &Engine, wait: Duration) -> Option<(IntakeJob, PathBuf
     }
     let read = engine.owner_job(Job::HomeAddEnded);
     let ended = match tokio::time::timeout(wait, read).await {
-        Ok(Ok(Some(ended))) => ended,
-        Ok(Ok(None)) => return None,
+        Ok(Ok(ended)) => ended,
         Ok(Err(e)) => {
             eprintln!("home_add_not_restored cause={}", e.0);
-            return None;
+            return Vec::new();
         }
         Err(_) => {
             eprintln!("home_add_not_restored cause=timeout");
-            return None;
+            return Vec::new();
         }
     };
-    let real = PathBuf::from(&ended.source);
-    let job = IntakeJob::restored(
-        ended.request,
-        JobKind::Add,
-        None,
-        ended.source,
-        ended.mode,
-        &ended.ended,
-    );
-    Some((job, real))
+    ended
+        .into_iter()
+        .map(|ended| {
+            let real = PathBuf::from(&ended.source);
+            let job = IntakeJob::restored(
+                ended.request,
+                JobKind::Add,
+                None,
+                ended.source,
+                ended.mode,
+                &ended.ended,
+            );
+            (job, real)
+        })
+        .collect()
 }
 
 /// Runs one job: forgets the ended jobs it replaced, waits for its turn, does the job's work,
