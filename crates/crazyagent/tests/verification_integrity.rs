@@ -292,19 +292,20 @@ async fn an_approval_is_logged_once_at_the_revision_its_reply_carries() {
     assert_eq!(body, expected);
 }
 
-/// The three verification tables' rows as they stand, every column, by id. Input: the
-/// store. Output: each table's rows.
+/// The three verification tables' rows and the current baseline of each project as they
+/// stand, every column, by key. Input: the store. Output: each table's rows.
 fn verification_rows(db: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
     let tables = [
         "verification_baselines",
         "verification_candidates",
         "verification_attempts",
+        "verification_current",
     ];
     tables
         .iter()
         .map(|table| {
             let mut statement = db
-                .prepare(&format!("SELECT * FROM {table} ORDER BY id"))
+                .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
                 .unwrap();
             let width = statement.column_count();
             statement
@@ -376,6 +377,67 @@ async fn verification_writes_log_their_rows_and_a_rebuild_equals_the_live_rows()
     assert!(live.iter().all(|rows| !rows.is_empty()));
     crazyagent::landing_log::rebuild(&db).unwrap();
     assert_eq!(verification_rows(&db), live);
+}
+
+/// V250-L9 (QUESTION-1132 A): a register or a Verify the store refuses as a duplicate
+/// prunes nothing, even at the 128-row cap, since a refusal moves no revision and a prune
+/// there would change rows no landing event records.
+#[tokio::test]
+async fn a_refused_duplicate_at_the_cap_prunes_no_row() {
+    let mut h = Harness::open().await;
+    h.setup().await;
+    let verify = || OwnerVerification::Verify {
+        candidate_id: id("candidate"),
+        attempt_id: id("attempt"),
+    };
+    assert_eq!(h.owner(verify()).await, Outcome::Applied);
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    for n in 0..127 {
+        let stale = format!("stale-{n:03}");
+        db.execute(
+            "INSERT INTO verification_candidates VALUES (?1, '{\"task_id\":\"gone\"}')",
+            [&stale],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO verification_attempts VALUES (?1, 'gone', '{}')",
+            [&stale],
+        )
+        .unwrap();
+    }
+    drop(db);
+    h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
+        .await
+        .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
+    let register = OwnerVerification::Register {
+        id: id("candidate"),
+        task_id: TaskId::new("task").unwrap(),
+        snapshot: snapshot(),
+        environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+    };
+    let exists = |code: &str| Outcome::Rejected { code: code.into() };
+    assert_eq!(h.owner(register).await, exists("candidate_exists"));
+    assert_eq!(h.owner(verify()).await, exists("attempt_exists"));
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let count = |table: &str| -> i64 {
+        db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        count("verification_candidates"),
+        128,
+        "no stale candidate pruned"
+    );
+    assert_eq!(
+        count("verification_attempts"),
+        128,
+        "no orphan attempt pruned"
+    );
 }
 
 #[tokio::test]
