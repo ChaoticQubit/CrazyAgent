@@ -180,3 +180,32 @@ fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() {
     );
     assert_eq!(crate::paths::executable_names("codex.cmd"), ["codex.cmd"]);
 }
+
+/// V243-WIN-HARNESS-SEARCH: no batch file is ever started on Windows. Every spelling Windows
+/// reads as a `.cmd` or `.bat` file counts as one, and the spawn gate refuses it before
+/// cmd.exe could run it, so a batch file that would leave a marker leaves none.
+#[test]
+fn no_batch_file_is_ever_started_on_windows() {
+    for name in [
+        "x.cmd",
+        "x.CMD",
+        "x.bat",
+        "x.Bat",
+        "x.cmd.",
+        "x.cmd  ",
+        "x.cmd::$DATA",
+        "x.bat:stream",
+    ] {
+        assert!(batch_file(Path::new(name)), "{name}");
+    }
+    for name in ["x.exe", "x.cmdx", "cmd", "x.js", "x.bat.exe"] {
+        assert!(!batch_file(Path::new(name)), "{name}");
+    }
+    let folder = tempfile::tempdir().unwrap();
+    let marker = folder.path().join("ran");
+    let script = folder.path().join("x.cmd");
+    std::fs::write(&script, format!("@echo ran> \"{}\"\r\n", marker.display())).unwrap();
+    let refused = crate::spawn_gate::spawn(&mut std::process::Command::new(&script)).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(!marker.exists());
+}

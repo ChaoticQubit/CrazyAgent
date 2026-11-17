@@ -102,15 +102,18 @@ pub(super) fn entry(
     }))
 }
 
-/// Whether Windows would start a file through cmd.exe: a `.cmd` or `.bat` file, in any case.
-/// Input: the file. Output: the answer.
+/// Whether Windows would start a file through cmd.exe: a `.cmd` or `.bat` file in any case,
+/// read as Windows reads the name, with a `:stream` part and trailing dots and spaces
+/// dropped. Input: the file. Output: the answer.
 #[cfg(windows)]
 pub(crate) fn batch_file(file: &Path) -> bool {
-    file.extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        })
+    let name = file
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let name = name.split(':').next().unwrap_or_default();
+    let name = name.trim_end_matches(['.', ' ']);
+    name.ends_with(".cmd") || name.ends_with(".bat")
 }
 
 /// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.

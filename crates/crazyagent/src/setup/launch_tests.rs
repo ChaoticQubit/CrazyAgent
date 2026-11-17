@@ -153,6 +153,13 @@ fn context_mode_is_set_up_on_windows_as_the_pinned_launch_the_engine_runs() {
     let root = case.base.join("engine");
     let bin = root.join("setup").join("bin");
     program(&bin.join("npx.cmd"));
+    program(&bin.join("node.exe"));
+    program(
+        &bin.join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npx-cli.js"),
+    );
     let places =
         crate::tools::Places::engine(Some(&root), None, None, Some(std::ffi::OsStr::new("")));
     let installer = WindowsInstaller::new(
