@@ -26,6 +26,7 @@ const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
+const NODE_PROFILE: &str = "node.sb";
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
@@ -235,7 +236,15 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
     let work = staging_folder(parent, &format!("{prefix}-work"));
     let result = work.and_then(|work| {
         let filled = fill(root, &staged, &work, bin, version, prefix.as_ref())
-            .and_then(|()| checked(&staged, version).map_err(InstallError))
+            .and_then(|()| checked(&staged, version).map_err(InstallError));
+        let profile = npm_profile(parent, version);
+        let released = os::release(&profile, &staged, &work.join("home"));
+        let filled = filled
+            .and_then(|()| {
+                released
+                    .then_some(())
+                    .ok_or(InstallError("context_mode_sandbox_unavailable"))
+            })
             .and_then(|()| {
                 std::fs::rename(&staged, folder)
                     .map_err(|_| InstallError("setup_store_unavailable"))
@@ -346,9 +355,11 @@ fn fixture_program(_: Option<&str>) -> bool {
 }
 
 /// Whether the `node` beside npx runs the shared install: its `--version`, read inside a
-/// boundary in a scratch folder removed after ([`node_command`]), names 22.5 or newer, which
-/// has the built-in SQLite context-mode uses without building a dependency. Inputs: the engine
-/// root and npx's folder. Output: false when it is older, fails or names no version, or
+/// boundary in a scratch folder ([`node_command`]), names 22.5 or newer, which has the
+/// built-in SQLite context-mode uses without building a dependency. After the run the
+/// boundary's container is released ([`os::release`]) and the scratch folder removed; a
+/// refused release keeps the folder and its profile. Inputs: the engine root and npx's
+/// folder. Output: false when it is older, fails or names no version, or
 /// `context_mode_sandbox_unavailable` when no boundary can hold it.
 fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
     let scratch = staging_folder(&root.join("setup").join("npm"), NODE_CHECK)?;
@@ -356,7 +367,10 @@ fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
         run_command(command, NODE_CHECK_TIME)
             .is_ok_and(|(ok, output)| ok && supported_node(&output))
     });
-    let _ = std::fs::remove_dir_all(&scratch);
+    let profile = scratch.join(NODE_PROFILE);
+    if os::release(&profile, &scratch.join("project"), &scratch.join("home")) {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
     supported
 }
 
@@ -391,7 +405,7 @@ fn node_command(
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let profile = scratch.join("node.sb");
+    let profile = scratch.join(NODE_PROFILE);
     let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
     let mut node = std::process::Command::new(bin.join(NODE));
     node.arg("--version").current_dir(&folders[0]);
@@ -614,6 +628,12 @@ fn fill(
     checked(staged, version).map_err(InstallError)
 }
 
+/// The boundary profile npm's install step writes beside its staging folders, one per version.
+/// Inputs: the staging folders' parent and the version. Output: its path.
+fn npm_profile(parent: &Path, version: &str) -> PathBuf {
+    parent.join(format!("{PACKAGE}@{version}.sb"))
+}
+
 fn npm_command(
     root: &Path,
     staged: &Path,
@@ -643,7 +663,7 @@ fn npm_command(
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
-    let profile = parent.join(format!("{PACKAGE}@{version}.sb"));
+    let profile = npm_profile(parent, version);
     os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
 

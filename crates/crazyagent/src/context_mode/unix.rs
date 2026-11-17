@@ -130,3 +130,9 @@ pub(super) fn npm_wrap(
         .env("npm_config_update_notifier", "false");
     Ok(command)
 }
+
+/// Reports nothing to release: Seatbelt and Landlock leave no access entry or container behind
+/// a finished job. Inputs: the job's profile, folder and home, unused. Output: true.
+pub(super) fn release(_profile: &Path, _folder: &Path, _home: &Path) -> bool {
+    true
+}
