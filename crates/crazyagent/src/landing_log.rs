@@ -615,7 +615,40 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
 /// than left without its event. Inputs: the connection and the change. Output: Ok, or the
 /// refusal (`landing_log_unavailable` inside a transaction), which writes nothing.
 pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError> {
-    within(db, |tx| record(tx, change).map(drop))
+    within(db, |tx| {
+        if forgets_nothing(tx, change)? {
+            return Ok(());
+        }
+        record(tx, change).map(drop)
+    })
+}
+
+/// Whether a change forgets a worktree's rows when none is left (rv-sec3 #415 F1): such a
+/// forget changes nothing, so it logs nothing, and a retire after a Delete everything
+/// names no forgotten path again. Inputs: the transaction and the change. Output: the
+/// answer, or `changes_unavailable`.
+fn forgets_nothing(tx: &Transaction<'_>, change: &Change) -> Result<bool, EngineError> {
+    let (table, waiting, gone) = match change {
+        Change::AgentBranchForgotten(gone) => ("landing_agent_branches", false, gone),
+        Change::BaseForgotten(gone) => ("landing_bases", false, gone),
+        Change::OwnerEditsDropped(gone) => ("landing_owner_edits", true, gone),
+        Change::WorktreeOwnerEditsForgotten(gone) => ("landing_owner_edits", false, gone),
+        _ => return Ok(false),
+    };
+    assert!(WORKTREE_TABLES.contains(&table));
+    assert!(!waiting || table == "landing_owner_edits");
+    if !has(tx, table)? {
+        return Ok(true);
+    }
+    let only = if waiting { " AND change_set=''" } else { "" };
+    let held: bool = tx
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE worktree=?1{only})"),
+            [&gone.worktree],
+            |row| row.get(0),
+        )
+        .map_err(|_| failure("changes_unavailable"))?;
+    Ok(!held)
 }
 
 /// Runs one landing write group in a transaction of its own, as [`write`] does: the group
