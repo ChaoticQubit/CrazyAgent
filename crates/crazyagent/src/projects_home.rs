@@ -340,7 +340,7 @@ fn real_folder(path: &Path, missing: &str, not_folder: &str) -> Result<PathBuf, 
 
 /// True when `path` is `/`, the owner's home folder or a folder holding it, under either of
 /// the home's names on macOS. Inputs: a path in its one spelling and the owner's home.
-fn holds_owner_home(path: &Path, owner: &Path) -> bool {
+pub(crate) fn holds_owner_home(path: &Path, owner: &Path) -> bool {
     path.parent().is_none()
         || owner.starts_with(path)
         || data_twin(owner).is_some_and(|twin| twin.starts_with(path))

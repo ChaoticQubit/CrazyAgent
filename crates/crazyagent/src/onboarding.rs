@@ -1,7 +1,7 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
-use crate::projects_home::{CRAZYAGENT_DIRECTORY, one_spelling};
+use crate::projects_home::{CRAZYAGENT_DIRECTORY, holds_owner_home, one_spelling};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -371,7 +371,7 @@ fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str>
         return Err("onboarding_folder_unsafe");
     }
     if let Some(home) = owner_home().map(one_spelling)
-        && (home.starts_with(&repo)
+        && (holds_owner_home(&repo, &home)
             || [".codex", ".claude"]
                 .iter()
                 .any(|private| repo.starts_with(home.join(private))))
