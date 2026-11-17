@@ -19,8 +19,13 @@ pub const OUTPUT_BYTES_MAX: usize = 4 * 1024 * 1024;
 const PAGES_MAX: u64 = 8;
 #[cfg(unix)]
 const ENV_KEPT: [&str; 6] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
+/// The environment names a trusted Windows command keeps from the engine's own, for the MCP
+/// check of a trusted command and a harness version read, both run as the engine's user with
+/// no boundary. `PSModuleAnalysisCachePath` points Windows PowerShell at a module analysis
+/// cache a machine image built, as the GitHub images do; without it a start there analyses
+/// every installed module first, about 20 s, past [`CHECK_TIME`].
 #[cfg(windows)]
-pub(crate) const ENV_KEPT: [&str; 12] = [
+pub(crate) const ENV_KEPT: [&str; 13] = [
     "PATH",
     "PATHEXT",
     "SystemRoot",
@@ -33,6 +38,7 @@ pub(crate) const ENV_KEPT: [&str; 12] = [
     "LOCALAPPDATA",
     "TEMP",
     "TMP",
+    "PSModuleAnalysisCachePath",
 ];
 #[cfg(windows)]
 const CREATE_SUSPENDED: u32 = 0x0000_0004;
