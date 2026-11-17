@@ -2670,10 +2670,12 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
 
 /// DS-148 code F1: an engine folder spelled with a code point HFS+ ignores in names, or in
 /// another letter case, stays out of the top-level entries like the plain name, since such
-/// a volume opens it as the engine's own folder.
+/// a volume opens it as the engine's own folder. The folder is a real repository, as `.GIT`
+/// is its `.git` on a case-insensitive volume and git answers only for a working `.git`.
 #[test]
 fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
     let dir = rust_repo();
+    git_init(dir.path());
     let spelled = [
         "\u{feff}.git",
         ".GIT",
@@ -2681,7 +2683,7 @@ fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
         "Graphify-Out",
     ];
     for name in spelled {
-        std::fs::create_dir(dir.path().join(name)).unwrap();
+        std::fs::create_dir_all(dir.path().join(name)).unwrap();
     }
     let evidence = draft::gather(dir.path(), &[]);
     for name in spelled {
