@@ -162,13 +162,13 @@ test("one walk of each side for C1 (DEC-169) and the candidate's absolute call b
     }
   }
   const findings = countFindings(counts.base, counts.candidate);
-  const budgets = callBudgets({ counts: counts.candidate, calls: timed.candidate, cpu: idle.candidate, idleMs: IDLE_MS });
   writeFileSync(join(evidence, "findings.json"), JSON.stringify(findings, null, 1));
-  writeFileSync(join(evidence, "budgets.json"), JSON.stringify(budgets, null, 1));
   await t.test("C1: the candidate makes no bridge call 2.3.2 never made and none more than once beyond it, at start, on each page switch and in a minute idle (DEC-169)", () => {
     assert.deepEqual(findings, [], `calls 2.4.x adds over 2.3.2 (scenario cmd base -> candidate):\n${findings.map((item) => `${item.scenario} ${item.cmd} ${item.base} -> ${item.candidate}`).join("\n")}\nevidence ${evidence}`);
   });
   await t.test("budgets: the idle project page under 5 calls a minute, 95% of engine calls under 20 ms and the engine's CPU under 600 ms over each idle minute (v2.5 S1)", () => {
+    const budgets = callBudgets({ counts: counts.candidate, calls: timed.candidate, cpu: idle.candidate, idleMs: IDLE_MS });
+    writeFileSync(join(evidence, "budgets.json"), JSON.stringify(budgets, null, 1));
     assert.deepEqual(budgets.findings, [], `budgets the candidate misses (budget scenario reading, limit):\n${budgets.findings.map((row) => `${row.budget} ${row.scenario ?? "all"} ${row.reading}, under ${row.limit}`).join("\n")}\nevidence ${evidence}`);
   });
 });
