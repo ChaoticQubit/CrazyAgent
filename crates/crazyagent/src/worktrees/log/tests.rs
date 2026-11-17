@@ -284,8 +284,9 @@ fn swapped_once(body: &str, from: &str, to: &str) -> String {
 }
 
 /// v2.5 L6 and L1-N1: replay reads only the three worktrees kinds at schema 1 with exactly
-/// their fields, ids as ids and a typed record whose texts are checked paths, the engine's
-/// branch and a commit id; anything else, free text in any of them included, is refused.
+/// their fields, ids as ids and a typed record whose paths are checked absolute paths, its
+/// branch the engine's and its head a commit id; free text in an id, the body, the branch or
+/// the head is refused, as are a relative path and a `..` part.
 #[test]
 fn replay_refuses_a_worktrees_event_it_does_not_know() {
     let good = good_save();

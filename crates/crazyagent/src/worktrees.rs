@@ -127,6 +127,7 @@ pub struct WorktreeLease {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Identity {
     device: u64,
     inode: u64,
@@ -141,6 +142,7 @@ impl Identity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Admission {
     repository: String,
     root: Identity,
@@ -148,6 +150,7 @@ pub(crate) struct Admission {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LeaseRecord {
     lease: WorktreeLease,
     admission: Admission,
@@ -1143,7 +1146,7 @@ fn verify(admission: &Admission) -> Result<Admission, EngineError> {
     Ok(current)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
