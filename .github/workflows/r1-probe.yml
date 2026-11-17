@@ -14,56 +14,31 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: "1.98.1"
-  NODE_VERSION: "26.12.1"
   TMUX_VERSION: "3.8"
   TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
-  NEXTEST_VERSION: "0.9.152"
-  NEXTEST_PROFILE: farm
-  CARGO_INCREMENTAL: "0"
-  CARGO_TERM_COLOR: never
-  RUST_BACKTRACE: "1"
-  PROBE: team::master::tests::r1_probe_prints_what_tmux_holds_for_a_live_master_pane
-  REDS: team::master::tests::engine_input_waits_until_the_live_masters_app_reads_keys
 
 jobs:
   probe:
-    name: R1 probe on Linux
+    name: R1 probe 2, who can change the farm tmux path
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 20
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
           set -euo pipefail
           [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the R1 probe runs only on GitHub-hosted runners"; exit 1; }
-      - name: Free disk on the Linux runner
+      - name: Path parts before the farm install
         run: |
           set -euo pipefail
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
+          id
+          for part in / /usr /usr/local /usr/local/bin /usr/bin /usr/bin/tmux /bin; do
+            stat -c 'R2 before %A %U:%G %a %F %n' "$part" || true
+          done
+          dpkg -S /usr/bin/tmux || true
+          dpkg -l tmux || true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Set debug info for the disk
-        run: |
-          set -euo pipefail
-          {
-            echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only"
-            echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only"
-          } >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Install cargo-nextest
-        run: bash scripts/ci/install-nextest.sh
       - name: Install Linux packages
         timeout-minutes: 10
         run: bash scripts/ci/linux-packages.sh
@@ -79,71 +54,13 @@ jobs:
           (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
           sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
           test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Show the runner
-        continue-on-error: true
+      - name: Path parts after the farm install
         run: |
           set -euo pipefail
-          uname -a
-          cat /etc/os-release
-          locale
-          locale -a
-          type -a tmux || true
-          ldd /usr/local/bin/tmux
-          grep -E 'UTF8PROC|JEMALLOC|HAVE_SYSTEMD|HAVE_UTF8PROC' "$RUNNER_TEMP/tmux/tmux-$TMUX_VERSION/config.log" || true
-          id
-          ps -o stat,pid,ppid,pgid,sid,tpgid,tty,args -p $$
-      - name: Build the crazyagent lib tests
-        run: cargo test --locked -p crazyagent --lib --no-run
-      - name: Probe under cargo test
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec cargo test --locked -p crazyagent --lib -- --exact "$PROBE" --ignored --nocapture'
-      - name: Reds row under cargo test
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec cargo test --locked -p crazyagent --lib -- --exact "$REDS" --nocapture'
-      - name: Probe and reds row under nextest run
-        continue-on-error: true
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec cargo nextest run --locked -p crazyagent --lib --success-output immediate --failure-output immediate --run-ignored all -E "test(=$PROBE) | test(=$REDS)"'
-      - name: Probe and reds row under nextest from a crate archive
-        continue-on-error: true
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/r1-crate.tar.zst"
-          cargo nextest archive --locked -p crazyagent --lib --archive-file "$archive"
-          dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec cargo nextest run --archive-file "$1" --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --success-output immediate --failure-output immediate --run-ignored all -E "test(=$PROBE) | test(=$REDS)"' probe "$archive"
-      - name: Probe and reds row from a workspace archive, as the farm builds it
-        continue-on-error: true
-        timeout-minutes: 75
-        run: |
-          set -euo pipefail
-          df -h /
-          archive="$RUNNER_TEMP/r1-workspace.tar.zst"
-          (cd apps/desktop && npm ci --ignore-scripts --no-audit --no-fund && npm run build)
-          cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --locked --offline
-          cargo nextest archive --workspace --locked --offline --archive-file "$archive"
-          rm -rf "$GITHUB_WORKSPACE/target"
-          export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$GITHUB_WORKSPACE/target/debug/crazyagent"
-          dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec cargo nextest run --archive-file "$1" --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --success-output immediate --failure-output immediate --run-ignored all -E "test(=$PROBE) | test(=$REDS)"' probe "$archive"
-      - name: Every team::master row in parallel from the workspace archive
-        continue-on-error: true
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          archive="$RUNNER_TEMP/r1-workspace.tar.zst"
-          export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$GITHUB_WORKSPACE/target/debug/crazyagent"
-          dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec cargo nextest run --archive-file "$1" --workspace-remap "$GITHUB_WORKSPACE" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --no-fail-fast --failure-output immediate -E "test(/^team::master::tests::/)"' probe "$archive"
-      - name: Show the free disk
-        if: always()
-        run: |
-          set -euo pipefail
-          df -h /
-          du -sh target || true
+          for part in / /usr /usr/local /usr/local/bin /usr/local/bin/tmux; do
+            stat -c 'R2 after %A %U:%G %a %F %n' "$part"
+          done
+          getfacl -p /usr/local /usr/local/bin /usr/local/bin/tmux 2>/dev/null || true
+          lsattr -d /usr/local/bin 2>/dev/null || true
+          getent group "$(stat -c %G /usr/local/bin)" || true
+          getent group "$(stat -c %G /usr/local)" || true
