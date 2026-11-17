@@ -1,9 +1,12 @@
 use super::Scenario;
+use crazyagent::engine::owner::{OwnerResponse, OwnerResult};
 use crazyagent::harnesses::interactive::{self, InteractiveCommand, Run, Support, Transcript};
 use crazyagent::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchLimits, LaunchRequest, Secret, command, route,
 };
 use crazyagent::model_gateway::relay::Relay;
+use crazyagent::protocol::ProjectId;
+use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -108,6 +111,9 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         scenario("interactive-plain-model-flag", interactive_plain_model_flag),
         scenario("interactive-plain-subcommand", interactive_plain_subcommand),
         scenario("interactive-refusals", interactive_refusals),
+        scenario("agent-policy-sandboxed", agent_policy_sandboxed),
+        scenario("agent-policy-own-branch", agent_policy_own_branch),
+        scenario("agent-policy-full", agent_policy_full),
     ]
 }
 
@@ -727,4 +733,127 @@ fn interactive_support(_scratch: &Path) -> Result<Value, String> {
         })
         .collect();
     Ok(Value::Array(answers))
+}
+
+/// The project the policy scenarios set up.
+const POLICY_PROJECT: &str = "snapshot-p2-policy";
+
+/// The policy view fields that read what this Mac has installed, never kept in a golden
+/// (NOTE-20:43 Q3): the toolchains found and the tool caches offered.
+const MACHINE_FIELDS: [&str; 2] = ["toolchains", "tool_caches"];
+
+/// The policy a save of one view at another access level sends, keeping every other choice
+/// the view shows and no toolchain. Inputs: the view and the level. Output: the policy.
+fn at_level(view: &PolicyView, access: AgentAccess) -> AgentPolicy {
+    AgentPolicy {
+        access,
+        toolchains: Vec::new(),
+        ide_git_hooks: view.ide_git_hooks,
+        network: view.network,
+        tool_cache: view.tool_cache,
+        home_caches: view.home_caches,
+        ide_agent_files: view.ide_agent_files,
+        apply_changes: view.apply_changes,
+        grants: view
+            .grants
+            .iter()
+            .map(|grant| grant.grant.clone())
+            .collect(),
+        shared_folders: view.shared_folders.clone(),
+    }
+}
+
+/// The result an owner change was recorded with. Input: the engine's response. Output: the
+/// result, or the response when it was not recorded.
+fn recorded(response: OwnerResponse) -> Result<OwnerResult, String> {
+    match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            Ok(operation.result)
+        }
+        other => Err(format!("the owner change was not recorded: {other:?}")),
+    }
+}
+
+/// Reads one project's agent policy as the owner's policy screen does. Inputs: the owner
+/// and the project. Output: the view, or the engine's refusal code.
+async fn policy_view(
+    owner: &mut super::e2e_support::Owner,
+    project: &ProjectId,
+) -> Result<PolicyView, String> {
+    owner
+        .controller
+        .project_agent_policy(project.clone())
+        .await
+        .map_err(|error| error.0)
+}
+
+/// Captures the agent policy a new project's agents get at one access level, as the owner's
+/// policy screen reads it: the level, network, the choices offered, the grants and their
+/// log, apply timing, shared and local folders and the temp folder a grant would hand over,
+/// all but the fields that read this Mac's installs. Inputs: the scratch folder and the
+/// level. Output: the view as JSON.
+fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
+    let projects = scratch
+        .canonicalize()
+        .map_err(|error| error.to_string())?
+        .join("projects");
+    std::fs::create_dir(&projects).map_err(|error| error.to_string())?;
+    let engine = super::provider::engine(scratch)?;
+    let view = super::provider::with_owner(&engine, |mut owner| async move {
+        let steps = async {
+            let home = owner.set_home(&projects).await;
+            if home != OwnerResult::Applied {
+                return Err(format!("set_home: {home:?}"));
+            }
+            let created = owner
+                .create_project(POLICY_PROJECT, "Snapshot policy")
+                .await;
+            if created != OwnerResult::Applied {
+                return Err(format!("create_project: {created:?}"));
+            }
+            let project = ProjectId::new(POLICY_PROJECT).map_err(|error| error.to_string())?;
+            let before = policy_view(&mut owner, &project).await?;
+            if before.access != access {
+                let generation = owner.next();
+                let saved = owner
+                    .controller
+                    .set_project_agent_policy(
+                        project.clone(),
+                        before.version,
+                        at_level(&before, access),
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| error.0)?;
+                let result = recorded(saved)?;
+                if result != OwnerResult::Applied {
+                    return Err(format!("set_project_agent_policy: {result:?}"));
+                }
+            }
+            policy_view(&mut owner, &project).await
+        };
+        let view = steps.await;
+        (owner, view)
+    })?;
+    assert_eq!(view.access, access);
+    let mut captured = serde_json::to_value(view).map_err(|error| error.to_string())?;
+    let fields = captured
+        .as_object_mut()
+        .ok_or_else(|| "a policy view is not an object".to_owned())?;
+    for field in MACHINE_FIELDS {
+        fields.remove(field);
+    }
+    Ok(captured)
+}
+
+fn agent_policy_sandboxed(scratch: &Path) -> Result<Value, String> {
+    agent_policy(scratch, AgentAccess::Sandboxed)
+}
+
+fn agent_policy_own_branch(scratch: &Path) -> Result<Value, String> {
+    agent_policy(scratch, AgentAccess::OwnBranch)
+}
+
+fn agent_policy_full(scratch: &Path) -> Result<Value, String> {
+    agent_policy(scratch, AgentAccess::Full)
 }

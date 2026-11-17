@@ -367,7 +367,7 @@ impl Recorder {
 /// Starts a real engine whose HOME is a private folder below the scratch folder and saves
 /// the owner profile. Input: the scratch folder. Output: the running engine, or why its HOME
 /// could not be made.
-fn engine(scratch: &Path) -> Result<Engine, String> {
+pub(super) fn engine(scratch: &Path) -> Result<Engine, String> {
     let home = scratch
         .canonicalize()
         .map_err(|error| error.to_string())?
@@ -384,7 +384,7 @@ fn engine(scratch: &Path) -> Result<Engine, String> {
 /// Runs owner steps against the engine as the TUI client on a runtime of its own, then
 /// detaches. Inputs: the engine and the steps, which hand the owner back with their result.
 /// Output: the steps' result.
-fn with_owner<T, F, Fut>(engine: &Engine, steps: F) -> Result<T, String>
+pub(super) fn with_owner<T, F, Fut>(engine: &Engine, steps: F) -> Result<T, String>
 where
     F: FnOnce(Owner) -> Fut,
     Fut: std::future::Future<Output = (Owner, Result<T, String>)>,
