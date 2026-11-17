@@ -2012,14 +2012,21 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
 }
 
 /// Adds the folder holding `crazyagent.exe` to the user's PATH on Windows through
-/// PowerShell, keeping every existing entry. Inputs: the executable and an unused bin
-/// folder. Output: the folder added.
+/// PowerShell, keeping every existing entry. A folder whose path holds ';' is refused with
+/// the user's PATH untouched, since PATH splits its entries there. Inputs: the executable
+/// and an unused bin folder. Output: the folder added, or the refusal.
 #[cfg(not(unix))]
 pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError> {
     let folder = executable
         .parent()
         .ok_or_else(|| failure("the executable has no folder"))?
         .to_path_buf();
+    if folder.to_string_lossy().contains(';') {
+        return Err(failure(format!(
+            "{} holds a ';', where the Windows PATH splits its entries; the user PATH is unchanged",
+            folder.display()
+        )));
+    }
     run_process(&mut windows_path_command(&folder))?;
     Ok(folder)
 }
