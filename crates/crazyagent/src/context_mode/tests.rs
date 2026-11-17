@@ -238,9 +238,28 @@ fn a_node_probe_leaves_a_scratch_alone_while_another_probe_holds_the_check_lock(
     held.lock_shared().unwrap();
     let _ = node_supported(&case.root, &case.bin);
     assert!(left.is_dir(), "a live probe's scratch is never touched");
+    held.unlock().unwrap();
     drop(held);
     let _ = node_supported(&case.root, &case.bin);
     assert!(!left.exists(), "with the lock free the scratch is ended");
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an install's work folder carries its staging folder's
+/// random suffix, so a later install can pair the two, and is never one that exists.
+#[test]
+fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
+    let case = case("/usr/bin/false");
+    let prefix = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    assert_eq!(random.len(), 24);
+    let work = work_folder(&staged, &prefix).unwrap();
+    assert_eq!(work, case.npm().join(format!(".{prefix}-work-{random}")));
+    assert!(work.is_dir());
+    assert_eq!(
+        work_folder(&staged, &prefix),
+        Err(InstallError("setup_store_unavailable"))
+    );
 }
 
 #[cfg(target_os = "macos")]

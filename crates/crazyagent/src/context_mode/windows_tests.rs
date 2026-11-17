@@ -632,6 +632,7 @@ fn a_node_probe_leaves_a_live_probe_container_alone() {
     assert!(record.is_file());
     assert!(package.is_dir());
     assert!(scratch.is_dir());
+    held.unlock().unwrap();
     drop(held);
     assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
     assert!(!record.exists());
@@ -669,6 +670,67 @@ fn an_npm_install_releases_the_container_a_crashed_install_left() {
     assert_eq!(entries(&case.bin), before);
     assert!(!record.exists());
     assert!(!package.exists());
+    assert!(!staged.exists());
+    assert!(!work.exists());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an install's work folder carries its staging folder's
+/// random suffix, so a later install can pair the two, and is never one that exists.
+#[test]
+fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    let work = work_folder(&staged, &prefix).unwrap();
+    assert_eq!(work, npm.join(format!(".{prefix}-work-{random}")));
+    assert!(work.is_dir());
+    assert_eq!(
+        work_folder(&staged, &prefix),
+        Err(InstallError("setup_store_unavailable"))
+    );
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a left pair whose version profile names another
+/// container is not released by the profile's word: the release refuses and keeps the
+/// profile, nothing of that container is touched, and both folders are still removed.
+#[test]
+fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let work = work_folder(&staged, &prefix).unwrap();
+    let (job, home) = npm_job(&staged, &work).unwrap();
+    let tmp = crate::sandbox::canonical(&work).unwrap().join("tmp");
+    for folder in [&home, &tmp] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let grants = case.root.join("grants");
+    fs::create_dir_all(&grants).unwrap();
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &job,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+    assert_eq!(
+        forged.container,
+        crate::sandbox::windows::container_for(&job, &home)
+    );
+    forged.container = format!("crazyagent.{}", "0".repeat(32));
+    let profile = npm_profile(&npm, VERSION);
+    fs::write(&profile, forged.encode().unwrap()).unwrap();
+    remove_staged(&npm, &prefix, VERSION);
+    assert!(profile.is_file(), "a refused release keeps the profile");
+    assert!(
+        !grants
+            .join(format!("container-{}.lock", forged.container))
+            .exists()
+    );
     assert!(!staged.exists());
     assert!(!work.exists());
 }
