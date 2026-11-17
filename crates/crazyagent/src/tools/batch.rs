@@ -102,18 +102,22 @@ pub(super) fn entry(
     }))
 }
 
-/// Whether Windows would start a file through cmd.exe: a `.cmd` or `.bat` file in any case,
-/// read as Windows reads the name, with a `:stream` part and trailing dots and spaces
-/// dropped. Input: the file. Output: the answer.
+/// Whether Windows would start a file through cmd.exe ([`batch_name`]). Input: the file.
+/// Output: the answer, false for a path with no file name.
 #[cfg(windows)]
 pub(crate) fn batch_file(file: &Path) -> bool {
-    let name = file
-        .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_default();
-    let name = name.split(':').next().unwrap_or_default();
+    file.file_name()
+        .is_some_and(|name| batch_name(&name.to_string_lossy()))
+}
+
+/// Whether a file name is a batch file as Windows reads it: `.cmd` or `.bat` in any case once
+/// the trailing dots and spaces Windows drops are gone, or any name with a `:` stream part,
+/// which no program the engine starts has, so it fails closed (#333 r1 N3/N5). Input: the
+/// name. Output: the answer.
+fn batch_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
     let name = name.trim_end_matches(['.', ' ']);
-    name.ends_with(".cmd") || name.ends_with(".bat")
+    name.contains(':') || name.ends_with(".cmd") || name.ends_with(".bat")
 }
 
 /// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.
@@ -132,11 +136,15 @@ fn shim_target(cmd: &Path) -> Option<PathBuf> {
 }
 
 /// The real file an npm cmd-shim starts, which is the pin of a harness found as one, as the
-/// real file of npm's link is on Unix. npx and any other batch file give none. Input: the
-/// shim's real file. Output: the target's real file.
+/// real file of npm's link is on Unix. npx, any other batch file and a shim whose target is
+/// itself a batch file give none (#333 r1 N6). Input: the shim's real file. Output: the
+/// target's real file.
 #[cfg(windows)]
 pub(crate) fn cmd_shim_real(cmd: &Path) -> Option<PathBuf> {
-    shim_target(cmd)?.canonicalize().ok()
+    shim_target(cmd)?
+        .canonicalize()
+        .ok()
+        .filter(|real| !batch_file(real))
 }
 
 /// npm's own `npx.cmd` by where it sits: named `npx.cmd`, with `node.exe` beside it and the
@@ -192,6 +200,28 @@ pub(super) mod tests {
             shim_text("node", r"node_modules\@openai\codex\bin\codex.js"),
             CODEX
         );
+    }
+
+    /// #333 r1 N3/N5: a file name is a batch file as Windows reads it: `.cmd` or `.bat` in any
+    /// case with trailing dots and spaces dropped, and any name with a `:` stream part, even
+    /// one whose part before the stream is a program.
+    #[test]
+    fn a_batch_name_is_read_as_windows_reads_it() {
+        for name in [
+            "run.cmd",
+            "RUN.BAT",
+            "run.Cmd.",
+            "run.cmd ",
+            "run.bat. .",
+            "tool.exe:x.cmd",
+            "tool.exe:stream",
+            "tool.exe::$DATA",
+        ] {
+            assert!(batch_name(name), "{name}");
+        }
+        for name in ["tool.exe", "cmd", "run.cmdx", "run.cmd.exe", "bat", ""] {
+            assert!(!batch_name(name), "{name}");
+        }
     }
 
     /// Any text but the generator's exact layout names nothing: line ends changed, a line
