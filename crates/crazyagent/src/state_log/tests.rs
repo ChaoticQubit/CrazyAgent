@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 26] = [
+const KINDS: [&str; 27] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -504,6 +504,7 @@ const KINDS: [&str; 26] = [
     crate::landing_log::BASELINE_APPROVED,
     crate::landing_log::PUBLISH_PROMPT_SNOOZED,
     crate::landing_log::PUBLISH_PROMPT_NEVER,
+    crate::landing_log::CHANGE_SET_SAVED,
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
@@ -909,6 +910,9 @@ fn landing_sample(kind: &str) -> serde_json::Value {
         landing::BASELINE_APPROVED => json!({"project": "app", "baseline": "b".repeat(64)}),
         landing::PUBLISH_PROMPT_SNOOZED => json!({"project": "app", "until_ms": 5}),
         landing::PUBLISH_PROMPT_NEVER => json!({"project": "app"}),
+        landing::CHANGE_SET_SAVED => json!({
+            "change_set": change_set, "project": "app", "row": "d".repeat(64), "number": 1
+        }),
         other => panic!("{other} is not a landing kind"),
     }
 }

@@ -479,14 +479,16 @@ fn signed(value: u64) -> Result<i64, EngineError> {
 }
 
 /// Writes a change set, adding it or updating every column of the row with its id, except
-/// that a record with no place keeps the place stored, and gives a set with no number the
-/// next number of its project in the same savepoint.
+/// that a record with no place keeps the place stored, gives a set with no number the next
+/// number of its project and logs the stored row as `ChangeSetSaved`, in one transaction.
 /// Inputs: the store and the record. Output: Ok once stored; a second open change set
 /// for the same worktree is refused with `changes_agent_has_pending` and both rows stay.
 pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> {
-    within(db, "landing_save", || {
-        write(db, record)?;
-        number(db, &record.id, &record.project)?;
+    landing_log::within(db, |tx| {
+        write(tx, record)?;
+        number(tx, &record.id, &record.project)?;
+        let logged = landing_log::record_row(tx, record.id.as_str())?;
+        assert!(logged, "a saved change set has its row");
         Ok(())
     })
 }
@@ -584,38 +586,55 @@ pub(super) fn project_kept(db: &Connection, project: &ProjectId) -> Result<bool,
 }
 
 /// Stores the subject an agent's summary gives a change set (F22), touching no other
-/// column, so a landing step running beside it keeps what it wrote. Inputs: the store, the
-/// change set and the subject, empty to clear it. Output: Ok once stored.
+/// column, so a landing step running beside it keeps what it wrote, and logs the row as
+/// `ChangeSetSaved`. Inputs: the store, the change set and the subject, empty to clear it.
+/// Output: Ok once stored, or the log's refusal with nothing stored.
 pub(super) fn set_summary(
     db: &Connection,
     id: &ChangeSetId,
     summary: &str,
 ) -> Result<(), EngineError> {
     initialize(db)?;
-    db.execute(
-        "UPDATE landing_change_sets SET summary=?2 WHERE id=?1",
-        params![id.as_str(), summary],
-    )
-    .map_err(storage)?;
-    Ok(())
+    landing_log::within(db, |tx| {
+        let changed = tx
+            .execute(
+                "UPDATE landing_change_sets SET summary=?2 WHERE id=?1",
+                params![id.as_str(), summary],
+            )
+            .map_err(storage)?;
+        let logged = landing_log::record_row(tx, id.as_str())?;
+        assert_eq!(logged, changed == 1, "a stored summary is logged");
+        Ok(())
+    })
 }
 
 /// Stores what a landing try that changed nothing did to a change set (F23), touching no
-/// other column, and only while the set is open, so a set closed beside it keeps its result.
-/// Inputs: the store, the change set and the result. Output: Ok once stored.
+/// other column, and only while the set is open, so a set closed beside it keeps its result;
+/// a stored result logs the row as `ChangeSetSaved`. Inputs: the store, the change set and
+/// the result. Output: Ok once stored, or the log's refusal with nothing stored.
 pub(super) fn set_landing_result(
     db: &Connection,
     id: &ChangeSetId,
     result: LandingResult,
 ) -> Result<(), EngineError> {
     initialize(db)?;
-    db.execute(
-        "UPDATE landing_change_sets SET landing_result=?2 \
-         WHERE id=?1 AND state IN ('pending','conflict','updating')",
-        params![id.as_str(), landing_name(result)],
-    )
-    .map_err(storage)?;
-    Ok(())
+    landing_log::within(db, |tx| {
+        let changed = tx
+            .execute(
+                "UPDATE landing_change_sets SET landing_result=?2 \
+                 WHERE id=?1 AND state IN ('pending','conflict','updating')",
+                params![id.as_str(), landing_name(result)],
+            )
+            .map_err(storage)?;
+        if changed == 1 {
+            assert!(
+                landing_log::record_row(tx, id.as_str())?,
+                "a stored result is logged"
+            );
+        }
+        assert!(changed <= 1, "an id names one change set");
+        Ok(())
+    })
 }
 
 /// Gives a change set the next number of its project when it has none yet: the project's
@@ -732,29 +751,6 @@ fn next_numbers(db: &Connection, sets: &[(String, String)]) -> Result<Vec<Change
     }
     assert!(highest.values().all(|number| *number >= 1));
     Ok(changes)
-}
-
-/// Runs `work` inside a savepoint, kept when it succeeds and undone when it fails, so it
-/// nests inside a caller's transaction. Inputs: the store, the savepoint's name and the
-/// work. Output: the work's result.
-fn within<T>(
-    db: &Connection,
-    name: &str,
-    work: impl FnOnce() -> Result<T, EngineError>,
-) -> Result<T, EngineError> {
-    db.execute_batch(&format!("SAVEPOINT {name}"))
-        .map_err(storage)?;
-    match work() {
-        Ok(value) => {
-            db.execute_batch(&format!("RELEASE {name}"))
-                .map_err(storage)?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = db.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
-            Err(error)
-        }
-    }
 }
 
 /// Stores the commit the next change set of a worktree opens above, logged as `BaseSet`

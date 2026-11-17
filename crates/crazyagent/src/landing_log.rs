@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 /// The body schema of every landing event.
@@ -40,7 +40,7 @@ pub const PUBLISH_PROMPT_SNOOZED: &str = "PublishPromptSnoozed";
 /// A Don't ask again to a project's publish prompt.
 pub const PUBLISH_PROMPT_NEVER: &str = "PublishPromptNever";
 /// Every landing event kind.
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     AGENT_BRANCH_SET,
     AGENT_BRANCH_FORGOTTEN,
     BASE_SET,
@@ -54,6 +54,7 @@ pub const KINDS: [&str; 13] = [
     BASELINE_APPROVED,
     PUBLISH_PROMPT_SNOOZED,
     PUBLISH_PROMPT_NEVER,
+    CHANGE_SET_SAVED,
 ];
 
 /// Whether a body path is absolute: `/`, then names `owner_edit::check_path` accepts, so
@@ -138,6 +139,17 @@ pub struct Approved {
     pub baseline: String,
 }
 
+/// A change set's stored row: its id, project and number (none for a set an engine without
+/// numbers stored) and the digest of the row's cells, kept as an owner text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Saved {
+    pub change_set: String,
+    pub project: String,
+    pub row: crate::owner_texts::TextDigest,
+    pub number: Option<u64>,
+}
+
 /// A Not now to a project's publish prompt: the project id and the time in ms it asks again,
 /// from 0.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +196,7 @@ pub enum Change {
     BaselineApproved(Approved),
     PublishPromptSnoozed(Snoozed),
     PublishPromptNever(Project),
+    ChangeSetSaved(Saved),
 }
 
 impl Change {
@@ -229,6 +242,13 @@ impl Change {
             Self::PublishPromptNever(never) => {
                 crate::protocol::ProjectId::new(never.project.as_str()).is_ok()
             }
+            Self::ChangeSetSaved(saved) => {
+                change_set_id(&saved.change_set)
+                    && crate::protocol::ProjectId::new(saved.project.as_str()).is_ok()
+                    && saved
+                        .number
+                        .is_none_or(|number| number >= 1 && i64::try_from(number).is_ok())
+            }
         }
     }
 
@@ -250,7 +270,8 @@ impl Change {
             | Self::BaseSet(_)
             | Self::BaseForgotten(_)
             | Self::ChangeSetNumbered(_)
-            | Self::BaselineApproved(_) => None,
+            | Self::BaselineApproved(_)
+            | Self::ChangeSetSaved(_) => None,
         }
     }
 
@@ -268,7 +289,8 @@ impl Change {
             | Self::ChangeSetNumbered(_)
             | Self::BaselineApproved(_)
             | Self::PublishPromptSnoozed(_)
-            | Self::PublishPromptNever(_) => Some(1),
+            | Self::PublishPromptNever(_)
+            | Self::ChangeSetSaved(_) => Some(1),
             Self::OwnerEditsSettled(_) | Self::OwnerEditsDropped(_) => Some(PATHS_PER_WORKTREE_MAX),
             Self::OwnerEditsForgotten(_) | Self::WorktreeOwnerEditsForgotten(_) => None,
         }
@@ -290,6 +312,7 @@ impl Change {
             Self::BaselineApproved(_) => BASELINE_APPROVED,
             Self::PublishPromptSnoozed(_) => PUBLISH_PROMPT_SNOOZED,
             Self::PublishPromptNever(_) => PUBLISH_PROMPT_NEVER,
+            Self::ChangeSetSaved(_) => CHANGE_SET_SAVED,
         };
         assert!(KINDS.contains(&kind), "the landing kind {kind} is in KINDS");
         kind
@@ -317,6 +340,7 @@ impl Change {
             Self::BaselineApproved(approved) => serde_json::to_vec(approved),
             Self::PublishPromptSnoozed(snoozed) => serde_json::to_vec(snoozed),
             Self::PublishPromptNever(never) => serde_json::to_vec(never),
+            Self::ChangeSetSaved(saved) => serde_json::to_vec(saved),
         };
         body.map_err(|_| failure("landing_log_body"))
     }
@@ -346,6 +370,7 @@ impl Change {
             BASELINE_APPROVED => serde_json::from_slice(body).map(Self::BaselineApproved),
             PUBLISH_PROMPT_SNOOZED => serde_json::from_slice(body).map(Self::PublishPromptSnoozed),
             PUBLISH_PROMPT_NEVER => serde_json::from_slice(body).map(Self::PublishPromptNever),
+            CHANGE_SET_SAVED => serde_json::from_slice(body).map(Self::ChangeSetSaved),
             _ => return Err(refused()),
         };
         let change = change.map_err(|_| refused())?;
@@ -444,22 +469,219 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
 /// its event. Inputs: the connection and the change. Output: Ok, or the refusal
 /// (`landing_log_unavailable` inside a transaction), which writes nothing.
 pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError> {
+    within(db, |tx| record(tx, change))
+}
+
+/// Runs one landing write group in a transaction of its own, as [`write`] does: the group
+/// writes and records through the transaction, which then commits. Refused inside a
+/// caller's transaction. Inputs: the connection and the group. Output: the group's value,
+/// or the refusal (`landing_log_unavailable` or the group's) with nothing written.
+pub(crate) fn within<T>(
+    db: &Connection,
+    group: impl FnOnce(&Transaction<'_>) -> Result<T, EngineError>,
+) -> Result<T, EngineError> {
     if !db.is_autocommit() {
         return Err(failure("landing_log_unavailable"));
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
         .map_err(|_| failure("landing_log_unavailable"))?;
-    record(&tx, change)?;
+    let value = group(&tx)?;
     tx.commit()
         .map_err(|_| failure("landing_log_unavailable"))?;
     assert!(db.is_autocommit(), "the landing write committed");
+    Ok(value)
+}
+
+/// Logs a change set's stored row in the writer's transaction (QUESTION-1056 A): its cells
+/// by column name are kept as an owner text under the set's row holder, which releases the
+/// text an earlier save kept, and `ChangeSetSaved` carries the digest and the set's number.
+/// Inputs: the transaction and the set's id. Output: whether the set has a row to log, or
+/// the refusal.
+pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineError> {
+    let Some(cells) = row_cells(tx, id)? else {
+        return Ok(false);
+    };
+    let refused = || failure("landing_log_row");
+    let project = cells
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(refused)?
+        .to_owned();
+    let owner = crate::protocol::ProjectId::new(project.as_str()).map_err(|_| refused())?;
+    let number: Option<i64> = tx
+        .query_row(
+            "SELECT number FROM landing_change_set_numbers WHERE change_set=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| failure("changes_unavailable"))?;
+    let number = number
+        .map(u64::try_from)
+        .transpose()
+        .map_err(|_| refused())?;
+    let text = serde_json::to_vec(&cells).map_err(|_| refused())?;
+    let holder = format!("landing_change_sets/{id}/row");
+    let row = crate::owner_texts::keep(tx, &holder, Some(&owner), &text)?;
+    let saved = Saved {
+        change_set: id.to_owned(),
+        project,
+        row,
+        number,
+    };
+    record(tx, &Change::ChangeSetSaved(saved))?;
+    assert!(!tx.is_autocommit());
+    Ok(true)
+}
+
+/// The most columns a change set row has, a bound on the reads of its cells.
+const ROW_COLUMNS_MAX: usize = 64;
+
+/// One change set row's cells by column name: text, integer or null. Inputs: the
+/// connection and the set's id. Output: the cells, none without the row, or the refusal.
+fn row_cells(
+    db: &Connection,
+    id: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, EngineError> {
+    let unavailable = |_| failure("changes_unavailable");
+    let mut statement = db
+        .prepare("SELECT * FROM landing_change_sets WHERE id=?1")
+        .map_err(unavailable)?;
+    let names: Vec<String> = statement
+        .column_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        names.len() <= ROW_COLUMNS_MAX,
+        "a change set row is bounded"
+    );
+    let stored = statement
+        .query_row([id], |row| {
+            (0..names.len())
+                .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .optional()
+        .map_err(unavailable)?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let mut cells = serde_json::Map::new();
+    for (name, value) in names.into_iter().zip(stored) {
+        cells.insert(name, cell(value)?);
+    }
+    assert_eq!(
+        cells.get("id").and_then(serde_json::Value::as_str),
+        Some(id)
+    );
+    Ok(Some(cells))
+}
+
+/// Applies a logged change set save: its kept row text upserted by column name, and its
+/// number. A save whose text a later one released is skipped (superseded). Inputs: the
+/// connection and the save. Output: Ok, `landing_log_row`, `landing_log_row_cell` or the
+/// store's refusal.
+fn apply_saved(db: &Connection, saved: &Saved) -> Result<(), EngineError> {
+    let mut missing = Vec::new();
+    let text = crate::owner_texts::replayed(db, &saved.row, &mut missing)?;
+    if !missing.is_empty() {
+        assert!(text.is_empty(), "a missing text reads as none");
+        return Ok(());
+    }
+    let cells: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&text).map_err(|_| failure("landing_log_row"))?;
+    upsert_row(db, saved, &cells)?;
+    if let Some(number) = saved.number {
+        let number = i64::try_from(number).map_err(|_| failure("landing_log_row"))?;
+        db.execute(
+            "INSERT INTO landing_change_set_numbers(change_set,project,number) \
+             VALUES (?1,?2,?3) ON CONFLICT(change_set) DO NOTHING",
+            params![saved.change_set, saved.project, number],
+        )
+        .map_err(|_| failure("changes_unavailable"))?;
+    }
     Ok(())
+}
+
+/// Upserts a change set row from its cells by column name: a cell the table has no column
+/// for, or of a type no column holds, fails closed; a column with no cell takes its default.
+/// Inputs: the connection, the save and the cells. Output: Ok, `landing_log_row` for cells of
+/// another set, `landing_log_row_cell`, or the store's refusal.
+fn upsert_row(
+    db: &Connection,
+    saved: &Saved,
+    cells: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), EngineError> {
+    use rusqlite::types::Value as Stored;
+    use serde_json::Value as Cell;
+    let refused = || failure("landing_log_row_cell");
+    let named = |key: &str| cells.get(key).and_then(Cell::as_str);
+    if named("id") != Some(saved.change_set.as_str())
+        || named("project") != Some(saved.project.as_str())
+    {
+        return Err(failure("landing_log_row"));
+    }
+    let columns = table_columns(db, "landing_change_sets")?;
+    let mut names = Vec::with_capacity(cells.len());
+    let mut values = Vec::with_capacity(cells.len());
+    for (name, value) in cells {
+        if !columns.contains(name) {
+            return Err(refused());
+        }
+        let stored = match value {
+            Cell::Null => Stored::Null,
+            Cell::String(text) => Stored::Text(text.clone()),
+            Cell::Number(number) => number.as_i64().map(Stored::Integer).ok_or_else(refused)?,
+            _ => return Err(refused()),
+        };
+        names.push(format!("\"{name}\""));
+        values.push(stored);
+    }
+    let marks = (1..=names.len()).map(|index| format!("?{index}"));
+    let updates = columns
+        .iter()
+        .filter(|column| column.as_str() != "id")
+        .map(|column| format!("\"{column}\"=excluded.\"{column}\""));
+    let sql = format!(
+        "INSERT INTO landing_change_sets({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
+        names.join(","),
+        marks.collect::<Vec<_>>().join(","),
+        updates.collect::<Vec<_>>().join(",")
+    );
+    db.execute(&sql, rusqlite::params_from_iter(values))
+        .map_err(|_| failure("changes_unavailable"))?;
+    assert!(names.len() <= columns.len());
+    assert!(names.len() >= 2, "a row has its id and project");
+    Ok(())
+}
+
+/// The column names of a table, in schema order. Inputs: the connection and the table.
+/// Output: the names, or `changes_unavailable` past [`ROW_COLUMNS_MAX`].
+fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>, EngineError> {
+    let unavailable = |_| failure("changes_unavailable");
+    let limit = i64::try_from(ROW_COLUMNS_MAX + 1).map_err(|_| failure("changes_unavailable"))?;
+    let columns = db
+        .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid LIMIT ?2")
+        .map_err(unavailable)?
+        .query_map(params![table, limit], |row| row.get::<_, String>(0))
+        .map_err(unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(unavailable)?;
+    if columns.len() > ROW_COLUMNS_MAX {
+        return Err(failure("changes_unavailable"));
+    }
+    assert!(columns.iter().all(|column| !column.is_empty()));
+    Ok(columns)
 }
 
 /// Applies one landing change to its table with the same statements live and in replay,
 /// within the change's row bound. Inputs: the connection and the change. Output: Ok, or the
 /// table's refusal.
 pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
+    if let Change::ChangeSetSaved(saved) = change {
+        return apply_saved(db, saved);
+    }
     let unavailable = |_| failure("changes_unavailable");
     if let Some(schema) = change.schema() {
         db.execute_batch(schema).map_err(unavailable)?;
@@ -543,6 +765,7 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
              ON CONFLICT(project) DO UPDATE SET never = 1",
             [&never.project],
         ),
+        Change::ChangeSetSaved(_) => unreachable!("apply runs a change set save on its own"),
     }
 }
 
@@ -788,11 +1011,12 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
 }
 
 /// The landing kinds whose body names a project by the key `project`.
-const PROJECT_KINDS: [&str; 4] = [
+const PROJECT_KINDS: [&str; 5] = [
     CHANGE_SET_NUMBERED,
     BASELINE_APPROVED,
     PUBLISH_PROMPT_SNOOZED,
     PUBLISH_PROMPT_NEVER,
+    CHANGE_SET_SAVED,
 ];
 
 /// Tombstones every logged landing event of a project, for Create demo's clear of an earlier
@@ -858,7 +1082,8 @@ pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
 /// Empties each table on the landing log the store has. Input: the store. Output: Ok, or
 /// `changes_unavailable`.
 fn clear(db: &Connection) -> Result<(), EngineError> {
-    for (table, _, _) in TABLES {
+    let tables = TABLES.map(|(table, _, _)| table);
+    for table in tables.into_iter().chain(["landing_change_sets"]) {
         if has(db, table)? {
             db.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|_| failure("changes_unavailable"))?;
