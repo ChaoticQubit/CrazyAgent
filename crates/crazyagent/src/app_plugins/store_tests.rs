@@ -863,6 +863,53 @@ fn off_linux_a_plugin_on_a_port_the_system_hands_out_stays_usable() {
     ));
 }
 
+/// H2 sec N3: a crash between a staged write and its rename leaves a `.replace-<id>` key
+/// copy in a key folder or an `.add-<id>` file in the plugins folder. The engine start sweep
+/// deletes them and keeps every saved key and plugin file.
+#[test]
+fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
+    let case = case();
+    trusted(&case, ACME);
+    set_key(
+        &case.db,
+        &case.root,
+        "acme",
+        "api_key",
+        b"sk-kept-key-00001".to_vec(),
+    )
+    .unwrap();
+    let kept = plugin_keys(&case);
+    assert_eq!(kept.len(), 1);
+    let accounts = case.root.join(crate::storage::accounts::ACCOUNT_KEYS);
+    std::fs::create_dir(&accounts).unwrap();
+    std::fs::set_permissions(&accounts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let plugins = case.root.join(crate::app_plugins::FOLDER);
+    let leftovers = [
+        case.root
+            .join(crate::storage::accounts::PLUGIN_KEYS)
+            .join(".replace-crashed"),
+        accounts.join(".replace-crashed"),
+        plugins.join(".add-crashed"),
+    ];
+    for leftover in &leftovers {
+        std::fs::write(leftover, b"sk-leftover-copy").unwrap();
+        std::fs::set_permissions(leftover, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let engine = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
+    crate::storage::trash::initialize(&engine).unwrap();
+
+    crate::storage::trash::sweep_at_start(&engine, None).unwrap();
+
+    for leftover in &leftovers {
+        assert!(!leftover.exists(), "{}", leftover.display());
+    }
+    assert_eq!(plugin_keys(&case), kept);
+    assert_eq!(std::fs::read(&kept[0]).unwrap(), b"sk-kept-key-00001");
+    assert!(plugins.join("acme.yaml").is_file());
+    let loaded = ready(&case.db, &case.root, "acme").unwrap();
+    assert_eq!(loaded.bindings.len(), 1);
+}
+
 /// H2 plan row: a key the owner entered for a plugin is never readable through the plugin
 /// state read. The listing, its JSON, the three store tables and the loaded plugin hold no
 /// key byte; the key lives only in its owner-only 0600 file and comes back only through
