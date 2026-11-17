@@ -103,6 +103,16 @@ pub struct Settled {
     pub change_set: String,
 }
 
+/// A change set's number in its project: a change set id, a project id `ProjectId::new`
+/// accepts and a number from 1 within `i64`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Numbered {
+    pub change_set: String,
+    pub project: String,
+    pub number: u64,
+}
+
 /// A change set an event is about, its id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +138,7 @@ pub enum Change {
     OwnerEditsDropped(Worktree),
     OwnerEditsForgotten(ChangeSet),
     WorktreeOwnerEditsForgotten(Worktree),
+    ChangeSetNumbered(Numbered),
 }
 
 impl Change {
@@ -154,6 +165,12 @@ impl Change {
                 absolute(&gone.worktree)
             }
             Self::OwnerEditsForgotten(gone) => change_set_id(&gone.change_set),
+            Self::ChangeSetNumbered(set) => {
+                change_set_id(&set.change_set)
+                    && crate::protocol::ProjectId::new(set.project.as_str()).is_ok()
+                    && set.number >= 1
+                    && i64::try_from(set.number).is_ok()
+            }
         }
     }
 
@@ -178,7 +195,8 @@ impl Change {
             Self::AgentBranchSet(_)
             | Self::AgentBranchForgotten(_)
             | Self::BaseSet(_)
-            | Self::OwnerEditKept(_) => Some(1),
+            | Self::OwnerEditKept(_)
+            | Self::ChangeSetNumbered(_) => Some(1),
             Self::OwnerEditsSettled(_) | Self::OwnerEditsDropped(_) => Some(PATHS_PER_WORKTREE_MAX),
             Self::OwnerEditsForgotten(_) | Self::WorktreeOwnerEditsForgotten(_) => None,
         }
@@ -195,6 +213,7 @@ impl Change {
             Self::OwnerEditsDropped(_) => OWNER_EDITS_DROPPED,
             Self::OwnerEditsForgotten(_) => OWNER_EDITS_FORGOTTEN,
             Self::WorktreeOwnerEditsForgotten(_) => WORKTREE_OWNER_EDITS_FORGOTTEN,
+            Self::ChangeSetNumbered(_) => CHANGE_SET_NUMBERED,
         };
         assert!(KINDS.contains(&kind), "the landing kind {kind} is in KINDS");
         kind
@@ -216,6 +235,7 @@ impl Change {
                 serde_json::to_vec(gone)
             }
             Self::OwnerEditsForgotten(gone) => serde_json::to_vec(gone),
+            Self::ChangeSetNumbered(set) => serde_json::to_vec(set),
         };
         body.map_err(|_| failure("landing_log_body"))
     }
@@ -240,6 +260,7 @@ impl Change {
             WORKTREE_OWNER_EDITS_FORGOTTEN => {
                 serde_json::from_slice(body).map(Self::WorktreeOwnerEditsForgotten)
             }
+            CHANGE_SET_NUMBERED => serde_json::from_slice(body).map(Self::ChangeSetNumbered),
             _ => return Err(refused()),
         };
         let change = change.map_err(|_| refused())?;
@@ -255,19 +276,39 @@ impl Change {
 /// projection. The caller commits. Inputs: the transaction and the change. Output: the
 /// event's seq, or the fence's, the log's or the table's refusal.
 pub(crate) fn record(tx: &Transaction<'_>, change: &Change) -> Result<u64, EngineError> {
-    let body = change.body()?;
+    record_all(tx, std::slice::from_ref(change))
+}
+
+/// Logs one write group of landing changes in the caller's transaction at one revision:
+/// every body is checked first, then each change is appended and applied in order behind
+/// the store's engine host. The caller commits. Inputs: the transaction and the changes, at
+/// least one and at most `TRANSACTION_EVENTS_MAX`. Output: the last event's seq, or the
+/// first refusal, which the caller rolls back.
+pub(crate) fn record_all(tx: &Transaction<'_>, changes: &[Change]) -> Result<u64, EngineError> {
+    assert!(
+        !changes.is_empty(),
+        "a write group logs at least one change"
+    );
+    assert!(changes.len() <= crate::state_log::TRANSACTION_EVENTS_MAX);
+    let bodies = changes
+        .iter()
+        .map(Change::body)
+        .collect::<Result<Vec<_>, _>>()?;
     let fence = crate::worktrees::log::store_fence(tx)?;
     let mut appender = Appender::own(tx, fence)?;
-    let seq = appender.append(&Draft {
-        aggregate: Aggregate::Landing,
-        kind: change.kind(),
-        schema: SCHEMA,
-        at_ms: Clock::System.now_ms(),
-        body: &body,
-    })?;
-    assert!(seq > 0, "a recorded landing event has a seq");
-    appender.project(|tx| apply(tx, change))?;
-    Ok(seq)
+    let mut last = 0;
+    for (change, body) in changes.iter().zip(&bodies) {
+        last = appender.append(&Draft {
+            aggregate: Aggregate::Landing,
+            kind: change.kind(),
+            schema: SCHEMA,
+            at_ms: Clock::System.now_ms(),
+            body,
+        })?;
+        appender.project(|tx| apply(tx, change))?;
+    }
+    assert!(last > 0, "a recorded landing event has a seq");
+    Ok(last)
 }
 
 /// Writes one landing change in a transaction of its own: opens it, records the event and
@@ -332,6 +373,10 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
             "DELETE FROM landing_owner_edits WHERE worktree=?1",
             [&gone.worktree],
         ),
+        Change::ChangeSetNumbered(set) => db.execute(
+            "INSERT INTO landing_change_set_numbers(change_set,project,number) VALUES (?1,?2,?3)",
+            params![set.change_set, set.project, set.number],
+        ),
     }
     .map_err(unavailable)?;
     let changed = i64::try_from(changed).map_err(|_| failure("changes_unavailable"))?;
@@ -347,7 +392,7 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
 /// landing event. Input: the store. Output: the last seq read, or the refusal.
 pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
     let tables = "DELETE FROM landing_agent_branches; DELETE FROM landing_bases; \
-                  DELETE FROM landing_owner_edits;";
+                  DELETE FROM landing_owner_edits; DELETE FROM landing_change_set_numbers;";
     db.execute_batch(crate::landing::owner_edit::SCHEMA)
         .and_then(|()| db.execute_batch(tables))
         .map_err(|_| failure("changes_unavailable"))?;

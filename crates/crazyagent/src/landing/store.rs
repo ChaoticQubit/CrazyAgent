@@ -3,7 +3,7 @@ use super::{
     AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
 };
 use crate::engine::EngineError;
-use crate::landing_log::{self, AgentBranch, Base, Change, Worktree};
+use crate::landing_log::{self, AgentBranch, Base, Change, Numbered, Worktree};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -663,12 +663,15 @@ pub(super) fn number_of(db: &Connection, id: &ChangeSetId) -> Result<Option<u64>
     }))
 }
 
-/// Numbers the change sets of the projects the engine has that carry no number yet, such
-/// as the ones an engine without numbers wrote, after each project's highest number, in the
-/// order they were made, the id breaking a tie, at most `NUMBER_PASS_MAX` a pass. Input: the
-/// store. Output: how many sets got a number.
+/// Numbers the change sets of the projects the engine has that carry no number yet, after
+/// each project's highest number, in the order they were made (the id breaks a tie), at most
+/// `NUMBER_PASS_MAX` a pass, in one transaction with one `ChangeSetNumbered` event per set
+/// (v2.5 L9); a pass with nothing to number writes nothing. Input: the store, outside a
+/// transaction. Output: how many sets got a number.
 pub(super) fn number_unnumbered(db: &Connection) -> Result<usize, EngineError> {
-    let sets = db
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+        .map_err(storage)?;
+    let sets = tx
         .prepare(
             "SELECT id, project FROM landing_change_sets \
              WHERE id NOT IN (SELECT change_set FROM landing_change_set_numbers) \
@@ -682,15 +685,53 @@ pub(super) fn number_unnumbered(db: &Connection) -> Result<usize, EngineError> {
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(storage)?;
-    within(db, "landing_numbers", || {
-        for (id, project) in &sets {
-            let id = ChangeSetId::new(id.clone()).map_err(|_| failure("changes_unavailable"))?;
-            let project =
-                ProjectId::new(project.clone()).map_err(|_| failure("changes_unavailable"))?;
-            number(db, &id, &project)?;
-        }
-        Ok(sets.len())
-    })
+    if sets.is_empty() {
+        return Ok(0);
+    }
+    let changes = next_numbers(&tx, &sets)?;
+    assert_eq!(
+        changes.len(),
+        sets.len(),
+        "every unnumbered set gets one number"
+    );
+    landing_log::record_all(&tx, &changes)?;
+    tx.commit().map_err(storage)?;
+    Ok(changes.len())
+}
+
+/// The numbering pass's changes: each set gets its project's highest number plus one,
+/// counting the sets numbered before it in the pass. Inputs: the transaction and the sets
+/// as (id, project), at most `NUMBER_PASS_MAX`. Output: one `ChangeSetNumbered` per set, or
+/// `changes_unavailable` for an id or project that is not one.
+fn next_numbers(db: &Connection, sets: &[(String, String)]) -> Result<Vec<Change>, EngineError> {
+    assert!(i64::try_from(sets.len()).is_ok_and(|count| count <= NUMBER_PASS_MAX));
+    let mut highest: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    let mut changes = Vec::with_capacity(sets.len());
+    for (id, project) in sets {
+        ChangeSetId::new(id.as_str()).map_err(|_| failure("changes_unavailable"))?;
+        ProjectId::new(project.as_str()).map_err(|_| failure("changes_unavailable"))?;
+        let last = match highest.get(project.as_str()) {
+            Some(last) => *last,
+            None => db
+                .query_row(
+                    "SELECT COALESCE(MAX(number), 0) FROM landing_change_set_numbers \
+                     WHERE project=?1",
+                    [project],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(storage)?
+                .unsigned_abs(),
+        };
+        let number = last + 1;
+        highest.insert(project, number);
+        changes.push(Change::ChangeSetNumbered(Numbered {
+            change_set: id.clone(),
+            project: project.clone(),
+            number,
+        }));
+    }
+    assert!(highest.values().all(|number| *number >= 1));
+    Ok(changes)
 }
 
 /// Runs `work` inside a savepoint, kept when it succeeds and undone when it fails, so it
