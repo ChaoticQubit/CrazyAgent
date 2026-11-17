@@ -664,6 +664,7 @@ pub(in crate::tui) enum ProjectReply {
     DeleteEverything(String),
     GitHubRules,
     TeamChange(Box<crate::team::TeamAction>),
+    ReinstallDismiss,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -735,6 +736,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub recovery: ProjectRecovery,
     pub roadmap: StatusLine,
     pub github_notice: bool,
+    pub reinstall: Option<crate::projects_home::reinstall::Offer>,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -768,6 +770,7 @@ impl ProjectScreen {
             recovery: ProjectRecovery::new(project.clone()),
             roadmap: StatusLine::new(project.clone()),
             github_notice: false,
+            reinstall: None,
             sessions: Sessions::default(),
             project,
             name,
@@ -1925,6 +1928,37 @@ impl ProjectScreen {
         &transcript.messages[skip..]
     }
 
+    /// Says whether `a` hands the reinstall offer's draft to the master's input: an offer is
+    /// kept and the master can take a message, a pool assigned and its transcript read and
+    /// signed in. Takes the screen. Returns the answer.
+    pub fn reinstall_ask(&self) -> bool {
+        self.reinstall.is_some() && self.master_usable()
+    }
+
+    /// Says whether the reinstall offer adds that an account is needed first: the master's
+    /// accounts aren't signed in. Takes the screen. Returns the answer.
+    pub fn reinstall_signed_out(&self) -> bool {
+        self.reinstall.is_some()
+            && self
+                .transcript
+                .as_ref()
+                .is_some_and(|t| matches!(t.status, MasterStatus::NotSignedIn))
+    }
+
+    /// Hands the reinstall offer's drafted message to the master's input and starts typing;
+    /// the offer stays until it is dismissed. Takes the screen. Returns nothing.
+    fn ask_reinstall(&mut self) {
+        let draft = self
+            .reinstall
+            .as_ref()
+            .expect("a only asks while an offer is kept")
+            .draft
+            .clone();
+        let text = console::seeded(self.input.value(), &draft);
+        self.input.set(&text);
+        self.typing = true;
+    }
+
     /// Says whether the master can take a message now.
     /// Takes the screen.
     /// Returns false without a pool or while the master is not ready.
@@ -1998,6 +2032,13 @@ impl ProjectScreen {
             KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
                 ProjectReply::EndConversation
+            }
+            KeyCode::Char('a') if !control && self.reinstall_ask() => {
+                self.ask_reinstall();
+                ProjectReply::Handled
+            }
+            KeyCode::Char('d') if !control && self.reinstall.is_some() => {
+                ProjectReply::ReinstallDismiss
             }
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),

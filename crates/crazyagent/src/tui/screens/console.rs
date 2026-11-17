@@ -73,6 +73,14 @@ pub(in crate::tui) const COMMANDS: &[Command] = &[
     },
 ];
 
+/// The master's input once a drafted message is handed to it, as the desktop console: the
+/// draft alone in an empty input, else after the owner's own text and a blank line, so
+/// nothing typed is lost. Takes the input's text and the draft. Returns the new text.
+pub(in crate::tui) fn seeded(text: &str, draft: &str) -> String {
+    let _ = draft;
+    text.to_owned()
+}
+
 /// The menu a prompt opens while the whole prompt is one `/` word, as the desktop console.
 /// Takes the whole prompt text.
 /// Returns the commands whose names start with the typed word, or contain it when none

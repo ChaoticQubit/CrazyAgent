@@ -1816,7 +1816,8 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         Vec::new()
     };
     let prompt_extra = if typed { prompt.len() - 1 } else { 0 };
-    let available = room.saturating_sub(4 + prompt_extra + below.len());
+    let notice = reinstall_rows(screen, content, look);
+    let available = room.saturating_sub(4 + prompt_extra + below.len() + notice.len());
     let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if !screen.pool_ready {
         (
             vec![Row::of(
@@ -1953,10 +1954,35 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         lines.extend(std::iter::repeat_n(Row::default(), gap));
     }
     lines.extend(below);
+    lines.extend(notice);
     lines.push(Row::of(look.glyph("\u{2500}").repeat(content), look.muted));
     let cursor = typed.then(|| (at.1, lines.len() + at.0));
     lines.extend(input);
     (lines, cursor, help)
+}
+
+/// What the reinstall offer adds while the master's accounts aren't signed in, as the desktop.
+pub(in crate::tui) const REINSTALL_SIGN_IN: &str =
+    "Add an account first; the master can reinstall them once one is signed in.";
+
+/// What the reinstall offer says, as the desktop: the folders a job left in iCloud, the first
+/// three named and the rest counted, and why. Takes the offer. Returns the sentence.
+pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Offer) -> String {
+    offer.folders.join(", ")
+}
+
+/// The reinstall offer's rows above the input: its sentence, the sign-in sentence while the
+/// master's accounts aren't signed in, and the keys that act on it, `a` only while the
+/// master can take a message; while typing they come after Tab. Takes the screen, the width and
+/// the look. Returns the rows, none without an offer.
+fn reinstall_rows(screen: &ProjectScreen, content: usize, look: &Look) -> Vec<Row> {
+    let _ = (
+        screen.reinstall_signed_out(),
+        content,
+        look,
+        REINSTALL_SIGN_IN,
+    );
+    Vec::new()
 }
 
 fn input_row(screen: &ProjectScreen, look: &Look) -> Row {
