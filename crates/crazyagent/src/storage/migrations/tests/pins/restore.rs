@@ -429,7 +429,9 @@ fn private_secret(file: &Path) {
 /// V250-L5-N5B: a restore moves the generated SDK home holding the key of an API key account
 /// only the replaced 2.5 data holds, and the whole profile slot of a native account only it
 /// holds, sign-in files included, into the same folders of its dated copy (DEC-192), private
-/// as they were, while the home of an account the 2.4 copy holds stays where it is.
+/// as they were, while the home of an account the 2.4 copy holds stays where it is. A home
+/// only the replaced data's trash still notes, of an account the owner removed in 2.5, is
+/// deleted, not kept in the copy.
 #[test]
 fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_copy() {
     use crate::config::ModelAuthentication;
@@ -462,11 +464,14 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
         profile_ref: reference("restore-new-profile"),
     };
     save_account(&db, "restore-native", native);
+    crate::storage::trash::initialize(&db).unwrap();
+    crate::storage::trash::put(&db, "generated_home", "restore-gone-key").unwrap();
     drop(db);
     let homes = root.path().join("configured-sdk-homes");
     let kept_home = homes.join(slot_name("restore-old-key"));
     let new_home = homes.join(slot_name("restore-new-key"));
-    for home in [&kept_home, &new_home] {
+    let gone_home = homes.join(slot_name("restore-gone-key"));
+    for home in [&kept_home, &new_home, &gone_home] {
         private_secret(&home.join(".backboard/config.json"));
         private_secret(&home.join(".backboard/keys.json"));
     }
@@ -490,7 +495,9 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
     assert!(kept_home.join(".backboard/keys.json").exists());
     assert!(!new_home.exists());
     assert!(!slot.exists());
+    assert!(!gone_home.exists());
     let copied_homes = copy.join("configured-sdk-homes");
+    assert!(!copied_homes.join(slot_name("restore-gone-key")).exists());
     let copied_slot = copy
         .join("native-profiles")
         .join(slot_name("restore-new-profile"));
