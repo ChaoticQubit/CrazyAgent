@@ -82,31 +82,12 @@ jobs:
           os: ${{ matrix.os }}
           node-version: ${{ env.NODE_VERSION }}
 
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+  windows-standard-user:
+    name: Sandbox rows as a standard local user on windows
     needs: build-windows
     if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
+    runs-on: windows-2022
+    timeout-minutes: 120
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -115,46 +96,91 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install SQLite for Windows
+      - name: Install Rust toolchain
         run: |
           set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  report:
-    name: Test farm report
-    needs: [build-windows, rust-windows]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install cargo-nextest
+        run: bash scripts/ci/install-nextest.sh
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
-          pattern: farm-junit-*
-          path: ${{ runner.temp }}/junit
-      - name: Write the summary table
-        env:
-          FARM_NEEDS: ${{ toJSON(needs) }}
+          name: farm-archive-windows
+          path: ${{ runner.temp }}/archive
+      - name: Extract the archive and find the sandbox test binaries
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/junit"
-          node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'archive\farm-windows.tar.zst'
+          $filter = 'binary_id(crazyagent) | binary_id(crazyagent-win-sandbox::boundary) | binary_id(crazyagent-win-sandbox::lowbox_probe)'
+          $json = cargo nextest list --archive-file $archive --workspace-remap $env:GITHUB_WORKSPACE --extract-to $env:GITHUB_WORKSPACE --extract-overwrite --message-format json -E $filter
+          if ($LASTEXITCODE -ne 0) { throw "nextest list failed with $LASTEXITCODE" }
+          $suites = ($json | Out-String | ConvertFrom-Json).'rust-suites'
+          foreach ($pair in @(@('ENGINE', 'crazyagent'), @('BOUNDARY', 'crazyagent-win-sandbox::boundary'), @('PROBE', 'crazyagent-win-sandbox::lowbox_probe'))) {
+            $suite = $suites.($pair[1])
+            if (-not $suite -or -not (Test-Path -LiteralPath $suite.'binary-path')) { throw "no test binary for $($pair[1])" }
+            $cwd = if ($suite.cwd) { $suite.cwd } else { $env:GITHUB_WORKSPACE }
+            "SBX_$($pair[0])_EXE=$($suite.'binary-path')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            "SBX_$($pair[0])_CWD=$cwd" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            Write-Host "$($pair[1]) => $($suite.'binary-path') in $cwd"
+          }
+      - name: Run the sandbox rows as a standard local user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $user = 'castd'
+          $alphabet = [char[]]'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+          $password = (-join (1..24 | ForEach-Object { $alphabet | Get-Random })) + 'aZ7!'
+          net user $user $password /add /y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "net user failed with $LASTEXITCODE" }
+          $admins = net localgroup Administrators
+          if ($admins -contains $user) { throw "$user is an administrator" }
+          icacls $env:GITHUB_WORKSPACE /grant "${user}:(OI)(CI)(RX)" /C /Q | Out-Null
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          $logs = Join-Path $env:RUNNER_TEMP 'standard-user'
+          New-Item -ItemType Directory -Force $logs | Out-Null
+          $script:codes = [ordered]@{}
+          function Invoke-AsUser([string]$name, [string]$program, [string]$cwd, [string[]]$arguments) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new($program)
+            foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+            $start.UserName = $user
+            $start.Domain = '.'
+            $start.Password = $secure
+            $start.LoadUserProfile = $true
+            $start.UseShellExecute = $false
+            $start.WorkingDirectory = $cwd
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            try {
+              $process = [System.Diagnostics.Process]::Start($start)
+            } catch {
+              Write-Host "==== $name did not start: $($_.Exception.Message)"
+              $script:codes[$name] = 'not started'
+              return
+            }
+            $out = $process.StandardOutput.ReadToEndAsync()
+            $err = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(2400000)) { $process.Kill($true) }
+            $process.WaitForExit()
+            Set-Content -LiteralPath (Join-Path $logs "$name.out.txt") -Value $out.Result
+            Set-Content -LiteralPath (Join-Path $logs "$name.err.txt") -Value $err.Result
+            Write-Host "==== $name exit $($process.ExitCode)"
+            Write-Host $out.Result
+            Write-Host $err.Result
+            $script:codes[$name] = $process.ExitCode
+          }
+          Invoke-AsUser 'whoami' "$env:SystemRoot\System32\whoami.exe" $env:GITHUB_WORKSPACE @('/all')
+          Invoke-AsUser 'profile' "$env:SystemRoot\System32\cmd.exe" $env:GITHUB_WORKSPACE @('/C', 'echo', '%USERNAME%', '%USERPROFILE%', '%TEMP%')
+          Invoke-AsUser 'engine' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD @('sandbox::windows::tests')
+          Invoke-AsUser 'boundary' $env:SBX_BOUNDARY_EXE $env:SBX_BOUNDARY_CWD @()
+          Invoke-AsUser 'probe' $env:SBX_PROBE_EXE $env:SBX_PROBE_CWD @()
+          $rows = $script:codes.GetEnumerator() | ForEach-Object { "| $($_.Key) | $($_.Value) |" }
+          @('| run as a standard local user | exit |', '| --- | --- |') + $rows | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($script:codes['engine'] -ne 0 -or $script:codes['boundary'] -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: farm-standard-user-windows
+          path: ${{ runner.temp }}/standard-user
+          if-no-files-found: warn
+          retention-days: 14
