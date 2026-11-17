@@ -500,8 +500,9 @@ fn shape_git(printed: Option<&str>) {
 /// W-GIT-FLOOR: on the git 2.39 of Xcode 16 and its Command Line Tools, a turn still records
 /// its change set and the list and diff still read it, while Accept, which needs
 /// `merge-tree --merge-base` and `check-attr --source`, refuses with `changes_git_old` and
-/// leaves the checkout as it was. A git older than 2.39 refuses at the first step, a
-/// version git does not name stays `changes_git_unsupported`, and 2.40 lands.
+/// leaves the checkout as it was. The merge check reads the version kept at open, running
+/// no git (#260 F1). A git older than 2.39 refuses at the first step, a version git does
+/// not name stays `changes_git_unsupported`, and 2.40 lands.
 #[test]
 fn on_git_2_39_a_turn_records_and_the_list_and_diff_read_it_while_accept_refuses_as_too_old() {
     let case = Case::new();
@@ -522,6 +523,12 @@ fn on_git_2_39_a_turn_records_and_the_list_and_diff_read_it_while_accept_refuses
         before,
         "a refused Accept changed the checkout"
     );
+    let owner = git::Repo::open(&case.repo, &case.repo.join(".git"), None).unwrap();
+    assert!(owner.old_git());
+    shape_git(Some("git version 2.40.0"));
+    let runs = git::GIT_RUNS.with(std::cell::Cell::get);
+    assert_eq!(refused(owner.check_merge_version()), "changes_git_old");
+    assert_eq!(git::GIT_RUNS.with(std::cell::Cell::get), runs);
 
     shape_git(Some("git version 2.38.1"));
     case.edit("README", "one\ntwo\nthree\nfour\nfive\n");

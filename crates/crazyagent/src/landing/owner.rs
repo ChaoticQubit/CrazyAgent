@@ -110,8 +110,7 @@ pub(super) fn merge_paths(
 /// Says whether any path has a filter attribute, or a merge attribute naming a driver,
 /// in any of the trees, reading attributes from each tree and the repository's own
 /// info/attributes. Inputs: the repository, the paths and the trees. Output: true when
-/// one does, so the change cannot land without running a configured command, or
-/// `changes_git_old` for a git without `check-attr --source` ([`Repo::check_merge_version`]).
+/// one does, so the change cannot land without running a configured command.
 pub(super) fn uses_configured_commands(
     repo: &Repo,
     paths: &[String],
@@ -120,7 +119,6 @@ pub(super) fn uses_configured_commands(
     if paths.is_empty() {
         return Ok(false);
     }
-    repo.check_merge_version()?;
     let mut input = Vec::new();
     for path in paths {
         input.extend_from_slice(path.as_bytes());
@@ -179,15 +177,13 @@ pub(super) fn merge(
 
 /// As [`merge`], with the conflicting paths exactly as git printed them, for comparing
 /// with another git listing. Inputs: the repository, the merge base and both sides.
-/// Output: the merged tree and the conflicting paths, or `changes_git_old` for a git
-/// without `merge-tree --merge-base` ([`Repo::check_merge_version`]).
+/// Output: the merged tree and the conflicting paths.
 pub(super) fn merge_raw(
     repo: &Repo,
     base: &str,
     ours: &str,
     theirs: &str,
 ) -> Result<(String, Vec<Vec<u8>>), EngineError> {
-    repo.check_merge_version()?;
     let output = repo.exec(
         &[
             "merge-tree",
@@ -2508,9 +2504,9 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// holds its head or merging its work onto the tip changes nothing, else the remainder a
 /// clean merge adds. A set whose work starts at the tip, so that merge is a fast-forward,
 /// shows its whole change without a merge, the same range a stored change shows. An empty
-/// change, a conflicting merge or a configured filter or merge driver leaves the whole
-/// change shown, measured as [`measured_from`] says (DEC-107). Inputs: the store, the
-/// owner repository, the change set and the tip. Output: the judgement.
+/// change, a conflicting merge, a git older than 2.40 or a configured filter or merge driver
+/// leaves the whole change shown, measured as [`measured_from`] says (DEC-107). Inputs: the
+/// store, the owner repository, the change set and the tip. Output: the judgement.
 fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
     let whole = |from: &str| -> Result<Shown, EngineError> {
         let stats = diff::stats(owner, from, &record.head)?;
@@ -2533,7 +2529,7 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
         return whole(&from).map(Judged::Open);
     }
     let paths = merge_paths(owner, &from, tip, &record.head)?;
-    if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
+    if owner.old_git() || uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
         return whole(&from).map(Judged::Open);
     }
     let (tree, conflicts) = merge(owner, &from, tip, &record.head)?;

@@ -344,14 +344,12 @@ fn line_counts(text: &[u8]) -> HashMap<&[u8], usize> {
 /// Tells whether any path has a conflict-marker-size attribute in any of the commits, read
 /// from each commit and the repository's own info/attributes, so its markers may be a
 /// length [`holds_conflict_marker`] does not know. Inputs: the owner repository, the paths
-/// as git printed them and the commits. Output: the answer, or `changes_git_old` for a git
-/// without `check-attr --source` ([`Repo::check_merge_version`]).
+/// as git printed them and the commits. Output: the answer.
 fn sets_marker_size(
     owner: &Repo,
     paths: &[Vec<u8>],
     commits: &[&str],
 ) -> Result<bool, EngineError> {
-    owner.check_merge_version()?;
     let mut input = Vec::new();
     for path in paths {
         input.extend_from_slice(path);

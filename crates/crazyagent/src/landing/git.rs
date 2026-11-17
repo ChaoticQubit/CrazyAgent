@@ -29,6 +29,38 @@ const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
 const CHECK_LINE_BYTES_MAX: usize = 80;
 
+/// Refuses a git version older than `needed`, logging the version found and the one needed
+/// once per process for each pair (W-GIT-FLOOR). Inputs: the numbers of the version, major
+/// first, and the oldest major and minor. Output: Ok, else `changes_git_old`, or
+/// `changes_git_unsupported` for fewer than two numbers.
+fn refuse_older(found: &[u32], needed: (u32, u32)) -> Result<(), EngineError> {
+    let (Some(&major), Some(&minor)) = (found.first(), found.get(1)) else {
+        return Err(failure("changes_git_unsupported"));
+    };
+    if (major, minor) >= needed {
+        return Ok(());
+    }
+    let shown: Vec<String> = found.iter().map(u32::to_string).collect();
+    super::log_once(&format!(
+        "changes_git_old found={} needed={}.{}",
+        shown.join("."),
+        needed.0,
+        needed.1
+    ));
+    Err(failure("changes_git_old"))
+}
+
+/// Whether git arguments use an option new in git 2.40.0, `merge-tree --merge-base` or
+/// `check-attr --source`, which [`Repo::check_merge_version`] holds back on an older git
+/// (W-GIT-FLOOR). Input: the arguments. Output: the answer.
+fn needs_merge_version(args: &[&str]) -> bool {
+    match args.first() {
+        Some(&"merge-tree") => args.contains(&"--merge-base"),
+        Some(&"check-attr") => args.contains(&"--source"),
+        _ => false,
+    }
+}
+
 /// The excludes setting a confined step's git takes in place of the owner's ignore file,
 /// which a step that writes an object or the work tree may not read (SA vid 2,
 /// [`Repo::step_excludes`]): an empty file, so git applies no excludes file at all and never
@@ -397,6 +429,9 @@ pub(super) struct Repo {
     /// repository that is not confined.
     #[cfg(target_os = "linux")]
     copies: bool,
+    /// The major and minor version of the git every call here runs, read once at
+    /// [`Self::open`]; None for a repository [`Self::fresh`] made (W-GIT-FLOOR).
+    version: Option<(u32, u32)>,
 }
 
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
@@ -455,8 +490,11 @@ impl Repo {
             index_steps: Vec::new(),
             #[cfg(target_os = "linux")]
             copies: false,
+            version: None,
         };
-        repo.require_version(OPEN_VERSION_MIN)?;
+        let found = repo.found_version()?;
+        refuse_older(&found, OPEN_VERSION_MIN)?;
+        repo.version = found.first().copied().zip(found.get(1).copied());
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
@@ -517,6 +555,7 @@ impl Repo {
             index_steps: Vec::new(),
             #[cfg(target_os = "linux")]
             copies: false,
+            version: None,
         }
     }
 
@@ -784,46 +823,43 @@ impl Repo {
     }
 
     /// Refuses a git older than 2.40, which has neither `merge-tree --merge-base` nor
-    /// `check-attr --source`, before a squash merge or an attribute check would run one, so
-    /// listing, diffs and the rest still work on the 2.39 of Xcode 16 and its Command Line
-    /// Tools (W-GIT-FLOOR). Output: Ok, else `changes_git_old`, or `changes_git_unsupported`
+    /// `check-attr --source`, before [`Self::exec`] runs either, so listing, diffs and the
+    /// rest still work on the 2.39 of Xcode 16 and its Command Line Tools (W-GIT-FLOOR). It
+    /// reads the version kept at open, running no git, or asks git for a repository
+    /// [`Self::fresh`] made. Output: Ok, else `changes_git_old`, or `changes_git_unsupported`
     /// when `git version` names no version.
     pub(super) fn check_merge_version(&self) -> Result<(), EngineError> {
-        self.require_version(VERSION_MIN)
+        let found = match self.version {
+            Some((major, minor)) => vec![major, minor],
+            None => self.found_version()?,
+        };
+        refuse_older(&found, VERSION_MIN)
     }
 
-    /// Refuses a git older than `needed`, logging the version found and the one needed.
-    /// Input: the oldest major and minor version. Output: Ok, else `changes_git_old`, or
-    /// `changes_git_unsupported` when `git version` names no version.
-    fn require_version(&self, needed: (u32, u32)) -> Result<(), EngineError> {
+    /// Whether the version kept at open is known to be older than 2.40, so that a squash
+    /// merge or an attribute check would be refused (W-GIT-FLOOR). Output: the answer, false
+    /// for a repository [`Self::fresh`] made.
+    pub(super) fn old_git(&self) -> bool {
+        self.version.is_some_and(|found| found < VERSION_MIN)
+    }
+
+    /// The numbers `git version` prints for this repository's git, or a row's shaped line.
+    /// Output: its first numbers, at most three, which [`refuse_older`] judges.
+    fn found_version(&self) -> Result<Vec<u32>, EngineError> {
         let printed = self.capture(&["version"], 256)?;
         #[cfg(test)]
         let printed = VERSION_PRINTED
             .with_borrow(Clone::clone)
             .map_or(printed, String::into_bytes);
         let text = String::from_utf8_lossy(&printed);
-        let found: Vec<u32> = text
+        Ok(text
             .trim()
             .strip_prefix("git version ")
             .unwrap_or_default()
             .split(|c: char| !c.is_ascii_digit())
             .map_while(|part| part.parse::<u32>().ok())
             .take(3)
-            .collect();
-        let (Some(&major), Some(&minor)) = (found.first(), found.get(1)) else {
-            return Err(failure("changes_git_unsupported"));
-        };
-        if (major, minor) >= needed {
-            return Ok(());
-        }
-        let shown: Vec<String> = found.iter().map(u32::to_string).collect();
-        eprintln!(
-            "changes_git_old found={} needed={}.{}",
-            shown.join("."),
-            needed.0,
-            needed.1
-        );
-        Err(failure("changes_git_old"))
+            .collect())
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
@@ -874,7 +910,8 @@ impl Repo {
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
     /// `limit` bytes of its output; a confined Linux step on the worktree's own index runs on
     /// a copy of it ([`Self::swapped`]), and a two-tree `read-tree -u -m` there that may write
-    /// the work tree runs split ([`Self::moved`]). Inputs: the arguments, the input, extra
+    /// the work tree runs split ([`Self::moved`]). An option new in git 2.40 runs only on a
+    /// git that has it ([`Self::check_merge_version`]). Inputs: the arguments, the input, extra
     /// environment and the bound. Output: the exit code, the output and whether it ran over;
     /// an error when git cannot start, is stopped by a signal or runs past the time.
     pub(super) fn exec(
@@ -884,6 +921,9 @@ impl Repo {
         env: &[(&str, &str)],
         limit: usize,
     ) -> Result<Output, EngineError> {
+        if needs_merge_version(args) {
+            self.check_merge_version()?;
+        }
         #[cfg(target_os = "linux")]
         if self.copies {
             let fills = !self.index_steps.is_empty();
