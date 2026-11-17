@@ -616,6 +616,62 @@ async fn a_send_after_an_account_joins_the_master_pool_continues_the_same_conver
     assert_eq!(current.binding().0, &after);
 }
 
+/// The owner's report (V243-SESSION-RESUME-CONFLICT) through the engine service: the
+/// owner parks a used session behind a new one, signs another account in to the master's
+/// pool and switches back, and the parked session resumes instead of asking for a new one.
+#[tokio::test]
+async fn a_resume_after_an_account_joins_the_master_pool_continues_the_parked_session() {
+    let mut case = RebindCase::start().await;
+    let first = case.open("resume-open").await;
+    let sent = case.submit(&first, "resume-first").await;
+    let settled = case.settled(&first, "resume-first").await;
+    let (config, source) = case.basis().await;
+    let renewed = case
+        .master(
+            "resume-renew",
+            MasterOwnerAction::NewSession {
+                project_id: first.project_id.clone(),
+                expected_config_id: config,
+                expected_source_hash: source,
+                selection: Box::new(first.selection.clone()),
+                cancel_running: true,
+            },
+        )
+        .await;
+    let fresh = case.session().await;
+    let joined = case
+        .edit(
+            "resume-join",
+            ModelAccessEdit::ReplacePool {
+                pool: master_pool(&["claude-connection", "second-connection", "spare-connection"]),
+            },
+        )
+        .await;
+    let resumed = case
+        .master(
+            "resume-first-again",
+            MasterOwnerAction::Resume {
+                project_id: first.project_id.clone(),
+                session_id: first.session_id.clone(),
+                cancel_running: true,
+            },
+        )
+        .await;
+    let current = case.session().await;
+    case.stop().await.unwrap();
+    assert_eq!(sent, OwnerResult::Applied);
+    assert!(settled.is_some(), "the first session holds a settled turn");
+    assert_eq!(renewed, OwnerResult::Applied);
+    assert_ne!(fresh.session_id, first.session_id);
+    assert_eq!(joined, OwnerResult::Applied);
+    assert_eq!(
+        resumed,
+        OwnerResult::Applied,
+        "an account joining the master's pool does not stop the owner switching back"
+    );
+    assert_eq!(current.session_id, first.session_id);
+}
+
 /// An owner who replaces the master's own connection, here with another model, changes
 /// what the conversation runs on, so the next send still asks for a new conversation.
 #[tokio::test]
