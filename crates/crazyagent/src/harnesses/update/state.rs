@@ -367,29 +367,27 @@ fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()>
 }
 
 /// Lets a harness file be started for its version only when a session would start it, the
-/// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), and only
-/// SYSTEM, the administrators, TrustedInstaller and this user can change it
-/// ([`crazyagent_win_sandbox::owner_only`]), the Windows twin of [`super::trusted`], which
-/// refuses every program here and keeps every update refused. The check covers the entry as
-/// written, the program launch would start and the real file the read runs. Inputs: the
-/// harness file and the resolver's places. Output: Some when it may start.
+/// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), and only the
+/// system and this user can change the entry as written and the program launch would start
+/// ([`owner_only`]), since [`super::trusted`] refuses every program here and keeps every
+/// update refused. Inputs: the harness file and the resolver's places. Output: Some when it
+/// may start.
 #[cfg(windows)]
 fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> {
     let launched = crate::harnesses::interactive::launch_tool(executable, places).ok()?;
-    let read = crate::tools::resolve_entry(executable, places).ok()?;
-    let mut programs = vec![
-        executable,
-        launched.program.as_path(),
-        read.program.as_path(),
-    ];
-    programs.dedup();
-    for program in programs {
-        if let Err(refused) = crazyagent_win_sandbox::owner_only(program) {
-            eprintln!("harness_version_owner_refused cause={refused}");
-            return None;
-        }
-    }
-    Some(())
+    owner_only(executable)?;
+    owner_only(&launched.program)
+}
+
+/// Lets a program be started for a version read on Windows only when SYSTEM, the
+/// administrators, TrustedInstaller and this user alone can change it and every folder above
+/// it ([`crazyagent_win_sandbox::owner_only`]), the twin of [`super::trusted`]. Logs a
+/// refusal. Input: the absolute program. Output: Some when it may start.
+#[cfg(windows)]
+fn owner_only(program: &Path) -> Option<()> {
+    crazyagent_win_sandbox::owner_only(program)
+        .map_err(|refused| eprintln!("harness_version_owner_refused cause={refused}"))
+        .ok()
 }
 
 /// Asks a harness for its version only when it passes [`version_gate`] and the tool resolver
@@ -397,7 +395,8 @@ fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> 
 /// its own folder ([`super::vetted`]), so a file agents can write, or one whose program is
 /// missing, is never started for a version. It runs the real file the resolver checked, once that file passes
 /// again by its own path, with the entry's folder kept as the search an interpreter asked for
-/// by name is found in, so no link of the entry's chain is followed after the check.
+/// by name is found in, so no link of the entry's chain is followed after the check. On
+/// Windows that real file must also pass [`owner_only`], since no link on its way is read.
 /// Inputs: the harness executable, the home folder and the resolver's places. Output: the
 /// version, or none.
 pub(super) fn version_if_runs(
@@ -415,6 +414,8 @@ pub(super) fn version_if_runs(
     if super::vetted(&fixed, places).ok()? != fixed.program {
         return None;
     }
+    #[cfg(windows)]
+    owner_only(&fixed.program)?;
     assert!(fixed.program.is_absolute());
     #[cfg(test)]
     if let Some(step) = between_vetted_and_run(executable) {
