@@ -5,6 +5,10 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod e2e_support;
+#[path = "snapshot_v242/storage.rs"]
+mod storage;
+
 /// The golden folders below tests/snapshots/v242, one per surface kind of the 2.5 plan's
 /// section 2.0, plus `runner` for the runner's own example. A scenario names one of these.
 const KINDS: [&str; 10] = [
@@ -38,11 +42,13 @@ struct Scenario {
 /// Lists every scenario: the runner's own example, then each kind's drivers.
 /// Output: the scenarios in the order the snapshot row runs them.
 fn scenarios() -> Vec<Scenario> {
-    vec![Scenario {
+    let mut all = vec![Scenario {
         kind: "runner",
         name: "masking-example",
         capture: masking_example,
-    }]
+    }];
+    all.extend(storage::scenarios());
+    all
 }
 
 /// Captures a fixed surface that holds one of every value the normalisation list masks: an
