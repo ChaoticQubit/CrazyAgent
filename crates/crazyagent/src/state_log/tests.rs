@@ -2,6 +2,9 @@ use super::*;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use walk::{draft_kinds, has_word, hides_draft, sources};
+
+mod walk;
 
 /// An in-memory engine store holding only the `state` row, as storage.rs creates it.
 /// Output: the connection, at revision 0.
@@ -542,56 +545,53 @@ const FREE_FORM: [(&str, &str); 2] = [
     (crate::landing_log::OWNER_EDIT_KEPT, "path"),
 ];
 
-/// The source files outside tests that name the log's appender, as paths under `src` in
-/// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-/// ide/log.rs and landing_log.rs write `change.kind()`, which maps each `Change` variant to
-/// one of their kinds.
+/// The source files outside tests that name the log's appender or build one of its drafts,
+/// as paths under `src` in sorted order, each with the kinds its drafts may name: the code
+/// after `kind:` with its spaces removed, the constants of its own kinds. ide/log.rs and
+/// landing_log.rs write `change.kind()`, which maps each `Change` variant to one of theirs.
 const WRITERS: [(&str, &[&str]); 9] = [
-    ("ide/log.rs", &["change.kind(),"]),
-    ("landing_log.rs", &["change.kind(),"]),
-    ("memory/log.rs", &["KIND,"]),
-    ("project_setup/removed/event.rs", &["KIND,"]),
+    ("ide/log.rs", &["change.kind()"]),
+    ("landing_log.rs", &["change.kind()"]),
+    ("memory/log.rs", &["KIND"]),
+    ("project_setup/removed/event.rs", &["KIND"]),
     (
         "sessions_log.rs",
         &[
-            "KIND_SESSION,",
-            "KIND_ENTRY,",
-            "KIND_ENTRIES_DROPPED,",
-            "KIND_TEXT,",
-            "KIND_TEXTS_DROPPED,",
-            "KIND_TURN,",
-            "KIND_PREPARATION,",
-            "KIND_RESOLVE,",
-            "KIND_RESOLVES_DROPPED,",
-            "KIND_PROFILE,",
-            "KIND_PROFILES_DROPPED,",
+            "KIND_SESSION",
+            "KIND_ENTRY",
+            "KIND_ENTRIES_DROPPED",
+            "KIND_TEXT",
+            "KIND_TEXTS_DROPPED",
+            "KIND_TURN",
+            "KIND_PREPARATION",
+            "KIND_RESOLVE",
+            "KIND_RESOLVES_DROPPED",
+            "KIND_PROFILE",
+            "KIND_PROFILES_DROPPED",
         ],
     ),
     (
         "settings_log.rs",
         &[
-            "KIND_SANDBOX,",
-            "KIND_CLEANUP,",
-            "KIND_QUIT,",
-            "KIND_RETRY,",
-            "KIND_HARNESS_UPDATE,",
-            "KIND_INSTRUCTION_APP,",
-            "KIND_INSTRUCTION,",
-            "KIND_ROADMAP,",
-            "KIND_STEPS,",
-            "KIND_TIME,",
-            "KIND_FRAMES,",
-            "KIND_PROFILE,",
+            "KIND_SANDBOX",
+            "KIND_CLEANUP",
+            "KIND_QUIT",
+            "KIND_RETRY",
+            "KIND_HARNESS_UPDATE",
+            "KIND_INSTRUCTION_APP",
+            "KIND_INSTRUCTION",
+            "KIND_ROADMAP",
+            "KIND_STEPS",
+            "KIND_TIME",
+            "KIND_FRAMES",
+            "KIND_PROFILE",
         ],
     ),
-    ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
-    (
-        "storage/master_session/delete.rs",
-        &["SESSION_DELETED,", "SESSION_DELETED.into(),"],
-    ),
+    ("state_log.rs", &["SNAPSHOT_CHUNK", "SNAPSHOT_DONE"]),
+    ("storage/master_session/delete.rs", &["SESSION_DELETED"]),
     (
         "worktrees/log.rs",
-        &["KIND_ADMITTED,", "KIND_RESERVED,", "KIND_SAVED,"],
+        &["KIND_ADMITTED", "KIND_RESERVED", "KIND_SAVED"],
     ),
 ];
 
@@ -819,55 +819,18 @@ fn closed_body(
     );
 }
 
-/// The source files outside tests whose text names the log's appender, each as its path
-/// under `src` with `/` between parts, and its text. A file or folder whose name ends in
-/// `tests` or `tests.rs` is left out. Output: the files.
-fn writer_sources() -> Vec<(String, String)> {
-    const ENTRIES_MAX: usize = 100_000;
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut folders = vec![src.clone()];
-    let mut found = Vec::new();
-    let mut seen = 0;
-    while let Some(folder) = folders.pop() {
-        for entry in std::fs::read_dir(&folder).unwrap() {
-            seen += 1;
-            assert!(seen <= ENTRIES_MAX);
-            let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if name.ends_with("tests") || name.ends_with("tests.rs") {
-                continue;
-            }
-            if path.is_dir() {
-                folders.push(path);
-                continue;
-            }
-            if !name.ends_with(".rs") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            if text.contains("Appender") {
-                let parts: Vec<String> = path
-                    .strip_prefix(&src)
-                    .unwrap()
-                    .components()
-                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                found.push((parts.join("/"), text));
-            }
-        }
-    }
-    found
-}
-
 /// Checks the snapshot rule of [`no_event_body_can_carry_a_secret`]: only state_log.rs and
 /// the writers [`SNAPSHOTS`] names take a snapshot, and a worktrees run carries only its
-/// named tables. Input: the writers' paths and sources. Output: none.
-fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
-    assert!(!writers.is_empty(), "the log has writers");
-    for (name, text) in writers {
+/// named tables. Input: every source path and its code. Output: none.
+fn only_named_writers_take_a_snapshot(sources: &[(String, String)]) {
+    assert!(!sources.is_empty(), "the walk reads sources");
+    for (name, code) in sources {
         let named = SNAPSHOTS.iter().any(|(path, _)| *path == name.as_str());
         assert!(
-            name.as_str() == "state_log.rs" || named || !text.contains(".snapshot("),
+            name.as_str() == "state_log.rs"
+                || named
+                || !has_word(code, "Appender")
+                || !code.contains(".snapshot("),
             "{name} takes a snapshot"
         );
     }
@@ -1341,25 +1304,39 @@ fn no_event_body_can_carry_a_secret() {
             "the landing kind {kind} needs a body rule"
         );
     }
-    let writers = writer_sources();
-    let mut names: Vec<&str> = writers.iter().map(|(name, _)| name.as_str()).collect();
-    names.sort_unstable();
+    let sources = sources();
+    let mut writers: Vec<(&str, Vec<Option<String>>)> = Vec::new();
+    for (name, code) in &sources {
+        let scoped =
+            name == "state_log.rs" || name.starts_with("state_log/") || has_word(code, "state_log");
+        let drafts = if scoped {
+            draft_kinds(code)
+        } else {
+            Vec::new()
+        };
+        assert!(
+            !scoped || name == "state_log.rs" || !hides_draft(code),
+            "{name} renames or re-exports the log's Draft"
+        );
+        if has_word(code, "Appender") || !drafts.is_empty() {
+            writers.push((name, drafts));
+        }
+    }
+    writers.sort_unstable_by_key(|(name, _)| *name);
+    let names: Vec<&str> = writers.iter().map(|(name, _)| *name).collect();
     let listed: Vec<&str> = WRITERS.iter().map(|(name, _)| *name).collect();
     assert_eq!(names, listed, "a new log writer needs its kinds in KINDS");
-    for (name, text) in &writers {
-        let (_, own) = WRITERS
-            .iter()
-            .find(|(path, _)| *path == name.as_str())
-            .unwrap();
-        for line in text.lines().map(str::trim) {
-            if let Some(written) = line.strip_prefix("kind: ") {
-                assert!(own.contains(&written), "{name}: {line}");
-            }
+    for ((name, drafts), (_, own)) in writers.iter().zip(WRITERS) {
+        for kind in drafts {
+            assert!(
+                kind.as_deref().is_some_and(|kind| own.contains(&kind)),
+                "{name}: a draft of kind {kind:?}"
+            );
         }
     }
     for kind in KINDS {
         match kind {
-            SNAPSHOT_CHUNK => only_named_writers_take_a_snapshot(&writers),
+            SNAPSHOT_CHUNK => only_named_writers_take_a_snapshot(&sources),
             SNAPSHOT_DONE => a_closing_body_is_its_hash(),
             replay::PROCESS_EXITED => closed_body(
                 kind,
