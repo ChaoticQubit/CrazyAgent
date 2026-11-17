@@ -8,6 +8,9 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(test)]
+mod log_tests;
+
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     id TEXT PRIMARY KEY,
     project TEXT NOT NULL,

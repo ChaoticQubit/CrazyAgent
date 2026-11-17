@@ -1,0 +1,96 @@
+use super::*;
+use crate::landing_log::{AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, rebuild, seed};
+use crate::state_log::replay::rows;
+use serde_json::json;
+
+const BRANCH: &str = "crazyagent/task-one";
+
+/// A landing store in a fresh engine root with the test engine host running.
+/// Output: the root and the store.
+fn store() -> (tempfile::TempDir, Connection) {
+    let root = tempfile::tempdir().unwrap();
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    initialize(&db).unwrap();
+    let host = seed(&db);
+    assert_eq!(host.db_instance.len(), 64);
+    (root, db)
+}
+
+/// The kind and body of every logged landing event, in log order. Input: the store.
+/// Output: the events.
+fn events(db: &Connection) -> Vec<(String, serde_json::Value)> {
+    let logged: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !logged {
+        return Vec::new();
+    }
+    let mut statement = db
+        .prepare("SELECT kind, body FROM state_log WHERE aggregate='landing' ORDER BY seq")
+        .unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .map(|row| {
+            let (kind, body) = row.unwrap();
+            (kind, serde_json::from_slice(&body).unwrap())
+        })
+        .collect()
+}
+
+/// The store's revision. Input: the store. Output: the revision.
+fn revision(db: &Connection) -> i64 {
+    db.query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+        row.get(0)
+    })
+    .unwrap()
+}
+
+/// V250-L9: each agent-branch write appends its event with a closed body in its own
+/// transaction, and the table rebuilt from the log equals the live rows.
+#[test]
+fn an_agent_branch_set_and_forgotten_is_logged_and_rebuilds_to_the_live_rows() {
+    let (root, db) = store();
+    let repository = root.path().join("repo");
+    let (one, two) = (repository.join(".wt/one"), repository.join(".wt/two"));
+    set_agent_branch(&db, &repository, &one, BRANCH).unwrap();
+    set_agent_branch(&db, &repository, &two, "crazyagent/task-two").unwrap();
+    forget_agent_branch(&db, two.to_str().unwrap()).unwrap();
+    let logged = events(&db);
+    let kinds: Vec<&str> = logged.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [AGENT_BRANCH_SET, AGENT_BRANCH_SET, AGENT_BRANCH_FORGOTTEN]
+    );
+    assert_eq!(
+        logged[0].1,
+        json!({"worktree": one, "repository": repository, "branch": BRANCH})
+    );
+    assert_eq!(logged[2].1, json!({"worktree": two}));
+    let live = rows(&db, "landing_agent_branches").unwrap();
+    assert_eq!(live.len(), 1);
+    rebuild(&db).unwrap();
+    assert_eq!(rows(&db, "landing_agent_branches").unwrap(), live);
+}
+
+/// V250-L9: a store whose owner runtime is not active refuses an agent-branch write and
+/// leaves no row, no event and no revision.
+#[test]
+fn a_store_without_a_running_host_refuses_an_agent_branch_write_and_leaves_nothing() {
+    let (root, db) = store();
+    db.execute("UPDATE owner_meta SET runtime_state='offline'", [])
+        .unwrap();
+    let before = revision(&db);
+    let repository = root.path().join("repo");
+    let set = set_agent_branch(&db, &repository, &repository.join(".wt/one"), BRANCH);
+    assert_eq!(set.unwrap_err().0, "owner_runtime_stale");
+    assert!(rows(&db, "landing_agent_branches").unwrap().is_empty());
+    assert!(events(&db).is_empty());
+    assert_eq!(revision(&db), before, "a refused write moves no revision");
+}
