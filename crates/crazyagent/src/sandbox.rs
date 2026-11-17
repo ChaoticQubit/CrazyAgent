@@ -1754,9 +1754,9 @@ impl ProjectSandbox {
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
     /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the native sign-in profiles, the configured SDK homes with their
-    /// keys, the terminal and IDE server folders and every engine socket and socket folder
-    /// found in it now. The agent's own home and
+    /// saved account keys, the upgrade backups with their engine.db copies, the native sign-in
+    /// profiles, the configured SDK homes with their keys, the terminal and IDE server folders
+    /// and every engine socket and socket folder found in it now. The agent's own home and
     /// temp dirs may sit inside it, but no granted root may hold or sit inside a secret.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
