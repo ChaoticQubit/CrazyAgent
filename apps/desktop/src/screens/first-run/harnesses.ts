@@ -51,15 +51,16 @@ export type HarnessRow =
   | { kind: "blocked"; line: string };
 
 /** Where an offered harness stands, from the engine's catalog row, versions read and install
- * queue: RCLI always comes with the app; a running or queued install wins; a failed install of a
- * harness still missing shows its result; a found harness the resolver can't run says what it
- * needs; else a fresh install, installed, the install line, or why it can't install. Inputs: the
- * id, its catalog row, its versions read (null while unread) and the queued ids. Output: the row. */
+ * queue: RCLI always comes with the app; a running install wins, and one held behind another
+ * harness's job or queued waits; a failed install of a harness still missing shows its result;
+ * a found harness the resolver can't run says what it needs; else a fresh install, installed,
+ * the install line, or why it can't install. Inputs: the id, its catalog row, its versions read
+ * (null while unread) and the queued ids. Output: the row. */
 export function harnessRow(id: string, entry: HarnessEntry | undefined, versions: HarnessVersions | null, queued: readonly string[]): HarnessRow {
   if (id === "rcli") return { kind: "bundled" };
   if (versions === null) return { kind: "reading" };
-  if (versions.running) return { kind: "installing" };
-  if (queued.includes(id)) return { kind: "waiting" };
+  if (versions.running && !versions.waiting) return { kind: "installing" };
+  if (versions.running || queued.includes(id)) return { kind: "waiting" };
   const present = Boolean(entry?.executable);
   const ended = versions.last;
   if (ended && !ended.ok && !present) return { kind: "failed", reason: updateCopy(ended.code ?? "harness_install_failed") };

@@ -214,10 +214,11 @@ pub(super) fn node_needed(versions: &HarnessVersions) -> bool {
 }
 
 /// Where an offered harness stands, in the desktop step's order: RCLI comes with the app; a
-/// running or queued install wins; a found harness the resolver can't run says what it needs;
-/// a failed install of a missing harness or a fresh install shows its result; else installed,
-/// the install line, or why it can't install. Inputs: the id, its catalog row, its versions
-/// (none while unread) and the queued ids.
+/// running install wins, and one held behind another harness's job or queued waits; a found
+/// harness the resolver can't run says what it needs; a failed install of a missing harness
+/// or a fresh install shows its result; else installed, the install line, or why it can't
+/// install. Inputs: the id, its catalog row, its versions (none while unread) and the queued
+/// ids.
 fn harness_row(
     id: &str,
     entry: Option<&HarnessEntry>,
@@ -230,10 +231,10 @@ fn harness_row(
     let Some(versions) = versions else {
         return Row::Reading;
     };
-    if versions.running {
+    if versions.running && versions.waiting.is_none() {
         return Row::Installing;
     }
-    if queued.iter().any(|waiting| waiting == id) {
+    if versions.running || queued.iter().any(|waiting| waiting == id) {
         return Row::Waiting;
     }
     let present = entry.is_some_and(|entry| entry.executable.is_some());
