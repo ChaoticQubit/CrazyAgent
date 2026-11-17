@@ -1322,9 +1322,9 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
-    crate::worktrees::reconcile(connection)?;
     crate::project_setup::removed::initialize(connection)?;
-    crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
+    let opened_ms = crate::state_log::replay::Clock::System.now_ms();
+    crate::worktrees::log::sweep(connection, opening::Opening::new(opened_ms))?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -1756,6 +1756,12 @@ fn apply(
         (transaction, outcome)
     } else {
         (transaction, outcome)
+    };
+    let revision = match &request.command {
+        Command::AdmitRepository { .. } | Command::AllocateWorktree { .. } => {
+            owner_revision(&transaction)?
+        }
+        _ => revision,
     };
     let changed = mutation && outcome == Outcome::Applied;
     let next = if changed {
@@ -2682,7 +2688,8 @@ fn owner_apply_with(
             let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
             let fence = crate::state_log::fence::Fence::Owner(a.clone());
             let project = removed.project.as_str();
-            redacted = crate::ide::log::forget_project(&tx, project, seq, &fence)?;
+            redacted = crate::worktrees::log::forget_project(&tx, project, seq, &fence)?;
+            redacted += crate::ide::log::forget_project(&tx, project, seq, &fence)?;
         }
     }
     let provenance = OwnerProvenance {

@@ -59,6 +59,7 @@ fn master_lease(
 ) -> (PathBuf, PathBuf) {
     use crate::protocol::{Outcome, ProjectSpec, SessionId, TaskId};
     crate::storage::initialize_authority_schemas(db).unwrap();
+    crate::state_log::fence::seed(db);
     let repository = repo.to_str().unwrap();
     let spec = ProjectSpec {
         name: "Project one".into(),

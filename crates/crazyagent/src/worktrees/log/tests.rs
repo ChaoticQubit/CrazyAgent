@@ -1,7 +1,10 @@
 use super::*;
+use crate::protocol::{ProjectId, SessionId, TaskId};
 use crate::state_log::fence::{engine, seed};
 use crate::state_log::replay::{Logged, redact, rows};
 use crate::state_log::{Aggregate, Appender, SNAPSHOT_CHUNK};
+use crate::storage::opening::Opening;
+use crate::worktrees::{Admission, Identity, LeaseRecord, LeaseState, WorktreeLease};
 use rusqlite::types::Value;
 use rusqlite::{Connection, params};
 
@@ -230,4 +233,216 @@ fn replay_refuses_a_worktrees_event_it_does_not_know() {
             "{kind} {schema} {body}"
         );
     }
+}
+
+/// A store no engine host runs: the `state` and `events` tables, the projects table with
+/// project p1, and the two worktree tables. Output: the connection.
+fn unhosted() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO state VALUES (1,0);
+        CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO projects VALUES ('p1','{}');",
+    )
+    .unwrap();
+    crate::worktrees::initialize(&db).unwrap();
+    db
+}
+
+/// A stored lease body of project p1 with no checked-out directory, as `persist_reservation`
+/// writes it. Inputs: the task, the repository and the state. Output: the body text.
+fn lease_body(task: &str, repository: &str, state: LeaseState) -> String {
+    let identity = Identity {
+        device: 1,
+        inode: 2,
+    };
+    let record = LeaseRecord {
+        lease: WorktreeLease {
+            project_id: ProjectId::new("p1").unwrap(),
+            task_id: TaskId::new(task).unwrap(),
+            repository: repository.into(),
+            path: format!("{repository}/.wt/{task}"),
+            branch: format!("crazyagent/{task}"),
+            owner_session: SessionId::new("s1").unwrap(),
+            native_descendant: None,
+            state,
+        },
+        admission: Admission {
+            repository: repository.into(),
+            root: identity.clone(),
+            metadata: identity,
+        },
+        head: "0".repeat(40),
+        directory: None,
+        metadata: None,
+    };
+    serde_json::to_string(&record).unwrap()
+}
+
+/// Writes rows as a writer before the log wrote them: admissions of p1 at /r1 and of a
+/// removed project at /r2, and t1's lease at /r1 in a state. Inputs: the store and the
+/// lease state. Output: none.
+fn unlogged(db: &Connection, state: LeaseState) {
+    db.execute(
+        "INSERT INTO repository_admissions VALUES ('p1','/r1','{}'),('gone','/r2','{}')",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO worktree_leases VALUES ('t1','/r1','/r1/.wt/t1',?1)",
+        [lease_body("t1", "/r1", state)],
+    )
+    .unwrap();
+}
+
+/// The `state` revision, the logged events (0 with no log) and the `events` rows. Input: the
+/// store. Output: the three counts.
+fn moved(db: &Connection) -> (i64, i64, i64) {
+    let revision = db
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let logged: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let count = |sql: &str| db.query_row(sql, [], |row| row.get(0)).unwrap();
+    let events = if logged {
+        count("SELECT COUNT(*) FROM state_log")
+    } else {
+        0
+    };
+    (revision, events, count("SELECT COUNT(*) FROM events"))
+}
+
+/// Asserts that replay of the log rebuilds both tables as they stand. Input: the store.
+/// Output: none.
+fn replays_to_live(db: &mut Connection) {
+    let live = tables(db);
+    let tx = db.transaction().unwrap();
+    rebuild(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(tables(db), live, "replay equals the live tables");
+}
+
+/// v2.5 L6 Q8: at open, a lease a stop left Reserved with no event is settled Uncertain and
+/// the removed project's admission is forgotten; rows changed, so one snapshot run follows
+/// at one revision through the open's proof, and replay equals the live tables.
+#[cfg(unix)]
+#[test]
+fn an_open_sweep_that_changes_rows_logs_one_snapshot_run() {
+    let mut db = unhosted();
+    unlogged(&db, LeaseState::Reserved);
+    assert!(sweep(&db, Opening::for_test(5)).unwrap());
+    let live = tables(&db);
+    assert_eq!(
+        live.0.len(),
+        1,
+        "the removed project's admission is forgotten"
+    );
+    assert!(matches!(&live.1[0][3], Value::Text(body) if body.contains("Uncertain")));
+    assert_eq!(
+        moved(&db),
+        (1, 3, 1),
+        "one revision: two chunks, the closing event"
+    );
+    replays_to_live(&mut db);
+}
+
+/// v2.5 L6 Q8: an open whose sweep changes no row builds no appender, so a plain start
+/// moves no revision and writes no event.
+#[cfg(unix)]
+#[test]
+fn an_open_sweep_that_changes_nothing_moves_no_revision() {
+    let db = unhosted();
+    unlogged(&db, LeaseState::Uncertain);
+    db.execute("DELETE FROM repository_admissions WHERE project='gone'", [])
+        .unwrap();
+    let before = tables(&db);
+    assert!(!sweep(&db, Opening::for_test(5)).unwrap());
+    assert_eq!(tables(&db), before);
+    assert_eq!(moved(&db), (0, 0, 0));
+}
+
+/// v2.5 L6 Q1 refusal row at its call site: once a host of the store runs, the open's sweep
+/// is refused and rolls back whole, its lease left Reserved.
+#[cfg(unix)]
+#[test]
+fn an_open_sweep_is_refused_once_a_host_of_the_store_runs() {
+    let db = store();
+    db.execute(
+        "INSERT INTO worktree_leases VALUES ('t1','/r1','/r1/.wt/t1',?1)",
+        [lease_body("t1", "/r1", LeaseState::Reserved)],
+    )
+    .unwrap();
+    let before = tables(&db);
+    assert_eq!(
+        code(sweep(&db, Opening::for_test(5))),
+        Some("state_log_opening_host_running".into())
+    );
+    assert_eq!(tables(&db), before, "the sweep rolled back");
+    assert_eq!(moved(&db), (0, 0, 0));
+}
+
+/// v2.5 L6 step 12: rows written before the log reach replay through one snapshot run at
+/// one revision, through the open's proof.
+#[test]
+fn the_first_run_puts_rows_written_before_the_log_on_it() {
+    let mut db = unhosted();
+    unlogged(&db, LeaseState::Reserved);
+    let tx = db.transaction().unwrap();
+    assert!(first_run(&tx, Opening::for_test(3)).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(moved(&db), (1, 3, 1));
+    assert_eq!(
+        (tables(&db).0.len(), tables(&db).1.len()),
+        (2, 1),
+        "the run changes no row"
+    );
+    replays_to_live(&mut db);
+}
+
+/// v2.5 L6 step 12: a store with no worktree row, no worktree tables or no `state` table
+/// gets no run, so the step moves no revision.
+#[test]
+fn the_first_run_writes_nothing_without_worktree_rows() {
+    let mut db = unhosted();
+    let tx = db.transaction().unwrap();
+    assert!(!first_run(&tx, Opening::for_test(3)).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(moved(&db), (0, 0, 0));
+
+    let mut bare = Connection::open_in_memory().unwrap();
+    bare.execute_batch(
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO state VALUES (1,0);",
+    )
+    .unwrap();
+    let tx = bare.transaction().unwrap();
+    assert!(
+        !first_run(&tx, Opening::for_test(3)).unwrap(),
+        "no worktree tables"
+    );
+    drop(tx);
+
+    let mut stateless = Connection::open_in_memory().unwrap();
+    crate::worktrees::initialize(&stateless).unwrap();
+    stateless
+        .execute(
+            "INSERT INTO repository_admissions VALUES ('p1','/r1','{}')",
+            [],
+        )
+        .unwrap();
+    let tx = stateless.transaction().unwrap();
+    assert!(
+        !first_run(&tx, Opening::for_test(3)).unwrap(),
+        "no state table"
+    );
 }

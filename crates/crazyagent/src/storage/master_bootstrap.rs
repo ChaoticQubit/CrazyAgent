@@ -463,11 +463,13 @@ pub(super) fn ready(
 
 /// Returns a master session's conversation worktree to Ready on the first send after an
 /// engine restart, when the worktree still verifies and nothing an earlier run launched in
-/// it can still write (LB-23). Inputs: the transaction and the session. Output: true when
-/// the session has no worktree or a Ready one; false sends it to a new conversation.
+/// it can still write (LB-23). The save is logged at the request's signed next revision.
+/// Inputs: the transaction, the session and that revision. Output: true when the session has
+/// no worktree or a Ready one; false sends it to a new conversation.
 pub(super) fn requalify(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
+    next: u64,
 ) -> Result<bool, EngineError> {
     assert!(!tx.is_autocommit());
     let Outcome::Worktrees { leases } = worktrees::leases(tx, &session.bootstrap_task_id)? else {
@@ -483,7 +485,7 @@ pub(super) fn requalify(
         LeaseState::Reserved | LeaseState::Uncertain => return Ok(false),
     }
     if !super::harness_groups::quiescent(tx, &session.session_id)?
-        || !worktrees::requalify(tx, &lease.task_id, &lease.repository)?
+        || !worktrees::requalify(tx, &lease.task_id, &lease.repository, next)?
     {
         return Ok(false);
     }
