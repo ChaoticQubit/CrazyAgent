@@ -114,10 +114,8 @@ const LEAD_SHELL: &str = "/bin/sh";
 const AGENT_TAG: &str = "@crazyagent";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
-const VERSION_MIN: (u32, u32) = (3, 2);
-const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
+const VERSION_MIN: (u32, u32) = (3, 7);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
-const CAPTURE_TRIMMED: &str = "-p -e";
 const REPLY_TIME: Duration = Duration::from_secs(10);
 /// Ends every format the engine has tmux expand. tmux stops expanding a format that has run
 /// for 100 ms of wall time, which a server stalled on a loaded machine reaches, and answers
@@ -181,7 +179,6 @@ struct Control {
     child: Mutex<Option<Child>>,
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<State>>,
-    capture: &'static str,
     serial: u64,
     #[cfg(test)]
     listed: std::sync::atomic::AtomicUsize,
@@ -255,9 +252,10 @@ const RAN_MAX: usize = 4;
 static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 
 /// Whether a tmux runs: `-V` reports a version within the bound and that version is one the
-/// terminal supports (3.2 or later). A read that runs out of time counts as running, since a
-/// new file can wait behind the system's first-run checks; the version read setup does next
-/// reports it. Takes the tmux. Returns the answer.
+/// terminal supports (3.7 or later, the first with the bracketed-paste flag the attach
+/// reads). A read that runs out of time counts as running, since a new file can wait behind
+/// the system's first-run checks; the version read setup does next reports it. Takes the
+/// tmux. Returns the answer.
 pub fn runs(tmux: &crate::tools::Resolved) -> bool {
     runs_within(tmux, VERSION_READ_TIME)
 }
@@ -643,11 +641,10 @@ impl Tmux {
             ..State::default()
         }));
         let reader = state.clone();
-        let mut control = Control {
+        let control = Control {
             child: Mutex::new(Some(child)),
             input: Mutex::new(Some(input)),
             state,
-            capture: CAPTURE_TRIMMED,
             serial: CONTROL_SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             #[cfg(test)]
             listed: std::sync::atomic::AtomicUsize::new(0),
@@ -663,13 +660,13 @@ impl Tmux {
         let version = control
             .ask(&format!("display-message -p '#{{version}}{FORMAT_END}'"))
             .map_err(|_| failure("terminal_unavailable"))?;
-        let Some(capture) = version
+        if version
             .first()
-            .and_then(|line| capture_flags(&String::from_utf8_lossy(line)))
-        else {
+            .and_then(|line| supported(&String::from_utf8_lossy(line)))
+            != Some(true)
+        {
             return Err(failure("terminal_tmux_unsupported"));
-        };
-        control.capture = capture;
+        }
         if let Some(pin) = &self.pin
             && let Err(refused) = pinned(&control, pin)
         {
@@ -1101,21 +1098,6 @@ fn release(version: &str) -> Option<(u32, u32)> {
 
 fn supported(version: &str) -> Option<bool> {
     release(version).map(|found| found >= VERSION_MIN)
-}
-
-/// Picks the `capture-pane` flags for the screen sent on attach. From tmux 3.4 the screen
-/// keeps every cell the program wrote, trailing spaces included, and no unused cell; older
-/// tmux trims trailing spaces and the cursor position still shows where the program is.
-/// Takes the tmux version report. Returns the flags, or none for an unsupported tmux.
-fn capture_flags(version: &str) -> Option<&'static str> {
-    if !supported(version)? {
-        return None;
-    }
-    Some(if release(version)? >= CAPTURE_WRITTEN_MIN {
-        CAPTURE_WRITTEN
-    } else {
-        CAPTURE_TRIMMED
-    })
 }
 
 fn quote(text: &str) -> String {
@@ -2127,8 +2109,7 @@ impl Tmux {
             format!("-{history}")
         };
         let asked = format!(
-            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
-            control.capture
+            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {CAPTURE_WRITTEN} -S {start} -t {target}"
         );
         let until = Instant::now() + REPLY_TIME;
         loop {
