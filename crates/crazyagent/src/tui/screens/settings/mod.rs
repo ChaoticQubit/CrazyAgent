@@ -3,6 +3,7 @@ pub mod pool_editor;
 pub mod pools;
 pub mod profile;
 pub mod replay;
+pub mod restore;
 pub mod spend;
 
 use super::{Flow, Screen, SettingsSection};
@@ -14,8 +15,8 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
-fn glyph(section: SettingsSection) -> Section {
-    match section {
+fn glyph(section: SettingsSection) -> Option<Section> {
+    Some(match section {
         SettingsSection::Accounts => Section::Accounts,
         SettingsSection::Pools => Section::Pools,
         SettingsSection::Harnesses => Section::Harnesses,
@@ -23,7 +24,22 @@ fn glyph(section: SettingsSection) -> Section {
         SettingsSection::Process => Section::Process,
         SettingsSection::Memory => Section::Memory,
         SettingsSection::Profile => Section::Profile,
+        SettingsSection::Restore => return None,
+    })
+}
+
+/// The Settings sections shown, in tab order: every section, then Restore 2.4 for an engine
+/// with a 2.4 backup or a restore record, or while its page is open (L5).
+/// Inputs: the active section and the context. Output: the sections, the active one among
+/// them.
+pub fn sections(active: SettingsSection, ctx: &Ctx) -> Vec<SettingsSection> {
+    let mut shown = SettingsSection::ALL.to_vec();
+    if ctx.restore_shown || active == SettingsSection::Restore {
+        shown.push(SettingsSection::Restore);
     }
+    assert!(shown.contains(&active));
+    assert!(!SettingsSection::ALL.contains(&SettingsSection::Restore));
+    shown
 }
 
 fn count<T>(load: &Load<T>, show: impl Fn(&T) -> String) -> String {
@@ -34,11 +50,12 @@ fn count<T>(load: &Load<T>, show: impl Fn(&T) -> String) -> String {
 /// Inputs: the active section and the context. Output: two lines; a count is
 /// shown only when the engine reported it.
 pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
-    let tabs: Vec<Tab> = SettingsSection::ALL
+    let shown = sections(active, ctx);
+    let tabs: Vec<Tab> = shown
         .iter()
         .map(|section| Tab {
             label: section.label().into(),
-            section: Some(glyph(*section)),
+            section: glyph(*section),
             count: match section {
                 SettingsSection::Accounts => {
                     count(&ctx.store.accounts, |rows| rows.len().to_string())
@@ -48,16 +65,17 @@ pub fn tabs(active: SettingsSection, ctx: &Ctx) -> [Line<'static>; 2] {
                     format!("{found} of {all}")
                 }),
                 SettingsSection::Memory => count(&ctx.store.memory, ToString::to_string),
-                SettingsSection::Plugins | SettingsSection::Process | SettingsSection::Profile => {
-                    String::new()
-                }
+                SettingsSection::Plugins
+                | SettingsSection::Process
+                | SettingsSection::Profile
+                | SettingsSection::Restore => String::new(),
             },
         })
         .collect();
-    let active = SettingsSection::ALL
+    let active = shown
         .iter()
         .position(|section| *section == active)
-        .expect("every section is listed");
+        .expect("the active section is shown");
     tab_strip(ctx.width as usize, &tabs, active, &ctx.theme, ctx.glyphs)
 }
 
@@ -82,7 +100,8 @@ pub fn draw_page(
 /// The neighbouring Settings section as a replacement screen.
 /// Inputs: the current section, direction and context. Output: the flow.
 pub fn step(section: SettingsSection, forward: bool, ctx: &mut Ctx) -> Flow {
-    Flow::Replace(open(section.step(forward), ctx))
+    let next = section.step(forward, &sections(section, ctx));
+    Flow::Replace(open(next, ctx))
 }
 
 /// Builds the screen for one Settings section.
@@ -98,6 +117,7 @@ pub fn open(section: SettingsSection, ctx: &mut Ctx) -> Box<dyn Screen> {
             Box::new(super::process::ProcessPage::new(super::process::Scope::App))
         }
         SettingsSection::Profile => Box::new(profile::ProfilePage::new(ctx)),
+        SettingsSection::Restore => Box::new(restore::RestorePage::new(ctx)),
     }
 }
 

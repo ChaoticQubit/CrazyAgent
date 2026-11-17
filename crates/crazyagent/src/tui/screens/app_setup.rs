@@ -2889,7 +2889,7 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
-            AppSetupEvent::Installed(_) => {}
+            AppSetupEvent::Installed(_) | AppSetupEvent::Restored(_) => {}
             AppSetupEvent::SandboxSet(result) => self.changed(result, sandbox_plain, ctx),
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
