@@ -131,6 +131,34 @@ pub(super) fn inside_path(before: char) -> bool {
     super::path_char(before) || matches!(before, ']' | ')' | '>')
 }
 
+/// Reads the path component a caseless run starts with, when a class or a group spells part
+/// of it and it ends at a `/` or where the name ends, not where the reader stopped inside it.
+/// Input: text starting with `/`. Output: the component in lowercase and the bytes it takes
+/// with its `/`, or none.
+pub(super) fn component(text: &str) -> Option<(String, usize)> {
+    assert!(text.starts_with('/'));
+    let read = unspell(text);
+    let len = read
+        .plain
+        .iter()
+        .skip(1)
+        .position(|c| *c == '/')
+        .map_or(read.plain.len(), |at| at + 1);
+    if len < 2 {
+        return None;
+    }
+    let taken = read.ends[len - 1];
+    let whole = if len < read.plain.len() {
+        read.ends[len] > taken
+    } else {
+        let next = &text[taken..];
+        !(next.starts_with(|c: char| super::path_char(c) || matches!(c, '[' | '\\'))
+            || (next.starts_with('(') && !next.starts_with("(/")))
+    };
+    let name: String = read.plain[1..len].iter().collect();
+    (whole && unspell(&text[..taken]).folded).then_some((name, taken))
+}
+
 /// Finds a caseless spelling that still names a user folder or a path below a temp folder
 /// once read back, the per-user temp parents below /var/folders included, which the plain
 /// checks cannot see. Input: the text. Output: the kind of path it holds, never the path,
@@ -169,7 +197,7 @@ pub(super) fn private(text: &str) -> Option<String> {
 /// Spells a plain path as 2.4.2's `any_case` does for the letters these rows use: a letter
 /// class, `s`, `k` and `i` as their groups, `st` as its fold group and `.` escaped.
 /// Input: the path. Output: the pattern.
-fn spell(path: &str) -> String {
+pub(super) fn spell(path: &str) -> String {
     let lower = path.to_ascii_lowercase();
     let mut pattern = String::new();
     let mut at = 0;
@@ -237,6 +265,42 @@ fn the_temp_folder_in_caseless_spelling_reads_as_its_plain_placeholders() {
         private(&rule).is_some(),
         real.starts_with("/private/var/folders/")
     );
+}
+
+#[test]
+fn a_caseless_hex_id_component_reads_as_the_plain_id_s_number() {
+    let id = "8[aA]479[dD][bB][cC]30[bB]22([fF][fF]|ﬀ)3017[fF][eE][dD]699[eE]7[eE][eE]85[dD]";
+    let rules = |plain: &str, caseless: &str| {
+        normalise(&json!({
+            "a_plain": format!("tool-cache/{plain}"),
+            "b_rule": format!("^/x/{}/{caseless}/(s|S|ſ)/.+", spell("tool-cache")),
+            "c_kept": [
+                format!("/{}/x", spell("a1234567890123b")),
+                format!("/{}[bB]?/x", spell("a234567890123456")),
+            ],
+        }))
+        .unwrap()
+    };
+    let first = rules("8a479dbc30b22ff3017fed699e7ee85d", id);
+    assert!(first.contains("\"tool-cache/<id-1>\""), "{first}");
+    assert!(first.contains("/<id-1>/(s|S|ſ)/.+"), "{first}");
+    assert!(!first.contains("<id-2>"), "{first}");
+    assert!(first.contains(&spell("a1234567890123b")), "{first}");
+    assert!(first.contains(&spell("a234567890123456")), "{first}");
+    let other = "07[aA]1[bB]38[fF]1182[aA]45[dD][bB][dD][eE][cC]3210[bB]8[fF]85[cC]48";
+    assert_eq!(
+        super::compare(
+            first.as_bytes(),
+            &rules("07a1b38f1182a45dbdec3210b8f85c48", other)
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        component(&format!("/{id}(/.*)?")).map(|(_, n)| n),
+        Some(id.len() + 1)
+    );
+    assert_eq!(component("/[aA]1((s|S|ſ)|ß)?"), None);
+    assert_eq!(component("/plain1234567890abcdef/x"), None);
 }
 
 #[test]
