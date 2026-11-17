@@ -370,7 +370,7 @@
   "crates/crazyagent/tests/tui_quota_flow.rs": 2,
   "crates/crazyagent/tests/tui_rcli_setup.rs": 2,
   "crates/crazyagent/tests/worker_engine_boundary.rs": 1,
-  "crates/crazyagent/tests/worktree_ownership.rs": 1,
+  "crates/crazyagent/tests/worktree_ownership/checkouts.rs": 1,
   "scripts/rcli/host.test.ts": 1,
   "scripts/trial/report.test.mjs": 2,
   "scripts/trial/run.test.mjs": 3
