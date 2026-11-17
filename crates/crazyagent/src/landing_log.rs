@@ -1193,6 +1193,104 @@ pub(crate) const WORKTREE_KINDS: [&str; 8] = [
     WORKTREE_OWNER_EDITS_FORGOTTEN,
 ];
 
+/// The landing tables keyed by an agent worktree, whose rows a Delete everything forgets.
+const WORKTREE_TABLES: [&str; 3] = [
+    "landing_agent_branches",
+    "landing_bases",
+    "landing_owner_edits",
+];
+
+/// The most agent worktrees one Delete everything forgets.
+const WORKTREES_MAX: usize = 65_536;
+
+/// The agent worktrees only one project names, in its team worktree rows or its change
+/// sets, read before a Delete everything deletes those rows; a path another project still
+/// names is left out, so its rows and events stay. Inputs: the delete's transaction and the
+/// project. Output: the paths, or `changes_unavailable` past [`WORKTREES_MAX`].
+pub(crate) fn project_worktrees(
+    tx: &Transaction<'_>,
+    project: &str,
+) -> Result<Vec<String>, EngineError> {
+    let mut sources = Vec::new();
+    for table in ["team_worktrees", "landing_change_sets"] {
+        if has(tx, table)? {
+            sources.push(table);
+        }
+    }
+    let Some(first) = sources.first() else {
+        return Ok(Vec::new());
+    };
+    let mut sql = format!("SELECT worktree FROM {first} WHERE project=?1");
+    for table in &sources[1..] {
+        sql.push_str(&format!(
+            " UNION SELECT worktree FROM {table} WHERE project=?1"
+        ));
+    }
+    for table in &sources {
+        sql.push_str(&format!(
+            " EXCEPT SELECT worktree FROM {table} WHERE project<>?1"
+        ));
+    }
+    sql.push_str(&format!(" LIMIT {}", WORKTREES_MAX + 1));
+    let unavailable = |_| failure("changes_unavailable");
+    let mut statement = tx.prepare(&sql).map_err(unavailable)?;
+    let worktrees = statement
+        .query_map([project], |row| row.get::<_, String>(0))
+        .map_err(unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(unavailable)?;
+    if worktrees.len() > WORKTREES_MAX {
+        return Err(failure("changes_unavailable"));
+    }
+    assert!(sources.len() <= 2);
+    Ok(worktrees)
+}
+
+/// Forgets the agent worktrees of a deleted project (rv-sec3 #415 F1): tombstones every
+/// landing event of [`WORKTREE_KINDS`] whose `worktree` is one of them, in one pass over
+/// the log, and deletes their agent branch, base and owner edit rows in the same
+/// transaction, so a landing rebuild equals the live tables; snapshot runs keep theirs until
+/// compaction (L1b). Inputs: the transaction, the worktrees and the owner fence. Output: how
+/// many events were tombstoned, or the refusal.
+pub(crate) fn forget_worktrees(
+    tx: &Transaction<'_>,
+    worktrees: &[String],
+    fence: &crate::state_log::fence::Fence,
+) -> Result<usize, EngineError> {
+    assert!(!tx.is_autocommit(), "the redaction is part of the delete");
+    assert!(worktrees.len() <= WORKTREES_MAX);
+    if worktrees.is_empty() {
+        return Ok(0);
+    }
+    let named: std::collections::BTreeSet<&str> = worktrees.iter().map(String::as_str).collect();
+    let mut found = Vec::new();
+    replay::replay(tx, Aggregate::Landing, 0, |event| {
+        if WORKTREE_KINDS.contains(&event.kind.as_str()) {
+            let body: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_slice(&event.body).map_err(|_| failure("changes_unavailable"))?;
+            let worktree = body.get("worktree").and_then(serde_json::Value::as_str);
+            if worktree.is_some_and(|worktree| named.contains(worktree)) {
+                found.push(event.seq);
+            }
+        }
+        Ok(())
+    })?;
+    for seq in &found {
+        replay::redact(tx, *seq, fence)?;
+    }
+    for table in WORKTREE_TABLES {
+        if has(tx, table)? {
+            let sql = format!("DELETE FROM {table} WHERE worktree=?1");
+            for worktree in &named {
+                tx.execute(&sql, [worktree])
+                    .map_err(|_| failure("changes_unavailable"))?;
+            }
+        }
+    }
+    assert!(WORKTREE_KINDS.iter().all(|kind| KINDS.contains(kind)));
+    Ok(found.len())
+}
+
 /// The most project removals a rebuild reads, as L6's bound.
 const REMOVALS_MAX: usize = 65_536;
 

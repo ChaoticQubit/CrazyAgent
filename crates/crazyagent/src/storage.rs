@@ -2569,6 +2569,7 @@ fn owner_apply_with(
         });
     }
     let deleting = matches!(effect, Some(Effect::Delete(_)));
+    let removing = crate::project_setup::removed::event::removing(&tx, &command, deleting)?;
     let mut onboarded = None;
     let outcome = match (effect, &command) {
         (Some(Effect::Home(effect)), _) => {
@@ -2648,14 +2649,9 @@ fn owner_apply_with(
             command,
         };
         persist_event(&tx, config, &wire, next)?;
-        if let Some(removed) =
-            crate::project_setup::removed::event::removal(&wire.command, deleting)
-        {
-            let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
-            let fence = crate::state_log::fence::Fence::Owner(a.clone());
-            let project = removed.project.as_str();
-            redacted = crate::worktrees::log::forget_project(&tx, project, Some(seq), &fence)?;
-            redacted += crate::ide::log::forget_project(&tx, project, Some(seq), &fence)?;
+        if let Some((removed, worktrees)) = &removing {
+            redacted =
+                crate::project_setup::removed::event::settle(&tx, next, a, removed, worktrees)?;
         }
     }
     let provenance = OwnerProvenance {
