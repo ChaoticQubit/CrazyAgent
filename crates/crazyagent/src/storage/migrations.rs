@@ -598,13 +598,33 @@ fn restore_pinned_at(
     }
     let kept = keep_replaced(&db, &folder, settings, now)?;
     let pinned_copy = source.join(DATABASE);
-    let (version_pinned, schema_pinned) = shape(&pinned_copy)?;
-    restore(&mut db, &source, version_pinned, &schema_pinned)
-        .and_then(|()| check_copy(&db, &pinned_copy))
-        .map_err(|cause| restore_failed(cause.0))?;
-    assert_eq!(version(&db)?, version_pinned);
+    let restored = shape(&pinned_copy).and_then(|(version_pinned, schema_pinned)| {
+        restore(&mut db, &source, version_pinned, &schema_pinned)?;
+        check_copy(&db, &pinned_copy)?;
+        assert_eq!(version(&db)?, version_pinned);
+        Ok(())
+    });
+    if let Err(cause) = restored {
+        return Err(drop_unneeded(&db, &kept, cause));
+    }
     assert!(kept.starts_with(&folder));
     Ok(kept)
+}
+
+/// Settles the copy a failed restore kept: it is removed when the live database still holds
+/// exactly its rows, so retries leave no copies outside the rotation, and kept otherwise,
+/// since it may then hold the only whole 2.5 data. Inputs: the connection, the copy folder and
+/// the failure. Output: `storage_restore_failed` naming the cause and whether the copy stays.
+fn drop_unneeded(db: &Connection, kept: &Path, cause: EngineError) -> EngineError {
+    let unchanged = check_copy(db, &kept.join(DATABASE)).is_ok();
+    if unchanged && std::fs::remove_dir_all(kept).is_ok() {
+        return restore_failed(cause.0);
+    }
+    restore_failed(format!(
+        "{}; the replaced data stays in {}",
+        cause.0,
+        kept.display()
+    ))
 }
 
 /// Builds a restore error. Input: the cause. Output: `storage_restore_failed` with it.
@@ -617,7 +637,9 @@ fn restore_failed(cause: impl std::fmt::Display) -> EngineError {
 /// connection, in this process or another, refuses the restore, and none can open while it
 /// runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
 fn alone(path: &Path) -> Result<Connection, EngineError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let db = Connection::open_with_flags(path, flags).map_err(restore_failed)?;
     db.busy_timeout(Duration::ZERO).map_err(restore_failed)?;
     match db.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;") {
@@ -709,7 +731,9 @@ fn keep_replaced(
 /// The copy is opened as `check_copy` opens it. Input: the copy's path. Output: both, or
 /// `storage_restore_failed` for a copy that is not 2.4 data.
 fn shape(copy: &Path) -> Result<(i64, Vec<String>), EngineError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let opened = Connection::open_with_flags(copy, flags).map_err(restore_failed)?;
     let found = version(&opened)?;
     if found > V24_VERSION_MAX {
