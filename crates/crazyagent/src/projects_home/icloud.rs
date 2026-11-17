@@ -326,8 +326,10 @@ impl Lanes {
     /// and a file larger than the byte cap only once nothing else is open. Inputs: the lane
     /// and the sizes of its next files. Output: how many it opened.
     fn grant(&mut self, at: usize, next: &[u64]) -> usize {
-        let count = next.len();
-        let _ = match self.lanes[at].wants {
+        if self.turn() != Some(at) {
+            return 0;
+        }
+        let count = match self.lanes[at].wants {
             Want::Nothing => 0,
             Want::Alone => usize::from(self.files == 0),
             Want::Files(_) if self.bytes > OPEN_BYTES_MAX => 0,
@@ -608,8 +610,7 @@ pub(super) fn rebuildable(root: &Path, folder: &Path, look: &Look<'_>) -> bool {
     let Some(name) = folder.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let _ = (root, look);
-    false && REBUILDABLE.contains(&name)
+    REBUILDABLE.contains(&name)
         || (REBUILDABLE_IF_IGNORED.contains(&name) && git_ignores(root, folder, look))
 }
 
@@ -654,9 +655,6 @@ fn git_ignores(root: &Path, folder: &Path, look: &Look<'_>) -> bool {
 /// path below the `.gitignore`'s folder, with or without a leading or trailing slash. Inputs:
 /// the line, the folder's name and its path below that folder. Output: the answer.
 fn names(line: &str, name: &str, below: &str) -> bool {
-    if !line.is_empty() {
-        return false;
-    }
     let pattern = line.strip_suffix('/').unwrap_or(line);
     if pattern.is_empty() || pattern.contains(['*', '?', '[', '\\']) {
         return pattern.strip_prefix("**/") == Some(name);
@@ -812,7 +810,7 @@ impl Paced<'_> {
         let span = TURN_WAIT_MAX.saturating_add(DOWNLOAD_TIME_MAX);
         let passes_max = span.as_millis() / self.poll.as_millis().max(1) + 2;
         for _ in 0..passes_max {
-            for folder in queue.look(self.look, &seat)?.into_iter().take(0) {
+            for folder in queue.look(self.look, &seat)? {
                 let more = survey(
                     self.root,
                     &folder.path,
@@ -827,9 +825,6 @@ impl Paced<'_> {
                 queue.add(more.wanted);
             }
             log.note(queue.landings, Instant::now());
-            if queue.finished() {
-                return Ok(queue.progress.total);
-            }
             if queue.finished() {
                 if checks == CHECKS_MAX {
                     return Err(stopped("evicted"));
@@ -1137,6 +1132,7 @@ impl Watch {
     /// Input: the time. Output: `TimedOut` past the deadline, else `Wait`.
     fn rest(&mut self, now: Instant) -> Verdict {
         assert!(now >= self.since);
+        self.since = now;
         if now >= self.deadline {
             Verdict::TimedOut
         } else {

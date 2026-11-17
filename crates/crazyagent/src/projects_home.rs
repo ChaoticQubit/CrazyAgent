@@ -591,7 +591,7 @@ pub fn add_bounds(overrides: &[AddOverride]) -> CopyBounds {
         COPY_BOUNDS
     };
     let bounds = CopyBounds {
-        skip_rebuildable: true,
+        skip_rebuildable: !overrides.contains(&AddOverride::DownloadEverything),
         ..limits
     };
     assert!(bounds.entries >= COPY_BOUNDS.entries);
