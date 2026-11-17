@@ -106,6 +106,7 @@ fn shown(text: &str, version: u64) -> ProcessText {
     ProcessText {
         text: text.into(),
         version,
+        outside: false,
     }
 }
 
@@ -1014,7 +1015,14 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         section_bytes: 0,
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
+    prepare(
+        &sub_home,
+        Harness::Codex,
+        &given,
+        &text("# Sub rules\n"),
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     record_skills(&root, &sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
@@ -1068,6 +1076,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         Harness::Claude,
         &given,
         &text("# Master rules\n"),
+        crate::agent_home::Caches::default(),
     )
     .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
@@ -1144,7 +1153,14 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         mode: Mode::Both,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
-    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    prepare(
+        &home,
+        Harness::Claude,
+        &launch,
+        &given,
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub))
             .unwrap()
@@ -1193,7 +1209,14 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         files: Vec::new(),
         section_bytes: 0,
     };
-    prepare(&home, Harness::Codex, &launch, &given).unwrap();
+    prepare(
+        &home,
+        Harness::Codex,
+        &launch,
+        &given,
+        crate::agent_home::Caches::default(),
+    )
+    .unwrap();
     record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
     let installed = vec!["tdd".to_owned(), "code-review".to_owned()];
     assert_eq!(
@@ -1559,11 +1582,22 @@ fn process_adoption_round_trip() {
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
     let unknown = ProjectId::new("never-set-up").unwrap();
+    let project = ProjectId::new("process-1").unwrap();
     {
-        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
         crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let tx = connection.transaction().unwrap();
+        let spec = crate::protocol::ProjectSpec {
+            name: "Process".into(),
+            repositories: vec![],
+        };
+        assert!(matches!(
+            crate::storage::create_project(&tx, &project, &spec).unwrap(),
+            crate::protocol::Outcome::Applied
+        ));
+        tx.commit().unwrap();
     }
-    let project = with_project(&root, &folder);
+    assert_eq!(with_project(&root, &folder), project);
     let master = team_agent(&root, project.as_str(), "master", "claude-code");
     let sub = team_agent(&root, project.as_str(), "sub", "codex");
     team_agent(&root, "another-project", "sub", "codex");
@@ -1678,17 +1712,7 @@ fn process_adoption_round_trip() {
     }
 
     {
-        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
-        let tx = connection.transaction().unwrap();
-        let spec = crate::protocol::ProjectSpec {
-            name: "Process".into(),
-            repositories: vec![],
-        };
-        assert!(matches!(
-            crate::storage::create_project(&tx, &project, &spec).unwrap(),
-            crate::protocol::Outcome::Applied
-        ));
-        tx.commit().unwrap();
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
         let on = crate::coord::settings::CoordSettings {
             nudges: crate::coord::settings::Nudges::TenMinutes,
             ..Default::default()
@@ -1731,13 +1755,11 @@ fn a_project_proposal_holds_both_texts_keeps_the_version_and_writes_nothing() {
         Ok("Done.\n~~~\n- Run make check.\n~~~\n".to_owned())
     })
     .unwrap();
-    assert_eq!(
-        proposed,
-        ProcessText {
-            text: "- Run make check.\n".into(),
-            version: before.version
-        }
-    );
+    assert_eq!(proposed.text, "- Run make check.\n");
+    assert_eq!(proposed.version, before.version);
+    let had = "The app instructions already have this line.";
+    let found = vec![Finding::new(FindingKind::Duplicate, vec![1], had)];
+    assert_eq!(proposed.findings, found, "the check rides along");
     assert_eq!(prompts.len(), 1, "one model run per proposal");
     assert!(
         prompts[0].contains("App instructions file, for comparison only:\n~~~\n- Use TDD.\n~~~\n")
@@ -2019,6 +2041,263 @@ fn accepting_a_proposal_made_before_a_newer_save_answers_stale_and_keeps_the_new
     );
 }
 
+fn check_prompt(root: &Path, project: Option<&ProjectId>) -> String {
+    let pool = CredentialRef::new("pool-a").unwrap();
+    let picked = project.is_none().then_some(&pool);
+    let mut seen = String::new();
+    propose(root, project, picked, |prompt| {
+        seen = prompt.to_owned();
+        Ok("~~~\n- Kept.\n~~~\n".to_owned())
+    })
+    .unwrap();
+    assert!(!seen.is_empty());
+    seen
+}
+
+fn set_master(root: &Path, project: &ProjectId, master: &str) {
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mut setup = crate::project_setup::load_setup(&connection, project)
+        .unwrap()
+        .unwrap();
+    setup.team.master = master.into();
+    let body = serde_json::to_string(&setup).unwrap();
+    let changed = connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            [project.as_str(), body.as_str()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+fn with_plugins(root: &Path, skill: &str, server: &str) -> tempfile::TempDir {
+    use crate::plugins::{Scope, ServerSpec};
+    use crate::storage::plugins::{Command, ResultValue, execute, initialize};
+    let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    initialize(&connection).unwrap();
+    let picked = tempfile::tempdir().unwrap();
+    let folder = picked.path().join(skill);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("SKILL.md"),
+        format!("---\nname: {skill}\ndescription: The {skill} skill.\n---\n"),
+    )
+    .unwrap();
+    execute(
+        &mut connection,
+        root,
+        Command::AddSkill {
+            scope: Scope::Global,
+            source: folder.display().to_string(),
+        },
+    )
+    .unwrap();
+    let spec = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into()],
+    };
+    let ResultValue::Server(view) = execute(
+        &mut connection,
+        root,
+        Command::AddServer {
+            scope: Scope::Global,
+            name: server.into(),
+            spec: spec.clone(),
+            secrets: Vec::new(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    execute(
+        &mut connection,
+        root,
+        Command::Approve { id: view.id, spec },
+    )
+    .unwrap();
+    picked
+}
+
+#[test]
+fn the_edit_names_a_text_over_what_a_claude_master_takes_as_over_budget() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let short = check_prompt(&root, Some(&project));
+    assert!(!short.contains("- over_budget"), "a short text fits");
+    let mut long = String::new();
+    let mut rule = 0;
+    while long.len() <= super::super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX {
+        rule += 1;
+        long.push_str(&format!("- Rule {rule} keeps the build green.\n"));
+    }
+    assert!(long.len() <= TEXT_BYTES_MAX);
+    let version = current_text(&root, Some(&project)).unwrap().version;
+    save(&root, Some(project.clone()), &long, version).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains("- over_budget, whole file: Agents get "));
+    assert!(seen.contains("; a Claude master takes at most "));
+    assert!(
+        !seen.contains("- duplicate"),
+        "numbered rules repeat nothing"
+    );
+}
+
+#[test]
+fn the_edit_names_a_file_reference_the_project_folder_does_not_have() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    fs::create_dir_all(root.join("project/docs")).unwrap();
+    fs::write(root.join("project/docs/kept.md"), "kept\n").unwrap();
+    let own = "- Read `docs/kept.md` first.\n- Read `docs/missing.md` too.\n\
+               - Never read `../outside.md`.\n- See `docs/kept.md:12` for the rule.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `docs/missing.md` is not a file or folder in this project.\n"
+    ));
+    assert!(!seen.contains("`docs/kept.md` is not"), "{seen}");
+    assert!(!seen.contains("`docs/kept.md:12` is not"), "{seen}");
+    assert!(!seen.contains("`../outside.md` is not"), "{seen}");
+    save(&root, None, "- Read `docs/missing.md` too.\n", 0).unwrap();
+    let app = check_prompt(&root, None);
+    assert!(
+        !app.contains("- broken_reference"),
+        "the app text has no project folder to check files in: {app}"
+    );
+}
+
+#[test]
+fn the_edit_names_a_skill_its_agents_do_not_get() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let _picked = with_plugins(&root, "grill-me", "docs");
+    let own = "- Use the `grill-me` skill first.\n- Use the `ghost-skill` skill after.\n\
+               - Name `plain-word` in prose.\n- Use the `superpowers:grill-me` skill.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(
+        seen.contains(
+            "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+        )
+    );
+    assert!(!seen.contains("`grill-me` is not"), "{seen}");
+    assert!(!seen.contains("`superpowers:grill-me` is not"), "{seen}");
+    assert!(!seen.contains("`plain-word` is not"), "{seen}");
+    save(&root, None, own, 0).unwrap();
+    let app = check_prompt(&root, None);
+    assert!(
+        app.contains(
+            "- broken_reference, line 2: `ghost-skill` is not a skill these agents get.\n"
+        )
+    );
+    assert!(!app.contains("`grill-me` is not"), "{app}");
+}
+
+#[test]
+fn the_edit_names_a_tool_whose_mcp_server_its_agents_do_not_get() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let _picked = with_plugins(&root, "grill-me", "docs");
+    let own = "- Search with `mcp__docs__search` first.\n\
+               - Search with `mcp__ghost__search` after.\n\
+               - Claim work with `mcp__crazyagent-team__start_work`.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `mcp__ghost__search` names the MCP server ghost, which these \
+         agents do not get.\n"
+    ));
+    assert!(!seen.contains("`mcp__docs__search` names"), "{seen}");
+    let team = "`mcp__crazyagent-team__start_work` names";
+    assert!(!seen.contains(team), "{seen}");
+}
+
+#[test]
+fn the_edit_names_a_command_this_computer_does_not_have() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let own = "- Run `sh -c true` before you commit.\n- Run `no-such-tool-dec172 --check` after.\n\
+               - Run `cd docs` to start.\n- Run `nosuchtool` alone.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains(
+        "- broken_reference, line 2: `no-such-tool-dec172` is not a command on this computer.\n"
+    ));
+    assert!(!seen.contains("`sh` is not"), "{seen}");
+    assert!(
+        !seen.contains("`cd` is not"),
+        "a shell builtin is no program: {seen}"
+    );
+    assert!(
+        !seen.contains("`nosuchtool` is not"),
+        "one word alone may name anything: {seen}"
+    );
+}
+
+#[test]
+fn the_edit_names_repeated_lines_and_lines_the_app_text_has_only_when_it_may_send_it() {
+    use crate::instruction_files::Mode;
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, None, "- Run make check.\n", 0).unwrap();
+    let own = "- Keep commits small.\n- Run make check.\n- Keep commits small.\n";
+    save(&root, Some(project.clone()), own, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    let repeated = "- duplicate, lines 1, 3: Line 3 repeats line 1.\n";
+    assert!(seen.contains(repeated), "{seen}");
+    assert!(
+        seen.contains("- duplicate, line 2: The app instructions already have this line.\n"),
+        "{seen}"
+    );
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    let alone = InstructionSettings {
+        mode: Mode::ProjectOnly,
+        ..fresh.settings
+    };
+    instruction_settings(&root, &project, Some((alone, Some(fresh.version)))).unwrap();
+    let alone = check_prompt(&root, Some(&project));
+    assert!(alone.contains("- duplicate, lines 1, 3: Line 3 repeats line 1.\n"));
+    assert!(
+        !alone.contains("The app instructions already have"),
+        "no app line is named in a run that may not see the app text: {alone}"
+    );
+}
+
+#[test]
+fn the_edit_asks_the_model_for_contradictions_and_rules_said_twice_as_finding_lines() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    let text = "- Always run tests.\n- Never run tests.\n";
+    save(&root, Some(project.clone()), text, 0).unwrap();
+    let seen = check_prompt(&root, Some(&project));
+    assert!(seen.contains("rules that contradict each other"), "{seen}");
+    let wanted = "FINDING {\"kind\":\"contradiction\",\"lines\":[";
+    assert!(seen.contains(wanted), "{seen}");
+    assert!(seen.contains("the kind \"duplicate\""), "{seen}");
+}
+
+#[test]
+fn a_project_edit_runs_only_on_a_master_harness_that_can_run_it() {
+    let (_directory, root) = root();
+    let project = cleanup_project(&root);
+    save(&root, Some(project.clone()), "- Run make check.\n", 0).unwrap();
+    let reply = |_: &str| Ok("~~~\n- Run make check.\n~~~\n".to_owned());
+    for master in ["codex", "claude", "claude-code"] {
+        set_master(&root, &project, master);
+        assert!(
+            propose(&root, Some(&project), None, reply).is_ok(),
+            "{master} runs it"
+        );
+    }
+    set_master(&root, &project, "pi");
+    assert_eq!(
+        propose(&root, Some(&project), None, reply).unwrap_err().0,
+        "instructions_cleanup_master_harness"
+    );
+    assert!(PROCESS_CODES.contains(&"instructions_cleanup_master_harness"));
+}
+
 #[test]
 fn only_a_proposal_request_is_served_past_the_owner_exchange() {
     let body = |action: Action| {
@@ -2071,7 +2350,8 @@ fn only_a_proposal_request_is_served_past_the_owner_exchange() {
 
 /// SA vid 7 (leader 09:47): the import Process confirms takes the project text as it is, so
 /// text in a `.crazyagent/instructions.md` the project's git tracks, here the owner's with
-/// the Imported heading taken off, stays first and unlabelled after the import.
+/// the Imported heading taken off, stays first and unlabelled in the file after the import,
+/// while agents still get it labelled, as Process never saved it (SA vid 7 residual).
 #[test]
 fn process_import_never_labels_the_project_text() {
     let (_directory, root) = root();
@@ -2110,4 +2390,64 @@ fn process_import_never_labels_the_project_text() {
         crate::agent_home::read_project(&folder).unwrap(),
         "OWNER-TEXT-7\n\n### Imported from CLAUDE.md\n\nREPO-RULE-7\n"
     );
+    assert!(read(&root, Some(project.clone())).unwrap().outside);
+    let shown = given(&root, &project).unwrap();
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    assert!(
+        shown.contains(&format!("{heading}\n\nOWNER-TEXT-7\n")),
+        "text Process never saved keeps its label after an import (SA vid 7 residual): {shown}"
+    );
+}
+
+/// SA vid 7 residual (leader 14:22 A): once the project file holds text Process did not
+/// save, as the owner's own git or an accepted change set leaves it, agents get that text
+/// under the Imported heading with its headings demoted, until the owner saves it in Process.
+#[test]
+fn project_text_changed_after_a_process_save_reaches_agents_labelled_until_saved_again() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    save(&root, Some(project.clone()), "Owner rule.\n", 0).unwrap();
+    let saved = given(&root, &project).unwrap();
+    assert!(
+        saved.ends_with("## Project instructions\n\nOwner rule.\n"),
+        "{saved}"
+    );
+    let pulled = "## Pulled\nRule.\n";
+    fs::write(folder.join(".crazyagent/instructions.md"), pulled).unwrap();
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    let label = format!("## Project instructions\n\n{heading}\n\n##### Pulled\nRule.\n");
+    let changed = given(&root, &project).unwrap();
+    assert!(changed.ends_with(&label), "{changed}");
+    save(&root, Some(project.clone()), pulled, 1).unwrap();
+    let kept = given(&root, &project).unwrap();
+    assert!(
+        kept.ends_with("## Project instructions\n\n## Pulled\nRule.\n"),
+        "{kept}"
+    );
+}
+
+/// SA vid 7 residual (leader 14:22 A): Process says when the project file holds text it did
+/// not save there last, in a read and in a stale reply, never for the app text, and a save
+/// that lands clears it.
+#[test]
+fn process_says_when_the_project_text_changed_outside_until_a_save_lands() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let project = with_project(&root, &folder);
+    assert!(!read(&root, Some(project.clone())).unwrap().outside);
+    fs::write(folder.join(".crazyagent/instructions.md"), "Pulled rule.\n").unwrap();
+    assert!(read(&root, Some(project.clone())).unwrap().outside);
+    fs::write(root.join(crate::agent_home::APP_FILE), "App rule.\n").unwrap();
+    assert!(!read(&root, None).unwrap().outside, "never the app text");
+    let refused = save(&root, Some(project.clone()), "Mine.\n", 5).unwrap();
+    let SavedText::Stale { current, .. } = refused else {
+        panic!("a save at another version is stale");
+    };
+    assert!(current.outside, "{current:?}");
+    assert_eq!(current.text, "Pulled rule.\n");
+    save(&root, Some(project.clone()), "Pulled rule.\n", 0).unwrap();
+    assert!(!read(&root, Some(project)).unwrap().outside);
 }

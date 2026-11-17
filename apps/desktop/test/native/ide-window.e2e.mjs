@@ -3,6 +3,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
+import { onScreen, planEnd } from "./ide-window-kit.mjs";
+import { SWITCHES, line, report, stampSample } from "./switch-time-kit.mjs";
 import { go, until } from "./trial-kit.mjs";
 
 const root = process.env.MS_ROOT;
@@ -22,10 +24,17 @@ const SETUP_MS = 120000;
 const BUILD_MS = 8 * 60 * 1000;
 const BACK_MS = 90000;
 const POLL_MS = 1000;
+const REAL_KEYS = process.platform !== "darwin" || process.env.E2E_REAL_KEYS === "1";
+const REAL_KEYS_OFF = "skipped on macOS without E2E_REAL_KEYS=1: its System Events keys go to whichever app is in front when they land, the owner's front app included, so Cmd+N, Cmd+W or typed text could reach the owner's window";
 const SHOWN_WIDTH = 1040;
 const SHOWN_HEIGHT = 720;
 const PANEL_SHIFT = "96px";
+const SHOT_MS = 5000;
+const SHOT_EVERY_MS = 200;
+const SHOT_MARGIN_MS = 200;
+const PLAN_SETTLE_S = 5;
 let generation = 0;
+let planDone = 0;
 
 /** Calls one desktop command through the app's own bridge. Inputs: the command and its
  * arguments. Output: its answer; throws with the failure the app returned. */
@@ -151,20 +160,26 @@ function ideRefusal() {
   return typeof written === "string" ? JSON.parse(written) : written;
 }
 
-/** The app's window number, found by its process. Output: the number as text; throws when
- * the window is not on screen. */
-function windowNumber() {
+/** The app's window number while the window server lists the window on screen, found by the
+ * app's process. Output: the number as text, or an empty string while the window is off that
+ * list; throws at once, with the window id tool's status and error, when the app has no
+ * process or the tool did not run or did not exit 0, so a broken tool is never waited on. */
+function listedWindow() {
   const found = spawnSync("/usr/bin/pgrep", ["-f", `^${app}`], { encoding: "utf8" }).stdout.trim().split("\n")[0];
   assert.ok(found, "the test app has a process");
   const listed = spawnSync(windowIdTool, [found], { encoding: "utf8" });
-  const number = listed.stdout.trim().split("\n")[0];
-  assert.ok(number, `the test app has a window on screen: ${listed.stderr}`);
-  return number;
+  const why = listed.error ? listed.error.message : (listed.stderr ?? "").trim();
+  assert.ok(!listed.error && listed.status === 0, `the window id tool ${windowIdTool} failed, status ${listed.status}: ${why}`);
+  return listed.stdout.trim().split("\n")[0];
 }
 
-/** Saves a picture of the app's window alone, with the IDE webview in it. Input: the name. */
-function shot(name) {
-  const taken = spawnSync("/usr/sbin/screencapture", ["-x", "-o", `-l${windowNumber()}`, join(evidence, `${name}.png`)], { encoding: "utf8" });
+/** Saves a picture of the app's window alone, with the IDE webview in it, once the window server
+ * lists the window on screen, waiting up to `by` for a window it dropped for a moment. Inputs:
+ * the name and that deadline in milliseconds. Output: once it is saved; throws naming how long
+ * the window was off the list. */
+async function shot(name, by = Date.now() + SHOT_MS) {
+  const number = await onScreen(listedWindow, { by, every: SHOT_EVERY_MS, label: `the ${name} picture: the app's window` });
+  const taken = spawnSync("/usr/sbin/screencapture", ["-x", "-o", `-l${number}`, join(evidence, `${name}.png`)], { encoding: "utf8" });
   assert.equal(taken.status, 0, `the ${name} picture: ${taken.stderr}`);
 }
 
@@ -177,8 +192,10 @@ function resize() {
 }
 
 /** Runs the plan in the page on its own timers, since the webdriver session cannot see the
- * main window while an IDE webview is in it. Input: the plan rows. Output: none. */
+ * main window while an IDE webview is in it, and notes when it ends, so a later row waits out
+ * a plan its failed row left running. Input: the plan rows. Output: none. */
 function startPlan(plan) {
+  planDone = Math.max(planDone, planEnd(plan, Date.now(), PLAN_SETTLE_S));
   return browser.execute((rows) => {
     const log = [];
     window.__ideWindowLog = log;
@@ -197,6 +214,10 @@ function startPlan(plan) {
         if (kind === "note") void note(value);
         if (kind === "shift") document.querySelector(".pj-tab-panel").style.marginTop = value;
         if (kind === "press") [...document.querySelectorAll("button")].find((node) => node.textContent.trim() === value)?.click();
+        if (kind === "click") {
+          log.push({ step: "click", at: Date.now(), selector: value });
+          document.querySelector(value)?.click();
+        }
       }, at * 1000);
     }
   }, plan);
@@ -268,11 +289,26 @@ async function testAppInFront() {
   }
 }
 
-/** Sends one Command key combination to the front window of the test app, only when the test app
- * is the frontmost app. Input: the key. Output: once it was sent. */
-async function commandKey(key) {
+/** Sends one real System Events keystroke line once the test app is the frontmost app, and only
+ * when REAL_KEYS allows real keys, since the key goes to whichever app is in front when it lands.
+ * Input: the keystroke line. Output: once it was sent; throws with nothing sent otherwise. */
+async function realKey(line) {
+  assert.ok(REAL_KEYS, REAL_KEYS_OFF);
   await testAppInFront();
-  onApp(`keystroke "${key}" using command down`);
+  onApp(line);
+}
+
+/** Sends one Command key combination to the front window of the test app through realKey. Input:
+ * the key. Output: once it was sent. */
+async function commandKey(key) {
+  await realKey(`keystroke "${key}" using command down`);
+}
+
+/** Declares a row that sends real keys: it runs off macOS, or on macOS with E2E_REAL_KEYS=1, and
+ * is skipped otherwise with REAL_KEYS_OFF in its title. Inputs: the row's title and body. */
+function keysIt(title, body) {
+  if (REAL_KEYS) it(title, body);
+  else it.skip(`${title} (${REAL_KEYS_OFF})`, body);
 }
 
 /** Raises the app's window with this title. Input: the title's words. */
@@ -301,6 +337,9 @@ const WINDOW_GONE_MS = 90000;
 const REOPEN_MS = 60000;
 const RESTORE_MS = 120000;
 const LEAVE_S = 320;
+const TAB_TURN_S = 3;
+const PAGE_TURN_S = 5;
+const CLOCK_SKEW_MS = 2;
 
 /** Fails the row unless two rows show one page. WebKit's time origin wobbles by a millisecond or
  * so, while a reload would move it by the many seconds since the page first loaded. Inputs: the
@@ -314,6 +353,13 @@ function samePage(row, other, message) {
 function serverUp(project) {
   const pattern = `server-data-dir ${root}/[^ ]*/ide/${project}/`;
   return spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim() !== "";
+}
+
+/** The process number of a project's IDE server under this run's test root. Input: the
+ * project. Output: it as text, empty when none runs. */
+function serverPid(project) {
+  const pattern = `server-data-dir ${root}/[^ ]*/ide/${project}/`;
+  return spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim().split("\n")[0];
 }
 
 /** Opens a project's IDE tab, waits for the workbench and presses the window button, all on the
@@ -335,16 +381,24 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     mkdirSync(join(root, "projects"), { mode: 0o700 });
     const homed = await invoke("desktop_set_projects_home", { path: join(root, "projects"), generation: ++generation });
     assert.equal(homed.outcome, "applied", `the projects home is set: ${JSON.stringify(homed)}`);
-    await browser.execute(() => location.reload());
-    await until(() => browser.execute(() => document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
-    ideDark = await browser.execute(() => {
+    await browser.execute(() => {
+      window.__ideWindowOldPage = true;
+      location.reload();
+    });
+    await until(() => browser.execute(() => window.__ideWindowOldPage !== true && document.readyState === "complete" && Boolean(window.__TAURI_INTERNALS__)), 60000, "the app window never loaded again");
+    const look = await browser.execute(() => {
       const dark = matchMedia("(prefers-color-scheme: dark)").matches;
       document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
-      return dark;
+      return { dark, painted: getComputedStyle(document.body).backgroundColor, old: window.__ideWindowOldPage === true };
     });
-    const painted = await browser.execute(() => getComputedStyle(document.body).backgroundColor);
-    const mean = painted.match(/\d+/g).slice(0, 3).reduce((sum, part) => sum + Number(part), 0) / 3;
-    assert.ok(ideDark ? mean > LIGHT_ABOVE : mean < DARK_BELOW, `the app page takes the appearance the IDE, which follows the system, does not: ${painted}`);
+    assert.equal(look.old, false, "the theme was set on the page the reload replaced");
+    ideDark = look.dark;
+    const mean = look.painted.match(/\d+/g).slice(0, 3).reduce((sum, part) => sum + Number(part), 0) / 3;
+    assert.ok(ideDark ? mean > LIGHT_ABOVE : mean < DARK_BELOW, `the app page takes the appearance the IDE, which follows the system, does not: ${look.painted}`);
+  });
+
+  beforeEach(async () => {
+    await pause(Math.max(0, planDone - Date.now()));
   });
 
   it("opens, leaves, returns, follows its panel, and goes away with its project", async () => {
@@ -374,15 +428,16 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     ]);
     const started = Date.now();
     const at = (seconds) => pause(Math.max(0, started + seconds * 1000 - Date.now()));
+    const by = (seconds) => started + seconds * 1000 - SHOT_MARGIN_MS;
     const actions = [
-      [30, () => shot("open-30s")], [60, () => shot("open-60s")], [92, () => shot("open-92s")],
-      [107, () => shot("left")], [127, () => shot("back")], [142, () => shot("moved")],
+      [30, () => shot("open-30s", by(60))], [60, () => shot("open-60s", by(92))], [92, () => shot("open-92s", by(95))],
+      [107, () => shot("left", by(110))], [127, () => shot("back", by(130))], [142, () => shot("moved", by(143))],
       [145, () => writeFileSync(join(evidence, "resize.json"), JSON.stringify(resize()))],
-      [157, () => shot("resized")], [217, () => shot("second-open")], [234, () => shot("closed")],
+      [157, () => shot("resized", by(160))], [217, () => shot("second-open", by(220))], [234, () => shot("closed")],
     ];
     for (const [seconds, action] of actions) {
       await at(seconds);
-      action();
+      await action();
     }
     let log = null;
     for (const deadline = Date.now() + BACK_MS; log === null; await pause(POLL_MS)) {
@@ -414,7 +469,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     }
   });
 
-  it("a saved level ends the IDE's own window, the tab opens it again, and the Save's words match what happens to an unsaved edit", async () => {
+  keysIt("a saved level ends the IDE's own window, the tab opens it again, and the Save's words match what happens to an unsaved edit", async () => {
     const project = await newProject("ide-own-level");
     await buildReady();
     await go(`#/projects/${encodeURIComponent(project)}/overview`);
@@ -426,10 +481,9 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const before = focused.look.editors;
     await commandKey("n");
     await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.look?.editors === before + 1, "Cmd+N opened no editor in the IDE window", OWN_WINDOW_MS, focused.at);
-    await testAppInFront();
-    onApp(`keystroke "${UNSAVED}"`);
+    await realKey(`keystroke "${UNSAVED}"`);
     await pause(BACKUP_MS);
-    shot("unsaved-before-restart");
+    await shot("unsaved-before-restart");
     await startPlan([[LEAVE_S, "go", "#/"]]);
     const view = await invoke("desktop_project_agent_policy", { id: project });
     const access = view.access === "sandboxed" ? "own_branch" : "sandboxed";
@@ -443,7 +497,7 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     let count = editors();
     for (const deadline = Date.now() + RESTORE_MS; count !== before + 1 && Date.now() < deadline; await pause(POLL_MS)) count = editors();
     const back = count === before + 1;
-    shot("unsaved-after-restart");
+    await shot("unsaved-after-restart");
     writeFileSync(join(evidence, "unsaved-after-restart.txt"), `${back ? "returned" : "lost"} editors ${count} before ${before}\n`);
     const said = readFileSync(new URL("../../src/screens/project/access.tsx", import.meta.url), "utf8").includes("Unsaved edits are lost.");
     assert.equal(said, !back, `an unsaved edit was ${back ? "returned" : "lost"} after the restart, and the Save ${said ? "says" : "does not say"} it is lost`);
@@ -451,7 +505,72 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     await until(() => browser.execute(() => location.hash === "#/"), 60000, "the page never left the project");
   });
 
-  it("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
+  it("a project removed with its terminal wall open: the wall's own read in WKWebView finds it gone and the wall closes itself (UI-5-F1)", async () => {
+    const name = "Wall own close";
+    const walls = () => Number(onApp(`count (every window whose title contains "${name}")`));
+    const project = await newProject("wall-own-close");
+    await invoke("desktop_open_terminal_windows", { id: project, name, count: 1, focus: false });
+    await until(() => walls() === 1, OWN_WINDOW_MS, "the project's terminal wall never opened");
+    const removal = await invoke("desktop_remove_project", { id: project, generation: ++generation });
+    assert.equal(removal.outcome, "applied", JSON.stringify(removal));
+    await until(() => walls() === 0, OWN_WINDOW_MS, "the wall stayed open after its project was removed");
+  });
+
+  it("a kept IDE comes back on a tab or a page switch within 50 ms, with no reload, no new webview and the same server (DEC-187)", async function () {
+    const project = await newProject("ide-switch");
+    await buildReady();
+    const page = (tab) => `#/projects/${encodeURIComponent(project)}/${tab}`;
+    await go(page("overview"));
+    await until(() => browser.execute(() => Boolean(document.querySelector("#tab-ide"))), 60000, "the project page never listed the IDE tab");
+    const plan = [[0, "go", page("ide")]];
+    const tabFrom = WORKBENCH_MS + 5;
+    for (let turn = 0; turn <= SWITCHES; turn += 1) {
+      const at = tabFrom + turn * TAB_TURN_S;
+      plan.push([at, "go", page("overview")], [at + 1, "click", "#tab-ide"]);
+    }
+    const pageFrom = tabFrom + (SWITCHES + 1) * TAB_TURN_S;
+    for (let turn = 0; turn <= SWITCHES; turn += 1) {
+      const at = pageFrom + turn * PAGE_TURN_S;
+      plan.push([at, "go", "#/"], [at + 1, "go", page("overview")], [at + 3, "click", "#tab-ide"]);
+    }
+    const end = pageFrom + (SWITCHES + 1) * PAGE_TURN_S;
+    plan.push([end, "note", "switched"]);
+    const started = Date.now();
+    await startPlan(plan);
+    await pause(Math.max(0, started + (tabFrom - 2) * 1000 - Date.now()));
+    const server = serverPid(project);
+    assert.ok(server, "the IDE's server runs once the workbench loaded");
+    let log = null;
+    for (const deadline = started + end * 1000 + BACK_MS; log === null; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the webdriver session never saw the main window again after the switches");
+      log = await browser.execute(() => (window.__ideWindowLog?.some((row) => row.step === "switched") ? window.__ideWindowLog : null)).catch(() => null);
+    }
+    assert.equal(serverPid(project), server, "every switch kept the same server: nothing reconnected");
+    const rows = windowRows().filter((row) => row.at > started && row.view?.webview?.startsWith("ide-") && row.look);
+    assert.ok(rows.length > 0, "the test build wrote the IDE page's rows");
+    const labels = [...new Set(rows.map((row) => row.view.webview))];
+    assert.equal(labels.length, 1, `one webview for every switch, none built again: ${labels}`);
+    samePage(rows.at(-1), rows[0], "no switch reloaded the IDE page");
+    const shows = rows.at(-1).look.shows ?? [];
+    const skew = Math.max(...rows.map((row) => row.look.skew ?? 0));
+    const clicks = log.filter((row) => row.step === "click");
+    assert.equal(clicks.length, 2 * (SWITCHES + 1), "every planned click ran");
+    const evidenceRow = { shows: shows.length, clicks: clicks.length, skew, labels };
+    if (shows.length < clicks.length || skew > CLOCK_SKEW_MS) {
+      writeFileSync(join(evidence, "switch-time-ide.json"), JSON.stringify({ verdict: "INCONCLUSIVE", ...evidenceRow }, null, 2));
+      console.log(`SWITCH-TIME ide INCONCLUSIVE: ${shows.length} shows for ${clicks.length} clicks, clock skew ${skew} ms`);
+      this.skip();
+    }
+    const judged = [["ide-tab", clicks.slice(1, SWITCHES + 1)], ["ide-page", clicks.slice(SWITCHES + 2)]].map(([name, timed]) => {
+      const result = report(timed.map((click) => stampSample(click.at, shows)));
+      console.log(line(name, result));
+      return { name, result };
+    });
+    writeFileSync(join(evidence, "switch-time-ide.json"), JSON.stringify({ judged, ...evidenceRow }, null, 2));
+    for (const { name, result } of judged) assert.ok(result.pass, line(name, result));
+  });
+
+  keysIt("moves to its own window with no reload, comes back, and closes with its project and the main window", async () => {
     const first = await newProject("ide-own-one");
     const second = await newProject("ide-own-two");
     const third = await newProject("ide-own-three");
@@ -481,13 +600,13 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
 
     raise("IDE");
     await pause(POLL_MS);
-    shot("own-window");
+    await shot("own-window");
     await testAppInFront();
     onApp(`set size of (first window whose title contains "IDE") to {${SHOWN_WIDTH}, ${SHOWN_HEIGHT}}`);
     const resized = await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.outer[0] === SHOWN_WIDTH * scale && row.view.ide.size[0] === row.view.outer[0], "the IDE did not follow its window's new size", OWN_WINDOW_MS);
     assert.equal(resized.view.ide.at[1] + resized.view.ide.size[1], resized.view.outer[1], "after a resize it still reaches the bottom");
     assert.equal(resized.view.ide.at[1], ide.at[1], "and still sits below the title bar");
-    shot("own-window-resized");
+    await shot("own-window-resized");
     await browser.saveScreenshot(join(evidence, "tab-while-out.png"));
     assert.ok(!menuNames().includes("File"), `the IDE window's menu owns none of the editor's keys: ${menuNames()}`);
     const before = (await rowWhere((row) => OWN_WINDOW.test(row.view?.window ?? "") && row.view.focused && row.look !== null, "the IDE window never had the focus", OWN_WINDOW_MS)).look.editors;
@@ -521,15 +640,17 @@ describe("In the real window the IDE webview stays in its panel and leaves with 
     const leaving = Date.now();
     await closeTitled("IDE");
     await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "closing the window after the page left kept the window", OWN_WINDOW_MS, leaving);
-    await until(() => !serverUp(fourth), OWN_WINDOW_MS, "closing the window after its page had left kept the IDE's server running");
+    await pause(POLL_MS);
+    assert.ok(serverUp(fourth), "closing the window keeps the IDE loaded with its server as the last used one (DEC-187)");
 
     await go(`#/projects/${encodeURIComponent(second)}/overview`);
     await moveOut(second);
     assert.ok(serverUp(second), "the second IDE's server runs while the IDE is in its own window");
+    await until(() => !serverUp(fourth), SERVER_GONE_MS, "opening another project's IDE dropped the last one with its server (DEC-187)");
     await go("#/");
     await pause(POLL_MS);
     const removing = Date.now();
-    const removal = await invoke("desktop_remove_project", { id: second, generation: ++generation, deleteName: null });
+    const removal = await invoke("desktop_remove_project", { id: second, generation: ++generation });
     assert.equal(removal.outcome, "applied", JSON.stringify(removal));
     await invoke("desktop_close_project_walls", { id: second });
     await rowWhere((row) => row.windows && !row.windows.some((label) => OWN_WINDOW.test(label)), "removing the project left its IDE window open", OWN_WINDOW_MS, removing);

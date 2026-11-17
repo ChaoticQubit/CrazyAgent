@@ -35,6 +35,9 @@ const POLL: Duration = Duration::from_millis(20);
 const RUNNING_PER_REPOSITORY_MAX: usize = 2;
 const ENV: &str = "/usr/bin/env";
 const SCRATCH_FOLDER: &str = "regenerate";
+/// The folder in a regeneration's scratch that holds only the private index of the check that
+/// the tools changed nothing else, the one folder that check's confined step may write.
+const CHECK_FOLDER: &str = "check";
 
 /// The change sets a regeneration is rewriting now, by id with their repository: one at a
 /// time for each set.
@@ -350,10 +353,10 @@ fn regenerated(
         return Ok(Regenerated::Refused);
     };
     let uv_clash = paths.iter().any(|path| program_for(path) == Some("uv"));
-    let sandbox = match confined(
+    let (sandbox, _listed) = match confined(
         db, &record, &root, &runtime, &worktree, &scratch, settings, uv_clash,
     ) {
-        Ok(sandbox) => sandbox,
+        Ok(confined) => confined,
         Err(code) => {
             eprintln!("landing_regenerate_unconfined code={code}");
             return Ok(Regenerated::Refused);
@@ -476,9 +479,11 @@ fn regenerated(
 
 /// Tells whether the tools changed any path of the temporary worktree, tracked or new,
 /// other than the lockfiles, against the merge they ran on, through the worktree's own git
-/// folder and a private index, writing no object. Inputs: the owner checkout, the scratch,
-/// the worktree, the merge and the lockfiles. Output: the answer; a listing git refuses or
-/// cuts short counts as yes.
+/// folder and a private index in a folder of its own, under the confined reading step that
+/// writes only that index ([`Repo::reading`]), so a link a tool left behind leads no git
+/// outside the step's read set. Inputs: the owner checkout, the scratch, the worktree, the
+/// merge and the lockfiles. Output: the answer; a listing git refuses or cuts short counts
+/// as yes.
 fn changed_outside(
     repository: &Path,
     scratch: &Scratch,
@@ -486,8 +491,11 @@ fn changed_outside(
     merged: &str,
     paths: &[String],
 ) -> Result<bool, EngineError> {
+    let folder = scratch.folder.join(CHECK_FOLDER);
+    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
     let check = Repo::open(repository, &scratch.admin, Some(worktree))?
-        .private_index(&scratch.folder.join("check-index"));
+        .private_index(&folder.join("index"))
+        .reading()?;
     check.capture(&["read-tree", merged], 256)?;
     check.exec(
         &["update-index", "-q", "--refresh"],
@@ -599,8 +607,8 @@ const REGENERATE_CACHE: &str = "regenerate";
 /// SM1-R rule allows (T8); another lockfile's clash never waits on uv priming. Installs its
 /// profile. Inputs: the store, the change set, the owner checkout's canonical root, the
 /// engine runtime folder, the temporary worktree, the scratch folders, the owner's settings
-/// files and whether a uv.lock clashes. Output: the sandbox, or the plain code of what
-/// refused it.
+/// files and whether a uv.lock clashes. Output: the sandbox with the hidden folders list's
+/// guard, held while the tools run (SA-VID14-R2-N2), or the plain code of what refused it.
 #[allow(clippy::too_many_arguments)]
 fn confined(
     db: &Connection,
@@ -611,15 +619,21 @@ fn confined(
     scratch: &Scratch,
     settings: Option<&(PathBuf, PathBuf)>,
     uv_clash: bool,
-) -> Result<ProjectSandbox, &'static str> {
+) -> Result<(ProjectSandbox, crate::sandbox::hidden_paths::HiddenRun), &'static str> {
     let kept = match settings {
         Some((global, project)) => crate::sandbox::settings_owner_ports(global, project)?,
         None => Vec::new(),
     };
     let project = record.project.as_str();
     let policy = crate::sandbox::policy::load(db, project).map_err(|_| "agent_access_unread")?;
+    let listed = crate::sandbox::hidden_paths::starting(
+        crate::sandbox::hidden_paths::RunKind::Lockfiles,
+        project,
+    )
+    .ok_or("hidden_paths_unread")?;
     let hidden =
         crate::sandbox::hidden_paths::load(db, project).map_err(|_| "hidden_paths_unread")?;
+    listed.hid(&hidden);
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
     let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;
     toolchains::prepare_cargo_home(&scratch.home, &homes).map_err(|_| "cargo_home_unmade")?;
@@ -656,7 +670,7 @@ fn confined(
     sandbox
         .install(&scratch.folder.join("profile.sb"))
         .map_err(|_| "sandbox_refused")?;
-    Ok(sandbox)
+    Ok((sandbox, listed))
 }
 
 /// Runs one program through `/usr/bin/env` in the tool sandbox, from a folder of the

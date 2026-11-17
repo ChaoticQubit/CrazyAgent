@@ -2296,10 +2296,10 @@ fn edge_label(edge: &RelationEdge) -> String {
 }
 
 /// Says whether a terminal code means the agent's terminal ended for good.
-/// Input: a Closed or Rejected code. Output: true for an ended run, a stopped agent or an
-/// unknown pane.
+/// Input: a Closed or Rejected code. Output: true for an ended run, a stopped agent, an
+/// unknown pane or a lead whose teammates' server ended ([`crate::terminal::ended_code`]).
 fn dead(code: &str) -> bool {
-    matches!(code, ENDED | STOPPED | "terminal_agent_unknown")
+    matches!(code, ENDED | STOPPED) || crate::terminal::ended_code(code)
 }
 
 /// Says whether a terminal code means the engine connection dropped, so the

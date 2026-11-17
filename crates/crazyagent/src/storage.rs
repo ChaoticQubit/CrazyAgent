@@ -177,9 +177,45 @@ pub(crate) enum Job {
         Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<(), EngineError>>,
     ),
-    HomeAddSettle(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
-    HomeAddForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
+    HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeJobForget(RequestId, oneshot::Sender<Result<(), EngineError>>),
+    HomeDeleteCheck(
+        Admission,
+        ProjectId,
+        String,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
+    HomeDeleteCutShort(
+        oneshot::Sender<
+            Result<Option<(crate::projects_home::delete_mark::CutShort, u64)>, EngineError>,
+        >,
+    ),
+    HomeDeleteKeep(RequestId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeSetupCheck(
+        Admission,
+        Box<crate::project_setup::SetupAction>,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
+    HomeSetupCutShort(
+        oneshot::Sender<Result<Option<crate::projects_home::setup_mark::Interrupted>, EngineError>>,
+    ),
+    HomeSetupMark(
+        ProjectId,
+        RequestId,
+        String,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeSetupMarkEnd(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeProjectMoveCheck(
+        Admission,
+        ProjectId,
+        crate::projects_home::AddMode,
+        oneshot::Sender<Result<String, EngineError>>,
+    ),
     HomeMovePlan(
         Admission,
         Cursor,
@@ -374,6 +410,11 @@ impl Storage {
                     }
                     if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
+                    }
+                    match crate::github::proposals::start_store(&connection) {
+                        Ok(0) => {}
+                        Ok(ended) => eprintln!("github_rule_proposals_cut_short count={ended}"),
+                        Err(e) => eprintln!("github_rule_proposals_not_settled cause={}", e.0),
                     }
                     if let Err(e) = projects_home::sweep_home(&connection) {
                         eprintln!("home_staging_not_swept cause={}", e.0);
@@ -651,22 +692,101 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::HomeAddSettle(request, reply) => {
+                        Job::HomeAddSettle(request, placed, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_settle(&mut connection, Some(&request)).map(drop)
+                                projects_home::add_settle(&mut connection, Some((&request, placed)))
+                                    .map(drop)
                             };
                             let _ = reply.send(result);
                         }
                         Job::HomeAddEnded(reply) => {
                             let _ = reply.send(projects_home::add_ended(&connection));
                         }
-                        Job::HomeAddForget(request, reply) => {
+                        Job::HomeProjectMoveEnded(reply) => {
+                            let _ = reply.send(projects_home::move_ended(&connection));
+                        }
+                        Job::HomeProjectMoveLeft(request, reply) => {
+                            let _ = reply.send(projects_home::move_left(&connection, &request));
+                        }
+                        Job::HomeProjectMoveCleared(request, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_forget(&connection, &request)
+                                projects_home::move_left_clear(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeJobForget(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::job_forget(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeDeleteCheck(admission, project, name, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::delete_job_check(
+                                    &mut connection,
+                                    &admission,
+                                    &project,
+                                    &name,
+                                )
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeDeleteCutShort(reply) => {
+                            let _ = reply.send(projects_home::delete_cut_short(&connection));
+                        }
+                        Job::HomeDeleteKeep(request, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::delete_keep(&connection, &request)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupCheck(admission, action, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_job_check(&mut connection, &config, &admission, &action)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupCutShort(reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_cut_short(&connection)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupMark(project, request, name, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_mark_begin(&connection, &project, &request, &name)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeSetupMarkEnd(project, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::setup_mark_end(&connection, &project)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeProjectMoveCheck(admission, project, mode, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_check(&mut connection, &admission, &project, mode)
                             };
                             let _ = reply.send(result);
                         }
@@ -758,6 +878,14 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Delete(&outcome)))
                             });
+                            if result.is_ok()
+                                && let OwnerOperation::Apply {
+                                    mutation: OwnerMutation::DeleteProject { project_id, .. },
+                                } = &request.operation
+                                && let Err(e) = accounts::forget_pool_project(&mut connection, &mut config, sources.as_ref(), &admission, project_id)
+                            {
+                                eprintln!("project_pool_not_forgotten cause={}", e.0);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::SetupPlan(admission, request, reply) => {
@@ -772,6 +900,16 @@ impl Storage {
                             let result = settings::ensure_clear(&connection).and_then(|()| {
                                 owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::NewProject(&staged)))
                             });
+                            if let Ok(applied) = &result
+                                && applied.result == OwnerResult::Applied
+                                && !applied.historical_replay
+                                && let OwnerOperation::Apply {
+                                    mutation: OwnerMutation::CreateDemo { project_id, pool },
+                                } = &request.operation
+                                && let Err(e) = accounts::settle_demo_pool(&mut connection, &mut config, sources.as_ref(), &admission, project_id, pool)
+                            {
+                                eprintln!("demo_pool_not_settled cause={}", e.0);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::OwnerApply(admission, request, reply) => {
@@ -1119,6 +1257,13 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
+        let started = std::time::Instant::now();
+        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+            eprintln!(
+                "projects_removed_backfill held={held} ms={}",
+                started.elapsed().as_millis()
+            );
+        }
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -1168,6 +1313,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
+    crate::project_setup::removed::initialize(connection)?;
+    crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -1701,7 +1848,9 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
-        Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
+        Command::OwnerSandbox { settings, version } => {
+            crate::sandbox_settings::save_from(tx, settings, *version)
+        }
         Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
         Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
         Command::OwnerProviderRetry { choice } => crate::provider_retry::save(tx, *choice),
@@ -1816,20 +1965,36 @@ fn execute(
 }
 
 /// Records a new project and clears any plugin rows a prior project of the same id left
-/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
-/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// behind, so a reused id (a project removed from the dashboard and brought back from its own
+/// folder, or the demo made again) inherits none of the old project's MCP servers,
+/// secrets, skills or switches. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
 /// project's plugins untouched. The reused id's old skill store folder is removed at once,
 /// not left for the next start's trash sweep, so the new project starts with a clean skill
 /// store and a same-name skill import is not refused by a stale folder. Creation is refused
 /// before any clearing when an existing project id equals the new one ignoring ASCII case,
 /// so a case-insensitive filesystem never lets one project's skill store delete another's.
+/// An id a removal holds is refused as `project_id_removed` (DEC-178 addendum 1).
 /// Inputs: the transaction, the id and the spec. Output: Applied, or Rejected when the id is
-/// already in use or clashes with one only by ASCII case.
+/// already in use, held by a removal or clashes with one only by ASCII case.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
+) -> Result<Outcome, EngineError> {
+    create_project_at(tx, project_id, spec, None)
+}
+
+/// Records a new project as [`create_project`] does, at the project's own folder: a project
+/// removed from the dashboard whose recorded folder is exactly this one comes back under its
+/// id, and any other return to this folder ends. Any other id a removal holds or leftover rows
+/// keep is refused, so no create path gives one out. Every refusal comes before any write.
+/// Inputs: the transaction, the id, the spec and the folder text. Output: as `create_project`.
+pub(crate) fn create_project_at(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    spec: &ProjectSpec,
+    folder: Option<&str>,
 ) -> Result<Outcome, EngineError> {
     let case_clash: bool = tx
         .query_row(
@@ -1841,6 +2006,20 @@ pub(crate) fn create_project(
     if case_clash {
         return Ok(Outcome::Rejected {
             code: "project_id_case_conflict".into(),
+        });
+    }
+    let returns = match folder {
+        Some(folder) => {
+            crate::project_setup::removed::returning(tx, folder)?.as_ref() == Some(project_id)
+        }
+        None => false,
+    };
+    if !returns
+        && (crate::project_setup::removed::held(tx, project_id)?
+            || crate::project_setup::removed::left(tx, project_id)?)
+    {
+        return Ok(Outcome::Rejected {
+            code: "project_id_removed".into(),
         });
     }
     let stored = StoredProject {
@@ -1863,6 +2042,10 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    if let Some(folder) = folder {
+        crate::project_setup::removed::claim(tx, project_id, folder)?;
+    }
+    assert!(!crate::project_setup::removed::held(tx, project_id)?);
     crate::activity::note_created(tx, project_id, &spec.name, created_ms());
     plugins::remove_project(tx, project_id)?;
     crate::memory::forget_project(tx, project_id)?;
@@ -2440,7 +2623,7 @@ fn setup_plan(
         return Ok(Err("stale_revision".into()));
     }
     let OwnerMutation::CreateDemo { pool, .. } = mutation else {
-        return crate::project_setup::plan_new(&tx, config, path, &action);
+        return crate::project_setup::plan_new(&tx, config, path, &action, false);
     };
     if crate::demo::exists(&tx)? {
         return Ok(Err("demo_exists".into()));
@@ -2448,7 +2631,10 @@ fn setup_plan(
     if let Some(code) = crate::demo::pool_unavailable(&tx, config, pool)? {
         return Ok(Err(code.into()));
     }
-    Ok(crate::project_setup::plan_new(&tx, config, path, &action)?.map_err(crate::demo::refusal))
+    Ok(
+        crate::project_setup::plan_new(&tx, config, path, &action, true)?
+            .map_err(crate::demo::refusal),
+    )
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.
@@ -2492,12 +2678,19 @@ fn owner_apply_with(
             current_revision: Cursor::new(revision),
         });
     }
+    let mut onboarded = None;
     let outcome = match (effect, &command) {
         (Some(Effect::Home(effect)), _) => {
             projects_home::record(&tx, path, &request.request_id, &command, effect)?
         }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
-            let outcome = crate::project_setup::record_new(&tx, config, action, staged)?;
+            let demo = matches!(
+                &request.operation,
+                OwnerOperation::Apply {
+                    mutation: OwnerMutation::CreateDemo { .. }
+                }
+            );
+            let outcome = crate::project_setup::record_new(&tx, config, action, staged, demo)?;
             if let (
                 Outcome::Applied,
                 OwnerOperation::Apply {
@@ -2513,12 +2706,22 @@ fn owner_apply_with(
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
             crate::learning::latch(&tx);
-            crate::project_setup::record_delete(&tx, action, outcome, revision)?
+            let recorded = crate::project_setup::record_delete(&tx, action, outcome, revision)?;
+            if let (Outcome::Applied, Ok(files)) = (&recorded, outcome) {
+                projects_home::record_files(&tx, files)?;
+            }
+            recorded
         }
         (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
         (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {
             code: "stale_revision".into(),
         },
+        (None, Command::Onboarding { action }) => {
+            let (outcome, started) = crate::onboarding::start(&tx, config, path, action)?;
+            assert_eq!(outcome == Outcome::Applied, started.is_some());
+            onboarded = started;
+            outcome
+        }
         (None, _) => execute(&tx, config, path, &command, revision)?,
     };
     let (result, changed) = match outcome {
@@ -2530,6 +2733,8 @@ fn owner_apply_with(
                 OwnerResult::VerificationUnavailable {
                     attempt_id: attempt_id.clone(),
                 }
+            } else if let Some(project_id) = onboarded {
+                OwnerResult::OnboardingStarted { project_id }
             } else {
                 OwnerResult::Applied
             };
@@ -2711,6 +2916,29 @@ fn owner_control_reconcile(
     .transpose()
 }
 
+/// Whether a project may hold another git repository, for its Agent access lines: a short
+/// transaction checks the admission and reads the project's folder and the supervisor
+/// setting, and the bounded read of that folder runs after it, so the owner read's own
+/// transaction never waits on a folder (DEC-179 T4d). Inputs: the database, the admission
+/// and the project. Output: the answer, true for a project with no setup.
+fn project_other_git(
+    db: &mut Connection,
+    a: &Admission,
+    project_id: &ProjectId,
+) -> Result<bool, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    check_owner_admission(&tx, a)?;
+    let setup = crate::project_setup::load_setup(&tx, project_id)?;
+    let calls = crate::sandbox_settings::load(&tx)
+        .ok()
+        .map(|settings| settings.linux_supervisor);
+    drop(tx);
+    let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+    let other_git = crate::sandbox::policy::LevelView::other_git;
+    let folder = setup.map(|setup| setup.project_folder());
+    Ok(folder.is_none_or(|folder| other_git(host, &folder)))
+}
+
 fn owner_read(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -2718,6 +2946,16 @@ fn owner_read(
     a: &Admission,
     query: &OwnerRead,
 ) -> Result<OwnerReadReply, EngineError> {
+    if matches!(
+        query,
+        OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
+    ) {
+        crate::sandbox::policy::LevelView::refresh();
+    }
+    let other_git = match query {
+        OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
+        _ => true,
+    };
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     let revision = owner_revision(&tx)?;
@@ -2756,6 +2994,9 @@ fn owner_read(
                     pool.as_ref(),
                     research,
                     &crate::project_setup::signed_in_connections(&tx, config, pool.as_ref())?,
+                    crate::sandbox_settings::load(&tx)
+                        .ok()
+                        .map(|settings| settings.linux_supervisor),
                 )
                 .map_err(error)?,
             ),
@@ -2773,15 +3014,20 @@ fn owner_read(
                 .collect(),
             version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
-        OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
-            project_id: project_id.clone(),
-            paths: crate::sandbox::hidden_paths::load(&tx, project_id.as_str())
-                .map_err(error)?
-                .into_iter()
-                .map(|path| path.display().to_string())
-                .collect(),
-            version: versioned::current(&tx, &versioned::hidden_paths_item(project_id))?.version,
-        },
+        OwnerRead::ProjectHiddenPaths { project_id } => {
+            let saved =
+                crate::sandbox::hidden_paths::load(&tx, project_id.as_str()).map_err(error)?;
+            OwnerData::ProjectHiddenPaths {
+                project_id: project_id.clone(),
+                runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                paths: saved
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect(),
+                version: versioned::current(&tx, &versioned::hidden_paths_item(project_id))?
+                    .version,
+            }
+        }
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
                 return Err(error(no_setup_code(&tx, project_id)?));
@@ -2794,6 +3040,8 @@ fn owner_read(
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    crate::sandbox_settings::load(&tx).ok(),
+                    other_git,
                 );
             policy.grant_log =
                 crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;

@@ -1,5 +1,7 @@
 use super::diagnostic::StreamDiagnostic;
-use super::{ClaudeHostLimits, Fault, Phase, Status, Turn, validate_command};
+use super::{
+    ClaudeHostLimits, Fault, Phase, Status, Turn, carried_retry, limit_retries, validate_command,
+};
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
@@ -37,6 +39,7 @@ pub(super) struct Channels {
     pub(super) output: mpsc::Sender<ObservedEvent>,
     pub(super) report: watch::Sender<Status>,
     pub(super) stop: Arc<AtomicBool>,
+    pub(super) doubt: Arc<AtomicBool>,
     pub(super) group: Arc<AtomicU32>,
     pub(super) diagnostic: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
@@ -65,6 +68,7 @@ struct Process {
     output: mpsc::Sender<ObservedEvent>,
     report: watch::Sender<Status>,
     stop: Arc<AtomicBool>,
+    doubt: Arc<AtomicBool>,
     pending: Option<PendingInput>,
     status: Option<ExitStatus>,
     fault: Option<Fault>,
@@ -78,10 +82,11 @@ struct Process {
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
 
-/// Runs one Claude Code master under custody until it retires. Inputs: the command, its
-/// sandbox, the account lease with the project whose leftover setting and owner view what
-/// it leaves running follow, the turn's home, the protocol, the limits and the channels.
-/// Output: none; the status channel reports how it ended.
+/// Runs one Claude Code master under custody until it retires, in a cleared environment
+/// that keeps the owner's connection-retry choice the command carried. Inputs: the command,
+/// its sandbox, the account lease with the project whose leftover setting and owner view
+/// what it leaves running follow, the turn's home, the protocol, the limits and the
+/// channels. Output: none; the status channel reports how it ended.
 pub(super) fn run(
     mut command: Command,
     sandbox: InstalledSandbox,
@@ -96,6 +101,7 @@ pub(super) fn run(
         output,
         report,
         stop,
+        doubt,
         group,
         diagnostic,
     } = channels;
@@ -116,12 +122,17 @@ pub(super) fn run(
         });
         return;
     }
+    let retry = carried_retry(&command);
     command
         .env_clear()
         .env("HOME", &home)
         .env("CLAUDE_CONFIG_DIR", &home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &home)
         .env("CLAUDE_CODE_TMPDIR", sandbox.sandbox().agent_tmp())
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        )
         .env("TERM", "dumb")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -132,6 +143,8 @@ pub(super) fn run(
             .env("SHELL", super::TOOLS_SHELL)
             .env(super::BACKGROUND_TASKS_OFF.0, super::BACKGROUND_TASKS_OFF.1);
     }
+    limit_retries(&mut command, retry);
+    assert_eq!(carried_retry(&command), retry);
     let mut command = match sandbox.wrap(&command) {
         Ok(command) => command,
         Err(_) => {
@@ -167,9 +180,7 @@ pub(super) fn run(
     };
     assert!(child.id() > 1);
     group.store(child.id(), Ordering::Release);
-    let follower = sandbox
-        .is_unconfined()
-        .then(|| Follower::start(child.id(), Some(token)));
+    let follower = Follower::start(child.id(), Some(token), sandbox.lineage_check());
     let mut process = Process {
         group: Pid::from_child(&child),
         group_absent: false,
@@ -188,6 +199,7 @@ pub(super) fn run(
         output,
         report,
         stop,
+        doubt,
         pending: None,
         status: None,
         fault: None,
@@ -237,6 +249,23 @@ impl Process {
         }
     }
 
+    /// Records a fault of the cleanup itself, which outranks the held stop so a run that
+    /// left something behind stays uncertain, and otherwise keeps the first fault.
+    /// Takes the cleanup fault. Returns nothing.
+    fn fail_cleanup(&mut self, fault: Fault) {
+        if self.fault.is_none_or(Fault::held) {
+            self.fault = Some(fault);
+        }
+    }
+
+    /// Records a cleanup fault after which processes the harness started may still run, so
+    /// the host is never settled, ranked as [`Self::fail_cleanup`] ranks it, above a held
+    /// stop. Input: the code. Output: none.
+    fn fail_in_doubt(&mut self, code: &'static str) {
+        self.doubt.store(true, Ordering::Release);
+        self.fail_cleanup(Fault::Host(code));
+    }
+
     fn drive(&mut self) {
         assert!(self.status.is_none());
         assert!(self.pending.is_none());
@@ -252,17 +281,22 @@ impl Process {
             self.read_stderr();
             self.reap();
             if self.status.is_some() {
-                if self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some()) {
+                let code = self.status.and_then(|status| status.code());
+                let held = Fault::Exit(code).held();
+                if !held && self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some())
+                {
                     std::thread::sleep(POLL_TIME);
                     continue;
                 }
-                if self.fault.is_none()
+                if held {
+                    self.fault = Some(Fault::Exit(code));
+                } else if self.fault.is_none()
                     && !(self.status.is_some_and(|status| status.success())
                         && self.completed_turns > 0
                         && self.protocol.state() == State::Idle
                         && self.frame.is_empty())
                 {
-                    self.fail(Fault::Exit(self.status.and_then(|status| status.code())));
+                    self.fail(Fault::Exit(code));
                 }
                 return;
             }
@@ -534,7 +568,7 @@ impl Process {
         match rustix::process::test_kill_process_group(self.group) {
             Err(Errno::SRCH) => self.group_absent = true,
             Ok(()) | Err(Errno::PERM) => {}
-            Err(_) => self.fail(Fault::Host("claude_host_group_unobservable")),
+            Err(_) => self.fail_cleanup(Fault::Host("claude_host_group_unobservable")),
         }
     }
 
@@ -547,7 +581,7 @@ impl Process {
             Ok(()) => true,
             Err(Errno::SRCH | Errno::PERM) => false,
             Err(_) => {
-                self.fail(Fault::Host("claude_host_kill_failed"));
+                self.fail_cleanup(Fault::Host("claude_host_kill_failed"));
                 false
             }
         };
@@ -558,7 +592,7 @@ impl Process {
                 Err(_) => {
                     self.reap();
                     if self.status.is_none() {
-                        self.fail(Fault::Host("claude_host_kill_failed"));
+                        self.fail_cleanup(Fault::Host("claude_host_kill_failed"));
                     }
                 }
             }
@@ -573,12 +607,13 @@ impl Process {
         if let Some(warden) = self.warden.take()
             && warden.fire(warden::FIRE_TIME).is_err()
         {
-            self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+            self.fail_in_doubt("claude_host_cleanup_uncertain");
         }
     }
 
     /// Ends the harness and everything it left in its group, then releases the account
-    /// lease. At Full access no warden reaches processes that left the group, so the
+    /// lease. At Full access, and under the plain Linux Landlock helper, no warden reaches
+    /// processes that left the group (LINUX-KILL-GROUP), so the
     /// harness's lineage, followed from its start, is taken before the kill and checked after
     /// it; while some still run, the turn ends with their code and a hold ends them by the
     /// default leftover setting, keeping the lease until none run or the owner signs the
@@ -625,7 +660,7 @@ impl Process {
                     if open {
                         self.stdout = None;
                         self.stderr = None;
-                        self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+                        self.fail_in_doubt("claude_host_cleanup_uncertain");
                     }
                     if !status.success()
                         && !self.stop.load(Ordering::Acquire)
@@ -640,7 +675,7 @@ impl Process {
             }
             if !uncertain && now >= cleanup_deadline {
                 uncertain = true;
-                self.fail(Fault::Host("claude_host_cleanup_uncertain"));
+                self.fail_in_doubt("claude_host_cleanup_uncertain");
                 self.report.send_replace(Status {
                     phase: Phase::Closing,
                     fault: self.fault,
@@ -664,7 +699,7 @@ impl Process {
         if let Some(lineage) = lineage
             && let Err(unstopped) = lineage.and_then(Lineage::settle)
         {
-            self.fail(Fault::Host(unstopped.code()));
+            self.fail_in_doubt(unstopped.code());
             if let (Unstopped::Left(left), Some(profile)) = (unstopped, self.profile.take()) {
                 let project = self.project.as_str();
                 left.hold(
@@ -693,7 +728,7 @@ impl Drop for Process {
     fn drop(&mut self) {
         if self.profile.is_some() {
             self.stop.store(true, Ordering::Release);
-            self.fail(Fault::Host("claude_host_custodian_interrupted"));
+            self.fail_cleanup(Fault::Host("claude_host_custodian_interrupted"));
             self.cleanup();
         }
     }

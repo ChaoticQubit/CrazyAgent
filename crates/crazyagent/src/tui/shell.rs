@@ -26,7 +26,7 @@ use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use crate::learning::MarkStep;
-use crate::projects_home::job::{JobState, JobView};
+use crate::projects_home::job::{JobKind, JobState, JobView};
 use crate::terminal::TerminalFrame;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -99,6 +99,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         label: "Settings / Setup".into(),
         kind: "Settings",
         place: Place::Setup { first_run: false },
+    });
+    out.push(Target {
+        label: "Settings / GitHub".into(),
+        kind: "Settings",
+        place: Place::GitHubDefaults,
     });
     for (label, place) in [
         ("New project", Place::NewProject),
@@ -321,10 +326,27 @@ impl Shell {
         self.refresh();
     }
 
+    /// Reads the engine's intake job again between ticks while the stored one runs, so a
+    /// New Project page that follows its job sees the end soon, as the desktop's one-second
+    /// read does. Input: none. Output: whether it asked.
+    pub fn read_running_job(&mut self) -> bool {
+        let running = self
+            .ctx
+            .store
+            .intake
+            .as_ref()
+            .is_some_and(intake_job::running);
+        if running {
+            intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
+        }
+        running
+    }
+
     /// Keeps the engine's intake job in the store from a status read or a start, says once on
     /// the message line when a running job ended and reads the found folders again so Home
-    /// lists the new one; a stop or a dismiss reads the status at once. A failed read keeps
-    /// the last view. Input: the intake reply. Output: none.
+    /// lists the new one, and the projects too after a project move, whose folder changed; a
+    /// stop or a dismiss reads the status at once. A failed read keeps the last view. Input:
+    /// the intake reply. Output: none.
     fn intake_job(&mut self, event: &IntakeEvent) {
         let view = match (&event.query, &event.result) {
             (IntakeQuery::JobStatus | IntakeQuery::JobStart { .. }, Ok(IntakeView::Job(view))) => {
@@ -348,6 +370,13 @@ impl Shell {
             Message::warning(&text, "")
         });
         intake::ask(&mut self.ctx, IntakeQuery::Found);
+        let kind = view.as_ref().map(|job| job.kind);
+        if matches!(
+            kind,
+            Some(JobKind::MoveProject | JobKind::Delete | JobKind::Setup)
+        ) {
+            self.ctx.request(Request::Projects);
+        }
         assert!(self.ctx.store.intake.is_some());
     }
 
@@ -1890,6 +1919,8 @@ mod tests {
     fn shop(state: JobState) -> JobView {
         JobView {
             id: crate::protocol::RequestId::new("add-1").unwrap(),
+            kind: crate::projects_home::job::JobKind::Add,
+            project_id: None,
             source: "/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop".into(),
             mode: crate::projects_home::AddMode::Move,
             overrides: Vec::new(),
@@ -1920,6 +1951,32 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// DEC-177 step 3b: between ticks the run loop reads the engine's intake job again only
+    /// while the stored one runs, so a New Project page that follows its job sees its end
+    /// soon; with no job or an ended one it asks nothing.
+    #[test]
+    fn a_running_intake_job_is_read_again_between_ticks_and_no_other_is() {
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+        drain(&mut shell);
+        assert!(!shell.read_running_job(), "no job is stored");
+        assert!(intake_asks(&mut shell).is_empty());
+
+        shell.arrive(status_arrival(Some(shop(JobState::Copying {
+            copied: 3,
+            checked: 0,
+        }))));
+        drain(&mut shell);
+        assert!(shell.read_running_job(), "the stored job runs");
+        let asks = intake_asks(&mut shell);
+        assert_eq!(asks.len(), 1, "{asks:?}");
+        assert!(asks[0].contains("JobStatus"), "{asks:?}");
+
+        shell.arrive(status_arrival(Some(shop(JobState::Done))));
+        drain(&mut shell);
+        assert!(!shell.read_running_job(), "the stored job ended");
+        assert!(intake_asks(&mut shell).is_empty());
     }
 
     /// DEC-159 S7: the tick reads the engine's intake job, the store keeps the last view

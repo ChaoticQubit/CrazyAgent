@@ -14,9 +14,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 23] = [
+const COMMANDS: [&str; 24] = [
     "desktop_project_catalog",
-    "desktop_setup_project",
     "desktop_project_setup",
     "desktop_research_jobs",
     "desktop_project_context",
@@ -34,11 +33,52 @@ const COMMANDS: [&str; 23] = [
     "desktop_update_project_setup",
     "desktop_remove_project",
     "desktop_move_project_home",
+    "desktop_delete_project_job",
+    "desktop_setup_project_job",
     "desktop_cancel_research",
     "desktop_retry_research",
     "desktop_plan_roadmap",
     "desktop_research_log",
 ];
+
+/// DEC-177 step 3c: New Project runs only as the engine's job, so the direct setup command is
+/// gone from the build list, the bindings, the window's capability, both clients and the e2e
+/// routes, while the job command stays. Takes nothing. Fails while any place still names it.
+#[test]
+fn the_direct_setup_command_is_registered_nowhere() {
+    let bindings = include_str!("../src/lib.rs");
+    let quoted = "\"desktop_setup_project\"";
+    for (place, text) in [
+        ("build", include_str!("../build.rs")),
+        ("client", include_str!("../../src/engine-client.ts")),
+        ("api", include_str!("../../src/api-projects.ts")),
+        ("routes", include_str!("../e2e_bridge/routes.rs")),
+    ] {
+        assert!(
+            !text.contains(quoted),
+            "{place} still names the direct setup"
+        );
+    }
+    assert!(
+        !bindings.contains("async fn desktop_setup_project("),
+        "binding"
+    );
+    assert!(
+        !bindings
+            .lines()
+            .any(|line| line.trim() == "desktop_setup_project,"),
+        "handler"
+    );
+    assert!(
+        !include_str!("../capabilities/main-window.json")
+            .contains("\"allow-desktop-setup-project\""),
+        "capability"
+    );
+    assert!(
+        bindings.contains("async fn desktop_setup_project_job("),
+        "the job command stays"
+    );
+}
 
 #[test]
 fn project_setup_commands_are_registered_in_all_four_places() {
@@ -372,7 +412,7 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
         .await?;
     assert_eq!(stale.rejection.as_deref(), Some("stale_revision"));
 
-    let removed = bridge.remove_project(&id, 17, None).await?;
+    let removed = bridge.remove_project(&id, 17).await?;
     assert!(
         matches!(removed.outcome, ActionOutcome::Applied),
         "{removed:?}"

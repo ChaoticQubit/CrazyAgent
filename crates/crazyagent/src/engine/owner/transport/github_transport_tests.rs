@@ -2,6 +2,42 @@ use super::*;
 use crate::engine::owner::AccountSecret;
 use crate::github::GitHubMethod;
 
+#[test]
+fn a_publish_start_answers_before_the_agent_drafts_its_gitignore() {
+    let start = crate::engine::owner::transport::github::Action::PublishStart {
+        project: crate::protocol::ProjectId::new("alpha").unwrap(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "octo-cat".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+    };
+    assert!(start.time() < crate::instruction_cleanup::WALL_TIME);
+}
+
+#[test]
+fn a_publish_start_outlasts_its_own_git_before_its_outcome_is_unknown() {
+    let start = crate::engine::owner::transport::github::Action::PublishStart {
+        project: crate::protocol::ProjectId::new("alpha").unwrap(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "octo-cat".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+    };
+    assert_eq!(crate::github::START_GIT_TIME, Duration::from_secs(80));
+    assert!(
+        start.time() >= crate::github::START_GIT_TIME.saturating_add(Duration::from_secs(60)),
+        "the Start's git, its listing and its save fit in {:?}",
+        start.time()
+    );
+    assert!(start.time() < crate::instruction_cleanup::WALL_TIME);
+}
+
 #[tokio::test]
 async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
     run_case(false, |context| async move {
@@ -26,6 +62,10 @@ async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
             "github_not_signed_in"
         );
         assert_eq!(
+            client.github_owners().await.unwrap_err().0,
+            "github_not_signed_in"
+        );
+        assert_eq!(
             client
                 .clone_repo("octo-cat/tool".into())
                 .await
@@ -40,6 +80,56 @@ async fn github_selector_reports_signed_out_and_refuses_work_before_sign_in() {
         );
         assert!(!client.github_sign_out().await.unwrap().signed_in);
         assert!(!context.state.join("github.json").exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_publish_prompt_answers_over_the_owner_socket_and_keeps_not_now() {
+    run_case(false, |context| async move {
+        #[cfg(target_os = "macos")]
+        let _keychain = {
+            let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+            keychain.serve(&crate::github::namespace(&context.state));
+            keychain
+        };
+        let folder = tempfile::Builder::new()
+            .prefix("ca-gh-prompt-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let project = std::fs::canonicalize(folder.path()).unwrap();
+        {
+            let db = crate::landing::open(&context.state).unwrap();
+            crate::ide::workspace::tests::add_project(&db, "alpha", &project);
+        }
+        let (client, _) =
+            OwnerClient::discover(&context.state, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .unwrap();
+        let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
+        let beta = crate::protocol::ProjectId::new("beta").unwrap();
+        assert!(client.github_publish_prompt(alpha.clone()).await.unwrap());
+        client
+            .github_publish_prompt_set(alpha.clone(), crate::github::GitHubPromptAnswer::NotNow)
+            .await
+            .unwrap();
+        assert!(!client.github_publish_prompt(alpha).await.unwrap());
+        assert_eq!(
+            client
+                .github_publish_prompt(beta.clone())
+                .await
+                .unwrap_err()
+                .0,
+            "github_publish_project_unknown"
+        );
+        assert_eq!(
+            client
+                .github_publish_prompt_set(beta, crate::github::GitHubPromptAnswer::Never)
+                .await
+                .unwrap_err()
+                .0,
+            "github_publish_project_unknown"
+        );
     })
     .await;
 }
@@ -164,6 +254,16 @@ mod slow_remote {
                 if seen.path == "/user" {
                     return Answer::json(200, serde_json::json!({ "login": "octo-cat" }));
                 }
+                if seen.path == "/user/memberships/orgs" {
+                    return Answer::json(
+                        200,
+                        serde_json::json!([{
+                            "state": "active",
+                            "role": "admin",
+                            "organization": { "login": "acme-labs" }
+                        }]),
+                    );
+                }
                 if seen.path == "/user/repos" {
                     std::thread::sleep(SLOW);
                     return Answer::json(
@@ -285,6 +385,17 @@ mod slow_remote {
             assert_eq!(page.repos.len(), 1);
             assert_eq!(page.repos[0].full_name, "octo-cat/tool");
             assert_eq!(page.next, None);
+            let owners = client
+                .github_owners()
+                .await
+                .unwrap_or_else(|error| panic!("the owner list answered {}", error.0));
+            let logins: Vec<&str> = owners
+                .owners
+                .iter()
+                .map(|owner| owner.login.as_str())
+                .collect();
+            assert_eq!(logins, ["octo-cat", "acme-labs"]);
+            assert!(owners.owners[0].personal);
             assert!(!client.github_sign_out().await.unwrap().signed_in);
         })
         .await;
@@ -458,6 +569,184 @@ mod slow_remote {
                 !holds(&root, token.as_bytes()),
                 "the engine root keeps only a reference to the token"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_project_publish_runs_over_the_owner_socket_by_its_project_id() {
+        use crate::github::{GitHubPublishPlan, GitHubPublishStep};
+        use crate::protocol::ProjectId;
+        run_case(false, |context| async move {
+            let token = "gho_enginepublish0123456789";
+            let bearer = format!("Bearer {token}");
+            let server = Server::start(move |seen, _| {
+                if seen.header("authorization") != Some(bearer.as_str()) {
+                    return Answer::json(401, serde_json::json!({ "message": "Bad credentials" }));
+                }
+                match (seen.method.as_str(), seen.path.as_str()) {
+                    ("GET", "/user") => Answer::json(
+                        200,
+                        serde_json::json!({ "login": "octo-cat", "id": 583_231 }),
+                    ),
+                    ("POST", "/user/repos") => Answer::json(
+                        403,
+                        serde_json::json!({ "message": "Resource not accessible by integration" }),
+                    ),
+                    _ => Answer::json(404, serde_json::json!({ "message": "Not Found" })),
+                }
+            });
+            let root = context.state.clone();
+            let space = namespace(&root);
+            let mut keychain = TestKeychain::temporary();
+            keychain.serve(&space);
+            let store = platform_store(&space)
+                .expect("UNAVAILABLE: the macOS Keychain of the signed-in user");
+            let _forget = Forget {
+                root: root.clone(),
+                store: Arc::clone(&store),
+                item: reference(&format!("{space}.github"), "token").unwrap(),
+            };
+            GitHub::new(&root, space, store, Endpoints::loopback(server.port))
+                .use_token(SecretString::new(token.as_bytes().to_vec()).unwrap())
+                .unwrap();
+            use_loopback(&root, Some(server.port));
+
+            let folder = tempfile::Builder::new()
+                .prefix("ca-gh-publish-")
+                .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+                .unwrap();
+            let project = std::fs::canonicalize(folder.path()).unwrap();
+            std::fs::write(project.join("main.rs"), "fn main() {}\n").unwrap();
+            std::fs::write(
+                project.join("keys.txt"),
+                "token ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\n",
+            )
+            .unwrap();
+            {
+                let db = crate::landing::open(&root).unwrap();
+                crate::ide::workspace::tests::add_project(&db, "alpha", &project);
+            }
+            let (client, _) =
+                OwnerClient::discover(&root, OwnerClientKind::Tui, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+            let plan = GitHubPublishPlan {
+                owner: "octo-cat".into(),
+                name: "tool".into(),
+                description: String::new(),
+                private: true,
+                docs: false,
+            };
+            let alpha = ProjectId::new("alpha").unwrap();
+            let beta = ProjectId::new("beta").unwrap();
+            assert_eq!(
+                client
+                    .github_publish_status(beta.clone())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_publish_project_unknown"
+            );
+            assert_eq!(
+                client
+                    .github_publish_start(beta, plan.clone())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_publish_project_unknown"
+            );
+            assert_eq!(
+                client.github_publish_status(alpha.clone()).await.unwrap(),
+                None
+            );
+            let started = client
+                .github_publish_start(alpha.clone(), plan.clone())
+                .await
+                .unwrap();
+            assert_eq!(started.project, project);
+            assert_eq!(started.step, GitHubPublishStep::Drafting, "{started:?}");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let drafted = loop {
+                let job = client.github_publish_status(alpha.clone()).await.unwrap();
+                match job {
+                    Some(job) if job.step != GitHubPublishStep::Drafting => break job,
+                    _ if Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    other => panic!("the draft did not end: {other:?}"),
+                }
+            };
+            assert!(
+                matches!(
+                    &drafted.step,
+                    GitHubPublishStep::Lines {
+                        draft: crate::github::GitHubIgnoreDraft::Baseline { reason },
+                        ..
+                    } if reason.starts_with("instructions_cleanup_")
+                ),
+                "{drafted:?}"
+            );
+            let lines = vec![".env*".to_owned()];
+            let blocked = client
+                .github_publish_approve(alpha.clone(), lines)
+                .await
+                .unwrap();
+            assert!(
+                matches!(blocked.step, GitHubPublishStep::Blocked { .. }),
+                "{blocked:?}"
+            );
+            assert_eq!(
+                client.github_publish_recheck(alpha.clone()).await.unwrap(),
+                blocked
+            );
+            let stopped = client
+                .github_publish_exclude(alpha.clone(), "keys.txt".into())
+                .await
+                .unwrap();
+            assert!(
+                matches!(stopped.step, GitHubPublishStep::Creating { .. }),
+                "{stopped:?}"
+            );
+            assert_eq!(
+                stopped.stopped.as_deref(),
+                Some("github_repo_create_refused")
+            );
+            assert_eq!(
+                client.github_publish_status(alpha.clone()).await.unwrap(),
+                Some(stopped.clone())
+            );
+            assert_eq!(
+                client.github_publish_continue(alpha.clone()).await.unwrap(),
+                stopped
+            );
+            assert_eq!(
+                client
+                    .github_publish_recheck(alpha.clone())
+                    .await
+                    .unwrap_err()
+                    .0,
+                "github_publish_step_invalid"
+            );
+            let creates = server
+                .seen()
+                .iter()
+                .filter(|seen| seen.method == "POST" && seen.path == "/user/repos")
+                .count();
+            assert_eq!(creates, 2);
+            assert_eq!(
+                client
+                    .github_publish_discard(alpha.clone())
+                    .await
+                    .map_err(|error| error.0),
+                Ok(None)
+            );
+            assert_eq!(
+                client.github_publish_status(alpha.clone()).await.unwrap(),
+                None
+            );
+            assert!(!holds(&root, token.as_bytes()));
+            assert!(!holds(&project, token.as_bytes()));
         })
         .await;
     }

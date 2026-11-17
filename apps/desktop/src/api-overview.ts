@@ -29,12 +29,19 @@ export type OverviewRefresh = "after_landing" | "refresh_only" | "off";
 export type OverviewApply = "always_ask" | "when_unedited";
 
 /** Everything the Overview tabs show for one project. `needs_home` is true for a project kept
- * outside the CrazyAgent folder, whose tabs cannot be written until it is moved there, and
- * `waiting_for_account` while `failure` is the engine's wait for an account. */
-export interface ProjectOverview { readme: Readme | null; tabs: TabState[]; competitors: CompetitorState; running: boolean; stale: boolean; checked_ms: number | null; failure: string | null; waiting_for_account: boolean; refresh: OverviewRefresh; apply: OverviewApply; needs_home: boolean }
+ * outside the CrazyAgent folder, whose tabs cannot be written until it is moved there,
+ * `waiting_for_account` while `failure` is the engine's wait for an account, and `due_in_ms`
+ * how long until a waiting run is due, null while a run writes, none waits, or from an older
+ * engine. */
+export interface ProjectOverview { readme: Readme | null; tabs: TabState[]; competitors: CompetitorState; running: boolean; stale: boolean; checked_ms: number | null; failure: string | null; waiting_for_account: boolean; due_in_ms: number | null; refresh: OverviewRefresh; apply: OverviewApply; needs_home: boolean }
 
-/** How often the tabs are read again while a run is going or a change set landed, in milliseconds. */
+/** How often the tabs are read again while a run writes, and the shortest wait for a due one,
+ * in milliseconds. */
 export const OVERVIEW_POLL_MS = 5_000;
+
+/** The longest wait for a due run, in milliseconds, so a far due time or a clock that moved
+ * still reads the tabs again. */
+export const OVERVIEW_WAIT_MAX_MS = 10 * 60_000;
 
 const OVERVIEW_FAILURES: Record<string, string> = {
   overview_tab_changed: "Someone changed this tab since you opened it. Your text is kept below; compare and save again.",

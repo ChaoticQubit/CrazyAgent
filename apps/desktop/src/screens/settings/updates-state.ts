@@ -1,4 +1,4 @@
-import type { AvailableUpdate, UpdateProgress } from "../../api-updates";
+import type { AvailableUpdate, EngineAfterUpdate, UpdateProgress } from "../../api-updates";
 import { withCode } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 
@@ -10,7 +10,7 @@ export type UpdatePhase =
   | { kind: "current"; checkedAt: number }
   | { kind: "available"; update: AvailableUpdate; checkedAt: number }
   | { kind: "installing"; update: AvailableUpdate; step: UpdateProgress }
-  | { kind: "installed"; update: AvailableUpdate; engineStarted: boolean }
+  | { kind: "installed"; update: AvailableUpdate; engine: EngineAfterUpdate }
   | { kind: "failed"; update: AvailableUpdate | null; message: string };
 
 export type UpdateEvent =
@@ -19,7 +19,7 @@ export type UpdateEvent =
   | { kind: "check_failed"; code: string }
   | { kind: "install_started" }
   | { kind: "progress"; progress: UpdateProgress }
-  | { kind: "install_done"; engineStarted: boolean }
+  | { kind: "install_done"; engine: EngineAfterUpdate }
   | { kind: "install_failed"; code: string }
   | { kind: "channel_changed" };
 
@@ -72,7 +72,7 @@ export function reduceUpdate(state: UpdatePhase, event: UpdateEvent): UpdatePhas
     case "progress":
       return state.kind === "installing" ? { ...state, step: event.progress } : state;
     case "install_done":
-      return state.kind === "installing" ? { kind: "installed", update: state.update, engineStarted: event.engineStarted } : state;
+      return state.kind === "installing" ? { kind: "installed", update: state.update, engine: event.engine } : state;
     case "install_failed":
       return state.kind === "installing" ? { kind: "failed", update: state.update, message: updateMessage(event.code) } : state;
     case "channel_changed":
@@ -99,6 +99,22 @@ export function progressLabel(step: UpdateProgress): string {
     case "verifying": return "Checking the signature...";
     case "stopping_engine": return "Stopping the engine. Your agents pick up where they were after the restart.";
     case "installing": return "Installing...";
+    case "starting_engine": {
+      const waited = `${Math.floor(step.waited_s / 60)}:${String(step.waited_s % 60).padStart(2, "0")}`;
+      return step.answering
+        ? `The engine is opening your projects (${waited})...`
+        : `Starting the engine on the new version (${waited}). Updating your data can take a few minutes.`;
+    }
+  }
+}
+
+/** The line the installed view shows under Restart now about the engine. Input: where the
+ * engine stands after the install. Output: the line, or null when it answered. */
+export function engineAfterLine(engine: EngineAfterUpdate): string | null {
+  switch (engine) {
+    case "ready": return null;
+    case "starting": return "The engine is still starting on the new version. Restart now; CrazyAgent connects once it answers.";
+    case "failed": return "The engine didn't start. Restart now to try again; the engine log says why.";
   }
 }
 

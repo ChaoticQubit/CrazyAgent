@@ -108,8 +108,9 @@ pub(super) fn load_catalog(wizard: &mut Wizard, signed_in: &[&str]) {
     wizard.apply_catalog(pool, research, Ok(served));
 }
 
-/// Reads the engine's catalog for the wizard's current request. Takes the wizard and the
-/// signed-in connection ids. Returns the pool, the research and the catalog.
+/// Reads the engine's catalog for the wizard's current request, with no Linux gap line, so
+/// a frame is the same on every computer. Takes the wizard and the signed-in connection
+/// ids. Returns the pool, the research and the catalog.
 fn engine_catalog(
     wizard: &mut Wizard,
     signed_in: &[&str],
@@ -124,7 +125,10 @@ fn engine_catalog(
         .map(|id| CredentialRef::new(*id).unwrap())
         .collect();
     let (pool, research) = wizard.catalog_request().expect("catalog request");
-    let served = catalog(&config, pool.as_ref(), &research, &signed).unwrap();
+    let mut served = catalog(&config, pool.as_ref(), &research, &signed, None).unwrap();
+    for level in &mut served.agent_access {
+        level.gaps.clear();
+    }
     (pool, research, served)
 }
 
@@ -1046,6 +1050,7 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     wizard.go(Step::Documents);
     type_text(&mut wizard, "~/scope.csv");
     wizard.key(key(KeyCode::Enter));
+    wizard.publish.on = false;
     wizard.go(Step::Review);
     let Reply::Create(request) = wizard.key(key(KeyCode::Enter)) else {
         panic!("create expected");
@@ -1109,6 +1114,7 @@ fn review_preselects_own_branch_and_left_and_right_change_the_agent_access() {
     let mut wizard = Wizard::new(pool_choices(&config()), None);
     type_text(&mut wizard, "Tidepool");
     load_catalog(&mut wizard, &["c-codex"]);
+    wizard.publish.on = false;
     wizard.go(Step::Review);
     assert_eq!(wizard.access, AgentAccess::OwnBranch);
     assert_eq!(wizard.focused(), Control::Continue);
@@ -1287,7 +1293,7 @@ fn a_catalog_reply_that_replaces_the_team_closes_an_open_harness_picker() {
     );
 
     let signed = BTreeSet::from([CredentialRef::new("c-codex").unwrap()]);
-    let served = catalog(&config(), pool.as_ref(), &research, &signed).unwrap();
+    let served = catalog(&config(), pool.as_ref(), &research, &signed, None).unwrap();
     assert!(served.default_team.sub_harnesses.is_empty());
     wizard.apply_catalog(pool, research, Ok(served));
 

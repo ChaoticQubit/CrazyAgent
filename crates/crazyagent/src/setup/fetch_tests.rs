@@ -1,5 +1,7 @@
 use super::*;
+use crate::setup::launch::{finish_plan, server_name};
 use crate::setup::pack::{PackGroup, PackKind};
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn private() -> tempfile::TempDir {
@@ -329,7 +331,7 @@ fn the_shipped_mcp_entries_read_as_servers_without_a_shell() {
     };
     let program = |name: &str| bin.join(name).display().to_string();
 
-    let plan = server_plan(&shipped("context-mode"), &folder, &lookup).unwrap();
+    let plan = server_plan(&shipped("context-mode"), Some(&folder), &lookup).unwrap();
     assert_eq!(plan.tool, None);
     assert_eq!(
         plan.spec,
@@ -339,7 +341,7 @@ fn the_shipped_mcp_entries_read_as_servers_without_a_shell() {
         }
     );
 
-    let plan = server_plan(&shipped("serena"), &folder, &lookup).unwrap();
+    let plan = server_plan(&shipped("serena"), Some(&folder), &lookup).unwrap();
     let ServerSpec::Stdio { command, args } = plan.spec else {
         panic!("serena runs as a command");
     };
@@ -351,7 +353,7 @@ fn the_shipped_mcp_entries_read_as_servers_without_a_shell() {
         ["serena", "start-mcp-server", "--project-from-cwd"]
     );
 
-    let plan = server_plan(&shipped("linear"), &folder, &lookup).unwrap();
+    let plan = server_plan(&shipped("linear"), Some(&folder), &lookup).unwrap();
     assert_eq!(
         plan.spec,
         ServerSpec::Http {
@@ -373,7 +375,7 @@ fn a_server_with_a_tool_step_finds_its_program_after_the_tool_is_installed() {
         runnable(&path).then_some(path)
     };
 
-    let plan = server_plan(&shipped("headroom"), &folder, &lookup).unwrap();
+    let plan = server_plan(&shipped("headroom"), Some(&folder), &lookup).unwrap();
     assert_eq!(plan.tool, Some(("headroom-ai".into(), "0.41.0".into())));
     assert_eq!(
         finish_plan(plan.clone(), &lookup).unwrap_err(),

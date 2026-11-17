@@ -80,7 +80,7 @@ impl SecretString {
             || bytes.len() > bytes_max
             || bytes.iter().any(|byte| !(0x21..=0x7e).contains(byte))
         {
-            bytes.fill(0);
+            wipe(&mut bytes);
             return Err(StoreError::code("credential_secret_invalid"));
         }
         Ok(Self(bytes))
@@ -95,8 +95,82 @@ impl SecretString {
 
 impl Drop for SecretString {
     fn drop(&mut self) {
-        self.0.fill(0);
+        wipe(&mut self.0);
     }
+}
+
+/// Overwrites a secret buffer with zeros through `zeroize`, whose volatile writes the
+/// compiler may not drop as dead stores before the buffer is freed. Every secret buffer is
+/// wiped here. Input: the buffer, of bytes or of wider units. Output: none; its length stays.
+pub fn wipe<Unit: zeroize::DefaultIsZeroes>(buffer: &mut [Unit]) {
+    zeroize::Zeroize::zeroize(buffer);
+}
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+/// One part of a text that holds a secret, as [`sized`] writes it.
+pub enum Piece<'a> {
+    /// Written as it is.
+    Plain(&'a str),
+    /// Written for a double-quoted curl config value: `\` and `"` take a backslash.
+    Escaped(&'a str),
+    /// Written as `application/x-www-form-urlencoded` writes one name or value.
+    Form(&'a str),
+    /// Written as two lowercase hex digits per byte.
+    Hex(&'a [u8]),
+}
+
+/// Writes the pieces into one buffer of exactly their size, so no growth or temporary
+/// frees a copy of a secret; the caller wipes the result after use. Input: the pieces.
+/// Output: the bytes, or none when an `Escaped` piece holds a control byte, found before
+/// anything is written.
+pub fn sized(pieces: &[Piece<'_>]) -> Option<Vec<u8>> {
+    let mut size = 0;
+    for piece in pieces {
+        size += match piece {
+            Piece::Plain(text) => text.len(),
+            Piece::Escaped(text) => {
+                if text.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+                    return None;
+                }
+                let escapes = text.bytes().filter(|byte| matches!(byte, b'\\' | b'"'));
+                text.len() + escapes.count()
+            }
+            Piece::Form(text) => url::form_urlencoded::byte_serialize(text.as_bytes())
+                .map(str::len)
+                .sum(),
+            Piece::Hex(bytes) => bytes.len() * 2,
+        };
+    }
+    let mut buffer = Vec::with_capacity(size);
+    let capacity = buffer.capacity();
+    for piece in pieces {
+        match piece {
+            Piece::Plain(text) => buffer.extend_from_slice(text.as_bytes()),
+            Piece::Escaped(text) => {
+                for byte in text.bytes() {
+                    if matches!(byte, b'\\' | b'"') {
+                        buffer.push(b'\\');
+                    }
+                    buffer.push(byte);
+                }
+            }
+            Piece::Form(text) => {
+                for part in url::form_urlencoded::byte_serialize(text.as_bytes()) {
+                    buffer.extend_from_slice(part.as_bytes());
+                }
+            }
+            Piece::Hex(bytes) => {
+                for byte in *bytes {
+                    buffer.push(HEX_DIGITS[usize::from(byte >> 4)]);
+                    buffer.push(HEX_DIGITS[usize::from(byte & 0x0f)]);
+                }
+            }
+        }
+    }
+    assert_eq!(buffer.len(), size);
+    assert_eq!(buffer.capacity(), capacity);
+    Some(buffer)
 }
 
 impl fmt::Debug for SecretString {
@@ -193,4 +267,38 @@ pub fn parts(reference: &CredentialRef) -> Result<(&str, &str), StoreError> {
         checked_name(service).map_err(|_| invalid())?,
         checked_name(account).map_err(|_| invalid())?,
     ))
+}
+
+/// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
+/// first pass, so no growth frees a partial copy of a secret the value holds; the caller
+/// wipes the result after use. Input: the value. Output: the bytes, or serde_json's error.
+#[cfg(unix)]
+pub(crate) fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, value)?;
+    let mut buffer = Vec::with_capacity(counted.0);
+    let capacity = buffer.capacity();
+    if let Err(problem) = serde_json::to_writer(&mut buffer, value) {
+        wipe(&mut buffer);
+        return Err(problem);
+    }
+    assert_eq!(buffer.len(), counted.0);
+    assert_eq!(buffer.capacity(), capacity);
+    Ok(buffer)
+}
+
+/// A writer that only counts the bytes written to it, for [`sized_json`]'s first pass.
+#[cfg(unix)]
+struct Counted(usize);
+
+#[cfg(unix)]
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

@@ -195,6 +195,31 @@ fn a_linked_instruction_file_or_state_folder_is_never_read() {
     );
 }
 
+/// SA vid 11 link route: an instructions file with a second hard link, such as one code in
+/// the IDE made before its deny, is never read, since a write through the other name
+/// rewrites the owner's text; once that name is gone the file reads again.
+#[cfg(unix)]
+#[test]
+fn an_instructions_file_with_a_second_hard_link_is_never_read() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let file = folder.join(".crazyagent/instructions.md");
+    fs::write(&file, "Owner rules.\n").unwrap();
+    let alias = folder.join("notes.md");
+    fs::hard_link(&file, &alias).unwrap();
+    assert_eq!(read_project(&folder).unwrap_err().0, "process_text_unsafe");
+    fs::remove_file(&alias).unwrap();
+    assert_eq!(read_project(&folder).unwrap(), "Owner rules.\n");
+    let app = project.data.join(APP_FILE);
+    fs::write(&app, "App rules.\n").unwrap();
+    fs::hard_link(&app, root.join("app-alias")).unwrap();
+    assert_eq!(
+        read_app(&project.data).unwrap_err().0,
+        "process_text_unsafe"
+    );
+}
+
 #[test]
 fn render_puts_app_text_first_and_project_text_last_under_headings() {
     assert_eq!(render("", " \n", Repeated::LeaveOut), "");
@@ -523,11 +548,9 @@ fn a_launch_follows_the_projects_repeated_lines_choice_and_never_dedupes_project
     let (_directory, root) = folder();
     let mut agent = project(&root);
     save_app(&agent.data, "- Use TDD.\n- No em dash.\n").unwrap();
-    save_project(
-        agent.folder.as_ref().unwrap(),
-        "- Use TDD.\n- Run make check.\n",
-    )
-    .unwrap();
+    let own = "- Use TDD.\n- Run make check.\n";
+    save_project(agent.folder.as_ref().unwrap(), own).unwrap();
+    mark_written(&agent.data, agent.folder.as_ref().unwrap(), own).unwrap();
     let left_out = text(&agent).unwrap().text;
     assert_eq!(left_out.matches("- Use TDD.").count(), 1);
     assert!(left_out.ends_with("## Project instructions\n\n- Run make check.\n"));
@@ -564,7 +587,14 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     assert!(app < own, "project text goes last");
 
     let claude = home(&root, "claude");
-    prepare(&claude, Harness::Claude, &project, &given(&rendered)).unwrap();
+    prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given(&rendered),
+        Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         rendered
@@ -580,7 +610,14 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     );
 
     let codex = home(&root, "codex");
-    prepare(&codex, Harness::Codex, &project, &given(&rendered)).unwrap();
+    prepare(
+        &codex,
+        Harness::Codex,
+        &project,
+        &given(&rendered),
+        Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(codex.join("AGENTS.md")).unwrap(),
         rendered
@@ -597,15 +634,36 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
     let (_directory, root) = folder();
     let project = project(&root);
     let codex = home(&root, "codex");
-    prepare(&codex, Harness::Codex, &project, &given("# old\n")).unwrap();
-    prepare(&codex, Harness::Codex, &project, &given("")).unwrap();
+    prepare(
+        &codex,
+        Harness::Codex,
+        &project,
+        &given("# old\n"),
+        Caches::default(),
+    )
+    .unwrap();
+    prepare(
+        &codex,
+        Harness::Codex,
+        &project,
+        &given(""),
+        Caches::default(),
+    )
+    .unwrap();
     assert!(!codex.join("AGENTS.md").exists());
 
     let outside = root.join("outside.md");
     fs::write(&outside, "owner file").unwrap();
     let claude = home(&root, "claude");
     std::os::unix::fs::symlink(&outside, claude.join("CLAUDE.md")).unwrap();
-    prepare(&claude, Harness::Claude, &project, &given("# new\n")).unwrap();
+    prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given("# new\n"),
+        Caches::default(),
+    )
+    .unwrap();
     assert_eq!(fs::read_to_string(&outside).unwrap(), "owner file");
     assert!(
         !fs::symlink_metadata(claude.join("CLAUDE.md"))
@@ -620,7 +678,14 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
 
     fs::remove_file(claude.join("CLAUDE.md")).unwrap();
     fs::create_dir_all(claude.join("CLAUDE.md/inner")).unwrap();
-    prepare(&claude, Harness::Claude, &project, &given("# again\n")).unwrap();
+    prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given("# again\n"),
+        Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         "# again\n"
@@ -630,7 +695,8 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
             Path::new("relative"),
             Harness::Claude,
             &project,
-            &given("x")
+            &given("x"),
+            Caches::default()
         )
         .unwrap_err()
         .0,
@@ -689,7 +755,14 @@ fn what_an_agent_received_is_read_back_from_its_own_home() {
         Some(Received::default())
     );
 
-    prepare(&claude, Harness::Claude, &project, &given("# given\n")).unwrap();
+    prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given("# given\n"),
+        Caches::default(),
+    )
+    .unwrap();
     record_skills(&project.data, &claude, &["tdd", "release-notes"]).unwrap();
     assert_eq!(
         received(&claude, Harness::Claude).unwrap(),
@@ -921,7 +994,14 @@ fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_pa
     let stale = claude.join("crazyagent-context");
     fs::create_dir(&stale).unwrap();
     fs::write(stale.join("app-instructions.md"), &app).unwrap();
-    prepare(&claude, Harness::Claude, &project, &given).unwrap();
+    prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given,
+        Caches::default(),
+    )
+    .unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         given.text
@@ -993,7 +1073,7 @@ fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent
         .unwrap();
         std::os::unix::fs::symlink(&outside, home.join("shell_snapshots")).unwrap();
 
-        prepare(&home, harness, &project, &given).unwrap();
+        prepare(&home, harness, &project, &given, Caches::default()).unwrap();
 
         let left: Vec<&str> = startup
             .iter()
@@ -1026,7 +1106,12 @@ fn a_launch_removes_shell_startup_files_and_shell_prelude_folders_from_the_agent
 /// npx installed, the harness's plugins, rules and memories and every other entry go, a
 /// link among them without what it names, while each
 /// harness's sign-in, transcripts, team and task state, the per-agent keychain, the
-/// launch's own files, the cargo caches linked from the owner's and the shared caches stay.
+/// launch's own files, the cargo caches linked from the owner's and, under Keep, the download
+/// caches stay.
+/// `skills` stays only in a Codex home, whose launch removes and makes it again; in a Claude
+/// Code home, where Claude Code would load whatever skill an earlier run wrote, it goes.
+/// `.config` itself stays, emptied, so no folder built elsewhere takes its name
+/// (RV-DS241-186).
 #[cfg(unix)]
 #[test]
 fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
@@ -1079,16 +1164,16 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
         "todos/t.json",
         "tasks/t/1.json",
         "plans/p.md",
-        "skills/s/SKILL.md",
         "config.toml",
         "Library/Keychains/login.keychain-db",
         "Library/Preferences/com.apple.security.plist",
         ".cache/uv/x",
         ".npm/_cacache/index-v5/x",
     ];
+    let skill = "skills/s/SKILL.md";
     for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
         let home = home(&root, name);
-        for file in planted.iter().chain(kept.iter()) {
+        for file in planted.iter().chain(kept.iter()).chain([&skill]) {
             let path = home.join(file);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, "planted\n").unwrap();
@@ -1098,13 +1183,17 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
         std::os::unix::fs::symlink(outside.join("config.toml"), home.join("history.jsonl"))
             .unwrap();
 
-        prepare(&home, harness, &project, &given).unwrap();
+        let keep = Caches {
+            choice: HomeCaches::Keep,
+            level: Some(AgentAccess::Sandboxed),
+        };
+        prepare(&home, harness, &project, &given, keep).unwrap();
 
         let left: Vec<&str> = planted
             .iter()
             .copied()
             .chain([
-                ".config",
+                ".config/cargo",
                 ".ssh",
                 ".local",
                 "history.jsonl",
@@ -1116,6 +1205,12 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
             left.is_empty(),
             "a {name} launch kept code-running config in the agent home: {left:?}"
         );
+        let config = home.join(".config");
+        assert!(
+            fs::symlink_metadata(&config).is_ok_and(|metadata| metadata.is_dir()),
+            "a {name} launch did not keep .config as a real folder"
+        );
+        assert_eq!(fs::read_dir(&config).unwrap().count(), 0, "{name}");
         for file in kept {
             assert_eq!(
                 fs::read_to_string(home.join(file)).unwrap(),
@@ -1124,12 +1219,501 @@ fn a_launch_keeps_only_harness_state_and_caches_in_the_agent_home() {
             );
         }
         assert_eq!(
+            fs::symlink_metadata(home.join("skills")).is_ok(),
+            harness == Harness::Codex,
+            "{name}: only a Codex home keeps skills, which its launch then makes again"
+        );
+        assert_eq!(
             fs::read_link(home.join(".cargo/registry")).unwrap(),
             outside
         );
         assert_eq!(
             fs::read_to_string(outside.join("config.toml")).unwrap(),
             "kept outside\n"
+        );
+    }
+}
+
+/// The caches choice of a row about the home reset walk, not the caches setting: Keep, so
+/// `.cache` and `.npm` stay in the kept list and the reset still walks into `.npm`, keeping
+/// only `_cacache` there, as it did before the setting (rv-code4 b2-caches F2).
+#[cfg(unix)]
+const KEEP_CACHES: Caches = Caches {
+    choice: HomeCaches::Keep,
+    level: None,
+};
+
+/// Writes a file into both download caches of an agent home, `.cache` and npm's `_cacache`.
+/// Input: the home.
+#[cfg(unix)]
+fn plant_caches(home: &Path) {
+    for file in [".cache/uv/x", ".npm/_cacache/index-v5/x"] {
+        let path = home.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "cached\n").unwrap();
+    }
+}
+
+/// Tells which of the files [`plant_caches`] writes are still in a home. Input: the home.
+/// Output: whether `.cache` and npm's `_cacache` still hold them.
+#[cfg(unix)]
+fn cached(home: &Path) -> [bool; 2] {
+    [".cache/uv/x", ".npm/_cacache/index-v5/x"].map(|file| home.join(file).exists())
+}
+
+/// Runs one launch of a home under one caches choice and level, then tells which caches
+/// stayed. Inputs: the home, its harness, the project, the choice and the level. Output:
+/// what [`cached`] reads after the launch.
+#[cfg(unix)]
+fn launch_caches(
+    home: &Path,
+    harness: Harness,
+    project: &AgentProject,
+    choice: HomeCaches,
+    level: Option<AgentAccess>,
+) -> [bool; 2] {
+    let given = text(project).unwrap();
+    prepare(home, harness, project, &given, Caches { choice, level }).unwrap();
+    cached(home)
+}
+
+/// DEC-173 add.1, Clear when access is raised: a launch at a wider level than the home's last
+/// launch removes both download caches, so nothing a narrower run wrote reaches a wider one; a
+/// launch at the same or a lower level keeps them, the next raise is counted from the last
+/// launch's level, not the widest one, and a home with no level record yet, as each home an
+/// earlier engine launched, clears once.
+#[cfg(unix)]
+#[test]
+fn a_raised_launch_clears_both_download_caches_and_a_same_or_lower_one_keeps_them() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        let launch = |level| {
+            launch_caches(
+                &home,
+                harness,
+                &project,
+                HomeCaches::ClearWhenRaised,
+                Some(level),
+            )
+        };
+        plant_caches(&home);
+        assert_eq!(
+            launch(AgentAccess::Sandboxed),
+            [false, false],
+            "{name}: a home with no level record clears once"
+        );
+        plant_caches(&home);
+        assert_eq!(
+            launch(AgentAccess::Sandboxed),
+            [true, true],
+            "{name}: a launch at the same level keeps both caches"
+        );
+        assert_eq!(
+            launch(AgentAccess::OwnBranch),
+            [false, false],
+            "{name}: a raise clears both caches"
+        );
+        plant_caches(&home);
+        assert_eq!(launch(AgentAccess::OwnBranch), [true, true], "{name}");
+        assert_eq!(
+            launch(AgentAccess::Sandboxed),
+            [true, true],
+            "{name}: a lower level keeps what a wider run wrote"
+        );
+        assert_eq!(
+            launch(AgentAccess::Full),
+            [false, false],
+            "{name}: Full after a Sandboxed run is a raise, whatever ran before it"
+        );
+    }
+}
+
+/// DEC-173 add.1, Keep: both download caches stay across a raise, and the launch still
+/// records its level, so a later switch to Clear when access is raised compares with the real
+/// last level. A launch of unknown level keeps them too.
+#[cfg(unix)]
+#[test]
+fn keep_leaves_both_download_caches_across_a_raise_and_still_records_the_level() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        let launch = |choice, level| launch_caches(&home, harness, &project, choice, level);
+        plant_caches(&home);
+        assert_eq!(
+            launch(HomeCaches::Keep, Some(AgentAccess::Sandboxed)),
+            [true, true],
+            "{name}"
+        );
+        assert_eq!(
+            launch(HomeCaches::Keep, Some(AgentAccess::Full)),
+            [true, true],
+            "{name}: Keep keeps both caches across a raise"
+        );
+        assert_eq!(
+            launch(HomeCaches::ClearWhenRaised, Some(AgentAccess::Full)),
+            [true, true],
+            "{name}: the Keep launch recorded Full, so Full again is no raise"
+        );
+        assert_eq!(
+            launch(HomeCaches::Keep, None),
+            [true, true],
+            "{name}: Keep keeps them whatever the level"
+        );
+    }
+}
+
+/// DEC-173 add.1, Clear every launch: both download caches go at each launch, the same level
+/// included.
+#[cfg(unix)]
+#[test]
+fn clear_every_launch_clears_both_download_caches_at_the_same_level() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        let launch = || {
+            launch_caches(
+                &home,
+                harness,
+                &project,
+                HomeCaches::ClearEveryLaunch,
+                Some(AgentAccess::Sandboxed),
+            )
+        };
+        plant_caches(&home);
+        assert_eq!(launch(), [false, false], "{name}");
+        plant_caches(&home);
+        assert_eq!(
+            launch(),
+            [false, false],
+            "{name}: the same level clears too"
+        );
+    }
+}
+
+/// A launch that does not know its level clears both download caches under Clear when access
+/// is raised and records Sandboxed, never a wider level, so the next launch at a wider level
+/// still clears what that run wrote.
+#[cfg(unix)]
+#[test]
+fn a_launch_of_unknown_level_clears_and_records_the_narrowest_level() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let home = home(&root, "claude");
+    let launch = |level| {
+        launch_caches(
+            &home,
+            Harness::Claude,
+            &project,
+            HomeCaches::ClearWhenRaised,
+            level,
+        )
+    };
+    launch(Some(AgentAccess::Full));
+    plant_caches(&home);
+    assert_eq!(
+        launch(None),
+        [false, false],
+        "an unknown level clears even after a Full launch"
+    );
+    plant_caches(&home);
+    assert_eq!(launch(Some(AgentAccess::Sandboxed)), [true, true]);
+    plant_caches(&home);
+    launch(None);
+    plant_caches(&home);
+    assert_eq!(
+        launch(Some(AgentAccess::OwnBranch)),
+        [false, false],
+        "the unknown launch recorded Sandboxed, so Own branch is a raise"
+    );
+}
+
+/// The level record a launch reads and writes lives in the engine's data folder, named by the
+/// home's real path, never in the home: a record an agent plants in its home under the
+/// folder's name goes at the reset and is never read, so no agent lowers the level its next
+/// launch compares with.
+#[cfg(unix)]
+#[test]
+fn the_level_record_lives_in_the_engine_folder_never_in_the_home() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let home = home(&root, "claude");
+    let launch = |level| {
+        launch_caches(
+            &home,
+            Harness::Claude,
+            &project,
+            HomeCaches::ClearWhenRaised,
+            Some(level),
+        )
+    };
+    launch(AgentAccess::OwnBranch);
+    let (folder, name) = record_place(&project.data, LEVELS_FOLDER, &home).unwrap();
+    assert!(folder.starts_with(&project.data) && !folder.starts_with(&home));
+    assert_eq!(
+        fs::read_to_string(folder.join(&name)).unwrap(),
+        "own_branch"
+    );
+    let planted = home.join(LEVELS_FOLDER).join(&name);
+    fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    fs::write(&planted, "full").unwrap();
+    plant_caches(&home);
+    assert_eq!(
+        launch(AgentAccess::Full),
+        [false, false],
+        "the record in the engine folder names Own branch, so Full is a raise"
+    );
+    assert!(fs::symlink_metadata(home.join(LEVELS_FOLDER)).is_err());
+    assert_eq!(fs::read_to_string(folder.join(&name)).unwrap(), "full");
+}
+
+/// A native lead's teammates follow their lead's home (DEC-173 add.1): the teammates' home has
+/// no level record of its own, so a lead launch that clears its download caches clears the
+/// teammates' too, and one that keeps its own leaves theirs, the teammates' other kept
+/// entries staying either way.
+#[cfg(unix)]
+#[test]
+fn a_lead_that_clears_its_caches_clears_its_teammates_caches_too() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let lead = home(&project.data, "lead");
+    let mates = crate::launch_context::mates_home(&lead);
+    assert_eq!(mates, home(&project.data, "mates-home"));
+    fs::write(mates.join(".credentials.json"), "kept\n").unwrap();
+    let launch = |level| {
+        launch_caches(
+            &lead,
+            Harness::Claude,
+            &project,
+            HomeCaches::ClearWhenRaised,
+            Some(level),
+        )
+    };
+    plant_caches(&lead);
+    plant_caches(&mates);
+    assert_eq!(launch(AgentAccess::Sandboxed), [false, false]);
+    assert_eq!(
+        cached(&mates),
+        [false, false],
+        "the lead's first launch clears the teammates' caches too"
+    );
+    plant_caches(&lead);
+    plant_caches(&mates);
+    assert_eq!(launch(AgentAccess::Sandboxed), [true, true]);
+    assert_eq!(
+        cached(&mates),
+        [true, true],
+        "the same level keeps both homes' caches"
+    );
+    assert_eq!(launch(AgentAccess::OwnBranch), [false, false]);
+    assert_eq!(
+        cached(&mates),
+        [false, false],
+        "a raise clears both homes' caches"
+    );
+    assert_eq!(
+        fs::read_to_string(mates.join(".credentials.json")).unwrap(),
+        "kept\n"
+    );
+}
+
+/// A home outside the engine data root, one the owner chose for a headless agent, never
+/// leads a clearing launch into the folder beside it that only shares the teammates' home's
+/// name: that folder may be the owner's, so its entries and caches stay as they were.
+#[cfg(unix)]
+#[test]
+fn a_clearing_launch_leaves_a_folder_beside_a_home_outside_the_engine_root_alone() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let lead = home(&root, "lead");
+    let beside = crate::launch_context::mates_home(&lead);
+    assert_eq!(beside, home(&root, "mates-home"));
+    fs::write(beside.join("note"), "the owner's\n").unwrap();
+    plant_caches(&lead);
+    plant_caches(&beside);
+
+    let left = launch_caches(
+        &lead,
+        Harness::Claude,
+        &project,
+        HomeCaches::ClearEveryLaunch,
+        Some(AgentAccess::Sandboxed),
+    );
+
+    assert_eq!(left, [false, false]);
+    assert_eq!(cached(&beside), [true, true]);
+    assert_eq!(
+        fs::read_to_string(beside.join("note")).unwrap(),
+        "the owner's\n"
+    );
+}
+
+/// A launch never renames text an agent chose into its home's instruction file
+/// (RV-DS241-184): the file is written in a folder of the engine's own before it is moved
+/// into the home, so a process an earlier run left, which writes only where the agent does,
+/// finds no temporary file in the home to swap between the write and the rename. The step
+/// stands in for that process: it replaces every temporary file of the instruction file's
+/// name it finds in the home.
+#[cfg(unix)]
+#[test]
+fn a_launch_never_stages_an_instruction_file_where_its_agent_writes() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    for (name, harness) in [("claude", Harness::Claude), ("codex", Harness::Codex)] {
+        let home = home(&root, name);
+        let file = harness.instruction_file();
+        let staged_here = move |folder: &Path| -> Vec<PathBuf> {
+            let prefix = format!(".{file}.");
+            fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                })
+                .collect()
+        };
+        let reached = home.clone();
+        WHILE_STAGED.with(|step| {
+            *step.borrow_mut() = Some(Box::new(move || {
+                for staged in staged_here(&reached) {
+                    fs::remove_file(&staged).unwrap();
+                    fs::write(&staged, "The agent's text.\n").unwrap();
+                }
+            }));
+        });
+
+        let prepared = prepare(
+            &home,
+            harness,
+            &project,
+            &given("The owner's text.\n"),
+            Caches::default(),
+        );
+        WHILE_STAGED.with(|step| *step.borrow_mut() = None);
+
+        assert_eq!(prepared.map_err(|error| error.0), Ok(()), "{name}");
+        assert_eq!(
+            fs::read_to_string(home.join(file)).unwrap(),
+            "The owner's text.\n",
+            "{name}"
+        );
+        assert_eq!(staged_here(&home), Vec::<PathBuf>::new(), "{name}");
+    }
+}
+
+/// A native lead's teammates' home keeps no `skills` an earlier run left: the teammates are
+/// Claude Code processes, which would load each skill found there, and the engine's own
+/// skills reach them through the plugin folder. Their transcripts stay.
+#[cfg(unix)]
+#[test]
+fn a_teammates_home_keeps_no_skills_an_earlier_run_left() {
+    let (_directory, root) = folder();
+    let mates = home(&root, "mates");
+    for file in [
+        "skills/s/SKILL.md",
+        "skills/.system/x/SKILL.md",
+        "projects/p/s.jsonl",
+    ] {
+        let path = mates.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "planted\n").unwrap();
+    }
+
+    let reset = reset_mates_home(&mates).map_err(|error| error.0);
+
+    assert_eq!(reset, Ok(()));
+    assert!(fs::symlink_metadata(mates.join("skills")).is_err());
+    assert_eq!(
+        fs::read_to_string(mates.join("projects/p/s.jsonl")).unwrap(),
+        "planted\n"
+    );
+}
+
+/// B20 (B16 follow-up N3, RV-DS241-205): every home reset clears the auto-memory Claude Code
+/// keeps in each project folder of `projects`, since a build between the sign-in minimum and
+/// the one the auto-memory switches were proven on may ignore them. A `memory` folder, file or
+/// link goes, and so does a project folder that is a link, without what either link names,
+/// while the transcripts and the project folders stay. It holds for a Claude Code home, a
+/// Codex home and a native lead's teammates' home.
+#[cfg(unix)]
+#[test]
+fn a_reset_clears_each_projects_auto_memory_and_keeps_its_transcripts() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let given = text(&project).unwrap();
+    let outside = root.join("outside");
+    let owned = [
+        "memory/MEMORY.md",
+        "project/memory/MEMORY.md",
+        "project/s.jsonl",
+    ];
+    for file in owned {
+        let path = outside.join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "the owner's\n").unwrap();
+    }
+    let gone = [
+        "projects/p/memory",
+        "projects/q/memory",
+        "projects/r/memory",
+        "projects/s",
+        "projects/t/memory",
+    ];
+    let transcripts = ["projects/p/s.jsonl", "projects/u/s.jsonl"];
+    for name in ["claude", "codex", "mates"] {
+        let home = home(&root, name);
+        for file in transcripts.iter().chain(&[
+            "projects/p/memory/MEMORY.md",
+            "projects/t/memory/deep/note.md",
+        ]) {
+            let path = home.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "planted\n").unwrap();
+        }
+        fs::create_dir_all(home.join("projects/q")).unwrap();
+        fs::write(home.join("projects/q/memory"), "planted\n").unwrap();
+        fs::create_dir_all(home.join("projects/r")).unwrap();
+        std::os::unix::fs::symlink(outside.join("memory"), home.join("projects/r/memory")).unwrap();
+        std::os::unix::fs::symlink(outside.join("project"), home.join("projects/s")).unwrap();
+
+        let reset = match name {
+            "claude" => prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES),
+            "codex" => prepare(&home, Harness::Codex, &project, &given, KEEP_CACHES),
+            _ => reset_mates_home(&home),
+        };
+
+        assert_eq!(reset, Ok(()), "{name}");
+        let left: Vec<&str> = gone
+            .into_iter()
+            .filter(|entry| fs::symlink_metadata(home.join(entry)).is_ok())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{name}: the reset kept auto-memory: {left:?}"
+        );
+        for file in transcripts {
+            assert_eq!(
+                fs::read_to_string(home.join(file)).unwrap(),
+                "planted\n",
+                "{name}: {file}"
+            );
+        }
+        for folder in ["projects/q", "projects/r", "projects/t"] {
+            assert!(
+                fs::symlink_metadata(home.join(folder)).is_ok_and(|metadata| metadata.is_dir()),
+                "{name}: {folder}"
+            );
+        }
+    }
+    for file in owned {
+        assert_eq!(
+            fs::read_to_string(outside.join(file)).unwrap(),
+            "the owner's\n",
+            "{file}"
         );
     }
 }
@@ -1156,7 +1740,7 @@ fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() 
     fs::create_dir(home.join(".cargo")).unwrap();
     std::os::unix::fs::symlink(&outside, home.join(".cargo/registry")).unwrap();
 
-    prepare(&home, Harness::Claude, &project, &given).unwrap();
+    prepare(&home, Harness::Claude, &project, &given, Caches::default()).unwrap();
 
     for entry in ["projects", "Library", ".claude.json"] {
         assert!(
@@ -1182,9 +1766,11 @@ fn a_launch_removes_a_link_in_the_place_of_a_kept_entry_without_what_it_names() 
 /// a folder outside the home while the reset walks it, never leads the reset outside
 /// (RV-DS241-137, sec F1 ds137-lock-linux): `.npm` swapped after the reset found it and
 /// before it lists it, `Library` swapped while the reset is in it and about to walk
-/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`.
-/// Every file in the folder the link names stays and the link goes as a link. It runs on
-/// plain folders, without the macOS profile's pin, so it holds where nothing pins them.
+/// `Library/Preferences`, and `.npm` swapped while the reset is about to remove `.npm/_npx`;
+/// and `projects`, then one of its project folders, swapped as the reset is about to walk in
+/// to clear auto-memory (B20). Every file in the folder the link names stays, a `memory`
+/// folder too, and the link goes as a link. It runs on plain folders, without the macOS
+/// profile's pin, so it holds where nothing pins them.
 #[cfg(unix)]
 #[test]
 fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
@@ -1192,12 +1778,16 @@ fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
         (".npm", ".npm", ".npm/junk"),
         ("Library/Preferences", "Library", "Library/Preferences/junk"),
         (".npm/_npx", ".npm", ".npm/_npx/0"),
+        ("projects", "projects", "projects/p/memory"),
+        ("projects/p", "projects/p", "projects/p/memory"),
     ];
     let owned = [
         "owner.txt",
         "junk/owner.txt",
         "Preferences/owner.plist",
         "_npx/owner.js",
+        "memory/MEMORY.md",
+        "p/memory/MEMORY.md",
     ];
     for (step, swapped, planted) in legs {
         let (_directory, root) = folder();
@@ -1218,7 +1808,7 @@ fn a_kept_folder_swapped_for_a_link_mid_reset_never_leads_the_reset_outside() {
         });
         BEFORE_HOME_STEP.with(|hook| *hook.borrow_mut() = Some((home.join(step), swap)));
 
-        let prepared = prepare(&home, Harness::Claude, &project, &given);
+        let prepared = prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES);
 
         let waiting = BEFORE_HOME_STEP.with(|hook| hook.borrow_mut().take());
         assert!(waiting.is_none(), "{step}: the swap never ran");
@@ -1261,7 +1851,7 @@ fn a_link_in_the_place_of_a_kept_folder_goes_at_any_depth_without_what_it_names(
         std::os::unix::fs::symlink(&outside, home.join(link)).unwrap();
     }
 
-    prepare(&home, Harness::Claude, &project, &given).unwrap();
+    prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES).unwrap();
 
     for link in links {
         assert!(
@@ -1306,7 +1896,7 @@ fn a_cargo_cache_an_agent_made_goes_at_each_launch_and_only_a_link_stays() {
             fs::write(&planted, "fn main() { planted() }\n").unwrap();
         }
 
-        prepare(&home, Harness::Codex, &project, &given).unwrap();
+        prepare(&home, Harness::Codex, &project, &given, Caches::default()).unwrap();
 
         let left: Vec<&str> = ["registry", "git"]
             .into_iter()
@@ -1329,9 +1919,10 @@ fn a_cargo_cache_an_agent_made_goes_at_each_launch_and_only_a_link_stays() {
 
 /// A flag an agent set in its own home never keeps its next launch from starting
 /// (RV-DS241-138): an immutable hook file in an immutable Claude Code session folder, an
-/// append-only startup file, an immutable cargo config in an immutable `.cargo` and an
-/// immutable home itself all give way, so the launch removes what it removes and writes
-/// what it writes, while the harness state it keeps stays.
+/// append-only startup file, an immutable cargo config in an immutable `.cargo`, an
+/// immutable auto-memory file in an immutable `memory` in an immutable project folder of
+/// `projects` (B20) and an immutable home itself all give way, so the launch removes what it
+/// removes and writes what it writes, while the harness state it keeps stays.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
@@ -1340,6 +1931,12 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     let project = project(&root);
     let given = text(&project).unwrap();
     let home = home(&root, "claude");
+    let transcripts = home.join("projects").join("p");
+    let memory = transcripts.join("memory");
+    let note = memory.join("MEMORY.md");
+    fs::create_dir_all(&memory).unwrap();
+    fs::write(&note, "planted\n").unwrap();
+    fs::write(transcripts.join("s.jsonl"), "planted\n").unwrap();
     let session = home.join("session-env").join("0b6f1c2e-5d4a");
     let hook = session.join("sessionstart-hook-0.sh");
     fs::create_dir_all(&session).unwrap();
@@ -1359,22 +1956,27 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
         (startup.as_path(), FileFlag::UF_APPEND),
         (config.as_path(), FileFlag::UF_IMMUTABLE),
         (cargo.as_path(), FileFlag::UF_IMMUTABLE),
+        (note.as_path(), FileFlag::UF_IMMUTABLE),
+        (memory.as_path(), FileFlag::UF_IMMUTABLE),
+        (transcripts.as_path(), FileFlag::UF_IMMUTABLE),
         (home.as_path(), FileFlag::UF_IMMUTABLE),
     ];
     for (path, flag) in pinned {
         nix::unistd::chflags(path, flag).unwrap();
     }
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     let kept_flags = fs::symlink_metadata(&claude).map(|metadata| {
         FileFlag::from_bits_retain(std::os::macos::fs::MetadataExt::st_flags(&metadata))
     });
+    let transcript = fs::read_to_string(transcripts.join("s.jsonl"));
     let left: Vec<&Path> = [
         hook.as_path(),
         session.as_path(),
         startup.as_path(),
         config.as_path(),
+        memory.as_path(),
     ]
     .into_iter()
     .filter(|path| fs::symlink_metadata(path).is_ok())
@@ -1384,6 +1986,7 @@ fn a_flag_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     }
     assert_eq!(prepared, Ok(()));
     assert!(left.is_empty(), "a flag kept {left:?} from the launch");
+    assert_eq!(transcript.ok().as_deref(), Some("planted\n"));
     assert_eq!(fs::read_to_string(&claude).unwrap(), "{}\n");
     assert!(
         kept_flags
@@ -1417,7 +2020,7 @@ fn a_flag_on_an_entry_at_mode_000_never_blocks_the_next_launch() {
         nix::unistd::chflags(path, FileFlag::UF_IMMUTABLE).unwrap();
     }
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     let left: Vec<&Path> = [locked.as_path(), vault.as_path()]
         .into_iter()
@@ -1466,7 +2069,7 @@ fn an_acl_an_agent_set_in_its_home_never_blocks_its_next_launch() {
     chmod(&["+a", "everyone deny delete,delete_child", &path(&stuck)]);
     chmod(&["+a", "everyone deny write,delete", &path(&claude)]);
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     let listed =
         crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&claude)).unwrap();
@@ -1547,7 +2150,7 @@ fn a_link_in_a_home_folder_the_launch_opens_up_never_carries_an_acl_clear_outsid
     std::os::unix::fs::symlink(&outside, shut.join("x")).unwrap();
     fs::set_permissions(&shut, fs::Permissions::from_mode(0o500)).unwrap();
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     let _ = fs::set_permissions(&shut, fs::Permissions::from_mode(0o700));
     assert_eq!(prepared, Ok(()));
@@ -1584,8 +2187,14 @@ fn a_kept_name_linked_to_a_file_outside_the_home_never_changes_that_file() {
     fs::hard_link(&pinned, codex.join(".credentials.json")).unwrap();
     nix::unistd::chflags(pinned.as_path(), FileFlag::UF_IMMUTABLE).unwrap();
 
-    let linked_acl = prepare(&claude, Harness::Claude, &project, &given);
-    let linked_flag = prepare(&codex, Harness::Codex, &project, &given);
+    let linked_acl = prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given,
+        Caches::default(),
+    );
+    let linked_flag = prepare(&codex, Harness::Codex, &project, &given, Caches::default());
 
     assert_eq!(linked_acl, Ok(()));
     assert!(denies(&denied), "a file outside the home lost its ACL");
@@ -1623,7 +2232,13 @@ fn a_linux_reset_keeps_the_held_lock_whatever_its_links() {
     fs::hard_link(&lock, claude.join(".cache").join("x")).unwrap();
     let inode = fs::symlink_metadata(&lock).unwrap().ino();
 
-    let reset = prepare(&claude, Harness::Claude, &project, &given);
+    let reset = prepare(
+        &claude,
+        Harness::Claude,
+        &project,
+        &given,
+        Caches::default(),
+    );
 
     assert_eq!(reset, Ok(()));
     assert_eq!(
@@ -1656,7 +2271,7 @@ fn a_home_folder_whose_acls_deny_listing_two_deep_still_goes() {
     acl("everyone deny list,search", &inner);
     acl("everyone deny list,search", &outer);
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     assert_eq!(prepared, Ok(()));
     assert!(
@@ -1689,7 +2304,7 @@ fn a_home_folder_that_reads_but_will_not_search_still_goes() {
     fs::set_permissions(&pinned, fs::Permissions::from_mode(0o600)).unwrap();
     nix::unistd::chflags(pinned.as_path(), FileFlag::UF_IMMUTABLE).unwrap();
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     let left: Vec<&Path> = [denied.as_path(), pinned.as_path()]
         .into_iter()
@@ -1723,7 +2338,7 @@ fn a_home_or_kept_folder_whose_acl_denies_listing_never_refuses_the_launch() {
     acl("everyone deny list", &npm);
     acl("everyone deny list", &home);
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES);
 
     assert_eq!(prepared, Ok(()));
     assert!(
@@ -1751,13 +2366,260 @@ fn a_file_whose_acl_denies_reading_and_deleting_it_still_goes() {
     let _planted = Released(planted.clone());
     acl("everyone deny read,delete", &planted);
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     assert_eq!(prepared, Ok(()));
     assert!(
         fs::symlink_metadata(&planted).is_err(),
         "the denied file stayed"
     );
+}
+
+/// A home kept from one launch to the next with no reset by allowlist, an rcli master's
+/// account profile, loses every shell startup file at a launch (SA vid 12): a zsh, bash or
+/// sh startup name goes whether it is a file, a compiled zsh form, a folder with a file in
+/// it or a link, what a link names outside the home stays, and every other entry of the
+/// home stays as it was.
+#[cfg(unix)]
+#[test]
+fn a_kept_home_loses_every_shell_startup_file_and_nothing_else() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    fs::create_dir(&home).unwrap();
+    let outside = root.join("owner.txt");
+    fs::write(&outside, "the owner's\n").unwrap();
+    for name in ZSH_STARTUP {
+        fs::write(home.join(name), "echo planted\n").unwrap();
+        fs::write(home.join(format!("{name}{ZSH_COMPILED}")), "planted").unwrap();
+    }
+    fs::write(home.join(".bashrc"), "echo planted\n").unwrap();
+    fs::write(home.join(".bash_profile"), "echo planted\n").unwrap();
+    fs::write(home.join(".bash_logout"), "echo planted\n").unwrap();
+    fs::create_dir(home.join(".bash_login")).unwrap();
+    fs::write(home.join(".bash_login").join("inside"), "x").unwrap();
+    std::os::unix::fs::symlink(&outside, home.join(".profile")).unwrap();
+    fs::write(home.join("config.json"), "{}").unwrap();
+    fs::create_dir(home.join("sessions")).unwrap();
+    fs::write(home.join("sessions").join(".zshrc"), "kept\n").unwrap();
+
+    let removed = remove_shell_startup(&home, &root).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    let mut left: Vec<_> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["config.json", "sessions"]);
+    assert_eq!(
+        fs::read_to_string(home.join("sessions").join(".zshrc")).unwrap(),
+        "kept\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+}
+
+/// A home the owner chose that lies outside the engine's data root, such as the owner's own
+/// HOME picked as an rcli SDK home while the engine keeps its data elsewhere
+/// (`CRAZYAGENT_HOME`), keeps every shell startup file the owner has there: only a home the
+/// engine made, below its data root, loses them (rv-sec3 B2 r1 F1). A folder beside the root
+/// whose name only begins like it counts as outside, and so does the root itself.
+#[cfg(unix)]
+#[test]
+fn an_owner_home_outside_the_engine_root_keeps_its_shell_startup_files() {
+    let (_directory, root) = folder();
+    let engine = root.join("engine");
+    let owner = root.join("owner-home");
+    let beside = root.join("engine-beside");
+    let made = engine.join("HOMES").join("generated");
+    for home in [&engine, &owner, &beside, &made] {
+        fs::create_dir_all(home).unwrap();
+        for name in [".zshrc", ".bashrc", ".profile"] {
+            fs::write(home.join(name), "the owner's\n").unwrap();
+        }
+    }
+
+    let removed: Vec<_> = [&owner, &beside, &engine, &made]
+        .into_iter()
+        .map(|home| remove_shell_startup(home, &engine).map_err(|error| error.0))
+        .collect();
+
+    assert_eq!(removed, [Ok(()), Ok(()), Ok(()), Ok(())]);
+    for home in [&owner, &beside, &engine] {
+        for name in [".zshrc", ".bashrc", ".profile"] {
+            assert_eq!(
+                fs::read_to_string(home.join(name)).unwrap(),
+                "the owner's\n",
+                "{}: {name}",
+                home.display()
+            );
+        }
+    }
+    for name in [".zshrc", ".bashrc", ".profile"] {
+        assert!(fs::symlink_metadata(made.join(name)).is_err(), "{name}");
+    }
+}
+
+/// The sorted names in one folder. Input: the folder. Output: its entries' names.
+#[cfg(unix)]
+fn names_in(folder: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An rcli master's kept home loses, besides its shell startup files, all its cargo home
+/// holds: `config.toml` and the older `config`, whose `build.rustc-wrapper`, linkers, runners
+/// and aliases name programs, as a file or a link, `bin`, whose `cargo-<name>` programs run
+/// as subcommands, `credentials.toml`, which can name a credential provider, and its own
+/// `registry` and `git`, whose unpacked crates cargo builds again in later turns without
+/// unpacking them anew (AGENT-HOME-CONFIG, rv-code4 and rv-sec3 r1 F1). `registry` and `git`
+/// come back as links to the owner's caches the sandbox grants read-only, as in every agent
+/// home, and what a link named outside the home stays.
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_its_cargo_code_and_crates_and_links_the_owners_caches() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    let unpacked = cargo.join("registry/src/index/dep-1.0.0");
+    let checkout = cargo.join("git/checkouts/dep/0a1b2c3");
+    for planted in [&unpacked, &checkout] {
+        fs::create_dir_all(planted).unwrap();
+        fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
+    }
+    fs::write(unpacked.join(".cargo-ok"), "{\"v\":1}").unwrap();
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::write(cargo.join("bin").join("cargo-build"), "#!/bin/sh\n").unwrap();
+    let wrapper = "[build]\nrustc-wrapper = \"/tmp/planted\"\n";
+    fs::write(cargo.join("config.toml"), wrapper).unwrap();
+    let outside = root.join("owner-config.toml");
+    fs::write(&outside, "the owner's\n").unwrap();
+    std::os::unix::fs::symlink(&outside, cargo.join("config")).unwrap();
+    let provider = "[registry]\ncredential-provider = \"/tmp/planted\"\n";
+    fs::write(cargo.join("credentials.toml"), provider).unwrap();
+    fs::write(home.join(".zshrc"), "echo planted\n").unwrap();
+    let owner = root.join("owner");
+    let shared = owner.join(".cargo");
+    fs::create_dir_all(shared.join("registry").join("index")).unwrap();
+    fs::create_dir_all(shared.join("git").join("db")).unwrap();
+    fs::write(shared.join("registry/index/crate"), "the owner's\n").unwrap();
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&owner);
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(names_in(&cargo), ["git", "registry"]);
+    for name in ["git", "registry"] {
+        assert_eq!(
+            fs::read_link(cargo.join(name)).ok(),
+            Some(shared.join(name)),
+            "{name}"
+        );
+    }
+    assert_eq!(names_in(&shared.join("registry")), ["index"]);
+    assert_eq!(names_in(&shared.join("git")), ["db"]);
+    assert_eq!(
+        fs::read_to_string(shared.join("registry").join("index").join("crate")).unwrap(),
+        "the owner's\n"
+    );
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "the owner's\n");
+    assert!(fs::symlink_metadata(home.join(".zshrc")).is_err());
+}
+
+/// An rcli master's kept home whose owner has no crate caches still loses its own `registry`
+/// and `git` and gets nothing in their place, so no crate a turn unpacked or edited is built
+/// in a later turn (rv-code4 and rv-sec3 r1 F1).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_loses_its_own_crates_when_the_owner_has_no_caches() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    let cargo = home.join(".cargo");
+    for planted in [
+        cargo.join("registry/src/index/dep-1.0.0"),
+        cargo.join("git/checkouts/dep/0a1b2c3"),
+    ] {
+        fs::create_dir_all(&planted).unwrap();
+        fs::write(planted.join("build.rs"), "fn main() { planted() }\n").unwrap();
+    }
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(names_in(&cargo), Vec::<String>::new());
+}
+
+/// An rcli master's kept home whose `.cargo` is a link, which cargo would follow to a config
+/// the master keeps elsewhere, loses the link and gets a real cargo home of its own in its
+/// place, and what the link named stays (AGENT-HOME-CONFIG).
+#[cfg(unix)]
+#[test]
+fn a_kept_rcli_home_whose_cargo_home_is_a_link_gets_a_real_one_and_the_target_stays() {
+    let (_directory, root) = folder();
+    let home = root.join("profile");
+    fs::create_dir(&home).unwrap();
+    let elsewhere = root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("config.toml"), "[alias]\nb = \"planted\"\n").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, home.join(".cargo")).unwrap();
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&root.join("owner"));
+
+    let removed = remove_home_code(&home, &root, &homes).map_err(|error| error.0);
+
+    assert_eq!(removed, Ok(()));
+    assert!(fs::symlink_metadata(home.join(".cargo")).is_ok_and(|found| found.is_dir()));
+    assert_eq!(names_in(&home.join(".cargo")), Vec::<String>::new());
+    assert_eq!(names_in(&elsewhere), ["config.toml"]);
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("config.toml")).unwrap(),
+        "[alias]\nb = \"planted\"\n"
+    );
+}
+
+/// A home outside the engine's data root, such as the owner's own HOME picked as an rcli SDK
+/// home, keeps its cargo config and its own crates, and the owner's caches are never linked
+/// over them: only a home the engine made loses them (rv-sec3 B2 r1 F1).
+#[cfg(unix)]
+#[test]
+fn an_owner_home_outside_the_engine_root_keeps_its_cargo_config_and_crates() {
+    let (_directory, root) = folder();
+    let engine = root.join("engine");
+    let owner = root.join("owner-home");
+    let tools = root.join("tools");
+    fs::create_dir_all(tools.join(".cargo").join("registry")).unwrap();
+    fs::create_dir_all(tools.join(".cargo").join("git")).unwrap();
+    for home in [&engine, &owner] {
+        fs::create_dir_all(home.join(".cargo").join("registry")).unwrap();
+        fs::write(home.join(".cargo").join("config.toml"), "the owner's\n").unwrap();
+        fs::write(
+            home.join(".cargo").join("registry").join("crate"),
+            "the owner's\n",
+        )
+        .unwrap();
+    }
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&tools);
+
+    let removed: Vec<_> = [&owner, &engine]
+        .into_iter()
+        .map(|home| remove_home_code(home, &engine, &homes).map_err(|error| error.0))
+        .collect();
+
+    assert_eq!(removed, [Ok(()), Ok(())]);
+    for home in [&owner, &engine] {
+        assert_eq!(names_in(&home.join(".cargo")), ["config.toml", "registry"]);
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("config.toml")).unwrap(),
+            "the owner's\n"
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(".cargo").join("registry").join("crate")).unwrap(),
+            "the owner's\n"
+        );
+    }
 }
 
 /// A home an agent filled with more entries than one listing of it takes still launches,
@@ -1776,7 +2638,7 @@ fn a_launch_clears_a_home_an_agent_filled_with_entries() {
         File::create(home.join(format!("n-{index}"))).unwrap();
     }
 
-    prepare(&home, Harness::Claude, &project, &given).unwrap();
+    prepare(&home, Harness::Claude, &project, &given, Caches::default()).unwrap();
 
     let left: Vec<String> = fs::read_dir(&home)
         .unwrap()
@@ -1803,7 +2665,7 @@ fn a_launch_clears_a_home_folder_holding_more_than_two_hundred_thousand_files() 
         File::create(junk.join(format!("n-{index}"))).unwrap();
     }
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     assert_eq!(prepared, Ok(()));
     let left: Vec<String> = fs::read_dir(&home)
@@ -1833,7 +2695,7 @@ fn a_launch_clears_a_tree_of_more_than_two_hundred_thousand_entries_below_one_ho
         }
     }
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, Caches::default());
 
     assert_eq!(prepared, Ok(()));
     let left: Vec<String> = fs::read_dir(&home)
@@ -1859,7 +2721,7 @@ fn a_kept_folder_left_readable_but_not_searchable_keeps_its_place() {
     fs::create_dir(&npm).unwrap();
     fs::set_permissions(&npm, fs::Permissions::from_mode(0o400)).unwrap();
 
-    let prepared = prepare(&home, Harness::Claude, &project, &given);
+    let prepared = prepare(&home, Harness::Claude, &project, &given, KEEP_CACHES);
 
     let _ = fs::set_permissions(&npm, fs::Permissions::from_mode(0o700));
     assert_eq!(prepared, Ok(()));
@@ -1914,7 +2776,7 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
     )
     .unwrap();
 
-    prepare(&home, Harness::Claude, &project, &given).unwrap();
+    prepare(&home, Harness::Claude, &project, &given, Caches::default()).unwrap();
 
     fs::write(
         home.join(".gitconfig"),
@@ -2090,4 +2952,143 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
              {heard:?}\n{output:?}"
         );
     }
+}
+
+/// SA vid 7 residual (leader 14:22 A): project instructions the engine did not write last,
+/// here from a project onboarded before arrived text was labelled, reach agents under the
+/// Imported heading with their headings demoted, while the file keeps its text as it is.
+#[test]
+fn project_text_the_engine_never_wrote_reaches_agents_labelled_and_the_file_stays() {
+    let (_directory, root) = folder();
+    let mut project = project(&root);
+    project.mode = crate::instruction_files::Mode::ProjectOnly;
+    let file = project
+        .folder
+        .as_deref()
+        .unwrap()
+        .join(".crazyagent/instructions.md");
+    fs::write(&file, "# Rules\nDo X.\n").unwrap();
+    let given = text(&project).unwrap().text;
+    let heading = crate::instruction_files::CARRIED_HEADING;
+    let label = format!("## Project instructions\n\n{heading}\n\n#### Rules\nDo X.\n");
+    assert!(given.ends_with(&label), "{given}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "# Rules\nDo X.\n");
+}
+
+/// Makes the folder `name` in `root` holding `files` empty files and opens it as a reset
+/// does. Inputs: the root, the name and how many files. Output: its path and its handle.
+#[cfg(unix)]
+fn walk_folder(root: &Path, name: &str, files: usize) -> (PathBuf, std::os::fd::OwnedFd) {
+    let at = root.join(name);
+    fs::create_dir_all(&at).unwrap();
+    for file in 0..files {
+        fs::write(at.join(file.to_string()), b"").unwrap();
+    }
+    let opened = open_real_folder(&at).unwrap();
+    (at, opened)
+}
+
+/// Makes a `projects` folder in `root` whose projects `p1` and `p2` each hold an auto-memory
+/// folder of two files, so one pass of [`clear_memory`] lists two projects and walks two
+/// listings of two names, six names in all. Input: the root. Output: its path and handle.
+#[cfg(unix)]
+fn memory_folder(root: &Path) -> (PathBuf, std::os::fd::OwnedFd) {
+    for project in ["p1", "p2"] {
+        let memory = root.join("projects").join(project).join(CLAUDE_MEMORY);
+        fs::create_dir_all(&memory).unwrap();
+        for file in ["1", "2"] {
+            fs::write(memory.join(file), b"").unwrap();
+        }
+    }
+    walk_folder(root, "projects", 0)
+}
+
+/// How many of the projects [`memory_folder`] made still hold their auto-memory. Input: the
+/// projects folder. Output: the count.
+#[cfg(unix)]
+fn memories_left(projects: &Path) -> usize {
+    ["p1", "p2"]
+        .iter()
+        .filter(|project| projects.join(project).join(CLAUDE_MEMORY).exists())
+        .count()
+}
+
+/// RESET-WALK-N1: one pass of a home reset spends one walk budget, a unit per name it lists,
+/// so a pass over more unwanted names than its budget refuses with a name left, though no
+/// name alone needs any walk, and a process adding names at the home root cannot stretch
+/// one pass past it. The refusal is `cleanup_walk_too_long`, which reaches the owner
+/// (RESET-WALK-CODE).
+#[cfg(unix)]
+#[test]
+fn a_home_pass_listing_more_names_than_its_walk_budget_refuses_with_one_left() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 4);
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 3);
+
+    assert_eq!(reset, Err(AgentHomeError("cleanup_walk_too_long".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
+/// RESET-WALK-N1: one pass of [`clear_memory`] spends one walk budget across the projects
+/// it lists and the auto-memory walks it makes, so two memory walks that each fit the
+/// budget alone refuse together with one memory left, instead of each walk getting a
+/// fresh budget. The walk's own refusal reaches the caller as `cleanup_walk_too_long`
+/// (RESET-WALK-CODE).
+#[cfg(unix)]
+#[test]
+fn a_memory_pass_whose_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (projects, opened) = memory_folder(&root);
+
+    let cleared = clear_memory(opened.as_fd(), &projects, 5);
+
+    assert_eq!(cleared, Err(AgentHomeError("cleanup_walk_too_long".into())));
+    assert_eq!(memories_left(&projects), 1);
+}
+
+/// RESET-WALK-N1 code r1 F1: the removals one home pass makes spend its budget too, so two
+/// unwanted folders whose walks each fit the budget alone refuse together with one folder
+/// left, instead of each removal getting a fresh budget. The walk's own refusal reaches the
+/// caller as `cleanup_walk_too_long` (RESET-WALK-CODE).
+#[cfg(unix)]
+#[test]
+fn a_home_pass_whose_folder_walks_together_pass_its_budget_refuses_though_each_fits_alone() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 0);
+    for name in ["a", "b"] {
+        walk_folder(&home, name, 2);
+    }
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 5);
+
+    assert_eq!(reset, Err(AgentHomeError("cleanup_walk_too_long".into())));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
+}
+
+/// RESET-WALK-N1 guard: a pass spends exactly a unit per name it lists and per name its
+/// walks list, so a budget of exactly those clears a home pass and a memory pass, and the
+/// next pass of each starts from a fresh budget.
+#[cfg(unix)]
+#[test]
+fn a_walk_budget_of_exactly_what_a_pass_lists_clears_a_home_pass_and_a_memory_pass() {
+    use std::os::fd::AsFd;
+    let (_directory, root) = folder();
+    let (home, opened) = walk_folder(&root, "home", 4);
+    let (projects, listed) = memory_folder(&root);
+    let kept = [("kept", Kept::File)];
+
+    let reset = keep_in(opened.as_fd(), &home, &kept, &mut Vec::new(), 0, 4);
+    let cleared = clear_memory(listed.as_fd(), &projects, 6);
+
+    assert_eq!(reset, Ok(()));
+    assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+    assert_eq!(cleared, Ok(()));
+    assert_eq!(memories_left(&projects), 0);
+    assert!(projects.join("p1").is_dir() && projects.join("p2").is_dir());
 }

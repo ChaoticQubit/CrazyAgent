@@ -170,8 +170,10 @@ impl Work {
         }
     }
 
-    /// Runs the disk work. Input: the tally an add reports into and obeys. Output: the step
-    /// to record and, for a project move, what it leaves for after the record.
+    /// Runs the disk work. Input: the tally an add, a project move, a delete or a New Project
+    /// reports into and obeys.
+    /// Output: the step to record and, for a project move, what it leaves for after the
+    /// record.
     fn run(self, tally: &Tally) -> (Step, After) {
         let step = match self {
             Self::Add(plan) => {
@@ -185,7 +187,7 @@ impl Work {
             Self::Move(plan) => Step::Record(plan.run().map(|()| None).map_err(|e| e.0)),
             Self::MoveProject(plan) => {
                 let source = plan.source().to_path_buf();
-                return match plan.run().map(Moved::into_parts) {
+                return match plan.run(tally).map(Moved::into_parts) {
                     Ok((placed, landing)) => (
                         Step::Record(Ok(Some(source))),
                         After {
@@ -199,9 +201,9 @@ impl Work {
                     Err(e) => (Step::Record(Err(e.0)), After::default()),
                 };
             }
-            Self::New(plan) => Step::Staged(plan.run()),
-            Self::Demo(plan) => Step::Staged(plan.run().and_then(seeded)),
-            Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
+            Self::New(plan) => Step::Staged(plan.run(tally)),
+            Self::Demo(plan) => Step::Staged(plan.run(tally).and_then(seeded)),
+            Self::Delete(plan, research) => Step::Deleted(plan.run(tally).map(|()| {
                 let files = plan.engine_files(&research);
                 (plan.database, files)
             })),
@@ -293,18 +295,29 @@ pub(super) fn reached_trash(outcome: Option<Result<(), &str>>, ran: bool) -> boo
 }
 
 /// Whether the disk changed before the first grant check of an answer: a Delete whose
-/// folders reached the Trash, or a projects home or project move whose disk work ran, even
-/// one that failed, so a grant found stale there is an outcome to reconcile (rv-code3 r1 F1).
-/// Inputs: whether the Trash move ran, whether the request moves the projects home or one
-/// project, and whether its disk work ran. Output: the answer, which [`regranted`] reads.
-pub(super) fn disk_changed(trashed: bool, moving: bool, moving_project: bool, ran: bool) -> bool {
-    trashed || ((moving || moving_project) && ran)
+/// folders reached the Trash, or a projects home move, project move or folder add whose disk
+/// work ran, even one that failed, so a grant found stale there is an outcome to reconcile
+/// (rv-code3 r1 F1, RV-DS241-198). Inputs: whether the Trash move ran, whether the request
+/// moves the projects home or one project or adds a folder, and whether its disk work ran.
+/// Output: the answer, which [`regranted`] reads.
+pub(super) fn disk_changed(
+    trashed: bool,
+    moving: bool,
+    moving_project: bool,
+    adding: bool,
+    ran: bool,
+) -> bool {
+    trashed || ((moving || moving_project || adding) && ran)
 }
 
-/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
-/// and FolderSize for one owner. A client's change claims its request id first: a resend of
-/// one this engine still runs answers `InProgress` and plans nothing (DEC-159); the intake
-/// job holds its own claim. Input: the sink (the client's stream, or the intake job, which
+/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, DeleteProject, SetupProject,
+/// CreateDemo and FolderSize for one owner. A client's change claims its request id first: a
+/// resend of one this engine still runs answers `InProgress` and plans nothing (DEC-159); the
+/// intake job holds its own claim. A client's AddExistingFolder, MoveProjectHome,
+/// DeleteProject, SetupProject or CreateDemo then holds the job slot until it ends, so no job
+/// starts beside it (DEC-177 addendum 2, Q2 A); while a job runs it answers its record when
+/// the request was already recorded, else `job_busy`, and plans nothing. Input: the sink (the
+/// client's stream, or the intake job, which
 /// keeps the reply and lends its tally to the copy), engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
@@ -360,9 +373,38 @@ pub(super) async fn serve(
         },
         false => None,
     };
-    let planned = tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
-        .await
-        .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+    let folder = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder { .. }
+                | OwnerMutation::MoveProjectHome { .. }
+                | OwnerMutation::DeleteProject { .. }
+                | OwnerMutation::SetupProject { .. }
+                | OwnerMutation::CreateDemo { .. }
+        }
+    );
+    let (_direct, recorded) = match client && folder {
+        true => match authority.intake.direct() {
+            Ok(direct) => (Some(direct), None),
+            Err(busy) => {
+                let replay = tokio::time::timeout_at(deadline, replayed(engine, a, &request))
+                    .await
+                    .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+                match replay {
+                    Ok(Some(step)) => (None, Some(step)),
+                    Ok(None) => return sink.reply(Err(busy), id, mutation).await,
+                    Err(e) => return sink.reply(Err(e), id, mutation).await,
+                }
+            }
+        },
+        false => (None, None),
+    };
+    let planned = match recorded {
+        Some(step) => Ok(Planned::Step(step)),
+        None => tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
+            .await
+            .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+    };
     let moving = matches!(
         &request.operation,
         OwnerOperation::Apply {
@@ -391,6 +433,7 @@ pub(super) async fn serve(
     #[cfg(unix)]
     let mut _moved_ide = None;
     let mut after = After::default();
+    let tally = sink.tally();
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
             let admitted = tokio::time::timeout_at(deadline, async {
@@ -427,8 +470,8 @@ pub(super) async fn serve(
                             Some(authority.ide_servers.hold_for_delete(plan.project()).await);
                     }
                     let interrupted = work.interrupted();
-                    let tally = sink.tally();
-                    let step = tokio::task::spawn_blocking(move || work.run(&tally))
+                    let tallied = Arc::clone(&tally);
+                    let step = tokio::task::spawn_blocking(move || work.run(&tallied))
                         .await
                         .map_err(|_| failure(interrupted))
                         .map(|(step, left)| {
@@ -457,9 +500,11 @@ pub(super) async fn serve(
         _ => None,
     };
     let trashed = deleting && reached_trash(outcome, ran);
+    let placed =
+        adding.is_some() && ran && (matches!(&step, Ok(Step::Record(Ok(_)))) || tally.clearing());
     let answer = async {
         let mut barrier = Some(engine.owner_egress.write().await);
-        let changed = disk_changed(trashed, moving, moving_project, ran);
+        let changed = disk_changed(trashed, moving, moving_project, adding.is_some(), ran);
         let mut result = match regranted(authority.authenticate(packet), a, changed) {
             Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
@@ -473,7 +518,17 @@ pub(super) async fn serve(
             )
         {
             drop(barrier.take());
+            tally.mark_clearing();
             let cleared = tokio::task::spawn_blocking(move || old.clear()).await;
+            if matches!(cleared, Ok(Ok(()))) {
+                let request = id.clone();
+                if let Err(e) = engine
+                    .owner_job(|reply| Job::HomeProjectMoveCleared(request, reply))
+                    .await
+                {
+                    eprintln!("project_move_left_not_forgotten cause={}", e.0);
+                }
+            }
             barrier = Some(engine.owner_egress.write().await);
             result = match regranted(authority.authenticate(packet), a, true) {
                 Ok(()) => match cleared {
@@ -501,6 +556,7 @@ pub(super) async fn serve(
     };
     let answered = tokio::time::timeout_at(deadline, answer).await;
     if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
+        tally.mark_clearing();
         let done = tokio::task::spawn_blocking(move || {
             crate::projects_home::remove_engine_files(&database, &files)
         })
@@ -532,7 +588,7 @@ pub(super) async fn serve(
     }
     if let Some(added) = adding {
         settled(engine, "home_add_not_settled", |reply| {
-            Job::HomeAddSettle(added.clone(), reply)
+            Job::HomeAddSettle(added.clone(), placed, reply)
         })
         .await;
     }
@@ -696,7 +752,9 @@ async fn remove_staging(staging: std::path::PathBuf) {
 }
 
 /// Finds an earlier recording of this exact mutation, so a retry after a lost
-/// reply returns the first receipt instead of repeating the disk work.
+/// reply returns the first receipt instead of repeating the disk work. A project move
+/// recorded as applied whose old folder is still left to clear answers
+/// `move_project_old_folder_left` again, as its first reply did (B17 -66).
 async fn replayed(
     engine: &Arc<Engine>,
     a: &Admission,
@@ -704,14 +762,30 @@ async fn replayed(
 ) -> Result<Option<Step>, EngineError> {
     let hash = request.mutation_hash()?;
     let id = request.request_id.clone();
+    let moved = matches!(
+        &request.operation,
+        OwnerOperation::Apply {
+            mutation: OwnerMutation::MoveProjectHome { .. }
+        }
+    );
     Ok(
         match engine
             .owner_job(|reply| Job::OwnerReconcile(a.clone(), id, Some(hash), reply))
             .await?
         {
             OwnerResponse::Committed { mut operation } => {
+                let left = moved
+                    && operation.result == OwnerResult::Applied
+                    && engine
+                        .owner_job(|reply| {
+                            Job::HomeProjectMoveLeft(request.request_id.clone(), reply)
+                        })
+                        .await?;
                 operation.historical_replay = true;
-                Some(Step::Reply(Box::new(OwnerResponse::Applied { operation })))
+                Some(match left {
+                    true => rejected(OLD_FOLDER_LEFT),
+                    false => Step::Reply(Box::new(OwnerResponse::Applied { operation })),
+                })
             }
             OwnerResponse::NotRecordedAtBarrier { .. } => None,
             other => Some(Step::Reply(Box::new(other))),

@@ -1,5 +1,8 @@
 use super::policy::AccessGrant;
-use super::{ProjectSandbox, SandboxNetwork, any_case, sbpl_overlong, seatbelt_pattern};
+use super::{
+    ADMIN_LINKS, ADMIN_WRITES, ProjectSandbox, SandboxNetwork, any_case, sbpl_overlong,
+    seatbelt_pattern,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -396,6 +399,29 @@ fn a_confined_agent_moves_no_admin_head_or_store_folder_in_any_letter_case() {
         &profile,
         &format!("printf w > {}", quoted(&worktree.join("work.txt"))),
     );
+}
+
+/// The admin names Seatbelt keeps out of a confined agent's hands are the shared lists the
+/// Linux call supervisor holds (DEC-185 S2a): each name in [`ADMIN_LINKS`] and
+/// [`ADMIN_WRITES`] is denied below the admin folders in any letter case.
+#[test]
+fn the_admin_names_seatbelt_denies_are_the_names_the_linux_supervisor_holds() {
+    let case = case();
+    let worktree = worktree(&case);
+    let profile = sandbox(&case)
+        .confine_to_worktree(&worktree)
+        .unwrap()
+        .profile();
+    let admin = seatbelt_pattern(&case.project.join(".git").join("worktrees").join("one"));
+    let [head, worktree_config] = ADMIN_WRITES.map(any_case);
+    let [commondir, gitdir] = ADMIN_LINKS.map(any_case);
+    assert!(profile.contains(&format!("^{admin}/{head}$")), "HEAD");
+    for denied in [
+        format!("/({commondir}|{gitdir})$"),
+        format!("/{worktree_config}$"),
+    ] {
+        assert!(profile.contains(&denied), "{denied}");
+    }
 }
 
 /// A confined agent with the owner's temp folder granted and `data` as a shared writable

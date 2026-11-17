@@ -331,7 +331,8 @@ fn an_owner_stop_during_an_instruction_restart_keeps_the_agent_stopped() {
     worker.restarting = true;
     worker.stop_for("engine_stop:instructions");
     let _ = worker.orders.send(Order::Stop);
-    team.instruction_restarts.insert(agent, project.clone());
+    team.restarts
+        .insert(agent, (project.clone(), Restart::Instructions));
     owner(
         &fixture,
         &[crate::team::TeamAction::StopAgent {

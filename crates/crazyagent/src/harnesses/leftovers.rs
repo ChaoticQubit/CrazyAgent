@@ -1,4 +1,5 @@
 use crate::protocol::CredentialRef;
+use crate::sandbox::LineageCheck;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -204,17 +205,21 @@ pub struct HeldView {
 
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
 /// still runs, what the stop holds, such as the agent's account lease, until the
-/// hold ends or the owner keeps the processes running, who left it, the names it shows, where
-/// it stands and when it began.
+/// hold ends or the owner keeps the processes running, the run's place on the hidden folders
+/// list, if it has one, until the hold ends in any mode ([`end_hold`]), who left it, the names
+/// it shows, where it stands, when it began and whether a sandboxed run left it
+/// ([`confined_left_by`]).
 struct Held {
     account: Option<CredentialRef>,
     report: String,
     #[allow(dead_code)]
     kept: Option<Box<dyn Send>>,
+    listed: Option<Box<dyn Send>>,
     by: HoldBy,
     names: String,
     state: HoldState,
     since_ms: i64,
+    sandboxed: bool,
 }
 
 /// Every account a Full access stop keeps now, by the order they were kept in, so a refused
@@ -227,20 +232,32 @@ fn held() -> MutexGuard<'static, BTreeMap<u64, Held>> {
 }
 
 /// Lets go of every hold a Full access stop keeps on one account, while what it named may
-/// still run, because the owner chose to sign the account out anyway. Input: the account.
-/// Output: how many holds ended.
+/// still run, because the owner chose to sign the account out anyway. A hold of a run on the
+/// hidden folders list stays as the owner's Keep leaves it, without the account and what it
+/// held for it, so the run stays named until its processes end. Input: the account.
+/// Output: how many holds let the account go.
 pub fn release(account: &CredentialRef) -> usize {
-    let released: Vec<Held> = {
+    let (count, let_go): (usize, Vec<Box<dyn Send>>) = {
         let mut held = held();
         let keys: Vec<u64> = held
             .iter()
             .filter(|(_, hold)| hold.account.as_ref() == Some(account))
             .map(|(key, _)| *key)
             .collect();
-        keys.iter().filter_map(|key| held.remove(key)).collect()
+        let mut let_go: Vec<Box<dyn Send>> = Vec::new();
+        for key in &keys {
+            let listed = held.get(key).is_some_and(|hold| hold.listed.is_some());
+            if !listed {
+                let_go.extend(held.remove(key).map(|hold| Box::new(hold) as Box<dyn Send>));
+            } else if let Some(hold) = held.get_mut(key) {
+                hold.state = HoldState::Kept;
+                hold.account = None;
+                let_go.extend(hold.kept.take());
+            }
+        }
+        (keys.len(), let_go)
     };
-    let count = released.len();
-    drop(released);
+    drop(let_go);
     count
 }
 
@@ -272,6 +289,22 @@ pub fn held_in(project: &str) -> Vec<HeldView> {
         .collect()
 }
 
+/// Whether a hold still lists commands a sandboxed run of `by` left that go on running: ones
+/// the owner keeps, or has yet to end or keep. Such a command writes where the agent does,
+/// so a next run in the same home would run what it leaves there (SA vid 12). A hold that
+/// is ending its commands does not count, nor does one a Full access run left, whose
+/// commands hold the owner's rights already. Input: who would start. Output: the answer.
+pub fn confined_left_by(by: &HoldBy) -> bool {
+    assert!(!by.who.is_empty());
+    let who: String = by.who.chars().take(WHO_CHARS_MAX).collect();
+    held().values().any(|hold| {
+        hold.sandboxed
+            && matches!(hold.state, HoldState::Held | HoldState::Kept)
+            && hold.by.project == by.project
+            && hold.by.who == who
+    })
+}
+
 /// Has one hold of a project end its processes, the owner's End: SIGTERM, then SIGKILL after
 /// [`LEFTOVER_GRACE`], each only to a process the same pass of its watcher found still
 /// running with the start it was known by. A hold already ending is left as it is. Inputs:
@@ -290,8 +323,9 @@ pub fn end_held(key: u64, project: &str) -> bool {
 
 /// Lets one hold of a project keep its processes running, the owner's Keep: the account and
 /// what the stop held for it, such as the account lease, are let go at once, and
-/// the processes stay listed until they end. Inputs: the hold's key and the project it must
-/// belong to. Output: whether it is now kept.
+/// the processes stay listed, as does the run's place on the hidden folders list, until they
+/// end. Inputs: the hold's key and the project it must belong to. Output: whether it is now
+/// kept.
 pub fn keep_held(key: u64, project: &str) -> bool {
     let released = {
         let mut held = held();
@@ -434,19 +468,23 @@ impl From<LineageToken> for String {
 }
 
 /// One process of an agent's lineage: its id, the start identity a reused id does not
-/// share, and its program's name as the owner reads it.
+/// share, its program's name as the owner reads it, and on macOS its unique id and the one of
+/// the process it was forked from, if read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Process {
     pid: i32,
     started: String,
     program: String,
+    unique: Option<u64>,
+    forked_from: Option<u64>,
 }
 
 /// The processes of a Full access agent the engine can still find: its leader, every
 /// process in the leader's session while that leader runs, every process whose parent is
-/// one of them, and every process whose environment holds the launch's `token`. A process
-/// that left all of them before it was seen, such as a daemon whose parent already exited
-/// and whose environment was cleared or is not shown, is not found. `table` is the command
+/// one of them, on macOS every process forked from one of them, and every process whose
+/// environment holds the launch's `token`. A process that left all of them before it was
+/// seen, such as a double-forked daemon whose short-lived middle process no table showed and
+/// whose environment was cleared or is not shown, is not found. `table` is the command
 /// that lists the processes; `unchecked` tells that a listing failed, so the lineage may
 /// miss processes; `pending` is a listing still held up past its bound, which a later read
 /// waits out instead of starting another; `sandboxed` tells the agent ran in a sandbox no
@@ -478,8 +516,10 @@ pub(crate) struct Lineage {
 }
 
 /// Where a listing thread reports its output, or none when it failed or ran out of bounds.
+/// The lock is never taken: it is reached only through `&mut` with `get_mut`, and it keeps
+/// a lineage `Sync`, so a stop's leftovers can be borrowed across an await.
 #[cfg(unix)]
-type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
+type Listing = std::sync::Mutex<std::sync::mpsc::Receiver<Option<Vec<u8>>>>;
 
 /// One row of a process table: the process, its parent's id and its session's id, if read.
 #[cfg(unix)]
@@ -567,8 +607,8 @@ impl Leftovers {
     /// `account` with this report and `by`, until a watcher pass shows no process of the agent
     /// running, both the table and the token's processes read, or the owner signs the account
     /// out ([`release`]), then drops it; the engine's exit ends the hold too. A pass that
-    /// cannot read both is retried, never taken as clean; with none named, the hold ends after
-    /// `UNCHECKED_HOLD_MAX` even while no listing works. `mode` starts it: End has the watcher
+    /// cannot read both is retried, never taken as clean; with none named, the hold ends once
+    /// no pass could check for `UNCHECKED_HOLD_MAX` in a row. `mode` starts it: End has the watcher
     /// end the processes, Keep lets `kept` and the account go at once, Ask waits for the
     /// owner's [`end_held`] or [`keep_held`]. When no watching thread starts, only the owner's
     /// sign-out ends it. Inputs: the leftovers, the account they keep, if any, what they hold,
@@ -580,7 +620,41 @@ impl Leftovers {
         by: HoldBy,
         mode: LeftoverMode,
     ) {
+        self.begin(account, Box::new(kept), None, by, mode);
+    }
+
+    /// Holds as [`Leftovers::hold`] does, for a run on the hidden folders list (SA-VID14):
+    /// `kept`, such as its account lease, goes as `mode` says, and `listed`, its place on that
+    /// list, stays in every mode, through Keep, the owner's [`keep_held`] and a sign-out
+    /// ([`release`]), until the hold ends, so a kept run is named while its processes, or a
+    /// child they handed off to that holds the launch's token, run and frees its place once
+    /// they end. Inputs: as for `hold`, plus the listing. Output: none.
+    pub fn hold_listed<T: Send + 'static, L: Send + 'static>(
+        self,
+        account: Option<CredentialRef>,
+        kept: T,
+        listed: L,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
+        assert!(by.project.is_some(), "a listed run belongs to a project");
+        self.begin(account, Box::new(kept), Some(Box::new(listed)), by, mode);
+    }
+
+    /// Starts one hold for [`Leftovers::hold`] and [`Leftovers::hold_listed`]: records it, with
+    /// `kept` let go at once under Keep and `listed` kept whatever the mode, and starts its
+    /// watcher. Inputs: the account, what it keeps, the listing, if any, who left it and the
+    /// owner's setting. Output: none.
+    fn begin(
+        self,
+        account: Option<CredentialRef>,
+        kept: Box<dyn Send>,
+        listed: Option<Box<dyn Send>>,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
         let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+        let sandboxed = self.0.sandboxed;
         let report = self.plain();
         let names = self.names();
         let by = HoldBy {
@@ -589,30 +663,33 @@ impl Leftovers {
         };
         let (state, account, kept): (HoldState, Option<CredentialRef>, Option<Box<dyn Send>>) =
             match mode {
-                LeftoverMode::End => (HoldState::Ending, account, Some(Box::new(kept))),
-                LeftoverMode::Ask => (HoldState::Held, account, Some(Box::new(kept))),
+                LeftoverMode::End => (HoldState::Ending, account, Some(kept)),
+                LeftoverMode::Ask => (HoldState::Held, account, Some(kept)),
                 LeftoverMode::Keep => {
                     drop(kept);
                     (HoldState::Kept, None, None)
                 }
             };
+        let listing = listed.is_some();
         let previous = held().insert(
             key,
             Held {
                 account,
                 report,
                 kept,
+                listed,
                 by,
                 names,
                 state,
                 since_ms: now_ms(),
+                sandboxed,
             },
         );
         assert!(previous.is_none());
         let lineage = *self.0;
         let _ = std::thread::Builder::new()
             .name("full-access-hold".into())
-            .spawn(move || watch(key, lineage));
+            .spawn(move || watch(key, lineage, listing));
     }
 }
 
@@ -624,27 +701,30 @@ enum Ending {
     Kill,
 }
 
-/// Watches one hold until its processes are gone and could be checked, or `UNCHECKED_HOLD_MAX`
-/// passes with none named, or the hold is let go: each pass reads the table, retries a token
-/// scan that failed, and under Ending sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`],
-/// only to processes that same pass found with the start they were known by. Inputs: the
-/// hold's key and its lineage. Output: none; the hold is removed at the end.
-fn watch(key: u64, mut lineage: Lineage) {
-    let begun = Instant::now();
+/// Watches one hold until a checked pass ([`Lineage::pass`]) finds none of its processes,
+/// passes find none and cannot check for `UNCHECKED_HOLD_MAX` in a row, or the hold is let
+/// go. Under Ending it sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`].
+/// Inputs: the hold's key, its lineage and whether the hold has a listing. Output: none; the
+/// hold ends through [`end_hold`].
+fn watch(key: u64, mut lineage: Lineage, listed: bool) {
     let mut termed: Option<Instant> = None;
+    let mut blind: Option<Instant> = None;
+    let mut checked = false;
     while let Some(state) = state_of(key) {
         let signal = match (state, termed) {
             (HoldState::Ending, None) => Some(Ending::Term),
             (HoldState::Ending, Some(at)) if at.elapsed() >= LEFTOVER_GRACE => Some(Ending::Kill),
             _ => None,
         };
-        let read = lineage.pass(signal);
+        let read = lineage.pass(signal, listed);
         if signal == Some(Ending::Term) && read.is_some() {
             termed = Some(Instant::now());
         }
-        let checked = read == Some(true);
+        checked = read == Some(true);
         assert_eq!(checked, !lineage.unchecked);
-        if lineage.known.is_empty() && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX) {
+        let none = lineage.known.is_empty();
+        blind = (none && !checked).then(|| blind.unwrap_or_else(Instant::now));
+        if none && (checked || blind.is_some_and(|at| at.elapsed() >= UNCHECKED_HOLD_MAX)) {
             break;
         }
         lineage.name();
@@ -655,8 +735,21 @@ fn watch(key: u64, mut lineage: Lineage) {
             HOLD_POLL
         });
     }
+    end_hold(key, checked);
+}
+
+/// Ends one hold once its watcher stops: removes it and drops what it keeps outside the lock,
+/// except that a listing whose last pass could not check, under Keep or Ask, is forgotten, so
+/// a run whose processes may still run stays on the hidden folders list for the engine's life.
+/// Inputs: the hold's key and whether its last pass was checked. Output: none.
+fn end_hold(key: u64, checked: bool) {
     let ended = held().remove(&key);
-    drop(ended);
+    if let Some(mut hold) = ended {
+        if !checked && hold.state != HoldState::Ending {
+            std::mem::forget(hold.listed.take());
+        }
+        drop(hold);
+    }
 }
 
 impl Lineage {
@@ -736,6 +829,8 @@ impl Lineage {
                 pid,
                 started,
                 program: String::new(),
+                unique: None,
+                forked_from: None,
             };
             if !self.known.iter().any(|known| same(known, &process)) {
                 self.known.push(process);
@@ -746,12 +841,13 @@ impl Lineage {
 
     /// One pass of a hold's watcher: reads the table and applies it, sends `signal`, if any,
     /// to the known processes that same table shows with the start they were known by, then
-    /// retries the token scan while it has not read. A failed read is a retry, never clean.
-    /// Inputs: the lineage and the signal. Output: none when the table could not be read,
-    /// else whether the lineage is now checked, the token's processes read too; `unchecked`
-    /// is set to the opposite.
+    /// scans for the token while it has not read, and again for a `listed` hold that knows
+    /// none, so a child its parent left keeps the run named. A failed read is a retry, never
+    /// clean. Inputs: the lineage, the signal and whether the hold has a listing. Output: none
+    /// when the table could not be read, else whether the lineage is now checked, the token's
+    /// processes read too; `unchecked` is set to the opposite.
     #[cfg(unix)]
-    fn pass(&mut self, signal: Option<Ending>) -> Option<bool> {
+    fn pass(&mut self, signal: Option<Ending>, listed: bool) -> Option<bool> {
         let Ok(rows) = rows(self.table, &mut self.pending) else {
             self.unchecked = true;
             return None;
@@ -760,7 +856,7 @@ impl Lineage {
         if let Some(signal) = signal {
             self.signal(&rows, signal);
         }
-        if !self.scanned {
+        if !self.scanned || (listed && self.known.is_empty()) {
             self.scanned = self.add_carriers().is_ok();
         }
         self.unchecked = !self.scanned;
@@ -769,7 +865,7 @@ impl Lineage {
 
     /// Reads nothing where no process table is read. Input: unused. Output: none.
     #[cfg(not(unix))]
-    fn pass(&mut self, _signal: Option<Ending>) -> Option<bool> {
+    fn pass(&mut self, _signal: Option<Ending>, _listed: bool) -> Option<bool> {
         self.unchecked = true;
         None
     }
@@ -1040,10 +1136,16 @@ impl Lineage {
     }
 
     /// Applies one table read: keeps each known process still running with the same start,
-    /// under the name it was last read by, then adds this user's processes in the leader's session
-    /// and those whose parent is kept. Session members join only while the leader runs with
-    /// the start its first read found, so a stranger that reuses a dead leader's id never
-    /// joins (SECAUDIT-SETSID-LEFTOVER r1 L1). Inputs: the lineage and the rows. Output: none.
+    /// under the name it was last read by and with the unique ids an earlier read found, which
+    /// a later read never replaces: a process keeps its ids for life, across exec as well, so
+    /// a later read that finds none or others met a process that exited, or an id reused,
+    /// between the listing and that read (rv-ds241 N1). Then adds this user's processes in
+    /// the leader's session, those whose parent is kept, and on macOS those forked from a
+    /// process known before this read or kept in it, by the forking parent's unique id, which
+    /// the kernel keeps after that parent exits and never reuses (SETSID-A-RESIDUAL). Session
+    /// members join only while the leader runs with the start its first read found, so a
+    /// stranger that reuses a dead leader's id never joins (SECAUDIT-SETSID-LEFTOVER r1 L1).
+    /// Inputs: the lineage and the rows. Output: none.
     #[cfg(unix)]
     fn apply(&mut self, rows: &[Row]) {
         let session = self.leader_started.as_ref().is_some_and(|started| {
@@ -1058,6 +1160,8 @@ impl Lineage {
                     .find(|known| same(known, process))
                     .map(|known| Process {
                         program: known.program.clone(),
+                        unique: known.unique.or(process.unique),
+                        forked_from: known.forked_from.or(process.forked_from),
                         ..process.clone()
                     })
             })
@@ -1066,7 +1170,13 @@ impl Lineage {
             let found = rows.iter().find(|(process, parent, member)| {
                 !kept.iter().any(|known| known.pid == process.pid)
                     && ((session && *member == Some(self.leader))
-                        || kept.iter().any(|known| known.pid == *parent))
+                        || kept.iter().any(|known| known.pid == *parent)
+                        || process.forked_from.is_some_and(|from| {
+                            self.known
+                                .iter()
+                                .chain(kept.iter())
+                                .any(|known| known.unique == Some(from))
+                        }))
             });
             match found {
                 Some((process, ..)) => kept.push(process.clone()),
@@ -1087,28 +1197,43 @@ enum Following {
     Taken,
 }
 
-/// A Full access headless run's or pane's processes, followed from its start on a thread of
-/// its own, since neither may be polled while it waits (SETSID-L2, BL-PANE-FOLLOW-GAP): the
+/// A Full access or sandboxed headless run's or pane's processes, followed from its start on
+/// a thread of its own, since neither may be polled while it waits (SETSID-L2,
+/// BL-PANE-FOLLOW-GAP, LINUX-KILL-GROUP): the
 /// thread takes the first read, or a pane's own, then the engine's shared table every
 /// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
-/// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
-/// plus the reads, is never seen, and only its token can still find it at the stop: the
-/// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
+/// run's session and loses its parent. On macOS so does a process forked from one a table
+/// showed, even when it leaves the session and that parent exits between two tables, as
+/// `ssh -f` and an ssh ControlPersist master detach: it is linked by the forking parent's
+/// unique id (SETSID-A-RESIDUAL). What stays open, accepted with owner item 6, is a double
+/// fork whose middle process lives and exits between two tables, up to the pace plus the
+/// table's age plus the reads: its child is never seen, and only its token can still find it
+/// at the stop, the SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
-/// token, the lineage and the sender whose drop ends the thread.
+/// token, whether the run is sandboxed, the lineage and the sender whose drop ends the thread.
 pub(crate) struct Follower {
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: Arc<Mutex<Following>>,
     _wake: std::sync::mpsc::Sender<()>,
 }
 
 impl Follower {
-    /// Starts following a Full access run from its first read on a thread of its own. When no
+    /// Starts following a headless run whose stop checks its lineage, a Full access run's or
+    /// a sandboxed one's as `check` says, from its first read on a thread of its own. When no
     /// thread starts, or no table is read here, the stop reads the lineage itself. Inputs: the
-    /// run's leader, whose id is also its session's, and the launch's token. Output: the
-    /// follower.
-    pub(crate) fn start(leader: u32, token: Option<LineageToken>) -> Self {
+    /// run's leader, whose id is also its session's, the launch's token and the check. Output:
+    /// the follower, or none where the run's boundary ends every process it started.
+    pub(crate) fn start(
+        leader: u32,
+        token: Option<LineageToken>,
+        check: LineageCheck,
+    ) -> Option<Self> {
+        if check == LineageCheck::Unneeded {
+            return None;
+        }
+        let sandboxed = check == LineageCheck::Sandboxed;
         let lineage = Arc::new(Mutex::new(Following::Reading));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1116,17 +1241,18 @@ impl Follower {
             let followed = Arc::clone(&lineage);
             let first = token.clone();
             let _ = std::thread::Builder::new()
-                .name("full-access-follow".into())
-                .spawn(move || follow_run(leader, first, &followed, &woken));
+                .name("run-follow".into())
+                .spawn(move || follow_run(leader, first, sandboxed, &followed, &woken));
         }
         #[cfg(not(unix))]
         drop(woken);
-        Self {
+        Some(Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
-        }
+        })
     }
 
     /// Follows, on a thread of its own, a lineage its owner already read, such as a pane's
@@ -1139,6 +1265,7 @@ impl Follower {
         token: Option<LineageToken>,
         first: Result<Lineage, Unstopped>,
     ) -> Self {
+        let sandboxed = first.as_ref().is_ok_and(|lineage| lineage.sandboxed);
         let lineage = Arc::new(Mutex::new(Following::Read(first)));
         let (wake, woken) = std::sync::mpsc::channel();
         #[cfg(unix)]
@@ -1153,6 +1280,7 @@ impl Follower {
         Self {
             leader,
             token,
+            sandboxed,
             lineage,
             _wake: wake,
         }
@@ -1166,7 +1294,9 @@ impl Follower {
         let taken = std::mem::replace(&mut *following(&self.lineage), Following::Taken);
         let mut lineage = match taken {
             Following::Read(read) => read?,
-            Following::Reading | Following::Taken => Lineage::of(self.leader, self.token)?,
+            Following::Reading | Following::Taken => {
+                first_read(self.leader, self.token, self.sandboxed)?
+            }
         };
         lineage.before_stop();
         Ok(lineage)
@@ -1179,18 +1309,35 @@ fn following(lineage: &Mutex<Following>) -> MutexGuard<'_, Following> {
     lineage.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Reads a followed run's lineage from the start: a sandboxed run's
+/// ([`Lineage::of_sandboxed`]) or a Full access one's ([`Lineage::of`]). Inputs: the leader,
+/// the token and whether the run is sandboxed. Output: the lineage, or why it cannot be read.
+fn first_read(
+    leader: u32,
+    token: Option<LineageToken>,
+    sandboxed: bool,
+) -> Result<Lineage, Unstopped> {
+    if sandboxed {
+        Lineage::of_sandboxed(leader, token)
+    } else {
+        Lineage::of(leader, token)
+    }
+}
+
 /// Takes a follower's first read, then the shared table every [`FOLLOWER_PACE`] until its
 /// stop. Each read runs with no lock held, and the lock is taken only to apply it. Ends at
-/// the stop, or once the first read found no lineage. Inputs: the leader, the token, the
-/// lineage's lock and the receiver the stop disconnects. Output: none.
+/// the stop, or once the first read found no lineage. Inputs: the leader, the token, whether
+/// the run is sandboxed, the lineage's lock and the receiver the stop disconnects. Output:
+/// none.
 #[cfg(unix)]
 fn follow_run(
     leader: u32,
     token: Option<LineageToken>,
+    sandboxed: bool,
     lineage: &Mutex<Following>,
     woken: &std::sync::mpsc::Receiver<()>,
 ) {
-    let first = Lineage::of(leader, token);
+    let first = first_read(leader, token, sandboxed);
     {
         let mut slot = following(lineage);
         if !matches!(*slot, Following::Reading) {
@@ -1289,8 +1436,9 @@ fn table(
     parse(&listing, user, own)
 }
 
-/// Reads the process table with `argv` and the session of each listed process. Inputs: the
-/// command and the pending listing. Output: the rows, or uncertain when the listing fails.
+/// Reads the process table with `argv`, the session of each listed process and, on macOS, its
+/// unique ids. Inputs: the command and the pending listing. Output: the rows, or uncertain
+/// when the listing fails.
 #[cfg(unix)]
 fn rows(
     argv: &'static [&'static str],
@@ -1302,6 +1450,15 @@ fn rows(
             let session = rustix::process::Pid::from_raw(process.pid)
                 .and_then(|pid| rustix::process::getsid(Some(pid)).ok())
                 .map(|session| session.as_raw_nonzero().get());
+            #[cfg(target_os = "macos")]
+            let process = match crazyagent_macos_fs::process_ids(process.pid) {
+                Some(ids) => Process {
+                    unique: Some(ids.unique),
+                    forked_from: Some(ids.forked_from),
+                    ..process
+                },
+                None => process,
+            };
             (process, parent, session)
         })
         .collect())
@@ -1459,6 +1616,9 @@ fn read_bounded(
 ) -> Result<Vec<u8>, Unstopped> {
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
     if let Some(listing) = pending {
+        let listing = listing
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if matches!(listing.try_recv(), Err(TryRecvError::Empty)) {
             return Err(Unstopped::Uncertain);
         }
@@ -1475,7 +1635,7 @@ fn read_bounded(
     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE) {
         Ok(listing) => listing.ok_or(Unstopped::Uncertain),
         Err(RecvTimeoutError::Timeout) => {
-            *pending = Some(receiver);
+            *pending = Some(std::sync::Mutex::new(receiver));
             Err(Unstopped::Uncertain)
         }
         Err(RecvTimeoutError::Disconnected) => Err(Unstopped::Uncertain),
@@ -1633,6 +1793,8 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
                 pid,
                 started: fields[4..TABLE_FIELDS].join(" "),
                 program: String::new(),
+                unique: None,
+                forked_from: None,
             },
             parent,
         ));
@@ -1883,6 +2045,8 @@ pub(crate) mod tests {
                 pid,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "sleep".into(),
+                unique: None,
+                forked_from: None,
             })
             .collect();
         let report = Leftovers(Box::new(Lineage {
@@ -2038,6 +2202,14 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_stops_leftovers_can_be_borrowed_across_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Lineage>();
+        shared::<Leftovers>();
+        shared::<Unstopped>();
+    }
+
+    #[test]
     fn a_settle_ends_at_once_while_a_held_up_listing_is_still_in_flight() {
         let (_listing, held_up) = std::sync::mpsc::channel::<Option<Vec<u8>>>();
         let lineage = Lineage {
@@ -2046,11 +2218,13 @@ pub(crate) mod tests {
                 pid: 2,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "sleep".into(),
+                unique: None,
+                forked_from: None,
             }],
             table: PS_TABLE,
             unchecked: true,
             scanned: true,
-            pending: Some(held_up),
+            pending: Some(std::sync::Mutex::new(held_up)),
             sandboxed: false,
             token: None,
             leader_started: None,
@@ -2090,11 +2264,13 @@ pub(crate) mod tests {
                 pid: own,
                 started: "Wed Oct 28 03:10:00 2026".into(),
                 program: "placeholder".into(),
+                unique: None,
+                forked_from: None,
             }],
             table: PS_TABLE,
             unchecked: true,
             scanned: true,
-            pending: Some(held_up),
+            pending: Some(std::sync::Mutex::new(held_up)),
             sandboxed: false,
             token: None,
             leader_started: None,
@@ -2230,8 +2406,93 @@ pub(crate) mod tests {
             pid,
             started: started.into(),
             program: "sleep".into(),
+            unique: None,
+            forked_from: None,
         };
         (process, parent, Some(session))
+    }
+
+    /// One table row of a `sleep` whose unique ids were read. Inputs: its id, parent, session,
+    /// start, unique id and the unique id of the process it was forked from. Output: the row.
+    fn forked(pid: i32, parent: i32, session: i32, started: &str, unique: u64, from: u64) -> Row {
+        let (mut process, parent, session) = row(pid, parent, session, started);
+        process.unique = Some(unique);
+        process.forked_from = Some(from);
+        (process, parent, session)
+    }
+
+    #[test]
+    fn a_setsid_child_of_a_seen_process_that_exited_joins_by_the_unique_id_it_was_forked_from() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        let pids = |lineage: &Lineage| -> Vec<i32> {
+            lineage.known.iter().map(|process| process.pid).collect()
+        };
+        assert_eq!(pids(&lineage), [500, 600]);
+
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            row(600, 500, 500, FIRST),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 600],
+            "600 was listed, then exited before its ids were read"
+        );
+
+        let orphan = forked(601, 1, 601, FIRST, 9_101, 9_100);
+        let stranger = forked(602, 1, 602, FIRST, 9_102, 7_000);
+        let unread = row(603, 1, 603, FIRST);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            orphan.clone(),
+            stranger.clone(),
+            unread.clone(),
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 601],
+            "the child of 600 left its session and went to launchd when 600 exited"
+        );
+
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            orphan,
+            stranger,
+            unread,
+        ]);
+        assert_eq!(
+            pids(&lineage),
+            [500, 601],
+            "it stays known once its parent is no longer known"
+        );
+    }
+
+    #[test]
+    fn a_known_process_keeps_the_unique_ids_first_read_when_a_reused_id_reads_others() {
+        let mut lineage = bare(500, Some(FIRST));
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_100, 9_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(600, 500, 500, FIRST, 9_900, 7_000),
+        ]);
+        lineage.apply(&[
+            forked(500, 1, 500, FIRST, 9_000, 8_000),
+            forked(601, 1, 601, FIRST, 9_101, 9_100),
+            forked(602, 1, 602, FIRST, 9_902, 9_900),
+        ]);
+        let pids: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        assert_eq!(
+            pids,
+            [500, 601],
+            "a stranger that reused 600's id between the listing and the read brings nothing"
+        );
     }
 
     #[test]
@@ -2582,6 +2843,73 @@ pub(crate) mod tests {
         }
     }
 
+    /// LINUX-KILL-GROUP: a headless run whose boundary leaves a process in a session of its
+    /// own running, as the plain Linux Landlock helper's does, follows a sandboxed lineage, so
+    /// the process its harness left outside the group is found once the harness is gone and
+    /// is named as a sandboxed run's leftover, never as a Full access one's. Its leader leads
+    /// a session of its own, as the Linux helper's `own_session` makes a wrapped harness.
+    #[test]
+    fn a_sandboxed_follower_names_what_its_run_left_outside_its_group_as_sandboxed() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut leader = crate::spawn_gate::spawn(
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
+                .arg(
+                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
+                )
+                .current_dir(folder.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let follower = Follower::start(leader.id(), None, LineageCheck::Sandboxed).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let lineage = follower.stop();
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        let settled = lineage.and_then(Lineage::settle);
+        end_pid(child);
+
+        match settled {
+            Err(Unstopped::Left(left)) => {
+                assert_eq!(left.code(), SANDBOX_LEFT);
+                assert!(left.0.known.iter().any(|process| process.pid == child));
+            }
+            other => panic!("the leftover was not found: {other:?}"),
+        }
+    }
+
+    /// LINUX-KILL-GROUP guard: a run whose boundary ends every process it started, as the
+    /// warden, a process namespace or the job does, gets no follower.
+    #[test]
+    fn a_run_whose_boundary_ends_every_process_it_started_has_no_follower() {
+        let follower = Follower::start(std::process::id(), None, LineageCheck::Unneeded);
+
+        assert!(follower.is_none());
+    }
+
+    /// Leaves a hold as a sandboxed run's stop does, for another module's row: a process in
+    /// a session of its own, listed under `by` with the owner's setting `mode`. Inputs: who
+    /// left it and the setting. Output: the process, which the row ends.
+    pub(crate) fn held_sandboxed(by: HoldBy, mode: LeftoverMode) -> std::process::Child {
+        let left = session_sleeper(false);
+        let lineage = Lineage::of_sandboxed(left.id(), None).unwrap();
+        Leftovers(Box::new(lineage)).hold(None, (), by, mode);
+        left
+    }
+
     /// Starts a perl process in a session of its own that ignores SIGTERM, or not, and waits
     /// until it left its session. Input: whether it ignores SIGTERM. Output: the child.
     fn session_sleeper(ignores_term: bool) -> std::process::Child {
@@ -2634,6 +2962,8 @@ pub(crate) mod tests {
             pid,
             started: started.into(),
             program: "sleep".into(),
+            unique: None,
+            forked_from: None,
         };
         let picked = targets(
             &[
@@ -2734,6 +3064,302 @@ pub(crate) mod tests {
         );
         assert!(still_runs, "Keep ended the process");
         assert!(cleared, "a kept process that ended stayed listed");
+    }
+
+    /// SA-VID14-KEEP-SLOTS: a sandboxed run on the hidden folders list whose stop left
+    /// processes stays named while they run and leaves the list once they end, under Keep
+    /// and under Ask then the owner's Keep, so no kept run holds a place on the list, which
+    /// takes at most 256 runs, for the engine's life.
+    #[test]
+    fn a_kept_or_asked_hold_frees_its_hidden_folders_listing_once_its_processes_end() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        for (project, mode) in [
+            ("keep-slots-kept", LeftoverMode::Keep),
+            ("keep-slots-asked", LeftoverMode::Ask),
+        ] {
+            let mut leftover = session_sleeper(false);
+            let pid = i32::try_from(leftover.id()).unwrap();
+            let listed = starting(RunKind::Research, project).expect("the list has room");
+            listed.hid(&[]);
+            let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+            Leftovers(Box::new(lineage)).hold_listed(None, (), listed, by_in(project), mode);
+            let view = held_in(project);
+            let kept = mode != LeftoverMode::Ask || keep_held(view[0].key, project);
+            let while_running = runs_seeing(project, &saved);
+            let _ = leftover.try_wait();
+            let still_runs = runs(pid);
+            end_pid(pid);
+            let _ = leftover.wait();
+            let cleared = within(LEFTOVER_GRACE, || held_in(project).is_empty());
+            let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+            assert_eq!(view.len(), 1, "{mode:?}: {view:?}");
+            assert!(kept, "{mode:?}: the owner's Keep was refused");
+            assert!(still_runs, "{mode:?} ended the process");
+            assert_eq!(
+                while_running,
+                vec![RunKind::Research],
+                "{mode:?}: a run whose processes still run was not named"
+            );
+            assert!(cleared, "{mode:?}: a hold whose processes ended stayed");
+            assert!(
+                freed,
+                "{mode:?}: a kept run stayed on the hidden folders list after its processes ended"
+            );
+        }
+    }
+
+    /// SA-VID14-KEEP-SLOTS: signing out the account an asked hold keeps lets the account and
+    /// its lease go, but the run stays on the hidden folders list while its processes run, as
+    /// the owner's Keep leaves it, and frees its place once they end.
+    #[test]
+    fn signing_out_keeps_a_listed_hold_named_until_its_processes_end() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-signed-out";
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let account = CredentialRef::new("keep-slots-signed-out").unwrap();
+        let (lease, released) = std::sync::mpsc::channel::<()>();
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+        Leftovers(Box::new(lineage)).hold_listed(
+            Some(account.clone()),
+            lease,
+            listed,
+            by_in(project),
+            LeftoverMode::Ask,
+        );
+        let ended = release(&account);
+        let let_go = released.recv_timeout(Duration::from_millis(500));
+        let reports = held_by(&account);
+        let while_running = runs_seeing(project, &saved);
+        let _ = leftover.try_wait();
+        let still_runs = runs(pid);
+        end_pid(pid);
+        let _ = leftover.wait();
+        let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+        assert_eq!(ended, 1, "the sign-out did not count the hold");
+        assert_eq!(
+            let_go,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the sign-out kept the lease"
+        );
+        assert!(reports.is_empty(), "{reports:?}");
+        assert!(still_runs, "the sign-out ended the process");
+        assert_eq!(
+            while_running,
+            vec![RunKind::Research],
+            "a signed-out run whose processes still run was not named"
+        );
+        assert!(
+            freed,
+            "a signed-out run stayed on the hidden folders list after its processes ended"
+        );
+    }
+
+    /// A run on the hidden folders list belongs to a project: a listed hold with none refuses
+    /// before anything is held, and the run leaves the list as its listing drops.
+    #[test]
+    fn a_listed_hold_without_a_project_refuses() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-no-project";
+        let mut leftover = session_sleeper(false);
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        let lineage = Lineage::of_sandboxed(leftover.id(), None).unwrap();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Leftovers(Box::new(lineage)).hold_listed(None, (), listed, by(), LeftoverMode::Keep);
+        }));
+        let after = runs_seeing(
+            project,
+            &[std::path::PathBuf::from("/tmp/keep-slots/vault")],
+        );
+        end_pid(i32::try_from(leftover.id()).unwrap());
+        let _ = leftover.wait();
+
+        let payload = refused.expect_err("a listed hold with no project was taken");
+        let text = payload
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned());
+        assert_eq!(text.as_deref(), Some("a listed run belongs to a project"));
+        assert!(after.is_empty(), "a refused listed hold kept its listing");
+    }
+
+    /// SA-VID14-KEEP-SLOTS r1 F1: a kept run whose process handed off to a child its parent
+    /// left, as a daemon does, stays on the hidden folders list while that child runs: before
+    /// a listed hold ends with nothing known, its watcher scans for the launch's token once
+    /// more and finds the child, and frees the run's place once the child ends too.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_kept_run_whose_process_handed_off_to_an_orphan_stays_on_the_hidden_folders_list() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let project = "keep-slots-handed-off";
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let ids = |names: &str| -> Vec<String> {
+            names
+                .split(", ")
+                .filter_map(|one| one.split(' ').next())
+                .map(str::to_owned)
+                .collect()
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let (_, orphan) = detached(folder.path(), "orphan.pid", &ours, ("UNUSED", "x"));
+        let mut lineage = Lineage::of_sandboxed(leftover.id(), Some(ours)).unwrap();
+        lineage.scanned = true;
+        let known: Vec<i32> = lineage.known.iter().map(|process| process.pid).collect();
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        Leftovers(Box::new(lineage)).hold_listed(
+            None,
+            (),
+            listed,
+            by_in(project),
+            LeftoverMode::Keep,
+        );
+        end_pid(pid);
+        let _ = leftover.wait();
+        let named = within(HOLD_POLL * 3, || {
+            held_in(project)
+                .iter()
+                .any(|hold| ids(&hold.names) == [orphan.to_string()])
+        });
+        let while_orphan_runs = runs_seeing(project, &saved);
+        let orphan_ran = runs(orphan);
+        end_pid(orphan);
+        let freed = within(LEFTOVER_GRACE, || runs_seeing(project, &saved).is_empty());
+
+        assert_eq!(
+            known,
+            vec![pid],
+            "the lineage did not start from the leftover alone"
+        );
+        assert!(orphan_ran, "the orphan ended before the check");
+        assert!(
+            named,
+            "the hold never named the orphan its process handed off to"
+        );
+        assert_eq!(
+            while_orphan_runs,
+            vec![RunKind::Research],
+            "a run whose handed-off process still runs left the hidden folders list"
+        );
+        assert!(
+            freed,
+            "the run stayed on the hidden folders list after the orphan ended"
+        );
+    }
+
+    /// SA-VID14-KEEP-SLOTS r1 F1: a listed hold its watcher ends unchecked under Keep or Ask
+    /// keeps the run on the hidden folders list, since its processes may still run; a
+    /// checked end, and an unchecked end under End, free its place.
+    #[test]
+    fn an_unchecked_end_keeps_a_kept_or_asked_run_on_the_hidden_folders_list() {
+        use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+        let saved = [std::path::PathBuf::from("/tmp/keep-slots/vault")];
+        let mut after = Vec::new();
+        for (project, state, checked) in [
+            ("keep-slots-unchecked-kept", HoldState::Kept, false),
+            ("keep-slots-unchecked-asked", HoldState::Held, false),
+            ("keep-slots-unchecked-ending", HoldState::Ending, false),
+            ("keep-slots-checked-kept", HoldState::Kept, true),
+        ] {
+            let listed = starting(RunKind::Research, project).expect("the list has room");
+            listed.hid(&[]);
+            let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+            let previous = held().insert(
+                key,
+                Held {
+                    account: None,
+                    report: String::new(),
+                    kept: None,
+                    listed: Some(Box::new(listed)),
+                    by: by_in(project),
+                    names: String::new(),
+                    state,
+                    since_ms: now_ms(),
+                    sandboxed: true,
+                },
+            );
+            assert!(previous.is_none());
+            end_hold(key, checked);
+            after.push((
+                project,
+                held_in(project).len(),
+                runs_seeing(project, &saved),
+            ));
+        }
+
+        assert_eq!(
+            after,
+            vec![
+                ("keep-slots-unchecked-kept", 0, vec![RunKind::Research]),
+                ("keep-slots-unchecked-asked", 0, vec![RunKind::Research]),
+                ("keep-slots-unchecked-ending", 0, vec![]),
+                ("keep-slots-checked-kept", 0, vec![]),
+            ]
+        );
+    }
+
+    /// Commands a sandboxed run left count against its agent's next start while the owner
+    /// keeps them or has not chosen, in that agent's project only, and no longer once the
+    /// hold ends them or they are gone; a Full access run's never count.
+    #[test]
+    fn commands_a_sandboxed_run_left_count_until_their_hold_ends_them() {
+        let mut asked = session_sleeper(false);
+        let mut full = session_sleeper(false);
+        let mut kept = session_sleeper(false);
+        let hold = |lineage: Lineage, project: &str, mode: LeftoverMode| {
+            Leftovers(Box::new(lineage)).hold(None, (), by_in(project), mode);
+        };
+        hold(
+            Lineage::of_sandboxed(asked.id(), None).unwrap(),
+            "left-asked",
+            LeftoverMode::Ask,
+        );
+        hold(
+            Lineage::of(full.id(), None).unwrap(),
+            "left-full",
+            LeftoverMode::Ask,
+        );
+        hold(
+            Lineage::of_sandboxed(kept.id(), None).unwrap(),
+            "left-kept",
+            LeftoverMode::Keep,
+        );
+        let another = HoldBy {
+            project: Some("left-asked".into()),
+            who: "team agent 8".into(),
+        };
+
+        let waiting = confined_left_by(&by_in("left-asked"));
+        let elsewhere = confined_left_by(&by_in("left-other"));
+        let for_another = confined_left_by(&another);
+        let unconfined = confined_left_by(&by_in("left-full"));
+        let keeping = confined_left_by(&by_in("left-kept"));
+        let key = held_in("left-asked")[0].key;
+        let ending = end_held(key, "left-asked");
+        let while_ending = confined_left_by(&by_in("left-asked"));
+        for child in [&mut asked, &mut full, &mut kept] {
+            end_pid(i32::try_from(child.id()).unwrap());
+            let _ = child.wait();
+        }
+        let cleared = within(LEFTOVER_GRACE, || !confined_left_by(&by_in("left-kept")));
+
+        assert!(waiting, "a hold the owner has not chosen on did not count");
+        assert!(!elsewhere, "a hold counted in another project");
+        assert!(!for_another, "a hold counted for another agent");
+        assert!(!unconfined, "a Full access run's commands counted");
+        assert!(keeping, "commands the owner keeps did not count");
+        assert!(ending);
+        assert!(!while_ending, "a hold that is ending its commands counted");
+        assert!(cleared, "kept commands that ended still counted");
     }
 
     #[test]

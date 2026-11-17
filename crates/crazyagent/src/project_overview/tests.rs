@@ -2044,6 +2044,51 @@ fn an_overview_from_an_engine_without_the_wait_flag_reads_as_no_wait() {
     );
 }
 
+/// SPEED-IDLE-POLLS: a read says how long until a waiting run is due, as a span so the
+/// app compares no two clocks: zero for a first read and after Refresh, the quiet period's
+/// rest after a landing, the retry's after a wait for an account, none while a run writes
+/// or none waits, and none in an older engine's reply, so the app waits that long instead
+/// of reading every few seconds.
+#[test]
+fn a_read_says_how_long_until_a_waiting_run_is_due_and_nothing_while_one_writes_or_none_waits() {
+    let (mut db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    let quiet = crate::roadmap_status::QUIET_MS;
+    let first = read(&db, &project, folder.path(), 0).unwrap();
+    assert!(first.stale);
+    assert_eq!(first.due_in_ms, Some(0), "a first read asks for a run now");
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let writing = read(&db, &project, folder.path(), 1).unwrap();
+    assert!(writing.running);
+    assert_eq!(writing.due_in_ms, None, "a run writes, so none waits");
+    assert_eq!(runs.end(&db, folder.path(), REPLIED, 2), 1);
+    let fresh = read(&db, &project, folder.path(), 3).unwrap();
+    assert!(!fresh.stale && !fresh.running);
+    assert_eq!(fresh.due_in_ms, None);
+
+    landed(&mut db, &project, 10_000);
+    let due = |now: i64| read(&db, &project, folder.path(), now).unwrap().due_in_ms;
+    assert_eq!(due(10_000), Some(quiet));
+    assert_eq!(due(10_000 + quiet / 2), Some(quiet - quiet / 2));
+    assert_eq!(due(10_000 + quiet), Some(0));
+    assert_eq!(due(10_000 + 2 * quiet), Some(0), "never a negative wait");
+    refresh(&db, &project).unwrap();
+    assert_eq!(due(10_001), Some(0), "Refresh makes the run due at once");
+
+    let last = read(&db, &project, folder.path(), 10_001).unwrap();
+    let mut wire = serde_json::to_value(&last).unwrap();
+    let fields = wire.as_object_mut().unwrap();
+    assert_eq!(fields.remove("due_in_ms"), Some(0.into()));
+    let older: Overview = serde_json::from_value(wire).unwrap();
+    assert_eq!(older.due_in_ms, None);
+
+    assert_eq!(tick(&db, &mut runs, 10_001).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    let retry = 10_002 + 60_000;
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, retry).unwrap());
+    assert_eq!(due(10_002), Some(60_000), "due at its retry");
+}
+
 /// A writing run whose loopback provider refuses connections fails at once with the plain
 /// reach line, before its evidence is read or any agent folder is made, in place of a
 /// harness retrying the dead port until the run's time is over.
@@ -2233,4 +2278,91 @@ fn the_name_of_an_overview_run_is_read_back_as_its_own_projects_only() {
     ] {
         assert!(!names_run(&demo, odd), "{odd}");
     }
+}
+
+/// RV-DS241-80/81: an engine start forgets the Overview rows of a project that is no longer
+/// recorded, left by a removal from before they went with it, so its stale row stops
+/// queueing a run every minute; a recorded project keeps its rows, and with no project
+/// record to check against nothing is forgotten.
+#[test]
+fn an_engine_start_forgets_the_overview_rows_of_projects_that_are_gone() {
+    let (db, _, _folder) = case();
+    db.execute_batch(
+        "INSERT INTO project_overview(project, stale) VALUES ('alpha', 1), ('gone', 1);
+         INSERT INTO project_overview_tabs(project, tab) VALUES
+           ('alpha', 'features'), ('gone', 'features');",
+    )
+    .unwrap();
+    let rows = |db: &Connection| -> Vec<String> {
+        db.prepare(
+            "SELECT project FROM project_overview UNION ALL
+             SELECT project FROM project_overview_tabs ORDER BY 1",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+
+    close_orphans(&db).unwrap();
+    assert_eq!(
+        rows(&db),
+        ["alpha", "alpha", "gone", "gone"],
+        "no project record, nothing forgotten"
+    );
+    db.execute_batch(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO projects VALUES ('alpha', '{}');",
+    )
+    .unwrap();
+    close_orphans(&db).unwrap();
+
+    assert_eq!(rows(&db), ["alpha", "alpha"]);
+}
+
+/// A page read that lands while a run ends, after its claim is checked and before its first
+/// tab is written, sees the run still running or wholly ended, never closed as unfinished
+/// with no tab, which stops the desktop page reading (gate race 2, bridge-overview-tabs at
+/// 31fe8b547).
+#[test]
+fn a_page_read_while_a_run_ends_sees_it_running_or_ended_never_half_way() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let (db, page, project, folder) = shared();
+    crate::project_setup::initialize(&db).unwrap();
+    db.execute("INSERT INTO project_setups VALUES ('alpha', '{}')", [])
+        .unwrap();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 1_000).unwrap();
+    assert_eq!(tick(&db, &mut runs, 1_000).unwrap(), 1);
+    let seen: Rc<RefCell<Option<Overview>>> = Rc::new(RefCell::new(None));
+    {
+        let seen = seen.clone();
+        let (project, path) = (project.clone(), folder.path().to_path_buf());
+        BEFORE_REPLACE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                if seen.borrow().is_none() {
+                    let shown = read(&page, &project, &path, 2_000).unwrap();
+                    *seen.borrow_mut() = Some(shown);
+                }
+            }));
+        });
+    }
+    let ended = runs.end(&db, folder.path(), REPLIED, 2_000);
+    BEFORE_REPLACE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(ended, 1);
+    let seen = seen.borrow_mut().take().expect("the run wrote a tab");
+    assert!(
+        seen.running || tab_of(&seen, Tab::QuickInfo).text.is_some(),
+        "a read while the run ended saw it closed with no tab: {seen:?}"
+    );
+    assert_ne!(seen.failure.as_deref(), Some(UNFINISHED), "{seen:?}");
+    let done = read(&db, &project, folder.path(), 3_000).unwrap();
+    assert!(!done.running && done.failure.is_none(), "{done:?}");
+    assert_eq!(done.checked_ms, Some(2_000));
+    assert_eq!(
+        tab_of(&done, Tab::QuickInfo).text.as_deref(),
+        Some("Alpha reads papers.\n")
+    );
 }

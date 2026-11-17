@@ -2554,12 +2554,14 @@ fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
 
 /// The agent profile keeps a confined agent from leaving in its own home what a later run
 /// executes or what trips the next launch (RV-DS241-137 code r1 F4, sec r1 F1, F2,
-/// DEC-173): no cargo or git config, cargo subcommand, npm or yarn config, in any letter
-/// case, no flag or ACL, no move, removal or link in place of a folder a launch walks or of
-/// the link to the owner's crates, and no link at a cargo cache name, while it still writes
-/// its own cache and `.gitconfig` and makes the cargo git cache the owner lacks. A later
-/// `cargo x` and `npm run` outside the sandbox then run nothing it planted. Needs npm and
-/// node on `PATH`.
+/// DEC-173, RV-DS241-186, -187): no cargo or git config, `.gitconfig` included, cargo
+/// subcommand, npm or yarn config, in any letter case, no `.config` built elsewhere and
+/// moved in nor moved away, no flag or ACL on what the next launch keeps, no move, removal
+/// or link in place of a folder a launch walks or of the link to the owner's crates, and no
+/// link at a cargo cache name, while it still writes its own cache and its own folder in
+/// `.config`, sets flags and ACLs on its own copies elsewhere in its home and in its cache,
+/// and makes the cargo git cache the owner lacks. A later `cargo x` and `npm run` outside
+/// the sandbox then run nothing it planted. Needs npm and node on `PATH`.
 #[test]
 fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     use nix::sys::stat::FileFlag;
@@ -2576,6 +2578,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     );
     write(&case.home.join(".npm/_cacache/index"), "cache\n");
     write(&case.home.join("f"), "plain\n");
+    write(&case.home.join(".claude.json"), "{}\n");
     let marker = case.profiles.join("ran.txt");
     let required = case.profiles.join("npmrc.js");
     write(
@@ -2601,10 +2604,37 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     let away = quoted(&elsewhere);
     let subcommand = home(".cargo/bin/cargo-x");
     let denied = [
-        ("flag", format!("/usr/bin/chflags uchg {}", home("f"))),
+        (
+            "flag",
+            format!("/usr/bin/chflags uchg {}", home(".claude.json")),
+        ),
         (
             "acl",
-            format!("/bin/chmod +a 'everyone deny delete' {}", home("f")),
+            format!(
+                "/bin/chmod +a 'everyone deny delete' {}",
+                home(".claude.json")
+            ),
+        ),
+        (
+            "config_parent",
+            format!(
+                "rm -rf {config} 2>/dev/null; mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {config}",
+                home("built"),
+                config = home(".config"),
+                built = home("built/git")
+            ),
+        ),
+        (
+            "config_away",
+            format!("mv {} {}", home(".config"), home(".config-away")),
+        ),
+        (
+            "gitconfig",
+            format!("printf '[core]\\n' > {}", home(".gitconfig")),
+        ),
+        (
+            "gitconfig_case",
+            format!("printf x > {}", home(".GitConfig")),
         ),
         (
             "cargo_config",
@@ -2674,8 +2704,29 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ),
         ("git_cache", format!("mkdir -p {}", home(".cargo/git/db"))),
         (
-            "gitconfig",
-            format!("printf '[core]\\n' > {}", home(".gitconfig")),
+            "config_tool",
+            format!(
+                "mkdir -p {} && printf ok > {}",
+                home(".config/tool"),
+                home(".config/tool/data")
+            ),
+        ),
+        ("flag_new", format!("/usr/bin/chflags uchg {}", home("f"))),
+        (
+            "acl_new",
+            format!("/bin/chmod +a 'everyone deny delete' {}", home("f")),
+        ),
+        (
+            "flag_cache",
+            format!("/usr/bin/chflags uchg {}", home(".cache/tool/data")),
+        ),
+        (
+            "flag_library",
+            format!(
+                "mkdir -p {} && printf x > {kernel} && /usr/bin/chflags uchg {kernel}",
+                home("Library/Jupyter"),
+                kernel = home("Library/Jupyter/k")
+            ),
         ),
     ];
     let mut problems = Vec::new();
@@ -2695,10 +2746,12 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         }
     }
     let listed = crazyagent::spawn_gate::collected(
-        Command::new("/bin/ls").arg("-led").arg(case.home.join("f")),
+        Command::new("/bin/ls")
+            .arg("-led")
+            .arg(case.home.join(".claude.json")),
     )
     .unwrap();
-    let flags = fs::symlink_metadata(case.home.join("f"))
+    let flags = fs::symlink_metadata(case.home.join(".claude.json"))
         .map(|metadata| FileFlag::from_bits_retain(metadata.st_flags()))
         .unwrap();
     let _ = crazyagent::spawn_gate::collected(
@@ -2720,7 +2773,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     if fs::read_link(case.home.join(".cargo/registry")).ok() != Some(registry.clone()) {
         problems.push("the link to the owner's crates changed".to_owned());
     }
-    for entry in [".npm", ".cargo", ".cargo/git"] {
+    for entry in [".npm", ".cargo", ".cargo/git", ".config"] {
         if !fs::symlink_metadata(case.home.join(entry)).is_ok_and(|metadata| metadata.is_dir()) {
             problems.push(format!("{entry} is no longer a real folder"));
         }
@@ -2730,6 +2783,8 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ".cargo/bin",
         ".cargo/config.toml",
         ".config/git",
+        ".config-away",
+        ".gitconfig",
         ".npmrc",
         ".yarnrc",
         ".yarnrc.yml",

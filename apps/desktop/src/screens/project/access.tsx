@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
+import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, GrantLogRow, HomeCaches, IdeAgentFiles, PolicyView, SharedAccess, SharedFolders, SharedScope, ToolCacheScope } from "../../api-projects";
 import { desktopPlatform } from "../../api-ide";
 import { Switch } from "../../ui";
 
@@ -48,11 +48,18 @@ export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: stri
   { network: "none", label: "None", help: "None limits agents to their model: a hosted model's own hosts, through the engine's proxy, or only the local model's port. The plugin check reaches nothing." },
 ];
 
+/** The line under a network choice that says what it can't hold on Linux: the engine's own for
+ * the choice when it sends one, null where the choice holds, else this desktop's line on Linux,
+ * for an engine that sends none. Inputs: the engine's view, the chosen network and this
+ * desktop's platform. Output: the line, or null. */
+export function networkGap(view: Pick<PolicyView, "networks"> | null | undefined, network: AgentNetwork, platform: string = desktopPlatform()): string | null {
+  const sent = view?.networks.find((choice) => choice.network === network)?.gap;
+  if (sent !== undefined) return sent;
+  return platform === "linux" ? LINUX_PORTS_ANY_HOST : null;
+}
+
 /** What a limited network can't hold on Linux, shown there only, the engine's LINUX_PORTS_ANY_HOST_LINE. */
 export const LINUX_PORTS_ANY_HOST = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
-
-/** What a writable project folder can't hold on Linux, shown there only, the engine's LINUX_NESTED_GIT_LINE. */
-export const LINUX_NESTED_GIT = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
 
 /** Why the network choice has no effect under Full access. */
 export const NETWORK_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so this choice does not apply.";
@@ -88,6 +95,17 @@ export const TOOL_CACHE_CLEAN = "uv cache clean fails inside an agent's sandbox.
 
 /** Why the tool cache choice has no effect under Full access. */
 export const TOOL_CACHE_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so their tools use their own caches.";
+
+/** The heading over the agent home caches choice (DEC-173 add.1), the same in the TUI. */
+export const HOME_CACHES = "Tool caches in agent homes";
+
+/** Every agent home caches choice with the engine's label and what it does to the .cache and npm
+ * cache in each agent's home at its start, the same in the TUI (DEC-173 add.1). */
+export const HOME_CACHES_CHOICES: { choice: HomeCaches; label: string; help: string }[] = [
+  { choice: "keep", label: "Keep", help: "An agent home keeps its .cache and npm cache from start to start, whatever level wrote them, so tools download less." },
+  { choice: "clear_when_raised", label: "Clear when access is raised", help: "An agent home loses its .cache and npm cache when its agent starts at a wider access level than its last start, so nothing a narrower run left there reaches a wider one." },
+  { choice: "clear_every_launch", label: "Clear every launch", help: "An agent home loses its .cache and npm cache at every start; tools download what they need again." },
+];
 
 /** The most extras of each kind a project allows, as the engine bounds them (F08). */
 export const GRANT_SOCKETS_MAX = 2;
@@ -206,12 +224,12 @@ export function sameShared(left: SharedFolders, right: SharedFolders): boolean {
 /** The policy Save sends: the level, the network choice, a choice only for each toolchain
  * whose switch differs from the project's own use, so the others keep following the project,
  * the IDE hooks switch, the agent folders choice, the tool cache choice, the shared folders
- * choice, the Apply access changes choice and the extras. Inputs: the engine's view, the
- * chosen level and network, one switch per view toolchain, the IDE hooks switch, the agent
- * folders choice, and the tool cache, shared folders and Apply choices and the extras, each
- * the saved one when left out, so a save from another screen never drops an extra. Output:
- * the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, ideAgentFiles: IdeAgentFiles, toolCache: ToolCacheScope = view.tool_cache, sharedFolders: SharedFolders = view.shared_folders ?? DEFAULT_SHARED_FOLDERS, applyChanges: AccessApply = view.apply_changes ?? "when_idle", grants: AccessGrant[] = savedGrants(view)): AgentPolicy {
+ * choice, the Apply access changes choice, the extras and the agent home caches choice.
+ * Inputs: the engine's view, the chosen level and network, one switch per view toolchain, the
+ * IDE hooks switch, the agent folders choice, and the tool cache, shared folders and Apply
+ * choices, the extras and the agent home caches choice, each the saved one when left out, so
+ * a save from another screen never drops an extra. Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean, ideAgentFiles: IdeAgentFiles, toolCache: ToolCacheScope = view.tool_cache, sharedFolders: SharedFolders = view.shared_folders ?? DEFAULT_SHARED_FOLDERS, applyChanges: AccessApply = view.apply_changes ?? "when_idle", grants: AccessGrant[] = savedGrants(view), homeCaches: HomeCaches = view.home_caches ?? "clear_when_raised"): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
   assert(sharedFolders.chosen.length <= SHARED_CHOSEN_MAX && sharedFolders.secrets.length <= SHARED_SECRETS_MAX, "shared folders within the engine's bounds");
   assert(grants.filter((grant) => grant.kind === "socket").length <= GRANT_SOCKETS_MAX, "at most 2 sockets");
@@ -222,6 +240,7 @@ export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNe
     toolchains: view.toolchains.flatMap((row, index) => row.used === allowed[index] ? [] : [{ toolchain: row.toolchain, allowed: allowed[index] }]),
     ide_git_hooks: ideGitHooks,
     tool_cache: toolCache,
+    home_caches: homeCaches,
     ide_agent_files: ideAgentFiles,
     shared_folders: sharedFolders,
     apply_changes: applyChanges,
@@ -265,11 +284,12 @@ function toolchainNote(row: PolicyView["toolchains"][number]): string {
 }
 
 /** The access level choice as radio cards, with the reason a level can't run here, the Full
- * access warning when it is chosen and, on Linux below Full access, the nested git gap. Inputs:
- * the radio group name, the chosen level, the reason each level is unavailable (null when it
- * runs), the change handler and this desktop's platform. Output: the fieldset. */
-export function AccessLevels({ name, value, unavailable, onChange, platform = desktopPlatform() }: {
-  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; onChange: (access: AgentAccess) => void; platform?: string;
+ * access warning when it is chosen and the lines the engine gives for what this Linux can't
+ * hold at the chosen level. Inputs: the radio group name, the chosen level, each level's
+ * unavailable reason (null when it runs) and gap lines, and the change handler. Output: the
+ * fieldset. */
+export function AccessLevels({ name, value, unavailable, gaps, onChange }: {
+  name: string; value: AgentAccess; unavailable: (access: AgentAccess) => string | null; gaps?: (access: AgentAccess) => string[]; onChange: (access: AgentAccess) => void;
 }) {
   return <fieldset className="pj-field">
     <legend>Agent access</legend>
@@ -287,16 +307,18 @@ export function AccessLevels({ name, value, unavailable, onChange, platform = de
       })}
     </div>
     {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}</p>}
-    {value !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_NESTED_GIT}</p>}
+    {(gaps?.(value) ?? []).map((gap) => <p className="pj-note" role="note" key={gap}>{gap}</p>)}
   </fieldset>;
 }
 
 /** The network choice as radio cards, with a note when Full access makes it moot or, on Linux,
  * that limits hold ports, not hosts. Inputs: the radio group name, the chosen network, the
- * chosen access level, the change handler and this desktop's platform. Output: the fieldset. */
-export function NetworkChoices({ name, value, access, onChange, platform = desktopPlatform() }: {
-  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void; platform?: string;
+ * chosen access level, the change handler, the engine's line for the chosen network (null for
+ * none, left out when the engine sends none) and this desktop's platform. Output: the fieldset. */
+export function NetworkChoices({ name, value, access, onChange, gap, platform = desktopPlatform() }: {
+  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void; gap?: string | null; platform?: string;
 }) {
+  const line = gap !== undefined ? gap : networkGap(null, value, platform);
   return <fieldset className="pj-field">
     <legend>Network for agents with tools on</legend>
     <div className="pj-radio-cards" role="radiogroup" aria-label="Agent network">
@@ -309,7 +331,7 @@ export function NetworkChoices({ name, value, access, onChange, platform = deskt
       </label>)}
     </div>
     {access === "full" && <p className="pj-note" role="note">{NETWORK_IGNORED_UNDER_FULL}</p>}
-    {access !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_PORTS_ANY_HOST}</p>}
+    {access !== "full" && line && <p className="pj-note" role="note">{line}</p>}
   </fieldset>;
 }
 
@@ -332,6 +354,26 @@ export function ToolCacheChoices({ name, value, access, onChange }: {
     </div>
     <p className="pj-help">{TOOL_CACHE_CLEAN}</p>
     {access === "full" && <p className="pj-note" role="note">{TOOL_CACHE_IGNORED_UNDER_FULL}</p>}
+  </fieldset>;
+}
+
+/** The agent home caches choice as radio cards with what each does at an agent's start
+ * (DEC-173 add.1). It applies at every level, Full access included. Inputs: the radio group
+ * name, the chosen choice and the change handler. Output: the fieldset. */
+export function HomeCachesChoices({ name, value, onChange }: {
+  name: string; value: HomeCaches; onChange: (choice: HomeCaches) => void;
+}) {
+  return <fieldset className="pj-field">
+    <legend>{HOME_CACHES}</legend>
+    <div className="pj-radio-cards" role="radiogroup" aria-label={HOME_CACHES}>
+      {HOME_CACHES_CHOICES.map((choice) => <label className={`pj-radio-card ${value === choice.choice ? "selected" : ""}`} key={choice.choice}>
+        <input type="radio" name={name} value={choice.choice} checked={value === choice.choice} onChange={() => onChange(choice.choice)} />
+        <span className="pj-radio-body">
+          <strong>{choice.label}</strong>
+          <span className="pj-secondary">{choice.help}</span>
+        </span>
+      </label>)}
+    </div>
   </fieldset>;
 }
 
@@ -461,12 +503,14 @@ export function ApplyChoices({ name, value, onChange }: {
 }
 
 /** The allowed extras: each saved or added one with what it means and Remove, a form to add one
- * socket, one port or the owner's temp folder within their bounds (F08) and, on Linux below Full
- * access, that a port is open on every host. Inputs: the id prefix, the engine's view, the extras
- * as edited, the chosen level, the change handler and this desktop's platform. Output: the fieldset. */
-export function GrantsEditor({ prefix, view, grants, access, onChange, platform = desktopPlatform() }: {
-  prefix: string; view: PolicyView; grants: AccessGrant[]; access: AgentAccess; onChange: (grants: AccessGrant[]) => void; platform?: string;
+ * socket, one port or the owner's temp folder within their bounds (F08) and, below Full access,
+ * the Linux ports line of the network being edited (networkGap). Inputs: the id prefix, the
+ * engine's view, the extras as edited, the chosen level, the network as edited (the saved one
+ * when left out), the change handler and this desktop's platform. Output: the fieldset. */
+export function GrantsEditor({ prefix, view, grants, access, network, onChange, platform = desktopPlatform() }: {
+  prefix: string; view: PolicyView; grants: AccessGrant[]; access: AgentAccess; network?: AgentNetwork; onChange: (grants: AccessGrant[]) => void; platform?: string;
 }) {
+  const line = networkGap(view, network ?? view.network, platform);
   const [kind, setKind] = useState<"socket" | "port">("port");
   const [typed, setTyped] = useState("");
   const [problem, setProblem] = useState("");
@@ -485,7 +529,7 @@ export function GrantsEditor({ prefix, view, grants, access, onChange, platform 
   return <fieldset className="pj-field">
     <legend>Allowed extras</legend>
     <p className="pj-help">One socket, one port on this computer or your temp folder that agents may reach beyond their level. Agents can also ask for one; you answer in Questions.</p>
-    {access !== "full" && platform === "linux" && <p className="pj-note" role="note">{LINUX_PORTS_ANY_HOST}</p>}
+    {access !== "full" && line && <p className="pj-note" role="note">{line}</p>}
     <ul className="pj-paths" aria-label="Allowed extras">
       {grants.length === 0 && <li className="pj-muted">No extras.</li>}
       {grants.map((grant) => <li key={grantLabel(grant)}>

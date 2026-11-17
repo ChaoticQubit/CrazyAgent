@@ -774,9 +774,11 @@ dependencies = [
 
 [[package]]
 name = "crazyagent"
-version = "2.4.1"
+version = "2.4.2"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent-linux-supervisor",
+ "crazyagent-macos-fs",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
@@ -806,14 +808,18 @@ dependencies = [
  "vt100",
  "windows-native-keyring-store",
  "zbus-secret-service-keyring-store",
+ "zeroize",
 ]
 
 [[package]]
 name = "crazyagent-desktop"
-version = "2.4.1"
+version = "2.4.2"
 dependencies = [
  "crazyagent",
  "getrandom 0.4.3",
+ "objc2 0.6.5",
+ "objc2-app-kit",
+ "objc2-foundation 0.3.2",
  "rusqlite",
  "serde",
  "serde_json",
@@ -827,8 +833,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-linux-supervisor"
+version = "2.4.2"
+dependencies = [
+ "libc",
+ "rustix 1.1.5",
+]
+
+[[package]]
+name = "crazyagent-macos-fs"
+version = "2.4.2"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "crazyagent-win-sandbox"
-version = "2.4.1"
+version = "2.4.2"
 dependencies = [
  "tempfile",
  "windows-sys 0.61.2",

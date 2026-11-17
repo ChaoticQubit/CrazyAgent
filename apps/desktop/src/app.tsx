@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, STUCK_SIGN_IN_LINE, type EngineVersions } from "./api";
 import { ideFocus, type IdeFocus } from "./engine-client";
+import { preloadLastIde } from "./api-ide";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
 import { questionWatch } from "./notify";
@@ -21,6 +22,7 @@ import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
 import { UserDialogLayer, closeUserDialog, openUserDialog, useUserDialog } from "./screens/user-menu";
 import { alertRoute, freshAlerts, unseenByProject, workingByProject } from "./screens/team/wake";
+import { useKeptTerminalProjects } from "./screens/team/terminal-panel";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, formatRoute, isUserMenuTab, navigate, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
@@ -187,6 +189,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
     return <SessionContext.Provider value={session}>
       <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
         onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
+      <Toast message={session.toast} />
     </SessionContext.Provider>;
   }
   const asked = route.name === "settings" && isUserMenuTab(route.tab) ? route.tab : null;
@@ -359,12 +362,24 @@ export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnde
   return { route, hash: hash || undefined };
 }
 
+/** Preloads the last used project's IDE once per launch, after the window's first paint and once
+ * the engine runs, so the app shows first and the IDE loads behind it (DEC-187). Input: whether
+ * the engine runs. */
+function useIdePreload(running: boolean) {
+  const done = useRef(false);
+  useEffect(() => {
+    if (!running || done.current) return;
+    done.current = true;
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => void preloadLastIde()));
+  }, [running]);
+}
+
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch, the new free reset notice and the TUI's "open in IDE"
- * focus. */
+ * notification and question watch, the new free reset notice, the TUI's "open in IDE" focus
+ * and the last used IDE's preload. */
 export function App() {
-  const session = useSession();
   const route = useRoute();
+  const session = useSession(route.name === "home");
   const under = useRef<PageUnder>({ route: { name: "home" } });
   under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();
@@ -372,6 +387,8 @@ export function App() {
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
+  useIdePreload(session.engine === "running");
   useLearningVisits(route, session.engine === "running");
+  useKeptTerminalProjects(session.projects, session.projectsMore);
   return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }

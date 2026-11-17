@@ -13,6 +13,13 @@ mod message_timeline;
 /// One test per refusal and outcome of removing a project, Remove from dashboard or
 /// Delete everything, through a real engine and its owner connection (DEC-118).
 mod delete;
+/// One test per rule of removed projects' ids and notes (DEC-178 addendum 1): a project
+/// removed from the dashboard returns only from its own folder, and no other folder and no
+/// deleted project ever gets its id, through a real engine and its owner connection.
+mod removed_projects;
+/// One test per state and refusal of a New Project run as the engine's job, through a real
+/// engine and its owner connection (DEC-177 addendum 2).
+mod setup_job;
 
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one
@@ -671,6 +678,33 @@ fn pooled_setup(research: Vec<ResearchKind>) -> ProjectSetup {
 
 fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
+}
+
+/// Adds a project removed from the dashboard again the way the owner does, by onboarding its
+/// own folder from Found (DEC-178 addendum 1). Inputs: the owner client, the project, its
+/// folder and the client generation. Output: none; it checks the engine gave the project its
+/// own id back.
+async fn return_project(
+    owner: &mut OwnerController,
+    project: &ProjectId,
+    folder: &Path,
+    generation: u64,
+) {
+    let response = owner
+        .start_onboarding(
+            folder.to_str().unwrap().into(),
+            CredentialRef::new("pool-team").unwrap(),
+            generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(response),
+        OwnerResult::OnboardingStarted {
+            project_id: project.clone()
+        },
+        "the folder brings its own project back"
+    );
 }
 
 /// A project created with a team size the owner set keeps that number, while one created
@@ -1859,7 +1893,9 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
             VALUES ('setup-pooled',1,'master','message','Start with the header',0);
             INSERT INTO team_message_settings(project,keep_master,kept,progress,results,owner_items,page_size)
-            VALUES ('setup-pooled',0,500,1,'full',1,25);",
+            VALUES ('setup-pooled',0,500,1,'full',1,25);
+            INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('setup-pooled','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0);",
         )
         .unwrap();
     let questions = crate::questions::open(engine.root.path()).unwrap();
@@ -1910,6 +1946,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM questions_log WHERE project='setup-pooled'"),
         0,
         "its questions to the owner go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE project='setup-pooled'"),
+        0,
+        "its agents' GitHub rule proposals go with it, so none is applied or told after it"
     );
     assert_eq!(
         engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
@@ -2252,6 +2293,12 @@ async fn stale_read_paths_write_is_refused() {
         "after a re-read the redo lands"
     );
 
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
     let removed = owner.remove_project(project.clone(), 7).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
@@ -2259,16 +2306,7 @@ async fn stale_read_paths_write_is_refused() {
         3,
         "a removed project's folders move their version on once more (V2V-1)"
     );
-    let again = owner
-        .setup_project(
-            project.clone(),
-            spec("Meal planner again"),
-            pooled_setup(vec![]),
-            8,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result(again), OwnerResult::Applied);
+    return_project(&mut owner, &project, &folder, 8).await;
     assert_eq!(
         owner.project_read_paths(project.clone()).await.unwrap(),
         ReadPaths {
@@ -2410,6 +2448,12 @@ async fn a_team_setting_read_before_a_projects_removal_is_refused_on_the_project
     assert!(before.keep_warm);
     assert_eq!(before.settings_version, 1);
 
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
     let removed = owner.remove_project(project.clone(), 3).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
@@ -2417,16 +2461,7 @@ async fn a_team_setting_read_before_a_projects_removal_is_refused_on_the_project
         2,
         "removal moves the team settings version past every screen read before it"
     );
-    let again = owner
-        .setup_project(
-            project.clone(),
-            spec("Meal planner again"),
-            pooled_setup(vec![]),
-            4,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result(again), OwnerResult::Applied);
+    return_project(&mut owner, &project, &folder, 4).await;
     let readded = owner.team_status(project.clone()).await.unwrap();
     assert!(
         !readded.keep_warm,
@@ -2526,6 +2561,12 @@ async fn a_removed_projects_wake_rule_goes_with_it_and_a_screen_read_before_cann
     assert_eq!(before.project, Some(quiet));
     assert_eq!(before.project_version, 1);
 
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
     let removed = owner.remove_project(project.clone(), 3).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
@@ -2541,16 +2582,7 @@ async fn a_removed_projects_wake_rule_goes_with_it_and_a_screen_read_before_cann
         "removal moves the project rule version past every screen read before it (V2V-1)"
     );
 
-    let again = owner
-        .setup_project(
-            project.clone(),
-            spec("Meal planner again"),
-            pooled_setup(vec![]),
-            4,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result(again), OwnerResult::Applied);
+    return_project(&mut owner, &project, &folder, 4).await;
     let readded = owner
         .team_status(project.clone())
         .await
@@ -2656,6 +2688,12 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
         chosen
     );
 
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
     let removed = owner.remove_project(project.clone(), 5).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     for table in ["team_nesting", "team_new_folder_limit"] {
@@ -2668,16 +2706,7 @@ async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() 
         );
     }
 
-    let again = owner
-        .setup_project(
-            project.clone(),
-            spec("Meal planner again"),
-            pooled_setup(vec![]),
-            6,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result(again), OwnerResult::Applied);
+    return_project(&mut owner, &project, &folder, 6).await;
     assert_eq!(
         settings(&owner.team_status(project).await.unwrap()),
         defaults,
@@ -2940,6 +2969,7 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
+                    home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     ..Default::default()
@@ -2989,6 +3019,7 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
         toolchains,
         ide_git_hooks,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3110,6 +3141,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         }],
         ide_git_hooks: true,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3132,6 +3164,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
@@ -3178,6 +3211,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ],
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3204,6 +3238,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -3237,6 +3272,12 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             .0,
         "invalid_project"
     );
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
     let removed = owner.remove_project(project.clone(), 4).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
@@ -3262,18 +3303,16 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         );
     }
 
-    let again = owner
-        .setup_project(
-            project.clone(),
-            spec("Meal planner again"),
-            pooled_setup(vec![]),
-            5,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result(again), OwnerResult::Applied);
+    return_project(&mut owner, &project, &folder, 5).await;
+    let onboarded = Some(AgentAccess::NEW_PROJECT)
+        .filter(|level| level.unavailable().is_none())
+        .unwrap_or_default();
+    assert_ne!(onboarded, AgentAccess::Full);
     let readded = owner.project_agent_policy(project.clone()).await.unwrap();
-    assert_eq!(readded.access, AgentAccess::Sandboxed);
+    assert_eq!(
+        readded.access, onboarded,
+        "the project back from its folder gets the access onboarding gives, not the old one"
+    );
     assert_eq!(readded.version, 3);
     let from_before = owner
         .set_project_agent_policy(
@@ -3284,6 +3323,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
@@ -3301,17 +3341,22 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
     assert_eq!(
         owner.project_agent_policy(project.clone()).await.unwrap(),
         readded,
-        "the project added again stays Sandboxed"
+        "the project added again keeps the access it came back with"
     );
     let chosen = owner
         .set_project_agent_policy(
             project.clone(),
             readded.version,
             AgentPolicy {
-                access: AgentAccess::OwnBranch,
+                access: if onboarded == AgentAccess::OwnBranch {
+                    AgentAccess::Sandboxed
+                } else {
+                    AgentAccess::OwnBranch
+                },
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
@@ -3633,6 +3678,60 @@ async fn owner_removal_takes_the_overview_and_master_conversation_rows_with_it()
             "{table} goes with the project"
         );
     }
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A project removed from the dashboard and brought back from its own folder starts with no
+/// repository admission of before (RV-DS241-149, DEC-178 addendum 1): the removal takes the
+/// admission with it, so the master bootstrap admits the repository now at that path instead
+/// of comparing it with the old folder's identity and failing every turn with
+/// `admitted_repository_replaced`.
+#[tokio::test]
+async fn owner_removal_takes_the_projects_repository_admissions_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    db.execute(
+        "INSERT INTO repository_admissions(project,repository,body)
+         VALUES ('setup-pooled','/old/meal-planner','{\"old\":true}')",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let admissions = "SELECT count(*) FROM repository_admissions WHERE project='setup-pooled'";
+    assert_eq!(engine.rows(admissions), 1);
+
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
+    let removed = owner.remove_project(project.clone(), 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows(admissions),
+        0,
+        "the admission goes with the project"
+    );
+    return_project(&mut owner, &project, &folder, 3).await;
+    assert_eq!(
+        engine.rows(admissions),
+        0,
+        "the project added again inherits no admission"
+    );
     drop(owner);
     engine.stop().await;
 }
@@ -4075,7 +4174,8 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         owner.project_hidden_paths(project.clone()).await.unwrap(),
         HiddenPaths {
             paths: vec![text(&secret)],
-            version: 1
+            version: 1,
+            runs: Vec::new(),
         },
         "the stale window changed nothing"
     );
@@ -4096,11 +4196,18 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         owner.project_hidden_paths(project.clone()).await.unwrap(),
         HiddenPaths {
             paths: vec![text(&secret), text(&vendor)],
-            version: 2
+            version: 2,
+            runs: Vec::new(),
         },
         "after a re-read the redo lands"
     );
 
+    let folder = owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap()
+        .project_folder();
     let removed = owner.remove_project(project.clone(), 7).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
@@ -4108,21 +4215,13 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         3,
         "a removed project's hidden folders move their version on once more"
     );
-    let again = owner
-        .setup_project(
-            project.clone(),
-            spec("Meal planner again"),
-            pooled_setup(vec![]),
-            8,
-        )
-        .await
-        .unwrap();
-    assert_eq!(result(again), OwnerResult::Applied);
+    return_project(&mut owner, &project, &folder, 8).await;
     assert_eq!(
         owner.project_hidden_paths(project.clone()).await.unwrap(),
         HiddenPaths {
             paths: vec![],
-            version: 3
+            version: 3,
+            runs: Vec::new(),
         },
         "the project added again under the same id starts with no hidden folders"
     );
@@ -4138,5 +4237,101 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
         );
     }
     drop(owner);
+    engine.stop().await;
+}
+
+/// SA-VID14-R2-N2: the hidden folders read names the kind of an engine run that started
+/// before a folder was hidden while it runs, and nothing once it ends.
+#[tokio::test]
+async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hidden() {
+    use crate::sandbox::hidden_paths::RunKind;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("hidden-runs-wire").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let secret = stored.project_folder().join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    let secret = std::fs::canonicalize(&secret).unwrap();
+    let run = crate::sandbox::hidden_paths::starting(RunKind::Research, project.as_str()).unwrap();
+    let saved = owner
+        .set_project_hidden_paths(
+            project.clone(),
+            0,
+            vec![secret.to_str().unwrap().to_owned()],
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .project_hidden_paths(project.clone())
+            .await
+            .unwrap()
+            .runs,
+        vec![RunKind::Research],
+        "a run that started before the folder was hidden is named before it records its folders"
+    );
+    run.hid(&[]);
+    assert_eq!(
+        owner
+            .project_hidden_paths(project.clone())
+            .await
+            .unwrap()
+            .runs,
+        vec![RunKind::Research],
+        "and while it runs after"
+    );
+    let after =
+        crate::sandbox::hidden_paths::starting(RunKind::Overview, project.as_str()).unwrap();
+    after.hid(std::slice::from_ref(&secret));
+    drop(run);
+    assert_eq!(
+        owner
+            .project_hidden_paths(project.clone())
+            .await
+            .unwrap()
+            .runs,
+        Vec::<RunKind>::new(),
+        "an ended run and one that hid the folder are not named"
+    );
+    drop(after);
+}
+
+/// DEC-182 S7: an engine start ends every GitHub rule proposal an earlier engine left
+/// approved or being applied as refused and tells each agent once, sending nothing, so the
+/// owner's sign-in never applies a change the owner may have set otherwise since.
+#[tokio::test]
+async fn an_engine_start_ends_a_github_rule_proposal_left_approved_or_applying() {
+    let mut engine = Engine::start().await;
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms)
+            VALUES ('alpha','agent:1','wiki_off',1,'Docs live in the repository.','octo-cat/tool','approved',0),
+                   ('alpha','agent:2','no_force_push',1,'History stays.','octo-cat/tool','applying',0);",
+        )
+        .unwrap();
+    engine.restart().await;
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM github_rule_requests WHERE status='refused' AND told=1"),
+        2
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT count(*) FROM team_messages WHERE project='alpha' AND author='engine' AND text LIKE '%: refused.'"
+        ),
+        2
+    );
     engine.stop().await;
 }

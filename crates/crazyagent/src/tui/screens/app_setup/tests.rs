@@ -6,8 +6,8 @@ use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-use crate::sandbox::LinuxSockets;
-use crate::sandbox_settings::SandboxSettings;
+use crate::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
@@ -184,8 +184,12 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
     shell.arrive(event(AppSetupEvent::Home(Ok(home()))));
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
-    shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
-        linux_sockets,
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(StoredSandboxSettings {
+        settings: SandboxSettings {
+            linux_sockets,
+            ..SandboxSettings::default()
+        },
+        version: 0,
     }))));
     shell.arrive(event(AppSetupEvent::Cleanup(
         Ok(CleanupSettings::default()),
@@ -228,6 +232,21 @@ fn chosen(shell: &mut Shell) -> LinuxSockets {
         panic!("one sandbox change required, got {} jobs", sent.len())
     };
     settings.linux_sockets
+}
+
+fn sent(shell: &mut Shell) -> SandboxSettings {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetSandbox { settings, .. }] = sent.as_slice() else {
+        panic!("one sandbox change required, got {} jobs", sent.len())
+    };
+    *settings
+}
+
+fn stored(shell: &mut Shell, settings: SandboxSettings) {
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(StoredSandboxSettings {
+        settings,
+        version: 0,
+    }))));
 }
 
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
@@ -754,7 +773,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     let github = find(&rows, "GitHub    ");
     assert!(github.contains("Signed in as octocat"));
     assert!(github.contains("with GitHub sign-in"));
-    assert!(bar(&rows).contains("g Sign out of GitHub"));
+    assert!(bar(&rows).contains("g Sign out"));
     shell.key(Key::Char('g'));
     find(&render(&mut shell, 120, 36), "Sign out of GitHub?");
     shell.key(Key::Char('y'));
@@ -773,7 +792,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     assert_eq!(lead(&shell), "Signed out of GitHub.");
     let rows = render(&mut shell, 120, 36);
     assert!(find(&rows, "GitHub    ").contains("Not signed in"));
-    assert!(!bar(&rows).contains("Sign out of GitHub"));
+    assert!(!bar(&rows).contains("g Sign out"));
 }
 
 #[test]
@@ -882,8 +901,8 @@ fn a_long_pack_scrolls_with_the_cursor() {
 
 #[test]
 fn settings_show_the_linux_sockets_setting_and_its_risk() {
-    let mut shell = settings(120, 60);
-    let rows = render(&mut shell, 120, 60);
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
     assert!(find(&rows, "Linux sockets  ").contains("TCP only, names looked up over TCP"));
     find(&rows, "RES_OPTIONS");
     assert!(
@@ -891,9 +910,9 @@ fn settings_show_the_linux_sockets_setting_and_its_risk() {
             .1
             .contains("Wrappers are judged by their first file, a script by its interpreter")
     );
-    assert!(bar(&rows).contains("l Linux sockets"));
+    assert!(bar(&rows).contains("l Sockets"));
     shell.key(Key::Char('l'));
-    let rows = render(&mut shell, 120, 60);
+    let rows = render(&mut shell, 120, 72);
     find(
         &rows,
         "how an agent limited to its model reaches the network",
@@ -975,6 +994,241 @@ fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
     assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
 }
 
+/// A Linux sandbox save refused as stale, as another window saved the sandbox first, says
+/// the setting changed in another window and that the saved one shows now, not the pack's
+/// sentence, and reads the setting again (STRICT-R2-F1). A stale pack change keeps its own
+/// sentence.
+#[test]
+fn a_stale_sandbox_save_says_the_setting_changed_elsewhere_and_reads_it_again() {
+    use crate::storage::versioned::STALE_CODE;
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::Refuse);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Err(STALE_CODE.into()))));
+    assert_eq!(
+        lead(&shell),
+        "This changed in another window, so yours was not saved. The saved one shows now."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Sandbox)),
+        "a stale save reads the setting again"
+    );
+    assert!(setup_plain(STALE_CODE).starts_with("The pack changed in another window"));
+}
+
+#[test]
+fn settings_show_the_linux_call_supervisor_setting_and_what_each_option_does() {
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
+    assert!(find(&rows, "Linux supervisor ").contains("On (recommended)"));
+    find(&rows, "makes them for them");
+    assert!(bar(&rows).contains("v Supervisor"));
+    shell.key(Key::Char('v'));
+    let rows = render(&mut shell, 120, 72);
+    find(&rows, "Linux call supervisor:");
+    for title in ["> On (recommended)", "  Off"] {
+        find(&rows, title);
+    }
+    find(&rows, "open to them on every host");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the current option saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn turning_the_call_supervisor_off_saves_it_and_keeps_the_sockets_choice() {
+    let mut shell = settings_with(120, 60, LinuxSockets::TcpPorts);
+    shell.key(Key::Char('v'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> Off");
+    shell.key(Key::Enter);
+    let off = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpPorts,
+        linux_supervisor: LinuxSupervisor::Off,
+        ..SandboxSettings::default()
+    };
+    assert_eq!(sent(&mut shell), off);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(lead(&shell), "Linux supervisor: Off.");
+    stored(&mut shell, off);
+    assert!(find(&render(&mut shell, 120, 60), "Linux supervisor ").contains("Off"));
+}
+
+#[test]
+fn changing_sockets_keeps_the_supervisor_off_and_turning_it_on_keeps_the_sockets() {
+    let mut shell = settings(120, 60);
+    let off = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpOnly,
+        linux_supervisor: LinuxSupervisor::Off,
+        ..SandboxSettings::default()
+    };
+    stored(&mut shell, off);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let refused = SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        ..off
+    };
+    assert_eq!(sent(&mut shell), refused);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    let _read_back = jobs(&mut shell);
+    stored(&mut shell, refused);
+    shell.key(Key::Char('v'));
+    find(&render(&mut shell, 120, 60), "> Off");
+    shell.key(Key::Up);
+    shell.key(Key::Enter);
+    let on = SandboxSettings {
+        linux_supervisor: LinuxSupervisor::On,
+        ..refused
+    };
+    assert_eq!(sent(&mut shell), on);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(lead(&shell), "Linux supervisor: On (recommended).");
+}
+
+#[test]
+fn neither_linux_setting_is_saved_while_the_engine_has_not_said_both() {
+    let mut shell = Shell::with(ctx(120, 60), Box::new(AppSetup::new(false)));
+    let _asked = jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    let _read = jobs(&mut shell);
+    shell.key(Key::Char('v'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        "The Linux call supervisor setting is not known yet."
+    );
+    for (key, words) in [('v', "Linux call supervisor"), ('l', "Linux sockets")] {
+        stored(&mut shell, SandboxSettings::default());
+        shell.key(Key::Char(key));
+        shell.arrive(event(AppSetupEvent::Sandbox(Err("busy".into()))));
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        assert!(
+            jobs(&mut shell).is_empty(),
+            "{key}: nothing is sent from defaults"
+        );
+        let unknown = format!("The {words} setting is not known yet.");
+        assert_eq!(lead(&shell), unknown);
+    }
+}
+
+#[test]
+fn settings_show_the_strict_linux_setting_off_by_default_and_what_each_option_does() {
+    let mut shell = settings(120, 72);
+    let rows = render(&mut shell, 120, 72);
+    assert!(find(&rows, "Linux strict ").contains("Off"));
+    assert!(bar(&rows).contains("x Strict"));
+    shell.key(Key::Char('x'));
+    let rows = render(&mut shell, 120, 72);
+    find(&rows, "Refuse agents without the full Linux sandbox:");
+    for title in ["> Off", "  On"] {
+        find(&rows, title);
+    }
+    find(&rows, "process space of its own");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the current option saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn turning_strict_on_saves_it_and_keeps_the_sockets_and_supervisor_choices() {
+    let mut shell = settings_with(120, 60, LinuxSockets::TcpPorts);
+    let kept = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpPorts,
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::Off,
+    };
+    stored(&mut shell, kept);
+    shell.key(Key::Char('x'));
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> On");
+    shell.key(Key::Enter);
+    let on = SandboxSettings {
+        linux_strict: LinuxStrict::On,
+        ..kept
+    };
+    assert_eq!(sent(&mut shell), on);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(lead(&shell), "Linux strict: On.");
+    stored(&mut shell, on);
+    assert!(find(&render(&mut shell, 120, 60), "Linux strict ").contains("On"));
+}
+
+#[test]
+fn changing_sockets_or_the_supervisor_keeps_strict_on() {
+    let mut shell = settings(120, 60);
+    let strict = SandboxSettings {
+        linux_sockets: LinuxSockets::TcpOnly,
+        linux_supervisor: LinuxSupervisor::On,
+        linux_strict: LinuxStrict::On,
+    };
+    stored(&mut shell, strict);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let refused = SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        ..strict
+    };
+    assert_eq!(sent(&mut shell), refused);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    let _read_back = jobs(&mut shell);
+    stored(&mut shell, refused);
+    shell.key(Key::Char('v'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let off = SandboxSettings {
+        linux_supervisor: LinuxSupervisor::Off,
+        ..refused
+    };
+    assert_eq!(sent(&mut shell), off);
+    assert_eq!(off.linux_strict, LinuxStrict::On);
+}
+
+#[test]
+fn each_sandbox_change_names_the_version_of_the_read_it_changes() {
+    for (key, version) in [('l', 7), ('v', 8), ('x', 9)] {
+        let mut shell = settings(120, 60);
+        shell.arrive(event(AppSetupEvent::Sandbox(Ok(StoredSandboxSettings {
+            settings: SandboxSettings::default(),
+            version,
+        }))));
+        shell.key(Key::Char(key));
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        let sent = jobs(&mut shell);
+        let named = match sent.as_slice() {
+            [AppSetupJob::SetSandbox { version, .. }] => Some(*version),
+            _ => None,
+        };
+        assert_eq!(named, Some(version), "key {key}");
+    }
+}
+
+#[test]
+fn the_strict_setting_is_not_saved_while_the_engine_has_not_said_it() {
+    let mut shell = Shell::with(ctx(120, 60), Box::new(AppSetup::new(false)));
+    let _asked = jobs(&mut shell);
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    let _read = jobs(&mut shell);
+    shell.key(Key::Char('x'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(lead(&shell), "The Linux strict setting is not known yet.");
+}
+
 fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
     let sent = jobs(shell);
     let [AppSetupJob::SetCleanup { settings, .. }] = sent.as_slice() else {
@@ -986,7 +1240,7 @@ fn cleanup_chosen(shell: &mut Shell) -> CleanupSettings {
     *settings
 }
 
-fn stored(shell: &mut Shell, mode: CleanupMode, days: u16) {
+fn stored_cleanup(shell: &mut Shell, mode: CleanupMode, days: u16) {
     shell.arrive(event(AppSetupEvent::Cleanup(Ok(CleanupSettings {
         mode,
         days,
@@ -1008,7 +1262,7 @@ fn settings_show_finished_agents_one_day_after_by_default_and_what_stays() {
         &rows,
         "Only the worktree goes: the code checkout and its build files.",
     );
-    assert!(bar(&rows).contains("f Finished agents"));
+    assert!(bar(&rows).contains("f Finished"));
     shell.key(Key::Char('f'));
     let rows = render(&mut shell, 160, 60);
     find(
@@ -1078,7 +1332,7 @@ fn after_n_days_saves_the_typed_days_and_refuses_days_outside_one_to_365() {
 #[test]
 fn once_its_work_lands_saves_it_and_keeps_the_stored_days() {
     let mut shell = settings(120, 60);
-    stored(&mut shell, CleanupMode::AfterDays, 7);
+    stored_cleanup(&mut shell, CleanupMode::AfterDays, 7);
     assert!(
         find(&render(&mut shell, 120, 60), "Finished agents  ")
             .contains("7 days after the agent finishes")
@@ -1117,7 +1371,7 @@ fn only_when_i_click_clean_up_saves_manual_and_a_refused_save_says_why() {
     shell.arrive(event(AppSetupEvent::CleanupSet(Err("busy".into()))));
     assert_ne!(lead(&shell), "Finished agents: Only when I click Clean up.");
     assert!(!lead(&shell).is_empty());
-    stored(&mut shell, CleanupMode::Manual, 1);
+    stored_cleanup(&mut shell, CleanupMode::Manual, 1);
     assert!(
         find(&render(&mut shell, 120, 60), "Finished agents  ")
             .contains("Only when I click Clean up")
@@ -1671,6 +1925,26 @@ fn the_sockets_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
 }
 
 #[test]
+fn the_strict_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('x'));
+        let (first, last) = ("Refuse agents without the full", "says why.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
+fn the_supervisor_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('v'));
+        let (first, last) = ("Linux call supervisor:", "your programs.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
 fn the_cleanup_ask_and_its_days_field_are_drawn_whole_at_the_smallest_and_odd_sizes() {
     for (width, height) in ASK_SIZES {
         let mut shell = settings(width, height);
@@ -1872,12 +2146,7 @@ fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
     let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
     assert_eq!(wide.len(), 1, "{wide:?}");
     let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
-    for needed in [
-        "Esc Back",
-        "z Master frame",
-        "g Sign out of GitHub",
-        "? Help",
-    ] {
+    for needed in ["Esc Back", "z Master frame", "g Sign out", "? Help"] {
         assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
     }
     for (width, height) in [(200, 80), (209, 80), (80, 24)] {
@@ -2065,13 +2334,7 @@ fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_
     let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
     assert_eq!(wide.len(), 1, "{wide:?}");
     let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
-    for needed in [
-        "p Fix",
-        "u Unused",
-        "Esc Back",
-        "g Sign out of GitHub",
-        "? Help",
-    ] {
+    for needed in ["p Fix", "u Unused", "Esc Back", "g Sign out", "? Help"] {
         assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
     }
     for (width, height) in [(200, 80), (209, 80), (80, 24)] {
@@ -2081,6 +2344,64 @@ fn a_refused_tool_keeps_every_app_settings_hint_on_the_bar_from_80_by_24_to_240_
             &hints,
             &format!("{width}x{height}"),
         );
+    }
+}
+
+/// Signed-in app settings show every key once at 80x24 in at most three bar rows, a
+/// refused tool's `p Fix` too and with questions waiting, so `u Unused` and `Esc Back`
+/// stay on the last row beside the badge; with no question waiting the whole bar is one
+/// row again at 240 columns. The keys are named here, not read from the wide bar, so a
+/// bar that grows past one row at 240 still fails this row.
+#[test]
+fn signed_in_app_settings_show_every_key_at_80_by_24_with_or_without_a_fix() {
+    let keys = [
+        "Space",
+        "Enter Install missing",
+        "d Remove",
+        "h Home",
+        "g Sign out",
+        "l Sockets",
+        "v Supervisor",
+        "x Strict",
+        "f Finished",
+        "q Quitting",
+        "e Retry",
+        "m Master steps",
+        "t Master time",
+        "z Master frame",
+        "u Unused",
+        "Esc Back",
+    ];
+    let mut shell = settings(240, 80);
+    for fix in [false, true] {
+        if fix {
+            shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+                crate::setup::RefusedTool::FixButton,
+            )))));
+        }
+        let mut wanted: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+        if fix {
+            wanted.push("p Fix".to_owned());
+        }
+        for waiting in [0, 12] {
+            shell.ctx.store.questions = Load::Ready(vec![(
+                crate::protocol::ProjectId::new("alpha").unwrap(),
+                waiting,
+            )]);
+            if waiting == 0 {
+                let rows = render(&mut shell, 240, 80);
+                let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
+                assert_eq!(wide.len(), 1, "fix {fix}: {wide:?}");
+            }
+            for (width, height) in [(80, 24), (100, 24), (240, 80)] {
+                let rows = render(&mut shell, width, height);
+                crate::tui::screens::settings_accounts::tests::every_hint_once(
+                    &rows,
+                    &wanted,
+                    &format!("fix {fix}, {waiting} waiting, {width}x{height}"),
+                );
+            }
+        }
     }
 }
 
@@ -2335,4 +2656,35 @@ fn below_80x24_no_key_reaches_setup_so_enter_installs_and_approves_nothing() {
             [AppSetupJob::Run { .. }]
         ));
     }
+}
+
+/// DEC-182 S6c: signed in, G opens Settings / GitHub, the rules a new repository starts
+/// with, and the Keys overlay lists it while Setup's bar leaves it out for the settings
+/// it already carries; signed out, G does nothing and neither lists it.
+#[test]
+fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
+    let shows = |rows: &[String], text: &str| rows.iter().any(|row| row.contains(text));
+    let listed = format!("{:<10}GitHub rules", "G");
+    let mut shell = settings(240, 80);
+    let rows = render(&mut shell, 240, 80);
+    assert!(!shows(&rows, "GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('?'));
+    let rows = render(&mut shell, 240, 80);
+    assert!(shows(&rows, &listed), "{rows:#?}");
+    shell.key(Key::Esc);
+    shell.key(Key::Char('G'));
+    assert_eq!(shell.place(), Some(Place::GitHubDefaults));
+    let mut shell = settings(240, 80);
+    shell.arrive(event(AppSetupEvent::GitHub(Ok(GitHubStatus {
+        signed_in: false,
+        ..signed_in()
+    }))));
+    let rows = render(&mut shell, 240, 80);
+    assert!(!shows(&rows, "GitHub rules"), "{}", bar(&rows));
+    shell.key(Key::Char('?'));
+    let rows = render(&mut shell, 240, 80);
+    assert!(!shows(&rows, "GitHub rules"), "{rows:#?}");
+    shell.key(Key::Esc);
+    shell.key(Key::Char('G'));
+    assert_eq!(shell.place(), Some(Place::Setup { first_run: false }));
 }

@@ -1,5 +1,4 @@
 use super::*;
-#[cfg(unix)]
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{RefusedTool, SetupAction, SetupStatus, progress};
@@ -25,7 +24,6 @@ const PRESENT: &str = "present";
 const SKILLS: [&str; 2] = ["skills", "global"];
 
 pub(crate) enum Command {
-    #[cfg(unix)]
     Install {
         id: String,
         source: String,
@@ -52,15 +50,22 @@ struct PackRecord {
     hooks: Vec<KeptHook>,
 }
 
-/// A hook the owner switched off, everywhere or in some projects, that went with a pin a
-/// new one replaced or with the item it followed, kept by name until setup adds the entry's
-/// hooks again ([`keep_hooks`]).
+/// A hook of a pin a new one replaced, or of an item removed while its entry stays, with what
+/// it runs (event, matcher and command) and how the owner switched it, everywhere or in some
+/// projects, kept until setup adds the entry's hooks again ([`keep_hooks`]). A row saved
+/// before what it runs was kept has none of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeptHook {
-    name: String,
-    enabled: bool,
-    projects: Vec<String>,
+pub(super) struct KeptHook {
+    pub(super) name: String,
+    pub(super) enabled: bool,
+    pub(super) projects: Vec<String>,
+    #[serde(default)]
+    pub(super) event: String,
+    #[serde(default)]
+    pub(super) matcher: Option<String>,
+    #[serde(default)]
+    pub(super) command: String,
 }
 
 /// Creates the installed default-pack tables when the engine database opens.
@@ -155,6 +160,50 @@ pub(crate) fn entry_switch(tx: &Transaction<'_>, id: &str) -> Result<Option<bool
     Ok(present(tx, entry)?.map(|record| record.enabled))
 }
 
+/// Drops one project from the switched-off hooks every pack row keeps ([`KeptHook`]) when the
+/// project is removed or its id is taken again, so a later setup run never switches a hook
+/// off in a new project that reuses the id (RV-DS241-195). Every kept hook stays, so the
+/// hook a new pin adds still matches the one running the same thing and takes nothing from
+/// a switched-off sibling (rv-code2 B3B-1); the next seed clears them all. A database with
+/// no pack table, or a row that does not read, is left as it is. Inputs: the transaction
+/// and the project. Output: any SQLite failure.
+pub(super) fn forget_project(
+    tx: &Transaction<'_>,
+    project: &crate::protocol::ProjectId,
+) -> Result<(), EngineError> {
+    let table: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            ["setup_pack"],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !table {
+        return Ok(());
+    }
+    let mut statement = tx.prepare("SELECT body FROM setup_pack").map_err(error)?;
+    let bodies = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let holds = |hook: &KeptHook| hook.projects.iter().any(|id| id == project.as_str());
+    for body in bodies {
+        let Ok(mut record) = serde_json::from_str::<PackRecord>(&body) else {
+            continue;
+        };
+        if !record.hooks.iter().any(holds) {
+            continue;
+        }
+        for hook in &mut record.hooks {
+            hook.projects.retain(|id| id != project.as_str());
+        }
+        assert!(!record.hooks.iter().any(holds));
+        save_pack(tx, &record)?;
+    }
+    Ok(())
+}
+
 fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineError> {
     let body = serde_json::to_string(record).map_err(|_| error("setup_record_invalid"))?;
     tx.execute(
@@ -166,7 +215,6 @@ fn save_pack(tx: &Transaction<'_>, record: &PackRecord) -> Result<(), EngineErro
     Ok(())
 }
 
-#[cfg(unix)]
 fn taken(problem: EngineError) -> EngineError {
     match problem.0.as_str() {
         "skill_name_taken" | "server_name_taken" => error("pack_name_taken"),
@@ -180,12 +228,7 @@ fn taken(problem: EngineError) -> EngineError {
 fn hooks_off(tx: &Transaction<'_>, item: &str) -> Result<Vec<KeptHook>, EngineError> {
     let hooks: Vec<KeptHook> = plugins::following_hooks(tx, item)?
         .into_iter()
-        .filter(|(_, enabled, projects)| !enabled || !projects.is_empty())
-        .map(|(name, enabled, projects)| KeptHook {
-            name,
-            enabled,
-            projects,
-        })
+        .filter(|hook| !hook.enabled || !hook.projects.is_empty())
         .collect();
     assert!(hooks.len() <= crate::plugins::HOOKS_PER_SCOPE_MAX);
     Ok(hooks)
@@ -308,7 +351,6 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
 /// What a new pin keeps from the pin it replaces: whether the entry is on, each skill's
 /// on/off state and per-project switches by skill name, the hooks the owner switched off
 /// ([`KeptHook`]), and the server when the new pin names the same one.
-#[cfg(unix)]
 struct Kept {
     enabled: bool,
     server: Option<String>,
@@ -316,13 +358,12 @@ struct Kept {
     hooks: Vec<KeptHook>,
 }
 
-/// Reads what the owner set on an older pin, then removes its skills, and its server
-/// unless the new pin names the same server, which is then reused so its secrets,
-/// switches and on/off state stay. Hooks the owner switched off are read from the live
-/// hooks, or kept from the old row when none is live: the entry was off, or the item they
-/// followed was removed. Inputs: the transaction, engine root, old row, new server and the
-/// moved-aside folders. Output: what the new pin keeps.
-#[cfg(unix)]
+/// Reads what the owner set on an older pin, then removes its skills, and its server unless
+/// the new pin names the same server, which is reused so its secrets, switches and on/off
+/// state stay. Every live hook is kept with what it runs and its switches, or the old row's
+/// when none is live: the entry was off, or the item they followed was removed. Inputs: the
+/// transaction, engine root, old row, new server and the moved-aside folders. Output: what
+/// the new pin keeps.
 fn carry(
     tx: &Transaction<'_>,
     root: &Path,
@@ -376,7 +417,7 @@ fn carry(
     }
     let mut hooks = Vec::new();
     for item in dropped.skills.iter().chain(dropped.server.iter()) {
-        hooks.extend(hooks_off(tx, item)?);
+        hooks.extend(plugins::following_hooks(tx, item)?);
     }
     if hooks.is_empty() {
         hooks = std::mem::take(&mut dropped.hooks);
@@ -395,7 +436,6 @@ fn carry(
 /// under the entry's name is adopted as present and never replaced or removed. Inputs: the
 /// transaction, engine root, new row, skill folders and server, plus the lists of added
 /// and moved-aside folders. Output: any failure.
-#[cfg(unix)]
 fn install(
     tx: &Transaction<'_>,
     root: &Path,
@@ -880,9 +920,10 @@ fn seed_hooks(
 }
 
 /// Switches the hooks setup just added off as the owner had them before they went with a
-/// replaced pin or a removed item ([`KeptHook`]), matched by name, everywhere or in the same
-/// projects, then forgets what was kept. Inputs: the transaction, engine root, the entry's
-/// row and the added hooks. Output: any failure.
+/// replaced pin or a removed item ([`KeptHook`]), each by the kept hooks [`kept_for`] gives
+/// it, everywhere or in the same projects that still exist (RV-DS241-195), then forgets what
+/// was kept. Inputs: the transaction, engine root, the entry's row and the added hooks.
+/// Output: any failure.
 #[cfg(unix)]
 fn keep_hooks(
     tx: &Transaction<'_>,
@@ -894,10 +935,8 @@ fn keep_hooks(
         return Ok(());
     }
     for hook in added {
-        let Some(kept) = record.hooks.iter().find(|kept| kept.name == hook.name) else {
-            continue;
-        };
-        if !kept.enabled {
+        let kept = kept_for(&record.hooks, added, hook);
+        if kept.iter().any(|kept| !kept.enabled) {
             plugins::run(
                 tx,
                 root,
@@ -907,9 +946,10 @@ fn keep_hooks(
                 },
             )?;
         }
-        for project in &kept.projects {
+        for project in kept.iter().flat_map(|kept| &kept.projects) {
             tx.execute(
-                "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
+                "INSERT OR IGNORE INTO plugin_switches(project,item)
+                 SELECT ?1, ?2 WHERE EXISTS(SELECT 1 FROM projects WHERE id=?1)",
                 [project, &hook.id],
             )
             .map_err(error)?;
@@ -920,6 +960,41 @@ fn keep_hooks(
     save_pack(tx, &record)
 }
 
+/// The kept hooks whose switches one added hook takes (RV-DS241-155): those running what it
+/// runs, else both its command under another event or matcher that no added hook runs as
+/// kept, and the switched hooks of its event no added hook runs any more, so any off wins
+/// (b3b4 r3); a row 2.4.1 saved without what it runs goes to every hook of its plugin event.
+/// Inputs: the kept hooks, every added hook and the one added hook. Output: those it takes.
+#[cfg(unix)]
+fn kept_for<'a>(
+    kept: &'a [KeptHook],
+    added: &[crate::plugins::HookView],
+    hook: &crate::plugins::HookView,
+) -> Vec<&'a KeptHook> {
+    let runs = |kept: &KeptHook, hook: &crate::plugins::HookView| {
+        kept.event == hook.event && kept.matcher == hook.matcher && kept.command == hook.command
+    };
+    let same: Vec<&KeptHook> = kept.iter().filter(|kept| runs(kept, hook)).collect();
+    if !same.is_empty() {
+        return same;
+    }
+    let moved = kept.iter().filter(|kept| {
+        !kept.event.is_empty()
+            && kept.command == hook.command
+            && !added.iter().any(|other| runs(kept, other))
+    });
+    let place = format!("{}/{}", hook.plugin, hook.event);
+    let replaced = |kept: &&KeptHook| {
+        if kept.event.is_empty() {
+            return kept.name.rsplit_once('/').map(|(at, _)| at) == Some(place.as_str());
+        }
+        let switched = !kept.enabled || !kept.projects.is_empty();
+        let gone = !added.iter().any(|other| other.command == kept.command);
+        switched && gone && kept.event == hook.event
+    };
+    moved.chain(kept.iter().filter(replaced)).collect()
+}
+
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
 /// MCP server in one transaction, add the hooks of its plugin folder and keep why they were
 /// refused for the entry's setup row, or sweep folders and secrets that removals left.
@@ -927,7 +1002,6 @@ fn keep_hooks(
 /// commit; replaced ones are deleted after it commits.
 /// Inputs: the engine connection, the engine root and the job. Output: nothing, or the
 /// plain reason.
-#[cfg(unix)]
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,
@@ -940,6 +1014,7 @@ pub(crate) fn execute(
             skills,
             server,
         } => (id, source, skills, server),
+        #[cfg(unix)]
         Command::SeedHooks { id, plugin } => {
             let seeded = seed_hooks(connection, root, &id, &plugin);
             progress::with(root, |state| match &seeded {
@@ -985,19 +1060,6 @@ pub(crate) fn execute(
             Err(problem)
         }
     }
-}
-
-/// Runs the only default-pack job that exists where setup cannot install packs: the sweep
-/// of folder and secret removals left by an earlier run. Inputs: the engine connection,
-/// engine root and job. Output: nothing, or a plain reason.
-#[cfg(not(unix))]
-pub(crate) fn execute(
-    connection: &mut Connection,
-    root: &Path,
-    command: Command,
-) -> Result<(), EngineError> {
-    let Command::Sweep = command;
-    sweep(connection, root)
 }
 
 #[cfg(test)]

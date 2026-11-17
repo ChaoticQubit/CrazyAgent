@@ -1,6 +1,5 @@
 use super::{Search, in_crazyagent_folder, is_shim, is_shim_folder};
 use crate::engine::EngineError;
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
@@ -37,8 +36,15 @@ const LINK_HOPS_MAX: usize = 40;
 /// ever left out of an [`AgentSpace`].
 pub const AGENT_ROWS_MAX: usize = 1024;
 pub const PROJECT_REPOSITORIES_MAX: usize = 64;
-const AGENT_FOLDERS_MAX: usize = 2 * (AGENT_ROWS_MAX * (PROJECT_REPOSITORIES_MAX + 3) + 1);
-const AGENT_TABLES: [(&str, Names, &str); 4] = [
+/// The most folders the agent tables can name: per row read, a setup names one folder, a
+/// project at most [`PROJECT_REPOSITORIES_MAX`] and each worktree table one, so
+/// (1 + 64 + 1 + 1) for each of [`AGENT_ROWS_MAX`] rows.
+pub(crate) const NAMED_FOLDERS_MAX: usize = AGENT_ROWS_MAX * (PROJECT_REPOSITORIES_MAX + 3);
+const AGENT_FOLDERS_MAX: usize = 2 * (NAMED_FOLDERS_MAX + 1);
+/// The engine tables that name folders agents can write, how each names them and the query
+/// that reads them, bounded by its one parameter: engine start's [`AgentSpace`] and the tool
+/// resolver's places ([`crate::tools::Places`]) read this one list.
+pub(crate) const AGENT_TABLES: [(&str, Names, &str); 4] = [
     (
         "project_setups",
         Names::Setup,
@@ -78,7 +84,7 @@ fn owner_temp() -> Vec<PathBuf> {
 /// worktree inside its repository or a `.crazyagent` folder is covered already and not read,
 /// so kept agents never fill [`AGENT_ROWS_MAX`].
 #[derive(Debug, Clone, Copy)]
-enum Names {
+pub(crate) enum Names {
     Setup,
     Project,
     Path,
@@ -116,35 +122,11 @@ impl AgentSpace {
 
     /// Reads the agent space from the engine database; a table not made yet names nothing.
     /// Inputs: the engine folder and its database. Output: the space, or
-    /// `harness_path_unreadable` for a failed read, a body that is not JSON, or more rows
-    /// than [`AGENT_ROWS_MAX`], so a read that falls short never lets a file through.
+    /// `harness_path_unreadable` for a failed read, a bad row ([`BadRow::Fail`]), or more
+    /// rows than [`AGENT_ROWS_MAX`], so a read that falls short never lets a file through.
     pub fn read(root: &Path, db: &Connection) -> Result<Self, EngineError> {
-        let unreadable = |_: rusqlite::Error| failure(PATH_UNREADABLE);
-        let mut named = Vec::new();
-        for (table, names, query) in AGENT_TABLES {
-            let present: bool = db
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                    [table],
-                    |row| row.get(0),
-                )
-                .map_err(unreadable)?;
-            if !present {
-                continue;
-            }
-            let mut statement = db.prepare(query).map_err(unreadable)?;
-            let rows: Vec<String> = statement
-                .query_map([AGENT_ROWS_MAX as i64 + 1], |row| row.get(0))
-                .map_err(unreadable)?
-                .collect::<Result<_, _>>()
-                .map_err(unreadable)?;
-            if rows.len() > AGENT_ROWS_MAX {
-                return Err(failure(PATH_UNREADABLE));
-            }
-            for text in rows {
-                named.extend(folders_in(names, &text)?);
-            }
-        }
+        let (named, skipped) = named_folders(db, BadRow::Fail)?;
+        assert_eq!(skipped, 0);
         Ok(Self::of(root, named, &owner_temp()))
     }
 
@@ -214,7 +196,7 @@ impl AgentSpace {
 /// Output: a setup's project folder, the repositories a project declares, or the stored
 /// path; `harness_path_unreadable` for a body that is not JSON or declares more than
 /// [`PROJECT_REPOSITORIES_MAX`] repositories.
-fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
+pub(crate) fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
     let body = || -> Result<serde_json::Value, EngineError> {
         serde_json::from_str(text).map_err(|_| failure(PATH_UNREADABLE))
     };
@@ -223,15 +205,7 @@ fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
         Names::Setup => body()?
             .get("folder")
             .and_then(serde_json::Value::as_str)
-            .map(|folder| {
-                let folder = Path::new(folder);
-                match folder.parent() {
-                    Some(project) if folder.ends_with(CRAZYAGENT_DIRECTORY) => {
-                        project.to_path_buf()
-                    }
-                    _ => folder.to_path_buf(),
-                }
-            })
+            .map(|folder| crate::project_setup::project_folder_of(Path::new(folder)))
             .into_iter()
             .collect(),
         Names::Project => {
@@ -253,6 +227,64 @@ fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
     };
     assert!(folders.len() <= PROJECT_REPOSITORIES_MAX);
     Ok(folders)
+}
+
+/// What a reader of the agent tables does with a row it cannot read: a body that is not
+/// JSON, a value that is not text, or a project declaring more than
+/// [`PROJECT_REPOSITORIES_MAX`] repositories. Engine start's [`AgentSpace`] fails the whole
+/// read on one; the tool resolver's places skip the row alone and count it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BadRow {
+    Skip,
+    Fail,
+}
+
+/// Reads every folder the agent tables name, as stored, in table and row order
+/// ([`AGENT_TABLES`]): the one reader for engine start and the tool resolver; a table not
+/// made yet names none. Inputs: the database and what a bad row does. Output: the folders
+/// and the rows skipped, or `harness_path_unreadable` for a failed read, a table past
+/// [`AGENT_ROWS_MAX`] rows, or a bad row under [`BadRow::Fail`].
+pub(crate) fn named_folders(
+    db: &Connection,
+    bad: BadRow,
+) -> Result<(Vec<PathBuf>, usize), EngineError> {
+    let unreadable = |_: rusqlite::Error| failure(PATH_UNREADABLE);
+    let mut named = Vec::new();
+    let mut skipped = 0usize;
+    for (table, names, query) in AGENT_TABLES {
+        let present: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(unreadable)?;
+        if !present {
+            continue;
+        }
+        let mut statement = db.prepare(query).map_err(unreadable)?;
+        let rows: Vec<Option<String>> = statement
+            .query_map([AGENT_ROWS_MAX as i64 + 1], |row| {
+                Ok(row.get_ref(0)?.as_str().ok().map(str::to_owned))
+            })
+            .map_err(unreadable)?
+            .collect::<Result<_, _>>()
+            .map_err(unreadable)?;
+        if rows.len() > AGENT_ROWS_MAX {
+            return Err(failure(PATH_UNREADABLE));
+        }
+        for row in rows {
+            match row.map(|text| folders_in(names, &text)) {
+                Some(Ok(folders)) => named.extend(folders),
+                _ if bad == BadRow::Skip => skipped += 1,
+                Some(Err(error)) => return Err(error),
+                None => return Err(failure(PATH_UNREADABLE)),
+            }
+        }
+    }
+    assert!(skipped <= AGENT_TABLES.len() * AGENT_ROWS_MAX);
+    assert!(named.len() <= NAMED_FOLDERS_MAX);
+    Ok((named, skipped))
 }
 
 /// Opens the engine database without making it, as engine start reads it before the
@@ -590,5 +622,47 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
         .tempdir_in(cache)
         .unwrap();
     assert!(folder.path().is_absolute());
+    folder
+}
+
+/// A folder for a row's owner entry outside every temp folder and every folder agents can
+/// write: in `~/Library/Caches` on macOS, `~/.cache` elsewhere, since this user's `getconf`
+/// cache folder lies in `/private/var/folders`, a temp folder, and the checkout and its
+/// build sit below a project folder. A HOME without that folder, as the gate's own HOME is,
+/// gets it private. A HOME inside a project, below a `.crazyagent` folder, leaves no such
+/// folder, so the rows stop here naming it rather than on a refusal they did not test.
+/// Input: the folder name's prefix. Output: the folder, removed when dropped.
+#[cfg(all(test, unix))]
+pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    let caches = if cfg!(target_os = "macos") {
+        home.join("Library").join("Caches")
+    } else {
+        home.join(".cache")
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&caches)
+        .unwrap();
+    let caches = caches.canonicalize().unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(caches)
+        .unwrap();
+    let place = folder.path().canonicalize().unwrap();
+    assert!(
+        !crate::tools::temp_roots()
+            .iter()
+            .any(|temp| place.starts_with(temp)),
+        "HOME lies in a temp folder: {}",
+        place.display()
+    );
+    assert!(
+        !crate::tools::Places::from_environment(None).agent_writable(&place),
+        "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
+        place.display()
+    );
     folder
 }

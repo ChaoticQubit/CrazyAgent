@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
-import { chromeArgs, chromeExecutable } from "./chrome.mjs";
+import { chromeArgs, chromeExecutable, refusedCall } from "./chrome.mjs";
 
 const MODULE = new URL("./chrome.mjs", import.meta.url).href;
 const KEYCHAIN = ["--use-mock-keychain", "--password-store=basic"];
@@ -172,4 +172,20 @@ test("browser.mjs starts its Chrome through chrome.mjs: the spawned argv has bot
   } finally {
     rmSync(root, REMOVE);
   }
+});
+
+test("a DevTools key event with Cmd held is refused on macOS before it is sent, every other call goes out, and no test opens DevTools another way (ABOUT-THIS-MAC)", () => {
+  const cmd = { type: "rawKeyDown", key: "c", code: "KeyC", modifiers: 4 };
+  assert.match(refusedCall("Input.dispatchKeyEvent", cmd, "darwin"), /ABOUT-THIS-MAC/);
+  for (const modifiers of [4, 5, 6, 12, 15]) assert.notEqual(refusedCall("Input.dispatchKeyEvent", { type: "keyUp", modifiers }, "darwin"), null, `modifiers ${modifiers}`);
+  for (const modifiers of [0, 1, 2, 8, 11]) assert.equal(refusedCall("Input.dispatchKeyEvent", { type: "rawKeyDown", modifiers }, "darwin"), null, `modifiers ${modifiers}`);
+  assert.equal(refusedCall("Input.dispatchKeyEvent", { type: "keyDown", text: "a" }, "darwin"), null);
+  assert.equal(refusedCall("Input.dispatchKeyEvent", cmd, "linux"), null, "on Linux a Cmd key reaches no Mac menu bar");
+  assert.equal(refusedCall("Input.dispatchMouseEvent", { type: "mousePressed", modifiers: 4 }, "darwin"), null);
+  const browser = readFileSync(new URL("./browser.mjs", import.meta.url), "utf8");
+  assert.match(browser, /const send = \(method, params = \{\}\) => new Promise\(\(resolve, reject\) => \{\s*const refused = refusedCall\(method, params\);\s*if \(refused !== null\) \{\s*reject\(/u, "the one DevTools send refuses first");
+  const root = new URL(".", import.meta.url).pathname;
+  const opened = readdirSync(root, { recursive: true }).filter((path) => /\.m?[jt]s$/.test(path) && !path.includes("node_modules"))
+    .filter((path) => /new WebSocket\(/.test(readFileSync(join(root, path), "utf8")));
+  assert.deepEqual(opened, ["browser.mjs"], "every DevTools connection is browser.mjs's connect");
 });

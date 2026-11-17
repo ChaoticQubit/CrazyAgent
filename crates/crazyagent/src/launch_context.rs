@@ -193,13 +193,15 @@ pub struct AgentContext {
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
-/// and writes into the agent's home, the hooks the owner turned on for it, and the owner's
-/// own instructions for the one team agent launched, empty for none.
+/// and writes into the agent's home, the hooks the owner turned on for it, the owner's
+/// own instructions for the one team agent launched, empty for none, and what the launch does
+/// with the download caches in the home (DEC-173 add.1).
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
     hooks: Vec<EffectiveHook>,
     agent: String,
+    caches: crate::agent_home::Caches,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
@@ -256,21 +258,43 @@ pub fn for_project(
     project: &ProjectId,
     layout: Layout,
 ) -> Result<AgentContext, LaunchError> {
+    for_project_skills(connection, project, layout, None)
+}
+
+/// Reads what agents launched for one project receive as [`for_project`] does, keeping only
+/// the approved skills `chosen` names (DEC-111 R3), none for every one, before the hooks are
+/// picked, so a hook follows only a skill the launch gives (RV-DS241-196); a chosen name
+/// that is not approved adds nothing. Inputs: a connection to `engine.db`, the project, the
+/// git layout and the chosen names. Output: the context, or a plain code.
+fn for_project_skills(
+    connection: &Connection,
+    project: &ProjectId,
+    layout: Layout,
+    chosen: Option<&[String]>,
+) -> Result<AgentContext, LaunchError> {
     let root = engine_root(connection)?;
     let tx = connection.unchecked_transaction().map_err(unavailable)?;
-    let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
+    let mut plugins = crate::storage::plugins::launch_set(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0, None))?;
+    if let Some(names) = chosen {
+        let before = plugins.skills.len();
+        plugins.skills.retain(|skill| names.contains(&skill.name));
+        assert!(plugins.skills.len() <= before.min(names.len()));
+    }
     let instructions = project_instructions(&tx, project, layout)?;
     let home_project = agent_project(&tx, project)?;
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
-    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project, &plugins.left_out)
+    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project, &plugins)
         .map_err(|problem| LaunchError(problem.0, None))?;
     let off_tools = off_tools(&tx, project, &plugins)?;
     let catch_up_main = crate::team::catch_up_main(&tx, project)
         .map_err(|problem| LaunchError(problem.0, None))?
         == crate::team::CatchUpMain::On;
+    let home_caches = crate::sandbox::policy::load(&tx, project.as_str())
+        .map_err(unavailable)?
+        .home_caches;
     drop(tx);
     crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0, None))?;
     Ok(AgentContext {
@@ -280,6 +304,10 @@ pub fn for_project(
             project: home_project,
             hooks,
             agent: String::new(),
+            caches: crate::agent_home::Caches {
+                choice: home_caches,
+                level: None,
+            },
         })),
         transcripts,
         off_tools,
@@ -294,9 +322,10 @@ pub fn for_project(
 }
 
 /// Reads what one team role's agents launched for a project receive (DEC-111 R3): the
-/// project's context with only the approved skills the owner chose for that role. Inputs: a
-/// connection to the engine's `engine.db`, the project, the agent's git layout and its
-/// role. Output: the context, or a plain code.
+/// project's context with only the approved skills the owner chose for that role and only
+/// the hooks that follow what it keeps (RV-DS241-196). Inputs: a connection to the
+/// engine's `engine.db`, the project, the agent's git layout and its role. Output: the
+/// context, or a plain code.
 pub fn for_team_role(
     connection: &Connection,
     project: &ProjectId,
@@ -306,7 +335,7 @@ pub fn for_team_role(
     let chosen = crate::coord::settings::read(connection, project)
         .map_err(|problem| LaunchError(problem.0, None))?
         .role_skills;
-    Ok(for_project(connection, project, layout)?.for_role(chosen.of(role)))
+    for_project_skills(connection, project, layout, chosen.of(role))
 }
 
 /// Reads the tools the owner switched off, for the project or app-wide, on each approved MCP
@@ -683,20 +712,6 @@ impl AgentContext {
         Some(text)
     }
 
-    /// Keeps only the approved skills the owner chose for one team role (DEC-111 R3); a
-    /// chosen name that is not approved adds nothing. Input: the role's chosen names, or
-    /// none for All approved skills, which keeps every one. Output: the context.
-    pub fn for_role(mut self, chosen: Option<&[String]>) -> Self {
-        if let Some(names) = chosen {
-            let before = self.plugins.skills.len();
-            self.plugins
-                .skills
-                .retain(|skill| names.contains(&skill.name));
-            assert!(self.plugins.skills.len() <= before.min(names.len()));
-        }
-        self
-    }
-
     /// Whether this launch's project has "Catch up with main" on, as read once with the rest
     /// of the context, so the agent's own `git` copy and its team tools section agree.
     /// Output: the choice.
@@ -713,7 +728,6 @@ impl AgentContext {
             if let ServerSpec::Stdio { command, .. } = &server.spec {
                 paths.push(PathBuf::from(command));
             }
-            #[cfg(unix)]
             paths.extend(
                 crate::context_mode::shared_install(&server.spec)
                     .map(|install| install.join("node_modules")),
@@ -765,6 +779,16 @@ impl AgentContext {
     pub fn with_model_proxy(mut self, port: u16) -> Self {
         assert_ne!(port, 0);
         self.model_proxy = Some(port);
+        self
+    }
+
+    /// Names the access level this launch runs at, which decides whether the launch keeps
+    /// the download caches an earlier run left in its home (DEC-173 add.1). A launch that
+    /// never names one is treated as unknown. Input: the level. Output: the context.
+    pub fn at_access(mut self, level: crate::sandbox::policy::AgentAccess) -> Self {
+        if let Some(process) = self.process.as_mut() {
+            process.caches.level = Some(level);
+        }
         self
     }
 
@@ -1095,7 +1119,7 @@ impl AgentContext {
                     crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
                 given.text.push_str(&section);
                 assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
-                crate::agent_home::prepare(home, harness, &process.project, &given)
+                crate::agent_home::prepare(home, harness, &process.project, &given, process.caches)
                     .map_err(|problem| LaunchError(problem.0, None))?;
                 given
             }
@@ -1667,9 +1691,6 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
         ContextModeOff::NodeTooOld => {
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n"
         }
-        ContextModeOff::Unsupported => {
-            "- context-mode is off for this launch: CrazyAgent cannot run it on this platform yet. Use the shell instead.\n"
-        }
         ContextModeOff::NpxNotFound => {
             "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n"
         }
@@ -1926,9 +1947,8 @@ fn codex_config(
         let mut table = toml_edit::Table::new();
         table.set_implicit(true);
         for server in servers {
-            let mut values = toml_edit::InlineTable::new();
             for secret in &server.secrets {
-                values.insert(secret.name.as_str(), secret_text(secret)?.into());
+                secret_text(secret)?;
             }
             let mut entry = toml_edit::Table::new();
             match &server.spec {
@@ -1939,15 +1959,9 @@ fn codex_config(
                             .map(String::as_str)
                             .collect::<toml_edit::Array>(),
                     );
-                    if !values.is_empty() {
-                        entry["env"] = toml_edit::value(values);
-                    }
                 }
                 ServerSpec::Http { url } => {
                     entry["url"] = toml_edit::value(url.as_str());
-                    if !values.is_empty() {
-                        entry["http_headers"] = toml_edit::value(values);
-                    }
                 }
             }
             if let Some((_, off)) = off_tools.iter().find(|(name, _)| *name == server.name) {
@@ -1962,7 +1976,76 @@ fn codex_config(
         }
         document["mcp_servers"] = toml_edit::Item::Table(table);
     }
-    Ok(document.to_string())
+    secret_tables(document.to_string(), servers)
+}
+
+/// Appends each server's secrets to a Codex `config.toml` text as its own
+/// `[mcp_servers.<server>.env]` or `.http_headers` table, written straight from the stored
+/// secret into one buffer of the text's exact size, so no document or growth copies a
+/// secret. Inputs: the text without secrets and the servers, their secrets already checked
+/// by `secret_text`. Output: the whole text.
+fn secret_tables(text: String, servers: &[LaunchServer]) -> Result<String, LaunchError> {
+    let mut tables = Vec::new();
+    for server in servers.iter().filter(|server| !server.secrets.is_empty()) {
+        let field = match server.spec {
+            ServerSpec::Stdio { .. } => "env",
+            ServerSpec::Http { .. } => "http_headers",
+        };
+        let server_key = toml_edit::Key::new(declared_server_name(&server.name));
+        let header = format!("\n[mcp_servers.{}.{field}]\n", server_key.display_repr());
+        let mut values = std::collections::BTreeMap::new();
+        for secret in &server.secrets {
+            values.insert(secret.name.as_str(), secret_text(secret)?);
+        }
+        let lines: Vec<(String, &str)> = values
+            .into_iter()
+            .map(|(name, value)| (toml_edit::Key::new(name).display_repr().into_owned(), value))
+            .collect();
+        tables.push((header, lines));
+    }
+    let newline = usize::from(!tables.is_empty() && !text.is_empty() && !text.ends_with('\n'));
+    let size = text.len()
+        + newline
+        + tables
+            .iter()
+            .map(|(header, lines)| {
+                header.len()
+                    + lines
+                        .iter()
+                        .map(|(name, value)| name.len() + value.len() + escapes(value) + 6)
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+    let mut whole = String::with_capacity(size);
+    let capacity = whole.capacity();
+    whole.push_str(&text);
+    if newline == 1 {
+        whole.push('\n');
+    }
+    for (header, lines) in &tables {
+        whole.push_str(header);
+        for (name, value) in lines {
+            whole.push_str(name);
+            whole.push_str(" = \"");
+            for character in value.chars() {
+                if matches!(character, '"' | '\\') {
+                    whole.push('\\');
+                }
+                whole.push(character);
+            }
+            whole.push_str("\"\n");
+        }
+    }
+    assert_eq!(whole.len(), size);
+    assert_eq!(whole.capacity(), capacity);
+    Ok(whole)
+}
+
+/// Counts the characters a TOML basic string must escape in a secret `secret_text` passed,
+/// which holds no control character: its double quotes and backslashes. Input: the secret.
+/// Output: the count.
+fn escapes(value: &str) -> usize {
+    value.matches(['"', '\\']).count()
 }
 
 /// One hook a Codex launch writes into its `config.toml`: the event, its trust-key label,
@@ -2208,29 +2291,102 @@ fn hook_command(root: &str, command: &str) -> String {
     )
 }
 
-fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
-    let mut declared = serde_json::Map::new();
+/// Writes Claude Code's `--mcp-config` text: each approved server with its secrets as the
+/// variables of a command server or the headers of a URL server. Input: the servers.
+/// Output: the JSON text, or `launch_context_secret_invalid` or
+/// `launch_context_server_name_taken`.
+pub fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
+    let mut declared = std::collections::BTreeMap::new();
     for server in servers {
-        let mut values = serde_json::Map::new();
+        let mut values = std::collections::BTreeMap::new();
         for secret in &server.secrets {
-            values.insert(secret.name.clone(), secret_text(secret)?.into());
+            values.insert(secret.name.as_str(), secret_text(secret)?);
         }
         let entry = match &server.spec {
-            ServerSpec::Stdio { command, args } => serde_json::json!({
-                "type": "stdio", "command": command, "args": args, "env": values
-            }),
-            ServerSpec::Http { url } => serde_json::json!({
-                "type": "http", "url": url, "headers": values
-            }),
+            ServerSpec::Stdio { command, args } => ClaudeServer::Stdio {
+                args,
+                command,
+                env: values,
+                r#type: "stdio",
+            },
+            ServerSpec::Http { url } => ClaudeServer::Http {
+                headers: values,
+                r#type: "http",
+                url,
+            },
         };
-        let name = declared_server_name(&server.name);
-        if declared.contains_key(name) {
+        if declared
+            .insert(declared_server_name(&server.name), entry)
+            .is_some()
+        {
             return Err(failure("launch_context_server_name_taken"));
         }
-        declared.insert(name.to_owned(), entry);
     }
-    serde_json::to_string(&serde_json::json!({ "mcpServers": declared }))
-        .map_err(|_| failure("launch_context_unavailable"))
+    sized_json(&ClaudeConfig {
+        mcp_servers: declared,
+    })
+}
+
+/// Claude Code's `--mcp-config` document, borrowing every value, secrets included.
+#[derive(Serialize)]
+struct ClaudeConfig<'a> {
+    #[serde(rename = "mcpServers")]
+    mcp_servers: std::collections::BTreeMap<&'a str, ClaudeServer<'a>>,
+}
+
+/// One declared MCP server, borrowing its values, so serializing it copies no secret. The
+/// fields are in name order, the order the file was always written in.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ClaudeServer<'a> {
+    Stdio {
+        args: &'a [String],
+        command: &'a str,
+        env: std::collections::BTreeMap<&'a str, &'a str>,
+        r#type: &'static str,
+    },
+    Http {
+        headers: std::collections::BTreeMap<&'a str, &'a str>,
+        r#type: &'static str,
+        url: &'a str,
+    },
+}
+
+/// Counts the bytes written to it and keeps none, so a buffer can be sized before the
+/// real write.
+struct Counted(usize);
+
+impl std::io::Write for Counted {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serializes a value that borrows secrets into one buffer allocated at the text's exact
+/// size, so no growth frees a block holding part of a secret, and wipes that buffer if the
+/// write fails. Input: the value. Output: the JSON text, or `launch_context_unavailable`.
+fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, value)
+        .map_err(|_| failure("launch_context_unavailable"))?;
+    let mut text = Vec::with_capacity(counted.0);
+    let capacity = text.capacity();
+    if serde_json::to_writer(&mut text, value).is_err() {
+        crate::credentials::wipe(&mut text);
+        return Err(failure("launch_context_unavailable"));
+    }
+    assert_eq!(text.len(), counted.0);
+    assert_eq!(text.capacity(), capacity);
+    String::from_utf8(text).map_err(|error| {
+        let mut bytes = error.into_bytes();
+        crate::credentials::wipe(&mut bytes);
+        failure("launch_context_unavailable")
+    })
 }
 
 /// Refuses launch context files where owner-only no-follow creation does not exist.
@@ -2244,9 +2400,12 @@ fn lock(_home: &Path) -> Result<File, LaunchError> {
 /// A flag or ACL an earlier run left on the home or on the lock, which would refuse the
 /// open, is cleared once, the ACL by path so one that denies listing or searching goes too,
 /// and the open tried again (RV-DS241-137 code r1 F1, r2 F3); a confined agent can set
-/// neither there. Only a lock [`lock_kept`] passes is held, the one the reset that follows
-/// keeps, so the reset never takes the lock this launch holds. Input: the home. Output: the
-/// locked file, `launch_context_unsafe` or `launch_home_busy`.
+/// neither there. An open that gets no plain file also clears the lock name of whatever an
+/// agent put there, or opens its own lock up again ([`clear_lock_name`]), before that second
+/// try, so a folder, link or FIFO at the name, or a lock left at mode 000, never refuses
+/// every later launch of the home. Only a lock [`lock_kept`] passes is held, the one the
+/// reset that follows keeps, so the reset never takes the lock this launch holds. Input: the
+/// home. Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
 #[cfg(unix)]
 fn lock(home: &Path) -> Result<File, LaunchError> {
     let path = home.join(LOCK);
@@ -2256,23 +2415,144 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
             OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::RUSR | Mode::WUSR,
         )
+        .ok()
+        .map(File::from)
+        .filter(plain_file)
     };
-    let opened = open().or_else(|_| {
-        #[cfg(target_os = "macos")]
-        for entry in [home, path.as_path()] {
-            crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
+    let (file, clearing) = match open() {
+        Some(file) => (file, None),
+        None => {
+            #[cfg(target_os = "macos")]
+            for entry in [home, path.as_path()] {
+                crate::team::cleanup::unpin_home_entry(rustix::fs::CWD, entry);
+            }
+            crate::team::cleanup::release_acls([home, path.as_path()]);
+            let folder = clear_lock_name(home)?;
+            let file = open().ok_or_else(|| failure("launch_context_unsafe"))?;
+            (file, Some(folder))
         }
-        crate::team::cleanup::release_acls([home, path.as_path()]);
-        open()
-    });
-    let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
+    };
     let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
     if !lock_kept(&found) {
         return Err(failure("launch_context_unsafe"));
     }
     rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| failure("launch_home_busy"))?;
+    drop(clearing);
     Ok(file)
+}
+
+/// Whether an open entry is a plain file, which a launch lock is and a folder, FIFO or
+/// device an agent put at its name is not. Input: the open entry. Output: the answer.
+#[cfg(unix)]
+fn plain_file(file: &File) -> bool {
+    rustix::fs::fstat(file).is_ok_and(|found| {
+        rustix::fs::FileType::from_raw_mode(found.st_mode) == rustix::fs::FileType::RegularFile
+    })
+}
+
+/// Clears a home's lock name of an entry that is no plain file, with all it holds, through
+/// the home's open folder and never following a link
+/// ([`crate::team::cleanup::remove_home_entry`]), so what a link there names stays. A plain
+/// file is never removed: it may be the lock another launch holds. One [`lock_kept`] passes
+/// gets its owner-only mode back instead ([`restore_lock_mode`]), since an agent that
+/// writes its home can take the owner's read and write off its own lock. The home's folder
+/// is locked meanwhile and stays locked until the caller holds the lock file, so of two
+/// launches that find the same entry one clears it and makes the lock and the other is
+/// refused, never removing the lock the first made. Input: the home. Output: the home's
+/// locked folder, `launch_context_unsafe` for a home that does not open or an entry that
+/// stays, `cleanup_walk_too_long` for an entry whose removal ran past its walk budget
+/// (RESET-WALK-CODE), or `launch_home_busy` while another launch clears the name.
+#[cfg(unix)]
+fn clear_lock_name(home: &Path) -> Result<LockedHome, LaunchError> {
+    use rustix::fs::{AtFlags, FileType};
+    let opened = rustix::fs::open(
+        home,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| failure("launch_context_unsafe"))?;
+    rustix::fs::flock(&opened, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| failure("launch_home_busy"))?;
+    let folder = LockedHome(opened);
+    #[cfg(test)]
+    if let Some(step) = WHILE_LOCK_NAME_CLEARS.with(|step| step.borrow_mut().take()) {
+        step();
+    }
+    let found = match rustix::fs::statat(&folder.0, LOCK, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => return Ok(folder),
+        found => found.map_err(|_| failure("launch_context_unsafe"))?,
+    };
+    if FileType::from_raw_mode(found.st_mode) != FileType::RegularFile {
+        crate::team::cleanup::remove_home_entry(&folder.0, LOCK).map_err(|problem| {
+            failure(crate::team::cleanup::home_code(
+                &problem,
+                "launch_context_unsafe",
+            ))
+        })?;
+    } else if lock_kept(&found) {
+        let _ = restore_lock_mode(&folder.0);
+    }
+    Ok(folder)
+}
+
+/// A home's folder locked while its lock name is cleared ([`clear_lock_name`]). Dropping it
+/// unlocks the folder on its open file description, as [`Installed`] does its lock, so a
+/// child forked by another thread before its exec never keeps the home busy.
+#[cfg(unix)]
+struct LockedHome(std::os::fd::OwnedFd);
+
+#[cfg(unix)]
+impl Drop for LockedHome {
+    /// Unlocks the home's folder. A failure leaves the lock to go when the handle closes.
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
+/// Gives a home's lock the owner-only mode it was made with, without following a link.
+/// Linux `fchmodat` cannot refuse a link, so there the lock is pinned by an `O_PATH` handle
+/// that refuses one, judged again on that handle ([`lock_kept`]) and changed through
+/// `/proc/self/fd/<n>` of it. Input: the home's open folder. Output: Ok, or the error that
+/// left the lock as it was, which the open that follows then reports.
+#[cfg(target_os = "linux")]
+fn restore_lock_mode(home: impl std::os::fd::AsFd) -> rustix::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let pinned = rustix::fs::openat(
+        home,
+        LOCK,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if !lock_kept(&rustix::fs::fstat(&pinned)?) {
+        return Ok(());
+    }
+    rustix::fs::chmod(
+        format!("/proc/self/fd/{}", pinned.as_raw_fd()).as_str(),
+        Mode::RUSR | Mode::WUSR,
+    )
+}
+
+/// Gives a home's lock the owner-only mode it was made with, without following a link,
+/// through `chmodat` with `AT_SYMLINK_NOFOLLOW`. Input: the home's open folder. Output: Ok,
+/// or the error that left the lock as it was, which the open that follows then reports.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn restore_lock_mode(home: impl std::os::fd::AsFd) -> rustix::io::Result<()> {
+    rustix::fs::chmodat(
+        home,
+        LOCK,
+        Mode::RUSR | Mode::WUSR,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step a launch test runs in [`clear_lock_name`] once the home's folder is locked and
+    /// before the lock name is read, standing in for a second launch of the same home that
+    /// arrives meanwhile. Runs once; None runs nothing.
+    pub(super) static WHILE_LOCK_NAME_CLEARS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no
@@ -2720,20 +3000,29 @@ fn write_private(_path: &Path, _bytes: &[u8]) -> Result<(), LaunchError> {
 #[cfg(unix)]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
     let mut file = create(path)?;
-    file.write_all(bytes)
+    let written = file
+        .set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| file.write_all(bytes))
         .and_then(|()| file.sync_all())
-        .map_err(|_| failure("launch_context_unwritable"))?;
-    assert_eq!(
-        file.metadata().map(|m| m.permissions().mode() & 0o777).ok(),
-        Some(0o600)
-    );
-    Ok(())
+        .and_then(|()| file.metadata());
+    let refusal = match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o600 && metadata.len() == bytes.len() as u64 =>
+        {
+            return Ok(());
+        }
+        Ok(_) => "launch_context_unsafe",
+        Err(_) => "launch_context_unwritable",
+    };
+    drop(file);
+    let _ = std::fs::remove_file(path);
+    Err(failure(refusal))
 }
 
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let mut bytes = text.into_bytes();
     let written = write_private(path, &bytes);
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     written
 }
 

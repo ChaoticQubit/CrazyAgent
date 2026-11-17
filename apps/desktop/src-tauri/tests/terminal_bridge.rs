@@ -10,8 +10,8 @@ use crazyagent::terminal::{
     AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, agent, channel_message, graph_shows, input_request, pane, plain_code,
-    request_valid,
+    Terminals, VIEWERS_MAX, ViewKey, agent, channel_message, graph_shows, input_request, pane,
+    plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -424,7 +424,10 @@ fn output_goes_to_the_window_as_raw_bytes_and_control_frames_as_json() {
 #[tokio::test]
 async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempotent() {
     let terminals = Arc::new(Terminals::default());
-    let team = AgentId::team(4).unwrap();
+    let team = ViewKey {
+        agent: AgentId::team(4).unwrap(),
+        pane: None,
+    };
     terminals.page_started("main");
     terminals.room("main", &team).unwrap();
     let typed = terminals
@@ -445,15 +448,18 @@ async fn typing_into_a_terminal_without_a_view_is_refused_and_detach_is_idempote
         .send("main", &team, TerminalRequest::Resize { cols: 0, rows: 24 })
         .await;
     assert_eq!(resized.unwrap_err().code, "terminal_request_invalid");
-    terminals.detach("main", &team, u64::MAX).unwrap();
-    terminals.detach("main", &team, u64::MAX).unwrap();
+    terminals.detach("main", &team.agent, u64::MAX).unwrap();
+    terminals.detach("main", &team.agent, u64::MAX).unwrap();
 }
 
 #[test]
 fn a_view_holds_its_place_from_the_room_check_until_it_attaches_or_gives_up() {
     let terminals = Arc::new(Terminals::default());
     terminals.page_started("main");
-    let team = |n| AgentId::team(n).unwrap();
+    let team = |n| ViewKey {
+        agent: AgentId::team(n).unwrap(),
+        pane: None,
+    };
     let past = VIEWERS_MAX as i64 + 1;
     let mut held: Vec<_> = (1..=VIEWERS_MAX as i64)
         .map(|n| terminals.room("main", &team(n)))

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, IDE_NOT_CLOSED, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, closeIde, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, sameBounds, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, cachedIdeView, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, sameBounds, saveLastIde, showKeptIde, touchIde } from "../../api-ide";
 import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
 import { Button, useOverlayShown } from "../../ui";
 import "./ide.css";
@@ -37,21 +37,12 @@ export function IdeUnavailable({ view, failure, busy = false, onAction }: { view
   </div>;
 }
 
-/** Closes the project's IDE when its page closes, and tells the owner when that failed. A build
- * with no IDE has nothing to close and says nothing. Inputs: the project and the toast the page
- * tells the owner through. Output: none. */
-export function useCloseIde(projectId: string, notify: (line: string) => void) {
-  useEffect(() => () => {
-    void closeIde(projectId).then((result) => {
-      if (result.kind === "error") notify(IDE_NOT_CLOSED);
-    });
-  }, [projectId]);
-}
-
 /** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
- * native webview over the panel. The webview follows the panel's bounds, hides when the tab
- * is left or a dialog, drawer or menu opens over the page, and the engine hears every minute
- * that the owner still uses it. Every state it reads goes to `onView`, so the page swaps
+ * native webview over the panel. A kept IDE shows at once from the last IDE state read, with no
+ * engine call, and only an IDE that is not kept is opened (DEC-187). The webview follows the
+ * panel's bounds, hides when the tab or the page is left or a dialog, drawer or menu opens over
+ * the page, and the engine hears every minute that the owner still uses it; a server that has
+ * gone is opened again, never shown from the kept webview. Every state it reads goes to `onView`, so the page swaps
  * Context and Changes back when the build fails. A failed move shows on the tab; a failed hide
  * goes to the page, whose line stays outside the box the IDE webview may still cover. The IDE can
  * also move to a window of its own: the tab then says so and offers to bring it forward until
@@ -60,7 +51,7 @@ export function useCloseIde(projectId: string, notify: (line: string) => void) {
  * the tab. */
 export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void }) {
   const panel = useRef<HTMLDivElement>(null);
-  const [state, setState] = useState<IdeTabState | null>(null);
+  const [state, setState] = useState<IdeTabState | null>(() => cachedIdeView()?.value.state ?? null);
   const [problem, setProblem] = useState<string | null>(null);
   const [left, setLeft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -146,9 +137,26 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
       place();
       frame = window.requestAnimationFrame(follow);
     };
-    const open = async () => {
+    const showKept = async (box: IdeBounds) => {
+      const kept = await showKeptIde(projectId, box);
+      if (!live) {
+        if (kept.kind === "ok" && kept.value.shown) hide();
+        return true;
+      }
+      if (kept.kind !== "ok" || !kept.value.shown) return false;
+      if (kept.value.left) setLeft(kept.value.left);
+      shown = true;
+      last = box;
+      saveLastIde(projectId, box);
+      setProblem(null);
+      onHideProblem(null);
+      if (frame === 0) follow();
+      return true;
+    };
+    const open = async (kept: boolean) => {
       const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box) return;
+      if (kept && await showKept(box)) return;
       const result = await openIde(projectId, box);
       if (!live) {
         if (result.kind === "ok") hide();
@@ -166,14 +174,15 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
       }
       shown = true;
       last = null;
+      saveLastIde(projectId, box);
       setProblem(null);
       onHideProblem(null);
       if (frame === 0) follow();
     };
-    void open();
+    void open(true);
     const beat = window.setInterval(() => {
       void touchIde(projectId).then((result) => {
-        if (live && result.kind === "ok" && !result.value) void open();
+        if (live && result.kind === "ok" && !result.value) void open(false);
       });
     }, HEARTBEAT_MS);
     return () => {

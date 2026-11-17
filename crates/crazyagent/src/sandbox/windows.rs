@@ -382,7 +382,7 @@ fn system_root() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{InstalledSandbox, SandboxRemote};
+    use crate::sandbox::{InstalledSandbox, LinuxStrict, LinuxSupervisor, SandboxRemote};
     use crazyagent_win_sandbox::profile::check_container;
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
@@ -623,7 +623,7 @@ mod tests {
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let beside = std::env::current_exe().unwrap().with_file_name(HELPER_NAME);
         let profile = folders.profiles.join("agent.sb");
-        match InstalledSandbox::install(sandbox, &profile) {
+        match InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off) {
             Ok(installed) => {
                 assert!(beside.is_file());
                 assert_eq!(installed.launcher(), beside.as_path());

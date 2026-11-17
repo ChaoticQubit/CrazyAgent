@@ -28,6 +28,7 @@ const IDLE_WAKE: Duration = Duration::from_millis(500);
 const STREAM_WAKE: Duration = Duration::from_millis(16);
 const FRAMES_PER_PASS: usize = 64;
 const REFRESH: Duration = Duration::from_secs(5);
+const JOB_READ: Duration = Duration::from_secs(1);
 const REPLY_WATCH: Duration = Duration::from_secs(1);
 const RECONNECT: Duration = Duration::from_secs(3);
 /// The most characters of one paste the TUI takes; the rest is dropped.
@@ -205,13 +206,14 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
 }
 
 /// Runs the rebuilt TUI until the owner quits or a signal arrives.
-/// Inputs: the unbound engine client, the stop flag set by signals and the
-/// editor-running flag the signal listener reads.
+/// Inputs: the unbound engine client, the stop flag set by signals, the editor-running
+/// flag the signal listener reads and the default engine `r` starts, none for a socket.
 /// Output: Ok after a clean exit, or the terminal or connection error.
 pub fn run(
     client: Client,
     stopped: &AtomicBool,
     editor_running: Arc<AtomicBool>,
+    engine: Option<(crate::paths::Layout, crate::service::Service)>,
 ) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()
@@ -221,9 +223,10 @@ pub fn run(
         socket.display().to_string(),
     )?;
     ctx.editor_running = editor_running;
+    ctx.starts_engine = engine.is_some();
     let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
-    let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
+    let mut connection = Connection::connect_starting(client, engine).map_err(TuiError)?;
     restore_on_panic();
     let _guard = TerminalGuard::enter()?;
     let _extras = Extras::enter(ctx.shift_enter)?;
@@ -281,6 +284,7 @@ fn drive(
     let mut asked: Option<Instant> = None;
     let mut tick = Instant::now();
     let mut refresh = Instant::now() + REFRESH;
+    let mut job_read = Instant::now() + JOB_READ;
     let mut reconnect = Instant::now() + RECONNECT;
     let mut showing_message = false;
     let mut link = shell.ctx.link.clone();
@@ -324,7 +328,11 @@ fn drive(
         }
         if !connection.busy() {
             if shell.ctx.take_reconnect() || (link == Link::Reconnecting && now >= reconnect) {
-                connection.reconnect().map_err(TuiError)?;
+                if shell.ctx.take_start() {
+                    connection.start_engine().map_err(TuiError)?;
+                } else {
+                    connection.reconnect().map_err(TuiError)?;
+                }
                 reconnect = now + RECONNECT;
             } else if link == Link::Ready {
                 if let Some(request) = shell.ctx.next_request() {
@@ -334,6 +342,10 @@ fn drive(
                 } else if now >= refresh {
                     shell.tick();
                     refresh = now + REFRESH;
+                    job_read = now + JOB_READ;
+                } else if now >= job_read {
+                    shell.read_running_job();
+                    job_read = now + JOB_READ;
                 }
             }
         }
@@ -451,13 +463,12 @@ pub(super) fn owner_arrival(event: OwnerEvent) -> Arrival {
 /// Turns a request the full request queue refused into the reply the engine worker gives
 /// a request that failed, with `owner_busy`, so the screen that asked stops waiting on it
 /// and says so; a refused terminal attach comes back as a terminal the engine refused, so
-/// the view closes and Enter attaches again. A refused creation Reconcile or Retry stays
-/// retained: the worker never saw it and still holds that submission. Reads of the shared
-/// profile, pools and projects and terminal keys, sizes and detaches get none: a refused
-/// read leaves the data alone, and the message line says the queue is full.
+/// the view closes and Enter attaches again. Reads of the shared profile, pools and
+/// projects and terminal keys, sizes and detaches get none: a refused read leaves the data
+/// alone, and the message line says the queue is full.
 /// Input: the refused request. Output: its failed arrival, or none.
 pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
-    use super::client::{ConversationEvent, ConversationJob, CreationEvent, MutationDelivery};
+    use super::client::{ConversationEvent, ConversationJob};
     use super::master_session::{Event as MasterEvent, Job as MasterJob};
     use super::seam::OWNER_BUSY;
     let busy = || OWNER_BUSY.to_owned();
@@ -496,15 +507,6 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
             query,
             result: Err(busy()),
         })),
-        Request::Creation(job) => {
-            let retained = !matches!(job.delivery, MutationDelivery::Submit);
-            OwnerEvent::Creation(Box::new(CreationEvent {
-                submission: job.submission,
-                operation: None,
-                result: Err(busy()),
-                retained,
-            }))
-        }
         Request::Conversation(job) => OwnerEvent::Conversation(Box::new(match *job {
             ConversationJob::Read { context, .. } => ConversationEvent::Read {
                 context,
@@ -607,7 +609,6 @@ fn send(
             generation: shell.ctx.next_generation(),
         }),
         Request::Setup(query) => connection.project_setup(query),
-        Request::Creation(job) => connection.creation(*job),
         Request::Conversation(job) => connection.conversation(*job),
         Request::Master(job) => connection.master(*job),
         Request::Wire { command, revision } => connection.start(command, revision).map(|_| ()),

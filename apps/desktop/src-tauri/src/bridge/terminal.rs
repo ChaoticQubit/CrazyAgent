@@ -191,11 +191,31 @@ pub fn pane(text: &str) -> Result<String, BridgeError> {
         .ok_or_else(|| failure("terminal_pane_invalid"))
 }
 
+/// One view's key in a window: the agent's terminal and, for a native teammate known only by
+/// its pane in its lead's terminal, that pane. A second view with the same key replaces the
+/// first; a lead and its teammate's pane are two keys, so one window holds both.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ViewKey {
+    pub agent: AgentId,
+    pub pane: Option<String>,
+}
+
+/// Checks the terminal name and the pane a window sent for one view, the one check the
+/// attach, input, prompt and resize commands share. Takes the name and the pane text, if
+/// any. Returns the view's key, `terminal_agent_invalid` or `terminal_pane_invalid`.
+pub fn view_key(name: &str, pane: Option<&str>) -> Result<ViewKey, BridgeError> {
+    Ok(ViewKey {
+        agent: agent(name)?,
+        pane: pane.map(self::pane).transpose()?,
+    })
+}
+
 fn attach_failure(code: &str) -> BridgeError {
     failure(match code {
         "terminal_unavailable" => "terminal_unavailable",
         "terminal_pane_unknown" => "terminal_pane_unknown",
         "terminal_agent_unknown" => "terminal_agent_unknown",
+        "terminal_teammates_server_ended" => "terminal_teammates_server_ended",
         "terminal_agent_invalid" => "terminal_agent_invalid",
         "terminal_viewers_full" => "terminal_viewers_full",
         "terminal_attach_timeout" => "terminal_attach_timeout",
@@ -340,8 +360,8 @@ struct Viewer {
 
 #[derive(Default)]
 struct Window {
-    viewers: HashMap<AgentId, Viewer>,
-    opening: HashMap<AgentId, u64>,
+    viewers: HashMap<ViewKey, Viewer>,
+    opening: HashMap<ViewKey, u64>,
     cleared: u64,
 }
 
@@ -350,7 +370,7 @@ impl Window {
         let opening = self
             .opening
             .keys()
-            .filter(|agent| !self.viewers.contains_key(*agent))
+            .filter(|key| !self.viewers.contains_key(*key))
             .count();
         self.viewers.len() + opening
     }
@@ -364,8 +384,8 @@ struct Views {
 
 impl Views {
     #[cfg(test)]
-    fn serial(&self, window: &str, agent: &AgentId) -> Option<u64> {
-        let viewer = self.windows.get(window)?.viewers.get(agent)?;
+    fn serial(&self, window: &str, key: &ViewKey) -> Option<u64> {
+        let viewer = self.windows.get(window)?.viewers.get(key)?;
         Some(viewer.serial)
     }
 
@@ -379,13 +399,13 @@ impl Views {
             .ok_or_else(|| failure("terminal_window_closed"))
     }
 
-    /// Whether a window has room for a view of the agent: one it already shows or is
+    /// Whether a window has room for a view of the key: one it already shows or is
     /// opening, or a free place in the window and in all windows together. Takes the window
-    /// label and the agent. Returns unit, `terminal_window_closed` or `terminal_viewers_full`.
-    fn admits(&self, window: &str, agent: &AgentId) -> Result<(), BridgeError> {
+    /// label and the key. Returns unit, `terminal_window_closed` or `terminal_viewers_full`.
+    fn admits(&self, window: &str, key: &ViewKey) -> Result<(), BridgeError> {
         let shown = self.window(window)?;
-        let room = shown.viewers.contains_key(agent)
-            || shown.opening.contains_key(agent)
+        let room = shown.viewers.contains_key(key)
+            || shown.opening.contains_key(key)
             || (shown.held() < VIEWERS_MAX && self.held() < VIEWS_MAX);
         if room {
             Ok(())
@@ -394,40 +414,40 @@ impl Views {
         }
     }
 
-    /// Makes one opened place the agent's view in its window. A place older than a view of
-    /// the same agent in that window that opened after it never replaces that view, so a
+    /// Makes one opened place the key's view in its window. A place older than a view of
+    /// the same key in that window that opened after it never replaces that view, so a
     /// closed panel's late attach cannot take over the newer one, and a place taken before
-    /// the window's last page load never lands. Takes the window label, the agent, the
+    /// the window's last page load never lands. Takes the window label, the key, the
     /// place's serial and its request queue. Returns unit, `terminal_window_closed`,
     /// `terminal_view_replaced` or `terminal_viewers_full`.
     fn install(
         &mut self,
         window: &str,
-        agent: &AgentId,
+        key: &ViewKey,
         serial: u64,
         requests: mpsc::Sender<TerminalRequest>,
     ) -> Result<(), BridgeError> {
         let shown = self.window(window)?;
         let newer = serial <= shown.cleared
-            || shown.opening.get(agent).is_some_and(|open| *open > serial)
+            || shown.opening.get(key).is_some_and(|open| *open > serial)
             || shown
                 .viewers
-                .get(agent)
+                .get(key)
                 .is_some_and(|viewer| viewer.serial > serial);
         if newer {
             return Err(failure("terminal_view_replaced"));
         }
-        self.admits(window, agent)?;
+        self.admits(window, key)?;
         let shown = self
             .windows
             .get_mut(window)
             .ok_or_else(|| failure("terminal_window_closed"))?;
-        if shown.opening.get(agent) == Some(&serial) {
-            shown.opening.remove(agent);
+        if shown.opening.get(key) == Some(&serial) {
+            shown.opening.remove(key);
         }
         shown
             .viewers
-            .insert(agent.clone(), Viewer { serial, requests });
+            .insert(key.clone(), Viewer { serial, requests });
         assert!(shown.held() <= VIEWERS_MAX);
         assert!(self.held() <= VIEWS_MAX);
         Ok(())
@@ -440,7 +460,7 @@ impl Views {
 pub struct Reservation {
     terminals: Arc<Terminals>,
     window: String,
-    agent: AgentId,
+    key: ViewKey,
     serial: u64,
 }
 
@@ -448,9 +468,9 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         if let Ok(mut views) = self.terminals.0.lock()
             && let Some(shown) = views.windows.get_mut(&self.window)
-            && shown.opening.get(&self.agent) == Some(&self.serial)
+            && shown.opening.get(&self.key) == Some(&self.serial)
         {
-            shown.opening.remove(&self.agent);
+            shown.opening.remove(&self.key);
         }
     }
 }
@@ -460,35 +480,35 @@ impl Reservation {
     /// frame with the size first, then the screen and live output.
     /// Takes the session of this place's agent and the channel.
     /// Returns the view's serial once the reader and writer run, which its detach names; a
-    /// place lost to a full set of views or to a newer view of the agent is refused.
+    /// place lost to a full set of views or to a newer view of the key is refused.
     pub fn attach(
         self,
         session: TerminalSession,
         output: Channel<InvokeResponseBody>,
     ) -> Result<u64, BridgeError> {
         let terminals = Arc::clone(&self.terminals);
-        let (agent, serial) = (self.agent.clone(), self.serial);
-        assert_eq!(session.agent, agent);
+        let (key, serial) = (self.key.clone(), self.serial);
+        assert_eq!(session.agent, key.agent);
         let (requests, queue) = mpsc::channel(REQUESTS_MAX);
         terminals
             .views()?
-            .install(&self.window, &agent, serial, requests)?;
+            .install(&self.window, &key, serial, requests)?;
         let attached = TerminalFrame::Attached {
-            agent_id: agent.clone(),
+            agent_id: key.agent.clone(),
             cols: session.cols,
             rows: session.rows,
         };
-        let (message, last) = channel_message(&agent, attached);
+        let (message, last) = channel_message(&key.agent, attached);
         assert!(!last);
         if output.send(message).is_err() {
-            terminals.forget(&self.window, &agent, serial);
+            terminals.forget(&self.window, &key, serial);
             return Err(failure("terminal_window_closed"));
         }
         tauri::async_runtime::spawn(write(session.control, queue));
         tauri::async_runtime::spawn(read(
             terminals,
             self.window.clone(),
-            agent,
+            key,
             serial,
             session.output,
             output,
@@ -498,9 +518,9 @@ impl Reservation {
 }
 
 /// The live terminal views of every window that shows terminals: the main window and the
-/// terminal wall windows, at most one view per agent in a window, `VIEWERS_MAX` in one
-/// window and `VIEWS_MAX` in all. Typing and resizing go through here without waiting on
-/// the owner bridge lock. A dropped view sends the engine a detach; the agent keeps running.
+/// terminal wall windows, at most one view per agent and pane in a window, `VIEWERS_MAX` in
+/// one window and `VIEWS_MAX` in all. Typing and resizing go through here without waiting
+/// on the owner bridge lock. A dropped view sends the engine a detach; the agent keeps running.
 #[derive(Default)]
 pub struct Terminals(Mutex<Views>);
 
@@ -510,17 +530,13 @@ impl Terminals {
     }
 
     /// Checks for room and takes a place for one more view in a window in the same step,
-    /// before its connection opens. Takes the window label and the terminal name; a second
-    /// view of the same agent in the window replaces the first. Returns the held place,
+    /// before its connection opens. Takes the window label and the view's key; a second
+    /// view of the same key in the window replaces the first. Returns the held place,
     /// `terminal_window_closed` or `terminal_viewers_full`.
-    pub fn room(
-        self: &Arc<Self>,
-        window: &str,
-        agent: &AgentId,
-    ) -> Result<Reservation, BridgeError> {
+    pub fn room(self: &Arc<Self>, window: &str, key: &ViewKey) -> Result<Reservation, BridgeError> {
         assert!(window_label_valid(window));
         let mut views = self.views()?;
-        views.admits(window, agent)?;
+        views.admits(window, key)?;
         views.next += 1;
         let serial = views.next;
         views
@@ -528,12 +544,12 @@ impl Terminals {
             .get_mut(window)
             .ok_or_else(|| failure("terminal_window_closed"))?
             .opening
-            .insert(agent.clone(), serial);
+            .insert(key.clone(), serial);
         assert!(views.held() <= VIEWS_MAX);
         Ok(Reservation {
             terminals: Arc::clone(self),
             window: window.to_owned(),
-            agent: agent.clone(),
+            key: key.clone(),
             serial,
         })
     }
@@ -541,26 +557,27 @@ impl Terminals {
     /// Takes a place for one more view as [`Terminals::room`] does, then runs the window's
     /// own check, the team graph read of a wall window, so a page load during that read
     /// refuses the place when it lands, and a failed check gives the place back. Inputs: the
-    /// window label, the terminal name and the check. Output: the held place, the room
+    /// window label, the view's key and the check. Output: the held place, the room
     /// errors or the check's error.
     pub async fn checked_room(
         self: &Arc<Self>,
         window: &str,
-        agent: &AgentId,
+        key: &ViewKey,
         check: impl std::future::Future<Output = Result<(), BridgeError>>,
     ) -> Result<Reservation, BridgeError> {
-        let place = self.room(window, agent)?;
+        let place = self.room(window, key)?;
         check.await?;
         Ok(place)
     }
 
-    /// Queues one input, prompt or resize request for an agent terminal a window shows.
-    /// Takes the window label, the terminal name and the request.
+    /// Queues one input, prompt or resize request for the view of exactly this agent and
+    /// pane a window shows; a lead's view never takes its teammate pane's keys, nor the
+    /// reverse. Takes the window label, the view's key and the request.
     /// Returns once queued in order, or a plain code for a bad request or no view.
     pub async fn send(
         &self,
         window: &str,
-        agent: &AgentId,
+        key: &ViewKey,
         request: TerminalRequest,
     ) -> Result<(), BridgeError> {
         if !request_valid(&request) {
@@ -570,7 +587,7 @@ impl Terminals {
             .views()?
             .windows
             .get(window)
-            .and_then(|shown| shown.viewers.get(agent))
+            .and_then(|shown| shown.viewers.get(key))
             .map(|viewer| viewer.requests.clone())
             .ok_or_else(|| failure("terminal_not_attached"))?;
         requests
@@ -579,19 +596,18 @@ impl Terminals {
             .map_err(|_| failure("terminal_not_attached"))
     }
 
-    /// Closes a window's view of one agent terminal; the agent keeps running.
-    /// Takes the window label, the terminal name and the serial its attach returned; a view
-    /// with another serial is a newer one and stays, and an agent without that view is
-    /// already detached. Returns nothing.
+    /// Closes a window's view of one agent terminal, whichever pane it shows; the agent keeps
+    /// running. Takes the window label, the terminal name and the serial its attach returned,
+    /// which names one view: a view with another serial, a newer one or the same agent's
+    /// other pane, stays, and an agent without that view is already detached. Returns nothing.
     pub fn detach(&self, window: &str, agent: &AgentId, serial: u64) -> Result<(), BridgeError> {
         let mut views = self.views()?;
-        if let Some(shown) = views.windows.get_mut(window)
-            && shown
+        if let Some(shown) = views.windows.get_mut(window) {
+            let before = shown.viewers.len();
+            shown
                 .viewers
-                .get(agent)
-                .is_some_and(|viewer| viewer.serial == serial)
-        {
-            shown.viewers.remove(agent);
+                .retain(|key, viewer| key.agent != *agent || viewer.serial != serial);
+            assert!(before - shown.viewers.len() <= 1);
         }
         Ok(())
     }
@@ -624,12 +640,12 @@ impl Terminals {
         }
     }
 
-    fn forget(&self, window: &str, agent: &AgentId, serial: u64) {
+    fn forget(&self, window: &str, key: &ViewKey, serial: u64) {
         if let Ok(mut views) = self.0.lock()
             && let Some(shown) = views.windows.get_mut(window)
-            && shown.viewers.get(agent).is_some_and(|v| v.serial == serial)
+            && shown.viewers.get(key).is_some_and(|v| v.serial == serial)
         {
-            shown.viewers.remove(agent);
+            shown.viewers.remove(key);
         }
     }
 }
@@ -656,14 +672,14 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
 async fn read(
     terminals: Arc<Terminals>,
     window: String,
-    agent: AgentId,
+    key: ViewKey,
     serial: u64,
     mut stream: TerminalOutput,
     output: Channel<InvokeResponseBody>,
 ) {
     loop {
         let (message, last) = match stream.next().await {
-            Ok(frame) => channel_message(&agent, frame),
+            Ok(frame) => channel_message(&key.agent, frame),
             Err(error) if error.0 == "terminal_closed" => {
                 (json(&closed("terminal_connection_closed")), true)
             }
@@ -676,7 +692,7 @@ async fn read(
             break;
         }
     }
-    terminals.forget(&window, &agent, serial);
+    terminals.forget(&window, &key, serial);
 }
 
 #[cfg(test)]
@@ -685,12 +701,22 @@ mod tests {
 
     const WALL: &str = "terminals-0123456789abcdef-1";
 
-    fn shown(terminals: &Terminals, window: &str, agent: &AgentId) -> Option<u64> {
-        terminals.views().unwrap().serial(window, agent)
+    fn shown(terminals: &Terminals, window: &str, key: &ViewKey) -> Option<u64> {
+        terminals.views().unwrap().serial(window, key)
     }
 
-    fn team(index: usize) -> AgentId {
-        AgentId::team(index as i64).unwrap()
+    fn team(index: usize) -> ViewKey {
+        ViewKey {
+            agent: AgentId::team(index as i64).unwrap(),
+            pane: None,
+        }
+    }
+
+    fn pane_of(lead: &ViewKey, pane: &str) -> ViewKey {
+        ViewKey {
+            agent: lead.agent.clone(),
+            pane: Some(pane.to_owned()),
+        }
     }
 
     fn code<T>(result: Result<T, BridgeError>) -> Option<&'static str> {
@@ -729,7 +755,7 @@ mod tests {
             .install("main", &agent, old.serial, requests.clone());
         assert_eq!(code(late), Some("terminal_view_replaced"));
         assert_eq!(shown(&terminals, "main", &agent), Some(new.serial));
-        terminals.detach("main", &agent, old.serial).unwrap();
+        terminals.detach("main", &agent.agent, old.serial).unwrap();
         assert_eq!(
             shown(&terminals, "main", &agent),
             Some(new.serial),
@@ -741,11 +767,11 @@ mod tests {
             .unwrap()
             .install("main", &other, elsewhere.serial, requests)
             .unwrap();
-        terminals.detach("main", &other, new.serial).unwrap();
+        terminals.detach("main", &other.agent, new.serial).unwrap();
         assert_eq!(shown(&terminals, "main", &other), Some(elsewhere.serial));
-        terminals.detach("main", &agent, new.serial).unwrap();
+        terminals.detach("main", &agent.agent, new.serial).unwrap();
         assert_eq!(shown(&terminals, "main", &agent), None);
-        terminals.detach("main", &agent, new.serial).unwrap();
+        terminals.detach("main", &agent.agent, new.serial).unwrap();
     }
 
     /// A wall window's page reloads while an attach waits on its team graph read: the place
@@ -870,7 +896,7 @@ mod tests {
         assert_eq!(installed, [None, None], "both windows show the agent");
         assert_eq!(shown(&terminals, "main", &agent), Some(main.serial));
         assert_eq!(shown(&terminals, WALL, &agent), Some(tile.serial));
-        terminals.detach(WALL, &agent, main.serial).unwrap();
+        terminals.detach(WALL, &agent.agent, main.serial).unwrap();
         assert_eq!(
             shown(&terminals, WALL, &agent),
             Some(tile.serial),
@@ -1169,5 +1195,241 @@ mod tests {
             "terminal_attach_failed"
         );
         assert_eq!(attach_failure("Not A Code").code, "terminal_attach_failed");
+    }
+
+    /// v242 MRR2-2 (rv-code2 r2): a pane attach refused because the teammates' server a native
+    /// lead's team panes were on ended, as once both of that lead's servers ended, keeps its
+    /// code, as one refused for an agent no server holds does, so the view says why its
+    /// terminal ended rather than that the attach failed.
+    #[test]
+    fn a_pane_attach_refused_as_its_teammates_server_ended_keeps_its_code_for_the_view() {
+        for ended in [
+            "terminal_agent_unknown",
+            crazyagent::terminal::TEAMMATES_SERVER_ENDED,
+        ] {
+            assert_eq!(attach_failure(ended).code, ended);
+        }
+    }
+
+    /// DEC-187 S1: a lead's view and its native teammate's pane view are two keys, so one
+    /// window holds both, each in its own place; a second view of the same agent and pane
+    /// still replaces the first and leaves the lead's view, and the replaced late attach is
+    /// refused.
+    #[test]
+    fn a_lead_view_and_its_teammate_pane_view_stay_held_together_in_one_window() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let lead = team(2);
+        let mate = pane_of(&lead, "%3");
+        let (requests, _queue) = mpsc::channel(1);
+        let lead_place = terminals.room("main", &lead).unwrap();
+        let mate_place = terminals.room("main", &mate).unwrap();
+        let installed =
+            [(&lead, lead_place.serial), (&mate, mate_place.serial)].map(|(key, serial)| {
+                code(
+                    terminals
+                        .views()
+                        .unwrap()
+                        .install("main", key, serial, requests.clone()),
+                )
+            });
+        assert_eq!(
+            installed,
+            [None, None],
+            "the lead and its teammate's pane both land"
+        );
+        assert_eq!(shown(&terminals, "main", &lead), Some(lead_place.serial));
+        assert_eq!(shown(&terminals, "main", &mate), Some(mate_place.serial));
+        assert_eq!(terminals.views().unwrap().held(), 2, "each takes a place");
+        let again = terminals.room("main", &mate).unwrap();
+        let replaced =
+            terminals
+                .views()
+                .unwrap()
+                .install("main", &mate, again.serial, requests.clone());
+        assert_eq!(code(replaced), None);
+        assert_eq!(
+            shown(&terminals, "main", &mate),
+            Some(again.serial),
+            "a second view of the same pane replaces the first"
+        );
+        assert_eq!(
+            shown(&terminals, "main", &lead),
+            Some(lead_place.serial),
+            "and leaves the lead's view"
+        );
+        let late = terminals
+            .views()
+            .unwrap()
+            .install("main", &mate, mate_place.serial, requests);
+        assert_eq!(code(late), Some("terminal_view_replaced"));
+        assert_eq!(terminals.views().unwrap().held(), 2);
+    }
+
+    /// DEC-187 S1: with a lead and its teammate's pane both held in a window, input, prompt
+    /// and resize reach only the view of their own agent and pane, and a pane the window
+    /// does not hold is refused, never sent to its lead.
+    #[test]
+    fn input_prompt_and_resize_reach_only_the_view_of_their_agent_and_pane() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let lead = team(2);
+        let mate = pane_of(&lead, "%3");
+        let lead_place = terminals.room("main", &lead).unwrap();
+        let mate_place = terminals.room("main", &mate).unwrap();
+        let (lead_requests, mut lead_queue) = mpsc::channel(4);
+        let (mate_requests, mut mate_queue) = mpsc::channel(4);
+        let landed = [
+            (&lead, lead_place.serial, lead_requests),
+            (&mate, mate_place.serial, mate_requests),
+        ]
+        .map(|(key, serial, requests)| {
+            code(
+                terminals
+                    .views()
+                    .unwrap()
+                    .install("main", key, serial, requests),
+            )
+        });
+        assert_eq!(landed, [None, None]);
+        let send = |key: &ViewKey, request: TerminalRequest| {
+            code(tauri::async_runtime::block_on(
+                terminals.send("main", key, request),
+            ))
+        };
+        assert_eq!(send(&mate, input_request(b"ls\r".to_vec(), false)), None);
+        assert_eq!(
+            send(
+                &mate,
+                TerminalRequest::Prompt {
+                    text: "hi".to_owned()
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            send(&lead, TerminalRequest::Resize { cols: 80, rows: 24 }),
+            None
+        );
+        assert_eq!(
+            send(&pane_of(&lead, "%4"), input_request(b"x".to_vec(), false)),
+            Some("terminal_not_attached"),
+            "a pane the window does not hold is refused, not sent to its lead"
+        );
+        let drained = |queue: &mut mpsc::Receiver<TerminalRequest>| {
+            std::iter::from_fn(|| queue.try_recv().ok()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            drained(&mut mate_queue),
+            [
+                TerminalRequest::Input {
+                    bytes: b"ls\r".to_vec()
+                },
+                TerminalRequest::Prompt {
+                    text: "hi".to_owned()
+                },
+            ],
+            "the teammate's pane gets only its own keys and prompt"
+        );
+        assert_eq!(
+            drained(&mut lead_queue),
+            [TerminalRequest::Resize { cols: 80, rows: 24 }],
+            "the lead gets only its own resize"
+        );
+    }
+
+    /// DEC-187 S1: a detach names its view by serial, so the teammate's detach leaves its
+    /// lead's view, the lead's detach leaves its teammate pane's view, and a serial sent
+    /// under another agent's name ends nothing.
+    #[test]
+    fn a_detach_ends_only_the_view_its_serial_names_among_an_agents_panes() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let lead = team(2);
+        let mate = pane_of(&lead, "%3");
+        let (requests, _queue) = mpsc::channel(1);
+        let [(lead_serial, lead_landed), (mate_serial, mate_landed)] = [&lead, &mate].map(|key| {
+            let place = terminals.room("main", key).unwrap();
+            let landed =
+                terminals
+                    .views()
+                    .unwrap()
+                    .install("main", key, place.serial, requests.clone());
+            (place.serial, code(landed))
+        });
+        assert_eq!((lead_landed, mate_landed), (None, None));
+        assert_eq!(shown(&terminals, "main", &lead), Some(lead_serial));
+        terminals.detach("main", &lead.agent, mate_serial).unwrap();
+        assert_eq!(shown(&terminals, "main", &mate), None);
+        assert_eq!(
+            shown(&terminals, "main", &lead),
+            Some(lead_serial),
+            "the teammate's detach leaves its lead"
+        );
+        let again = terminals.room("main", &mate).unwrap();
+        let landed = terminals
+            .views()
+            .unwrap()
+            .install("main", &mate, again.serial, requests);
+        assert_eq!(code(landed), None);
+        terminals
+            .detach("main", &team(5).agent, again.serial)
+            .unwrap();
+        assert_eq!(
+            shown(&terminals, "main", &mate),
+            Some(again.serial),
+            "a serial under another agent's name ends nothing"
+        );
+        terminals.detach("main", &lead.agent, lead_serial).unwrap();
+        assert_eq!(shown(&terminals, "main", &lead), None);
+        assert_eq!(
+            shown(&terminals, "main", &mate),
+            Some(again.serial),
+            "the lead's detach leaves its teammate's pane"
+        );
+        assert_eq!(terminals.views().unwrap().held(), 1);
+    }
+
+    /// DEC-187 S1: a teammate's pane takes a new place, never its lead's: a window full of
+    /// views, its lead among them, refuses the pane view by name, while the lead's own
+    /// second view still replaces its first.
+    #[test]
+    fn a_full_window_holding_a_lead_refuses_its_teammate_pane_as_a_new_place() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let places: Vec<_> = (1..=VIEWERS_MAX)
+            .map(|index| terminals.room("main", &team(index)))
+            .collect();
+        assert!(places.iter().all(Result::is_ok));
+        assert_eq!(
+            code(terminals.room("main", &pane_of(&team(1), "%3"))),
+            Some("terminal_viewers_full")
+        );
+        assert!(
+            terminals.room("main", &team(1)).is_ok(),
+            "the lead's own second view still replaces its first"
+        );
+    }
+
+    /// DEC-187 S1: the attach, input, prompt and resize commands check the terminal name and
+    /// the pane in one place, so each refuses a bad one by the same name.
+    #[test]
+    fn a_view_key_checks_its_terminal_name_and_its_pane() {
+        assert_eq!(
+            view_key("team-2", Some("%3")).unwrap(),
+            pane_of(&team(2), "%3")
+        );
+        assert_eq!(view_key("team-2", None).unwrap(), team(2));
+        assert_eq!(
+            code(view_key("Team 2", Some("%3"))),
+            Some("terminal_agent_invalid")
+        );
+        for bad in ["3", "%", "%3a", ""] {
+            assert_eq!(
+                code(view_key("team-2", Some(bad))),
+                Some("terminal_pane_invalid"),
+                "{bad}"
+            );
+        }
     }
 }

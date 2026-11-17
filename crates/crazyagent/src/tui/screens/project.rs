@@ -660,6 +660,9 @@ pub(in crate::tui) enum ProjectReply {
     AccountOrder(Option<crate::scheduling::Strategy>),
     RefreshOverview,
     MoveHome(crate::projects_home::AddMode),
+    DeleteEverything(String),
+    GitHubRules,
+    TeamChange(Box<crate::team::TeamAction>),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -727,6 +730,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub questions: ProjectQuestions,
     pub recovery: ProjectRecovery,
     pub roadmap: StatusLine,
+    pub github_notice: bool,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -759,6 +763,7 @@ impl ProjectScreen {
             questions: ProjectQuestions::new(project.clone()),
             recovery: ProjectRecovery::new(project.clone()),
             roadmap: StatusLine::new(project.clone()),
+            github_notice: false,
             sessions: Sessions::default(),
             project,
             name,
@@ -896,7 +901,10 @@ impl ProjectScreen {
             && due(self.read_paths_read_ms)
         {
             SetupQuery::ReadPaths { project }
-        } else if self.hidden_paths.is_none()
+        } else if self
+            .hidden_paths
+            .as_ref()
+            .is_none_or(|saved| !saved.runs.is_empty())
             && self.tab == Tab::Settings
             && due(self.hidden_paths_read_ms)
         {
@@ -1347,12 +1355,6 @@ impl ProjectScreen {
                 action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
-            SetupQuery::MoveHome { .. } => {
-                self.setup_due = true;
-                if !applied && self.problem.is_none() {
-                    self.problem = Some(plain_problem("change_outcome_unknown"));
-                }
-            }
             SetupQuery::Change {
                 action: SetupAction::SetReadPaths { .. },
                 ..
@@ -2470,10 +2472,7 @@ impl ProjectScreen {
                             return ProjectReply::Handled;
                         };
                         self.close_remove();
-                        return ProjectReply::Change(Box::new(SetupAction::Delete {
-                            project_id: self.project.clone(),
-                            name,
-                        }));
+                        return ProjectReply::DeleteEverything(name);
                     }
                     KeyCode::Backspace => {
                         self.remove_typed.pop();
@@ -2518,6 +2517,18 @@ impl ProjectScreen {
         self.remove_choice = RemoveChoice::Dashboard;
         self.remove_everything = false;
         self.remove_typed.clear();
+    }
+
+    /// Shows why the engine refused to start the job that moves this project into the projects
+    /// home or deletes it, as a plain line; a busy refusal names the job that runs, as last read.
+    /// Takes the refusal code and the job read. Returns nothing.
+    pub fn job_refused(&mut self, code: &str, held: Option<&crate::projects_home::job::JobView>) {
+        assert!(!code.is_empty());
+        self.problem = Some(match code {
+            "job_busy" => super::intake_job::busy(held),
+            code => plain_problem(code),
+        });
+        assert!(self.problem.is_some());
     }
 
     /// Opens the remove ask for a delete an engine stop cut short, as x does, on the Settings
@@ -2621,6 +2632,11 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('R') if !self.hidden_seers().is_empty() => {
+                ProjectReply::TeamChange(Box::new(crate::team::TeamAction::RestartHiddenSeers {
+                    project_id: self.project.clone(),
+                }))
+            }
             KeyCode::Char('k') => {
                 match &self.hidden_paths {
                     Some(saved) => {
@@ -2652,11 +2668,12 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('m') => {
+            KeyCode::Char('M') => {
                 self.confirm_move = true;
                 ProjectReply::Handled
             }
             KeyCode::Char('i') => ProjectReply::Process,
+            KeyCode::Char('G') => ProjectReply::GitHubRules,
             KeyCode::Char('u') => match &self.schedule {
                 Some(schedule) => ProjectReply::AccountOrder(
                     crate::tui::screens::settings::account_choice::cycle(
@@ -2733,6 +2750,25 @@ impl ProjectScreen {
             .iter()
             .find(|entry| entry.id.as_str() == self.project.as_str())
             .map(|entry| entry.strategy)
+    }
+
+    /// The running agents the team graph names as able to open a folder hidden after they
+    /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
+    /// their labels in graph order, none while nothing is hidden or the graph loads.
+    pub fn hidden_seers(&self) -> Vec<&str> {
+        let hides = self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| !saved.paths.is_empty());
+        match self.team.ready() {
+            Some(graph) if hides => graph
+                .nodes
+                .iter()
+                .filter(|node| node.sees_hidden)
+                .map(|node| node.label.as_str())
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// The project's account order for its Settings tab: its own strategy, or the one it
@@ -3116,6 +3152,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
+        "team_no_hidden_seers" => "No running agent can still open a hidden folder.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
         crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
         "agent_policy_invalid" => {
@@ -3235,7 +3272,8 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         code if code.starts_with("move_project_")
             || code.starts_with("home_")
-            || code.starts_with("delete_") =>
+            || code.starts_with("delete_")
+            || code == "projects_removed_full" =>
         {
             return crate::projects_home::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),

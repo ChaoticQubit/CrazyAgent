@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { applyTheme, readQuestionsShown, readTerminalInput, readTheme, saveQuestionsShown, saveTerminalInput, useAppSession, type ThemeChoice } from "../../state";
+import { chooseTheme, readQuestionsShown, readTerminalInput, readTheme, saveQuestionsShown, saveTerminalInput, useAppSession, type ThemeChoice } from "../../state";
 import type { QuestionsShown } from "../../api-questions";
 import { QuestionsShownSetting } from "../project/question-popup";
 import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
@@ -13,7 +13,7 @@ function Appearance() {
   const [questions, setQuestions] = useState<QuestionsShown>(readQuestionsShown);
   return <SettingSection title="Appearance">
     <SettingLine label="Theme" help="System follows your Mac. This choice is kept in this app only.">
-      <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); applyTheme(value); }} options={[
+      <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); chooseTheme(value); }} options={[
         { value: "system", label: "System", icon: "monitor" }, { value: "light", label: "Light", icon: "sun" }, { value: "dark", label: "Dark", icon: "moon" },
       ]} />
     </SettingLine>

@@ -1902,6 +1902,29 @@ fn validate_registration(
     Ok(())
 }
 
+/// Whether the home a configured registration made under an older engine run or settings
+/// binding pinned has changed since, read from a fresh custody capture so the actor's own
+/// custody is left as it was: a stale registration is then re-registered only on that
+/// pinned home, as a current one is, and a write-and-restore stays refused across a
+/// rebinding (rv-code4 B22 F2). Input: the registration. Output: true when custody gives
+/// rcli_profile_identity_changed for it.
+fn pinned_home_changed(record: &ConfiguredRegistration) -> bool {
+    let proof = &record.proof;
+    let host = HostStamp {
+        db_instance: proof.database_instance.clone(),
+        engine_epoch: proof.engine_epoch.clone(),
+    };
+    let loaded = std::fs::symlink_metadata(&record.database_path)
+        .map_err(error)
+        .and_then(|metadata| NativeProfileCustody::capture(&record.database_path, &metadata))
+        .and_then(|mut custody| {
+            custody
+                .configured_rcli_profile(&host, &proof.connection, &proof.profile_ref)
+                .map(|_| ())
+        });
+    matches!(loaded, Err(failure) if failure.0 == "rcli_profile_identity_changed")
+}
+
 /// Proves one RCLI member's configured registration can authorize a turn now.
 /// Inputs: the transaction, settings, host, session and member. Output: the member's
 /// proof, or the missing, stale or conflicting registration code.
@@ -3035,7 +3058,10 @@ fn bundle(
         .ok_or_else(|| error("master_attempt_missing"))?;
     let tools = turn_tools(tx, &session)?;
     let tools_off = match tools {
-        true => crate::team::master::switched_off_tools(tx, &session.project_id)?,
+        true => crate::team::tool::console_off(crate::team::master::switched_off_tools(
+            tx,
+            &session.project_id,
+        )?),
         false => Vec::new(),
     };
     let instructions = crate::launch_context::for_master(
@@ -3612,6 +3638,7 @@ fn registration_session(
     Ok(session)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn produce_rcli_profile(
     db: &Connection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
@@ -3620,14 +3647,22 @@ fn produce_rcli_profile(
     connection: ModelConnection,
     configured_home: &Path,
     at_revision: Cursor,
+    undone: bool,
 ) -> Result<RcliConfiguredProfileProof, EngineError> {
     assert!(db.is_autocommit());
     let profile = rcli_profile(session, &connection)
         .ok_or_else(|| error("rcli_profile_configuration_required"))?;
-    let metadata = custody
-        .as_mut()
-        .map_err(|failure| failure.clone())?
-        .register_configured_rcli_profile(host, &connection, &profile, configured_home)?;
+    let custody = custody.as_mut().map_err(|failure| failure.clone())?;
+    let metadata = if undone {
+        custody.register_undone_configured_rcli_profile(
+            host,
+            &connection,
+            &profile,
+            configured_home,
+        )?
+    } else {
+        custody.register_configured_rcli_profile(host, &connection, &profile, configured_home)?
+    };
     configured_proof(host, session, connection, &profile, metadata, at_revision)
 }
 
@@ -3902,6 +3937,7 @@ struct RcliRegistration<'a> {
     session_id: &'a SessionId,
     member: Option<&'a ModelConnection>,
     configured_home: &'a Path,
+    undone: bool,
 }
 
 fn register_rcli_profile(
@@ -3936,6 +3972,7 @@ fn register_rcli_profile(
         connection,
         registration.configured_home,
         revision,
+        registration.undone,
     )?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3946,11 +3983,16 @@ fn register_rcli_profile(
 }
 
 /// Registers the configured RCLI members of a session about to prepare a turn (PA-6):
-/// each member without a registration whose engine-generated SDK home exists, and each
-/// member whose registration was made under an older binding, from custody's unchanged
-/// profile. Inputs: the actor database, settings, custody, host and the session.
-/// Output: Ok; a member that cannot register is left for its turn check to name, except the
-/// owner's chosen member, whose failure stops the preparation as before.
+/// each member without a registration whose engine-generated SDK home exists, each member
+/// whose registration was made under an older binding, from custody's unchanged profile,
+/// and each member whose pinned home custody no longer loads, under any binding, on the
+/// home its slot pins, which registration re-pins only for the config an undone account
+/// save put back with a new change time this engine run (rv-sec3 G4 r2 F1, rv-code4 B22
+/// F2). Inputs: the actor database, settings, custody, host and the session. Output: Ok; a
+/// member that cannot register is left for its turn check to name, except the owner's
+/// chosen member, whose failure stops the preparation: any failure with an unchanged home
+/// or on a pinned home a stale registration led to, whose turn check would only say stale
+/// (rv-code4 B22 R2-F1), and rcli_profile_changed_in_conversation on any pinned home (F3).
 fn register_generated_rcli_profile(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -3983,23 +4025,47 @@ fn register_generated_rcli_profile(
         {
             continue;
         }
-        let stale = match registration(&tx, session_id, &profile)? {
-            None => None,
+        let (stale, pinned) = match registration(&tx, session_id, &profile)? {
+            None => (None, None),
             Some(record) => match validate_registration(&tx, &session, &record) {
-                Err(failure) if failure.0 == "master_configured_receipt_stale" => Some(record),
+                Err(failure)
+                    if failure.0 == "master_configured_receipt_stale"
+                        && !pinned_home_changed(&record) =>
+                {
+                    (Some(record), None)
+                }
+                Err(failure)
+                    if failure.0 == "rcli_profile_identity_changed"
+                        || failure.0 == "master_configured_receipt_stale" =>
+                {
+                    let Some(pinned) = custody.as_ref().ok().and_then(|custody| {
+                        custody
+                            .configured_rcli_home(host, &record.proof.profile_ref)
+                            .ok()
+                    }) else {
+                        continue;
+                    };
+                    let rebound = failure.0 == "master_configured_receipt_stale";
+                    (Some(record), Some((pinned, rebound)))
+                }
                 Ok(()) | Err(_) => continue,
             },
         };
         let account = super::account_profile::configured_profile_ref(member)?;
-        pending.push((member.clone(), account, stale, chosen));
+        pending.push((member.clone(), account, stale, chosen, pinned));
     }
     drop(tx);
     assert!(pending.len() <= crate::config::POOL_MEMBERS_MAX);
-    for (member, account, stale, chosen) in pending {
-        let home = custody
-            .as_ref()
-            .map_err(|failure| failure.clone())?
-            .generated_configured_home(&account);
+    for (member, account, stale, chosen, pinned) in pending {
+        let rebound = pinned.as_ref().is_some_and(|(_, rebound)| *rebound);
+        let undone = pinned.is_some();
+        let home = match pinned {
+            Some((pinned, _)) => pinned,
+            None => custody
+                .as_ref()
+                .map_err(|failure| failure.clone())?
+                .generated_configured_home(&account),
+        };
         let registered = if home.join(".backboard/config.json").is_file() {
             let registration = RcliRegistration {
                 host,
@@ -4007,6 +4073,7 @@ fn register_generated_rcli_profile(
                 session_id,
                 member: Some(&member),
                 configured_home: &home,
+                undone,
             };
             let repaired = custody
                 .as_mut()
@@ -4022,6 +4089,7 @@ fn register_generated_rcli_profile(
         };
         if let Err(failure) = registered
             && chosen
+            && (!undone || rebound || failure.0 == "rcli_profile_changed_in_conversation")
         {
             return Err(failure);
         }
@@ -4290,6 +4358,7 @@ pub(super) fn apply_rcli_profile_registration(
         connection,
         &registration.configured_home,
         Cursor::new(revision),
+        false,
     )?;
 
     let tx = db
@@ -4401,6 +4470,7 @@ pub(super) fn runtime(
             session_id: &session_id,
             member: None,
             configured_home: &configured_home,
+            undone: false,
         };
         return register_rcli_profile(db, config, sources, custody, registration)
             .map(|proof| MasterRuntimeResult::ConfiguredProfile(Box::new(proof)));
@@ -5791,9 +5861,13 @@ auth = { method = "none" }"#;
     }
 
     async fn owner_apply(storage: &Storage, started: &Started, id: &str, mutation: OwnerMutation) {
-        assert_eq!(
-            owner_result(storage, started, id, mutation).await,
-            OwnerResult::Applied
+        let result = owner_result(storage, started, id, mutation).await;
+        assert!(
+            matches!(
+                result,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. }
+            ),
+            "{result:?}"
         );
     }
 
@@ -6512,6 +6586,15 @@ auth = { method = "none" }"#;
             panic!("the registered key must prepare the first turn");
         };
         fail_first(case, &first, MasterReason::RuntimeUnavailable).await;
+        let before = add_outside_account(case).await;
+        let prepare = next_turn(case, "after-settings-change").await;
+        (before, prepare)
+    }
+
+    /// Has the owner add an account outside the master's pool, which moves the settings
+    /// binding and leaves the master's scope as it was, so the next send rebinds the
+    /// session (PA-6, DEC-092). Input: the fixture. Output: the config id before the edit.
+    async fn add_outside_account(case: &Fixture) -> ConfigId {
         let basis = owner_read(
             &case.storage,
             &case.started,
@@ -6538,8 +6621,114 @@ auth = { method = "none" }"#;
             },
         )
         .await;
-        let prepare = next_turn(case, "after-settings-change").await;
-        (basis.config_id, prepare)
+        basis.config_id
+    }
+
+    /// Moves the fixture's configured home to its account's generated SDK home, which the
+    /// engine registers at the first turn. Input: the fixture. Output: the path of the config
+    /// file in that home.
+    fn generated_master_config(case: &Fixture) -> std::path::PathBuf {
+        let connection = case
+            .config
+            .settings
+            .model_access
+            .as_ref()
+            .unwrap()
+            .connections[0]
+            .clone();
+        let profile_ref =
+            super::super::account_profile::configured_profile_ref(&connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        std::fs::create_dir(&homes).unwrap();
+        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let generated = homes.join(format!(
+            "{:x}",
+            Sha256::digest(profile_ref.as_str().as_bytes())
+        ));
+        std::fs::rename(&case.home, &generated).unwrap();
+        generated.join(".backboard/config.json")
+    }
+
+    /// Writes other bytes over a config file and puts its bytes and modified time back, as
+    /// a confined master can, so only its change time moves (rv-sec3 G4 r2 F1). Input: the
+    /// config file. Output: none; it asserts the same file and bytes with a new change time.
+    fn write_and_restore_config(config: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let bytes = std::fs::read(config).unwrap();
+        let before = std::fs::symlink_metadata(config).unwrap();
+        std::fs::write(config, b"{}").unwrap();
+        std::fs::write(config, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(config)
+            .unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
+        let after = std::fs::symlink_metadata(config).unwrap();
+        assert_eq!(std::fs::read(config).unwrap(), bytes);
+        assert_eq!(
+            (after.dev(), after.ino(), after.mode(), after.nlink()),
+            (before.dev(), before.ino(), before.mode(), before.nlink())
+        );
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec())
+        );
+    }
+
+    /// Replaces a config file with a copy of the same bytes and mode, a new inode, as a
+    /// save through a rename does. Input: the config file. Output: none; it asserts the
+    /// new inode.
+    fn replace_config(config: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        let before = std::fs::symlink_metadata(config).unwrap();
+        let copy = config.with_extension("json.copy");
+        std::fs::write(&copy, std::fs::read(config).unwrap()).unwrap();
+        std::fs::set_permissions(
+            &copy,
+            std::fs::Permissions::from_mode(before.mode() & 0o7777),
+        )
+        .unwrap();
+        std::fs::rename(&copy, config).unwrap();
+        assert_ne!(
+            std::fs::symlink_metadata(config).unwrap().ino(),
+            before.ino()
+        );
+    }
+
+    /// Runs the preparation of a master turn that must be refused. Inputs: the fixture, the
+    /// prepare command and what the turn follows, named in the panic. Output: the refusal's
+    /// cause, from a refused turn or from the error, or None.
+    async fn refused_cause(
+        case: &Fixture,
+        prepare: MasterRuntimeCommand,
+        after: &str,
+    ) -> Option<String> {
+        match case.runtime(prepare).await {
+            Ok(MasterRuntimeResult::Turn(turn)) => turn.cause,
+            Ok(MasterRuntimeResult::Prepared(prepared)) => panic!(
+                "a turn after {after} must not prepare {:?}",
+                prepared.attempt.connection
+            ),
+            Ok(_) => None,
+            Err(failure) => Some(failure.0),
+        }
+    }
+
+    /// Checks the generation the fixture's master registration records. Inputs: the
+    /// fixture and the generation it must hold. Output: none; it asserts.
+    fn assert_master_generation(case: &Fixture, generation: u64) {
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.proof.generation, generation);
     }
 
     /// Ends the fixture's first turn with a failure the runtime reported. Inputs: the
@@ -6838,6 +7027,161 @@ auth = { method = "none" }"#;
             record.proof.profile_ref,
             case.session.selection.target_profile_ref
         );
+        drop(tx);
+        case.close().await;
+    }
+
+    /// rv-sec3 G4 r2 F1: a master whose generated SDK home's config was written over and
+    /// put back outside an account save, the same bytes and inode with its modified time
+    /// reset, moves only its change time. The master's next turn is refused with
+    /// rcli_profile_changed_in_conversation (rv-code4 B22 F3) and its slot keeps its
+    /// generation; at RV-DS241-50 r1 the turn re-pinned it unseen. An undone save's put-back
+    /// still re-pins, in custody's rows.
+    #[tokio::test]
+    async fn a_master_turn_after_its_config_was_written_and_restored_outside_a_save_is_refused() {
+        let case = Fixture::new(true).await;
+        let config = generated_master_config(&case);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("an engine-generated SDK home must register and prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        write_and_restore_config(&config);
+
+        let prepare = next_turn(&case, "after-write-and-restore").await;
+        let refused = refused_cause(&case, prepare, "a write-and-restore").await;
+
+        assert_eq!(
+            refused.as_deref(),
+            Some("rcli_profile_changed_in_conversation")
+        );
+        assert_master_generation(&case, 1);
+        case.close().await;
+    }
+
+    /// rv-code4 B22 F2: the G4 refusal holds across a rebinding. A master writes over its
+    /// generated SDK home's config and puts it back, then the owner adds an account outside
+    /// the master's pool and sends, so the session moves to the new settings binding and
+    /// its registration reads stale. The turn is still refused, with
+    /// rcli_profile_changed_in_conversation, and the slot keeps its generation; before, the
+    /// stale registration took the owner's permissive register and re-pinned it unseen.
+    #[tokio::test]
+    async fn a_master_turn_after_a_write_and_restore_and_a_settings_rebind_is_refused() {
+        let case = Fixture::kept().await;
+        let config = generated_master_config(&case);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("an engine-generated SDK home must register and prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        write_and_restore_config(&config);
+        let before = add_outside_account(&case).await;
+
+        let prepare = next_turn(&case, "after-write-and-restore-and-rebind").await;
+        let refused = refused_cause(&case, prepare, "a write-and-restore and a rebind").await;
+
+        let (session, _) = case.view().await;
+        assert_ne!(
+            session.binding().0,
+            &before,
+            "the outside edit rebound the session"
+        );
+        assert_eq!(
+            refused.as_deref(),
+            Some("rcli_profile_changed_in_conversation")
+        );
+        assert_master_generation(&case, 1);
+        case.close().await;
+    }
+
+    /// rv-code4 B22 R2-F1: after a rebinding, a real change to the chosen member's pinned
+    /// home, its config replaced by a copy (a new inode), is still named as a changed file.
+    /// The owner adds an account outside the master's pool and sends; the turn is refused
+    /// with rcli_profile_identity_changed and the slot keeps its generation. At d6bc5cf16
+    /// the pinned route's refusal was dropped and the turn named
+    /// master_configured_receipt_stale, a sign-in gap that fails over.
+    #[tokio::test]
+    async fn a_master_turn_after_a_replaced_config_and_a_settings_rebind_names_the_changed_file() {
+        let case = Fixture::kept().await;
+        let config = generated_master_config(&case);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("an engine-generated SDK home must register and prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        replace_config(&config);
+        let before = add_outside_account(&case).await;
+
+        let prepare = next_turn(&case, "after-replace-and-rebind").await;
+        let refused = refused_cause(&case, prepare, "a replaced config and a rebind").await;
+
+        let (session, _) = case.view().await;
+        assert_ne!(
+            session.binding().0,
+            &before,
+            "the outside edit rebound the session"
+        );
+        assert_eq!(refused.as_deref(), Some("rcli_profile_identity_changed"));
+        assert_master_generation(&case, 1);
+        case.close().await;
+    }
+
+    /// RV-DS241-50 r1: turn preparation re-pins a moved member only on the home its slot
+    /// pins. An owner-registered home whose config was replaced stays refused even when
+    /// the account's engine-generated home exists, and the slot is never moved onto it.
+    #[tokio::test]
+    async fn a_replaced_config_in_an_owner_home_is_never_moved_onto_the_generated_home() {
+        let case = Fixture::new(true).await;
+        let registered = case.register().await;
+        let connection = case
+            .config
+            .settings
+            .model_access
+            .as_ref()
+            .unwrap()
+            .connections[0]
+            .clone();
+        let profile_ref =
+            super::super::account_profile::configured_profile_ref(&connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        std::fs::create_dir(&homes).unwrap();
+        std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let generated = homes.join(format!(
+            "{:x}",
+            Sha256::digest(profile_ref.as_str().as_bytes())
+        ));
+        let config = case.home.join(".backboard/config.json");
+        let bytes = std::fs::read(&config).unwrap();
+        for folder in [generated.clone(), generated.join(".backboard")] {
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        private_file(&generated.join(".backboard/config.json"), &bytes);
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered owner home must prepare the first turn");
+        };
+        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
+        let replacement = case.home.join(".backboard/config.json.new");
+        private_file(&replacement, &bytes);
+        std::fs::rename(&replacement, &config).unwrap();
+
+        let prepare = next_turn(&case, "after-replaced-config").await;
+        if let Ok(MasterRuntimeResult::Prepared(_)) = case.runtime(prepare).await {
+            panic!("a replaced owner config must not prepare on another home");
+        }
+
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        let record = registration(
+            &tx,
+            &case.session.session_id,
+            &case.session.selection.target_profile_ref,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(record.proof.registration_id, registered.registration_id);
+        assert_eq!(record.proof.generation, registered.generation);
         drop(tx);
         case.close().await;
     }

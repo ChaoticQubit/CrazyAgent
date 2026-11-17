@@ -334,3 +334,35 @@ fn a_held_folder_copies_only_its_own_files_after_its_name_becomes_a_link() {
     assert!(fs::symlink_metadata(target.join("extra")).is_err());
     assert_eq!(tally.files, 1);
 }
+
+/// DS-148 code F1: a `.git` folder in any letter case, or spelled with a code point HFS+
+/// ignores in names, is left out of the copy, inside a hooks folder or named by a hook
+/// command at the top, since a case-insensitive volume opens each as `.git`.
+#[test]
+fn a_git_folder_in_any_spelling_the_volume_opens_as_git_is_left_out_of_the_copy() {
+    let parent = tempfile::tempdir().unwrap();
+    let real = plugin(parent.path(), "real");
+    let top = "\u{feff}.git";
+    let command = format!("sh \"${{CLAUDE_PLUGIN_ROOT}}/{top}/start.sh\"");
+    let config = serde_json::json!({
+        "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": command}]}]}
+    });
+    fs::write(real.join("hooks/hooks.json"), config.to_string()).unwrap();
+    let spelled = [
+        top,
+        "hooks/.GIT",
+        "hooks/\u{feff}.git",
+        "hooks/.g\u{200c}it",
+    ];
+    for folder in spelled {
+        fs::create_dir_all(real.join(folder)).unwrap();
+        fs::write(real.join(folder).join("start.sh"), "exit 0\n").unwrap();
+    }
+    let found = read(&real).unwrap();
+    let copy = parent.path().join("copy");
+    super::copy(&real, &copy, &found.hooks).unwrap();
+    for folder in spelled {
+        assert!(fs::symlink_metadata(copy.join(folder)).is_err(), "{folder}");
+    }
+    assert!(copy.join("hooks/hooks.json").is_file());
+}

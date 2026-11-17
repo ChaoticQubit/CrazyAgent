@@ -73,6 +73,10 @@ impl NativeProfileUse {
         match *self {}
     }
 
+    pub(crate) fn engine_root(&self) -> &Path {
+        match *self {}
+    }
+
     pub(crate) fn revalidate_retained(&self) -> Result<(), EngineError> {
         match *self {}
     }
@@ -216,6 +220,24 @@ impl NativeProfileCustody {
         _target_profile_ref: &CredentialRef,
         _configured_home: &Path,
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
+        match *self {}
+    }
+
+    pub(crate) fn register_undone_configured_rcli_profile(
+        &mut self,
+        _host: &HostStamp,
+        _connection: &ModelConnection,
+        _target_profile_ref: &CredentialRef,
+        _configured_home: &Path,
+    ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
+        match *self {}
+    }
+
+    pub(crate) fn configured_rcli_home(
+        &self,
+        _host: &HostStamp,
+        _target_profile_ref: &CredentialRef,
+    ) -> Result<PathBuf, EngineError> {
         match *self {}
     }
 

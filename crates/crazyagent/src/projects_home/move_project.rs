@@ -141,30 +141,52 @@ impl ProjectMove {
     }
 
     /// Waits for the project's agents to stop, then puts the folder in the home as an add
-    /// does, deleting nothing. Output: what is left to clear once the move is recorded (the
-    /// whole old folder of a move that went by copy), or the refusal code.
-    pub fn run(self) -> Result<Moved, EngineError> {
-        self.run_with(MOVE_STOP_WAIT)
+    /// does, deleting nothing, reporting into the tally and stopping when it asks. Input:
+    /// the tally. Output: what is left to clear once the move is recorded (the whole old
+    /// folder of a move that went by copy), or the refusal code (`home_add_cancelled` after
+    /// a stop, with nothing moved).
+    pub fn run(self, tally: &Tally) -> Result<Moved, EngineError> {
+        self.run_with(MOVE_STOP_WAIT, tally)
     }
 
     /// Runs the plan with a bounded wait: nothing moves while an agent of the project
     /// runs or a main graph refresh works in its folder (`move_project_busy` past the
     /// wait), then the folder is placed by [`AddPlan::place`], which leaves the source
-    /// whole. Input: the wait. Output: the outcome.
-    pub(crate) fn run_with(self, wait: Duration) -> Result<Moved, EngineError> {
-        let landing = self.ready(wait)?;
-        let placed = self.add.place(&Tally::default())?;
+    /// whole, and the project text the engine wrote stays the owner's there
+    /// ([`carry_written`]). Inputs: the wait and the tally. Output: the outcome.
+    pub(crate) fn run_with(self, wait: Duration, tally: &Tally) -> Result<Moved, EngineError> {
+        let landing = self.ready(wait, tally)?;
+        assert!(!tally.waiting());
+        let written = self.written_text();
+        let target = self.add.destination().to_path_buf();
+        let placed = self.add.place(tally)?;
+        carry_written(&self.database, &target, written);
         Ok(Moved { placed, landing })
     }
 
     /// Runs the plan as a move across disks or out of iCloud Drive does, by a checked
-    /// copy, on any disk. Input: the wait. Output: the old folder to clear, or the
-    /// refusal code.
+    /// copy, on any disk. Inputs: the wait and the tally. Output: the old folder to clear,
+    /// or the refusal code.
     #[cfg(all(test, unix))]
-    pub(crate) fn run_by_copy(self, wait: Duration) -> Result<Moved, EngineError> {
-        let landing = self.ready(wait)?;
-        let placed = self.add.place_by_copy(&Tally::default())?;
+    pub(crate) fn run_by_copy(self, wait: Duration, tally: &Tally) -> Result<Moved, EngineError> {
+        let landing = self.ready(wait, tally)?;
+        let written = self.written_text();
+        let target = self.add.destination().to_path_buf();
+        let placed = self.add.place_by_copy(tally)?;
+        carry_written(&self.database, &target, written);
         Ok(Moved { placed, landing })
+    }
+
+    /// The project instructions text the engine last wrote into the folder, read before the
+    /// folder moves, since that record is named by the folder's real path and stays behind
+    /// ([`crate::agent_home::outside`], rv-code2 b7-rest F1). Output: the text, or none for
+    /// blank or other text, a folder that cannot be read or no engine data folder.
+    fn written_text(&self) -> Option<String> {
+        let data = self.database.parent()?;
+        let source = self.add.source();
+        let text = crate::agent_home::read_project(source).ok()?;
+        let owners = !text.trim().is_empty() && !crate::agent_home::outside(data, source, &text);
+        owners.then_some(text)
     }
 
     /// Waits until no agent of the project runs, no main graph refresh builds or publishes
@@ -174,10 +196,12 @@ impl ProjectMove {
     /// [`busy`] asked at the plan: work that started since (a master session's working
     /// copy, a change set step, an onboarding step, research) refuses the move before
     /// anything moves. Landing work that began before the plan has ended by then, and none
-    /// starts until the caller drops the holds, after the record. Input: the wait. Output:
-    /// the landing holds when the folder may move now, `move_project_busy` past the wait,
-    /// or the code of the work found.
-    fn ready(&self, wait: Duration) -> Result<RepositoryHolds, EngineError> {
+    /// starts until the caller drops the holds, after the record. While agents run the
+    /// tally says the move waits and how many are left, and a stop asked then ends the wait
+    /// with `home_add_cancelled` and the tally still waiting. Inputs: the wait and the
+    /// tally. Output: the landing holds when the folder may move now, `move_project_busy`
+    /// past the wait, or the code of the work found.
+    fn ready(&self, wait: Duration, tally: &Tally) -> Result<RepositoryHolds, EngineError> {
         let unavailable = |_| refused("move_project_unavailable");
         let db =
             Connection::open_with_flags(&self.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -185,14 +209,23 @@ impl ProjectMove {
         db.busy_timeout(Duration::from_secs(5))
             .map_err(unavailable)?;
         let deadline = Instant::now() + wait;
-        while active_agents(&db, &self.project).map_err(unavailable)? > 0
-            || crate::onboarding::service::refreshing_in(self.add.source())
-        {
+        loop {
+            tally.go_on()?;
+            let active = active_agents(&db, &self.project).map_err(unavailable)?;
+            assert!(active >= 0);
+            match u64::try_from(active) {
+                Ok(0) | Err(_) => tally.waited(),
+                Ok(left) => tally.wait_for(left),
+            }
+            if active == 0 && !crate::onboarding::service::refreshing_in(self.add.source()) {
+                break;
+            }
             if Instant::now() >= deadline {
                 return Err(refused("move_project_busy"));
             }
             std::thread::sleep(MOVE_POLL);
         }
+        assert!(!tally.waiting());
         let origin = self
             .add
             .source()
@@ -208,6 +241,19 @@ impl ProjectMove {
             Some(code) => Err(refused(code)),
             None => Ok(landing),
         }
+    }
+}
+
+/// Records the text a move carried at the folder's place in the home once that is the text
+/// there, so the owner's own text stays theirs after the move; a record that cannot be
+/// written leaves the text labelled until the next save, the safe side. Inputs: the engine
+/// database, the folder's new place and the text [`ProjectMove::written_text`] read.
+fn carry_written(database: &Path, target: &Path, text: Option<String>) {
+    if let Some(text) = text
+        && let Some(data) = database.parent()
+        && crate::agent_home::read_project(target).is_ok_and(|now| now == text)
+    {
+        let _ = crate::agent_home::mark_written(data, target, &text);
     }
 }
 
@@ -335,6 +381,30 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
     }))
 }
 
+/// Tells whether a pending project move lands in `folder`: the folder is the move's
+/// destination in the home or inside it, as given or as it resolves now. Nothing is
+/// registered there until the move is finished or forgotten, since the move's record
+/// rewrites every stored path under its old folder to the same place under the
+/// destination and replaces a row already there. Inputs: an engine connection and the
+/// folder. Output: the answer, or any SQLite failure.
+pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<bool> {
+    if !present(connection, "projects_home_project_move")? {
+        return Ok(false);
+    }
+    let target: Option<String> = connection
+        .query_row(
+            "SELECT target FROM projects_home_project_move WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(target.is_some_and(|target| {
+        let target = Path::new(&target);
+        folder.starts_with(target)
+            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(target))
+    }))
+}
+
 /// Forgets a pending project move whose disk work never ran. Inputs: the transaction and
 /// the transport exchange that planned it. Output: Ok; a move of another exchange stays.
 pub(crate) fn forget(tx: &Transaction<'_>, exchange: i64) -> Result<(), EngineError> {
@@ -441,6 +511,85 @@ fn linked_agent_copies(tx: &Transaction<'_>, origin: &Path) -> Result<bool, Engi
     Ok(false)
 }
 
+/// What the checks of a project move that read nothing inside its folder found: the projects
+/// home, the project's real folder and every other registered project.
+struct Checked {
+    home: PathBuf,
+    real: PathBuf,
+    others: Vec<Registered>,
+}
+
+/// Checks a project move as far as it can without reading inside the folder, so a job that
+/// would be refused is refused before it starts: another project move pending
+/// (`move_project_in_progress`), no projects home, an unknown project, a project without
+/// setup, a folder gone (`home_source_missing`), already in the home
+/// (`move_project_already_home`) or reached through a link (`move_project_folder_link`),
+/// another project using the folder (`home_move_project`), what [`busy`] names, and a Copy
+/// while an agent works in a linked worktree (`move_project_copy_worktrees`). Nothing is
+/// written. Inputs: the transaction, the guarded projects, the project and the mode.
+/// Output: the project's real folder, or the refusal code.
+pub(crate) fn check(
+    tx: &Transaction<'_>,
+    registered: &[Registered],
+    project: &ProjectId,
+    mode: AddMode,
+) -> Result<PathBuf, EngineError> {
+    let found = checked(tx, registered, project, mode)?;
+    assert!(found.real.is_absolute());
+    assert!(!found.real.starts_with(&found.home));
+    Ok(found.real)
+}
+
+/// The checks [`check`] names, keeping what they found for [`plan`]. Inputs: as
+/// [`check`]. Output: what was found, or the refusal code.
+fn checked(
+    tx: &Transaction<'_>,
+    registered: &[Registered],
+    project: &ProjectId,
+    mode: AddMode,
+) -> Result<Checked, EngineError> {
+    if pending(tx)?.is_some() {
+        return Err(refused("move_project_in_progress"));
+    }
+    let home = super::load(tx)?.ok_or_else(|| refused("projects_home_unset"))?;
+    let found = registered
+        .iter()
+        .find(|known| &known.project_id == project)
+        .ok_or_else(|| refused("invalid_project"))?;
+    let set_up = count(
+        tx,
+        "project_setups",
+        "SELECT COUNT(*) FROM project_setups WHERE project=?1",
+        [project.as_str()],
+    )?;
+    if set_up == 0 {
+        return Err(refused("project_setup_missing"));
+    }
+    let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
+    if real.starts_with(&home) {
+        return Err(refused("move_project_already_home"));
+    }
+    if real != found.folder {
+        return Err(refused("move_project_folder_link"));
+    }
+    let source = text(&real)?;
+    let others: Vec<Registered> = registered
+        .iter()
+        .filter(|known| &known.project_id != project)
+        .cloned()
+        .collect();
+    if others.iter().any(|other| in_use(&real, other)) {
+        return Err(refused("home_move_project"));
+    }
+    if let Some(code) = busy(tx, project, source)? {
+        return Err(refused(code));
+    }
+    if mode == AddMode::Copy && linked_agent_copies(tx, &real)? {
+        return Err(refused("move_project_copy_worktrees"));
+    }
+    Ok(Checked { home, real, others })
+}
+
 /// Plans moving a registered project kept in place into the projects home and records the
 /// move as pending in the caller's write, before any disk work. The pending record is also
 /// the hold: no agent or research run starts in the folder until the move is finished or
@@ -463,65 +612,23 @@ pub(crate) fn plan(
     asked: &Asked<'_>,
 ) -> Result<ProjectMove, EngineError> {
     assert!(asked.exchange > 0);
-    if pending(tx)?.is_some() {
-        return Err(refused("move_project_in_progress"));
-    }
-    let home = super::load(tx)?.ok_or_else(|| refused("projects_home_unset"))?;
-    let found = registered
-        .iter()
-        .find(|known| &known.project_id == asked.project)
-        .ok_or_else(|| refused("invalid_project"))?;
-    let set_up = count(
-        tx,
-        "project_setups",
-        "SELECT COUNT(*) FROM project_setups WHERE project=?1",
-        [asked.project.as_str()],
-    )?;
-    if set_up == 0 {
-        return Err(refused("project_setup_missing"));
-    }
-    let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
-    if real.starts_with(&home) {
-        return Err(refused("move_project_already_home"));
-    }
-    if real != found.folder {
-        return Err(refused("move_project_folder_link"));
-    }
+    let Checked { home, real, others } = checked(tx, registered, asked.project, asked.mode)?;
     let source = text(&real)?;
-    let others: Vec<Registered> = registered
-        .iter()
-        .filter(|known| &known.project_id != asked.project)
-        .cloned()
-        .collect();
-    if others.iter().any(|other| in_use(&real, other)) {
-        return Err(refused("home_move_project"));
-    }
-    if let Some(code) = busy(tx, asked.project, source)? {
-        return Err(refused(code));
-    }
     let mut overrides = asked.overrides.to_vec();
-    match asked.mode {
-        AddMode::Copy => {
-            if linked_agent_copies(tx, &real)? {
-                return Err(refused("move_project_copy_worktrees"));
+    if asked.mode == AddMode::Move && !overrides.contains(&AddOverride::Worktrees) {
+        let outside = match git_link(&real) {
+            GitLink::None => false,
+            GitLink::Worktrees => {
+                let paths = linked_worktree_paths(&real, LINKED_WORKTREES_MAX);
+                paths.len() < linked_worktrees(&real)
+                    || paths.iter().any(|path| !path.starts_with(&real))
             }
+            _ => true,
+        };
+        if outside {
+            return Err(refused("home_move_worktrees"));
         }
-        AddMode::Move if !overrides.contains(&AddOverride::Worktrees) => {
-            let outside = match git_link(&real) {
-                GitLink::None => false,
-                GitLink::Worktrees => {
-                    let paths = linked_worktree_paths(&real, LINKED_WORKTREES_MAX);
-                    paths.len() < linked_worktrees(&real)
-                        || paths.iter().any(|path| !path.starts_with(&real))
-                }
-                _ => true,
-            };
-            if outside {
-                return Err(refused("home_move_worktrees"));
-            }
-            overrides.push(AddOverride::Worktrees);
-        }
-        AddMode::Move => {}
+        overrides.push(AddOverride::Worktrees);
     }
     let add = plan_add(&home, engine_root, source, asked.mode, &overrides, &others)?;
     assert_eq!(add.source(), real);
@@ -569,7 +676,10 @@ pub(crate) enum Finished {
 /// after this record. Without that report a Move counts only when the old folder is gone
 /// (a rename), since a copy cut short looks the same on disk; a Copy counts only when
 /// verified. A finished move re-points the project's agent copies and rewrites every
-/// stored path of the folder in the caller's write. Inputs: the transaction, which pending
+/// stored path of the folder in the caller's write; a verified Move whose old folder is
+/// still there went by copy, so the same write marks that folder as still to clear under
+/// the move's request (`projects_home_project_move_left`, B17 -66), replacing an older
+/// mark, until the clear forgets it. Inputs: the transaction, which pending
 /// move to finish and whether its disk work reported success. Output: None when no such
 /// move is pending, else what was found.
 pub(crate) fn finish(
@@ -600,6 +710,17 @@ pub(crate) fn finish(
     }
     let repointed = repoint(tx, &pending.origin, &pending.target)?;
     rewrite(tx, &pending.project, &pending.origin, &pending.target)?;
+    if verified && left && matches!(pending.mode, AddMode::Move) {
+        tx.execute(
+            "INSERT OR REPLACE INTO projects_home_project_move_left VALUES (1,?1,?2,?3)",
+            params![
+                pending.request,
+                pending.project.as_str(),
+                text(&pending.origin)?
+            ],
+        )
+        .map_err(sql)?;
+    }
     Ok(Some(Finished::Moved { repointed }))
 }
 
@@ -672,7 +793,8 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
 
 /// Rewrites every stored path of the project's old folder to the same place in the new
 /// one, by whole path parts: the setup's folder, the repositories the project declares
-/// and each column of [`PATH_COLUMNS`]. A stale row already at the new path gives way to
+/// and each column of [`PATH_COLUMNS`], and carries the project's GitHub publish job to the
+/// new folder. A stale row already at the new path gives way to
 /// the moved one; [`plan`] refused a destination any other project still names, so such a
 /// row belongs to no project, and a plain UPDATE that failed here would leave a folder
 /// already moved unrecorded. Records of what was said or done (prompts, messages, events)
@@ -698,6 +820,7 @@ fn rewrite(
         let mut stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(json)?;
         if let Some(place) = moved(Path::new(&stored.folder), origin, target) {
+            let before = stored.project_folder();
             stored.folder = text(&place)?.to_owned();
             assert!(Path::new(&stored.folder).starts_with(target));
             tx.execute(
@@ -708,6 +831,7 @@ fn rewrite(
                 ],
             )
             .map_err(sql)?;
+            crate::github::carry_publish(tx, &before, &stored.project_folder());
         }
     }
     let body: Option<String> = tx

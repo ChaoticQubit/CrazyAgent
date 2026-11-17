@@ -5,6 +5,7 @@ export const INPUT_BYTES_MAX = 4096;
 export const SIZE_MIN = 2;
 export const SIZE_MAX = 1000;
 export const QUEUED_CHUNKS_MAX = 256;
+const ESC = 0x1b;
 
 /** Where the owner types to a master or an agent: straight into its terminal, only in the
  * message box under it, or in both. */
@@ -117,12 +118,18 @@ export function terminalSize(cols: number, rows: number): { cols: number; rows: 
   return { cols: clamp(cols), rows: clamp(rows) };
 }
 
+type Job = () => Promise<boolean>;
+
+/** How many sends every `jobQueue` of this page took, so a lane's waiting batch can tell
+ * whether anything was queued after it, through whatever wrapper hands sends to the queue. */
+let queuedSends = 0;
+
 /** Runs a terminal's sends one at a time in the order queued, so a long paste never overtakes
  * later keys or a prompt. Input: a callback for the stop. Output: a function that queues one
  * send, which resolves false once nothing more can be delivered; it returns whether the send
  * was queued. After a stop, or past `QUEUED_CHUNKS_MAX` waiting sends, it refuses them and
  * reports the stop once. */
-export function jobQueue(stopped: () => void): (job: () => Promise<boolean>) => boolean {
+export function jobQueue(stopped: () => void): (job: Job) => boolean {
   let tail: Promise<void> = Promise.resolve();
   let waiting = 0;
   let stop = false;
@@ -138,6 +145,7 @@ export function jobQueue(stopped: () => void): (job: () => Promise<boolean>) => 
       return false;
     }
     waiting += 1;
+    queuedSends += 1;
     tail = tail
       .then(async () => { if (!stop && !await job()) halt(); })
       .catch(halt)
@@ -157,36 +165,56 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
   };
 }
 
-/** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Wheel
- * reports that arrive while earlier input is still being sent wait as one batch that later
- * reports join, so a fast scroll costs a few sends rather than one per wheel event and never
- * fills the queue. Typed bytes close the batch, so keys and scrolling keep their order.
- * Inputs: the queue and the send call for one chunk, told whether the wheel made it.
- * Output: the two lanes. */
-export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
-  const keys = keyQueue(run, (chunk) => send(chunk, false));
-  const scrolls = keyQueue(run, (chunk) => send(chunk, true));
-  let batch: number[] | null = null;
-  const typed = (bytes: Uint8Array) => {
-    batch = null;
-    keys(bytes);
-  };
-  const wheel = (bytes: Uint8Array) => {
+/** One lane's waiting batch on a shared send queue. Bytes that arrive while earlier input is
+ * still being sent join the one batch that waits, up to `INPUT_BYTES_MAX`, but only while no
+ * `jobQueue` of the page took a send after that batch, so nothing queued after it, a prompt or
+ * the other lane's input, is ever overtaken; it goes out as one send when the queue reaches it,
+ * and nothing waits on a timer. Bytes over the limit go out in chunks; empty input sends
+ * nothing. Inputs: the queue, a `jobQueue` or a wrapper that hands it the sends, and the send
+ * call for one chunk. Output: a function that queues bytes and, when told, closes the batch
+ * after them. */
+function batchLane(run: (job: Job) => boolean, send: (chunk: number[]) => Promise<boolean>): (bytes: Uint8Array, last: boolean) => void {
+  const chunks = keyQueue(run, send);
+  let waiting: { bytes: number[]; after: number } | null = null;
+  return (bytes, last) => {
+    if (bytes.length === 0) return;
     if (bytes.length > INPUT_BYTES_MAX) {
-      batch = null;
-      return scrolls(bytes);
+      waiting = null;
+      return chunks(bytes);
     }
-    if (batch && batch.length + bytes.length <= INPUT_BYTES_MAX) {
-      batch.push(...bytes);
-      return;
+    const joins = waiting !== null
+      && waiting.after === queuedSends
+      && waiting.bytes.length + bytes.length <= INPUT_BYTES_MAX;
+    if (joins && waiting) {
+      waiting.bytes.push(...bytes);
+    } else {
+      const batch = Array.from(bytes);
+      const queued = run(() => {
+        if (waiting?.bytes === batch) waiting = null;
+        return send(batch);
+      });
+      waiting = queued ? { bytes: batch, after: queuedSends } : null;
     }
-    const waiting = Array.from(bytes);
-    batch = run(() => {
-      if (batch === waiting) batch = null;
-      return send(waiting, true);
-    }) ? waiting : null;
+    if (last) waiting = null;
+    assert(waiting === null || waiting.bytes.length <= INPUT_BYTES_MAX, "a waiting batch fits one send");
   };
-  return { typed, wheel };
+}
+
+/** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Keys typed
+ * or wheel reports that arrive while earlier input is still being sent wait as one batch per
+ * lane, so fast typing or a fast scroll costs one send per round trip rather than one per key
+ * or wheel event, and never fills the queue. A batch takes more input only while no send was
+ * queued after it, so keys, scrolling and prompts keep their order. A lone Esc closes its batch
+ * after it, so Esc and a quick key after it never reach the app as one Alt key. Inputs: the
+ * queue and the send call for one chunk, told whether the wheel made it. Output: the two
+ * lanes. */
+export function inputLanes(run: (job: Job) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
+  const keys = batchLane(run, (chunk) => send(chunk, false));
+  const scrolls = batchLane(run, (chunk) => send(chunk, true));
+  return {
+    typed: (bytes) => keys(bytes, bytes.length === 1 && bytes[0] === ESC),
+    wheel: (bytes) => scrolls(bytes, false),
+  };
 }
 
 /** Sends typed input in order, one chunk at a time, on a queue of its own. Inputs: the send
@@ -287,6 +315,7 @@ export type TerminalEvent =
 
 const END_COPY: Record<string, string> = {
   terminal_agent_unknown: "This agent's terminal isn't running. It may have finished or not started yet.",
+  terminal_teammates_server_ended: "The terminal server this lead's teammates ran on ended, so its team panes are closed.",
   terminal_ended: "This run finished. Its last screen stays above.",
   terminal_unavailable: "Terminals need tmux, and it isn't ready on this Mac. Run setup again from Settings.",
   terminal_viewers_full: "Terminal limit reached. Close a terminal or a terminal window, then open this one again.",

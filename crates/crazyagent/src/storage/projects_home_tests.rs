@@ -40,6 +40,265 @@ fn a_home_move_rechecks_agent_work_under_its_hold_before_the_first_write() {
     );
 }
 
+/// rv-sec3 S5b F2: a projects home move carries each moved project's GitHub publish job,
+/// named by the project's folder, to the project's folder in the new home, so a recorded
+/// publish is still found there and nothing is left under the old folder.
+#[test]
+fn a_home_move_carries_each_moved_projects_github_publish_job() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (home, next, engine) = (base.join("home"), base.join("next"), base.join("engine"));
+    for folder in [&home, &next, &engine] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let database = engine.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::team::cleanup::initialize(&connection).unwrap();
+    drop(crate::landing::open(&engine).unwrap());
+    crate::projects_home::save(&connection, &home).unwrap();
+    let (origin, target) = (home.join("demo"), next.join("demo"));
+    std::fs::create_dir(&origin).unwrap();
+    let setup = crate::project_setup::StoredSetup {
+        project_id: ProjectId::new("demo").unwrap(),
+        name: "demo".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 16,
+        },
+        documents: vec![],
+        folder: origin.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES ('demo',?1)",
+            params![serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"demo\"]')",
+            params![home.to_str().unwrap(), next.to_str().unwrap()],
+        )
+        .unwrap();
+    let job = crate::github::GitHubPublishJob {
+        project: origin.clone(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: "demo".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+        rules: crate::github::GitHubRule::defaults(),
+    };
+    crate::github::keep_job(&engine, &job);
+    std::fs::rename(&origin, &target).unwrap();
+    assert!(projects_home::settle_pending(&mut connection, &database, None, false).unwrap());
+    assert_eq!(crate::github::kept_job(&engine, &origin), None);
+    assert_eq!(
+        crate::github::kept_job(&engine, &target),
+        Some(crate::github::GitHubPublishJob {
+            project: target.clone(),
+            ..job
+        })
+    );
+}
+
+/// rv-code2 GH5B-1, DEC-178 add.1: Remove from dashboard keeps a project's answer to the
+/// Overview's publish question, as it keeps the project's notes for a re-add of the same
+/// folder, and a Delete everything forgets the answer with the project's records.
+#[test]
+fn delete_everything_forgets_the_publish_question_answer_and_remove_from_dashboard_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().canonicalize().unwrap();
+    let mut connection = Connection::open(engine.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let (kept, gone) = (
+        ProjectId::new("kept").unwrap(),
+        ProjectId::new("gone").unwrap(),
+    );
+    for project in [&kept, &gone] {
+        let body = serde_json::to_string(&crate::protocol::StoredProject {
+            project_id: project.clone(),
+            spec: crate::protocol::ProjectSpec {
+                name: project.as_str().into(),
+                repositories: vec![],
+            },
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![project.as_str(), body],
+            )
+            .unwrap();
+        crate::github::keep_prompt_answer(
+            &engine,
+            project,
+            crate::github::GitHubPromptAnswer::Never,
+        );
+        assert!(crate::github::kept_prompt_answer(&engine, project));
+    }
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = connection.transaction().unwrap();
+    let removed = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: kept.clone(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(matches!(removed, crate::protocol::Outcome::Applied));
+    let deleted = crate::project_setup::record_delete(
+        &tx,
+        &crate::project_setup::SetupAction::Delete {
+            project_id: gone.clone(),
+            name: "gone".into(),
+        },
+        &Ok(Vec::new()),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    tx.commit().unwrap();
+    assert!(
+        crate::github::kept_prompt_answer(&engine, &kept),
+        "Remove from dashboard keeps Don't ask again"
+    );
+    assert!(
+        !crate::github::kept_prompt_answer(&engine, &gone),
+        "Delete everything forgets it"
+    );
+}
+
+/// QUESTION-22:50 R, DEC-178 add.1: a Delete everything forgets the project's GitHub publish
+/// job, kept under its folder, so a New project that later lands in the same folder finds
+/// no old publish to show or go on with; Remove from dashboard keeps its job for a re-add
+/// of the same folder.
+#[test]
+fn delete_everything_forgets_the_github_publish_job_and_remove_from_dashboard_keeps_it() {
+    let root = tempfile::tempdir().unwrap();
+    let engine = root.path().canonicalize().unwrap();
+    let home = engine.join("home");
+    let mut connection = Connection::open(engine.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let job = |folder: &Path| crate::github::GitHubPublishJob {
+        project: folder.to_path_buf(),
+        plan: crate::github::GitHubPublishPlan {
+            owner: "me".into(),
+            name: "tool".into(),
+            description: String::new(),
+            private: true,
+            docs: false,
+        },
+        lines: vec![".env*".into()],
+        written: Vec::new(),
+        step: crate::github::GitHubPublishStep::Drafting,
+        stopped: None,
+        made: None,
+        rules: crate::github::GitHubRule::defaults(),
+    };
+    for id in ["kept", "gone"] {
+        let folder = home.join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        let project = ProjectId::new(id).unwrap();
+        let body = serde_json::to_string(&crate::protocol::StoredProject {
+            project_id: project.clone(),
+            spec: crate::protocol::ProjectSpec {
+                name: id.into(),
+                repositories: vec![],
+            },
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, ?2)",
+                params![id, body],
+            )
+            .unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project,
+            name: id.into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 16,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1, ?2)",
+                params![id, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+        crate::github::keep_job(&engine, &job(&folder));
+    }
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = connection.transaction().unwrap();
+    let removed = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: ProjectId::new("kept").unwrap(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(matches!(removed, crate::protocol::Outcome::Applied));
+    let deleted = crate::project_setup::record_delete(
+        &tx,
+        &crate::project_setup::SetupAction::Delete {
+            project_id: ProjectId::new("gone").unwrap(),
+            name: "gone".into(),
+        },
+        &Ok(Vec::new()),
+        3,
+    )
+    .unwrap();
+    assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    tx.commit().unwrap();
+    let (kept, gone) = (home.join("kept"), home.join("gone"));
+    assert_eq!(
+        crate::github::kept_job(&engine, &kept),
+        Some(job(&kept)),
+        "Remove from dashboard keeps the publish job"
+    );
+    assert_eq!(
+        crate::github::kept_job(&engine, &gone),
+        None,
+        "Delete everything forgets it"
+    );
+}
+
 /// A Delete everything moves nothing while an agent of the project runs: past the wait it
 /// refuses `delete_agents_running`, and once the agent stops every move sees the Stop all row
 /// and no running agent of the project. A first failed move refuses `home_trash_failed`, a
@@ -77,7 +336,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         Ok(())
     };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_millis(300), &record),
+        plan.run_with(
+            std::time::Duration::from_millis(300),
+            &record,
+            &crate::projects_home::Tally::default()
+        ),
         Err("delete_agents_running".to_owned())
     );
     assert!(
@@ -122,7 +385,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         Ok(())
     };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(10), &stopped_first),
+        plan.run_with(
+            std::time::Duration::from_secs(10),
+            &stopped_first,
+            &crate::projects_home::Tally::default()
+        ),
         Ok(())
     );
     stopper.join().unwrap();
@@ -131,7 +398,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
     let first_fails =
         |_: &Path| -> Result<(), EngineError> { Err(EngineError("home_trash_failed".into())) };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(1), &first_fails),
+        plan.run_with(
+            std::time::Duration::from_secs(1),
+            &first_fails,
+            &crate::projects_home::Tally::default()
+        ),
         Err("home_trash_failed".to_owned())
     );
     let calls = std::cell::Cell::new(0);
@@ -144,7 +415,11 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
         }
     };
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(1), &second_fails),
+        plan.run_with(
+            std::time::Duration::from_secs(1),
+            &second_fails,
+            &crate::projects_home::Tally::default()
+        ),
         Err("delete_trash_partial".to_owned())
     );
     assert_eq!(calls.get(), 2);
@@ -153,13 +428,109 @@ fn delete_everything_moves_folders_only_after_the_projects_agents_stop() {
     std::os::unix::fs::symlink(&base, &api).unwrap();
     moved.borrow_mut().clear();
     assert_eq!(
-        plan.run_with(std::time::Duration::from_secs(1), &record),
+        plan.run_with(
+            std::time::Duration::from_secs(1),
+            &record,
+            &crate::projects_home::Tally::default()
+        ),
         Err("delete_outside_home".to_owned())
     );
     assert!(
         moved.borrow().is_empty(),
         "a folder swapped for a link after the first check refuses before any move"
     );
+}
+
+/// A Delete everything's two folders and the plan over them, with agent 4 of the project
+/// still working. Input: the temp root. Output: the database and the plan.
+fn delete_with_agent(base: &Path) -> (std::path::PathBuf, crate::projects_home::DeletePlan) {
+    let home = base.join("home");
+    let (web, api) = (home.join("web"), home.join("api"));
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::create_dir_all(&api).unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_paused_projects(project,since_ms) VALUES ('demo',1);
+             INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (4,'demo','team','codex',1,'working',0,0);",
+        )
+        .unwrap();
+    let plan = crate::projects_home::DeletePlan {
+        database: database.clone(),
+        project: ProjectId::new("demo").unwrap(),
+        home,
+        folders: vec![web, api],
+        agents: vec![4],
+    };
+    (database, plan)
+}
+
+/// DEC-177 step 2: a Stop asked while a Delete everything waits for its agents ends it with
+/// `home_add_cancelled` and nothing moved, and the tally showed the agents it waited for.
+#[test]
+fn a_stop_while_a_delete_waits_for_its_agents_moves_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (_database, plan) = delete_with_agent(&base);
+    let tally = std::sync::Arc::new(crate::projects_home::Tally::default());
+    let moved = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let running = {
+        let (tally, moved) = (std::sync::Arc::clone(&tally), std::sync::Arc::clone(&moved));
+        std::thread::spawn(move || {
+            let record = |_: &Path| -> Result<(), EngineError> {
+                moved.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            };
+            plan.run_with(std::time::Duration::from_secs(20), &record, &tally)
+        })
+    };
+    let started = std::time::Instant::now();
+    while tally.waiting_for() != Some(1) {
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(tally.stop(), "a stop before the first Trash move is taken");
+    assert_eq!(
+        running.join().unwrap(),
+        Err("home_add_cancelled".to_owned())
+    );
+    assert_eq!(moved.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(tally.trashing(), None);
+}
+
+/// DEC-177 step 2: once a Delete everything commits to its first Trash move a Stop is
+/// refused, even one asked from inside that move, and every folder moves, each counted.
+#[test]
+fn a_stop_asked_during_the_first_trash_move_is_refused_and_every_folder_moves() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let (database, plan) = delete_with_agent(&base);
+    Connection::open(&database)
+        .unwrap()
+        .execute("UPDATE team_agents SET status='stopped' WHERE id=4", [])
+        .unwrap();
+    let tally = crate::projects_home::Tally::default();
+    let refused = std::cell::Cell::new(None);
+    let moved = std::cell::RefCell::new(Vec::<std::path::PathBuf>::new());
+    let record = |folder: &Path| -> Result<(), EngineError> {
+        if refused.get().is_none() {
+            assert_eq!(tally.trashing(), Some((0, 2)), "committed before the move");
+            refused.set(Some(!tally.stop()));
+        }
+        moved.borrow_mut().push(folder.to_path_buf());
+        Ok(())
+    };
+    assert_eq!(
+        plan.run_with(std::time::Duration::from_secs(1), &record, &tally),
+        Ok(())
+    );
+    assert_eq!(refused.get(), Some(true), "the stop was refused");
+    assert!(!tally.stopped());
+    assert_eq!(moved.borrow().len(), 2);
+    assert_eq!(tally.trashing(), Some((2, 2)));
 }
 
 /// Delete everything refuses what can change while it waits, in the plan and again after the
@@ -226,7 +597,7 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
         refusal.reason
     );
     assert_eq!(
-        plan.run_with(wait, &record),
+        plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
         Err("delete_shared_folder".to_owned()),
         "a project registered during the wait refuses before any move"
     );
@@ -246,7 +617,7 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
         assert_eq!(refusal.code, "delete_research_running", "{status}");
         assert!(refusal.reason.contains("research"), "{}", refusal.reason);
         assert_eq!(
-            plan.run_with(wait, &record),
+            plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
             Err("delete_research_running".to_owned()),
             "{status}"
         );
@@ -271,7 +642,7 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
         "home_move_in_progress"
     );
     assert_eq!(
-        plan.run_with(wait, &record),
+        plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
         Err("home_move_in_progress".to_owned())
     );
     assert!(
@@ -281,7 +652,10 @@ fn delete_everything_refuses_a_shared_folder_open_research_and_a_pending_move_be
     connection
         .execute("DELETE FROM projects_home_move", [])
         .unwrap();
-    assert_eq!(plan.run_with(wait, &record), Ok(()));
+    assert_eq!(
+        plan.run_with(wait, &record, &crate::projects_home::Tally::default()),
+        Ok(())
+    );
     assert_eq!(*moved.borrow(), vec![web.clone()]);
 }
 
@@ -391,7 +765,7 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     assert!(held.contains("home_add_in_progress"), "{held}");
     let add_1 = RequestId::new("add-1").unwrap();
     assert_eq!(
-        projects_home::add_settle(&mut connection, Some(&add_1)).unwrap(),
+        projects_home::add_settle(&mut connection, Some((&add_1, false))).unwrap(),
         1
     );
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
@@ -425,8 +799,116 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         .unwrap();
     assert_eq!(rows, 1, "only the newest end is kept");
     let add_3 = RequestId::new("add-3").unwrap();
-    projects_home::add_forget(&connection, &add_3).unwrap();
+    projects_home::job_forget(&connection, &add_3).unwrap();
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+}
+
+/// RV-DS241-198: an add whose folder landed in the projects home but whose record never
+/// came, as when its grant was found stale after the disk changed, is not forgotten by its
+/// exchange's settle: its running row ends with what its disk shows, as after an engine stop,
+/// so the owner reads where the folder went and nothing is deleted. An add that landed
+/// nothing is forgotten as before, and so is one that placed nothing because another folder
+/// took its destination after the plan (rv-sec2 b9 F1), while a settle after a record leaves
+/// the kept end alone.
+#[test]
+fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let (source, landed) = (base.join("source"), home.join("source"));
+    std::fs::create_dir_all(source.join("lib")).unwrap();
+    std::fs::write(source.join("lib/a.txt"), "a\n").unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str, mode: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, ?4)",
+                params![
+                    request,
+                    source.to_str().unwrap(),
+                    landed.to_str().unwrap(),
+                    mode
+                ],
+            )
+            .unwrap();
+    };
+    let settle = |connection: &mut Connection, request: &str, placed: bool| {
+        let request = RequestId::new(request).unwrap();
+        projects_home::add_settle(connection, Some((&request, placed))).unwrap()
+    };
+
+    insert(&connection, "add-unlanded", "move");
+    assert_eq!(settle(&mut connection, "add-unlanded", true), 1);
+    assert_eq!(
+        projects_home::add_ended(&connection).unwrap(),
+        None,
+        "an add that landed nothing is forgotten"
+    );
+
+    std::fs::create_dir_all(landed.join("lib")).unwrap();
+    insert(&connection, "add-copied", "copy");
+    assert_eq!(settle(&mut connection, "add-copied", true), 1);
+    let ended = projects_home::add_ended(&connection)
+        .unwrap()
+        .expect("a landed add whose record never came was forgotten");
+    assert_eq!(
+        (ended.request.as_str(), ended.mode, ended.ended.as_str()),
+        ("add-copied", crate::projects_home::AddMode::Copy, "done")
+    );
+
+    insert(&connection, "add-moved", "move");
+    assert_eq!(settle(&mut connection, "add-moved", true), 1);
+    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(
+        (ended.request.as_str(), ended.mode, ended.ended.as_str()),
+        (
+            "add-moved",
+            crate::projects_home::AddMode::Move,
+            "home_move_source_left"
+        )
+    );
+    let rows: i64 = connection
+        .query_row("SELECT count(*) FROM projects_home_add", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(
+        std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
+        "a\n",
+        "a settle deletes nothing of the old folder"
+    );
+    assert!(landed.join("lib").is_dir(), "nor of the landed folder");
+
+    assert_eq!(
+        settle(&mut connection, "add-moved", true),
+        0,
+        "a recorded or settled add has no running row"
+    );
+    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(kept.request.as_str(), "add-moved");
+
+    insert(&connection, "add-taken", "copy");
+    assert_eq!(settle(&mut connection, "add-taken", false), 1);
+    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(
+        kept.request.as_str(),
+        "add-moved",
+        "an add that placed nothing is not told as landed in a folder another took"
+    );
+    let running: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(running, 0, "the add that placed nothing is forgotten");
+    assert!(landed.join("lib").is_dir(), "the other folder stays");
 }
 
 /// A delete's mark outlives a settle that only shares its exchange number, since a new engine
@@ -503,5 +985,334 @@ fn a_delete_mark_shown_to_the_owner_outlives_a_settle_of_a_reused_exchange() {
         outcome("next").as_deref(),
         Some("failed"),
         "its records stayed",
+    );
+}
+
+/// DEC-177 add.1: a delete's mark carries its job's request, the project's name and how many
+/// folders it moves, and keeps them when a settle after a Trash move or an engine start shows
+/// it as cut short, so the start can show the delete as the engine's job. A mark from 2.4.1
+/// that names no request shows on the banner only.
+#[test]
+fn a_delete_mark_keeps_its_request_name_and_count_when_it_shows_cut_short() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch("INSERT INTO projects(id, body) VALUES ('meals','{}'),('older','{}')")
+        .unwrap();
+    let meals = ProjectId::new("meals").unwrap();
+    let request = crate::protocol::RequestId::new("delete-7").unwrap();
+    let mark = crate::projects_home::delete_mark::begin(
+        &connection,
+        &meals,
+        7,
+        &request,
+        "Meal planner",
+        2,
+    )
+    .unwrap();
+    assert_eq!(mark, Ok(()));
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        None,
+        "a live delete is not cut short"
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::settle(&connection, 7, true).unwrap(),
+        1
+    );
+    let shown = crate::projects_home::delete_mark::CutShort {
+        project: meals.clone(),
+        request: request.clone(),
+        name: "Meal planner".into(),
+        total: 2,
+    };
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        Some(shown.clone())
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::start(&connection).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        Some(shown),
+        "an engine start keeps what the job needs"
+    );
+    assert!(crate::projects_home::delete_mark::forget(&connection, &meals).unwrap());
+    let _older = crate::ledger::begin(
+        &connection,
+        crate::ledger::ActionKind::ProjectDelete,
+        "older",
+        r#"{"project":"older","exchange":8}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::projects_home::delete_mark::start(&connection).unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::projects_home::delete_mark::cut_short(&connection).unwrap(),
+        None,
+        "a 2.4.1 mark names no job"
+    );
+}
+
+/// RV-DS241-152: a delete records every engine file name the engine makes, up to the
+/// `RECORDED_NAME_BYTES_MAX` bytes of an Overview or roadmap status run of a long project
+/// id, and a name the record cannot hold fails the write instead of going unrecorded, so no
+/// run folder of a deleted project is left unfound. A name recorded twice stays one record.
+/// The name is built from that constant, so a wider one fails here until the record's
+/// check follows it (G1 code r1 F1).
+#[test]
+fn a_delete_records_run_names_up_to_the_recorded_width_and_refuses_a_longer_one() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let width = crate::projects_home::RECORDED_NAME_BYTES_MAX;
+    let pad = width - "overview--1794000000000".len();
+    let name = format!("overview-{}-1794000000000", "a".repeat(pad));
+    assert_eq!(name.len(), width);
+    let count = |connection: &Connection, name: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_delete_files WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    let twice = [(name.clone(), 7), (name.clone(), 7)];
+    let tx = connection.transaction().unwrap();
+    projects_home::record_files(&tx, &twice).unwrap();
+    tx.commit().unwrap();
+    let longer = format!("{name}0");
+    let tx = connection.transaction().unwrap();
+    let refused = projects_home::record_files(&tx, &[(longer.clone(), 8)]);
+    drop(tx);
+
+    assert_eq!(
+        count(&connection, &name),
+        1,
+        "a run name of the recorded width is recorded once"
+    );
+    assert!(
+        refused.is_err(),
+        "a name the record cannot hold fails the write"
+    );
+    assert_eq!(count(&connection, &longer), 0);
+}
+
+/// RV-DS241-149: an engine start forgets the repository admissions of projects that are no
+/// longer recorded, which removals before the fix left behind, so a project added again
+/// under such an id admits its repository afresh; a recorded project keeps its admission.
+#[test]
+fn an_engine_start_forgets_the_admissions_of_projects_that_are_gone() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let kept = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: ProjectId::new("kept").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Kept".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('kept', ?1)", [kept])
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO repository_admissions(project,repository,body) VALUES
+               ('kept','/repos/kept','{}'), ('gone','/repos/gone','{}');",
+        )
+        .unwrap();
+
+    initialize_authority_schemas(&connection).unwrap();
+
+    let left: Vec<String> = connection
+        .prepare("SELECT project FROM repository_admissions ORDER BY project")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(left, ["kept"]);
+}
+
+/// B17 (-66): a project move whose record marked its old folder as still to clear is told as
+/// left under its own request while that folder is there, and its mark is forgotten once the
+/// folder is cleared or the owner dismisses it. An engine start keeps it as the ended job with
+/// the old-folder code while the folder is there and no other end is kept, and forgets a mark
+/// whose folder is gone.
+#[test]
+fn a_move_whose_old_folder_is_left_is_told_until_it_is_cleared_or_dismissed() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let origin = base.join("first").join("reading-list");
+    std::fs::create_dir_all(&origin).unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    let mark = |connection: &Connection, request: &str| {
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO projects_home_project_move_left VALUES (1, ?1, 'reading', ?2)",
+                params![request, origin.to_str().unwrap()],
+            )
+            .unwrap();
+    };
+    let marks = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_home_project_move_left",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let move_1 = RequestId::new("move-1").unwrap();
+    let move_2 = RequestId::new("move-2").unwrap();
+    mark(&connection, "move-1");
+    assert!(projects_home::move_left(&connection, &move_1).unwrap());
+    assert!(!projects_home::move_left(&connection, &move_2).unwrap());
+    projects_home::move_left_clear(&connection, &move_2).unwrap();
+    assert_eq!(
+        marks(&connection),
+        1,
+        "another request's clear keeps the mark"
+    );
+    projects_home::move_left_clear(&connection, &move_1).unwrap();
+    assert_eq!(marks(&connection), 0);
+    assert!(!projects_home::move_left(&connection, &move_1).unwrap());
+
+    mark(&connection, "move-1");
+    projects_home::project_move_settle(&mut connection, None, false).unwrap();
+    let ended = projects_home::move_ended(&connection)
+        .unwrap()
+        .map(|ended| {
+            (
+                ended.request,
+                ended.project,
+                ended.source,
+                ended.mode,
+                ended.ended,
+            )
+        });
+    assert_eq!(
+        ended,
+        Some((
+            move_1.clone(),
+            ProjectId::new("reading").unwrap(),
+            origin.to_str().unwrap().to_owned(),
+            crate::projects_home::AddMode::Move,
+            "move_project_old_folder_left".to_owned()
+        ))
+    );
+    projects_home::job_forget(&connection, &move_1).unwrap();
+    assert_eq!(projects_home::move_ended(&connection).unwrap(), None);
+    assert_eq!(
+        marks(&connection),
+        0,
+        "a dismissed warning is not kept again"
+    );
+    projects_home::project_move_settle(&mut connection, None, false).unwrap();
+    assert_eq!(projects_home::move_ended(&connection).unwrap(), None);
+
+    mark(&connection, "move-2");
+    std::fs::remove_dir_all(&origin).unwrap();
+    assert!(!projects_home::move_left(&connection, &move_2).unwrap());
+    projects_home::project_move_settle(&mut connection, None, false).unwrap();
+    assert_eq!(projects_home::move_ended(&connection).unwrap(), None);
+    assert_eq!(
+        marks(&connection),
+        0,
+        "a start forgets a mark whose folder is gone"
+    );
+}
+
+/// DEC-177 add.2 Q3 A: a New Project's ledger mark names the job's request and the project's
+/// name; a second build of the same project ends the first mark, the record ends the mark done,
+/// and an engine start ends every mark left: done when its project was recorded, else failed,
+/// returning the newest failed one so the start shows it as the job cut short. A second start
+/// finds none.
+#[test]
+fn a_setup_mark_ends_with_its_record_and_a_start_ends_the_rest_naming_the_newest_cut_short() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    connection
+        .execute_batch("INSERT INTO projects(id, body) VALUES ('kept','{}')")
+        .unwrap();
+    let mark = |project: &str, request: &str, name: &str| {
+        crate::projects_home::setup_mark::begin(
+            &connection,
+            &ProjectId::new(project).unwrap(),
+            &crate::protocol::RequestId::new(request).unwrap(),
+            name,
+        )
+        .unwrap()
+    };
+    let open = |key: &str| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM ledger_actions
+                 WHERE kind='project_setup' AND action_key=?1 AND outcome IS NULL",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let ended = |key: &str| -> Vec<String> {
+        let mut statement = connection
+            .prepare(
+                "SELECT outcome FROM ledger_actions
+                 WHERE kind='project_setup' AND action_key=?1 AND outcome IS NOT NULL ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([key], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    mark("meals", "setup-1", "Meal planner");
+    mark("meals", "setup-2", "Meal planner");
+    assert_eq!(open("meals"), 1, "a second build ends the first mark");
+    assert_eq!(ended("meals"), ["failed"]);
+    let meals = ProjectId::new("meals").unwrap();
+    assert!(crate::projects_home::setup_mark::end(&connection, &meals, true).unwrap());
+    assert_eq!(open("meals"), 0);
+    assert_eq!(ended("meals"), ["failed", "done"]);
+    assert!(!crate::projects_home::setup_mark::end(&connection, &meals, false).unwrap());
+
+    mark("older", "setup-3", "Older");
+    mark("newer", "setup-4", "Newer");
+    mark("kept", "setup-5", "Kept");
+    let cut = crate::projects_home::setup_mark::start(&connection)
+        .unwrap()
+        .expect("the newest New Project an engine stop cut short");
+    assert_eq!(cut.project, ProjectId::new("newer").unwrap());
+    assert_eq!(cut.request.as_str(), "setup-4");
+    assert_eq!(cut.name, "Newer");
+    for key in ["older", "newer", "kept"] {
+        assert_eq!(open(key), 0, "{key}");
+    }
+    assert_eq!(ended("older"), ["failed"]);
+    assert_eq!(ended("newer"), ["failed"]);
+    assert_eq!(
+        ended("kept"),
+        ["done"],
+        "a recorded project's mark ends done"
+    );
+    assert_eq!(
+        crate::projects_home::setup_mark::start(&connection).unwrap(),
+        None
     );
 }

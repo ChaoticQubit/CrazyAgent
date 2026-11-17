@@ -304,18 +304,18 @@ pub fn grant(queue: &[Queued], lane: HeavyLane, resources: &[SharedResource]) ->
 }
 
 /// The line a waiting heavy command shows: what it waits for and how many commands run and
-/// wait ahead of it. Takes the lane option, the commands that run, those that wait ahead of
-/// it and the shared resources it uses. Returns the line, at most `LINE_BYTES_MAX` bytes.
+/// wait ahead of it, then the shared resources it uses unless naming them would pass
+/// `LINE_BYTES_MAX` bytes (RV-DS241-57). Takes the lane option, the commands that run, those
+/// that wait ahead of it and the shared resources it uses. Returns the line, at most
+/// `LINE_BYTES_MAX` bytes.
 pub fn waiting_line(lane: HeavyLane, running: usize, ahead: usize, uses: &[String]) -> String {
-    let resources = if uses.is_empty() {
-        String::new()
-    } else {
-        format!(" It uses {}.", uses.join(", "))
-    };
-    let line = format!(
-        "Waiting for its turn in the heavy lane ({}): {running} running, {ahead} waiting ahead.{resources}",
+    let queue = format!(
+        "Waiting for its turn in the heavy lane ({}): {running} running, {ahead} waiting ahead.",
         lane.words().to_lowercase()
     );
+    let resources = format!(" It uses {}.", uses.join(", "));
+    let named = !uses.is_empty() && (queue.len() + resources.len()) as u64 <= LINE_BYTES_MAX;
+    let line = if named { queue + &resources } else { queue };
     assert!(line.len() as u64 <= LINE_BYTES_MAX);
     line
 }
@@ -553,6 +553,20 @@ fn say_waiting(folder: &crate::team::tool::Mailbox, id: &str, line: &str) {
     }
 }
 
+/// A step a lane test runs once in [`tick`] between its read of the lane rows and the
+/// change that reads them again, standing in for a project removal that clears them
+/// meanwhile. Takes the database.
+#[cfg(all(test, unix))]
+type LaneStep = Box<dyn FnOnce(&Connection)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// The step [`tick`] runs between its two reads of the lane rows (RV-DS241-57). Runs
+    /// once; None runs nothing.
+    pub(super) static BETWEEN_LANE_READS: std::cell::RefCell<Option<LaneStep>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(unix)]
 struct Found {
     agent: AgentId,
@@ -563,7 +577,8 @@ struct Found {
 /// Moves a project's heavy lane one step each team tick (F28): reads each live agent's lane
 /// folder without following a link, drops a ticket whose lock is gone or that went unread
 /// past `SILENCE_MAX`, stores at most `TICKETS_PER_AGENT_MAX` per agent and
-/// `TICKETS_PER_PROJECT_MAX` per project, refuses unknown resources, grants by `grant` and
+/// `TICKETS_PER_PROJECT_MAX` per project, refuses a ticket that is not valid, a running one
+/// too, and unknown resources but for a running ticket (RV-DS241-57), grants by `grant` and
 /// answers each ticket read. Inputs: database, project, folders, settings, time. Output: Ok
 /// or the SQLite failure.
 #[cfg(unix)]
@@ -607,7 +622,12 @@ pub fn tick(
                 Probe::Held(None) => answer(&folder, &format!("{id}{NO}"), UNREADABLE.as_bytes()),
                 Probe::Held(Some(ticket)) => {
                     let runs = running_before.contains(&(holder.agent, id.clone()));
-                    match refusal(&ticket, settings).filter(|_| !runs) {
+                    let reason = if runs && ticket.valid() {
+                        None
+                    } else {
+                        refusal(&ticket, settings)
+                    };
+                    match reason {
                         Some(reason) => answer(&folder, &format!("{id}{NO}"), reason.as_bytes()),
                         None => live.push(Found {
                             agent: holder.agent,
@@ -629,6 +649,10 @@ pub fn tick(
             .any(|found| found.agent == agent && found.id == ticket)
     };
     let opened = |agent: AgentId| folders.iter().any(|(holder, _)| *holder == agent);
+    #[cfg(test)]
+    if let Some(step) = BETWEEN_LANE_READS.with(|step| step.borrow_mut().take()) {
+        step(db);
+    }
     let change = Change::begin(db)?;
     let tx = change.db();
     let before = stored(tx, project)?;
@@ -677,6 +701,7 @@ pub fn tick(
         if mine >= TICKETS_PER_AGENT_MAX || total >= TICKETS_PER_PROJECT_MAX {
             continue;
         }
+        assert!(found.ticket.valid());
         let uses = serde_json::to_string(&found.ticket.uses).map_err(state)?;
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,seen_ms,granted_ms)

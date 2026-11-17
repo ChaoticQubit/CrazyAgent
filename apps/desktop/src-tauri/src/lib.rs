@@ -1,7 +1,10 @@
 pub mod bridge;
 pub mod ide;
+pub mod theme;
 mod updates;
 
+#[cfg(feature = "native-webdriver")]
+mod e2e_window;
 #[cfg(feature = "native-webdriver")]
 mod ide_probe;
 #[cfg(feature = "native-webdriver")]
@@ -31,7 +34,11 @@ use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
     ModelAccessCollection, NativeAuthMethod,
 };
-use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
+use crazyagent::github::{
+    CloneReceipt, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
+    GitHubPublishPlan, GitHubRepoPage, GitHubStatus,
+};
+use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
@@ -57,7 +64,7 @@ use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::quit_settings::QuitSettings;
 use crazyagent::roadmap_status::{Refresh, RoadmapStatus};
-use crazyagent::sandbox_settings::SandboxSettings;
+use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
@@ -67,7 +74,9 @@ use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
@@ -92,7 +101,7 @@ fn main_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
 /// Admits the main window and the terminal wall windows to the terminal, graph, stop and
 /// Terminals per window commands; any other window gets `window_denied`. Takes the calling
 /// page. Returns unit or the refusal.
-fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
+fn terminal_window<R: Runtime>(webview: &Webview<R>) -> Result<(), BridgeError> {
     if !bridge::terminal::window_label_valid(webview.label()) {
         return Err(engine_failure("window_denied"));
     }
@@ -103,7 +112,7 @@ fn terminal_window(webview: &Webview) -> Result<(), BridgeError> {
 /// terminal wall window only for the project its label was made for; any other window or
 /// project gets `window_denied`. Takes the calling page and the project id. Returns unit or
 /// the refusal.
-fn terminal_window_for(webview: &Webview, id: &str) -> Result<(), BridgeError> {
+fn terminal_window_for<R: Runtime>(webview: &Webview<R>, id: &str) -> Result<(), BridgeError> {
     terminal_window(webview)?;
     let label = webview.label();
     let admitted = label == "main"
@@ -231,9 +240,66 @@ fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
     }
 }
 
+/// Set once this app run has taken its one replacement of an older engine, so a swap that
+/// does not end the mismatch never turns into a restart loop (DEC-134 addendum 1).
+static ENGINE_REPLACED: AtomicBool = AtomicBool::new(false);
+
+/// Set when that replacement succeeded and no connect reply has said so yet.
+static ENGINE_UPDATE_UNTOLD: AtomicBool = AtomicBool::new(false);
+
+/// Whether an engine reporting `engine` is older than an app at `app`, so the app may replace
+/// it on its own at launch (DEC-134 addendum 1). Inputs: both versions. Output: true only
+/// when both read as versions and the app's is newer; equal, newer and unreadable give false.
+fn engine_older(engine: &str, app: &str) -> bool {
+    crazyagent::update::is_newer(app, engine).unwrap_or(false)
+}
+
+/// Whether the launch may replace the engine that answered without the owner's confirm: it
+/// is older than this app and the login service is installed and running, so the swap stops
+/// the service's engine and never installs a service beside an engine started by hand
+/// (DEC-134 addendum 1, #111 F1). Inputs: both versions and the service's status. Output:
+/// the answer.
+fn swap_on_launch(engine: &str, app: &str, service: &crazyagent::service::Status) -> bool {
+    service.installed && service.running && engine_older(engine, app)
+}
+
+/// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
+/// true the first time, false after.
+fn first_replacement(taken: &AtomicBool) -> bool {
+    !taken.swap(true, Ordering::SeqCst)
+}
+
+/// Takes a one-shot signal: true once after it was set, then false until it is set again.
+/// Input: the signal. Output: whether it was set.
+fn take_signal(signal: &AtomicBool) -> bool {
+    signal.swap(false, Ordering::SeqCst)
+}
+
+/// Whether this app replaced an older engine since the last connect reply said so. Reading
+/// it clears it, so the owner is told once. Output: the answer.
+pub(crate) fn engine_update_untold() -> bool {
+    take_signal(&ENGINE_UPDATE_UNTOLD)
+}
+
+/// Checks the default engine's version against this app's within 5 s. Input: the layout.
+/// Output: ready, a mismatch with the engine's version, or unavailable.
+async fn check_default_engine(
+    layout: &crazyagent::paths::Layout,
+) -> crazyagent::service::EngineCheck {
+    crazyagent::service::check_engine(
+        layout.root(),
+        crazyagent::engine::owner::OwnerClientKind::Desktop,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+}
+
 /// Makes sure the default engine runs before the bridge connects: when none answers it
-/// starts the login service, installing it for this app's sidecar on first launch. An
-/// engine of another version is refused with `engine_version_mismatch`. Skipped when
+/// starts the login service, installing it for this app's sidecar on first launch. An engine
+/// older than this app that the running login service runs is replaced once per app run
+/// through Restart engine's path, without its confirm, and once it answers on this app's
+/// version the next connect reply says so (DEC-134 addendum 1); any other version or engine,
+/// or a replacement the service refuses, is `engine_version_mismatch`. Skipped when
 /// `CRAZYAGENT_DESKTOP_SOCKET` names an engine explicitly.
 async fn ensure_default_engine() -> Result<(), BridgeError> {
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
@@ -243,19 +309,40 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
     if !crazyagent::service::answering(&layout.socket()) {
         start_engine(&layout, &service, false).await?;
     }
-    match crazyagent::service::check_engine(
-        layout.root(),
-        crazyagent::engine::owner::OwnerClientKind::Desktop,
-        std::time::Duration::from_secs(5),
-    )
-    .await
+    let crazyagent::service::EngineCheck::Mismatch { version, .. } =
+        check_default_engine(&layout).await
+    else {
+        return Ok(());
+    };
+    let running = service
+        .status()
+        .map_err(|_| engine_failure("engine_version_mismatch"))?;
+    if !swap_on_launch(&version, crazyagent::version::VERSION, &running)
+        || !first_replacement(&ENGINE_REPLACED)
     {
-        crazyagent::service::EngineCheck::Mismatch { .. } => {
-            Err(engine_failure("engine_version_mismatch"))
-        }
-        crazyagent::service::EngineCheck::Ready { .. }
-        | crazyagent::service::EngineCheck::Unavailable { .. } => Ok(()),
+        return Err(engine_failure("engine_version_mismatch"));
     }
+    match start_engine(&layout, &service, true).await {
+        Err(error)
+            if matches!(
+                error.code,
+                "engine_newer_than_app" | "engine_app_not_installed"
+            ) =>
+        {
+            return Err(engine_failure("engine_version_mismatch"));
+        }
+        result => result?,
+    }
+    match check_default_engine(&layout).await {
+        crazyagent::service::EngineCheck::Mismatch { .. } => {
+            return Err(engine_failure("engine_version_mismatch"));
+        }
+        crazyagent::service::EngineCheck::Ready { .. } => {
+            ENGINE_UPDATE_UNTOLD.store(true, Ordering::SeqCst);
+        }
+        crazyagent::service::EngineCheck::Unavailable { .. } => {}
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -551,21 +638,6 @@ async fn desktop_project_catalog(
 ) -> Result<ProjectCatalog, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.project_catalog(pool, research).await
-}
-
-#[tauri::command]
-async fn desktop_setup_project(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    spec: ProjectSpec,
-    setup: ProjectSetup,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
-    main_window(&webview)?;
-    lock(&state)
-        .await?
-        .setup_project(spec, setup, generation)
-        .await
 }
 
 #[tauri::command]
@@ -1768,6 +1840,20 @@ async fn desktop_team_wake_agent(
 }
 
 #[tauri::command]
+async fn desktop_team_restart_hidden_seers(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_restart_hidden_seers(&id, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_seen(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -1836,8 +1922,7 @@ async fn desktop_terminal_attach(
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
-    let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     let id = match webview.label() {
         "main" => None,
         _ => {
@@ -1849,7 +1934,7 @@ async fn desktop_terminal_attach(
     let shows = async {
         if let Some(id) = id {
             let graph = read(&state).await?.team_graph(&id).await?;
-            if !bridge::terminal::graph_shows(&graph, &agent) {
+            if !bridge::terminal::graph_shows(&graph, &key.agent) {
                 return Err(engine_failure("window_denied"));
             }
         }
@@ -1857,15 +1942,19 @@ async fn desktop_terminal_attach(
     };
     let room = terminals
         .0
-        .checked_room(webview.label(), &agent, shows)
+        .checked_room(webview.label(), &key, shows)
         .await?;
-    let session = lock(&state).await?.open_terminal(agent, pane).await?;
+    let session = lock(&state)
+        .await?
+        .open_terminal(key.agent, key.pane)
+        .await?;
     room.attach(session, output)
 }
 
-/// Types a view's keys into an attached agent terminal. Inputs: the window, the terminals,
-/// the terminal name, the bytes and whether the view made them from the owner's mouse
-/// wheel, which never counts as the owner typing. Output: ok once queued, or a bridge error.
+/// Types a view's keys into an attached agent terminal, the view of exactly that pane when
+/// one is named. Inputs: the window, the terminals, the terminal name, the bytes, whether
+/// the view made them from the owner's mouse wheel, which never counts as the owner typing,
+/// and the pane. Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_input(
     webview: Webview,
@@ -1873,28 +1962,36 @@ async fn desktop_terminal_input(
     agent: String,
     bytes: Vec<u8>,
     wheel: Option<bool>,
+    pane: Option<String>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     let request = bridge::terminal::input_request(bytes, wheel.unwrap_or(false));
-    terminals.0.send(webview.label(), &agent, request).await
+    terminals.0.send(webview.label(), &key, request).await
 }
 
+/// Sends the owner's prompt to an attached agent terminal, the view of exactly that pane
+/// when one is named. Inputs: the window, the terminals, the terminal name, the text and
+/// the pane. Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_prompt(
     webview: Webview,
     terminals: State<'_, TerminalState>,
     agent: String,
     text: String,
+    pane: Option<String>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     terminals
         .0
-        .send(webview.label(), &agent, TerminalRequest::Prompt { text })
+        .send(webview.label(), &key, TerminalRequest::Prompt { text })
         .await
 }
 
+/// Sets an attached agent terminal's size, the view of exactly that pane when one is
+/// named. Inputs: the window, the terminals, the terminal name, columns, rows and the pane.
+/// Output: ok once queued, or a bridge error.
 #[tauri::command]
 async fn desktop_terminal_resize(
     webview: Webview,
@@ -1902,14 +1999,15 @@ async fn desktop_terminal_resize(
     agent: String,
     cols: u16,
     rows: u16,
+    pane: Option<String>,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let agent = bridge::terminal::agent(&agent)?;
+    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
     terminals
         .0
         .send(
             webview.label(),
-            &agent,
+            &key,
             TerminalRequest::Resize { cols, rows },
         )
         .await
@@ -2029,27 +2127,41 @@ fn desktop_focus_terminal_window(
 /// Inputs: the calling window, the app and the project id. Output: unit, `window_denied`
 /// from any other window or a wall window of another project, or `invalid_project`.
 #[tauri::command]
-fn desktop_close_project_walls(
-    webview: Webview,
-    app: AppHandle,
+fn desktop_close_project_walls<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
     id: String,
 ) -> Result<(), BridgeError> {
     terminal_window_for(&webview, &id)?;
     let project = ProjectId::new(id).map_err(|_| engine_failure("invalid_project"))?;
     close_walls(&app, Some(&project));
+    let (kept_app, removed) = (app.clone(), project.clone());
+    tauri::async_runtime::spawn(async move {
+        if let (Some(state), Some(views)) = (
+            kept_app.try_state::<NativeState>(),
+            kept_app.try_state::<ide::IdeViews>(),
+        ) {
+            let _ = close_ide(&kept_app, &state, &views, &removed).await;
+        }
+    });
     ide::shut_own_windows(app, Some(project));
     Ok(())
 }
 
 /// Closes the terminal wall windows: every one, or only one project's. Inputs: the app and
-/// the project, if any. Output: none; a window that refuses to close stays open.
-fn close_walls(app: &AppHandle, project: Option<&ProjectId>) {
+/// the project, if any. Output: the labels of the walls asked to close and accepting it; a
+/// window that refuses to close stays open and is not listed.
+fn close_walls<R: Runtime>(app: &AppHandle<R>, project: Option<&ProjectId>) -> Vec<String> {
     let open = app.webview_windows();
+    let mut closed = Vec::new();
     for label in bridge::terminal::walls_to_close(open.keys().map(String::as_str), project) {
-        if let Some(wall) = open.get(label) {
-            let _ = wall.close();
+        if let Some(wall) = open.get(label)
+            && wall.close().is_ok()
+        {
+            closed.push(label.to_owned());
         }
     }
+    closed
 }
 
 /// Whether a webview may load a URL: the app's own pages only, and the dev server in a
@@ -2185,6 +2297,7 @@ fn build_wall(
         })
         .build()
         .map_err(|_| engine_failure("terminal_window_failed"))?;
+    theme::dress(&wall);
     let terminals = Arc::clone(&app.state::<TerminalState>().0);
     let closed = label.to_owned();
     wall.on_window_event(move |event| {
@@ -2221,13 +2334,34 @@ async fn desktop_move_project_home(
     id: String,
     mode: AddMode,
     overrides: Vec<AddOverride>,
-    generation: u64,
-) -> Result<IntentReceipt, BridgeError> {
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
     main_window(&webview)?;
-    lock(&state)
-        .await?
-        .move_project_home(&id, mode, overrides, generation)
-        .await
+    let call = lock(&state).await?.move_project_job(&id, mode, overrides)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_delete_project_job(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    name: String,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.delete_project_job(&id, name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_setup_project_job(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    spec: ProjectSpec,
+    setup: ProjectSetup,
+) -> Result<crazyagent::projects_home::job::JobView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.setup_project_job(spec, setup)?;
+    call.await
 }
 
 #[tauri::command]
@@ -2236,13 +2370,9 @@ async fn desktop_remove_project(
     state: State<'_, NativeState>,
     id: String,
     generation: u64,
-    delete_name: Option<String>,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
-    lock(&state)
-        .await?
-        .remove_project(&id, generation, delete_name)
-        .await
+    lock(&state).await?.remove_project(&id, generation).await
 }
 
 #[tauri::command]
@@ -2518,6 +2648,171 @@ async fn desktop_github_repos(
 ) -> Result<GitHubRepoPage, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.github_repos(page)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_owners(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<GitHubOwners, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_owners()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_status(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<Option<GitHubPublishJob>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_status(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_approve(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    lines: Vec<String>,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_approve(&project, lines)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_exclude(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    path: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_exclude(&project, path)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_recheck(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_recheck(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_continue(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_continue(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_prompt(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_prompt_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    answer: crazyagent::github::GitHubPromptAnswer,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_publish_prompt_set(&project, answer)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_discard(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<Option<GitHubPublishLeft>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_discard(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_publish_start(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    plan: GitHubPublishPlan,
+) -> Result<GitHubPublishJob, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_publish_start(&project, plan)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_defaults(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<BTreeSet<GitHubRule>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_defaults()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_defaults_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    rules: BTreeSet<GitHubRule>,
+) -> Result<BTreeSet<GitHubRule>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rule_defaults_set(rules)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rules(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+) -> Result<GitHubRepoRules, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.github_rules(&project)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_github_rule_set(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project: String,
+    repo: String,
+    rule: GitHubRule,
+    on: bool,
+) -> Result<GitHubRepoRules, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .github_rule_set(&project, repo, rule, on)?;
     call.await
 }
 
@@ -3081,10 +3376,20 @@ async fn desktop_save_owner_profile(
 }
 
 #[tauri::command]
+fn desktop_set_theme<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
+    choice: theme::ThemeChoice,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    theme::apply(&app, choice).map_err(|_| engine_failure("theme_not_applied"))
+}
+
+#[tauri::command]
 async fn desktop_sandbox_settings(
     webview: Webview,
     state: State<'_, NativeState>,
-) -> Result<SandboxSettings, BridgeError> {
+) -> Result<StoredSandboxSettings, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.sandbox_settings().await
 }
@@ -3094,12 +3399,13 @@ async fn desktop_set_sandbox_settings(
     webview: Webview,
     state: State<'_, NativeState>,
     settings: SandboxSettings,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .set_sandbox_settings(settings, generation)
+        .set_sandbox_settings(settings, version, generation)
         .await
 }
 
@@ -4397,7 +4703,81 @@ async fn desktop_ide_open(
     let window = webview.window();
     let bounds = bounds.in_window(&window)?;
     let own_window = ide::show(&app, &window, &views, &project, workbench, bounds, ticket)?;
-    Ok(ide::Opened { own_window, left })
+    let kept = views.take_left(&project);
+    drop_others(&app, &state, &views, &project).await;
+    Ok(ide::Opened {
+        own_window,
+        left: left.or(kept),
+    })
+}
+
+/// Shows a project's kept IDE over its panel with no engine call, so a tab or page switch back
+/// is instant (DEC-187), then drops any other in-panel IDE off the reply's path. Inputs: the
+/// project and the panel. Output: whether it was shown, false when none is kept so the tab
+/// opens it, and what the last IDE left running, named once.
+#[tauri::command]
+async fn desktop_ide_show<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<ide::Shown, BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?.in_window(&webview.window())?;
+    let shown = ide::show_kept(&app, &views, &project, bounds)?;
+    if shown.shown && !views.others(&project).is_empty() {
+        tauri::async_runtime::spawn(async move {
+            if let (Some(state), Some(views)) = (
+                app.try_state::<NativeState>(),
+                app.try_state::<ide::IdeViews>(),
+            ) {
+                drop_others(&app, &state, &views, &project).await;
+            }
+        });
+    }
+    Ok(shown)
+}
+
+/// Loads the last used project's IDE hidden at app start, through the same engine open as the
+/// tab, giving way to any open that came meanwhile; a preload that gave way to another project
+/// stops the server it started. Inputs: the project and its last panel. Output: whether it
+/// loaded, or the refusal.
+#[tauri::command]
+async fn desktop_ide_preload(
+    webview: Webview,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    views: State<'_, ide::IdeViews>,
+    project_id: String,
+    bounds: ide::Bounds,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let project = bridge::ide::ide_project(&project_id)?;
+    let bounds = bounds.checked()?;
+    let Some((ticket, turn)) = views.begin_preload(&project) else {
+        return Ok(false);
+    };
+    let opened = {
+        let _turn = turn.lock().await;
+        let call = read(&state).await?.ide_open(project.clone())?;
+        call.await?
+    };
+    let left = opened.left.clone();
+    let workbench = ide::workbench(&opened)?;
+    let window = webview.window();
+    let bounds = bounds.in_window(&window)?;
+    match ide::preload(
+        &app, &window, &views, &project, workbench, bounds, ticket, left,
+    )? {
+        ide::Preload::Admitted => Ok(true),
+        ide::Preload::Superseded => Ok(false),
+        ide::Preload::Refused => {
+            close_ide(&app, &state, &views, &project).await?;
+            Ok(false)
+        }
+    }
 }
 
 #[tauri::command]
@@ -4425,23 +4805,21 @@ async fn desktop_ide_hide<R: Runtime>(
     ide::hide(&app, &views, &bridge::ide::ide_project(&project_id)?)
 }
 
-#[tauri::command]
-async fn desktop_ide_close<R: Runtime>(
-    webview: Webview<R>,
-    app: AppHandle<R>,
-    state: State<'_, NativeState>,
-    views: State<'_, ide::IdeViews>,
-    project_id: String,
-) -> Result<(), BridgeError> {
-    main_window(&webview)?;
-    let project = bridge::ide::ide_project(&project_id)?;
-    if views.keep_for_own_window(&project) {
-        return Ok(());
+/// Drops every other project's in-panel IDE once this project's shows, so only the last used
+/// one stays loaded (DEC-187). Inputs: the app, the engine bridge, the views and the project.
+async fn drop_others<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &NativeState,
+    views: &ide::IdeViews,
+    project: &ProjectId,
+) {
+    for other in views.others(project) {
+        let _ = close_ide(app, state, views, &other).await;
     }
-    close_ide(&app, &state, &views, &project).await
 }
 
-/// Closes a project's IDE webview and stops its server, in the project's turn. Inputs: the app,
+/// Closes a project's IDE webview and stops its server, in the project's turn: when another
+/// project's IDE replaces it, a preload gave way, or its project is removed. Inputs: the app,
 /// the engine bridge, the views and the project. Output: Ok, or the engine's refusal.
 async fn close_ide<R: Runtime>(
     app: &AppHandle<R>,
@@ -5015,7 +5393,6 @@ native_commands! {
     desktop_project_list,
     desktop_create_project,
     desktop_project_catalog,
-    desktop_setup_project,
     desktop_project_setup,
     desktop_research_jobs,
     desktop_project_activity,
@@ -5068,6 +5445,7 @@ native_commands! {
     desktop_team_hand_off,
     desktop_team_rename,
     desktop_team_wake_agent,
+    desktop_team_restart_hidden_seers,
     desktop_team_stop_agent,
     desktop_coord_send,
     desktop_team_stop_teammate,
@@ -5100,6 +5478,8 @@ native_commands! {
     desktop_project_demo,
     desktop_create_demo,
     desktop_move_project_home,
+    desktop_delete_project_job,
+    desktop_setup_project_job,
     desktop_cancel_research,
     desktop_retry_research,
     desktop_plan_roadmap,
@@ -5121,6 +5501,20 @@ native_commands! {
     desktop_github_use_cli,
     desktop_github_sign_out,
     desktop_github_repos,
+    desktop_github_owners,
+    desktop_github_publish_status,
+    desktop_github_publish_approve,
+    desktop_github_publish_exclude,
+    desktop_github_publish_recheck,
+    desktop_github_publish_continue,
+    desktop_github_publish_prompt,
+    desktop_github_publish_prompt_set,
+    desktop_github_publish_discard,
+    desktop_github_publish_start,
+    desktop_github_rule_defaults,
+    desktop_github_rule_defaults_set,
+    desktop_github_rules,
+    desktop_github_rule_set,
     desktop_clone_repo,
     desktop_icloud_download,
     desktop_icloud_progress,
@@ -5190,6 +5584,7 @@ native_commands! {
     desktop_submit_claude_auth_code,
     desktop_owner_profile,
     desktop_save_owner_profile,
+    desktop_set_theme,
     desktop_sandbox_settings,
     desktop_set_sandbox_settings,
     desktop_cleanup_settings,
@@ -5283,7 +5678,8 @@ native_commands! {
     desktop_ide_open,
     desktop_ide_place,
     desktop_ide_hide,
-    desktop_ide_close,
+    desktop_ide_show,
+    desktop_ide_preload,
     desktop_ide_touch,
     desktop_ide_window_open,
     desktop_ide_window_focus,
@@ -5347,6 +5743,7 @@ pub fn run() {
         .manage(UpdateState::default())
         .manage(ide::IdeViews::default())
         .manage(Notices::default())
+        .manage(theme::Mirrored::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(native_handler())
@@ -5374,6 +5771,9 @@ pub fn run() {
                 if matches!(event, tauri::WindowEvent::Focused(true)) {
                     ide::main_focused(&handle);
                 }
+                if let tauri::WindowEvent::ThemeChanged(shown) = event {
+                    theme::followed(&handle, *shown);
+                }
             });
             let handle = app.handle().clone();
             app.notification()
@@ -5398,6 +5798,7 @@ pub fn run() {
                 }
             })
             .plugin(tauri_plugin_wdio_webdriver::init())
+            .plugin(e2e_window::plugin())
     };
     builder
         .run(tauri::generate_context!())
@@ -5439,6 +5840,146 @@ mod tests {
         .map(|_| ())
     }
 
+    /// DEC-134 addendum 1: the app replaces an engine on its own only when the engine's
+    /// version is older than the app's. A dev build sorts below its stable; an equal, newer or
+    /// unreadable version is never replaced, so the app never downgrades an engine.
+    #[test]
+    fn only_an_engine_older_than_the_app_is_replaced_on_its_own() {
+        let app = "2.4.1-dev.202611161323";
+        assert!(engine_older("2.4.1-dev.202611150900", app));
+        assert!(engine_older("2.4.0", app));
+        assert!(engine_older(app, "2.4.1"));
+        assert!(!engine_older(app, app));
+        assert!(!engine_older("2.4.1", app));
+        assert!(!engine_older("2.4.1-dev.202611170000", app));
+        for unreadable in ["", "x", "unknown", "2.4.1\n\u{1b}[2J"] {
+            assert!(!engine_older(unreadable, app), "{unreadable:?}");
+            assert!(!engine_older(app, unreadable), "{unreadable:?}");
+        }
+    }
+
+    /// DEC-134 addendum 1: one app run replaces an older engine at most once, so a swap that
+    /// leaves the mismatch shows the restart view instead of restarting the engine again.
+    #[test]
+    fn an_app_run_replaces_an_older_engine_at_most_once() {
+        let taken = AtomicBool::new(false);
+        assert!(first_replacement(&taken));
+        assert!(!first_replacement(&taken));
+        assert!(!first_replacement(&taken));
+        assert!(taken.load(Ordering::SeqCst));
+    }
+
+    /// DEC-134 addendum 1: a replacement that succeeded is told by the next connect reply
+    /// and by no later one. A local signal stands in for the app's, which the bridge rows
+    /// that connect read in parallel.
+    #[test]
+    fn a_finished_replacement_is_told_by_one_connect_reply() {
+        let untold = AtomicBool::new(true);
+        assert!(take_signal(&untold));
+        assert!(!take_signal(&untold));
+        untold.store(true, Ordering::SeqCst);
+        assert!(take_signal(&untold));
+        assert!(!untold.load(Ordering::SeqCst));
+    }
+
+    /// #111 F1: the launch swaps an older engine only while the login service is installed
+    /// and running; an older engine with no service, or with a service that runs nothing,
+    /// keeps today's mismatch view, and an engine of this app's version is never swapped.
+    #[test]
+    fn only_an_older_engine_the_login_service_runs_is_replaced_at_launch() {
+        let app = "2.4.1-dev.202611161323";
+        let older = "2.4.1-dev.202611150900";
+        let service = |installed: bool, running: bool| crazyagent::service::Status {
+            installed,
+            running,
+            pid: running.then_some(4242),
+        };
+        assert!(swap_on_launch(older, app, &service(true, true)));
+        assert!(
+            !swap_on_launch(older, app, &service(false, false)),
+            "an older engine started by hand, with no login service, is left alone"
+        );
+        assert!(
+            !swap_on_launch(older, app, &service(true, false)),
+            "an installed service that runs nothing did not start the engine that answered"
+        );
+        assert!(
+            !swap_on_launch(older, app, &service(false, true)),
+            "a loaded job without its definition cannot be replaced through the service"
+        );
+        assert!(!swap_on_launch(app, app, &service(true, true)));
+        assert!(!swap_on_launch("2.4.2", app, &service(true, true)));
+    }
+
+    /// UI-5-F3: the close walls command refuses a wall of another project and admits the main
+    /// window and the project's own wall; close_walls closes every wall of the removed project
+    /// and no other window, and every wall once main is gone. The mock runtime keeps a closed
+    /// window listed, as it runs no event loop, so the walls a close reached are read from
+    /// close_walls's own answer.
+    #[test]
+    fn a_removal_closes_every_wall_of_its_project_and_only_those_and_another_project_s_wall_is_refused()
+     {
+        let app = mock_builder()
+            .manage(ide::IdeViews::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![
+                desktop_close_project_walls,
+            ]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let (one, other) = (
+            ProjectId::new("project-one").unwrap(),
+            ProjectId::new("project-other").unwrap(),
+        );
+        let own = [
+            bridge::terminal::wall_label(&one, 1),
+            bridge::terminal::wall_label(&one, 2),
+        ];
+        let other_wall = bridge::terminal::wall_label(&other, 1);
+        let main = page("main");
+        let own_page = page(&own[0]);
+        let _ = page(&own[1]);
+        let other_page = page(&other_wall);
+        let close = json!({ "id": one.as_str() });
+        let refused = ask(
+            other_page.as_ref(),
+            "desktop_close_project_walls",
+            close.clone(),
+        )
+        .unwrap_err();
+        assert_eq!(refused["code"], "window_denied");
+        for admitted in [&own_page, &main] {
+            assert_eq!(
+                ask(
+                    admitted.as_ref(),
+                    "desktop_close_project_walls",
+                    close.clone()
+                ),
+                Ok(()),
+                "{}",
+                admitted.label()
+            );
+        }
+        let sorted = |mut labels: Vec<String>| {
+            labels.sort();
+            labels
+        };
+        assert_eq!(
+            sorted(close_walls(app.handle(), Some(&one))),
+            sorted(own.to_vec()),
+            "every wall of the removed project closes, and no other window"
+        );
+        assert_eq!(
+            sorted(close_walls(app.handle(), None)),
+            sorted(vec![own[0].clone(), own[1].clone(), other_wall.clone()]),
+            "once main is gone every wall closes, and main is not one"
+        );
+    }
+
     #[test]
     fn a_wall_title_shows_hidden_characters_as_their_escapes_and_stays_bounded() {
         assert_eq!(
@@ -5465,7 +6006,7 @@ mod tests {
             .invoke_handler(admit_pages(tauri::generate_handler![
                 desktop_ide_place,
                 desktop_ide_hide,
-                desktop_ide_close,
+                desktop_ide_show,
             ]))
             .build(mock_context(noop_assets()))
             .unwrap();
@@ -5489,7 +6030,7 @@ mod tests {
         let calls = [
             ("desktop_ide_place", &placed),
             ("desktop_ide_hide", &project),
-            ("desktop_ide_close", &project),
+            ("desktop_ide_show", &placed),
         ];
         for (command, args) in calls {
             assert_eq!(
@@ -5503,6 +6044,36 @@ mod tests {
                 "{command} from the IDE page",
             );
         }
+    }
+
+    #[test]
+    fn the_main_window_mirrors_its_theme_choice_and_a_wall_or_a_stray_word_changes_nothing() {
+        let app = mock_builder()
+            .manage(theme::Mirrored::default())
+            .invoke_handler(admit_pages(tauri::generate_handler![desktop_set_theme]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let page = |label: &str| {
+            WebviewWindowBuilder::new(&app, label, WebviewUrl::default())
+                .build()
+                .unwrap()
+        };
+        let main = page("main");
+        let wall = page("terminals-0123456789abcdef-1");
+        let set = |page: &Webview<MockRuntime>, choice: &str| {
+            ask(page, "desktop_set_theme", json!({ "choice": choice }))
+        };
+        let dark = theme::Mirror {
+            choice: theme::ThemeChoice::Dark,
+            icon: tauri::Theme::Dark,
+        };
+        assert_eq!(set(main.as_ref(), "dark"), Ok(()));
+        assert_eq!(theme::mirrored(app.handle()), Some(dark));
+        let refused = set(wall.as_ref(), "light").unwrap_err();
+        assert_eq!(refused["code"], "window_denied");
+        assert!(set(main.as_ref(), "Light").is_err());
+        assert!(set(main.as_ref(), "blue").is_err());
+        assert_eq!(theme::mirrored(app.handle()), Some(dark));
     }
 
     #[test]

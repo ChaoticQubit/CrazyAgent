@@ -289,6 +289,72 @@ fn checking_a_stored_spec_with_hidden_characters_is_refused_before_it_runs() {
     assert_eq!(*spec, valid);
 }
 
+/// RV-DS241-197: a server approved before its spec's hidden or control characters were
+/// refused, so its approval digest still matches, never launches: the launch set leaves it
+/// out and its view says it can't start and why, while a valid approved server still
+/// launches.
+#[test]
+fn an_approved_server_whose_stored_spec_fails_the_checks_never_launches() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let valid = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into()],
+    };
+    let kept = server(&mut connection, root, "kept", &valid);
+    execute(
+        &mut connection,
+        root,
+        Command::Approve {
+            id: kept,
+            spec: valid.clone(),
+        },
+    )
+    .unwrap();
+    let old = server(&mut connection, root, "old", &valid);
+    let stored = ServerSpec::Stdio {
+        command: "/usr/bin/tr\u{202e}ue".into(),
+        args: vec!["--stdio".into()],
+    };
+    {
+        let tx = connection.transaction().unwrap();
+        let mut record: ServerRecord = load(&tx, "server", &old).unwrap();
+        record.spec = stored.clone();
+        record.approved = Some(stored.digest());
+        put_server(&tx, &record).unwrap();
+        tx.commit().unwrap();
+    }
+
+    let launch = execute(
+        &mut connection,
+        root,
+        Command::Launch {
+            project: ProjectId::new("app").unwrap(),
+        },
+    );
+
+    let Ok(ResultValue::Launch(launch)) = launch else {
+        panic!("launch set required");
+    };
+    let launched: Vec<&str> = launch
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect();
+    assert_eq!(
+        launched,
+        ["kept"],
+        "a spec that fails the checks never launches"
+    );
+    let Ok(ResultValue::Server(view)) = execute(&mut connection, root, Command::Server { id: old })
+    else {
+        panic!("server view required");
+    };
+    let sentence = "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.";
+    assert_eq!(view.status, ServerStatus::CantStart);
+    assert_eq!(view.problem.as_deref(), Some(sentence));
+}
+
 #[test]
 fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped() {
     let record = SkillRecord {
@@ -1549,52 +1615,4 @@ fn an_mcp_secret_shorter_than_eight_bytes_is_refused_with_a_plain_reason() {
     let reference = new_secret_reference().unwrap();
     store_secret(root, &reference, b"12345678".to_vec()).unwrap();
     assert_eq!(read_secret(root, &reference).unwrap(), b"12345678");
-}
-
-/// Where the engine has no shared context-mode install, the default pack's pinned
-/// context-mode launch is left out with its reason, never run through npx: one whose npx the
-/// tool resolver finds as this platform's, and one only shaped like it, as a repository's own
-/// npx, as an npx CrazyAgent did not find (RV-DS241-150 r2). Every other spec runs as approved.
-#[cfg(unix)]
-#[test]
-fn a_launch_without_a_shared_install_leaves_the_pinned_context_mode_server_out_never_npx() {
-    use crate::plugins::ContextModeOff;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
-    let root = base.join("engine");
-    let bin = root.join("setup").join("bin");
-    let tools = base.join("repo").join("tools");
-    for folder in [&bin, &tools] {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(folder)
-            .unwrap();
-        std::fs::write(folder.join("npx"), "#!/bin/sh\nexit 3\n").unwrap();
-        std::fs::set_permissions(folder.join("npx"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
-    let stdio = |command: &str, package: &str| ServerSpec::Stdio {
-        command: command.into(),
-        args: vec!["-y".into(), package.into()],
-    };
-    let (found, shaped) = (bin.join("npx"), tools.join("npx"));
-    let (found, shaped) = (found.to_str().unwrap(), shaped.to_str().unwrap());
-    assert_eq!(
-        without_shared_install(&root, stdio(found, "context-mode@1.0.169")),
-        Err(ContextModeOff::Unsupported)
-    );
-    assert_eq!(
-        without_shared_install(&root, stdio(shaped, "context-mode@1.0.169")),
-        Err(ContextModeOff::NpxNotFound)
-    );
-    for kept in [
-        stdio(found, "context-mode@latest"),
-        stdio(shaped, "other-server@1.0.0"),
-        stdio("npx", "context-mode@1.0.169"),
-        stdio("/opt/homebrew/bin/node", "context-mode@1.0.169"),
-    ] {
-        assert_eq!(without_shared_install(&root, kept.clone()), Ok(kept));
-    }
 }

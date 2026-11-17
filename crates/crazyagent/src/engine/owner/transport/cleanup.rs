@@ -15,6 +15,7 @@ const SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 pub const CLEANUP_CODES: &[&str] = &[
     "changes_git_failed",
     "changes_git_hooks",
+    "changes_git_include",
     "changes_git_unsupported",
     "changes_unavailable",
     "cleanup_agent_has_task",
@@ -30,6 +31,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "cleanup_request_bounds",
     "cleanup_request_invalid",
     "cleanup_unavailable",
+    "cleanup_walk_too_long",
     "cleanup_worktree_dirty",
     "cleanup_worktree_invalid",
     "cleanup_worktree_leftover",

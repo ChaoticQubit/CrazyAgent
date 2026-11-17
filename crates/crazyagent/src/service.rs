@@ -17,6 +17,10 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// it started: a busy machine took close to a minute to bring the owner's engine up.
 pub const START_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// The launchd plist keys that lift launchd's default resource limits off the engine: with
+/// `ProcessType` unset, launchd throttles a job's CPU and I/O (`man launchd.plist`), and a
+/// start on a busy machine took minutes (ENGINE-START-PRE-READY).
+const PROCESS_TYPE: &str = "\t<key>ProcessType</key>\n\t<string>Interactive</string>\n";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
 const SCHTASKS: &str = "schtasks";
@@ -321,6 +325,7 @@ impl Service {
 \t</dict>\n\
 \t<key>ExitTimeOut</key>\n\
 \t<integer>30</integer>\n\
+{PROCESS_TYPE}\
 \t<key>StandardOutPath</key>\n\
 \t<string>{log}</string>\n\
 \t<key>StandardErrorPath</key>\n\
@@ -574,10 +579,21 @@ WantedBy=default.target\n",
     /// only when this service runs a private copy in place of the `bundled` engine and the
     /// file on disk is not [`Service::current`], as with a unit naming the copy with another
     /// PATH. A definition naming a gone or other program is decided before this in
-    /// [`Service::repair`]. Any other installed service starts as it is, so a launch PATH
-    /// that differs never stops or restarts a running engine. Input: the bundled engine.
+    /// [`Service::repair`]. Any other installed service starts as it is unless it is
+    /// [`Service::throttled`], so a launch PATH that differs never stops or restarts a
+    /// running engine. Input: the bundled engine.
     pub fn stale(&self, bundled: &Path) -> bool {
         self.executable != bundled && !self.current()
+    }
+
+    /// Whether the installed definition is a launchd plist without the `ProcessType`
+    /// Interactive key, as every install before 2.4.2 wrote, so launchd throttles the
+    /// engine's CPU and I/O until it is rewritten. Output: false off macOS and when no
+    /// readable definition is installed.
+    pub fn throttled(&self) -> bool {
+        self.platform == Platform::MacOs
+            && bounded_text(&self.definition)
+                .is_some_and(|installed| !installed.contains(PROCESS_TYPE))
     }
 
     /// The program the installed definition runs when it is gone or [`transient`], as after
@@ -618,9 +634,10 @@ WantedBy=default.target\n",
     /// path every AppImage shares, which keeps a newer engine's bytes while one is known there
     /// ([`newer_engine_at`], [`persistable`], DS-118 r3 F1). Else this definition is installed
     /// when asked, when none is installed, when the installed one names a broken program
-    /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`]; otherwise
-    /// the installed one starts as it is. An engine that is itself [`transient`] is never
-    /// installed: it starts a usable installed definition and is refused otherwise. Inputs:
+    /// ([`Self::broken_program`]) or another program, or when it is [`Self::stale`] or
+    /// [`Self::throttled`]; otherwise the installed one starts as it is. An engine that is
+    /// itself [`transient`] is never installed: it starts a usable installed definition and
+    /// is refused otherwise. Inputs:
     /// the bundled engine, whether a definition is installed and whether the owner asked for a
     /// reinstall. Output: the repair.
     pub fn repair(&self, bundled: &Path, installed: bool, reinstall: bool) -> Repair {
@@ -641,7 +658,8 @@ WantedBy=default.target\n",
                 Repair::Start
             };
         }
-        let replace = reinstall || !installed || broken || another || self.stale(bundled);
+        let replace =
+            reinstall || !installed || broken || another || self.stale(bundled) || self.throttled();
         if !replace {
             return Repair::Start;
         }
@@ -1867,9 +1885,18 @@ pub async fn wait_ready(
     }
 }
 
+/// How a start wait that did not fail ended: the engine answered, or the wait reached
+/// [`START_TIMEOUT`] while the service manager still ran the process it was first seen
+/// running, so the engine is still starting rather than stopped or relaunched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartWait {
+    Answered,
+    StillStarting,
+}
+
 /// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
 /// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
-/// seen running, and it fails at once when that process stops or another one takes its
+/// seen running before `bound`, and it fails at once when that process stops or another one takes its
 /// place. Inputs: the layout, the service, the bound and the log length before the start.
 /// Output: Ok once the engine answers, or an error naming the engine log.
 pub async fn wait_started(
@@ -1878,20 +1905,39 @@ pub async fn wait_started(
     bound: Duration,
     since: u64,
 ) -> Result<(), ServiceError> {
+    match wait_start(layout, service, bound, since).await? {
+        StartWait::Answered => Ok(()),
+        StartWait::StillStarting => Err(unanswered(layout, START_TIMEOUT)),
+    }
+}
+
+/// Waits like [`wait_started`], but a wait that reaches [`START_TIMEOUT`] looks at the
+/// service manager once more and, when it still runs the process first seen running, ends
+/// as [`StartWait::StillStarting`] instead of failing. Inputs: the layout, the service, the
+/// bound and the log length before the start. Output: how the wait ended, or an error
+/// naming the engine log when the engine stopped, was relaunched or never ran.
+pub async fn wait_start(
+    layout: &Layout,
+    service: &Service,
+    bound: Duration,
+    since: u64,
+) -> Result<StartWait, ServiceError> {
     assert!(bound <= START_TIMEOUT);
     let started = Instant::now();
+    let limit = |seen: Option<u32>| if seen.is_some() { START_TIMEOUT } else { bound };
     let mut seen: Option<u32> = None;
     let mut looked: Option<Instant> = None;
     loop {
         if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
-            return Ok(());
+            return Ok(StartWait::Answered);
         }
-        if looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
+        let due = started.elapsed() >= limit(seen);
+        if due || looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
             looked = Some(Instant::now());
             let status = service.status()?;
             let running = status.pid.filter(|_| status.running);
             match (seen, running) {
-                (None, pid) => seen = pid,
+                (None, pid) => seen = pid.filter(|_| started.elapsed() < bound),
                 (Some(first), Some(pid)) if pid == first => {}
                 (Some(_), _) => {
                     return Err(failure(format!(
@@ -1902,9 +1948,11 @@ pub async fn wait_started(
                 }
             }
         }
-        let limit = if seen.is_some() { START_TIMEOUT } else { bound };
-        if started.elapsed() >= limit {
-            return Err(unanswered(layout, limit));
+        if started.elapsed() >= limit(seen) {
+            return match seen {
+                Some(_) => Ok(StartWait::StillStarting),
+                None => Err(unanswered(layout, bound)),
+            };
         }
         tokio::time::sleep(POLL).await;
     }

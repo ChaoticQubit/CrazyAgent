@@ -21,7 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const SEARCH_DIRECTORIES_MAX: usize = 128;
 const PATH_BYTES_MAX: usize = 1024;
@@ -729,9 +729,11 @@ pub(crate) fn with_needs(
     marked
 }
 
-/// The engine's last harness probe and the search it ran with, so a catalog read answers at
-/// once instead of waiting on the filesystem. A read older than `fresh_for` is still served and
-/// starts one background re-probe; a changed search or an owner's check probes before answering.
+/// The engine's last harness probe, the search it ran with and the identity of each harness
+/// file it found, so a catalog read answers at once instead of waiting on the filesystem walk.
+/// A read older than `fresh_for` is still served and starts one background re-probe; a changed
+/// search, a found harness file that changed since the probe, or an owner's check probes
+/// before answering.
 pub struct ProbeCache {
     fresh_for: Duration,
     last: Mutex<Option<Probe>>,
@@ -741,6 +743,7 @@ pub struct ProbeCache {
 struct Probe {
     search: Search,
     entries: Vec<HarnessEntry>,
+    found: Identities,
     started: Instant,
 }
 
@@ -754,24 +757,29 @@ impl ProbeCache {
         })
     }
 
-    /// Answers one catalog read: the cached probe for the same search at once, starting a
-    /// background re-probe when it is older than `fresh_for`, or a new probe when nothing is
-    /// cached for this search or the owner asked to check now. Inputs: the search and whether to
-    /// probe now. Output: the catalog, or an error when the probe task failed.
+    /// Answers one catalog read: the cached probe for the same search at once while every
+    /// harness file it found is still the same one, starting a background re-probe when it is
+    /// older than `fresh_for`, or a new probe when nothing is cached for this search, a found
+    /// file changed or is gone, or the owner asked to check now. Inputs: the search and whether
+    /// to probe now. Output: the catalog, or an error when a task failed.
     pub async fn entries(
         self: &Arc<Self>,
         search: Search,
         check: bool,
     ) -> Result<Vec<HarnessEntry>, tokio::task::JoinError> {
-        if !check && let Some((entries, stale)) = self.cached(&search) {
-            if stale {
-                self.refresh(search);
+        if !check && let Some((entries, found, stale)) = self.cached(&search) {
+            let listed = entries.clone();
+            let now = tokio::task::spawn_blocking(move || identities(&listed)).await?;
+            if now == found {
+                if stale {
+                    self.refresh(search);
+                }
+                return Ok(entries);
             }
-            return Ok(entries);
         }
         let started = Instant::now();
-        let probed = probe(search.clone()).await?;
-        self.store(search, probed.clone(), started);
+        let (probed, found) = probe(search.clone()).await?;
+        self.store(search, probed.clone(), found, started);
         Ok(probed)
     }
 
@@ -780,13 +788,14 @@ impl ProbeCache {
         self.probing.load(Ordering::SeqCst)
     }
 
-    fn cached(&self, search: &Search) -> Option<(Vec<HarnessEntry>, bool)> {
+    fn cached(&self, search: &Search) -> Option<(Vec<HarnessEntry>, Identities, bool)> {
         let last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
         last.as_ref()
             .filter(|probe| probe.search == *search)
             .map(|probe| {
                 (
                     probe.entries.clone(),
+                    probe.found.clone(),
                     probe.started.elapsed() >= self.fresh_for,
                 )
             })
@@ -799,28 +808,96 @@ impl ProbeCache {
         let cache = self.clone();
         tokio::spawn(async move {
             let started = Instant::now();
-            if let Ok(entries) = probe(search.clone()).await {
-                cache.store(search, entries, started);
+            if let Ok((entries, found)) = probe(search.clone()).await {
+                cache.store(search, entries, found, started);
             }
             cache.probing.store(false, Ordering::SeqCst);
         });
     }
 
-    fn store(&self, search: Search, entries: Vec<HarnessEntry>, started: Instant) {
+    fn store(
+        &self,
+        search: Search,
+        entries: Vec<HarnessEntry>,
+        found: Identities,
+        started: Instant,
+    ) {
         assert_eq!(entries.len(), specs().len());
+        assert_eq!(found.len(), entries.len(), "one identity per catalog row");
         let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
         if last.as_ref().is_none_or(|probe| probe.started <= started) {
             *last = Some(Probe {
                 search,
                 entries,
+                found,
                 started,
             });
         }
     }
 }
 
-async fn probe(search: Search) -> Result<Vec<HarnessEntry>, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(move || catalog(&search)).await
+/// What a found harness file is on disk, read through its links: its real path, size and
+/// modified time, and on unix its device, inode and change time, so a binary replaced in place
+/// or a link repointed outside the app reads as a different one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Identity {
+    real: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    node: (u64, u64, i64, i64),
+}
+
+/// The identity of each catalog row's harness file, in the rows' order, none for a row with no
+/// file found.
+type Identities = Vec<Option<Identity>>;
+
+/// Reads a harness file's identity. Input: the executable path as the catalog lists it.
+/// Output: the identity, or none when the file cannot be read.
+fn identity(executable: &Path) -> Option<Identity> {
+    let real = std::fs::canonicalize(executable).ok()?;
+    let metadata = std::fs::metadata(&real).ok()?;
+    assert!(real.is_absolute(), "a canonical path is absolute");
+    #[cfg(unix)]
+    let node = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    };
+    Some(Identity {
+        real,
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        node,
+    })
+}
+
+/// Reads the identity of every catalog row's harness file, none for a row with no file found.
+/// Input: the catalog rows. Output: one identity per row, in the same order.
+fn identities(entries: &[HarnessEntry]) -> Identities {
+    let found: Identities = entries
+        .iter()
+        .map(|entry| entry.executable.as_deref().and_then(identity))
+        .collect();
+    assert_eq!(found.len(), entries.len());
+    found
+}
+
+/// Probes the catalog off the runtime and reads each found harness file's identity right
+/// after. Input: the search. Output: the rows and their identities, or an error when the task
+/// failed.
+async fn probe(search: Search) -> Result<(Vec<HarnessEntry>, Identities), tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        let entries = catalog(&search);
+        let found = identities(&entries);
+        (entries, found)
+    })
+    .await
 }
 
 /// Finds a harness spec by its catalog id or by the harness name stored on a

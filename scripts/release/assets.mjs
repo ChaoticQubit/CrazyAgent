@@ -11,6 +11,11 @@ const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
 const PRODUCT = "CrazyAgent";
 const STDERR_TAIL = 2000;
+const ELF_HEADER_BYTES = 64;
+const ELF_PROGRAM_HEADER_BYTES = 56;
+const ELF_PROGRAM_HEADERS_MAX = 256;
+const ELF_MACHINE_X86_64 = 62;
+const PT_INTERP = 3;
 
 /** Release targets: operating system, the architecture word Tauri puts in bundle names, executable suffix. */
 export const TARGETS = Object.freeze({
@@ -42,6 +47,25 @@ export function sidecars(target) {
   if (os === "linux") names.push("crazyagent-landlock");
   if (os === "windows") names.push("crazyagent-win-boundary");
   return names;
+}
+
+/**
+ * Tells whether an x86_64 Linux executable needs the dynamic loader: true when one of its
+ * program headers names an interpreter (PT_INTERP). Input: the file's bytes. Output: the
+ * answer, or `release_helper_not_static` when the bytes are no well-formed 64-bit
+ * little-endian x86_64 ELF file.
+ */
+export function needsLoader(bytes) {
+  const elf = bytes.length >= ELF_HEADER_BYTES && bytes.readUInt32BE(0) === 0x7f454c46 && bytes[4] === 2 && bytes[5] === 1 && bytes.readUInt16LE(18) === ELF_MACHINE_X86_64;
+  if (!elf) fail("release_helper_not_static");
+  const offset = Number(bytes.readBigUInt64LE(32));
+  const size = bytes.readUInt16LE(54);
+  const count = bytes.readUInt16LE(56);
+  if (size < ELF_PROGRAM_HEADER_BYTES || count === 0 || count > ELF_PROGRAM_HEADERS_MAX || offset + size * count > bytes.length) fail("release_helper_not_static");
+  let interpreted = false;
+  for (let index = 0; index < count; index += 1) interpreted ||= bytes.readUInt32LE(offset + size * index) === PT_INTERP;
+  assert.ok(offset + size * count <= bytes.length, "release_helper_header_bound_invariant");
+  return interpreted;
 }
 
 /** Names the CLI archive for `version` and `target`: `.zip` on Windows, `.tar.gz` elsewhere. */
@@ -76,7 +100,8 @@ function run(command, args, options = {}) {
  * Copies the built executables for `target` from `cargoDir`, the rcli host from `rcli` and the
  * tmux build-tmux.sh made from `tmux` into `<tauriDir>/binaries/<name>-<target>[.exe]`, and writes
  * `binaries/release.conf.json`, the `tauri build --config` overlay naming them as
- * `bundle.externalBin`. Output: staged paths and overlay path.
+ * `bundle.externalBin`. A Linux sandbox helper that needs the dynamic loader is refused
+ * (`needsLoader`). Output: staged paths and overlay path.
  */
 export async function stageSidecars({ target, cargoDir, rcli, tmux, tauriDir }) {
   const { exe } = targetInfo(target);
@@ -84,6 +109,7 @@ export async function stageSidecars({ target, cargoDir, rcli, tmux, tauriDir }) 
   const given = { "crazyagent-rcli": rcli, "crazyagent-tmux": tmux };
   const sources = names.map((name) => (Object.hasOwn(given, name) ? given[name] : join(cargoDir, `${name}${exe}`)));
   for (const [index, source] of sources.entries()) if (typeof source !== "string" || !(await isFile(source))) fail(`release_sidecar_missing:${names[index]}`);
+  if (targetInfo(target).os === "linux" && needsLoader(await readFile(sources[names.indexOf("crazyagent-landlock")]))) fail("release_helper_not_static");
   const out = join(tauriDir, "binaries");
   await mkdir(out, { recursive: true });
   const staged = [];

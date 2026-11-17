@@ -28,7 +28,7 @@ const PHASES = {
   current: [{ kind: "check_done", update: null, at: 1 }],
   available: [CHECKED],
   installing: INSTALLING,
-  installed: [...INSTALLING, { kind: "install_done", engineStarted: false }],
+  installed: [...INSTALLING, { kind: "install_done", engine: "starting" }],
   failed: [{ kind: "check_started" }, { kind: "check_failed", code: "update_download_failed" }],
 };
 let root = null;
@@ -54,7 +54,7 @@ function answer(scene, command, args) {
     case "desktop_projects_home": return read(scene.home, command, { path: scene.home === "none" ? null : HOME_PATH, watching: scene.home !== "cold" });
     case "desktop_pick_folder": return scene.pick ?? "/Users/mira/Work";
     case "desktop_folder_size": return { bytes: 3 * 1024 ** 3 };
-    case "desktop_sandbox_settings": return read(scene.sandbox, command, { linux_sockets: scene.stored ?? "tcp_only" });
+    case "desktop_sandbox_settings": return read(scene.sandbox, command, { settings: { linux_sockets: scene.stored ?? "tcp_only", linux_supervisor: scene.calls ?? "on", linux_strict: scene.strict ?? "off" }, version: scene.sandboxVersion ?? 0 });
     case "desktop_set_sandbox_settings": throw FAILURE;
     case "desktop_cleanup_settings": return read(scene.finished, command, { mode: "after_days", days: 1 });
     case "desktop_set_cleanup_settings": throw FAILURE;

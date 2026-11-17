@@ -4,10 +4,13 @@ mod e2e_support;
 
 use crazyagent::engine::owner::{OwnerData, OwnerRead, OwnerResult};
 use crazyagent::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
+use crazyagent::memory::library::MemoryScope;
 use crazyagent::protocol::ProjectId;
 use crazyagent::setup::{Dependency, DependencyState, PackState, SetupStatus};
 use crazyagent::terminal::tmux::installed;
-use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, repository, scratch, stop_tmux};
+use e2e_support::{
+    ENGINE, Engine, Owner, TMUX, hex, profile, repository, result, scratch, stop_tmux,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -49,17 +52,33 @@ const LIVE_PROJECT: &str = "CRAZYAGENT_E2E_LIVE_PROJECT";
 struct Pty {
     tmux: PathBuf,
     socket: PathBuf,
+    home: PathBuf,
     _folder: tempfile::TempDir,
 }
 
 impl Pty {
-    fn launch(tmux: PathBuf, engine_socket: &Path) -> Self {
+    /// Starts the TUI under its own tmux server whose HOME, and so the TUI's, is `home`, a
+    /// private folder, never the runner's (rv-sec3 S4 F1); checks tmux holds that HOME.
+    /// Inputs: tmux, the engine's socket and the HOME. Output: the running TUI.
+    fn launch_at(tmux: PathBuf, engine_socket: &Path, home: &Path) -> Self {
+        let pty = Self::start(tmux, engine_socket, home);
+        let shown = pty.run(&["show-environment", "-g", "HOME"]);
+        assert_eq!(
+            String::from_utf8_lossy(&shown.stdout).trim(),
+            format!("HOME={}", home.display()),
+            "the TUI runs with the private HOME"
+        );
+        pty
+    }
+
+    fn start(tmux: PathBuf, engine_socket: &Path, home: &Path) -> Self {
         let engine_socket = engine_socket.to_str().unwrap();
         assert!(!ENGINE.contains('\'') && !engine_socket.contains('\''));
         let folder = scratch("ca-e2e-pty-");
         let pty = Self {
             tmux,
             socket: folder.path().join("pty.sock"),
+            home: home.to_path_buf(),
             _folder: folder,
         };
         let command = format!("'{ENGINE}' tui '{engine_socket}'");
@@ -80,17 +99,20 @@ impl Pty {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let output = crazyagent::spawn_gate::output(
-            Command::new(&self.tmux)
-                .arg("-S")
-                .arg(&self.socket)
-                .args(args)
-                .env_remove("TMUX")
-                .stdin(Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped()),
-        )
-        .expect(TMUX);
+        let mut command = Command::new(&self.tmux);
+        command
+            .arg("-S")
+            .arg(&self.socket)
+            .args(args)
+            .env_remove("TMUX")
+            .stdin(Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+            .env("HOME", &self.home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME");
+        let output = crazyagent::spawn_gate::output(&mut command).expect(TMUX);
         assert!(
             output.status.success(),
             "tmux {args:?}: {}",
@@ -338,7 +360,8 @@ fn team_from_home(pty: &Pty, project: &str) {
 
 #[test]
 fn the_tui_walks_from_home_into_the_project_team_tree() {
-    let mut engine = Engine::start("ca-e2e-tui-");
+    let user = private_home("ca-e2e-tui-home-");
+    let mut engine = start_at("ca-e2e-tui-", user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -358,7 +381,7 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
             owner.controller.detach();
         });
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, PROJECT);
     let screen = pty.screen();
     assert!(screen.contains("Master"), "{screen}");
@@ -374,7 +397,8 @@ const NEWER_PROJECT: &str = "Tidepool e2e readd";
 /// ca-trial-4-readd-202611051754 for ca-trial-4).
 #[test]
 fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_name() {
-    let mut engine = Engine::start("ca-e2e-tui-");
+    let user = private_home("ca-e2e-tui-home-");
+    let mut engine = start_at("ca-e2e-tui-", user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -399,7 +423,7 @@ fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_nam
             owner.controller.detach();
         });
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| at_home(screen, NEWER_PROJECT));
     open_team(&pty, PROJECT);
     let screen = pty.screen();
@@ -454,7 +478,8 @@ fn stopped_team(root: &Path, project: &str) -> (i64, [i64; 2]) {
 
 #[test]
 fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
-    let mut engine = Engine::start("ca-e2e-stopped-");
+    let user = private_home("ca-e2e-stopped-home-");
+    let mut engine = start_at("ca-e2e-stopped-", user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -499,7 +524,7 @@ fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
     let lead_name = name(lead);
     let worker_names = workers.map(name);
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, STOPPED_PROJECT);
     let screen = pty.until("the Tasks rows show every task", |screen| {
         screen.contains(LEAD_TASK) && WORKER_TASKS.iter().all(|task| screen.contains(task))
@@ -658,11 +683,21 @@ fn settled(turn: &MasterTurnView) -> bool {
     )
 }
 
+/// Drives the owner from Home through adding a folder, its setup, its team tree, one master
+/// turn in the Conversation tab's console and removal, on the real engine. The project's
+/// Live terminal is Off before the project page opens: with it On, the first team read after
+/// the tab is entered opens the master's live terminal (DEC-117 Q4) and races the row's Enter.
 #[test]
 fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui() {
-    let mut engine = Engine::new("ca-e2e-flow-");
+    let user = private_home("ca-e2e-flow-home-");
+    let mut engine = engine_at("ca-e2e-flow-", user.path());
     let _provider = unreachable_provider(&engine);
     engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(user.path()),
+        "the engine runs with the private HOME"
+    );
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-disk-");
     let home = disk.path().join("Projects");
@@ -681,7 +716,7 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         owner.controller.detach();
     });
 
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| screen.contains("No projects yet."));
     nothing_left_setting_up(&pty.screen());
 
@@ -814,6 +849,24 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
         !ready.contains("Needs a pool"),
         "the chosen pool went to the project:\n{ready}"
     );
+    let terminal_off = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let generation = owner.next();
+        let reply = owner
+            .controller
+            .team_action(
+                crazyagent::team::TeamAction::MasterLiveTerminal {
+                    project_id: project.clone(),
+                    on: false,
+                },
+                generation,
+            )
+            .await
+            .unwrap();
+        owner.controller.detach();
+        e2e_support::result(reply)
+    });
+    assert_eq!(terminal_off, OwnerResult::Applied);
 
     tab_until_enter(&pty, "Open");
     pty.keys(&["Enter"]);
@@ -951,6 +1004,7 @@ fn live_team_missing() -> ! {
 }
 
 #[test]
+#[ignore = "live: needs a running engine with a live team agent; run it in a live window with CRAZYAGENT_E2E_LIVE_SOCKET and CRAZYAGENT_E2E_LIVE_PROJECT"]
 fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     let socket = std::env::var_os(LIVE_SOCKET)
         .map(PathBuf::from)
@@ -959,7 +1013,8 @@ fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     assert!(socket.exists(), "{LIVE_SOCKET} names no socket");
     let probe = scratch("ca-e2e-probe-");
     let tmux = installed(probe.path()).expect(TMUX);
-    let pty = Pty::launch(tmux, &socket);
+    let user = private_home("ca-e2e-live-home-");
+    let pty = Pty::launch_at(tmux, &socket, user.path());
     reach_home(&pty, |screen| at_home(screen, &project));
     team_from_home(&pty, &project);
     pty.keys(&["Enter"]);
@@ -1023,6 +1078,7 @@ impl ScriptPty {
             .env("HOME", home)
             .env("TERM", "xterm-256color")
             .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             .env_remove("TMUX")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1149,8 +1205,8 @@ fn welcome_bio(pty: &ScriptPty) {
 /// back to legacy keys.
 #[test]
 fn shift_enter_auto_turns_the_keyboard_protocol_on_and_the_exit_turns_it_off() {
-    let mut engine = Engine::start("ca-e2e-keys-");
     let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let mut pty = ScriptPty::launch(&engine.socket(), home.path());
     pty.until_written(
         "Auto asks the terminal for the keyboard protocol",
@@ -1191,8 +1247,8 @@ fn shift_enter_auto_turns_the_keyboard_protocol_on_and_the_exit_turns_it_off() {
 /// off; Ctrl-J still makes a new line in the bio.
 #[test]
 fn shift_enter_auto_leaves_a_terminal_without_the_protocol_as_it_is() {
-    let mut engine = Engine::start("ca-e2e-keys-");
     let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let mut pty = ScriptPty::launch(&engine.socket(), home.path());
     pty.until_written(
         "Auto asks the terminal for the keyboard protocol",
@@ -1224,8 +1280,8 @@ fn shift_enter_auto_leaves_a_terminal_without_the_protocol_as_it_is() {
 /// makes a new line in the bio.
 #[test]
 fn shift_enter_off_never_asks_the_terminal_and_ctrl_j_makes_a_new_line() {
-    let mut engine = Engine::start("ca-e2e-keys-");
     let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let prefs = if cfg!(target_os = "macos") {
         home.path().join("Library/Application Support/CrazyAgent")
     } else {
@@ -1279,7 +1335,8 @@ fn script_home(pty: &mut ScriptPty) {
 /// back on, and the exit turns it off once more before it leaves the alternate screen.
 #[test]
 fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
-    let mut engine = Engine::start("ca-e2e-keys-");
+    let home = scratch("ca-e2e-keys-home-");
+    let mut engine = start_at("ca-e2e-keys-", home.path());
     let disk = scratch("ca-e2e-keys-projects-");
     let projects = disk.path().join("Projects");
     std::fs::create_dir(&projects).unwrap();
@@ -1297,7 +1354,6 @@ fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
             );
             owner.controller.detach();
         });
-    let home = scratch("ca-e2e-keys-home-");
     let mut pty = ScriptPty::launch(&engine.socket(), home.path());
     pty.until_written("Auto asks the terminal at start", |written| {
         found(written, KEYBOARD_QUERY).len() == 1
@@ -1364,10 +1420,11 @@ fn applied(screen: &str, choice: &str) -> bool {
 }
 
 /// Starts an engine with one fresh project and opens that project's Team settings in the
-/// TUI. Input: a scratch prefix. Output: the engine, the TUI, the project id and the
-/// projects home, which lives as long as the test needs it.
-fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) {
-    let engine = Engine::start(prefix);
+/// TUI, both on a private HOME. Input: a scratch prefix. Output: the engine, the TUI, the
+/// project id, and the projects home with that HOME, which live as long as the test needs them.
+fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, [tempfile::TempDir; 2]) {
+    let user = private_home(&format!("{prefix}home-"));
+    let engine = start_at(prefix, user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -1386,13 +1443,14 @@ fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) 
             );
             owner.controller.detach();
         });
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, SWITCH_PROJECT);
     pty.keys(&["s"]);
     pty.until("s on the team tree opens the Team settings", |screen| {
         screen.contains("Team settings") && screen.contains("On harness switch  ")
     });
-    (engine, pty, ProjectId::new(SWITCH_ID).unwrap(), disk)
+    let project = ProjectId::new(SWITCH_ID).unwrap();
+    (engine, pty, project, [disk, user])
 }
 
 /// Reads what the engine keeps for the master harness switch.
@@ -1642,8 +1700,8 @@ fn pass_harness_step(pty: &mut ScriptPty) {
 /// starting an install.
 #[test]
 fn first_run_shows_the_harness_step_with_only_rcli_picked() {
-    let mut engine = Engine::start("ca-e2e-harness-step-");
     let home = scratch("ca-e2e-harness-step-home-");
+    let mut engine = start_at("ca-e2e-harness-step-", home.path());
     std::fs::create_dir(home.path().join("Projects")).unwrap();
     let prefs = if cfg!(target_os = "macos") {
         home.path().join("Library/Application Support/CrazyAgent")
@@ -1708,8 +1766,7 @@ fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_r
     std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
     let gate = scratch("ca-e2e-node-gate-");
-    let mut engine = Engine::new("ca-e2e-node-");
-    engine.home = Some(home.path().to_path_buf());
+    let mut engine = engine_at("ca-e2e-node-", home.path());
     engine.env.push(("PATH", SYSTEM_PATH.into()));
     engine
         .env
@@ -1766,8 +1823,8 @@ fn first_run_installs_node_for_a_codex_that_cannot_run_and_its_row_leaves_cant_r
 /// on Home with the guide, and the engine holds nothing as skipped.
 #[test]
 fn first_run_with_the_guide_ticked_skips_accounts_and_keeps_the_guide_on_home() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1844,8 +1901,8 @@ fn open_profile_replay(pty: &mut ScriptPty) {
 /// guide again clears the skip in the engine and Home shows the guide again.
 #[test]
 fn show_the_learning_guide_again_on_profile_clears_the_skip_and_home_shows_the_guide() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1871,8 +1928,8 @@ fn show_the_learning_guide_again_on_profile_clears_the_skip_and_home_shows_the_g
 /// Skip for now with the guide ticked ends on Home with the guide.
 #[test]
 fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_the_guide() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1922,8 +1979,8 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
 /// Home, the engine holds the guide as skipped, and Home shows no guide.
 #[test]
 fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
-    let mut engine = Engine::start("ca-e2e-learn-");
     let home = scratch("ca-e2e-learn-home-");
+    let mut engine = start_at("ca-e2e-learn-", home.path());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1973,9 +2030,11 @@ fn flat(screen: &str) -> String {
 
 /// Opens Settings, Pools in the TUI on a fresh engine with a saved profile, home and one
 /// project, once the Pools spend part shows its Claude free resets line.
-/// Input: the scratch prefix. Output: the engine, the TUI and the scratch home.
-fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
-    let engine = Engine::start(prefix);
+/// Input: the scratch prefix. Output: the engine, the TUI, and the scratch projects home
+/// with the private HOME the engine and the TUI run on.
+fn pools_settings(prefix: &str) -> (Engine, Pty, [tempfile::TempDir; 2]) {
+    let user = private_home(&format!("{prefix}home-"));
+    let engine = start_at(prefix, user.path());
     let tmux = installed(engine.path()).expect(TMUX);
     let disk = scratch("ca-e2e-home-");
     let home = disk.path().join("Projects");
@@ -1994,7 +2053,7 @@ fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
             );
             owner.controller.detach();
         });
-    let pty = Pty::launch(tmux, &engine.socket());
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     reach_home(&pty, |screen| at_home(screen, RESETS_PROJECT));
     setup_checked(&pty);
     pty.keys(&["s"]);
@@ -2006,7 +2065,7 @@ fn pools_settings(prefix: &str) -> (Engine, Pty, tempfile::TempDir) {
         "] steps to Pools with its Claude free resets line",
         |screen| flat(screen).contains("Claude free resets (f):"),
     );
-    (engine, pty, disk)
+    (engine, pty, [disk, user])
 }
 
 /// Reads where the engine keeps reading Claude free resets from, as any client reads it.
@@ -2318,8 +2377,7 @@ fn first_run_home(prefix: &str) -> tempfile::TempDir {
 /// graphify it can find is the one in the home. Inputs: a scratch prefix, the home and the
 /// gate root. Output: the running engine.
 fn clean_engine(prefix: &str, home: &Path, gate: &Path) -> Engine {
-    let mut engine = Engine::new(prefix);
-    engine.home = Some(home.to_path_buf());
+    let mut engine = engine_at(prefix, home);
     engine.env.push(("PATH", SYSTEM_PATH.into()));
     engine
         .env
@@ -2582,8 +2640,7 @@ fn old_harnesses(home: &Path, claude: (Option<&str>, &str), codex: (Option<&str>
 /// and the system folders, so no harness installed on this Mac is ever found or run. Inputs:
 /// the prefix, the HOME and the PATH. Output: the running engine.
 fn stand_in_engine(prefix: &str, home: &Path, path: String) -> Engine {
-    let mut engine = Engine::new(prefix);
-    engine.home = Some(home.to_path_buf());
+    let mut engine = engine_at(prefix, home);
     engine.env.push(("PATH", path.into()));
     engine.launch();
     engine
@@ -2768,6 +2825,327 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
         "a ChatGPT sign-in that runs Codex",
         SIGN_IN_TIME,
         ran_the_harness,
+    );
+    drop(pty);
+    engine.stop();
+}
+
+const NOTE: &str = "Deploys go out on Tuesdays.";
+
+/// A private HOME for the engine and the TUI, never the runner's (rv-sec3 S4 F1), with the
+/// TUI's Shift-Enter question already answered so Home opens. Input: a scratch prefix.
+/// Output: the HOME.
+fn private_home(prefix: &str) -> tempfile::TempDir {
+    let home = scratch(prefix);
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    home
+}
+
+/// The real engine, not yet started, with `home` as its HOME and its XDG config and data
+/// folders inside that HOME, a private folder that is never the runner's
+/// (E2E-TUI-SCRATCH-HOME), so no row reads or writes the owner's live profile.
+/// Inputs: a scratch prefix and the HOME. Output: the engine.
+fn engine_at(prefix: &str, home: &Path) -> Engine {
+    assert_ne!(
+        std::env::var_os("HOME").as_deref(),
+        Some(home.as_os_str()),
+        "the engine HOME is a private folder"
+    );
+    let mut engine = Engine::new(prefix);
+    engine.home = Some(home.to_path_buf());
+    engine
+        .env
+        .push(("XDG_CONFIG_HOME", home.join(".config").into_os_string()));
+    engine
+        .env
+        .push(("XDG_DATA_HOME", home.join(".local/share").into_os_string()));
+    engine
+}
+
+/// Starts [`engine_at`] and checks it runs with that private HOME.
+/// Inputs: a scratch prefix and the HOME. Output: the running engine.
+fn start_at(prefix: &str, home: &Path) -> Engine {
+    let mut engine = engine_at(prefix, home);
+    engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(home),
+        "the engine runs with the private HOME"
+    );
+    engine
+}
+
+/// Makes the project `gone-app` the way New project does, saves the owner's note on it, then
+/// removes it from the dashboard, or with its files when `everything`, as both apps do.
+/// Inputs: the engine, the projects home and the choice. Output: the project's folder.
+async fn noted_then_removed(engine: &Engine, home: &Path, everything: bool) -> PathBuf {
+    let mut owner = Owner::attach(engine).await;
+    assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+    assert_eq!(owner.set_home(home).await, OwnerResult::Applied);
+    assert_eq!(
+        owner.create_project("gone-app", "Gone App").await,
+        OwnerResult::Applied
+    );
+    let project = ProjectId::new("gone-app").unwrap();
+    let generation = owner.next();
+    let noted = owner
+        .controller
+        .add_memory(
+            MemoryScope::Project {
+                project_id: project.clone(),
+            },
+            NOTE.into(),
+            generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(noted), OwnerResult::Applied);
+    let setup = owner
+        .controller
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .expect("the new project has its setup");
+    let folder = PathBuf::from(setup.folder.trim_end_matches("/.crazyagent"));
+    let generation = owner.next();
+    let removed = if everything {
+        owner
+            .controller
+            .delete_project(project, setup.name, generation)
+            .await
+            .unwrap()
+    } else {
+        owner
+            .controller
+            .remove_project(project, generation)
+            .await
+            .unwrap()
+    };
+    assert_eq!(result(removed), OwnerResult::Applied);
+    owner.controller.detach();
+    folder
+}
+
+/// Reads whether the engine has a project in setup under `id` and whether its approved notes
+/// hold the note. Inputs: the engine and the id. Output: both answers.
+async fn in_setup_with_note(engine: &Engine, id: &str) -> (bool, bool) {
+    let mut owner = Owner::attach(engine).await;
+    let project = ProjectId::new(id).unwrap();
+    let setting_up = owner.controller.onboarding(project.clone()).await.is_ok();
+    let noted = owner
+        .controller
+        .approved_memories(project)
+        .await
+        .is_ok_and(|notes| notes.items.iter().any(|item| item.text == NOTE));
+    owner.controller.detach();
+    (setting_up, noted)
+}
+
+/// Sets up a folder where it is from Home's Existing folder page as the owner does, waits for
+/// its setup page and goes back Home. Inputs: the TUI and the folder. Output: the setup page.
+fn set_up_here(pty: &Pty, folder: &Path) -> String {
+    let name = folder.file_name().unwrap().to_str().unwrap();
+    pty.keys(&["a"]);
+    pty.until("a on Home offers the ways to add a project", |screen| {
+        screen.contains("Existing folder")
+    });
+    pty.keys(&["e"]);
+    pty.until("the Existing folder page asks for the folder", |screen| {
+        screen.contains("Use where it is") && screen.contains("Set up here")
+    });
+    pty.text(folder.to_str().unwrap());
+    pty.until("the typed folder shows", |screen| screen.contains(name));
+    pty.keys(&["Enter"]);
+    pty.until("the setup page offers the pool", |screen| {
+        screen.contains(&format!("Set up {name}"))
+            && screen.contains("local-pool")
+            && screen.contains("Start setup")
+    });
+    pty.keys(&["Enter"]);
+    let setup = pty.until("the setup page of the project the engine gave", |screen| {
+        screen.contains("Build the code graph")
+            && (screen.contains("Map the project") || screen.contains("Mapping failed:"))
+    });
+    assert!(!setup.contains("Couldn't"), "{setup}");
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back Home", |screen| {
+        screen.contains("Most recent first") || screen.contains("No projects yet.")
+    });
+    setup
+}
+
+/// DEC-178: a project removed from the dashboard comes back with its note when the TUI sets up
+/// its own folder again, and another folder with its name is set up in the TUI as a new
+/// project, `gone-app-2`, with none of the note; the TUI opens each by the id the engine gave.
+#[test]
+fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
+    let user = private_home("ca-e2e-return-home-");
+    let mut engine = engine_at("ca-e2e-return-", user.path());
+    let _provider = unreachable_provider(&engine);
+    engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(user.path()),
+        "the engine runs with the private HOME"
+    );
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-return-disk-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let folder = runtime.block_on(noted_then_removed(&engine, &home, false));
+    assert!(
+        folder.join(".crazyagent").is_dir(),
+        "the folder stays on disk"
+    );
+
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
+    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    set_up_here(&pty, &folder);
+    assert_eq!(
+        runtime.block_on(in_setup_with_note(&engine, "gone-app")),
+        (true, true),
+        "its own folder brings gone-app back with its note"
+    );
+
+    let other = disk.path().join("other").join("gone-app");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("notes.md"), "another folder\n").unwrap();
+    set_up_here(&pty, &other);
+    assert_eq!(
+        runtime.block_on(in_setup_with_note(&engine, "gone-app-2")),
+        (true, false),
+        "another folder with the name is gone-app-2, with none of the note"
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// A fresh APFS disk image mounted for one test, detached when dropped, so a Delete everything
+/// moves its folders to the image's own Trash and never to the owner's.
+#[cfg(target_os = "macos")]
+struct Volume {
+    mount: PathBuf,
+    _image: tempfile::TempDir,
+}
+
+#[cfg(target_os = "macos")]
+impl Volume {
+    /// Creates and mounts a 64 MB APFS image. Input: none. Output: the mounted volume.
+    fn attach() -> Self {
+        let image = scratch("ca-e2e-volume-");
+        let disk = image.path().join("projects.dmg");
+        let mount = image.path().join("mount");
+        std::fs::create_dir(&mount).unwrap();
+        for args in [
+            vec![
+                "create",
+                "-quiet",
+                "-size",
+                "64m",
+                "-fs",
+                "APFS",
+                "-volname",
+                "CAReturnE2E",
+                disk.to_str().unwrap(),
+            ],
+            vec![
+                "attach",
+                "-quiet",
+                "-nobrowse",
+                "-noautoopen",
+                "-mountpoint",
+                mount.to_str().unwrap(),
+                disk.to_str().unwrap(),
+            ],
+        ] {
+            let status =
+                crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
+                    .unwrap();
+            assert!(status.success(), "hdiutil {args:?}");
+        }
+        Self {
+            mount: mount.canonicalize().unwrap(),
+            _image: image,
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Volume {
+    fn drop(&mut self) {
+        let _ = crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
+            "detach",
+            "-quiet",
+            "-force",
+            self.mount.to_str().unwrap(),
+        ]));
+    }
+}
+
+/// DEC-178: after Delete everything the same folder made again is set up in the TUI as a new
+/// project, `gone-app-2`, with none of the note; the deleted id is never given out again.
+/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[test]
+fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
+    let user = private_home("ca-e2e-deleted-home-");
+    let mut engine = engine_at("ca-e2e-deleted-", user.path());
+    let _provider = unreachable_provider(&engine);
+    engine.launch();
+    assert_eq!(
+        engine.home.as_deref(),
+        Some(user.path()),
+        "the engine runs with the private HOME"
+    );
+    let tmux = installed(engine.path()).expect(TMUX);
+    let volume = Volume::attach();
+    let home = volume.mount.join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let folder = runtime.block_on(noted_then_removed(&engine, &home, true));
+    assert!(
+        !folder.exists(),
+        "Delete everything moved the folder to the Trash"
+    );
+    let trash = volume
+        .mount
+        .join(".Trashes")
+        .join(rustix::process::getuid().as_raw().to_string());
+    assert!(
+        std::fs::read_dir(&trash).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("gone-app")),
+        "the folder is in the image's own Trash"
+    );
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("notes.md"), "made again\n").unwrap();
+
+    let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
+    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    set_up_here(&pty, &folder);
+    assert_eq!(
+        runtime.block_on(in_setup_with_note(&engine, "gone-app-2")),
+        (true, false),
+        "the folder made again is gone-app-2, with none of the note"
+    );
+    assert!(
+        !runtime.block_on(in_setup_with_note(&engine, "gone-app")).0,
+        "the deleted id is never given out again"
     );
     drop(pty);
     engine.stop();

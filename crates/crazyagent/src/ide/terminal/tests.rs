@@ -202,6 +202,56 @@ fn an_own_branch_terminal_on_open_reaches_a_local_listener() {
     assert!(output.status.success(), "{output:?}");
 }
 
+/// A Sandboxed terminal starts with no shell startup file in its own home (SA vid 12): its
+/// profile lets nothing inside it write one, so one found there was left by a build from
+/// before that rule or written from outside, and a login shell would run it. The start
+/// removes each zsh, bash and sh startup name, the login shell runs none of them, and every
+/// other entry of the home stays.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_terminal_starts_with_no_shell_startup_file_left_in_its_home() {
+    let case = Case::new();
+    let home = case.root.join("ide-shell").join(PROJECT).join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    for name in [".profile", ".zshenv", ".bashrc"] {
+        std::fs::write(home.join(name), "echo planted\n").unwrap();
+    }
+    std::fs::write(home.join("kept.txt"), "kept\n").unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let shell_arguments = arguments(&["-l", "-c", "echo ran"]);
+    let launch = ide_shell::Launch {
+        root: &case.root,
+        project: &project,
+        folder: &case.folder,
+        cwd: &case.folder,
+        shell: std::path::Path::new("/bin/sh"),
+        arguments: &shell_arguments,
+        incoming: &[],
+        extra_reads: &[],
+        level: AgentAccess::Sandboxed,
+        network: AgentNetwork::Open,
+        kept_ports: &[],
+        agent_files: AgentFilesRule::default(),
+    };
+
+    let mut command = ide_shell::command(&launch).unwrap();
+    let output = crate::spawn_gate::collected(&mut command).unwrap();
+
+    let printed = String::from_utf8_lossy(&output.stdout);
+    assert!(printed.contains("ran"), "{output:?}");
+    assert!(!printed.contains("planted"), "{output:?}");
+    for name in [".profile", ".zshenv", ".bashrc"] {
+        assert!(
+            std::fs::symlink_metadata(home.join(name)).is_err(),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.join("kept.txt")).unwrap(),
+        "kept\n"
+    );
+}
+
 /// An Own branch terminal on Port 443 only is refused any other port and holds the 443 rule.
 #[cfg(target_os = "macos")]
 #[test]
@@ -1262,4 +1312,64 @@ fn an_ide_terminal_reads_the_global_git_python_and_npm_config_of_its_home() {
             "{pinned} reached the owner's terminal: {stdout}"
         );
     }
+}
+
+/// The owner's IDE terminal writes its own npm, yarn, git and cargo config and cargo's
+/// subcommands in its home, and sets a flag and an ACL on what it copies there, since no
+/// launch resets that home and those denies are an agent home's alone (RV-DS241-188, -187):
+/// `npm login`, `yarn config set`, `git config --global` and `cargo install` work there.
+/// The terminal stays confined: the engine's owner keys stay out of its reach.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_writes_its_own_npm_yarn_git_and_cargo_config_in_its_home() {
+    let case = Case::new();
+    let keys = case.root.join("account-keys").join("planted");
+    let tries = [
+        ("npmrc", "printf 'token=x\\n' > .npmrc"),
+        ("yarnrc", "printf 'x\\n' > .yarnrc"),
+        ("yarnrc_yml", "printf 'x: 1\\n' > .yarnrc.yml"),
+        ("gitconfig", "printf '[user]\\n' > .gitconfig"),
+        (
+            "git_xdg",
+            "mkdir -p .config/git && printf '[user]\\n' > .config/git/config",
+        ),
+        (
+            "cargo_config",
+            "mkdir -p .cargo && printf '[build]\\n' > .cargo/config.toml",
+        ),
+        (
+            "cargo_bin",
+            "mkdir -p .cargo/bin && printf x > .cargo/bin/cargo-x",
+        ),
+        (
+            "flag",
+            "printf x > copied && /usr/bin/chflags uchg copied && /usr/bin/chflags nouchg copied",
+        ),
+        (
+            "acl",
+            "/bin/chmod +a 'everyone deny delete' copied && /bin/chmod -N copied",
+        ),
+    ];
+    let mut script = String::from("cd \"$HOME\" || exit 9\n");
+    for (name, step) in tries {
+        script.push_str(&format!("( {step} ) 2>/dev/null; echo {name}=$?\n"));
+    }
+    script.push_str(&format!(
+        "printf x > {} 2>/dev/null; echo keys=$?\n",
+        quoted(&keys)
+    ));
+    let output = in_terminal(&case, &script);
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let refused: Vec<&str> = tries
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !stdout.lines().any(|line| line == format!("{name}=0")))
+        .collect();
+    assert!(
+        refused.is_empty(),
+        "refused in the owner's terminal: {refused:?}\n{stdout}"
+    );
+    let keys_tried = stdout.lines().find(|line| line.starts_with("keys="));
+    assert!(keys_tried.is_some_and(|line| line != "keys=0"), "{stdout}");
+    assert!(!keys.exists());
 }

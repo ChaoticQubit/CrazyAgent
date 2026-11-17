@@ -46,7 +46,7 @@ for (const [name, expected, missing] of [
   ["current", ["CrazyAgent is up to date.", "Check now"], "Download and install"],
   ["available", ["CrazyAgent 0.3.0 is available. You have 0.2.0.", "Faster startup.", "Installing stops the engine for a moment.", "Download and install", "Check again", "Update channel"], "Channel: Stable"],
   ["installing", ["Installing CrazyAgent 0.3.0.", "Downloading 5 bytes of 10 bytes (50%)", "Channel: Stable"], "Check now"],
-  ["installed", ["CrazyAgent 0.3.0 is installed. Restart to finish.", "The engine starts again when CrazyAgent restarts.", "Restart now"], "Check now"],
+  ["installed", ["CrazyAgent 0.3.0 is installed. Restart to finish.", "The engine is still starting on the new version. Restart now; CrazyAgent connects once it answers.", "Restart now"], "Check now"],
   ["failed", ["Try again"], "Check now"],
 ]) {
   test(`the ${name} update stays in the Updates section with its words`, async () => {

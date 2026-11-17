@@ -55,7 +55,7 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
     match response {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
             match &operation.result {
-                OwnerResult::Applied => None,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => None,
                 OwnerResult::Rejected { code } => Some(code.clone()),
                 other => panic!("unexpected owner result: {other:?}"),
             }
@@ -121,6 +121,7 @@ async fn under_no_network_an_agent_reaches_no_other_host_through_or_around_its_m
         network: AgentNetwork::None,
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()

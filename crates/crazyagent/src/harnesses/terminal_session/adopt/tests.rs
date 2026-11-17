@@ -424,6 +424,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         frozen_ms: None,
         frozen_for_ms: None,
         keepers: None,
+        hidden: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -470,6 +471,37 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let networked = narrowed.encode().unwrap();
     assert!(networked.contains("\"network\":\"none\""), "{networked}");
     assert_eq!(PaneRecord::decode(&networked), Some(narrowed));
+    assert!(!text.contains("hidden"), "{text}");
+    let secrets =
+        crate::sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
+    let hid = PaneRecord {
+        hidden: Some(vec![secrets.clone()]),
+        ..record.clone()
+    };
+    let kept = hid.encode().unwrap();
+    assert!(
+        kept.contains(&format!("\"hidden\":[\"{secrets}\"]")),
+        "{kept}"
+    );
+    assert_eq!(PaneRecord::decode(&kept), Some(hid));
+    let shout = kept.replace(&secrets, &secrets.to_uppercase());
+    assert_eq!(
+        PaneRecord::decode(&shout),
+        None,
+        "not a digest the engine writes"
+    );
+    let nine = PaneRecord {
+        hidden: Some(vec![
+            secrets.clone();
+            crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
+        ]),
+        ..record.clone()
+    };
+    assert_eq!(
+        PaneRecord::decode(&nine.encode().unwrap()),
+        None,
+        "more than a project may hide"
+    );
     let mut relative = record.clone();
     relative.cwd = PathBuf::from("worktrees/agent-3");
     assert_eq!(PaneRecord::decode(&relative.encode().unwrap()), None);
@@ -682,6 +714,7 @@ fn keyed(key: &std::path::Path) -> PaneRecord {
         frozen_ms: None,
         frozen_for_ms: None,
         keepers: None,
+        hidden: None,
     }
 }
 
@@ -759,11 +792,11 @@ fn long_record(fixture: &Fixture, turns: usize) -> PathBuf {
     fixture.transcript(&lines)
 }
 
-/// RV-DS241-72 and -143: an agent can grow its record without end, so adoption reads it only
-/// while the launch's run time lasts, at most `REPLAY_WAIT`. A read cut short passes over the
-/// rest of the record as it stands, unread, so no earlier turn reaches the session as a new
-/// one; whether a turn is open there is unknown, so nothing is typed (the stand-in records
-/// every Escape), the turn is told as dropped and the next turn is followed alone.
+/// RV-DS241-72, -143 and -190: an agent can grow its record without end, so adoption reads it
+/// only while the launch's run time lasts, at most `REPLAY_WAIT`. A read cut short passes over
+/// the rest of the record as it stands, unread, so no earlier turn reaches the session as a
+/// new one. On a pane that shows the app's input prompt nothing is typed (the stand-in records
+/// every Escape), the unknown turn is told as dropped and the next turn is followed alone.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_session_no_old_turn() {
@@ -773,8 +806,9 @@ fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_ses
     let file = long_record(&fixture, 1_024);
     let length = std::fs::metadata(&file).unwrap().len();
     assert!(length > 4 * READ_BYTES_MAX as u64);
-    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
-    std::thread::sleep(Duration::from_millis(500));
+    let harness = format!("{IDLE_PROMPT}{ESCAPE_HARNESS}");
+    let record = fixture.spawn(&host, &agent, &harness, &file);
+    std::thread::sleep(Duration::from_secs(5));
     let launched = PaneRecord {
         since_ms: record.since_ms - 60_000,
         ..record
@@ -798,6 +832,110 @@ fn an_adoption_replay_cut_at_the_run_time_passes_over_the_rest_and_hands_the_ses
         "a pane whose record was cut is taken over idle, its turn told as dropped"
     );
     assert_eq!(lines(&file), 2 * 1_024, "nothing was typed into the pane");
+    session.clear_deadline();
+    follows_a_typed_command(&mut session, &file);
+    drop(session);
+    assert!(host.alive().unwrap().is_empty());
+}
+
+/// RV-DS241-190: a read cut short leaves unknown whether a turn is open, so a sub-agent pane
+/// that does not show the app's input prompt may still be mid-turn. It is not taken over
+/// idle with the turn running, where the next order would be typed behind it and the old
+/// turn's reply reported for the new one: it gets Escape like a pane with an open turn, its
+/// turn settles, and only then is it taken over. The stand-in records every Escape.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cut_adoption_replay_on_a_pane_without_its_input_prompt_stops_the_turn_before_the_pane_is_adopted()
+ {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(16).unwrap();
+    let file = long_record(&fixture, 1_024);
+    let length = std::fs::metadata(&file).unwrap().len();
+    assert!(length > 4 * READ_BYTES_MAX as u64);
+    let record = fixture.spawn(&host, &agent, ESCAPE_HARNESS, &file);
+    std::thread::sleep(Duration::from_millis(500));
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 60_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: Duration::from_secs(30),
+        ..LaunchLimits::default()
+    };
+    assert!(launched.run_time_left(limits.run_time).is_zero());
+
+    let mut session =
+        TerminalSession::adopt(host.clone(), agent.clone(), &launched, limits).unwrap();
+    assert_eq!(
+        lines(&file),
+        2 * 1_024 + 1,
+        "the pane whose read was cut got Escape and its turn ended before it was taken over"
+    );
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .ends_with("[Request interrupted by user]\"}]}}\n")
+    );
+    assert_eq!(
+        session.reader.unread(),
+        Some(0),
+        "the old turn's lines and its end are read before the session takes orders"
+    );
+    assert!(session.ready && !session.turn);
+    session.clear_deadline();
+    follows_a_typed_command(&mut session, &file);
+    drop(session);
+    assert!(host.alive().unwrap().is_empty());
+}
+
+/// RV-DS241-190 sec F1: an agent can draw its app's input prompt on its own terminal and
+/// stop a process of its pane, so the pane draws nothing for `APP_QUIET` while it shows the
+/// prompt. A cut read on such a pane does not take it over idle: a pane with a stopped
+/// process is not waiting, so it gets Escape like a pane with an open turn, its turn settles,
+/// and only then is it taken over. The stand-in shows the prompt, stops a process it started
+/// and records every Escape.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cut_adoption_replay_on_a_pane_that_shows_its_prompt_over_a_stopped_process_stops_the_turn_first()
+ {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(17).unwrap();
+    let file = long_record(&fixture, 1_024);
+    let length = std::fs::metadata(&file).unwrap().len();
+    assert!(length > 4 * READ_BYTES_MAX as u64);
+    let harness = format!("{IDLE_PROMPT}sleep 600 & kill -STOP $!; {ESCAPE_HARNESS}");
+    let record = fixture.spawn(&host, &agent, &harness, &file);
+    std::thread::sleep(Duration::from_secs(5));
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 60_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: Duration::from_secs(30),
+        ..LaunchLimits::default()
+    };
+    assert!(launched.run_time_left(limits.run_time).is_zero());
+
+    let mut session =
+        TerminalSession::adopt(host.clone(), agent.clone(), &launched, limits).unwrap();
+    assert_eq!(
+        lines(&file),
+        2 * 1_024 + 1,
+        "the pane that shows its prompt over a stopped process got Escape before it was taken over"
+    );
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .ends_with("[Request interrupted by user]\"}]}}\n")
+    );
+    assert_eq!(
+        session.reader.unread(),
+        Some(0),
+        "the old turn's lines and its end are read before the session takes orders"
+    );
+    assert!(session.ready && !session.turn);
     session.clear_deadline();
     follows_a_typed_command(&mut session, &file);
     drop(session);

@@ -275,6 +275,59 @@ test("the Add MCP server form turns typed text into the engine's spec and refuse
   assert.ok("spec" in serverSpecInput({ kind: "http", command: "", args: "", url: "http://127.0.0.1:8931/mcp" }));
 });
 
+test("the Add MCP server form takes exactly the full command paths the engine takes on this system (#128 code F1)", async () => {
+  const client = await import("../src/engine-client.ts");
+  const keys = await import("../src/ui/keys.ts");
+  const stdio = (command, windows) => serverSpecInput({ kind: "stdio", command, args: "", url: "" }, windows);
+  const npx = "C:\\Program Files\\nodejs\\npx.cmd";
+  const windowsCopy = "Enter the full path to the command, such as C:\\Program Files\\nodejs\\npx.cmd.";
+  const unixCopy = "Enter the full path to the command, starting with /.";
+  assert.deepEqual(stdio(` ${npx} `, true), { spec: { kind: "stdio", command: npx, args: [] } });
+  for (const command of ["/usr/local/bin/npx", "npx.cmd", "\\nodejs\\npx.cmd", "\\\\server\\share\\npx.cmd", "\\\\?\\C:\\nodejs\\npx.cmd",
+    "\\\\.\\pipe\\npx", "C:nodejs\\npx.cmd", "C:/nodejs/npx.cmd", "C:\\nodejs\\npx.cmd:stream", "C:\\nodejs\\..\\npx.cmd", "C:\\nodejs\\npx.cmd.", "C:\\"]) {
+    assert.deepEqual(stdio(command, true), { error: { command: windowsCopy } }, command);
+    assert.equal(client.fullCommandPath(command, true), false, command);
+  }
+  assert.deepEqual(stdio("/usr/local/bin/npx", false), { spec: { kind: "stdio", command: "/usr/local/bin/npx", args: [] } });
+  assert.deepEqual(stdio(npx, false), { error: { command: unixCopy } });
+  assert.equal(client.fullCommandPath(npx, true), true);
+  assert.equal(client.commandPathCopy(true), windowsCopy);
+  assert.equal(client.commandPathCopy(false), unixCopy);
+  assert.equal(keys.isWindows("Win32"), true);
+  assert.equal(keys.isWindows("MacIntel"), false);
+});
+
+const addServerShown = async (platform) => {
+  const { SessionContext } = await import("../src/state.ts");
+  Object.defineProperty(navigator, "platform", { value: platform, configurable: true });
+  try {
+    return renderToStaticMarkup(createElement(SessionContext.Provider, { value: { showToast() {} } },
+      createElement(plugins.AddServerDialog, { open: true, scope: { kind: "global" }, onClose: forbidden, onAdded: forbidden })));
+  } finally {
+    delete navigator.platform;
+  }
+};
+
+test("the Add MCP server command field's example is a drive path on Windows and a /-path elsewhere (#132 r2 F1)", async () => {
+  const windows = await addServerShown("Win32");
+  assert.match(windows, /The full path, such as C:\\Program Files\\nodejs\\npx\.cmd\./);
+  assert.doesNotMatch(windows, /opt\/homebrew/);
+  const mac = await addServerShown("MacIntel");
+  assert.match(mac, /The full path, such as \/opt\/homebrew\/bin\/npx\./);
+  assert.doesNotMatch(mac, /npx\.cmd/);
+});
+
+test("the Add MCP server dialog says this Mac only on a Mac, and this computer on Windows and Linux (#132 r2 F1, leader 13:12)", async () => {
+  for (const platform of ["Win32", "Linux x86_64"]) {
+    const markup = await addServerShown(platform);
+    assert.match(markup, /Command on this computer/, platform);
+    assert.doesNotMatch(markup, /this Mac/, platform);
+  }
+  const mac = await addServerShown("MacIntel");
+  assert.match(mac, /Command on this Mac/);
+  assert.doesNotMatch(mac, /this computer/);
+});
+
 test("names, secret names and skill folders are checked with the engine's rules before sending", () => {
   assert.equal(serverNameError("github"), undefined);
   assert.equal(serverNameError("GitHub tools"), "Use 1 to 64 lowercase letters, digits, - or _ for the name.");

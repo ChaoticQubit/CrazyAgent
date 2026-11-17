@@ -525,11 +525,11 @@ test("in a real xterm, the view answers no color query, since tmux already answe
   assert.deepEqual(typed, []);
 });
 
-test("a closed terminal panel detaches only the view its own attach opened", () => {
+test("a terminal view let go detaches only the view its own attach opened", () => {
   const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(panel, /detachTerminal\(name\)/);
   assert.match(panel, /if \(result\.kind === "ok"\) void detachTerminal\(name, result\.value\);/);
-  assert.match(panel, /if \(serial !== null\) void detachTerminal\(name, serial\);/);
+  assert.match(panel, /if \(link\.serial !== null\) void detachTerminal\(name, link\.serial\);/);
 });
 
 test("a live master area left before the start reply changes nothing on the next page", () => {

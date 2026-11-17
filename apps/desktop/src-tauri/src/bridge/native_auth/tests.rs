@@ -1,12 +1,14 @@
 use super::super::{ActionOutcome, NativeBridge};
 use crazyagent::client_controller::OwnerController;
 use crazyagent::config::ModelAccessEdit;
+use crazyagent::engine::EngineError;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
-    ModelAccessCollection, NativeAuthMethod, OwnerClientKind, OwnerData, OwnerMutation, OwnerRead,
-    OwnerResponse, OwnerResult,
+    ModelAccessCollection, NativeAuthFact, NativeAuthMethod, NativeAuthPhase, NativeAuthReply,
+    NativeProfileBinding, OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse,
+    OwnerResult,
 };
-use crazyagent::protocol::{ConfigId, CredentialRef};
+use crazyagent::protocol::{ConfigId, CredentialRef, Cursor};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
@@ -250,6 +252,132 @@ async fn a_busy_engine_leaves_a_running_sign_in_running_and_connected() {
         bridge.status().connected,
         "a busy engine dropped the connection"
     );
+    drop(bridge);
+    case.stop().await;
+}
+
+/// A connected bridge holding a sign-in it last read as running and certain, as a recheck
+/// finds one. Input: the case. Output: the bridge.
+async fn held_running(case: &Case) -> NativeBridge {
+    let mut bridge = case.stuck().await;
+    bridge.connect().await.unwrap();
+    let operation = bridge.native_auth.as_mut().unwrap();
+    operation.running = true;
+    operation.uncertain = false;
+    assert!(bridge.stuck_auth().is_none());
+    bridge
+}
+
+/// An answer about the bridge's held sign-in, in the given phase, that matches it in every
+/// field the bridge checks. Inputs: the bridge and the phase. Output: the reply.
+fn matching(bridge: &NativeBridge, phase: NativeAuthPhase) -> NativeAuthReply {
+    let operation = bridge.native_auth.as_ref().unwrap();
+    let identity = bridge.controller.as_ref().unwrap().identity();
+    let scope = operation.original.scope();
+    NativeAuthReply {
+        request_id: operation.request_id.clone(),
+        database_instance: identity.database_instance().to_owned(),
+        engine_epoch: identity.engine_epoch().to_owned(),
+        fact: NativeAuthFact {
+            operation_id: operation.original.id().clone(),
+            action: operation.original.action(),
+            binding: NativeProfileBinding {
+                database_instance: scope.expected_database_instance.clone(),
+                engine_epoch: identity.engine_epoch().to_owned(),
+                config_id: scope.expected_config_id.clone(),
+                source_hash: scope.expected_source_hash.clone(),
+                at_revision: Cursor::new(1),
+                connection: operation.connection.clone(),
+                custody_id: "custody-row".into(),
+            },
+            generation: operation.generation.unwrap_or(1),
+            phase,
+            code: None,
+        },
+        challenge: None,
+        claude_challenge: None,
+        account: None,
+    }
+}
+
+const ENDED: [NativeAuthPhase; 6] = [
+    NativeAuthPhase::AuthenticatedObserved,
+    NativeAuthPhase::UnauthenticatedObserved,
+    NativeAuthPhase::Failed,
+    NativeAuthPhase::Cancelled,
+    NativeAuthPhase::Unavailable,
+    NativeAuthPhase::Uncertain,
+];
+
+/// PROTO-3-SEC F2: on the recheck route, an ended answer the bridge cannot match, here one
+/// bound to settings the sign-in did not start with, is refused as an unknown outcome and
+/// leaves the sign-in stuck, as any other answer that fails the check does, instead of
+/// holding it as running.
+#[tokio::test]
+async fn a_recheck_never_keeps_an_ended_answer_that_fails_the_check() {
+    let case = Case::new().await;
+    let mut bridge = held_running(&case).await;
+    let mut other = matching(&bridge, NativeAuthPhase::AuthenticatedObserved);
+    other.fact.binding.config_id = ConfigId::new("e".repeat(64)).unwrap();
+    assert_eq!(
+        bridge
+            .running_answer(Ok(other), true)
+            .map_err(|error| error.code),
+        Err("native_auth_outcome_unknown_read_same_operation")
+    );
+    assert_eq!(
+        bridge.status().stuck_sign_in.as_deref(),
+        Some("b-claude"),
+        "an ended answer the bridge cannot match leaves the sign-in stuck"
+    );
+    drop(bridge);
+    case.stop().await;
+}
+
+/// PROTO-3-SEC F1: on the recheck route a matching answer in every ended phase, finished,
+/// failed and cancelled alike, keeps the sign-in held and running for the drawer's own read,
+/// and the next read that settles drops it.
+#[tokio::test]
+async fn a_recheck_keeps_each_matching_end_until_a_settling_read() {
+    let case = Case::new().await;
+    let mut bridge = held_running(&case).await;
+    for phase in ENDED {
+        assert!(!phase.unfinished());
+        let reply = matching(&bridge, phase);
+        let kept = bridge.running_answer(Ok(reply), true);
+        assert_eq!(kept.map_err(|error| error.code), Ok(false), "{phase:?}");
+        let operation = bridge.native_auth.as_ref().unwrap();
+        assert!(operation.unresolved && operation.running, "{phase:?}");
+        assert_eq!(bridge.stuck_auth(), None, "{phase:?}");
+    }
+    let reply = matching(&bridge, NativeAuthPhase::Failed);
+    let settled = bridge.running_answer(Ok(reply), false);
+    assert_eq!(settled.map_err(|error| error.code), Ok(true));
+    assert!(bridge.native_auth.is_none());
+    drop(bridge);
+    case.stop().await;
+}
+
+/// PROTO-3-SEC F1: on the recheck route a refusal that ends the sign-in (`ends_it`'s
+/// refusal arm) keeps it held and running for the drawer's own read, and the next read that
+/// settles drops it.
+#[tokio::test]
+async fn a_recheck_keeps_a_sign_in_the_engine_refused_as_ended_until_a_settling_read() {
+    let case = Case::new().await;
+    let mut bridge = held_running(&case).await;
+    let ended = || -> Result<NativeAuthReply, EngineError> {
+        Err(EngineError("native_auth_not_active".to_owned()))
+    };
+    assert!(crazyagent::engine::owner::ends_operation(
+        "native_auth_not_active"
+    ));
+    let kept = bridge.running_answer(ended(), true);
+    assert_eq!(kept.map_err(|error| error.code), Ok(false));
+    let operation = bridge.native_auth.as_ref().unwrap();
+    assert!(operation.unresolved && operation.running);
+    let settled = bridge.running_answer(ended(), false);
+    assert_eq!(settled.map_err(|error| error.code), Ok(true));
+    assert!(bridge.native_auth.is_none());
     drop(bridge);
     case.stop().await;
 }

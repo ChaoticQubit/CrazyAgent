@@ -1,0 +1,78 @@
+{
+  "fill-specializations": [
+    {
+      "value": {
+        "linear-gradient": [
+          "srgb:0.96863,0.95686,0.93333,1.00000",
+          "srgb:0.90980,0.89020,0.85098,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    },
+    {
+      "appearance": "dark",
+      "value": {
+        "linear-gradient": [
+          "srgb:0.16471,0.15686,0.14118,1.00000",
+          "srgb:0.08627,0.08235,0.07451,1.00000"
+        ],
+        "orientation": {
+          "start": {
+            "x": 0.5,
+            "y": 0
+          },
+          "stop": {
+            "x": 0.5,
+            "y": 1
+          }
+        }
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": [
+      "macOS"
+    ]
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "mark-dark.svg",
+          "name": "mark-dark",
+          "hidden-specializations": [
+            {
+              "value": true
+            },
+            {
+              "appearance": "dark",
+              "value": false
+            }
+          ]
+        },
+        {
+          "image-name": "mark-light.svg",
+          "name": "mark-light",
+          "hidden-specializations": [
+            {
+              "value": false
+            },
+            {
+              "appearance": "dark",
+              "value": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

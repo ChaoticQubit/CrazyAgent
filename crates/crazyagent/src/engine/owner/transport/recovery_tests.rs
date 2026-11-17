@@ -126,7 +126,7 @@ fn dismiss(root: &Path, kind: ActionKind, id: i64) -> Result<(), EngineError> {
     });
     let bytes = serde_json::to_vec(&body).unwrap();
     assert!(matches!(protocol(&bytes).unwrap(), Protocol::Recovery));
-    let reply = run(root, parse(&bytes)?)?;
+    let (reply, _) = run(root, parse(&bytes)?)?;
     assert!(matches!(reply, Reply::Dismissed));
     Ok(())
 }
@@ -202,7 +202,7 @@ fn the_owner_dismisses_a_notice_once_and_never_an_intent_still_checked() {
 fn ask(root: &Path, request: serde_json::Value) -> Result<Reply, EngineError> {
     let bytes = serde_json::to_vec(&serde_json::json!({ "recovery": request })).unwrap();
     assert!(matches!(protocol(&bytes).unwrap(), Protocol::Recovery));
-    run(root, parse(&bytes)?)
+    run(root, parse(&bytes)?).map(|(reply, _)| reply)
 }
 
 fn banner_of(root: &Path, project: &str) -> RecoveryBanner {

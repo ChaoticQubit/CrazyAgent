@@ -34,6 +34,23 @@ test("a reply this app could not read shows the restart sentence", async () => {
   assert.equal(state.engineState(failed), "outdated");
 });
 
+test("a connect reply that replaced an older engine on its own gives one line, and no other reply does (DEC-134 addendum 1)", () => {
+  const replaced = { kind: "ok", value: { connected: true, pending: false, stuck_sign_in: null, engine_updated: true } };
+  assert.equal(state.engineUpdatedLine(replaced), "CrazyAgent's engine was updated to match this app.");
+  assert.equal(state.engineUpdatedLine({ kind: "ok", value: { ...replaced.value, engine_updated: false } }), null);
+  assert.equal(state.engineUpdatedLine({ kind: "ok", value: { connected: true, pending: false } }), null, "a reply without the field names no update");
+  assert.equal(state.engineUpdatedLine({ kind: "error", code: "engine_version_mismatch", message: "x" }), null);
+});
+
+test("the first-run Welcome page shows the session's toast line, so a launch that replaced an older engine says so there too", () => {
+  const line = "CrazyAgent's engine was updated to match this app.";
+  const welcome = render({ profile: { kind: "ok", value: null }, toast: line });
+  assert.match(welcome, /<h1>Tell CrazyAgent about you<\/h1>/);
+  assert.match(welcome, /class="toast" role="status"/);
+  assert.ok(welcome.includes("CrazyAgent&#x27;s engine was updated to match this app."), "the line shows on Welcome");
+  assert.doesNotMatch(render({ profile: { kind: "ok", value: null } }), /class="toast"/, "no line, no toast");
+});
+
 test("the real App first renders the launch skeleton without calling the engine during render", () => {
   const markup = renderToStaticMarkup(createElement(App));
   assert.match(markup, /aria-busy="true"/);

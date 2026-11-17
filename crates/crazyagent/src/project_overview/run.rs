@@ -1,6 +1,6 @@
 use super::{
-    FAILURE_BYTES_MAX, Offered, Research, Tab, clipped, evidence, named_tabs, offer, parse_reply,
-    prompt, read, unavailable,
+    FAILURE_BYTES_MAX, Offered, Research, Tab, clipped, evidence, named_tabs, offer_held,
+    parse_reply, prompt, read, unavailable, writing,
 };
 use crate::engine::EngineError;
 use crate::onboarding::draft::names;
@@ -59,10 +59,12 @@ impl Started {
     /// Closes with [`UNFINISHED`] every noted run that began [`RUN_TIME`] or longer ago on
     /// the steady clock, by its claim, so a run that already ended, or a newer run of the
     /// project, is left alone; each such entry goes whether or not its run was still
-    /// open. An entry whose close fails stays for the next try. Inputs: the connection and
-    /// the steady time now. Output: how many open runs were closed, or
+    /// open. It holds the one-writer lock, so no run is closed between its finish's claim
+    /// check and its close. An entry whose close fails stays for the next try. Inputs: the
+    /// connection and the steady time now. Output: how many open runs were closed, or
     /// `overview_unavailable`.
     fn close_overdue(&mut self, db: &Connection, now: Instant) -> Result<usize, EngineError> {
+        let _writing = writing();
         let mut closed = 0usize;
         let mut failed = None;
         self.0.retain(|(project, claim, began)| {
@@ -329,7 +331,7 @@ fn offered(
             missed.push((tab, why));
             continue;
         };
-        let outcome: Result<Offered, EngineError> = offer(db, project, folder, tab, text);
+        let outcome: Result<Offered, EngineError> = offer_held(db, project, folder, tab, text);
         match outcome {
             Ok(_) => taken += 1,
             Err(error) => {
@@ -352,14 +354,17 @@ fn offered(
     Ok(missed_note(&missed))
 }
 
-/// Ends the run a claim names, and only that run. The run is closed first, by its claim:
-/// a run that was closed for its time on the steady clock, or whose project is gone, ends
-/// nothing and writes no tab. A reply's tabs are offered only after that, then the time
-/// is stored, with a line naming each asked tab that was not written; a failure stores one
-/// plain line and is not retried until the next landing or Refresh; a skip only closes
-/// the run. A reply whose offers do not finish leaves the run closed as unfinished.
-/// Inputs: the connection, the project, its folder, the claim, how the run ended and now.
-/// Output: whether this run was the one in flight, or `overview_unavailable`.
+/// Ends the run a claim names, and only that run, under the one-writer lock, which the close
+/// of a run for its time also takes, so a read sees the run still running or wholly ended,
+/// never closed with its tabs unwritten (gate race 2). The claim is checked first: a run
+/// closed for its time on the steady clock, or whose project is gone, ends nothing and writes
+/// no tab. A reply's tabs are offered next, then one statement closes the run by its claim
+/// with the time and a line naming each asked tab that was not written; a failure stores one
+/// plain line and is not retried until the next landing or Refresh; a skip only closes the
+/// run. A finish that stops before that close leaves the run open, for the close at its time
+/// or at engine start. Inputs: the connection, the project, its folder, the claim, how the
+/// run ended and now. Output: whether this run was the one in flight, or
+/// `overview_unavailable`.
 pub fn finish(
     db: &Connection,
     project: &ProjectId,
@@ -369,43 +374,42 @@ pub fn finish(
     now_ms: i64,
 ) -> Result<bool, EngineError> {
     assert!(claim.ms() >= 0 && now_ms >= 0);
-    let closing = match ended {
-        Ended::Reply { .. } => Some(UNFINISHED.to_owned()),
-        Ended::Failed(words) => Some(line(words)),
-        Ended::Skipped => None,
+    let _writing = writing();
+    if !in_flight(db, project, claim)? {
+        return Ok(false);
+    }
+    let (failure, checked) = match ended {
+        Ended::Reply {
+            reply,
+            with_competitors,
+        } => match offered(db, project, folder, reply, with_competitors) {
+            Ok(left) => (left, true),
+            Err(words) => (Some(words.to_owned()), false),
+        },
+        Ended::Failed(words) => (Some(line(words)), false),
+        Ended::Skipped => (None, false),
     };
     let closed = db
         .execute(
-            "UPDATE project_overview SET running_ms=NULL, failure=?3
+            "UPDATE project_overview
+             SET running_ms=NULL, failure=?3, checked_ms=CASE WHEN ?4 THEN ?5 ELSE checked_ms END
              WHERE project=?1 AND running_ms=?2",
-            params![project.as_str(), claim.ms(), closing],
+            params![project.as_str(), claim.ms(), failure, checked, now_ms],
         )
         .map_err(unavailable)?;
     assert!(closed <= 1);
-    if closed == 0 {
-        return Ok(false);
-    }
-    let Ended::Reply {
-        reply,
-        with_competitors,
-    } = ended
-    else {
-        return Ok(true);
-    };
-    let (failure, checked) = match offered(db, project, folder, reply, with_competitors) {
-        Ok(left) => (left, true),
-        Err(words) => (Some(words.to_owned()), false),
-    };
-    let stored = db
-        .execute(
-            "UPDATE project_overview
-             SET failure=?2, checked_ms=CASE WHEN ?3 THEN ?4 ELSE checked_ms END
-             WHERE project=?1 AND running_ms IS NULL",
-            params![project.as_str(), failure, checked, now_ms],
-        )
-        .map_err(unavailable)?;
-    assert!(stored <= 1);
-    Ok(true)
+    Ok(closed == 1)
+}
+
+/// Whether the run a claim names is still the project's open run. Inputs: the connection,
+/// the project and the claim. Output: the answer, or `overview_unavailable`.
+fn in_flight(db: &Connection, project: &ProjectId, claim: Claim) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_overview WHERE project=?1 AND running_ms=?2)",
+        params![project.as_str(), claim.ms()],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
 /// Ends the run a claim names with the words saying why it failed, for a run that never
@@ -506,8 +510,10 @@ pub(crate) fn waits_for_account(stored: &str) -> bool {
 
 /// Makes the Overview tables and closes every run an engine that stopped left open: a run
 /// lives on a thread of its engine, so at engine start none can still report, and each is
-/// closed with [`UNFINISHED`] without a new try. Input: the connection. Output: how many
-/// runs were closed, or `overview_unavailable`.
+/// closed with [`UNFINISHED`] without a new try. Then forgets the Overview rows of projects
+/// no longer recorded, which removals from before they went with their project left
+/// (RV-DS241-80/81). Input: the connection. Output: how many runs were closed, or
+/// `overview_unavailable`.
 pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
     super::initialize(db)?;
     let closed = db
@@ -525,5 +531,7 @@ pub fn close_orphans(db: &Connection) -> Result<usize, EngineError> {
         )
         .map_err(unavailable)?;
     assert_eq!(open, 0, "no run stays open once every open one is closed");
+    crate::project_setup::forget_removed(db, &["project_overview", "project_overview_tabs"])
+        .map_err(unavailable)?;
     Ok(closed)
 }

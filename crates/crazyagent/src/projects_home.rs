@@ -7,17 +7,22 @@ mod move_project;
 #[cfg(all(test, unix))]
 mod move_tests;
 mod platform;
+pub(crate) mod setup_mark;
 mod watch;
 
 pub use intake::{
     AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, Measured, MovePlan, OldSource, Placed,
     Tally, add_left, copy_tree, folder_size, move_by_copy, sweep_staging, verify_tree,
 };
+pub(crate) use layout::append_lines;
 pub use layout::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_agents, exclude_from_git, prepare_layout,
 };
 pub(crate) use move_project::holds as project_move_holds;
-pub(crate) use move_project::{Asked, Finished, finish, forget, pending, plan};
+pub(crate) use move_project::lands as project_move_lands;
+pub(crate) use move_project::{
+    Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
+};
 pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
@@ -53,6 +58,20 @@ CREATE TABLE IF NOT EXISTS projects_home_project_move (
     target TEXT NOT NULL CHECK(length(CAST(target AS BLOB)) BETWEEN 1 AND 1024),
     mode TEXT NOT NULL CHECK(mode IN ('move', 'copy'))
 );
+CREATE TABLE IF NOT EXISTS projects_home_project_move_ended (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024),
+    mode TEXT NOT NULL CHECK(mode IN ('move', 'copy')),
+    ended TEXT NOT NULL CHECK(length(ended) BETWEEN 1 AND 64)
+);
+CREATE TABLE IF NOT EXISTS projects_home_project_move_left (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    request TEXT NOT NULL CHECK(length(request) BETWEEN 1 AND 128),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 1 AND 1024)
+);
 CREATE TABLE IF NOT EXISTS projects_home_add (
     request TEXT PRIMARY KEY CHECK(length(request) BETWEEN 1 AND 128),
     owner TEXT NOT NULL CHECK(length(owner) BETWEEN 1 AND 256),
@@ -63,10 +82,6 @@ CREATE TABLE IF NOT EXISTS projects_home_add (
 );
 CREATE TABLE IF NOT EXISTS projects_delete_pending (
     exchange INTEGER PRIMARY KEY CHECK(exchange > 0)
-);
-CREATE TABLE IF NOT EXISTS projects_delete_files (
-    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64),
-    inode INTEGER NOT NULL
 )";
 
 /// The owner's projects home folder and whether the engine is watching it.
@@ -771,21 +786,26 @@ pub struct DeletePlan {
 
 impl DeletePlan {
     /// Waits for the project's agents to stop, then moves its folders to the system Trash
-    /// in order. Output: Ok once every folder is gone from the home, or the refusal code.
-    pub fn run(&self) -> Result<(), String> {
-        self.run_with(DELETE_STOP_WAIT, &trash)
+    /// in order. Input: the tally it reports into and whose stop it obeys until the first
+    /// move. Output: Ok once every folder is gone from the home, or the refusal code.
+    pub fn run(&self, tally: &Tally) -> Result<(), String> {
+        self.run_with(DELETE_STOP_WAIT, &trash, tally)
     }
 
     /// Runs the plan with a bounded wait and a mover: no folder moves while an agent of the
-    /// project runs (`delete_agents_running` past the wait), the folders are checked again
-    /// just before the first move, with any other project using one of them, research of the
-    /// project not finished or a pending home move refusing as the plan did, and a later
-    /// folder that fails leaves the earlier ones moved (`delete_trash_partial`). Inputs: the
-    /// wait and the mover. Output: the outcome.
+    /// project runs (`delete_agents_running` past the wait; the tally counts the agents
+    /// left), the folders are checked again just before the first move, with any other
+    /// project using one of them, research of the project not finished or a pending home move
+    /// refusing as the plan did, and a later folder that fails leaves the earlier ones moved
+    /// (`delete_trash_partial`). A stop asked before the first move ends it with
+    /// `home_add_cancelled` and nothing moved; the delete then commits, refusing any later
+    /// stop, and counts each folder it moved. Inputs: the wait, the mover and the tally.
+    /// Output: the outcome.
     pub(crate) fn run_with(
         &self,
         wait: std::time::Duration,
         mover: &dyn Fn(&Path) -> Result<(), EngineError>,
+        tally: &Tally,
     ) -> Result<(), String> {
         let unavailable = |_| "delete_unavailable".to_owned();
         let mut db = rusqlite::Connection::open_with_flags(
@@ -797,6 +817,7 @@ impl DeletePlan {
             .map_err(unavailable)?;
         let deadline = std::time::Instant::now() + wait;
         loop {
+            tally.go_on().map_err(|e| e.0)?;
             let running: i64 = db
                 .query_row(
                     "SELECT COUNT(*) FROM team_agents WHERE project=?1 AND status NOT IN ('stopped','failed')",
@@ -804,7 +825,11 @@ impl DeletePlan {
                     |row| row.get(0),
                 )
                 .map_err(unavailable)?;
-            if running == 0 {
+            match u64::try_from(running) {
+                Ok(0) | Err(_) => tally.waited(),
+                Ok(left) => tally.wait_for(left),
+            }
+            if running <= 0 {
                 break;
             }
             if std::time::Instant::now() >= deadline {
@@ -812,12 +837,15 @@ impl DeletePlan {
             }
             std::thread::sleep(DELETE_POLL);
         }
+        assert!(!tally.waiting());
         let folders = plan_delete(&self.home, &self.folders).map_err(|refusal| refusal.0)?;
         if let Some(code) = crate::storage::delete_recheck(&mut db, &self.project, &folders)
             .map_err(|_| "delete_unavailable".to_owned())?
         {
             return Err(code);
         }
+        let total = u64::try_from(folders.len()).map_err(|_| "delete_unavailable".to_owned())?;
+        tally.commit_trash(total).map_err(|e| e.0)?;
         for (moved, folder) in folders.iter().enumerate() {
             if mover(folder).is_err() {
                 return Err(if moved == 0 {
@@ -827,7 +855,9 @@ impl DeletePlan {
                 }
                 .into());
             }
+            tally.trashed_one();
         }
+        assert_eq!(tally.trashing(), Some((total, total)));
         Ok(())
     }
 
@@ -911,6 +941,25 @@ fn recorded(root: &Path, names: Vec<String>) -> Vec<RecordedFile> {
 /// One engine file a delete recorded: its exact name and the identity of the folder that held
 /// it when the project's rows were dropped.
 pub type RecordedFile = (String, i64);
+
+/// The longest engine file name a delete records, an Overview or roadmap status run of the
+/// longest project id (RV-DS241-152), the one width the record's check
+/// ([`delete_files_table`]), its readers and its rows take; migration step 11, which widened
+/// older records to it, is tied to it at build time (G1 code r1 F1).
+pub(crate) const RECORDED_NAME_BYTES_MAX: usize = 96;
+
+/// The statement that makes the record of the engine files a Delete everything moved when
+/// it is missing, its names checked to hold [`RECORDED_NAME_BYTES_MAX`] bytes. Output: the
+/// statement.
+#[cfg(unix)]
+fn delete_files_table() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS projects_delete_files (
+    name TEXT PRIMARY KEY CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND {RECORDED_NAME_BYTES_MAX}),
+    inode INTEGER NOT NULL
+)"
+    )
+}
 
 /// The folder under the engine root that holds every project's tool caches (T8).
 const TOOL_CACHE_FOLDER: &str = "tool-cache";
@@ -1177,6 +1226,7 @@ pub fn found(
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(TABLE)
+        .and_then(|()| connection.execute_batch(&delete_files_table()))
         .map_err(|e| EngineError(e.to_string()))
 }
 
@@ -1288,6 +1338,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "delete_in_progress" => {
             "This project is already being deleted. Wait for that to finish; nothing else was changed."
         }
+        "projects_removed_full" => {
+            "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash."
+        }
         "delete_not_recorded" => {
             "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent."
         }
@@ -1303,10 +1356,19 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "delete_trash_partial" => {
             "Some of its folders are in the Trash and the rest could not be moved. The project stays listed; try again."
         }
+        "delete_cannot_stop" => {
+            "It is moving its folders to the Trash, so it cannot stop now. Wait for it to finish on Home."
+        }
         "project_delete_requires_transport" => {
             "This engine cannot delete projects. Remove it from the dashboard instead."
         }
         "home_new_project_failed" => "The project folder could not be created. Nothing was kept.",
+        "home_new_project_interrupted" => {
+            "Setting up the project stopped part way. Nothing was kept; set it up again from New Project."
+        }
+        "setup_cannot_stop" => {
+            "The project is being saved, so it cannot stop now. Wait for it to finish on Home."
+        }
         "home_source_missing" => "That folder is no longer there.",
         "home_source_not_folder" => "Pick a folder, not a file or a link.",
         "home_source_in_home" => "That folder is already in your projects folder.",
@@ -1335,6 +1397,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "The folder could not be added. Nothing was removed."
         }
         "home_copy_unverified" => "The copy didn't match the original, so the original was kept.",
+        "home_copy_names_fold" => {
+            "Two names in the folder differ only in case or accents, and your projects folder can't keep both. Rename one of them, then try again. The original is untouched."
+        }
+        "home_copy_entry_swapped" => {
+            "Something replaced a file or folder in it while it was being copied, so the copy stopped. The original is untouched. Try again once nothing else is changing the folder."
+        }
         "home_move_source_left" => {
             "The folder was added, but part of the original couldn't be removed. What's left there may be newer than the copy, so check it before you delete anything."
         }
@@ -1393,6 +1461,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "home_add_in_progress" => {
+            "A folder is being added to your projects folder. Try again when it finishes."
         }
         "move_project_old_folder_left" => {
             "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything."

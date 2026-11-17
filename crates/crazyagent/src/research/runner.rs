@@ -87,9 +87,10 @@ static REPOSITORY_FREED: Condvar = Condvar::new();
 const BRIEF_BYTES_MAX: u64 = 32 * 1024;
 const DOCUMENTS_LISTED_MAX: usize = 50;
 /// The lines a job shows while it waits out a refused launch, the same in the desktop app
-/// and the terminal app (DEC-141, DEC-170 addendum 6).
-const HOME_MOVE_WAITING: &str = "Waiting for the projects home move to finish";
-const PROFILE_BUSY_WAITING: &str = "Waiting for another run to finish with this account's sign-in";
+/// and the terminal app (DEC-141, DEC-170 addendum 6), each at most 40 characters so it
+/// shows whole beside a work row's status on the Overview (RV-DS241-27 r3).
+const HOME_MOVE_WAITING: &str = "Waiting for the projects home move";
+const PROFILE_BUSY_WAITING: &str = "Waiting for another run on this sign-in";
 const ACCOUNT_WAITING: &str = "Waiting for this account to be ready";
 /// Every line a refused launch leaves on a job that waits Queued, so its progress reports why
 /// (RV-DS241-27 r2).
@@ -140,8 +141,9 @@ const CLAUDE_USER_LINE: &[u8] = b"{\"type\":\"user\"";
 const CLAUDE_PARENT_KEY: &[u8] = b"\"parent_tool_use_id\":";
 /// The model name Claude Code gives the messages it writes itself, such as its API errors.
 const CLAUDE_OWN_MODEL: &str = "<synthetic>";
-/// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
-const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
+/// The `--settings` every research Claude Code gets, hooks and auto-memory off
+/// (RV-DS241-205); a keyed run adds its `apiKeyHelper`.
+const CLAUDE_SETTINGS: &str = "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}";
 
 /// The most bytes of one research report: the runner takes no longer report from an agent,
 /// and a reader of a stored report reads up to this many.
@@ -883,6 +885,10 @@ impl ResearchRunner {
                 let status = jobs.refused(&job, ACCOUNT_WAITING)?;
                 Ok(run(status, None, None))
             }
+            Err(RunError::Invalid(line)) if owner_refusal(&line) => {
+                let status = jobs.fail(&job, &line, 1)?;
+                Ok(run(status, None, None))
+            }
             Err(error) => {
                 let (reason, attempts_max) = match &error {
                     RunError::Context(problem) => (
@@ -1070,7 +1076,9 @@ impl ResearchRunner {
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
-        let context = context.with_terminal_display(display);
+        let context = context
+            .with_terminal_display(display)
+            .at_access(policy.access);
         let context = match &proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -1118,14 +1126,20 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
+        let (sandbox, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
             let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+            let listed = crate::sandbox::hidden_paths::starting(
+                crate::sandbox::hidden_paths::RunKind::Research,
+                project.as_str(),
+            )
+            .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?;
             let hidden = jobs
                 .hidden_paths(&project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+            listed.hid(if unconfined { &[] } else { &hidden });
             if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
                 return Err(RunError::Invalid(code.into()));
             }
@@ -1138,7 +1152,7 @@ impl ResearchRunner {
                         .map_err(|code| RunError::Invalid(code.into()))?;
             }
             sandbox.install(&profile)?;
-            Ok(sandbox)
+            Ok((sandbox, listed))
         })??;
         still_held(jobs, job)?;
         let linked = self.linked_research(job, &root)?;
@@ -1192,6 +1206,7 @@ impl ResearchRunner {
                         credential.retain();
                     }
                     std::mem::forget(lease);
+                    std::mem::forget(listed);
                     return Err(RunError::Uncertain(leftovers::UNCERTAIN));
                 }
                 Err(Unstopped::Left(left)) => {
@@ -1203,7 +1218,7 @@ impl ResearchRunner {
                         who: format!("research job {}", job.id),
                     };
                     let mode = jobs.leftover_mode(&job.project);
-                    left.hold(account, lease, by, mode);
+                    left.hold_listed(account, lease, listed, by, mode);
                     return Err(RunError::Uncertain(code));
                 }
             }
@@ -1336,6 +1351,7 @@ impl ResearchRunner {
                 credential.retain();
             }
             std::mem::forget(lease);
+            std::mem::forget(listed);
             return Err(RunError::Uncertain(code));
         }
         drop(credential);
@@ -1655,13 +1671,17 @@ impl ResearchRunner {
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
-/// as, `prompt` goes to it on stdin, `wall_time` bounds it and
+/// as, `kind` names it on the project's hidden folders list while it runs (none
+/// for a run whose folder holds nothing of the project), `prompt` goes to it on
+/// stdin, `wall_time` bounds it and
 /// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
 /// limit; a Codex run has no such cap).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
     #[cfg(unix)]
     pub agent: &'a str,
+    #[cfg(unix)]
+    pub kind: Option<crate::sandbox::hidden_paths::RunKind>,
     #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
@@ -1809,12 +1829,22 @@ impl ResearchRunner {
             sandbox = sandbox.allow_read(parent)?;
         }
         sandbox = allow_harness(sandbox, &program)?;
+        let listed = match (run.kind, run.project) {
+            (Some(kind), Some(project)) => Some(
+                crate::sandbox::hidden_paths::starting(kind, project.as_str())
+                    .ok_or_else(|| RunError::Invalid("project hidden folders unreadable".into()))?,
+            ),
+            _ => None,
+        };
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
             None => Vec::new(),
         };
+        if let Some(listed) = &listed {
+            listed.hid(&hidden);
+        }
         if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
             return Err(RunError::Invalid(code.into()));
         }
@@ -1929,6 +1959,7 @@ impl ResearchRunner {
                 credential.retain();
             }
             std::mem::forget(lease);
+            std::mem::forget(listed);
             return Err(RunError::Uncertain(code));
         }
         drop(credential);
@@ -2505,7 +2536,11 @@ fn claude_arguments(
         .env("CLAUDE_CODE_TMPDIR", tmp)
         .env("TERM", "dumb")
         .env("DISABLE_TELEMETRY", "1")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        );
     if tools {
         command
             .args([
@@ -2737,6 +2772,24 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
     Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
 }
 
+/// The owner's line refusing agents a folder of the owner's that is no git repository.
+/// Only the owner's `git init` and first commit clear it, so a research job meeting it fails
+/// on that try with this line (RV-DS241-158).
+const NOT_A_REPOSITORY: &str = "The project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit";
+
+/// How the owner's line refusing a worktree in a repository whose effective Git config
+/// names a hook starts. Only the owner's change to that config clears it, so a research job
+/// meeting it fails on that try with the line (RV-DS241-158).
+const HOOK_REFUSAL_START: &str = "The project's Git config sets ";
+
+/// Whether a setup refusal is one only the owner's change to the project clears, a hook
+/// its Git config names or an owner's folder that is no repository, which a later attempt
+/// meets again. Takes the refusal's line, the engine's own words with at most a hook key
+/// `listed_hook` bounded. Returns true for those two refusals only.
+fn owner_refusal(line: &str) -> bool {
+    line.starts_with(HOOK_REFUSAL_START) || line == NOT_A_REPOSITORY
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
 /// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
@@ -2750,9 +2803,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     let owners = root.ends_with(crate::projects_home::CRAZYAGENT_DIRECTORY)
         || fs::symlink_metadata(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).is_ok();
     if owners {
-        return Err(RunError::Invalid(
-            "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
-        ));
+        return Err(RunError::Invalid(NOT_A_REPOSITORY.into()));
     }
     let git = |arguments: &[&str]| engine_git(root, tmp, arguments);
     let created = git(&["init", "-q", "--template="])?
@@ -3178,7 +3229,6 @@ fn setup_debug_stderr() -> Stdio {
 /// hooks and never with its branches or remotes. The `-c` adds one key of the engine's own,
 /// which git reads last: a listing that ends with it ([`FILTER_KEYS_END`]) is whole, and
 /// git always has a key to print, so no exit status stands for "no filter".
-#[cfg(unix)]
 pub(crate) const FILTER_KEYS: [&str; 7] = [
     "-c",
     "filter.crazyagent-listing-end.required=false",
@@ -3190,7 +3240,6 @@ pub(crate) const FILTER_KEYS: [&str; 7] = [
 ];
 
 /// The most bytes of a hook key an owner line shows.
-#[cfg(unix)]
 const HOOK_KEY_SHOWN_MAX: usize = 128;
 
 /// The first config hook key a [`FILTER_KEYS`] listing names: `hook.<name>.<key>`, which
@@ -3199,7 +3248,6 @@ const HOOK_KEY_SHOWN_MAX: usize = 128;
 /// [`listed_filter_keys`] gives. Returns the key as an owner line shows it, at most
 /// [`HOOK_KEY_SHOWN_MAX`] bytes with every byte outside letters, digits, `.`, `-` and `_`
 /// shown as `?`, or None when the listing names no hook.
-#[cfg(unix)]
 pub(crate) fn listed_hook(keys: &[u8]) -> Option<String> {
     let key = keys
         .split(|byte| *byte == 0)
@@ -3228,21 +3276,19 @@ fn hook_refusal(keys: &[u8]) -> Result<(), RunError> {
     match listed_hook(keys) {
         None => Ok(()),
         Some(key) => Err(RunError::Invalid(format!(
-            "the project's Git config sets {key}, a hook the engine never runs; remove it from the repository's config, then start again"
+            "{HOOK_REFUSAL_START}{key}, a hook the engine never runs; remove it from the repository's config, then start again"
         ))),
     }
 }
 
 /// The key the `-c` of [`FILTER_KEYS`] sets with its NUL, as git prints it at the end of a
 /// whole listing.
-#[cfg(unix)]
 const FILTER_KEYS_END: &[u8] = b"filter.crazyagent-listing-end.required\0";
 
 /// The repository's own filter keys in what a [`FILTER_KEYS`] listing printed. Takes git's
 /// whole output. Returns the NUL-separated keys before the engine's closing key, or none
 /// for a listing that does not end with that key on its own, which is cut short or not a
 /// listing at all.
-#[cfg(unix)]
 pub(crate) fn listed_filter_keys(listing: &[u8]) -> Option<&[u8]> {
     let keys = listing.strip_suffix(FILTER_KEYS_END)?;
     (keys.is_empty() || keys.ends_with(&[0])).then_some(keys)
@@ -3527,6 +3573,14 @@ impl Lifeline {
         if let Some(mut pipe) = self.child.stdin.take() {
             let _ = pipe.write_all(b"done\n");
         }
+        let _ = self.child.wait();
+    }
+
+    /// Closes the lifeline's pipe without `done`, as the engine's death does, and waits
+    /// until the lifeline has acted. For rows only.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn sever(&mut self) {
+        drop(self.child.stdin.take());
         let _ = self.child.wait();
     }
 }
@@ -4678,6 +4732,87 @@ mod tests {
         );
     }
 
+    /// Runs one research job of a fresh project, whose folder `prepare` sets up, on a listening
+    /// loopback provider as far as its runner takes it.
+    /// Takes the folder's setup. Returns the run's ending and the job as it was left.
+    #[cfg(target_os = "macos")]
+    fn one_refused_run(
+        prepare: impl FnOnce(&Path),
+    ) -> (Result<Option<ResearchRun>, RunError>, ResearchJob) {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        prepare(&folder);
+        register_project(&root.database, "alpha", &folder);
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            ResearchLimits {
+                wall_time: Duration::from_secs(10),
+                ..ResearchLimits::default()
+            },
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: format!(
+                    "http://127.0.0.1:{}/v1",
+                    provider.local_addr().unwrap().port()
+                ),
+                model: "local-model".into(),
+                key: None,
+            }),
+        };
+        let ending = runner.run_once(&project);
+        (ending, jobs.get(id).unwrap().unwrap())
+    }
+
+    /// RV-DS241-158: a research job refused a worktree for what only the owner's change to
+    /// the project clears, a hook its Git config names or an owner's folder that is no
+    /// repository, fails on its first try with the owner's line, not the sandbox line a
+    /// second try meets again, and its run ends as a plain failure nobody has to read.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_job_refused_what_only_the_owner_clears_fails_once_with_the_owners_line() {
+        let hook = "The project's Git config sets hook.x.command, a hook the engine never runs; remove it from the repository's config, then start again";
+        let bare = "The project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit";
+        let runs = [
+            (
+                hook,
+                one_refused_run(|folder| {
+                    repository_git(folder, &["init", "-q"]);
+                    repository_git(folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+                    repository_git(folder, &["config", "hook.x.command", "true"]);
+                }),
+            ),
+            (
+                bare,
+                one_refused_run(|folder| {
+                    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+                    fs::create_dir(state).unwrap();
+                }),
+            ),
+        ];
+        for (line, (ending, job)) in runs {
+            assert_eq!(job.error.as_deref(), Some(line), "{ending:?}");
+            assert_eq!((job.status, job.attempts), (ResearchStatus::Failed, 1));
+            assert_eq!(job.claimer, None);
+            let run = ending.unwrap().unwrap();
+            assert_eq!(
+                (run.job, run.status, run.process_group),
+                (job.id, ResearchStatus::Failed, None)
+            );
+        }
+    }
+
     struct EngineRoot {
         _temp: tempfile::TempDir,
         base: PathBuf,
@@ -5286,6 +5421,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "onboard-m-alpha-1",
             agent: "onboarding",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
             project: Some(&project),
             folder: &folder,
             prompt: "Map this repository.",
@@ -5365,6 +5501,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-1",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -5432,6 +5569,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-6",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -5504,6 +5642,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-2",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: Some(&project),
             folder: &folder,
             prompt: "Describe this project.",
@@ -5615,6 +5754,7 @@ mod tests {
         let run = ReadOnlyRun {
             name: "overview-alpha-3",
             agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
             project: None,
             folder: &folder,
             prompt: "Describe this project.",
@@ -5665,6 +5805,7 @@ mod tests {
             let run = ReadOnlyRun {
                 name,
                 agent: "overview",
+                kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
                 project: None,
                 folder: &folder,
                 prompt: "Describe this project.",
@@ -6468,7 +6609,7 @@ mod tests {
         assert_eq!((job.attempts, job.claimer), (0, None));
         assert_eq!(
             job.error.as_deref(),
-            Some("Waiting for the projects home move to finish")
+            Some("Waiting for the projects home move")
         );
         let started: i64 = connection
             .query_row(

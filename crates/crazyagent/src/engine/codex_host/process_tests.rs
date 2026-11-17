@@ -53,6 +53,34 @@ async fn codex_host_process_real_pipe_input_output_eof_and_reap_are_retained() {
     assert_eq!(process.close().await.unwrap(), status);
 }
 
+/// DEC-185 S2a (rv-sec3 F1): a Codex host process that exits with the Linux call
+/// supervisor's held-stop code ends with the sandbox cause once it is reaped, past what it
+/// wrote, never as a plain exit the host reads as a disconnect; and it closes clean, so the
+/// master runtime stores SandboxStopped (#101 r1, the Claude host's parity).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn codex_host_process_the_sandbox_stopped_ends_with_the_sandbox_cause() {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = selected_command("/bin/sh", root.path());
+    command.args(["-c", "printf half; exit 122"]);
+    let mut process = CodexHostProcess::spawn(command, &budget()).await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match process.next_output().await {
+                Ok(CodexHostOutput::Stdout(_)) => {}
+                Ok(CodexHostOutput::Exited) => break None,
+                Err(error) => break Some(error.0),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended.as_deref(), Some(crate::sandbox::HELD_STOP_CAUSE));
+    let closed = process.close().await.map(|status| status.code());
+    assert_eq!(closed.map_err(|error| error.0), Ok(Some(122)));
+    assert_eq!(process.operation_result().map_err(|error| error.0), Ok(()));
+}
+
 /// A shell script that writes 5,600 numbered lines of 101 bytes, 565,600 bytes: more than
 /// the 128 chunks of 4,096 bytes the output queue holds.
 const FLOOD: &str =
@@ -197,7 +225,7 @@ async fn stand_in_host_at(
     };
     let clock = Some(Duration::from_millis(limits.wall_time_ms));
     let lease = Some((profile, fixture.project_id.clone()));
-    CodexHostProcess::spawn_guarded(command, &limits, clock, lease, unconfined)
+    CodexHostProcess::spawn_guarded(command, &limits, clock, lease, sandbox.lineage_check())
         .await
         .unwrap()
 }
@@ -229,6 +257,10 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
     let closed = process.close().await;
     let elapsed = started.elapsed();
     assert!(closed.is_ok(), "{closed:?} after {elapsed:?}");
+    assert!(
+        process.settled(),
+        "SA-VID14-R2 F2: a clean close is settled"
+    );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     assert_eq!(group, Ok(processes.leader));
     processes.assert_gone();
@@ -307,6 +339,10 @@ async fn a_codex_host_whose_group_keeps_an_unreaped_process_still_ends_and_relea
     assert_eq!(
         closed.map_err(|error| error.0),
         Err("codex_host_cleanup_uncertain".to_owned())
+    );
+    assert!(
+        !process.settled(),
+        "SA-VID14-R2 F2: a cleanup in doubt is never settled"
     );
     let started = Instant::now();
     while fixture.sign_in("codex-group-next", 3).is_err() {

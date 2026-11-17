@@ -513,8 +513,23 @@ struct Authority {
     ide_servers: crate::ide::server::Servers,
     ide: Arc<crate::ide::bridge::Grants>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
+    reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
+}
+
+/// Removes what an earlier engine left at a runner folder's place beside the engine's root
+/// (RV-DS241-77): a folder with all it holds, clearing the flags, modes and ACLs its runner
+/// set there when a plain delete stops (G5 sec F1), or a file or link itself, never what a
+/// link names. No runner of this engine owns that place: a new slot takes the next free
+/// index. Takes the folder's path. Returns Ok once nothing has that name, or the failure.
+fn clear_stale_runner(path: &Path) -> Result<(), EngineError> {
+    match std::fs::symlink_metadata(path) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(problem) => Err(io_error(problem)),
+        Ok(found) if found.is_dir() => crate::team::cleanup::remove_agent_tree(path),
+        Ok(_) => std::fs::remove_file(path).map_err(io_error),
+    }
 }
 
 impl Authority {
@@ -562,7 +577,7 @@ impl Authority {
         }
         let registration_id =
             RequestId::new(format!("runner-{}", random_id()?)).map_err(io_error)?;
-        runners.push(None);
+        clear_stale_runner(&path)?;
         parent.create_directory(name.as_str())?;
         parent.verify()?;
         let root = Root::open(&path)?;
@@ -594,8 +609,8 @@ impl Authority {
         };
         slot.verify(&self.root)?;
         parent.directory.sync_all().map_err(io_error)?;
-        assert!(runners[index].is_none());
-        runners[index] = Some(slot);
+        assert_eq!(runners.len(), index);
+        runners.push(Some(slot));
         assert!(runners.len() <= RUNNERS_MAX);
         Ok(prepared)
     }
@@ -1362,6 +1377,7 @@ impl OwnerServer {
                 ide_servers,
                 ide,
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
             });
@@ -2759,6 +2775,7 @@ fn owner_reply_frame(
                 | "master_dispatch_stopped"
                 | "master_dispatch_capacity"
                 | "move_project_old_folder_left"
+                | "job_busy"
         );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {

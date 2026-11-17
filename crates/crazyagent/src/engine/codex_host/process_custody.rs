@@ -5,6 +5,7 @@ use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::protocol::ProjectId;
+use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -64,13 +65,13 @@ struct Custody(Option<OwnedChild>);
 pub(super) fn run(
     command: Command,
     lease: Option<(NativeProfileUse, ProjectId)>,
-    unconfined: bool,
+    check: LineageCheck,
     mut input: mpsc::Receiver<WriteRequest>,
     shared: Arc<ProcessShared>,
     deadline: Option<Instant>,
     output_limit: u64,
 ) {
-    let mut custody = match start(command, lease, unconfined, &shared) {
+    let mut custody = match start(command, lease, check, &shared) {
         Ok(custody) => custody,
         Err(code) => {
             if let Ok(mut state) = shared.lock() {
@@ -108,7 +109,7 @@ pub(super) fn run(
 fn start(
     command: Command,
     lease: Option<(NativeProfileUse, ProjectId)>,
-    unconfined: bool,
+    check: LineageCheck,
     shared: &Arc<ProcessShared>,
 ) -> Result<Custody, &'static str> {
     let (profile, project) = lease.unzip();
@@ -130,7 +131,7 @@ fn start(
             .stderr(Stdio::piped()),
     )
     .map_err(|_| "codex_host_spawn_failed")?;
-    let follower = unconfined.then(|| Follower::start(child.id(), Some(token)));
+    let follower = Follower::start(child.id(), Some(token), check);
     let mut custody = Custody(Some(OwnedChild {
         child,
         warden,
@@ -291,13 +292,14 @@ impl OwnedChild {
             Err(_) => {
                 self.shared.fail("codex_host_wait_failed");
                 if let Ok(mut state) = self.shared.lock() {
-                    state.cleanup_error = Some("codex_host_wait_uncertain");
+                    state.doubt("codex_host_wait_uncertain");
                 }
             }
         }
     }
 
-    /// Stops the harness: closes its input and kills its group and itself. At Full access it
+    /// Stops the harness: closes its input and kills its group and itself. At Full access,
+    /// and under the plain Linux Landlock helper (LINUX-KILL-GROUP), it
     /// first takes the harness's lineage, followed from its start, once, so what left the
     /// group can be checked when the run completes. Takes nothing.
     fn stop(&mut self) {
@@ -317,7 +319,7 @@ impl OwnedChild {
             if self.status.is_none() {
                 self.shared.fail("codex_host_kill_uncertain");
                 if let Ok(mut state) = self.shared.lock() {
-                    state.cleanup_error = Some("codex_host_kill_uncertain");
+                    state.doubt("codex_host_kill_uncertain");
                 }
             }
         }
@@ -422,7 +424,7 @@ impl OwnedChild {
     fn cleanup_uncertain(&self, code: &'static str) {
         self.shared.fail(code);
         if let Ok(mut state) = self.shared.lock() {
-            state.cleanup_error = Some(code);
+            state.doubt(code);
         }
     }
 
@@ -447,7 +449,8 @@ impl OwnedChild {
         }
     }
 
-    /// Publishes the run's end and releases the account lease. At Full access, no warden
+    /// Publishes the run's end and releases the account lease. At Full access, and under the
+    /// plain Linux Landlock helper (LINUX-KILL-GROUP), no warden
     /// reaches what left the group, so the lineage taken at the stop, or now when the harness
     /// ended on its own, is checked first; while some of it still runs the run ends with that
     /// code and a hold follows it by its project's leftover setting, listed in the project's
@@ -496,6 +499,7 @@ impl OwnedChild {
                     .then_some("codex_host_cleanup_uncertain")
                     .or(left)
             };
+            state.doubted |= state.cleanup_error.is_some();
         }
     }
 }
@@ -623,6 +627,7 @@ mod tests {
                 complete: false,
                 error: None,
                 cleanup_error: None,
+                doubted: false,
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),

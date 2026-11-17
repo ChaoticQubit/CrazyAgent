@@ -175,9 +175,10 @@ impl ClaudeHostLimits {
     }
 }
 
-/// Builds the tools-off Claude Code master command for one turn.
-/// Input: the registered executable, the leased project directory, the private profile
-/// home, the model and, when given, the engine's 0600 startup instruction file.
+/// Builds the tools-off Claude Code master command for one turn, hooks and auto-memory off
+/// (RV-DS241-205). Input: the registered executable, the leased project directory, the
+/// private profile home, the model and, when given, the engine's 0600 startup instruction
+/// file.
 /// Output: the command, or a plain refusal for an unsafe path, model or file.
 #[cfg(unix)]
 pub(in crate::engine) fn launch_command(
@@ -198,8 +199,9 @@ pub(in crate::engine) fn launch_command(
 }
 
 /// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
-/// agents' tool flags, hooks and setting sources off, only the engine's team MCP server, and
-/// no step count, since the host's run time and output limits bound the turn (OB-5).
+/// agents' tool flags, hooks, auto-memory (RV-DS241-205) and setting sources off, only the
+/// engine's team MCP server, and no step count, since the host's run time and output
+/// limits bound the turn (OB-5).
 /// Input: as `launch_command`, plus the engine executable, drop file, mailbox and tools
 /// switched off. Output: the command, or a plain refusal for an unsafe input.
 #[cfg(unix)]
@@ -377,7 +379,7 @@ fn command_for(
         "--setting-sources",
         "",
         "--settings",
-        "{\"disableAllHooks\":true}",
+        "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
         "--disable-slash-commands",
         "--no-session-persistence",
     ]);
@@ -393,6 +395,10 @@ fn command_for(
         .env("HOME", profile_home)
         .env("CLAUDE_CONFIG_DIR", profile_home)
         .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", profile_home)
+        .env(
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
+            crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
+        )
         .env("TERM", "dumb");
     if tools.is_some() {
         command
@@ -447,9 +453,24 @@ impl Fault {
         match self {
             Self::Host(code) => failure(code),
             Self::Protocol(error) => protocol_error(error),
+            Self::Exit(Some(code))
+                if crate::sandbox::held_stop(std::env::consts::OS, code).is_some() =>
+            {
+                failure(crate::sandbox::HELD_STOP_CAUSE)
+            }
             Self::Exit(Some(code)) => EngineError(format!("claude_host_native_exit_{code}")),
             Self::Exit(None) => failure("claude_host_native_exit_signal"),
         }
+    }
+
+    /// Whether this is the Linux call supervisor's held stop: the run's own end, which a
+    /// clean cleanup does not turn into a close failure and a cleanup fault outranks.
+    /// Takes the fault. Returns true only for the held-stop exit on this system.
+    fn held(self) -> bool {
+        let Self::Exit(Some(code)) = self else {
+            return false;
+        };
+        crate::sandbox::held_stop(std::env::consts::OS, code).is_some()
     }
 }
 
@@ -498,6 +519,7 @@ pub(in crate::engine) struct ClaudeHost {
     events: mpsc::Receiver<ObservedEvent>,
     status: watch::Receiver<Status>,
     stop: Arc<AtomicBool>,
+    doubt: Arc<AtomicBool>,
     group: Arc<AtomicU32>,
     diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
@@ -549,6 +571,7 @@ impl ClaudeHost {
             fault: None,
         });
         let stop = Arc::new(AtomicBool::new(false));
+        let doubt = Arc::new(AtomicBool::new(false));
         let group = Arc::new(AtomicU32::new(0));
         let kept = Arc::new(std::sync::Mutex::new(None));
         let mut host = Self {
@@ -556,10 +579,11 @@ impl ClaudeHost {
             events,
             status,
             stop: Arc::clone(&stop),
+            doubt: Arc::clone(&doubt),
             group: Arc::clone(&group),
             diagnostic: Arc::clone(&kept),
             close_time: limits.cleanup_time
-                + if sandbox.is_unconfined() {
+                + if sandbox.lineage_check() != crate::sandbox::LineageCheck::Unneeded {
                     crate::harnesses::leftovers::STOP_TIME
                 } else {
                     Duration::ZERO
@@ -584,6 +608,7 @@ impl ClaudeHost {
                         output,
                         report,
                         stop,
+                        doubt,
                         group,
                         diagnostic: kept,
                     },
@@ -718,13 +743,24 @@ impl ClaudeHost {
         loop {
             let current = *self.status.borrow();
             if current.phase == Phase::Retired {
-                return current.fault.map_or(Ok(()), |error| Err(error.error()));
+                return current
+                    .fault
+                    .filter(|fault| !fault.held())
+                    .map_or(Ok(()), |error| Err(error.error()));
             }
             tokio::time::timeout_at(deadline, self.status.changed())
                 .await
                 .map_err(|_| failure("claude_host_cleanup_uncertain"))?
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
         }
+    }
+
+    /// Says whether the harness retired with nothing it started left possibly running:
+    /// false before it retires, and after a cleanup in doubt or processes left behind
+    /// whatever turn fault came first, as the fault keeps only the first (SA-VID14-R2 F2).
+    /// Input: the host. Output: the answer.
+    pub(in crate::engine) fn settled(&self) -> bool {
+        self.status.borrow().phase == Phase::Retired && !self.doubt.load(Ordering::Acquire)
     }
 }
 
@@ -793,6 +829,11 @@ impl ClaudeHost {
 
     /// Never closes: takes the host. Unreachable without a host value.
     pub(in crate::engine) async fn close(&mut self) -> Result<(), EngineError> {
+        match *self {}
+    }
+
+    /// Never settles: takes the host. Unreachable without a host value.
+    pub(in crate::engine) fn settled(&self) -> bool {
         match *self {}
     }
 }

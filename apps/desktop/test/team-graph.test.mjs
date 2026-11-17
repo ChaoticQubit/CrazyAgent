@@ -387,6 +387,150 @@ test("typed keys and a sent prompt go out in order on one queue, and only the pr
   assert.equal(stops, 1);
 });
 
+/** A send call that holds every send until the row lets it go and keeps what each carried.
+ * Output: the call, the sends as [text, wheel] pairs, and `release`, which answers the oldest
+ * held send. */
+function heldSends() {
+  const sent = [];
+  const held = [];
+  const send = (chunk, wheel) => new Promise((resolve) => {
+    sent.push([String.fromCharCode(...chunk), wheel]);
+    held.push(resolve);
+  });
+  return { send, sent, release: (answer = true) => held.shift()?.(answer) };
+}
+
+/** Waits until a check holds, at most two seconds, then 20 ms more so queued sends start.
+ * Input: the check. */
+async function until(done) {
+  for (let waited = 0; !done() && waited < 2000; waited += 5) await new Promise((resolve) => setTimeout(resolve, 5));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+/** Answers the held sends one at a time, `count` in all, waiting after each for the next send
+ * to go out. Inputs: the held sends and the count. */
+async function drain(lane, count) {
+  for (let answered = 1; answered <= count; answered += 1) {
+    lane.release();
+    await until(() => answered === count || lane.sent.length > answered);
+  }
+}
+
+test("keys typed while one send is in flight go out as one more send, in order, never one send per key (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  let stops = 0;
+  const lanes = io.inputLanes(io.jobQueue(() => { stops += 1; }), lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  for (const key of "abcdefghij") lanes.typed(io.encodeTyped(key));
+  await drain(lane, 2);
+  assert.deepEqual(lane.sent, [["x", false], ["abcdefghij", false]], "ten keys typed during one send cost one more send");
+  assert.equal(stops, 0);
+});
+
+test("a wheel report between typed keys closes the typed batch and a typed key closes the wheel batch, so the order holds (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const lanes = io.inputLanes(io.jobQueue(() => assert.fail("no stop")), lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  lanes.typed(io.encodeTyped("a"));
+  lanes.typed(io.encodeTyped("b"));
+  lanes.wheel(io.encodeTyped("W"));
+  lanes.wheel(io.encodeTyped("V"));
+  lanes.typed(io.encodeTyped("c"));
+  await drain(lane, 4);
+  assert.deepEqual(lane.sent, [["x", false], ["ab", false], ["WV", true], ["c", false]]);
+});
+
+test("a prompt queued between keys or wheel reports closes their batch, so input after the prompt goes after it (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const run = io.jobQueue(() => assert.fail("no stop"));
+  const lanes = io.inputLanes(run, lane.send);
+  const prompt = (text) => assert.equal(run(() => lane.send(io.encodeTyped(text), "prompt")), true);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  lanes.typed(io.encodeTyped("a"));
+  prompt("P");
+  lanes.typed(io.encodeTyped("b"));
+  lanes.wheel(io.encodeTyped("W"));
+  prompt("Q");
+  lanes.wheel(io.encodeTyped("V"));
+  await drain(lane, 7);
+  assert.deepEqual(lane.sent, [["x", false], ["a", false], ["P", "prompt"], ["b", false], ["W", true], ["Q", "prompt"], ["V", true]]);
+});
+
+test("lanes over a queue that wraps a jobQueue, as the wheel fixtures count sends, still merge and still keep a prompt's place (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const inner = io.jobQueue(() => assert.fail("no stop"));
+  const run = (job) => inner(async () => job());
+  const lanes = io.inputLanes(run, lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  for (const key of "abc") lanes.typed(io.encodeTyped(key));
+  assert.equal(run(() => lane.send(io.encodeTyped("P"), "prompt")), true);
+  lanes.typed(io.encodeTyped("d"));
+  lanes.wheel(io.encodeTyped("W"));
+  lanes.wheel(io.encodeTyped("V"));
+  await drain(lane, 5);
+  assert.deepEqual(lane.sent, [["x", false], ["abc", false], ["P", "prompt"], ["d", false], ["WV", true]]);
+});
+
+test("empty input sends nothing and never stops typing, idle or while a batch waits (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  let stops = 0;
+  const lanes = io.inputLanes(io.jobQueue(() => { stops += 1; }), lane.send);
+  lanes.typed(new Uint8Array());
+  lanes.wheel(new Uint8Array());
+  await until(() => true);
+  assert.deepEqual(lane.sent, [], "nothing to send while idle");
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  lanes.typed(io.encodeTyped("a"));
+  lanes.typed(new Uint8Array());
+  lanes.wheel(new Uint8Array());
+  lanes.typed(io.encodeTyped("b"));
+  await drain(lane, 2);
+  assert.deepEqual(lane.sent, [["x", false], ["ab", false]]);
+  assert.equal(stops, 0);
+});
+
+test("a lone Esc closes its batch, so Esc and a quick key after it never go out as one Alt key (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const lanes = io.inputLanes(io.jobQueue(() => assert.fail("no stop")), lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  for (const key of ["a", "\x1b", "j", "k", "\x1bx", "y"]) lanes.typed(io.encodeTyped(key));
+  await drain(lane, 3);
+  assert.deepEqual(lane.sent, [["x", false], ["a\x1b", false], ["jk\x1bxy", false]], "an Alt key typed as one call still joins its batch");
+});
+
+test("a typed batch never passes one send's limit and a paste over it still goes out in chunks after the waiting batch (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  const lanes = io.inputLanes(io.jobQueue(() => assert.fail("no stop")), lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  for (const text of ["y".repeat(4000), "z".repeat(200), "p".repeat(5000), "q"]) lanes.typed(io.encodeTyped(text));
+  await drain(lane, 6);
+  assert.deepEqual(lane.sent.map(([text]) => [text[0], text.length]), [["x", 1], ["y", 4000], ["z", 200], ["p", 4096], ["p", 904], ["q", 1]]);
+  assert.ok(lane.sent.every(([text]) => text.length <= io.INPUT_BYTES_MAX));
+});
+
+test("a stop while keys wait drops the waiting batch and reports the stop once (DEC-187 typing A)", async () => {
+  const lane = heldSends();
+  let stops = 0;
+  const lanes = io.inputLanes(io.jobQueue(() => { stops += 1; }), lane.send);
+  lanes.typed(io.encodeTyped("x"));
+  await until(() => lane.sent.length === 1);
+  lanes.typed(io.encodeTyped("a"));
+  lanes.typed(io.encodeTyped("b"));
+  lane.release(false);
+  await until(() => stops === 1);
+  lanes.typed(io.encodeTyped("c"));
+  await until(() => true);
+  assert.deepEqual(lane.sent, [["x", false]]);
+  assert.equal(stops, 1);
+});
+
 test("the note under a live terminal says typed keys are not kept or told to the master", async () => {
   const panel = await import("../src/screens/team/terminal-panel.tsx");
   assert.equal(panel.typingNote(team.nodes[2], true), "Typing goes straight to the master.");

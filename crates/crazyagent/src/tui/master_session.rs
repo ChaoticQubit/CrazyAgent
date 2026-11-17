@@ -3296,6 +3296,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
             "Its copy of the project could not be checked: close it (F4), open it again (F2, Enter), then send again"
         }
         MasterReason::Cancelled => "Cancelled",
+        MasterReason::SandboxStopped => crate::sandbox::HELD_NOT_PUT_BACK,
         MasterReason::Unknown => "Something went wrong",
     }
 }
@@ -3444,6 +3445,11 @@ mod turn_line_tests {
                 MasterReason::WorktreeUncertain,
                 "master_bootstrap_uncertain",
                 "Turn 1: Blocked | Its copy of the project could not be checked: close it (F4), open it again (F2, Enter), then send again (master_bootstrap_uncertain)",
+            ),
+            (
+                MasterReason::SandboxStopped,
+                "sandbox_held_not_put_back",
+                "Turn 1: Blocked | The sandbox stopped this run: a protected name could not be put back (sandbox_held_not_put_back)",
             ),
         ] {
             let mut lines = Vec::new();

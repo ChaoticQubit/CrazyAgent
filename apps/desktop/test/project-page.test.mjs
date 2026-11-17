@@ -418,8 +418,23 @@ test("every refusal the engine gives a master send, start or end has its own pla
   const codes = ["master_source_conflict", "master_session_active", "master_session_capacity", "master_session_missing",
     "master_session_not_active", "master_turn_outstanding", "master_turn_capacity", "master_turn_not_current",
     "master_input_too_large", "master_scope_or_budget_denied", "master_pool_missing", "master_backend_account_denied",
-    "rcli_profile_identity_changed"];
+    "rcli_profile_identity_changed", "rcli_profile_changed_in_conversation"];
   for (const code of codes) assert.notEqual(research.sendFailureLine(code), "Couldn't send. Try again.", code);
+});
+
+test("a turn or send refused for a changed local model config says to end the conversation (rv-sec3 G4 r2 F1, rv-code4 B22 F3)", () => {
+  const sentence = "The local model's config file changed since this conversation started, so the master can't use it. End the conversation, then send again.";
+  const refused = { id: "t", ordinal: 1, phase: "blocked", reason: "runtime_unavailable", cause: "rcli_profile_changed_in_conversation", detail: null, reply: null };
+  assert.equal(research.turnLine(refused), `${sentence} (rcli_profile_changed_in_conversation)`);
+  assert.equal(research.sendFailureLine("rcli_profile_changed_in_conversation"), `Couldn't send. ${sentence}`);
+});
+
+test("a refusal for a local model config changed on disk names it and never says to end the conversation (rv-code4 B22 F3)", () => {
+  const sentence = "The local model's config file or folder changed on disk, so the master can't use it.";
+  assert.equal(api.failureCopy("rcli_profile_identity_changed"), sentence);
+  assert.equal(research.sendFailureLine("rcli_profile_identity_changed"), `Couldn't send. ${sentence}`);
+  const refused = { id: "t", ordinal: 1, phase: "blocked", reason: "runtime_unavailable", cause: "rcli_profile_identity_changed", detail: null, reply: null };
+  assert.ok(!research.turnLine(refused).includes("End the conversation"), research.turnLine(refused));
 });
 
 test("only a send refused because the settings changed starts a new conversation", () => {
@@ -704,11 +719,11 @@ test("Project Settings offers No pool, and a project without a pool tells the ow
   assert.equal(settings.poolSaved("Main"), "Main is assigned.");
 });
 
-test("removing a project says it ends the master conversation and its folder stays on disk", async () => {
+test("removing a project says it ends the master conversation, keeps the owner's notes for the same folder and leaves the folder on disk (DEC-178 addendum 1)", async () => {
   const settings = await import("../src/screens/project/settings.tsx");
   assert.equal(settings.removeLine("/Users/me/CrazyAgent/harbor-notes"),
-    "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
-  assert.equal(settings.removeLine(null), "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk where it is, with every file in it.");
+    "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk at ~/CrazyAgent/harbor-notes, with every file in it.");
+  assert.equal(settings.removeLine(null), "Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk where it is, with every file in it.");
 });
 
 test("a project set up in an existing folder shows that folder, not the .crazyagent folder inside it", async () => {
@@ -1212,7 +1227,7 @@ test("a failed IDE state read shows the failure with Retry instead of falling ba
   assert.ok(markup.includes("IDE unavailable on ") && markup.includes("CrazyAgent&#x27;s engine isn&#x27;t ready yet."), markup);
   assert.match(markup, />Retry</);
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
-  assert.match(index, /useState<Result<IdeView>>\(\)/, "the page keeps a failed read, not only a good one");
+  assert.match(index, /useState<Result<IdeView> \| undefined>\(cachedIdeView\)/, "the page keeps a failed read, not only a good one, and starts from the last read (DEC-187)");
   assert.match(index, /failure=\{failure\}/);
   assert.match(index, /failure \? readIde\(\) : fetchIde\(\)/, "Retry after a failed read reads again and starts no download");
 });

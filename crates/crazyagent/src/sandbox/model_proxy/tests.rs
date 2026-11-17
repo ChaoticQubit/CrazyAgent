@@ -628,6 +628,39 @@ fn a_tunnel_dials_no_address_on_this_machine_but_keeps_the_local_network() {
     }
 }
 
+/// CLOUD-METADATA-ADDRS: a tunnel dials no cloud's metadata or credential service outside
+/// the link-local range, whatever a model host's name resolves to: Alibaba's and Azure's
+/// IPv4 addresses, also inside IPv6, and the IPv6 ones of AWS IMDS and EKS Pod Identity,
+/// Google, OCI, Akamai and Scaleway. Their neighbours stay dialable.
+#[test]
+fn a_tunnel_dials_no_cloud_metadata_service() {
+    let listed = [
+        "100.100.100.200",
+        "168.63.129.16",
+        "fd00:ec2::254",
+        "fd00:ec2::23",
+        "fd20:ce::254",
+        "fd00:c1::a9fe:a9fe",
+        "fd00:a9fe:a9fe::1",
+        "fd00:42::42",
+    ];
+    let parsed: Vec<IpAddr> = listed.iter().map(|text| text.parse().unwrap()).collect();
+    assert_eq!(
+        parsed,
+        super::super::CLOUD_METADATA,
+        "the list as its sources write it"
+    );
+    for address in listed
+        .into_iter()
+        .chain(["::ffff:100.100.100.200", "::ffff:168.63.129.16"])
+    {
+        assert!(!dialable(address.parse().unwrap()), "{address}");
+    }
+    for address in ["100.100.100.100", "168.63.129.17", "fd00:ec2::255"] {
+        assert!(dialable(address.parse().unwrap()), "{address}");
+    }
+}
+
 /// The address this machine sends from toward the documentation network, found with a UDP
 /// connect, which only picks a route and sends nothing. Output: the address, or none on a
 /// machine with no such route.

@@ -51,9 +51,10 @@ pub enum RecordSource {
 /// under (CS-2) and the owner's narrow grants its profile holds (F08). For DEC-158 it also
 /// keeps whether the pane's keeper was given the engine's freeze record, when the pane was
 /// last frozen, how long it was frozen before, and for a native lead the keepers of its
-/// servers. A record from an engine that did not keep the level, the files, the
-/// toolchains, the port, the network, the grants or the freeze facts has none; no grants
-/// means none were held.
+/// servers, and the digests of the folders its sandbox hid, as
+/// [`crate::sandbox::hidden_paths::digest`] writes them. A record from an engine that did
+/// not keep the level, the files, the toolchains, the port, the network, the grants, the
+/// freeze facts or the hidden folders has none; no grants means none were held.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -87,6 +88,8 @@ pub struct PaneRecord {
     pub frozen_for_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepers: Option<Vec<KeeperPin>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<Vec<String>>,
 }
 
 /// One server keeper of a native lead that a quitting engine froze (DEC-158): its process
@@ -139,6 +142,7 @@ impl PaneRecord {
             frozen_ms: None,
             frozen_for_ms: None,
             keepers: None,
+            hidden: None,
         })
     }
 
@@ -151,8 +155,9 @@ impl PaneRecord {
     }
 
     /// Reads a stored record. Takes the JSON.
-    /// Returns the record, or none for anything malformed, long, with relative paths or with
-    /// a toolchain listed twice.
+    /// Returns the record, or none for anything malformed, long, with relative paths, with
+    /// a toolchain listed twice or with more hidden folders, or other digests, than a launch
+    /// records.
     pub fn decode(text: &str) -> Option<Self> {
         if text.len() > RECORD_BYTES_MAX {
             return None;
@@ -186,6 +191,12 @@ impl PaneRecord {
                     .enumerate()
                     .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
         });
+        let hidden = record.hidden.as_ref().is_none_or(|hidden| {
+            hidden.len() <= crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                && hidden
+                    .iter()
+                    .all(|digest| crate::sandbox::hidden_paths::digest_plain(digest))
+        });
         let keepers = record.keepers.as_ref().is_none_or(|keepers| {
             keepers.len() <= KEEPERS_MAX
                 && keepers.iter().all(|keeper| {
@@ -207,6 +218,7 @@ impl PaneRecord {
             && toolchains
             && grants
             && keepers
+            && hidden
             && record.proxy != Some(0))
         .then_some(record)
     }
@@ -263,7 +275,8 @@ enum Replayed {
     /// No turn is open there, or no fact says.
     Idle,
     /// The read was cut before the end and the rest passed over unread (see
-    /// `TranscriptReader::skip_to_end`), so whether a turn is open is unknown.
+    /// `TranscriptReader::skip_to_end`), so whether a turn is open is unknown; `adopt_as`
+    /// asks the pane's screen instead of the last fact read.
     Cut,
 }
 
@@ -361,10 +374,15 @@ impl TerminalSession {
     /// budget go on counting from its start, and the record is read only while that run time
     /// lasts, at most `REPLAY_WAIT`. A live master is not bound by the launch's run time (the
     /// runtime's Master run time bounds it, F01): its pane gets no deadline and its record is
-    /// read for `REPLAY_WAIT`. A read cut short passes over the rest of the record unread;
-    /// nothing is typed, the pane is taken over idle and the unknown turn is dropped and told
-    /// by `took_none` (RV-DS241-143). A pane whose first process is not the record's, before
-    /// or after that read, is `launch_closed` and is left as it is. A Codex pane still on its folder access screen
+    /// read for `REPLAY_WAIT`. A read cut short passes over the rest of the record unread, so
+    /// whether a turn is open there is unknown. A live master's pane is then taken over idle
+    /// with nothing typed and the unknown turn dropped and told by `took_none`, since its
+    /// caller holds engine input until the idle prompt (RV-DS241-143). Any other pane is taken
+    /// over that way only while it shows the app's input prompt (see `waits`); otherwise it is
+    /// handled as a pane whose turn is open, with Escape and the wait for the turn to settle,
+    /// so an order typed next is never queued behind a running turn (RV-DS241-190). A pane
+    /// whose first process is not the record's, before or after that read, is
+    /// `launch_closed` and is left as it is. A Codex pane still on its folder access screen
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
     /// failed look at the screen counts as not on it, so it cannot end the pane. The
     /// key and context files are removed when the session stops, or at once when the pane
@@ -397,7 +415,11 @@ impl TerminalSession {
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
         let mut replayed = replay(&mut reader, until)?;
-        let open = replayed == Replayed::Open;
+        let open = match replayed {
+            Replayed::Open => true,
+            Replayed::Idle => false,
+            Replayed::Cut => !live && !super::waits(host.as_ref(), &agent, true),
+        };
         let stale = open
             && reader
                 .silent()
@@ -483,6 +505,8 @@ impl TerminalSession {
             _key: record.key_file(),
             _context: context,
             _relay: None,
+            #[cfg(unix)]
+            lifeline: None,
         })
     }
 
@@ -493,12 +517,18 @@ impl TerminalSession {
     }
 
     /// Lets go of the pane without ending it, as the engine quits with this agent kept alive.
-    /// Generated context and key files stay for the harness that still runs.
+    /// Generated context and key files stay for the harness that still runs. A pane on an
+    /// engine key relay keeps its lifeline held until this engine exits, so it still ends
+    /// with the engine whose relay it reaches.
     /// Takes the session; a later engine adopts the pane from its record.
     pub fn leave(mut self) {
         self.stopped = true;
         if let Some(key) = self._key.take() {
             std::mem::forget(key);
+        }
+        #[cfg(unix)]
+        if let Some(lifeline) = self.lifeline.take() {
+            std::mem::forget(lifeline);
         }
         if let Some(context) = self._context.take() {
             context.keep();

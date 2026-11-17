@@ -1,4 +1,5 @@
 use super::new_project_view::{Look, Row};
+use super::project_time::{clock, local_offset};
 use crate::project_setup::{ResearchJob, ResearchKind, ResearchStatus, SetupAction};
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{ItemStatus, Refresh, RoadmapStatus};
@@ -6,7 +7,8 @@ use crate::tui::client::roadmap::{RoadmapEvent, RoadmapQuery, RoadmapReply};
 use crossterm::event::KeyCode;
 
 /// Where a project's roadmap planning stands: not planned, waiting for research, planning,
-/// done, or failed or stopped, with the planning job it reads from.
+/// done, or failed or stopped, with the planning job it reads from and, for one parked on a
+/// rate limit, when that limit ends and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::tui) enum Planning {
     Idle,
@@ -15,6 +17,7 @@ pub(in crate::tui) enum Planning {
         job: i64,
         status: ResearchStatus,
         reason: Option<String>,
+        limit: Option<(i64, String)>,
     },
     Done {
         job: i64,
@@ -64,6 +67,9 @@ pub(in crate::tui) fn planning(jobs: &[ResearchJob]) -> Planning {
                 .map(str::trim)
                 .filter(|reason| job.status == ResearchStatus::Queued && !reason.is_empty())
                 .map(str::to_owned),
+            limit: job
+                .rate_limited()
+                .map(|(until, reason)| (until, reason.to_owned())),
         },
         Some(job) if job.status == ResearchStatus::Done => Planning::Done { job: job.id },
         Some(job) => Planning::Failed {
@@ -80,12 +86,24 @@ pub(in crate::tui) fn planning(jobs: &[ResearchJob]) -> Planning {
 }
 
 /// Draws the planning state as one value: the status word, what the job reports, and the key
-/// of the one action. Takes the state and the look. Returns the row, without a label.
+/// of the one action; a job parked on a rate limit reads when it ends in local time and why
+/// (RV-DS241-133). Takes the state and the look. Returns the row, without a label.
 pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
     let plan = format!("   p {PLAN_NOW}");
     match state {
         Planning::Idle => Row::of("Not planned", look.fg).push(plan, look.muted),
         Planning::Waiting => Row::of("Waiting for research", look.muted),
+        Planning::Active {
+            limit: Some((until, reason)),
+            ..
+        } => Row::of(
+            format!(
+                "! Rate limited until {}",
+                clock(*until, local_offset(*until))
+            ),
+            look.warning,
+        )
+        .push(format!("  {reason}"), look.muted),
         Planning::Active {
             reason: Some(reason),
             ..

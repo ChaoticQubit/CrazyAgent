@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -164,11 +164,13 @@ export interface ContextChunk {
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
 /** One access level as the engine names it, with the reason it can't run agents on this
- * computer, null when it runs. */
+ * computer, null when it runs, and the lines for what this Linux can't hold at that level,
+ * absent from an older engine. */
 export interface AccessLevel {
   access: AgentAccess;
   label: string;
   unavailable: string | null;
+  gaps?: string[];
 }
 
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
@@ -186,6 +188,11 @@ export type Toolchain = "rust" | "node" | "python";
 /** Who shares the uv cache and pnpm store a project's sandboxed agents write (T8): shared is
  * one per access level and kind of folder, per_agent one per agent. */
 export type ToolCacheScope = "shared" | "per_agent";
+
+/** What a launch does with the .cache and npm cache an earlier run left in an agent home
+ * (DEC-173 add.1): keep them, clear them when the agent starts at a wider level than its last
+ * start, or clear them at every start. */
+export type HomeCaches = "keep" | "clear_when_raised" | "clear_every_launch";
 
 /** When a wider saved access reaches agents already running (F08): when_idle stops each at its
  * next idle point so its next start has it, the live master resuming its own conversation;
@@ -224,7 +231,8 @@ export interface SharedFolders {
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
  * that differ from the project's own use, whether git in the IDE runs the project's own
  * hooks, what the IDE may change in agent folders, who shares the agents' tool cache,
- * shared when it is left out, when wider access reaches running agents and the allowed
+ * shared when it is left out, what a launch does with an agent home's caches, Clear
+ * when access is raised when it is left out, when wider access reaches running agents and the allowed
  * extras, the saved ones kept when left out, and the shared local folders, All and
  * Read-only when left out. */
 export interface AgentPolicy {
@@ -233,6 +241,7 @@ export interface AgentPolicy {
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
   ide_git_hooks: boolean;
   tool_cache?: ToolCacheScope;
+  home_caches?: HomeCaches;
   ide_agent_files: IdeAgentFiles;
   apply_changes?: AccessApply;
   grants?: AccessGrant[];
@@ -242,16 +251,19 @@ export interface AgentPolicy {
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
  * with the reason one can't run, the network choices, every detected toolchain, the IDE
  * hooks switch, the IDE agent folders choice, the tool cache choice with every choice, the
+ * agent home caches choice with every choice, the
  * shared local folders choice and the project folder's top-level folders to pick from. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
   levels: AccessLevel[];
-  networks: { network: AgentNetwork; label: string }[];
+  networks: { network: AgentNetwork; label: string; gap?: string | null }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;
   tool_cache: ToolCacheScope;
   tool_caches: { scope: ToolCacheScope; label: string }[];
+  home_caches?: HomeCaches;
+  home_cache_choices?: { choice: HomeCaches; label: string }[];
   ide_agent_files: IdeAgentFiles;
   apply_changes?: AccessApply;
   apply_choices?: { apply: AccessApply; label: string }[];
@@ -331,6 +343,7 @@ const copy: Record<string, string> = {
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
+  team_no_hidden_seers: "No running agent can still open a hidden folder.",
   team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
   team_rounds_invalid: "Pick a listed number of sub-agent rounds, or Until the goal is done.",
   team_run_time_invalid: "Pick a listed master run time, or No limit.",
@@ -408,7 +421,8 @@ const copy: Record<string, string> = {
   master_scope_or_budget_denied: "The master's limits aren't allowed by your settings. Check the project's pool.",
   master_pool_missing: "This project needs a pool before the master can reply.",
   master_backend_account_denied: "The project's pool has no account the master can use. Check the pool's accounts.",
-  rcli_profile_identity_changed: "The local model's profile changed while the master started. Try again.",
+  rcli_profile_identity_changed: "The local model's config file or folder changed on disk, so the master can't use it.",
+  rcli_profile_changed_in_conversation: "The local model's config file changed since this conversation started, so the master can't use it. End the conversation, then send again.",
   stale_master: "The conversation changed. It was reloaded; send again.",
   resync_required: "The conversation changed while it loaded. Try again.",
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
@@ -424,9 +438,11 @@ const copy: Record<string, string> = {
   delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
   delete_in_progress: "This project is already being deleted. Wait for that to finish; nothing else was changed.",
   delete_not_recorded: "Nothing was deleted. CrazyAgent couldn't record the delete before starting it. Try again; if it keeps failing, restart CrazyAgent.",
+  projects_removed_full: "CrazyAgent keeps a record of up to 100,000 removed projects and that record is full, so no project can be removed. Nothing was removed or moved to the Trash.",
   home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
   project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
+  delete_cannot_stop: "It's moving its folders to the Trash, so it can't stop now. Wait for it to finish on Home.",
 };
 
 /** Plain sentence for one engine failure, never opaque.
@@ -467,10 +483,6 @@ export function receiptState(receipt: IntentReceipt): ReceiptState {
 
 export function loadProjectCatalog(pool: string | null, research: ResearchKind[]): Promise<Result<ProjectCatalog>> {
   return call<ProjectCatalog>("desktop_project_catalog", { pool, research });
-}
-
-export function setupProject(spec: ProjectSpec, setup: ProjectSetup, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_setup_project", { spec, setup, generation });
 }
 
 /** Whether a New Project receipt gets one automatic reconcile, as the TUI does: the engine
@@ -583,6 +595,13 @@ export function renameTeamAgent(id: string, agent: number, handle: string, gener
  * Output: the engine receipt. */
 export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Restarts the project's running agents that can still open a folder hidden after they
+ * started (SA-VID14-A): each starts again in its own worktree and conversation, kept out of
+ * every hidden folder. Inputs: the project id and a generation. Output: the engine receipt. */
+export function restartHiddenSeers(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_restart_hidden_seers", { id, generation });
 }
 
 /** Stops one harness with the teammates in its terminal; it stays stopped until the owner wakes
@@ -699,7 +718,9 @@ export function saveReadPaths(id: string, paths: string[], version: number, gene
 
 /** The folders a project's agents are kept out of in saved order and the version a change
  * sends back. */
-export type HiddenPaths = { paths: string[]; version: number };
+/** The kinds of engine runs, not team agents, that hide a project's folders from their start (SA-VID14-R2-N2). */
+export type HiddenRunKind = "master" | "research" | "overview" | "roadmap" | "onboarding" | "code_graph" | "lockfiles";
+export type HiddenPaths = { paths: string[]; version: number; runs?: HiddenRunKind[] };
 
 /** Reads the folders this project's agents are kept out of, read, write and run.
  * Input: project id. Output: the folders in saved order and their version. */
@@ -783,23 +804,38 @@ export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> 
   return call<RemovalPreview>("desktop_project_removal", { id });
 }
 
-/** Removes a project from CrazyAgent. Without a name its folder stays on disk; with the name the
- * owner typed, the engine stops its agents and moves its folders to the Trash, only when the name
- * is the project's exact name. Either way, once the engine applied the removal, the project's
- * terminal wall windows close; one that fails to close leaves the removal as it is. Inputs:
- * project id, a generation and the typed name or null. Output: the receipt. */
-export async function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
-  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
+/** Removes a project from CrazyAgent; its folder stays on disk. Delete everything is the engine's
+ * job instead (startDeleteJob). Once the engine applied the removal, the project's terminal
+ * wall windows close; one that fails to close leaves the removal as it is. Inputs: project id and
+ * a generation. Output: the receipt. */
+export async function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
+  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation });
   if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
   return result;
 }
 
-/** Moves or copies a project kept where it is into the projects folder. The engine waits for
- * its team to stop, moves the folder and points the project and its agents' copies at the new
- * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
- * generation. Output: the receipt. */
-export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
+/** Starts the engine's job that moves or copies a project kept where it is into the projects
+ * folder, followed on Home: it downloads what is only in iCloud, waits for the project's agents
+ * to stop, moves the folder and points the project and its agents' copies at the new place
+ * (DEC-177). Inputs: the project id, move or copy and the soft refusals the owner chose to go
+ * past. Output: the started job, or the move's refusal. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[]): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_move_project_home", { id, mode, overrides });
+}
+
+/** Starts the engine's job that deletes a project, followed on Home: its agents stop, its
+ * folders go to the Trash and its records go (DEC-177 add.1). Inputs: the project id and its
+ * exact name as typed. Output: the started job, or the delete's refusal. */
+export function startDeleteJob(id: string, name: string): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_delete_project_job", { id, name });
+}
+
+/** Starts the engine's job that sets up a New Project, followed on the New Project page and on
+ * Home: it builds the project's folder in the projects folder with its documents counted and
+ * records it, and leaving the page never stops it (DEC-177 add.2). Inputs: the name spec and
+ * the setup. Output: the started job, or New Project's refusal. */
+export function startSetupJob(spec: ProjectSpec, setup: ProjectSetup): Promise<Result<IntakeJob>> {
+  return call<IntakeJob>("desktop_setup_project_job", { spec, setup });
 }
 
 export const PAGES_MAX = 50;

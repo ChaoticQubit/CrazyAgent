@@ -10,7 +10,6 @@ pub mod assets;
 pub mod cleanup_settings;
 pub mod client_controller;
 pub mod config;
-#[cfg(unix)]
 pub mod context_mode;
 pub mod conversation;
 pub mod coord;
@@ -26,6 +25,7 @@ pub mod harnesses;
 /// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
 /// and environment.
 pub mod ide;
+pub mod instruction_check;
 /// Edit with AI for the owner's instructions: the prompt, the proposal read out of a
 /// model reply, the pool rule and the one confined model run.
 pub mod instruction_cleanup;

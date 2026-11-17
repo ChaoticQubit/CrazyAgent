@@ -36,6 +36,9 @@ mod live_terminal_probe_tests;
 #[path = "freeze_tests.rs"]
 mod freeze_tests;
 
+#[path = "hidden_seers_tests.rs"]
+mod hidden_seers_tests;
+
 #[cfg(target_os = "macos")]
 #[path = "stop_race_tests.rs"]
 mod stop_race_tests;
@@ -401,6 +404,41 @@ fn an_engine_set_to_stop_team_agents_ends_their_panes_at_shutdown() {
     assert_eq!(again.shutdown().unwrap(), Vec::<AgentId>::new());
 }
 
+/// SA vid 10 r2 (rv-sec2 F1): an agent whose thread is still stopping when shutdown's join
+/// wait ends was never seen to stop, so it is recorded stopped with the note that its
+/// sandbox could not be confirmed empty, never plainly.
+#[test]
+fn an_agent_whose_stop_outlives_the_join_wait_is_not_recorded_plainly_stopped() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let release = Arc::new(AtomicBool::new(false));
+    let held = release.clone();
+    let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+    worker.thread = Some(std::thread::spawn(move || {
+        while !held.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }));
+    team.workers.insert(agent, worker);
+
+    let started = Instant::now();
+    assert!(team.shutdown().unwrap().is_empty());
+    release.store(true, Ordering::SeqCst);
+    assert!(started.elapsed() >= JOIN_WAIT);
+    assert_eq!(
+        fixture.agent_status(agent),
+        (
+            AgentStatus::Stopped,
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN)
+            ))
+        )
+    );
+}
+
 /// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
 /// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
 #[cfg(target_os = "macos")]
@@ -418,6 +456,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 ..Default::default()
@@ -524,6 +563,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
@@ -653,6 +693,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
@@ -8971,28 +9012,45 @@ fn a_master_on_the_fifteen_minute_choice_stops_at_the_idle_bound() {
 }
 
 /// The 1 h choice keeps an idle master for four of the engine's bounds, so it outlasts the
-/// 15 min bound and then stops (DEC-117 Q4).
+/// 15 min bound and then stops (DEC-117 Q4). The row sets the master's idle time itself, so
+/// a slow machine between the turn's end and the row's checks cannot shift the count.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_master_on_the_one_hour_choice_stops_at_four_idle_bounds() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let bound = Duration::from_secs(1);
+    let bound = Duration::from_secs(30);
     let (mut team, id) = idle_plain_master(
         &fixture,
         &host,
         bound,
         Some(crate::team::MasterIdleStop::OneHour),
     );
-    let idle_seen = Instant::now();
+    let idle_for = |team: &mut TeamRuntime, idle: Duration| {
+        let since = Instant::now()
+            .checked_sub(idle)
+            .expect("the machine has run longer than four idle bounds");
+        team.workers.get_mut(&id).unwrap().idle_since = since;
+        since
+    };
+    assert!(
+        team.workers[&id].busy.is_none() && !team.workers[&id].stopping,
+        "the master is idle after its turn"
+    );
+    let kept = idle_for(&mut team, bound * 7 / 2);
+    team.reap_idle(&fixture.setup).unwrap();
+    assert!(
+        !team.workers[&id].stopping,
+        "the 1 h choice keeps a master idle for 3.5 bounds, past the 15 min bound"
+    );
+    assert_eq!(
+        team.workers[&id].idle_since, kept,
+        "the reap counted the master as idle and kept its idle time"
+    );
+    idle_for(&mut team, bound * 4);
     fixture.until(&mut team, "the idle master stops at four bounds", |f| {
         f.agent_status(id).0 == AgentStatus::Stopped
     });
-    assert!(
-        idle_seen.elapsed() >= bound * 2,
-        "the 1 h choice stopped it after {:?}, at the 15 min bound",
-        idle_seen.elapsed()
-    );
     team.shutdown().unwrap();
 }
 
@@ -9151,6 +9209,7 @@ fn an_idle_stopped_live_master_starts_again_on_the_same_conversation() {
         fixture.status().live_idle_stopped,
         "the idle stop is told apart"
     );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
     start_again(&fixture);
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
@@ -9205,6 +9264,7 @@ fn an_idle_stopped_live_master_with_no_owner_turn_starts_again() {
         fixture.status().live_idle_stopped,
         "the idle stop is told apart"
     );
+    choose_master_idle_stop(&fixture, crate::team::MasterIdleStop::Off);
     start_again(&fixture);
     fixture.until(&mut team, "the master runs again", |f| {
         live_agent(&f.connection) == Some(id) && f.agent_status(id).0 == AgentStatus::Idle
@@ -12198,6 +12258,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -14922,6 +14983,7 @@ fn agent_at_level_running(
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15148,6 +15210,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15208,6 +15271,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             }],
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
@@ -15262,6 +15326,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15413,6 +15478,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
+            home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             ..Default::default()
@@ -15495,6 +15561,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -17492,6 +17559,7 @@ fn between_turns(
         narrowed: None,
         ran_before: Duration::ZERO,
         proxy: None,
+        keyed: false,
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
@@ -17499,6 +17567,7 @@ fn between_turns(
         reasked: None,
         starts: crate::coord::relay::TaskStarts::default(),
         after_done: AfterDone::default(),
+        hidden: None,
     }
 }
 
@@ -23285,6 +23354,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     }
 }
 
@@ -24746,6 +24816,75 @@ fn wiring_a_kept_native_lead_being_stopped_is_not_left_running_at_engine_stop() 
     host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
+/// LP-R1 F2: an engine stop that leaves an agent's pane running presses Escape in every
+/// other live pane of that agent's window, the teammates a native lead split off, as it
+/// does in the agent's own pane, so their turns stop with the engine while every pane stays.
+/// The agent is a real adopted pane served by its worker thread; the teammate is a real
+/// tmux pane in its window that records the first key it reads.
+/// macOS only: by DEC-094 no team agent or agent pane runs on Linux, where the launch is
+/// refused with `launch_unavailable_on_linux` (asserted in `harnesses::terminal_session::tests`).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_engine_stop_that_leaves_an_agent_running_presses_escape_in_its_teammates_panes() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = fixture.pane(&host, master);
+    fixture.keep(master, &record);
+    let agent = AgentId::team(master).unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the adopted agent is idle", |f| {
+        f.agent_status(master).0 == AgentStatus::Idle && f.recorded(master)
+    });
+    let own = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .find(|listed| listed.pid == record.pid)
+        .unwrap()
+        .id;
+    let ready = fixture.base.join("teammate-ready");
+    let read = fixture.base.join("teammate-read");
+    let mate = teammate_split_running(
+        &fixture,
+        &own,
+        &format!(
+            "/bin/stty raw -echo && : > '{}' && /bin/dd bs=1 count=1 of='{}' 2>/dev/null; exec /bin/sleep 300",
+            ready.display(),
+            read.display()
+        ),
+    );
+    let deadline = Instant::now() + WAIT;
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "the teammate pane reads keys");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    let deadline = Instant::now() + WAIT;
+    while std::fs::metadata(&read).map_or(0, |file| file.len()) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        std::fs::read(&read).unwrap_or_default(),
+        b"\x1b",
+        "the engine stop pressed Escape in the teammate's pane"
+    );
+    let left: Vec<String> = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .filter(|listed| !listed.dead)
+        .map(|listed| listed.id)
+        .collect();
+    assert_eq!(left, [own, mate], "both panes keep running");
+    assert_eq!(
+        fixture.agent_status(master),
+        (AgentStatus::Stopped, Some(LEFT_RUNNING_NOTE.into()))
+    );
+    host.close(&[]).unwrap();
+}
+
 /// Wiring test of engine mechanics: a managed agent that starts its harness for each turn
 /// keeps no pane record, so a later engine neither leaves its pane running nor refuses to
 /// take it over, and its session record stays with recovery.
@@ -24791,7 +24930,10 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
     let plan = Plan {
         native: true,
         tmux: Some(fixture.tmux.clone()),
-        pane: Some((crate::terminal::own_server(host.clone()), agent.clone())),
+        pane: Some((
+            crate::terminal::own_server(host.clone(), false),
+            agent.clone(),
+        )),
         ..hooks_plan("claude-code", false)
     };
     let home = fixture.base.join("lead-home");
@@ -25050,6 +25192,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         relay: None,
         terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
+        hidden: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
@@ -26526,6 +26669,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
+                    home_caches: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     ..Default::default()
@@ -27225,6 +27369,14 @@ fn test_tmux(fixture: &Fixture, arguments: &[&str]) -> String {
 /// own pane. Returns the new pane's id.
 #[cfg(target_os = "macos")]
 fn teammate_split(fixture: &Fixture, lead_pane: &str) -> String {
+    teammate_split_running(fixture, lead_pane, "exec /bin/sleep 300")
+}
+
+/// Opens one teammate pane in a harness's window running a shell command, as
+/// [`teammate_split`] does. Takes the fixture, the harness's own pane and the command.
+/// Returns the new pane's id.
+#[cfg(target_os = "macos")]
+fn teammate_split_running(fixture: &Fixture, lead_pane: &str, command: &str) -> String {
     let pane = test_tmux(
         fixture,
         &[
@@ -27235,7 +27387,7 @@ fn teammate_split(fixture: &Fixture, lead_pane: &str) -> String {
             "#{pane_id}",
             "-t",
             lead_pane,
-            "exec /bin/sleep 300",
+            command,
         ],
     );
     test_tmux(fixture, &["select-layout", "-t", lead_pane, "tiled"]);
@@ -29599,7 +29751,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         ],
         transcript: Transcript::ClaudeSession { file: session },
     };
-    let placed = host.spawn_own_server(&lead, &command).unwrap();
+    let placed = host.spawn_own_server(&lead, &command, false).unwrap();
     assert!(crate::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");
@@ -29745,6 +29897,126 @@ fn an_agent_refused_for_skills_left_in_its_codex_home_says_what_happened() {
          CrazyAgent could not remove them and Codex would have loaded them. \
          (launch_context_skills_kept)"
     );
+}
+
+/// RESET-WALK-CODE code r1 F1: a team agent whose cargo home could not be made because
+/// removing a cargo name ran past its walk budget says so in its start line with its code
+/// kept, and any other failure keeps the cargo home line with its io code.
+#[test]
+fn an_agent_whose_cargo_name_walk_ran_past_its_budget_says_so_in_its_start_line() {
+    let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+    assert_eq!(
+        cargo_home_problem(&walked),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+    assert_eq!(
+        cargo_home_problem(&missing),
+        "the agent cargo home could not be made. (io_not_found)"
+    );
+}
+
+/// RESET-WALK-CODE code r1 F1: a native lead whose teammates' home reset or cargo name
+/// removal ran past its walk budget says so in its start line with its code kept, and any
+/// other failure keeps the teammates' home line with its code.
+#[cfg(unix)]
+#[test]
+fn a_lead_whose_teammates_home_walk_ran_past_its_budget_says_so_in_its_start_line() {
+    let walked = EngineError("cleanup_walk_too_long".into());
+    let changed = EngineError("team_shared_folder_changed".into());
+
+    assert_eq!(
+        mates_home_problem(&walked),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+    assert_eq!(
+        mates_home_problem(&changed),
+        "the teammates' home could not be made. (team_shared_folder_changed)"
+    );
+}
+
+/// RESET-WALK-CODE: a launch refused because resetting the agent's home ran past its walk
+/// budget says so in words, with its code kept, and asks for another try, since a refused
+/// pass already removed what it reached.
+#[test]
+fn an_agent_refused_for_a_home_reset_past_its_walk_budget_says_what_happened() {
+    assert_eq!(
+        start_problem(&LaunchError("cleanup_walk_too_long".into(), None)),
+        "The agent could not start: its home folder held too many files to reset at once, or \
+         something kept adding files to it. Try again. (cleanup_walk_too_long)"
+    );
+}
+
+/// SA vid 12: an agent is not started while a hold still lists commands a sandboxed run of
+/// it left that the owner has not ended, since they write where the agent does and its next
+/// run would run what they leave in its home. The refusal says what to do, with its code
+/// kept; another agent of the project starts.
+#[cfg(unix)]
+#[test]
+fn an_agent_is_not_started_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 41".into(),
+    };
+    let other = HoldBy {
+        project: Some("commands-left".into()),
+        who: "team agent 42".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Ask,
+    );
+
+    let refused = commands_left(&by).map_err(|problem| problem.0);
+    let started = commands_left(&other).map_err(|problem| problem.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(started, Ok(()));
+    assert_eq!(
+        start_problem(&LaunchError(COMMANDS_LEFT.into(), None)),
+        "This agent still has commands running from its last run. End them on the team \
+         page, then start it again. (team_commands_left)"
+    );
+}
+
+/// rv-code2 B2P2-1: nothing from the account, such as the credential copy, is handed to an
+/// agent's home while a hold still lists commands a sandboxed run of it left, since they
+/// read where the agent reads; another agent of the project is handed its own.
+#[cfg(unix)]
+#[test]
+fn nothing_is_handed_to_an_agent_home_while_commands_of_its_last_sandboxed_run_stay_held() {
+    let by = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 51".into(),
+    };
+    let other = HoldBy {
+        project: Some("handed-left".into()),
+        who: "team agent 52".into(),
+    };
+    let mut left = crate::harnesses::leftovers::tests::held_sandboxed(
+        by.clone(),
+        crate::harnesses::leftovers::LeftoverMode::Keep,
+    );
+    let handed = std::cell::Cell::new(0);
+
+    let refused = hand_after_check(&by, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let while_refused = handed.get();
+    let given = hand_after_check(&other, || handed.set(handed.get() + 1)).map_err(|e| e.0);
+    let _ = left.kill();
+    let _ = left.wait();
+
+    assert_eq!(refused, Err(COMMANDS_LEFT.to_owned()));
+    assert_eq!(
+        while_refused, 0,
+        "the refused agent's home was handed the credential"
+    );
+    assert_eq!(given, Ok(()));
+    assert_eq!(handed.get(), 1);
 }
 
 /// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
@@ -31750,11 +32022,12 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
 
 /// An agent leaves neither cargo's, git's, npm's nor yarn's own config in its home, nor a
 /// cargo subcommand, a file flag or an ACL there, for its next start (RV-DS241-137, -138,
-/// sec r1 F1, F2). In its installed profile a tools-on agent cannot write `.cargo/config`,
-/// `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`, in any letter case, nor make
-/// `.config/git` or `.cargo/bin`, nor set a flag or an ACL on its home or on anything in it,
-/// while it still writes a `.gitconfig`, which no agent git reads, and its own caches. The
-/// next launch removes that `.gitconfig` and keeps the caches.
+/// sec r1 F1, F2, RV-DS241-186). In its installed profile a tools-on agent cannot write
+/// `.gitconfig`, `.cargo/config`, `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`,
+/// in any letter case, nor make `.config/git` or `.cargo/bin`, nor move a `.config` it built
+/// elsewhere into place, nor set a flag or an ACL on its home or on a file the next launch
+/// keeps, while it still writes its own caches. Whether the next launch keeps those caches
+/// is the Tool caches in agent homes setting's call (a2a79acae), not this row's.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
@@ -31794,6 +32067,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         )
         .unwrap();
     let home = agent_home(&runtime.state, id);
+    std::fs::write(home.join(".claude.json"), "{}\n").unwrap();
     let work = plan.working_dir.clone();
     let tried = work.join("tried.txt");
     let script = work.join("plant.sh");
@@ -31806,14 +32080,15 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
+             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config' && test -e '{home}/.config/git/config'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
              try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
              try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
              try yarnrc sh -c \"printf x > '{home}/.yarnrc'\"\n\
              try yarnrc_yml sh -c \"printf x > '{home}/.yarnrc.yml'\"\n\
              try cargo_bin sh -c \"mkdir -p '{home}/.cargo/bin' && printf x > '{home}/.cargo/bin/cargo-x'\"\n\
-             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.cache/tool/data'\n\
-             try flag_file /usr/bin/chflags uchg '{home}/.cache/tool/data'\n\
+             try acl_file /bin/chmod +a 'everyone deny delete' '{home}/.claude.json'\n\
+             try flag_file /usr/bin/chflags uchg '{home}/.claude.json'\n\
              try flag_home /usr/bin/chflags uchg '{home}'\n",
             home = home.display(),
             tried = tried.display(),
@@ -31840,7 +32115,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         Command::new("/usr/bin/chflags")
             .arg("nouchg")
             .arg(&home)
-            .arg(home.join(".cache/tool/data"))
+            .arg(home.join(".claude.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -31848,7 +32123,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
     let acl_cleared = crate::spawn_gate::output(
         Command::new("/bin/chmod")
             .arg("-N")
-            .arg(home.join(".cache/tool/data"))
+            .arg(home.join(".claude.json"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
@@ -31879,6 +32154,8 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         "cargo_config_case",
         "cargo_config_old",
         "git_config",
+        "gitconfig",
+        "config_parent",
         "npmrc",
         "npmrc_case",
         "yarnrc",
@@ -31892,14 +32169,15 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
             problems.push(format!("{attempt} written: {:?}", exit(attempt)));
         }
     }
-    for attempt in ["gitconfig", "control_cache"] {
-        if exit(attempt).as_deref() != Some("0") {
-            problems.push(format!("{attempt} refused: {:?}", exit(attempt)));
-        }
+    if exit("control_cache").as_deref() != Some("0") {
+        problems.push(format!(
+            "control_cache refused: {:?}",
+            exit("control_cache")
+        ));
     }
     for entry in [
         ".gitconfig",
-        ".config",
+        ".config/git",
         ".cargo/config",
         ".cargo/config.toml",
         ".cargo/bin",
@@ -31910,13 +32188,6 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         if std::fs::symlink_metadata(home.join(entry)).is_ok() {
             problems.push(format!("{entry} kept by the launch"));
         }
-    }
-    if std::fs::read_to_string(home.join(".cache/tool/data"))
-        .ok()
-        .as_deref()
-        != Some("ok")
-    {
-        problems.push("the agent's cache removed by the launch".to_owned());
     }
     assert!(
         problems.is_empty(),

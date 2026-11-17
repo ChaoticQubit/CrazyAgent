@@ -199,7 +199,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 async function codexToolsOff(me, page, setup) {
   await me.waitFor("the Team section", (text) => text.includes("+ Add harness") && text.includes("Save team"));
   await me.click("+ Add harness");
-  const picked = await page.evaluate(`(() => {
+  const pick = `(() => {
     const select = document.getElementById("ps-row-0");
     if (!select || ![...select.options].some((option) => option.value === "codex" && !option.disabled)) return false;
     select.focus();
@@ -207,8 +207,10 @@ async function codexToolsOff(me, page, setup) {
     select.dispatchEvent(new Event("input", { bubbles: true }));
     select.dispatchEvent(new Event("change", { bubbles: true }));
     return true;
-  })()`);
-  assert.ok(picked, "no Codex to pick for the new agent row");
+  })()`;
+  for (const deadline = Date.now() + STEP_MS; !(await page.evaluate(pick)); await pause(POLL_MS)) {
+    assert.ok(Date.now() < deadline, "no Codex to pick for the new agent row");
+  }
   await me.follow(`[id="ps-tools-0"]`);
   assert.equal(await page.evaluate(`document.getElementById("ps-tools-0")?.getAttribute("aria-checked")`), "false", "the Codex row's tools switch is off");
   await me.click("Save team");

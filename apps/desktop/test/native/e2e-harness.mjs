@@ -189,6 +189,26 @@ export async function value(bridge, cmd, args) {
   return answer.value;
 }
 
+/** Makes one project through the engine's New Project job, as the New Project page does
+ * (DEC-177 step 3): starts the job, reads it until it ends, requires it done and dismisses it.
+ * Inputs: the bridge, the project spec and its setup. Output: the made project's id. */
+export async function setUpProject(bridge, spec, setup) {
+  const started = await value(bridge, "desktop_setup_project_job", { spec, setup });
+  assert.equal(started.kind, "setup", `${spec.name} starts a New Project job: ${JSON.stringify(started)}`);
+  assert.ok(started.project_id, `the job names its project: ${JSON.stringify(started)}`);
+  const deadline = Date.now() + STEP_MS * 2;
+  let job = started;
+  while (job?.id === started.id && job.state.state === "building") {
+    assert.ok(Date.now() < deadline, `${spec.name}'s New Project job never ended: ${JSON.stringify(job)}`);
+    await pause(POLL_MS);
+    job = await value(bridge, "desktop_intake_status");
+  }
+  assert.equal(job?.id, started.id, `${spec.name}'s New Project job is the one read: ${JSON.stringify(job)}`);
+  assert.equal(job.state.state, "done", `${spec.name} is made: ${JSON.stringify(job)}`);
+  assert.equal(await value(bridge, "desktop_intake_dismiss", { id: started.id }), true, `${spec.name}'s ended job is dismissed`);
+  return started.project_id;
+}
+
 /** Serves the built frontend and forwards the page's invokes to the bridge. The commands
  * answered here are the native folder chooser, with the owner's next pick from `picks`, and
  * each native-only command `local` names, whose function gives the answer from the arguments.

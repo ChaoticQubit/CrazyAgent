@@ -367,6 +367,10 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --release --locked --target "$TARGET" -p crazyagent --bins
+          if [ "$PLATFORM" = linux ]; then
+            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --locked --target "$TARGET" -p crazyagent --bin crazyagent-landlock --target-dir "${CARGO_TARGET_DIR:-target}/crt-static"
+            install -m 0755 "${CARGO_TARGET_DIR:-target}/crt-static/$TARGET/release/crazyagent-landlock" "${CARGO_TARGET_DIR:-target}/$TARGET/release/crazyagent-landlock"
+          fi
           if [ "$PLATFORM" = windows ]; then
             cargo build --release --locked --target "$TARGET" -p crazyagent-win-sandbox --bin crazyagent-win-boundary
           fi
@@ -557,6 +561,18 @@ jobs:
             display="$(codesign --display --verbose=2 "$tmux" 2>&1)"
             grep -E -q 'flags=.*runtime' <<< "$display" || { echo "::error::the bundled tmux is not signed with the hardened runtime"; exit 1; }
           fi
+      - name: Check the app icon carries its dark look
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          app="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle/macos/CrazyAgent.app"
+          test -s "$app/Contents/Resources/Assets.car" || { echo "::error::no Assets.car: icons/AppIcon.icon needs actool from Xcode 26 or newer (DEC-181)"; exit 1; }
+          name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app/Contents/Info.plist")"
+          test "$name" = Icon || { echo "::error::CFBundleIconName is '$name', not Icon"; exit 1; }
+          test -s "$app/Contents/Resources/icon.icns" || { echo "::error::the icon.icns fallback for macOS before 26 is missing"; exit 1; }
+          info="$(assetutil --info "$app/Contents/Resources/Assets.car")"
+          grep -q '"NSAppearanceNameDarkAqua"' <<< "$info" || { echo "::error::Assets.car has no dark icon look"; exit 1; }
+          echo "app icon: Assets.car with a dark look, CFBundleIconName $name, icon.icns fallback"
       - name: Package release assets
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}

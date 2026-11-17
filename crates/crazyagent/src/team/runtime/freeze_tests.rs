@@ -329,6 +329,85 @@ fn a_kept_pane_whose_agent_killed_its_warden_fails_its_thaw_with_its_cleanup_nam
     host.close(&[]).unwrap();
 }
 
+/// SA vid 10 (a): a kept proxied pane an earlier engine left unfrozen, whose agent killed
+/// its warden, is refused by the next engine before its thaw since its proxy port is held,
+/// and its note says its sandbox could not be confirmed empty while the setsid child runs on.
+#[test]
+fn a_pane_refused_before_its_thaw_after_its_warden_was_killed_names_its_cleanup_uncertain() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let open = endpoint_runtimes(&fixture);
+    let id = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let pane = Proxied::keep_killing(&fixture, &host, id, free_proxy_port(), WardenKill::AtStart);
+    let _stop = StopChild(pane.folder.clone());
+    pane.pid("warden.killed");
+    let _held = [hold("127.0.0.1", pane.port), hold("::1", pane.port)];
+
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    assert!(!host.alive().unwrap().contains(&pane.agent));
+    let child = state_of(pane.pid("child.pid"));
+    assert!(
+        child.is_some_and(|state| state != 'T'),
+        "the agent's setsid child runs on: {child:?}"
+    );
+    assert!(
+        fixture.note(&format!(
+            "The terminal of team agent {id} was closed: its model proxy port {} is taken. {}.",
+            pane.port,
+            crate::sandbox::warden::CLEANUP_UNCERTAIN
+        )),
+        "the note names the cleanup uncertain"
+    );
+    assert!(team.shutdown().unwrap().is_empty());
+    host.close(&[]).unwrap();
+}
+
+/// SA vid 10 (b): with team agents set to stop when CrazyAgent quits, a proxied pane whose
+/// agent killed its warden is stopped at quit with no end its keeper confirmed, so while the
+/// agent's setsid child runs on the agent is stopped with a note that its sandbox could not
+/// be confirmed empty, never plainly.
+#[test]
+fn an_agent_stopped_at_quit_after_its_warden_was_killed_is_not_recorded_plainly_stopped() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let open = endpoint_runtimes(&fixture);
+    let id = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let pane = Proxied::keep_killing(&fixture, &host, id, free_proxy_port(), WardenKill::OnAsk);
+    let _stop = StopChild(pane.folder.clone());
+    crate::quit_settings::save(
+        &fixture.connection,
+        &crate::quit_settings::QuitSettings {
+            on_quit: crate::quit_settings::OnQuit::Stop,
+            ..crate::quit_settings::QuitSettings::default()
+        },
+    )
+    .unwrap();
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the proxied pane is taken over", |f| {
+        f.agent_status(id) == (AgentStatus::Idle, None)
+    });
+    std::fs::write(pane.folder.join("kill.warden"), "").unwrap();
+    pane.pid("warden.killed");
+
+    assert!(team.shutdown().unwrap().is_empty());
+    let child = state_of(pane.pid("child.pid"));
+    assert!(
+        child.is_some_and(|state| state != 'T'),
+        "the agent's setsid child runs on: {child:?}"
+    );
+    assert_eq!(
+        fixture.agent_status(id),
+        (
+            AgentStatus::Stopped,
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN)
+            ))
+        )
+    );
+    host.close(&[]).unwrap();
+}
+
 /// DEC-158: a listener that takes a frozen pane's proxy port while no engine runs gets no
 /// request from it, and the next engine, finding the port held, ends the pane without
 /// letting it run again.
@@ -963,6 +1042,78 @@ fn a_frozen_native_lead_the_next_engine_refuses_ends_without_running_again() {
     );
     assert!(next.shutdown().unwrap().is_empty());
     lead.end(&frozen);
+}
+
+/// v242 mates(): a native lead an earlier engine left running, whose teammates' server
+/// ended while no engine ran, is still ended by the next engine, which holds no keeper for
+/// that server and has no record of the lead: its kill finds no teammates' server rather
+/// than failing on the ended one, so the next engine starts instead of failing.
+#[test]
+fn an_unrecorded_native_lead_whose_teammates_server_ended_is_ended_by_a_next_engine() {
+    let lead = NativeLead::start_with(BEATING_CLAUDE);
+    let deadline = Instant::now() + WAIT;
+    while lead.beats() == 0 {
+        assert!(Instant::now() < deadline, "the lead's process never beat");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let agent = AgentId::team(lead.id).unwrap();
+    let mates = crate::terminal::teammates_socket(&lead.fixture.base, &agent).unwrap();
+    assert!(
+        crate::spawn_gate::connect_unix_std(&mates).is_ok(),
+        "the lead's teammates' server listens"
+    );
+    let ended = crate::spawn_gate::status(
+        Command::new(&lead.fixture.tmux)
+            .arg("-S")
+            .arg(&mates)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(ended.success(), "the teammates' server was not ended");
+    let deadline = Instant::now() + WAIT;
+    while crate::spawn_gate::connect_unix_std(&mates).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the ended teammates' server still listens"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        std::fs::symlink_metadata(&mates)
+            .is_ok_and(|found| std::os::unix::fs::FileTypeExt::is_socket(&found.file_type())),
+        "the ended teammates' server's socket file stays"
+    );
+    lead.fixture
+        .connection
+        .execute("DELETE FROM team_panes WHERE agent=?1", [lead.id])
+        .unwrap();
+
+    let fresh = crate::terminal::tmux_host(&lead.fixture.base, Some(lead.fixture.tmux.clone()));
+    let mut next = match standin_claude_runtime(&lead.fixture, BEATING_CLAUDE).with_terminal(fresh)
+    {
+        Ok(next) => next,
+        Err(problem) => panic!(
+            "the next engine failed on the lead's ended teammates' server: {}",
+            problem.0
+        ),
+    };
+    assert!(lead.fixture.note(&format!(
+        "The terminal of team agent {} was closed: the engine has no record of it.",
+        lead.id
+    )));
+    let deadline = Instant::now() + WAIT;
+    while state_of(lead.left).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the unrecorded lead's process still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(next.shutdown().unwrap().is_empty());
 }
 
 /// DEC-158: when the quitting engine cannot store one frozen pane's record, that pane is

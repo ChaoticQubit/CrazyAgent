@@ -1,5 +1,7 @@
 use super::buffer::buffer;
-use super::{AgentId, Host, HostError, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
+use super::{
+    AgentId, Host, HostError, PaneAt, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX,
+};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -75,6 +77,8 @@ impl LastScreens {
             history: Vec::new(),
             screen: kept.screen.clone(),
             chunks,
+            #[cfg(unix)]
+            at: None,
         })
     }
 }
@@ -205,6 +209,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input(agent, bytes)
     }
 
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        self.inner.input_at(agent, at, bytes)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.inner.input_live(agent)
     }
@@ -265,9 +273,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         &self,
         agent: &AgentId,
         command: &InteractiveCommand,
+        relayed: bool,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
-        let pane = self.inner.spawn_own_server(agent, command)?;
+        let pane = self.inner.spawn_own_server(agent, command, relayed)?;
         self.screens().forget(agent);
         Ok(pane)
     }
@@ -285,6 +294,11 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn server_keepers(&self, agent: &AgentId) -> Vec<(u32, bool)> {
         self.inner.server_keepers(agent)
+    }
+
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        self.inner.sever_lifelines(agent);
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -495,6 +509,8 @@ mod tests {
                 history: Vec::new(),
                 screen: b"last screen".to_vec(),
                 chunks,
+                #[cfg(unix)]
+                at: None,
             })
         }
 

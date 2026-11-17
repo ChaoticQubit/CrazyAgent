@@ -232,9 +232,9 @@ impl OwnerClient {
                 let mut bytes = key.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
-                bytes.fill(0);
+                crate::credentials::wipe(&mut bytes);
                 let sent = stream.write_all(&framed).await;
-                framed.fill(0);
+                crate::credentials::wipe(&mut framed);
                 sent.map_err(|_| failure("accounts_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
@@ -324,7 +324,7 @@ async fn handle(
             else {
                 return Err(unknown());
             };
-            let mut accounts = views(root, items).await?;
+            let mut accounts = views(authority, items).await?;
             let mut next = next;
             while encode_frame(&Reply::Page {
                 page: AccountPage {
@@ -375,7 +375,7 @@ async fn handle(
                 return Err(unknown());
             };
             Reply::Account {
-                account: views(root, vec![*added]).await?.remove(0),
+                account: views(authority, vec![*added]).await?.remove(0),
             }
         }
         Action::Rename { id, name } => {
@@ -385,26 +385,11 @@ async fn handle(
                 return Err(unknown());
             };
             Reply::Account {
-                account: views(root, vec![*listed]).await?.remove(0),
+                account: views(authority, vec![*listed]).await?.remove(0),
             }
         }
         Action::Remove { id } => {
-            let keys = authority.clone();
-            let removed = engine
-                .settled_job(
-                    |reply| Job::Accounts(admission.clone(), Command::Remove(id), reply),
-                    move |result| match result {
-                        Ok(ResultValue::Removed(connection)) => match &connection.auth {
-                            ModelAuthentication::ApiKey { credential_ref } => {
-                                remove_key(&keys.root, credential_ref)
-                            }
-                            _ => Ok(()),
-                        },
-                        _ => Ok(()),
-                    },
-                )
-                .await?;
-            let ResultValue::Removed(_) = removed else {
+            let ResultValue::Removed = actor(engine, admission, Command::Remove(id)).await? else {
                 return Err(unknown());
             };
             Reply::Removed
@@ -414,31 +399,23 @@ async fn handle(
             let listed = match actor(engine, admission, Command::Get(id.clone())).await {
                 Ok(ResultValue::Account(listed)) => listed,
                 refused => {
-                    key.into_bytes().fill(0);
+                    crate::credentials::wipe(&mut key.into_bytes());
                     return Err(refused.err().unwrap_or_else(unknown));
                 }
             };
             let ModelAuthentication::ApiKey { credential_ref } = &listed.connection.auth else {
-                key.into_bytes().fill(0);
+                crate::credentials::wipe(&mut key.into_bytes());
                 return Err(failure("account_key_not_allowed"));
             };
             replace_key(root, credential_ref, key)?;
-            let listed = match key_replaced(
-                engine,
-                admission,
-                authority,
-                id,
-                credential_ref.clone(),
-            )
-            .await
-            {
+            let listed = match key_replaced(engine, admission, id, credential_ref.clone()).await {
                 Ok(ResultValue::Account(current)) => current,
                 Err(gone) if gone.0 == "account_not_found" => return Err(gone),
                 Err(problem) if problem.0.starts_with("account_key") => return Err(problem),
                 _ => return Err(unknown()),
             };
             Reply::Account {
-                account: views(root, vec![*listed]).await?.remove(0),
+                account: views(authority, vec![*listed]).await?.remove(0),
             }
         }
         Action::Check { id } => {
@@ -446,7 +423,7 @@ async fn handle(
             else {
                 return Err(unknown());
             };
-            let (account, models) = check(root, *listed).await?;
+            let (account, models) = check(authority, *listed).await?;
             Reply::Checked {
                 check: AccountCheck { account, models },
             }
@@ -470,28 +447,18 @@ async fn actor(
         .await
 }
 
-/// Tells storage that a new key replaced an account's key, and deletes that key file once
-/// storage answers that the account is gone, even after the owner's wait ended, so a key
-/// replace racing a Remove leaves no key behind. Inputs: the engine, the admission, the
-/// authority, the account and its key reference. Output: storage's answer, or the error
-/// of a key file that could not be deleted.
+/// Tells storage that a new key replaced an account's key. Storage deletes that key file
+/// itself when the account is gone, even after the owner's wait ended, unless another
+/// connection still names the key, so a key replace racing a Remove leaves no key behind
+/// and takes none a sibling uses. Inputs: the engine, the admission, the account and its
+/// key reference. Output: storage's answer.
 pub(super) async fn key_replaced(
     engine: &Engine,
     admission: &Admission,
-    authority: &Arc<Authority>,
     id: CredentialRef,
     credential: CredentialRef,
 ) -> Result<ResultValue, EngineError> {
-    let keys = authority.clone();
-    engine
-        .settled_job(
-            |reply| Job::Accounts(admission.clone(), Command::KeyReplaced(id), reply),
-            move |result| match result {
-                Err(gone) if gone.0 == "account_not_found" => remove_key(&keys.root, &credential),
-                _ => Ok(()),
-            },
-        )
-        .await
+    actor(engine, admission, Command::KeyReplaced(id, credential)).await
 }
 
 async fn authenticate(
@@ -516,7 +483,7 @@ async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineErr
         }
         let mut bytes = vec![0; size];
         if stream.read_exact(&mut bytes).await.is_err() {
-            bytes.fill(0);
+            crate::credentials::wipe(&mut bytes);
             return Err(invalid());
         }
         AccountSecret::new(bytes).map_err(|_| failure("account_key_invalid"))
@@ -628,7 +595,7 @@ fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), Eng
     let mut file = File::from(fd);
     let mut bytes = key.into_bytes();
     let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all());
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     if written.is_err() {
         let _ = rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
@@ -671,7 +638,7 @@ fn store_key(
     key: AccountSecret,
 ) -> Result<(), EngineError> {
     let mut bytes = key.into_bytes();
-    bytes.fill(0);
+    crate::credentials::wipe(&mut bytes);
     Err(failure("account_key_store_unavailable"))
 }
 
@@ -713,7 +680,7 @@ pub(super) fn replace_key(
     _credential: &CredentialRef,
     key: AccountSecret,
 ) -> Result<(), EngineError> {
-    key.into_bytes().fill(0);
+    crate::credentials::wipe(&mut key.into_bytes());
     Err(failure("account_key_store_unavailable"))
 }
 
@@ -735,7 +702,7 @@ fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, 
         .is_err()
         || bytes.len() > SECRET_MAX
     {
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         return Err(failure("account_key_store_unavailable"));
     }
     Ok(Some(bytes))
@@ -798,12 +765,20 @@ fn entered_url(listed: &Listed) -> bool {
         .is_some_and(|method| method.url != Field::Hidden)
 }
 
-fn base_status(root: &Root, listed: &Listed) -> Result<AccountStatus, EngineError> {
+/// Reads an account's status before any URL probe. A sign-in an earlier engine run proved
+/// reads as signing in while this run's engine-start re-proof still has it to check, so the
+/// Accounts page keeps reading until it settles; one the re-proof skipped or already ended
+/// reads as not signed in (SIGNOUT-AFTER-RESTART). Inputs: the engine root, the listed
+/// account and whether that re-proof still has it to check. Output: the status.
+fn base_status(root: &Root, listed: &Listed, pending: bool) -> Result<AccountStatus, EngineError> {
     Ok(match &listed.connection.auth {
         ModelAuthentication::NativeManaged { .. } | ModelAuthentication::Oauth { .. } => {
             match listed.sign_in {
                 Some(NativeAuthPhase::AuthenticatedObserved) if listed.launchable => {
                     AccountStatus::SignedIn
+                }
+                Some(NativeAuthPhase::AuthenticatedObserved) if pending && listed.rechecking => {
+                    AccountStatus::SigningIn
                 }
                 Some(
                     NativeAuthPhase::Starting
@@ -857,6 +832,10 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         status,
         status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
             "Sign-in rejected"
+        } else if status == AccountStatus::SigningIn
+            && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
+        {
+            "Checking sign-in"
         } else {
             status.label()
         }
@@ -864,11 +843,13 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
     }
 }
 
-async fn views(root: &Root, items: Vec<Listed>) -> Result<Vec<AccountView>, EngineError> {
+async fn views(authority: &Authority, items: Vec<Listed>) -> Result<Vec<AccountView>, EngineError> {
+    let root = &authority.root;
     let mut probes: BTreeMap<String, Option<bool>> = BTreeMap::new();
     let mut bases = Vec::with_capacity(items.len());
     for listed in &items {
-        let base = base_status(root, listed)?;
+        let pending = authority.reproof_pending(&listed.connection.id);
+        let base = base_status(root, listed, pending)?;
         if base != AccountStatus::NotSignedIn
             && entered_url(listed)
             && let Some(url) = http_url(&listed.connection)
@@ -915,8 +896,13 @@ async fn views(root: &Root, items: Vec<Listed>) -> Result<Vec<AccountView>, Engi
     Ok(views)
 }
 
-async fn check(root: &Root, listed: Listed) -> Result<(AccountView, Vec<String>), EngineError> {
-    let base = base_status(root, &listed)?;
+async fn check(
+    authority: &Authority,
+    listed: Listed,
+) -> Result<(AccountView, Vec<String>), EngineError> {
+    let root = &authority.root;
+    let pending = authority.reproof_pending(&listed.connection.id);
+    let base = base_status(root, &listed, pending)?;
     let Some(url) = http_url(&listed.connection) else {
         return Ok((view(&listed, base), Vec::new()));
     };
@@ -936,7 +922,7 @@ async fn check(root: &Root, listed: Listed) -> Result<(AccountView, Vec<String>)
     let checked = probe::check(&url, key.as_deref(), CHECK_PROBE).await;
     let mut key = key;
     if let Some(bytes) = key.as_mut() {
-        bytes.fill(0);
+        crate::credentials::wipe(bytes);
     }
     Ok(match checked {
         Err(_) => (view(&listed, AccountStatus::Unreachable), Vec::new()),

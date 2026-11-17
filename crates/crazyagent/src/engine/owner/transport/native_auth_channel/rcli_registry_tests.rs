@@ -1122,3 +1122,119 @@ async fn engine_start_checks_the_real_file_it_pins_not_its_entry_again() {
     })
     .await;
 }
+
+/// An owner install of RCLI reached through a link in an owner folder, beside a file an
+/// agent dropped in its own folder. Inputs: the row's folder and whether the link leads to
+/// the agent's file. Output: the entry, the link, the installed file and the agent's file.
+fn rcli_chain(root: &Path, to_agent: bool) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let owner = root.join("owner");
+    let links = owner.join("links");
+    let planted = root.join("work/.crazyagent/agents/a1/bin");
+    std::fs::create_dir_all(&links).unwrap();
+    std::fs::create_dir_all(&planted).unwrap();
+    let installed = physical_file(&owner, "rcli-2.4.2", b"owner-rcli");
+    let dropped = physical_file(&planted, crate::paths::RCLI_EXECUTABLE, b"agent-rcli");
+    let middle = links.join(crate::paths::RCLI_EXECUTABLE);
+    let first = if to_agent { &dropped } else { &installed };
+    std::os::unix::fs::symlink(first, &middle).unwrap();
+    let entry = owner.join(crate::paths::RCLI_EXECUTABLE);
+    std::os::unix::fs::symlink(&middle, &entry).unwrap();
+    (entry, middle, installed, dropped)
+}
+
+/// A step that points a link at another file. Inputs: the link and its new target. Output:
+/// the step.
+fn relink(link: PathBuf, to: PathBuf) -> super::Step {
+    Box::new(move || {
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&to, &link).unwrap();
+    })
+}
+
+/// RV-DS241-191 (DeepSec -191, fixed in fb35aec3f): engine start pins a found RCLI host as
+/// it pins a found harness. An entry that leads to an agent's file when it is resolved and
+/// back to the owner's install when the check runs is refused with the start check's code
+/// and neither identity is pinned; found again through the owner's link, the master and the
+/// key writer are both pinned to the owner's install.
+#[tokio::test]
+async fn a_found_rcli_is_pinned_only_once_the_file_it_resolved_passes_the_start_checks() {
+    let mut fixture = RegistryCase::start().await;
+    let host = fixture.host();
+    let root = std::fs::canonicalize(fixture.tools.path()).unwrap();
+    let (entry, middle, installed, _) = rcli_chain(&root, true);
+    super::BETWEEN_CHECK_AND_CAPTURE
+        .lock()
+        .unwrap()
+        .push((entry.clone(), relink(middle, installed.clone())));
+    let refused = fixture
+        .service
+        .register_found_rcli_executable(&entry)
+        .err()
+        .map(|error| error.0);
+    let unpinned = (
+        host.registered_rcli_master_executable().is_err(),
+        host.registered_rcli_private_key_executable().is_err(),
+    );
+    let again = fixture
+        .service
+        .register_found_rcli_executable(&entry)
+        .map_err(|error| error.0);
+    let pinned = [
+        host.registered_rcli_master_executable(),
+        host.registered_rcli_private_key_executable(),
+    ]
+    .map(|role| {
+        role.ok()
+            .and_then(|found| found.verified_path().ok().map(|path| path.to_path_buf()))
+    });
+    fixture.service.shutdown().await.unwrap();
+    assert_eq!(
+        refused.as_deref(),
+        Some(crate::harnesses::finding::PATH_AGENT_SPACE)
+    );
+    assert_eq!(
+        unpinned,
+        (true, true),
+        "a refused RCLI pins neither identity"
+    );
+    assert_eq!(again, Ok(()));
+    assert_eq!(pinned, [Some(installed.clone()), Some(installed)]);
+}
+
+/// rv-sec2 B1 N2: the master and the key writer are one capture of one checked file, held as
+/// one pinned host in both roles, so no link that moves after it can split them. A step
+/// queued for a second capture never runs, and both roles hold the owner's install.
+#[tokio::test]
+async fn a_found_rcli_pins_the_master_and_the_key_writer_from_one_capture() {
+    let mut fixture = RegistryCase::start().await;
+    let host = fixture.host();
+    let root = std::fs::canonicalize(fixture.tools.path()).unwrap();
+    let (entry, middle, installed, dropped) = rcli_chain(&root, false);
+    {
+        let mut steps = super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap();
+        steps.push((entry.clone(), Box::new(|| {})));
+        steps.push((entry.clone(), relink(middle, dropped)));
+    }
+    let registered = fixture
+        .service
+        .register_found_rcli_executable(&entry)
+        .map_err(|error| error.0);
+    let master = host.registered_rcli_master_executable();
+    let writer = host.registered_rcli_private_key_executable();
+    let one = matches!((&master, &writer), (Ok(master), Ok(writer)) if Arc::ptr_eq(master, writer));
+    let pinned = [master, writer].map(|role| {
+        role.ok()
+            .and_then(|found| found.verified_path().ok().map(|path| path.to_path_buf()))
+    });
+    let steps_left = {
+        let mut steps = super::BETWEEN_CHECK_AND_CAPTURE.lock().unwrap();
+        let left = steps.iter().filter(|(path, _)| *path == entry).count();
+        steps.retain(|(path, _)| *path != entry);
+        left
+    };
+    fixture.service.shutdown().await.unwrap();
+    assert_eq!(registered, Ok(()));
+    assert!(one, "one pinned host fills both roles");
+    assert_eq!(pinned, [Some(installed.clone()), Some(installed)]);
+    assert_eq!(steps_left, 1, "no second capture ran");
+}

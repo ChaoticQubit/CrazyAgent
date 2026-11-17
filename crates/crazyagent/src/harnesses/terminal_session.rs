@@ -86,6 +86,8 @@ pub struct TerminalSession {
     _key: Option<KeyFile>,
     _context: Option<Installed>,
     _relay: Option<Relay>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
@@ -117,29 +119,66 @@ struct FirstScreen {
 /// on the same account home.
 pub(super) struct KeyFile {
     path: PathBuf,
+    #[cfg(unix)]
+    home: Option<std::os::fd::OwnedFd>,
     digest: [u8; 32],
 }
 
 impl KeyFile {
-    /// Guards the key file at `path` that holds `content`. Inputs: the path and the bytes.
-    /// Output: the guard, which removes the file on drop only while it still holds them.
+    /// Guards the key file at `path` that holds `content`. On Unix it holds the folder the
+    /// file sits in from here on, opened without following a link, so a home swapped later
+    /// cannot redirect the removal. Inputs: the path and the bytes. Output: the guard, which
+    /// removes the file on drop only while it still holds them.
     pub(super) fn new(path: PathBuf, content: &[u8]) -> Self {
         assert!(content.len() as u64 <= KEY_FILE_BYTES_MAX);
         Self {
+            #[cfg(unix)]
+            home: path.parent().and_then(|home| {
+                use rustix::fs::{Mode, OFlags};
+                let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+                rustix::fs::open(home, flags, Mode::empty()).ok()
+            }),
             path,
             digest: Sha256::digest(content).into(),
         }
+    }
+
+    /// Tells whether a read of the key file found this guard's bytes. Input: the text read,
+    /// none when it could not be read as a small plain file. Output: the answer.
+    fn holds(&self, current: Option<String>) -> bool {
+        current.is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
     }
 }
 
 impl Drop for KeyFile {
     /// Removes the key file only while it is still a regular file holding this guard's
-    /// bytes, read through one open that follows no link and waits on no FIFO, since the
-    /// path sits in the agent-writable account home. Input: the guard. Output: none.
+    /// bytes. It reads and unlinks through the home folder held since the guard was made, by
+    /// an open that follows no link and waits on no FIFO, since the file sits in the
+    /// agent-writable account home. A home that could not be held removes nothing.
+    #[cfg(unix)]
     fn drop(&mut self) {
-        if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
-            .is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
-        {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        let (Some(home), Some(name)) = (&self.home, self.path.file_name()) else {
+            return;
+        };
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let current = rustix::fs::openat(home, name, flags, Mode::empty())
+            .ok()
+            .and_then(|file| crate::platform::read_plain(file.into(), KEY_FILE_BYTES_MAX));
+        if self.holds(current) {
+            let _ = rustix::fs::unlinkat(home, name, AtFlags::empty());
+        }
+    }
+
+    /// Removes the key file only while it is still a regular file holding this guard's
+    /// bytes, read through one open that follows no link, since the path sits in the
+    /// agent-writable account home. Input: the guard. Output: none.
+    #[cfg(not(unix))]
+    fn drop(&mut self) {
+        if self.holds(crate::platform::read_plain_file(
+            &self.path,
+            KEY_FILE_BYTES_MAX,
+        )) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -170,17 +209,35 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
 }
 
 /// Says whether an agent's app works on nothing in its pane: it drew nothing for
-/// `APP_QUIET` and no question or permission prompt is on its screen. With `prompted` the
-/// screen must also show the app's own input prompt (see `idle_prompt`), so a still dialog
-/// the question rule does not know does not count. A host that cannot tell and a failed
-/// look say no. Takes the host, the pane name and whether the prompt is needed. Returns
-/// the answer.
+/// `APP_QUIET`, no question or permission prompt is on its screen and no process of its
+/// pane is stopped (see `unstopped`). With `prompted` the screen must also show the app's
+/// own input prompt (see `idle_prompt`), so a still dialog the question rule does not know
+/// does not count. A host that cannot tell and a failed look say no. Takes the host, the
+/// pane name and whether the prompt is needed. Returns the answer.
 fn waits(host: &dyn Host, agent: &AgentId, prompted: bool) -> bool {
     use crate::team::events::{idle_prompt, question};
     matches!(host.quiet(agent), Ok(Some(quiet)) if quiet >= APP_QUIET)
         && host
             .screen(agent)
             .is_ok_and(|screen| question(&screen).is_none() && (!prompted || idle_prompt(&screen)))
+        && unstopped(host, agent)
+}
+
+/// Says whether no process of an agent's pane is stopped. An agent can write to its own
+/// terminal and signal what runs in its sandbox, so it can draw its app's input prompt and
+/// stop the app under it, which then draws nothing (RV-DS241-190 sec F1). Takes the host
+/// and the pane name. Returns the answer; a host that names no first process and a process
+/// table that cannot be read say no.
+#[cfg(unix)]
+fn unstopped(host: &dyn Host, agent: &AgentId) -> bool {
+    matches!(host.pane_pid(agent), Ok(Some(pid)) if !crate::team::caller::stopped_under(pid))
+}
+
+/// Says no where no process table is read; no agent pane runs there (DEC-094). Inputs:
+/// unused. Output: false.
+#[cfg(not(unix))]
+fn unstopped(_host: &dyn Host, _agent: &AgentId) -> bool {
+    false
 }
 
 fn host_failure(error: HostError) -> LaunchError {
@@ -349,7 +406,7 @@ impl TerminalSession {
         let ready = LaunchEvent::Ready {
             native_session: claude.then_some(session_id),
         };
-        Ok(Self {
+        let session = Self {
             host,
             agent,
             pid: pane.pid,
@@ -400,7 +457,36 @@ impl TerminalSession {
             _key: key,
             _context: installed,
             _relay: relay,
-        })
+            #[cfg(unix)]
+            lifeline: None,
+        };
+        session.guarded(&request)
+    }
+
+    /// Gives a pane whose harness reaches its model through an engine key relay a lifeline,
+    /// so its process group ends when the engine dies, a crash included, and nothing dials
+    /// the relay's freed port (SA vid 9, B6 r1 F1). Other panes stay adoptable. Input: the
+    /// started session and its routed request. Output: the session, or `launch_spawn_failed`
+    /// when the lifeline did not start, which drops the session and so ends its pane.
+    #[cfg(unix)]
+    fn guarded(mut self, request: &LaunchRequest) -> Result<Self, LaunchError> {
+        let relayed = request
+            .account
+            .key()
+            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
+        if relayed {
+            let lifeline = crate::research::runner::Lifeline::watch(self.pid)
+                .map_err(|_| failure("launch_spawn_failed"))?;
+            self.lifeline = Some(lifeline);
+        }
+        Ok(self)
+    }
+
+    /// Gives the session back as it is: off unix no agent pane starts at all (see
+    /// `agent_pane_unavailable`). Input: the session and its request. Output: the session.
+    #[cfg(not(unix))]
+    fn guarded(self, _request: &LaunchRequest) -> Result<Self, LaunchError> {
+        Ok(self)
     }
 
     /// Names the harness conversation this pane records, once its record exists: the id
@@ -508,6 +594,26 @@ impl TerminalSession {
             return Ok(());
         }
         self.type_bytes(ESCAPE)
+    }
+
+    /// Presses Escape once in every other live pane of this agent's own window, the
+    /// teammates a native lead split off, as the engine quits with the agent kept, so their
+    /// running turns stop as this pane's does while every pane keeps running. A window the
+    /// host cannot list, or one no longer holding this agent's own pane, gets nothing, and a
+    /// pane that does not take the key is passed over. Takes the session. Returns nothing.
+    pub fn interrupt_teammates(&self) {
+        let Ok(panes) = self.host.panes(&self.agent) else {
+            return;
+        };
+        if !panes.iter().any(|pane| pane.pid == self.pid) {
+            return;
+        }
+        let pressed = panes
+            .iter()
+            .filter(|pane| pane.pid != self.pid && !pane.dead)
+            .filter(|pane| self.host.input_pane(&self.agent, &pane.id, ESCAPE).is_ok())
+            .count();
+        assert!(pressed < panes.len());
     }
 
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
@@ -961,6 +1067,10 @@ impl TerminalSession {
         }
         let _ = self.host.kill(&self.agent);
         self.end_group(seen, held);
+        #[cfg(unix)]
+        if let Some(lifeline) = self.lifeline.as_mut() {
+            lifeline.release();
+        }
     }
 
     /// Kills what the harness left in the pane's process group once the pane is gone, as a
@@ -1324,6 +1434,15 @@ impl AgentSession {
         match self {
             Self::Piped(session) => session.interrupt(),
             Self::Terminal(session) => session.interrupt(),
+        }
+    }
+
+    /// Presses Escape in the teammates' panes of a pane agent, see
+    /// [`TerminalSession::interrupt_teammates`]; a headless agent on pipes has none.
+    /// Takes the session. Returns nothing.
+    pub fn interrupt_teammates(&self) {
+        if let Self::Terminal(session) = self {
+            session.interrupt_teammates();
         }
     }
 

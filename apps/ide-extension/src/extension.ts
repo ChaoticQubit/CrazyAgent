@@ -1,4 +1,4 @@
-import type * as vscode from "vscode";
+import * as vscode from "vscode";
 import { registerBaseContent } from "./base-content.js";
 import { registerComments } from "./comments.js";
 import { Engine } from "./engine.js";
@@ -15,6 +15,15 @@ import { sidebarMemories } from "./sidebar/memories.js";
 import { registerChanges } from "./scm.js";
 import { sandboxedTerminal, terminalGit, terminalMenu } from "./terminal.js";
 import { registerTrust } from "./trust.js";
+
+/**
+ * What the built-in extension tells the owner when the engine refused its session as
+ * taken (CA-SEC-004): the IDE's access was used twice, by another extension, by a second
+ * window starting at the same moment, or by this one again after the engine could not
+ * remove the access file, so it names all three (rv-ds241 CA-SEC-004b N1).
+ */
+export const SESSION_TAKEN =
+  "CrazyAgent ended this IDE's connection because its access was used twice: by another extension in it, by a second window of it opening at the same moment, or after CrazyAgent could not remove its access file. Close the IDE and open it again from CrazyAgent. If it happens again with one window, an extension you approved for this project may not be safe.";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -44,12 +53,14 @@ const features: Feature[] = [
 /**
  * Starts the settings lock, then every feature when the CrazyAgent engine launched this IDE
  * server, which it shows by setting the capability and socket variables. The bridge keeps
- * its session token in the context's secret storage.
+ * its session token in the context's secret storage, and says `SESSION_TAKEN` once if the
+ * engine refuses its session as taken.
  * Input: the extension context. Output: none; the bridge closes with the context.
  */
 export function activate(context: vscode.ExtensionContext): void {
   startLock(context, process.env);
-  const engine = Engine.fromEnv(process.env, context.secrets);
+  const taken = () => void vscode.window.showErrorMessage(SESSION_TAKEN);
+  const engine = Engine.fromEnv(process.env, context.secrets, taken);
   if (engine === undefined) return;
   context.subscriptions.push(engine);
   for (const feature of features) feature(context, engine);

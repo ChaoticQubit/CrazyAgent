@@ -1,19 +1,25 @@
-import { checkUnconfirmed, harnessCatalog, nextGeneration, poolSummaries, receiptResult } from "../../api";
+import { harnessCatalog, poolSummaries } from "../../api";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { dismissIntake, loadIntakeJob, newProjectCopy, stopIntake } from "../../api-intake";
 import {
-  failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, saveAgentPolicy, settledReceipt, setProjectPool, setupProject,
+  failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, startSetupJob,
 } from "../../api-projects";
-import type { PoolChoice, ProjectCatalog } from "../../api-projects";
+import type { PoolChoice, ProjectCatalog, ProjectSetup, ProjectSpec } from "../../api-projects";
+import type { IntakeJob } from "../../engine-client";
 import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader } from "../../ui";
 import { displayText } from "../conversation";
+import { jobActions, jobLine, refusalLine, setupFollow } from "../intake/intake";
 import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
-import { AccessLevels, accessLabel, policyOf } from "../project/access";
+import { AccessLevels } from "../project/access";
+import { carryFollowUps, dropStarted, keepStarted, startedJob, type Carry } from "./carry";
 import { PoolPicker } from "./pool-picker";
-import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
+import { BasicsFields, PublishFields, ResearchSwitches, RoadmapSwitch, useGitHubPublish } from "./fields";
+import { noteLostStart } from "../project/publish-job";
+import { createWait, emptyPublish, publishOutcome, startPublish, startReplyLost } from "./publish";
 import { TeamEditor } from "./team-editor";
 import {
   STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
@@ -24,20 +30,76 @@ import "../project/projects.css";
 
 let kept: { draft: ProjectDraft; step: StepId } | null = null;
 
-/** Forgets the kept New Project draft.
- * Input: none. Output: none. */
+/** Forgets the kept New Project draft and the job it started, whose follow-ups then never run
+ * unless they already started. Input: none. Output: none. */
 export function discardKeptDraft(): void {
   kept = null;
+  dropStarted();
 }
 
 function valueOf<T>(result: Result<T> | undefined): T | null {
   return result?.kind === "ok" ? result.value : null;
 }
 
+const KEPT_LINE = "Couldn't create the project. Your answers are kept.";
+
+/** What Create got from the engine: the started New Project job, or the note the page shows
+ * with the answers kept. */
+export type SetupStarted = { kind: "started"; job: IntakeJob } | { kind: "refused"; note: string };
+
+/** Starts the engine's New Project job (DEC-177 add.2). Inputs: the name spec, the setup, the
+ * start and the job read a busy refusal names the running job from. Output: the started job,
+ * or the note the page shows. */
+export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start = startSetupJob,
+  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<SetupStarted> {
+  const result = await start(spec, setup);
+  if (result.kind === "ok") return { kind: "started", job: result.value };
+  if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: creating a project with research isn't in this build." };
+  return { kind: "refused", note: `${KEPT_LINE} ${await refusalLine(result.code, newProjectCopy(result), read)}` };
+}
+
+/** What New Project opened again keeps of the job it started before the owner left it
+ * (DEC-177 add.2 Q1 A): it follows one still building and keeps the answers of one that failed
+ * or stopped; a project the job made keeps no answers, read from the job ended done or, once
+ * the job left Home, from the projects listing it (rv-code bgjobs-3b F3). Inputs: the job read,
+ * the started job and the project ids the session lists. Output: the job id to follow, or null,
+ * and whether the answers stay. */
+export function reopened(job: IntakeJob | null, started: { id: string; project: string }, projects: readonly string[]): { follow: string | null; keep: boolean } {
+  const now = setupFollow(job, started.id);
+  switch (now.kind) {
+    case "running":
+      return { follow: started.id, keep: true };
+    case "done":
+      return { follow: null, keep: false };
+    case "ended":
+      return { follow: null, keep: true };
+    case "lost":
+      return { follow: null, keep: !projects.includes(started.project) };
+  }
+}
+
+/** Reads the New Project job this page started before the owner left it, as the page opens
+ * again, by `reopened`: it follows one still building, else lets go, dropping the answers of a
+ * project already made, whose follow-ups Home's poll ran, Home saying how it ended. Inputs:
+ * Home's read of the engine's job and the project ids the session lists. Output: the job id to
+ * follow, or null. */
+function resumeSetup(job: IntakeJob | null, projects: readonly string[]): string | null {
+  const started = startedJob();
+  if (started === null) return null;
+  const now = reopened(job, started, projects);
+  if (now.follow !== null) return now.follow;
+  if (!now.keep) kept = null;
+  dropStarted();
+  return null;
+}
+
 /** The five-step New Project flow: Basics, Documents, Work, Pool and Team, then Create project.
  * Inputs: an optional starting step and a navigate handler for hash routes.
  * Output: the page; answers are kept if the owner leaves and comes back. */
 export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: string; navigate?: (path: string) => void }) {
+  const session = useContext(SessionContext);
+  const [following, setFollowing] = useState<string | null>(() => resumeSetup(session?.intake ?? null,
+    session?.projects.kind === "ok" ? session.projects.value.map((row) => row.id) : []));
   const initialStep = STEPS.some((item) => item.id === routeStep) ? routeStep as StepId : kept?.step ?? "basics";
   const [draft, setDraftState] = useState<ProjectDraft>(() => kept?.draft ?? emptyDraft());
   const [step, setStepState] = useState<StepId>(initialStep);
@@ -51,10 +113,14 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [docErrors, setDocErrors] = useState<string[]>([]);
   const [docPath, setDocPath] = useState("");
   const [picker, setPicker] = useState<"ready" | "missing" | "failed">("ready");
-  const [creating, setCreating] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   const [createError, setCreateError] = useState("");
   const [discarding, setDiscarding] = useState(false);
-  const session = useContext(SessionContext);
+  const mounted = useRef(true);
+  const follow = following === null ? null : setupFollow(session?.intake ?? null, following);
+  const creating = starting || finishing || following !== null;
+  const github = useGitHubPublish();
 
   const setDraft = (next: ProjectDraft) => {
     setDraftState(next);
@@ -119,6 +185,29 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     return () => window.removeEventListener("keydown", onKey);
   }, [discarding]);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    session?.followIntake(following);
+    return () => session?.followIntake(null);
+  }, [following]);
+
+  useEffect(() => {
+    if (following === null || follow === null || follow.kind === "running") return;
+    const carried = follow.kind === "done" ? carryFollowUps(following, follow.project) : null;
+    dropStarted();
+    setFollowing(null);
+    if (follow.kind === "done") {
+      if (carried) void finish(follow.project, following, carried);
+      return;
+    }
+    if (follow.kind === "ended") void leave(following);
+    setCreateError(follow.kind === "ended" ? `${KEPT_LINE} ${follow.words}` : "We couldn't confirm the project was created. Check your projects before trying again.");
+  }, [following, follow?.kind]);
+
   const catalogValue = valueOf(catalog);
   const harnessValue = valueOf(harnesses);
   const poolValue = valueOf(pools);
@@ -127,53 +216,61 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const index = STEPS.findIndex((item) => item.id === step);
   const showBasicsErrors = visited.has("documents") || visited.has("work") || visited.has("pool") || visited.has("team") || draft.name !== "";
   const teamOk = draft.team !== null && teamValid(draft.team, harnessValue);
-  const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && teamOk && !creating;
+  const publishWait = createWait(draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered, github.signedIn, github.checking);
+  const canCreate = catalog?.kind === "ok" && Object.keys(basics).length === 0 && !publishWait && teamOk && !creating;
 
   async function create() {
     if (!canCreate) return;
-    setCreating(true);
+    setStarting(true);
     setCreateError("");
     const request = buildRequest(draft);
-    const result = await setupProject(request.spec, request.setup, nextGeneration());
-    if (result.kind !== "ok") {
-      setCreating(false);
-      setCreateError(result.kind === "not_ready" ? "Not ready yet: creating a project with research isn't in this build." : `Couldn't create the project. Your answers are kept. ${failureCopy(result)}`);
+    const result = await setupStart(request.spec, request.setup);
+    setStarting(false);
+    if (result.kind === "refused") {
+      setCreateError(result.note);
       return;
     }
-    let receipt = result.value;
-    if (needsReconcile(receipt)) {
-      const settled = await checkUnconfirmed();
-      session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
-      receipt = settledReceipt(receipt, settled);
-    }
-    const state = receiptState(receipt);
-    const id = receipt.project_id;
-    if (state.kind !== "applied" || !id) {
-      setCreating(false);
-      setCreateError(state.kind === "unconfirmed" ? "We couldn't confirm your last change. Check your projects before trying again." : `Couldn't create the project. Your answers are kept. ${failureCopy(state.kind === "rejected" ? state.code : "unknown")}`);
+    keepStarted({
+      id: result.job.id, project: result.job.project_id ?? "", draft, name: request.spec.name, pool: draft.pool,
+      poolLabel: chosenPool ? poolName(chosenPool.pool) : draft.pool ?? "", access: draftAccess(draft, catalogValue?.agent_access),
+      research: request.setup.research.length,
+    });
+    session?.refreshIntake(result.job);
+    setFollowing(result.job.id);
+  }
+
+  async function stop(job: IntakeJob) {
+    const result = await stopIntake(job.id);
+    if (result.kind === "error") setCreateError(newProjectCopy(result));
+    session?.refreshIntake();
+  }
+
+  /** Takes the page's ended job off Home: waits for the engine to drop it, then reads the job
+   * again, so Home's panel clears at once instead of at the idle read. Input: the job's id. */
+  async function leave(job: string) {
+    await dismissIntake(job);
+    session?.refreshIntake();
+  }
+
+  /** Ends a New Project on its page once its job is done: the shared pool and agent access
+   * follow-ups (DEC-177 add.2 Q1 B), which finish even if the owner leaves, a toast then saying
+   * how they ended, then, only while the page stays open, its publish, the job leaving Home and
+   * the project opening. Inputs: the new project's id, the job's id and the carry. */
+  async function finish(id: string, job: string, carried: Carry) {
+    kept = null;
+    setFinishing(true);
+    const draft = carried.setup.draft;
+    let message = await carried.outcome;
+    if (!mounted.current) {
+      session?.showToast(message, { name: "home" });
       return;
     }
-    const name = request.spec.name;
-    const count = request.setup.research.length;
-    let message = draft.pool
-      ? `${name} created.${count ? ` ${count} research ${count === 1 ? "agent is" : "agents are"} starting.` : ""}`
-      : `${name} created. Research starts when you choose a pool.`;
-    if (draft.pool) {
-      const assigned = await setProjectPool(id, draft.pool, nextGeneration());
-      if (assigned.kind !== "ok" || assigned.value.kind !== "applied") {
-        message = `${name} created. Couldn't assign ${chosenPool ? poolName(chosenPool.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
-      }
-    }
-    const access = draftAccess(draft, catalogValue?.agent_access);
-    if (access !== "sandboxed") {
-      const read = await loadAgentPolicy(id);
-      const saved = read.kind === "ok" ? await saveAgentPolicy(id, policyOf(read.value, access, read.value.network, read.value.toolchains.map((row) => row.allowed), read.value.ide_git_hooks, read.value.ide_agent_files), read.value.version, nextGeneration()) : read;
-      const state = saved.kind === "ok" ? receiptState(saved.value) : null;
-      if (state?.kind !== "applied") {
-        const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";
-        message = `${message} Its agents stay Sandboxed: ${accessLabel(access)} wasn't saved.${why} Choose it again in the project's Settings, Agent access.`;
-      }
-    }
+    const publishing = startPublish(id, draft.publish ?? emptyPublish(), draft.name, draft.about, github.offered);
+    const started = publishing ? await publishing : null;
+    const outcome = publishOutcome(started);
+    if (startReplyLost(started)) noteLostStart(id, Date.now());
+    if (outcome) message = `${message} ${outcome}`;
+    void leave(job);
     kept = null;
     await session?.refreshProjects();
     flash(message);
@@ -227,6 +324,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         {step === "basics" && <div className="pj-stack">
           <h2 id="pj-step-title">Basics</h2>
           <BasicsFields prefix="np" draft={draft} onChange={setDraft} catalog={catalog} errors={basics} showErrors={showBasicsErrors} autoFocus />
+          <PublishFields prefix="np" draft={draft} onChange={setDraft} github={github} />
           <div className="pj-field">
             <span className="pj-label">Project folder</span>
             <p>CrazyAgent creates a new folder for this project when you create it.</p>
@@ -274,27 +372,32 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         </div>}
         {step === "team" && <div className="pj-stack">
           <h2 id="pj-step-title">Team</h2>
-          {createError && <Notice tone="danger" alert>{createError}</Notice>}
           {harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build, so installed status isn't checked." />}
           {draft.team ? <TeamEditor prefix="np" team={draft.team} harnesses={harnessValue} pool={chosenPool} research={draft.research}
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
           {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
-          <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} onChange={(access) => setDraft({ ...draft, access })} />
+          <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} gaps={(level) => catalogValue?.agent_access?.find((item) => item.access === level)?.gaps ?? []} onChange={(access) => setDraft({ ...draft, access })} />
           <p className="pj-help">You can change agent access later in the project's Settings, Agent access.</p>
           <p className="pj-summary">{summary(draft, chosenPool ? poolName(chosenPool.pool) : null)}</p>
+        </div>}
+        {createError && <Notice tone="danger" alert>{createError}</Notice>}
+        {follow?.kind === "running" && <div className="pj-row" role="status">
+          <span className="pj-small pj-secondary">{displayText(jobLine(follow.job))}</span>
+          {jobActions(follow.job).includes("stop") && <Button size="small" variant="secondary" onClick={() => void stop(follow.job)}>Stop</Button>}
+          <span className="pj-small pj-muted">You can leave this page and it keeps going. If you do, choose its pool and agent access in its Settings afterwards.</span>
         </div>}
         <footer className="pj-footer">
           <Button icon="arrow-left" disabled={index === 0} onClick={() => setStep(STEPS[Math.max(0, index - 1)].id)}>Back</Button>
           {step === "team"
             ? <Button type="submit" variant="primary" icon="folder-plus" pending={creating} pendingLabel="Creating..." disabled={!canCreate} aria-describedby={!canCreate ? "np-create-why" : undefined}>Create project</Button>
             : <Button type="submit" variant="primary">Next</Button>}
-          {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : "Fix the team above first."}</span>}
+          {step === "team" && !canCreate && !creating && <span className="pj-small pj-muted" id="np-create-why">{catalog?.kind !== "ok" ? "Create project needs the engine's project setup." : Object.keys(basics).length ? "Finish Basics first." : publishWait ?? "Fix the team above first."}</span>}
         </footer>
       </form>
     </div>
     <ConfirmDialog open={discarding} title="Discard this new project?" confirmLabel="Discard" cancelLabel="Keep editing"
-      onCancel={() => setDiscarding(false)} onConfirm={() => { kept = null; setDiscarding(false); navigate("/home"); }}>
+      onCancel={() => setDiscarding(false)} onConfirm={() => { discardKeptDraft(); setDiscarding(false); navigate("/home"); }}>
       Your answers on every step are thrown away.
     </ConfirmDialog>
   </div>;

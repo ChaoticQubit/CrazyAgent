@@ -3,7 +3,9 @@ use crate::engine::EngineError;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
-use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crate::sandbox::{
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
+};
 use rustix::process::Pid;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -222,7 +224,8 @@ impl MasterFixture {
         .unwrap()
         .allow_read(readable)
         .unwrap();
-        InstalledSandbox::install(sandbox, &self.root.path().join("master.sb")).unwrap()
+        let profile = self.root.path().join("master.sb");
+        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off).unwrap()
     }
 }
 

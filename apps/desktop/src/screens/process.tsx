@@ -3,10 +3,10 @@ import { listSkills, poolSummaries, type Result } from "../api";
 import { loadTeamStatus } from "../api-projects";
 import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, REPEATED_LINES, lineDiff, loadAppInstructionSettings, proposeProcess, saveAppInstructionSettings, commitInstructionImport, committedMessage, confirmInstructionImport,
+  DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, FINDING_KINDS, findingLines, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, REPEATED_LINES, lineDiff, loadAppInstructionSettings, proposeProcess, saveAppInstructionSettings, commitInstructionImport, committedMessage, confirmInstructionImport,
   defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
   processTextError, repeatedNote, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
-  type AppInstructionSettings, type InstructionSettings, type InstructionView, type Proposal, type SavedText, type SkillEntry, type EditDelivery,
+  type AppInstructionSettings, type InstructionSettings, type InstructionView, type Proposal, type SavedText, type SkillEntry, type EditDelivery, type Finding,
 } from "../api-process";
 import { sameJson, useAppSession, useHeld, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, NotReady, Notice, Panel, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
@@ -29,6 +29,9 @@ const INSTRUCTION_VIEWS: { value: InstructionsView; label: string }[] = [
 ];
 
 const FOLD_LINES = 12;
+/** What Process tells the owner when the project instructions file holds text CrazyAgent did
+ * not save there last, word for word as the TUI says it (DEC-141, SA vid 7 residual). */
+export const OUTSIDE_NOTICE = "This file changed outside CrazyAgent. Agents get it under the heading Imported from .crazyagent/instructions.md until you save it here.";
 const TRANSCRIPTS_OFF = "Off: Claude Code keeps no transcript. Codex keeps its own session record, which CrazyAgent reads to count its usage.";
 
 const MODE_SUBTITLES: Record<InstructionMode, string> = {
@@ -110,9 +113,27 @@ export function acceptProposal(proposal: Proposal, projectId: string | null, sav
   return save(projectId, proposal.text, proposal.base_version, null);
 }
 
+/** What Edit with AI's check found, shown above the proposed text (DEC-172): a count and each
+ * finding's kind, lines and note, or one line saying it found nothing. A note is text, never
+ * markup. Input: the findings. */
+function FindingsList({ findings }: { findings: readonly Finding[] }) {
+  if (findings.length === 0) return <p className="secondary">The check found nothing to fix.</p>;
+  return <section className="pr-findings" aria-label="What the check found">
+    <h3>{findings.length === 1 ? "1 finding" : `${findings.length} findings`}</h3>
+    <ul>
+      {findings.map((finding, index) => <li key={index} className="pr-finding">
+        <strong>{FINDING_KINDS[finding.kind]}</strong>
+        <span className="secondary">{findingLines(finding.lines)}</span>
+        <span>{finding.note}</span>
+      </li>)}
+    </ul>
+  </section>;
+}
+
 /** Edit with AI's steps as a pure view: the pool question, the waiting line, or the proposal
- * as a line diff with Accept and Discard. Inputs: the step, the saved text the proposal is
- * compared with, whether a save runs and the actions. Nothing is saved by showing it. */
+ * with what the check found and a line diff with Accept and Discard. Inputs: the step, the
+ * saved text the proposal is compared with, whether a save runs and the actions. Nothing is
+ * saved by showing it. */
 function CleanupView({ cleanup, saved, saving, onPick, onPropose, onAccept, onDiscard }: {
   cleanup: Cleanup;
   saved: string;
@@ -151,6 +172,7 @@ function CleanupView({ cleanup, saved, saving, onPick, onPropose, onAccept, onDi
   if (rows !== null && removed + added === 0) {
     return <Panel title="Proposed instructions">
       <div className="stack-small">
+        <FindingsList findings={cleanup.proposal.findings} />
         <p className="secondary">The model found nothing to change.</p>
         <span className="row"><Button onClick={onDiscard}>Close</Button></span>
       </div>
@@ -158,6 +180,7 @@ function CleanupView({ cleanup, saved, saving, onPick, onPropose, onAccept, onDi
   }
   return <Panel title="Proposed instructions">
     <div className="stack-small">
+      <FindingsList findings={cleanup.proposal.findings} />
       {rows !== null
         ? <>
           <p className="secondary">{`${removed} ${removed === 1 ? "line" : "lines"} removed, ${added} added. Nothing changes until you accept.`}</p>
@@ -748,6 +771,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   if (scope.kind === "app") return editor;
   return <div className="pr">
     <div className="stack">
+      {loaded.kind === "ok" && loaded.value.outside === true && <Notice tone="warn">{OUTSIDE_NOTICE}</Notice>}
       {editor}
       <ProjectFollowing projectId={scope.id} />
     </div>

@@ -67,6 +67,7 @@ const REFUSALS: Record<string, string> = {
   instructions_cleanup_too_large: "The model's file is over 64 KB, so nothing changed. Try again.",
   instructions_cleanup_off: "Edit with AI is off for these instructions, so nothing was sent. Turn it on first.",
   instructions_cleanup_unavailable: "Edit with AI can't run in this engine, so nothing was sent.",
+  instructions_cleanup_master_harness: "Edit with AI runs on this project's master harness, and it can't run on that one yet, so nothing was sent.",
   process_outcome_unknown: "CrazyAgent couldn't confirm what happened. Reload before you try again.",
   process_agent_unknown: "This agent isn't part of this project's team.",
   process_agent_unsupported: "CrazyAgent doesn't write instructions for this agent's harness.",
@@ -106,10 +107,13 @@ export function processTextError(text: string): string | undefined {
 /** Who saved a shared item's current version: nobody yet, the owner, or one agent. */
 export type LastWriter = "nobody" | "owner" | { agent: string };
 
-/** One instructions text and the version it was read at; a save names that version. */
+/** One instructions text and the version it was read at; a save names that version.
+ * `outside` says a project's text is not what CrazyAgent last saved there, so agents get it
+ * under the Imported heading until the owner saves it in Process. */
 export interface ProcessText {
   text: string;
   version: number;
+  outside?: boolean;
 }
 
 /** What a save comes to: the bytes of app and project instructions the project's agents now
@@ -536,11 +540,40 @@ export function saveAppInstructionSettings(settings: AppInstructionSettings): Pr
   return call<AppInstructionSettings>("desktop_save_app_instruction_settings", { settings });
 }
 
-/** A cleaned instructions file a model proposes and the version of the saved file it was made
- * from, which Accept names so a newer save is never lost. */
+/** What one finding of Edit with AI's check is about (DEC-172), as the engine names it. */
+export type FindingKind = "over_budget" | "duplicate" | "broken_reference" | "contradiction";
+
+/** One finding of the check: its kind, the saved lines it covers counted from 1, none for the
+ * whole file, and a plain note the page shows as text, never markup. */
+export interface Finding {
+  kind: FindingKind;
+  lines: number[];
+  note: string;
+}
+
+/** The owner's words for each finding kind, the same the TUI shows. */
+export const FINDING_KINDS: Record<FindingKind, string> = {
+  over_budget: "Over budget",
+  duplicate: "Duplicate",
+  broken_reference: "Broken reference",
+  contradiction: "Contradiction",
+};
+
+/** Names the lines one finding covers. Input: the line numbers, none for the whole file.
+ * Output: "Whole file", "Line 7" or "Lines 2, 9, 14". */
+export function findingLines(lines: readonly number[]): string {
+  if (lines.length === 0) return "Whole file";
+  if (lines.length === 1) return `Line ${lines[0]}`;
+  return `Lines ${lines.join(", ")}`;
+}
+
+/** A cleaned instructions file a model proposes, the version of the saved file it was made
+ * from, which Accept names so a newer save is never lost, and what the check found in that
+ * saved file (DEC-172). */
 export interface Proposal {
   text: string;
   base_version: number;
+  findings: Finding[];
 }
 
 /** Asks the engine for a cleaned version of the saved instructions (DEC-132 Q6). Inputs: null

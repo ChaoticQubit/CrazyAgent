@@ -1,4 +1,5 @@
 use crate::engine::EngineError;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -23,6 +24,32 @@ fn authority(url: &url::Url) -> Option<String> {
     Some(format!("{host}:{port}"))
 }
 
+/// The resolved addresses a probe dials, in order: every one but a cloud's metadata or
+/// credential service ([`crate::sandbox::metadata_address`]), so an account's host name
+/// cannot steer the engine there. This machine and private networks stay, for local models
+/// and servers on the owner's network (ACCOUNTS-PROBE-MAY-DIAL). Input: the resolved
+/// addresses. Output: the addresses to dial.
+fn dialed(resolved: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
+    resolved
+        .into_iter()
+        .filter(|address| !crate::sandbox::metadata_address(address.ip()))
+        .collect()
+}
+
+/// Resolves `address` and connects to the first of its [`dialed`] addresses that accepts,
+/// each socket made inside the spawn gate. Input: the `host:port` text. Output: the
+/// stream, PermissionDenied when every address the name gave was refused, or the last
+/// error.
+async fn connect(address: &str) -> std::io::Result<tokio::net::TcpStream> {
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(address).await?.collect();
+    let allowed = dialed(resolved.iter().copied());
+    assert!(allowed.len() <= resolved.len());
+    if allowed.is_empty() && !resolved.is_empty() {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    crate::spawn_gate::connect_tcp(&allowed[..]).await
+}
+
 /// Opens and closes one TCP connection to the URL's host and port within the timeout.
 /// Input: an HTTP(S) URL. Output: whether anything accepted the connection; nothing is sent.
 pub(crate) async fn reachable(url: &url::Url, timeout: Duration) -> bool {
@@ -30,7 +57,7 @@ pub(crate) async fn reachable(url: &url::Url, timeout: Duration) -> bool {
         return false;
     };
     matches!(
-        tokio::time::timeout(timeout, crate::spawn_gate::connect_tcp(address)).await,
+        tokio::time::timeout(timeout, connect(&address)).await,
         Ok(Ok(_))
     )
 }
@@ -53,7 +80,7 @@ pub(crate) async fn get(
     }
     let address = authority(url).ok_or_else(|| failure("account_url_invalid"))?;
     tokio::time::timeout(timeout, async {
-        let mut stream = crate::spawn_gate::connect_tcp(&address).await.map_err(|_| failure("account_url_unreachable"))?;
+        let mut stream = connect(&address).await.map_err(|_| failure("account_url_unreachable"))?;
         let mut request = format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\nConnection: close\r\n").into_bytes();
         if let Some(key) = bearer {
             request.extend_from_slice(b"Authorization: Bearer ");
@@ -62,7 +89,7 @@ pub(crate) async fn get(
         }
         request.extend_from_slice(b"\r\n");
         let sent = stream.write_all(&request).await;
-        request.fill(0);
+        crate::credentials::wipe(&mut request);
         sent.map_err(|_| failure("account_url_unreachable"))?;
         let mut reply = Vec::new();
         (&mut stream).take(RESPONSE_MAX as u64 + 1).read_to_end(&mut reply).await.map_err(|_| failure("account_url_unreachable"))?;
@@ -221,5 +248,31 @@ mod tests {
             openai_models(br#"{"data":[{"id":"b"},{"id":"a"},{"id":"bad name"}]}"#).unwrap(),
             ["a", "b"]
         );
+    }
+
+    #[test]
+    fn a_probe_dials_no_cloud_metadata_service_and_keeps_this_machine_and_private_hosts() {
+        let addresses = |list: &[&str]| -> Vec<SocketAddr> {
+            list.iter().map(|text| text.parse().unwrap()).collect()
+        };
+        let refused = addresses(&[
+            "169.254.169.254:80",
+            "168.63.129.16:443",
+            "100.100.100.200:80",
+            "[fd00:ec2::254]:80",
+            "[::ffff:169.254.169.254]:80",
+            "[fe80::1]:443",
+        ]);
+        for address in &refused {
+            assert!(dialed([*address]).is_empty(), "{address}");
+        }
+        let kept = addresses(&[
+            "127.0.0.1:11434",
+            "[::1]:443",
+            "10.0.0.5:443",
+            "192.168.1.5:8000",
+            "100.100.100.100:443",
+        ]);
+        assert_eq!(dialed(refused.iter().chain(&kept).copied()), kept);
     }
 }

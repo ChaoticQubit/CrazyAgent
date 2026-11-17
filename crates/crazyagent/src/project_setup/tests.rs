@@ -225,8 +225,8 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
 #[test]
 fn catalog_names_every_access_level_with_why_it_cannot_run_here() {
     use crate::sandbox::policy::{AgentAccess, LevelView};
-    let catalog = catalog(&config(), None, &[], &BTreeSet::new()).unwrap();
-    assert_eq!(catalog.agent_access, LevelView::all());
+    let catalog = catalog(&config(), None, &[], &BTreeSet::new(), None).unwrap();
+    assert_eq!(catalog.agent_access, LevelView::all(None));
     let runs: Vec<(AgentAccess, bool)> = catalog
         .agent_access
         .iter()
@@ -268,6 +268,7 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
         Some(&mixed),
         &[ResearchKind::MarketResearch, ResearchKind::DesignResearch],
         &signed(&["c-codex", "b-claude"]),
+        None,
     )
     .unwrap();
     assert!(
@@ -374,9 +375,15 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
         ResearchKind::CompetitorResearch,
         ResearchKind::DesignResearch,
     ];
-    let claude = catalog(&config, Some(&managed), &toggles, &signed(&["m-claude"]))
-        .unwrap()
-        .default_team;
+    let claude = catalog(
+        &config,
+        Some(&managed),
+        &toggles,
+        &signed(&["m-claude"]),
+        None,
+    )
+    .unwrap()
+    .default_team;
     assert_eq!(claude.master, "claude");
     assert!(claude.master_tools);
     assert!(
@@ -405,7 +412,7 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
         "an RCLI account never leads the default team"
     );
     assert_eq!(
-        catalog(&config, Some(&managed), &toggles, &signed(&[]))
+        catalog(&config, Some(&managed), &toggles, &signed(&[]), None)
             .unwrap()
             .default_team_status
             .as_deref(),
@@ -418,12 +425,13 @@ fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_
 }
 
 fn catalog_ok_without_pool(config: &EffectiveConfig) -> bool {
-    catalog(config, None, &ResearchKind::ALL, &BTreeSet::new()).is_ok()
+    catalog(config, None, &ResearchKind::ALL, &BTreeSet::new(), None).is_ok()
         && catalog(
             config,
             Some(&CredentialRef::new("pool-absent").unwrap()),
             &[],
             &BTreeSet::new(),
+            None,
         )
         .is_err()
 }
@@ -1716,4 +1724,76 @@ fn a_pool_with_only_an_anthropic_api_key_leads_with_claude_code_not_codex() {
         default_team_status(&config, Some(&rcli), &signed),
         Some(NEEDS_ACCOUNT)
     );
+}
+
+/// A New Project plan for a home inside `runtime`, building `name` from the documents given,
+/// as `plan_new` makes one. Inputs: the engine folder, the home, the folder name and the
+/// documents. Output: the plan.
+#[cfg(unix)]
+fn new_plan(runtime: &Path, home: &Path, name: &str, documents: Vec<String>) -> NewProjectPlan {
+    NewProjectPlan {
+        database: runtime.join("engine.db"),
+        staging: home.join(format!(".crazyagent-new-{}", "a".repeat(64))),
+        folder: home.join(name),
+        documents,
+    }
+}
+
+/// DEC-177 add.2: a New Project build counts each document it copies into its job's tally, so
+/// the job reads "copying documents 2 of 2", and leaves the built folder staged.
+#[cfg(unix)]
+#[test]
+fn a_new_project_build_counts_each_document_it_copies() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().canonicalize().unwrap();
+    let home = runtime.join("home");
+    let sources = runtime.join("sources");
+    for folder in [&home, &sources] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let documents: Vec<String> = ["scope.md", "notes.txt"]
+        .iter()
+        .map(|name| {
+            let path = sources.join(name);
+            std::fs::write(&path, name).unwrap();
+            path.to_str().unwrap().to_owned()
+        })
+        .collect();
+    let plan = new_plan(&runtime, &home, "notes", documents);
+    let staging = plan.staging.clone();
+    let tally = crate::projects_home::Tally::default();
+    let staged = plan.run(&tally).unwrap();
+    assert_eq!(tally.building(), (2, 2));
+    assert_eq!(staged.documents.len(), 2);
+    assert_eq!(staged.staging(), staging.as_path());
+    assert!(
+        staging
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+            .join(CONTEXT_DIRECTORY)
+            .join("documents")
+            .join("scope.md")
+            .is_file()
+    );
+}
+
+/// DEC-177 add.2: a stop asked before a New Project builds ends the build cancelled with
+/// nothing counted and no staging folder left, as Stop on its job does.
+#[cfg(unix)]
+#[test]
+fn a_new_project_build_stopped_before_it_starts_leaves_no_staging_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().canonicalize().unwrap();
+    let home = runtime.join("home");
+    std::fs::create_dir(&home).unwrap();
+    let plan = new_plan(&runtime, &home, "notes", vec![]);
+    let staging = plan.staging.clone();
+    let tally = crate::projects_home::Tally::default();
+    assert!(tally.stop());
+    assert_eq!(plan.run(&tally).unwrap_err(), "home_add_cancelled");
+    assert_eq!(tally.building(), (0, 0));
+    assert!(
+        !staging.exists(),
+        "a stopped build leaves no staging folder"
+    );
+    assert!(!home.join("notes").exists());
 }

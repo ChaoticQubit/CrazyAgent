@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::io;
 #[cfg(unix)]
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
@@ -116,6 +117,29 @@ pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the 
 
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
+
+/// The Linux helper's exit code when its call supervisor could not take back an entry a
+/// case-folding folder read as a held name, and so stopped the run (DEC-185 S2a, rv-sec3
+/// F1). The supervisor crate keeps its own copy, tied to this one in the Linux sandbox; 125
+/// is its other stops, and 126 and up are the shell's and the signals'.
+pub const HELD_NOT_PUT_BACK_EXIT: i32 = 122;
+
+/// What the engine shows for a Linux run that ended with [`HELD_NOT_PUT_BACK_EXIT`].
+pub const HELD_NOT_PUT_BACK: &str =
+    "The sandbox stopped this run: a protected name could not be put back";
+
+/// Tells why a harness ended when its sandbox stopped it. Only the Linux call supervisor
+/// ends a run with [`HELD_NOT_PUT_BACK_EXIT`], so the code means that on Linux alone.
+/// Inputs: the system's name, as `std::env::consts::OS` gives it, and the exit code.
+/// Output: the sentence to show, or none when the code is the harness's own.
+pub fn held_stop(os: &str, code: i32) -> Option<&'static str> {
+    (os == "linux" && code == HELD_NOT_PUT_BACK_EXIT).then_some(HELD_NOT_PUT_BACK)
+}
+
+/// The cause every master host gives a turn whose harness the Linux call supervisor stopped
+/// because it could not take back an entry read as a held name ([`held_stop`]); the engine
+/// names it `MasterReason::SandboxStopped`.
+pub const HELD_STOP_CAUSE: &str = "sandbox_held_not_put_back";
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
@@ -487,8 +511,10 @@ pub fn agent_env<'a>(
 /// Builds the environment of the owner's confined IDE terminal as [`agent_env`] does for an
 /// agent, but without [`AGENT_HOME_ENV`]: its home is the owner's own, kept across
 /// terminals, so the global git config, Python user site and npm config the owner sets up
-/// there stay in use (RV-DS241-137 code r1 F3). Inputs: the base and terminal variables.
-/// Output: the variables, or `Invalid` when any one fails [`agent_variable_allowed`].
+/// there stay in use (RV-DS241-137 code r1 F3), and its profile leaves their files writable
+/// ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). Inputs: the base and terminal
+/// variables. Output: the variables, or `Invalid` when any one fails
+/// [`agent_variable_allowed`].
 pub fn owner_terminal_env<'a>(
     base: &[(&str, &OsStr)],
     terminal: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
@@ -620,14 +646,16 @@ pub const PANE_SHIM: [&str; 5] = [
 /// native lead's server keeper, never both, user signal 1 asks the warden to stop every
 /// process in the sandbox and user signal 2 to continue them, and each answer is written to
 /// that record as `S` or `C` (DEC-158); without it both signals are ignored. Its deadline reads count wall time, so answers do not hasten
-/// them.
+/// them. Given [`KEEPER_LIFELINE`], as the server keepers of a lead on an engine key relay
+/// are, it also reads its standard input, the engine's end of a pipe its command never gets,
+/// and once that closes, as at the engine's death, it stops as at a passed deadline (B6b).
 #[cfg(target_os = "macos")]
 pub const KEEPER: [&str; 6] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-MSocket",
     "-e",
-    r#"$^F = 1023; my $why = ""; my ($every, $late, $record) = split(/ /, delete($ENV{CRAZYAGENT_KEEPER_DEADLINE}) // "", 3); !defined($record) || ($every =~ /\A[1-9][0-9]{0,3}\z/ && $late =~ /\A[1-9][0-9]{0,2}\z/ && $record =~ m{\A/}) or die "crazyagent: no deadline\n"; my $state = delete($ENV{CRAZYAGENT_KEEPER_STATE}); if (@ARGV > 2 && $ARGV[1] eq "/usr/bin/sandbox-exec") { !defined($state) or die "crazyagent: two state records\n"; $state = shift(@ARGV) } !defined($state) || $state =~ m{\A/[^\n\0]{1,1000}\z} or die "crazyagent: no state record\n"; my ($next, $armed, $missed, $want) = (time + ($every // 0), 0, 0, ""); $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE USR1 USR2); if (defined($state)) { $SIG{USR1} = sub { $want = "S" }; $SIG{USR2} = sub { $want = "C" } } $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD USR1 USR2); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); my ($seen, $open, $wanted) = ("", 1, ""); vec($wanted, fileno($keep), 1) = 1; until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { if (length($want)) { syswrite($keep, $want) if $open; $want = "" } my $ready = $open ? $wanted : ""; if (select($ready, undef, undef, 1) > 0 && defined(my $got = sysread($keep, my $more, 8))) { $open = 0 if !$got; $seen .= $more // ""; if ($seen =~ s/([sc]+)\z// && defined($state)) { my $now = uc(substr($1, -1)); unlink("$state.new"); if (sysopen(my $out, "$state.new", POSIX::O_WRONLY() | POSIX::O_CREAT() | POSIX::O_EXCL(), 0600)) { syswrite($out, $now); close($out); rename("$state.new", $state) or unlink("$state.new") } } } next unless defined($record) && time >= $next; $next = time + $every; my $ahead = 0; if (my @at = lstat($record)) { if (-f _ && $at[4] == $< && $at[7] <= 19 && open(my $in, "<", $record)) { $ahead = (<$in> // "") =~ /\A([0-9]{1,19})\z/ && time < $1 } } if ($ahead) { ($armed, $missed) = (1, 0) } elsif ($armed && ++$missed >= $late) { $why = "LATE" } } kill("KILL", $harness) if $why eq "LATE"; shutdown($keep, 1); my $report = ""; my $until = time + 4; while ($open && time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } my $said = $seen . $report; POSIX::_exit(0) if $said =~ /\AA[sc]*F\z/ || $said eq "U" || $why eq "HUP"; POSIX::_exit(3) if $why eq "LATE"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
+    r#"$^F = 1023; my $why = ""; my ($every, $late, $record) = split(/ /, delete($ENV{CRAZYAGENT_KEEPER_DEADLINE}) // "", 3); !defined($record) || ($every =~ /\A[1-9][0-9]{0,3}\z/ && $late =~ /\A[1-9][0-9]{0,2}\z/ && $record =~ m{\A/}) or die "crazyagent: no deadline\n"; my $state = delete($ENV{CRAZYAGENT_KEEPER_STATE}); if (@ARGV > 2 && $ARGV[1] eq "/usr/bin/sandbox-exec") { !defined($state) or die "crazyagent: two state records\n"; $state = shift(@ARGV) } !defined($state) || $state =~ m{\A/[^\n\0]{1,1000}\z} or die "crazyagent: no state record\n"; my $life = delete($ENV{CRAZYAGENT_KEEPER_LIFELINE}); !defined($life) || $life eq "0" or die "crazyagent: no lifeline\n"; my ($next, $armed, $missed, $want) = (time + ($every // 0), 0, 0, ""); $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE USR1 USR2); if (defined($state)) { $SIG{USR1} = sub { $want = "S" }; $SIG{USR2} = sub { $want = "C" } } $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD USR1 USR2); close($keep); if (defined($life)) { open(STDIN, "<", "/dev/null") or die "crazyagent: no null input: $!\n" } $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); my ($seen, $open, $wanted) = ("", 1, ""); vec($wanted, fileno($keep), 1) = 1; until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { if (length($want)) { syswrite($keep, $want) if $open; $want = "" } my $ready = $open ? $wanted : ""; vec($ready, 0, 1) = 1 if defined($life); my $count = select($ready, undef, undef, 1); if ($count > 0 && defined($life) && vec($ready, 0, 1)) { my $got = sysread(STDIN, my $any, 64); $why ||= "GONE" if defined($got) ? !$got : !$!{EINTR} } if ($count > 0 && $open && vec($ready, fileno($keep), 1) && defined(my $got = sysread($keep, my $more, 8))) { $open = 0 if !$got; $seen .= $more // ""; if ($seen =~ s/([sc]+)\z// && defined($state)) { my $now = uc(substr($1, -1)); unlink("$state.new"); if (sysopen(my $out, "$state.new", POSIX::O_WRONLY() | POSIX::O_CREAT() | POSIX::O_EXCL(), 0600)) { syswrite($out, $now); close($out); rename("$state.new", $state) or unlink("$state.new") } } } next unless defined($record) && time >= $next; $next = time + $every; my $ahead = 0; if (my @at = lstat($record)) { if (-f _ && $at[4] == $< && $at[7] <= 19 && open(my $in, "<", $record)) { $ahead = (<$in> // "") =~ /\A([0-9]{1,19})\z/ && time < $1 } } if ($ahead) { ($armed, $missed) = (1, 0) } elsif ($armed && ++$missed >= $late) { $why = "LATE" } } kill("KILL", $harness) if $why eq "LATE" || $why eq "GONE"; shutdown($keep, 1); my $report = ""; my $until = time + 4; while ($open && time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } my $said = $seen . $report; POSIX::_exit(0) if $said =~ /\AA[sc]*F\z/ || $said eq "U" || $why eq "HUP"; POSIX::_exit(3) if $why eq "LATE" || $why eq "GONE"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
     "--",
 ];
 
@@ -637,6 +665,12 @@ pub const KEEPER: [&str; 6] = [
 /// spaces. The [`KEEPER`] removes it before the command starts; a kept pane has none.
 #[cfg(target_os = "macos")]
 pub const KEEPER_DEADLINE: &str = "CRAZYAGENT_KEEPER_DEADLINE";
+
+/// The variable that asks a native lead's server [`KEEPER`] to watch its standard input as
+/// the engine's lifeline, for a lead on an engine key relay (B6b); `0` is the only value it
+/// takes. The keeper removes it and starts its command with `/dev/null` as input.
+#[cfg(target_os = "macos")]
+pub const KEEPER_LIFELINE: &str = "CRAZYAGENT_KEEPER_LIFELINE";
 
 /// The variable that names the engine's absolute freeze record to a native lead's server
 /// [`KEEPER`], whose warden then stops and continues the sandbox on the engine's signals
@@ -810,7 +844,9 @@ pub enum SandboxNetwork {
 }
 
 /// One outbound TCP destination a tools-off agent may still reach. Seatbelt
-/// filters by port only, either on loopback or on any host.
+/// filters by port only, either on loopback or on any host, so `accounts::account_url`
+/// refuses an endpoint on another machine on a port a cloud metadata service answers on
+/// when it is saved (MACOS-ANYHOST-METADATA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRemote {
     Loopback(u16),
@@ -859,6 +895,76 @@ pub enum LinuxSockets {
     TcpPorts,
 }
 
+/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
+/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
+/// the guards a launch needs: ports on this computer only, no new `.git` outside the
+/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
+/// and every line as they were before the supervisor. Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxSupervisor {
+    #[default]
+    On,
+    Off,
+}
+
+/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
+/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
+/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
+/// it unless [`linux_holds_fully`] does. Team agents need the full sandbox whatever it says.
+/// Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxStrict {
+    #[default]
+    Off,
+    On,
+}
+
+/// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).
+pub const LINUX_NOT_FULL: &str = "linux_sandbox_not_full";
+
+/// Why [`InstalledSandbox::install`] refuses a Linux launch under [`LinuxStrict::On`]: it
+/// does not hold the full Linux sandbox ([`linux_holds_fully`]).
+pub const LINUX_NOT_FULL_LINE: &str = "this Linux does not hold the full sandbox for this launch, and the setting 'Refuse agents without the full Linux sandbox' is on";
+
+/// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
+/// (the nested backend), the call supervisor running, and its network limits held, so none
+/// of the gap lines would show for it. An open network has no limit to hold; a limited one
+/// needs TCP-only sockets and, for a port on any host, a network of its own (DEC-179 SBX-2).
+/// Inputs: what the launch got and its sandbox. Output: true when it holds all of it.
+pub fn linux_holds_fully(
+    nested: bool,
+    supervised: bool,
+    routed: bool,
+    sandbox: &ProjectSandbox,
+) -> bool {
+    assert!(
+        !routed || nested,
+        "only a nested launch has a network of its own"
+    );
+    if !nested || !supervised {
+        return false;
+    }
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
+        return true;
+    };
+    if sandbox.linux_sockets != LinuxSockets::TcpOnly {
+        return false;
+    }
+    remotes.iter().all(|remote| match remote {
+        SandboxRemote::Loopback(port) => *port >= BRIDGE_PORT_MIN,
+        SandboxRemote::AnyHost(_) => routed,
+    })
+}
+
+/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
+/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
+/// answer.
+pub fn linux_not_full(error: &SandboxError) -> bool {
+    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+}
+
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
 pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 
@@ -903,15 +1009,297 @@ pub const GIT_STATE_FILES: [&str; 6] = [
     "config.worktree",
 ];
 
+/// The links in a linked worktree's admin folder that tie it to the project and to its
+/// worktree: no confined agent rewrites, removes or relinks one. Seatbelt denies each by
+/// name, letting a worktree-adding profile create one, and the Linux call supervisor holds
+/// each (DEC-185 S2a).
+pub const ADMIN_LINKS: [&str; 2] = ["commondir", "gitdir"];
+
+/// The files in a linked worktree's admin folder no confined agent writes: the branch it
+/// stands on and the config git reads for that worktree alone. Seatbelt denies each by name
+/// and the Linux call supervisor holds each (DEC-185 S2a).
+pub const ADMIN_WRITES: [&str; 2] = ["HEAD", "config.worktree"];
+
+/// The files in an object store's `info` folder that send git to another store: no
+/// confined agent writes one. Seatbelt denies each by name in the project's store, the
+/// store its checkout shares and a clone's own, and the Linux call supervisor holds each
+/// in a clone (DEC-185 S2b).
+pub const STORE_ALTERNATES: [&str; 2] = ["alternates", "http-alternates"];
+
+/// The repository git serves beside a clone's git folder when that folder fails git's
+/// repository test (RL-1): nothing is made there. Seatbelt denies it by name and the Linux
+/// call supervisor holds it whole (DEC-185 S2b).
+pub const GIT_FALLBACK: &str = ".git.git";
+
+/// The pack folder's multi-pack-index, which can name a pack outside the store (RL-2): no
+/// confined agent makes one. Seatbelt denies every name it begins, and the Linux call
+/// supervisor holds the file and its `.d` chain folder, the two names git reads
+/// (DEC-185 S2b).
+pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
+
+/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
+/// own an agent's helper has no capability to listen below it.
+pub const BRIDGE_PORT_MIN: u16 = 1024;
+
+/// The cloud metadata and credential services a VM reaches outside the link-local range,
+/// which no routed agent and no engine tunnel may reach (CLOUD-METADATA-ADDRS): Alibaba ECS
+/// and Azure's WireServer over IPv4; AWS IMDS, AWS EKS Pod Identity, Google, OCI, Akamai and
+/// Scaleway over IPv6. Only these addresses, so the rest of their ranges, such as Tailscale's
+/// 100.100.100.100, stays reachable.
+pub(crate) const CLOUD_METADATA: [IpAddr; 8] = [
+    IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200)),
+    IpAddr::V4(Ipv4Addr::new(168, 63, 129, 16)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0023)),
+    IpAddr::V6(Ipv6Addr::new(0xfd20, 0x00ce, 0, 0, 0, 0, 0, 0x0254)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x00c1, 0, 0, 0, 0, 0xa9fe, 0xa9fe)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0xa9fe, 0xa9fe, 0, 0, 0, 0, 0x0001)),
+    IpAddr::V6(Ipv6Addr::new(0xfd00, 0x0042, 0, 0, 0, 0, 0, 0x0042)),
+];
+
+/// Tells whether `address` is a cloud's metadata or credential service: link-local
+/// (169.254.0.0/16, fe80::/10) or one of [`CLOUD_METADATA`], also as an IPv4 address inside
+/// an IPv6 one. No engine tunnel or account probe dials one (ACCOUNTS-PROBE-MAY-DIAL).
+/// Input: the address. Output: true when it is one.
+pub(crate) fn metadata_address(address: IpAddr) -> bool {
+    let address = match address {
+        IpAddr::V6(ip) => ip.to_ipv4().map_or(address, IpAddr::V4),
+        IpAddr::V4(_) => address,
+    };
+    CLOUD_METADATA.contains(&address)
+        || match address {
+            IpAddr::V4(ip) => ip.is_link_local(),
+            IpAddr::V6(ip) => ip.is_unicast_link_local(),
+        }
+}
+
+/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
+/// computer's network on a Linux that could give them one of their own: on the project's
+/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
+/// the sentences, the port named.
+pub fn linux_unbridged_line(port: u16) -> String {
+    format!(
+        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
+    )
+}
+
+/// What a launch tells the owner in the agent's messages when a Linux that nests agents
+/// still leaves it on this computer's network: for an agent that could have a network of
+/// its own ([`ProjectSandbox::routed`]) on a host that does not route, [`LINUX_UNROUTED_LINE`]
+/// or, with no loopback port or the supervisor on, [`LINUX_UNROUTED_ANY_HOST_LINE`]; none
+/// when it routes; then [`linux_unbridged_line`] for the lowest port below
+/// [`BRIDGE_PORT_MIN`], else under None [`LINUX_PORTS_ANY_HOST_LINE`]. Inputs: this Linux,
+/// the network choice, the sandbox as launched. Output: the sentences, or none.
+pub fn linux_unbridged_notice_on(
+    host: Option<LinuxHost>,
+    choice: policy::AgentNetwork,
+    sandbox: &ProjectSandbox,
+) -> Option<String> {
+    let host = host.filter(|host| host.nested)?;
+    let SandboxNetwork::Only(remotes) = &sandbox.network else {
+        return None;
+    };
+    let reaches = remotes
+        .iter()
+        .any(|remote| matches!(remote, SandboxRemote::Loopback(_)));
+    if sandbox.routed().is_some() {
+        if host.routed {
+            return None;
+        }
+        let wide = reaches && !host.supervised;
+        let line = if wide {
+            LINUX_UNROUTED_LINE
+        } else {
+            LINUX_UNROUTED_ANY_HOST_LINE
+        };
+        return Some(line.to_owned());
+    }
+    let low = remotes
+        .iter()
+        .filter_map(|remote| match remote {
+            SandboxRemote::Loopback(port) if *port < BRIDGE_PORT_MIN => Some(*port),
+            _ => None,
+        })
+        .min();
+    let any = remotes
+        .iter()
+        .any(|remote| matches!(remote, SandboxRemote::AnyHost(_)));
+    let tcp = sandbox.linux_sockets == LinuxSockets::TcpOnly;
+    if let Some(port) = low.filter(|_| host.routed && any && tcp) {
+        return Some(linux_unbridged_line(port));
+    }
+    if let Some(port) = sandbox.unbridged_port() {
+        assert!(port < BRIDGE_PORT_MIN);
+        return Some(linux_unbridged_line(port));
+    }
+    let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
+    (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
+}
+
+/// [`linux_unbridged_notice_on`] for this computer as it was last read, under the owner's
+/// call supervisor setting ([`LinuxHost::under`]). Inputs: the project's network choice,
+/// the agent's sandbox as launched and the setting, none when it cannot be read, which
+/// counts as no supervisor. Output: the sentences, or none.
+pub fn linux_unbridged_notice(
+    choice: policy::AgentNetwork,
+    sandbox: &ProjectSandbox,
+    calls: Option<LinuxSupervisor>,
+) -> Option<String> {
+    let host = linux_host_kept().map(|host| host.under(calls));
+    linux_unbridged_notice_on(host, choice, sandbox)
+}
+
+/// What a launch tells the owner in the agent's messages when this Linux nests agents but
+/// could not give this one the network of its own its ports allow (DEC-179 SBX-2): why it
+/// has none, the AppArmor profile and root included (rv-sa241 NOTE-2, NOTE-3), and what
+/// that leaves open.
+pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so every port it may reach is open to it on every host, this computer included.";
+
+/// [`LINUX_UNROUTED_LINE`] for an agent with no loopback port, or one the call supervisor
+/// keeps to this computer (rv-sa241 7b LOW-1 and N1): its ports on any host then reach
+/// this computer too.
+pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so the ports it may reach on any host include this computer's own.";
+
 /// What a limited network cannot hold on Linux, shown there only, under the network choice
 /// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
 /// host, so a port an agent may reach on this computer is open to it on every host.
 pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
 
-/// What a writable project folder cannot hold on Linux, shown there only, under the access
-/// level in the desktop and the TUI (RV-DS241-85): no Landlock rule stops an agent from
-/// making a git repository inside a folder it may change.
+/// What a writable project folder cannot hold on a Linux where no call supervisor runs,
+/// among the engine's lines under the access level in the desktop and the TUI (RV-DS241-85,
+/// DEC-179 T4c): no Landlock rule stops an agent from making a git repository inside a
+/// folder it may change.
 pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
+
+/// What a Linux agent can still do to the owner's other programs where this machine gives
+/// it neither a process namespace of its own nor the Landlock signal scope (Linux before
+/// 6.12 without usable user namespaces), shown there only, under the access level in the
+/// desktop and the TUI (SA vid 4, DEC-089).
+pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which programs you run and stop or signal them, such as a dev server or CrazyAgent itself. Linux 6.12 or newer stops the signals.";
+
+/// What a Linux agent can still see where the kernel scopes its signals but this machine
+/// gives it no process namespace of its own, shown there only, under the access level in
+/// the desktop and the TUI (RV-DS241-86).
+pub const LINUX_PROCESS_LIST_LINE: &str =
+    "On this Linux, agents can see which programs you run and how they were started.";
+
+/// What a writable project folder still cannot hold where the call supervisor runs: it
+/// refuses every new `.git` entry but the agent's own, yet an agent may change a git
+/// repository already in the project. Shown under the access level when the project may
+/// hold one ([`linux_other_git`]) and in the New Project catalog (DEC-179 T4c).
+pub const LINUX_KEPT_GIT_LINE: &str = "On Linux, agents can change a git repository already inside a project folder they may change, and your own git or IDE runs its settings when you open that folder. Check folders with a .git inside the project before you open them.";
+
+/// What the call supervisor changes for agents where it runs (DEC-179 T4c): it makes the
+/// calls it guards for them, so a program's own Landlock limits do not hold for those
+/// (QUESTION-16:21), and it refuses a create, even of a file already there, under a `.git`
+/// the agent did not make (rv-sec3 N3).
+pub const LINUX_SUPERVISED_LINE: &str = "On this Linux, CrazyAgent makes some calls for agents, such as making a file or folder or connecting, so a program an agent starts can't narrow those with limits of its own. In a .git folder CrazyAgent didn't make, agents can't create files and some writes to files already there are refused, so git commands that write fail in a repository nested in the project.";
+
+/// Why no call supervisor runs where CrazyAgent runs as root (rv-sec3 N1): dumpability does
+/// not keep a root agent away from it, so none starts and the lines after this one hold.
+pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it starts no call supervisor and agents can do what the lines below say. Run CrazyAgent as your own user to turn it on.";
+
+/// What a limited network that reaches websites still cannot hold where the call supervisor
+/// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
+/// 53 is open to them on every host.
+pub const LINUX_DNS_ANY_HOST_LINE: &str =
+    "On this Linux, agents can also reach port 53, used to look up names, on every host.";
+
+/// Why agents share the owner's process space where AppArmor keeps unprivileged programs
+/// out of user namespaces (Ubuntu 23.10 and newer) and this machine nests none, shown before
+/// the process or signals line it explains, with the deb package that adds the profile
+/// allowing it (DEC-179 SBX-3, addendum 7).
+pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from getting a process space of their own. CrazyAgent's .deb package adds the AppArmor profile that allows it: install it, or if it is installed, run sudo dpkg-reconfigure crazy-agent.";
+
+/// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
+/// when it starts agents in a process namespace of their own, `scoped` when the kernel
+/// keeps their signals inside their own Landlock domain (Linux 6.12 or newer),
+/// `supervised` when the call supervisor holds every guard here, as launches start it,
+/// `root` when CrazyAgent runs as root, where it starts no supervisor (rv-sec3 N1),
+/// `armored` when AppArmor's user namespace restriction is why it nests none (SBX-3), and
+/// `routed` when it gives an agent limited to ports on any host a network of its own (SBX-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinuxHost {
+    pub nested: bool,
+    pub scoped: bool,
+    pub supervised: bool,
+    pub root: bool,
+    pub armored: bool,
+    pub routed: bool,
+}
+
+/// The network a Linux that nests agents gives one limited to ports on any host
+/// ([`ProjectSandbox::routed`]): `any`, the ports it leaves through on any host, and
+/// `bridged`, the loopback ports carried to this computer as for a bridged agent, each list
+/// rising and each port once (DEC-179 SBX-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Routed {
+    pub any: Vec<u16>,
+    pub bridged: Vec<u16>,
+}
+
+impl LinuxHost {
+    /// What this Linux holds under the owner's Linux call supervisor setting: supervised
+    /// only while it is On, and run as root only while it is not Off, so the root line says
+    /// why no supervisor runs. Input: the setting, none when it cannot be read, which shows
+    /// every line. Output: the facts the access lines read; what is kept is never changed.
+    pub fn under(self, calls: Option<LinuxSupervisor>) -> Self {
+        assert!(!(self.root && self.supervised));
+        let held = Self {
+            supervised: self.supervised && calls == Some(LinuxSupervisor::On),
+            root: self.root && calls != Some(LinuxSupervisor::Off),
+            ..self
+        };
+        assert!(self.supervised || !held.supervised);
+        assert!(!(held.root && held.supervised));
+        held
+    }
+}
+
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
+/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// another system; on Linux the facts, each false when it cannot be read, so its gap line
+/// is shown.
+pub fn linux_host() -> Option<LinuxHost> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::host_now())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// What this computer holds as [`linux_host`] last read it, however long ago, so a caller
+/// inside a database transaction starts no helper; it reads only when nothing was read
+/// yet. No input. Output: as [`linux_host`].
+pub fn linux_host_kept() -> Option<LinuxHost> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(linux::host_kept())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Tells whether a project may hold a git repository besides its own top-level `.git`,
+/// which an agent may still change under the call supervisor: on Linux what a bounded read
+/// of the folder finds; elsewhere yes, where no Linux line shows. Input: the project
+/// folder. Output: true when one may be there.
+pub fn linux_other_git(project: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::holds_other_git(project)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = project;
+        true
+    }
+}
 
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
@@ -988,6 +1376,9 @@ pub struct ProjectSandbox {
     shared_writes: Vec<PathBuf>,
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
+    owner_config: bool,
+    #[cfg(unix)]
+    engine_home: Option<bool>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -1075,6 +1466,9 @@ impl ProjectSandbox {
             shared_writes: Vec::new(),
             open_tops: None,
             node_bin: None,
+            owner_config: false,
+            #[cfg(unix)]
+            engine_home: None,
         })
     }
 
@@ -2173,6 +2567,32 @@ impl ProjectSandbox {
         self
     }
 
+    /// Marks the home as one the owner keeps for their own tools, which no launch resets, as
+    /// the IDE terminal's and the IDE server's are: the profile leaves out
+    /// [`agent_config_denies`], so `npm login`, `git config --global` and `cargo install`
+    /// write there and copies keep their flags (RV-DS241-188, -187), and [`Self::install`]
+    /// makes no folder there, as [`owner_terminal_env`] leaves out [`AGENT_HOME_ENV`].
+    /// Output: the sandbox.
+    pub fn keep_owner_config(mut self) -> Self {
+        self.owner_config = true;
+        self
+    }
+
+    /// Names the engine's data root the agent home is judged by, as a master turn's home may
+    /// be a configured RCLI home the owner chose in one of their own folders (never HOME
+    /// itself or a folder holding it, which [`Self::new`] refuses): [`Self::install`] makes
+    /// and removes nothing in a home not strictly below the root, so a link a dotfile manager
+    /// made there stays, and clears what holds a config folder's name in one that is
+    /// (rv-code2 b8 F1). The profile keeps every deny either way. Input: the canonical data
+    /// root. Output: the sandbox.
+    #[cfg(unix)]
+    pub fn anchor_home(mut self, engine_root: &Path) -> Self {
+        assert!(engine_root.is_absolute());
+        let below = self.agent_home != engine_root && self.agent_home.starts_with(engine_root);
+        self.engine_home = Some(below);
+        self
+    }
+
     /// Keeps one file or folder inside a granted root from being read, written or run: its
     /// name, size and dates stay visible, its contents, folder listing and attribute values
     /// do not, so a tool that stats an import does not fail; the graph step keeps the
@@ -2461,6 +2881,91 @@ impl ProjectSandbox {
         self.linux_sockets
     }
 
+    /// The loopback ports a Linux that nests agents carries for this one over a bridge, the
+    /// agent then having a network namespace of its own: the sockets setting is `TcpOnly`
+    /// and the limited network names loopback ports only, each [`BRIDGE_PORT_MIN`] or
+    /// higher. Output: the ports in rising order, or none when the agent keeps the shared
+    /// network.
+    pub fn bridged_ports(&self) -> Option<Vec<u16>> {
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly || remotes.is_empty() {
+            return None;
+        }
+        let mut ports = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            match remote {
+                SandboxRemote::Loopback(port) if *port >= BRIDGE_PORT_MIN => ports.push(*port),
+                _ => return None,
+            }
+        }
+        ports.sort_unstable();
+        ports.dedup();
+        assert!(!ports.is_empty() && ports.len() <= REMOTES_MAX);
+        assert!(!self.resolves_over_tcp());
+        Some(ports)
+    }
+
+    /// The network a Linux that nests agents gives this one of its own, leaving only
+    /// through its ports on any host: the sockets setting is `TcpOnly`, the limited network
+    /// names at least one port on any host and every other remote is a loopback port
+    /// [`BRIDGE_PORT_MIN`] or higher, bridged as [`ProjectSandbox::bridged_ports`] does.
+    /// Output: the ports, or none when the agent keeps the shared network.
+    pub fn routed(&self) -> Option<Routed> {
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly || remotes.len() > REMOTES_MAX {
+            return None;
+        }
+        let mut any = Vec::with_capacity(remotes.len());
+        let mut bridged = Vec::with_capacity(remotes.len());
+        for remote in remotes {
+            match remote {
+                SandboxRemote::AnyHost(port) => any.push(*port),
+                SandboxRemote::Loopback(port) if *port >= BRIDGE_PORT_MIN => bridged.push(*port),
+                SandboxRemote::Loopback(_) => return None,
+            }
+        }
+        if any.is_empty() {
+            return None;
+        }
+        any.sort_unstable();
+        any.dedup();
+        bridged.sort_unstable();
+        bridged.dedup();
+        assert!(!any.contains(&0));
+        assert!(any.len() + bridged.len() <= REMOTES_MAX);
+        assert!(self.bridged_ports().is_none());
+        assert!(self.resolves_over_tcp());
+        Some(Routed { any, bridged })
+    }
+
+    /// The port that alone keeps this agent on this computer's network on a Linux that
+    /// nests agents: the sockets setting is `TcpOnly` and the limited network names
+    /// loopback ports only, but one lies below [`BRIDGE_PORT_MIN`]. Output: the lowest such
+    /// port, or none when the agent is bridged or shares the network for another reason.
+    pub fn unbridged_port(&self) -> Option<u16> {
+        let SandboxNetwork::Only(remotes) = &self.network else {
+            return None;
+        };
+        if self.linux_sockets != LinuxSockets::TcpOnly {
+            return None;
+        }
+        let mut lowest: Option<u16> = None;
+        for remote in remotes {
+            let SandboxRemote::Loopback(port) = remote else {
+                return None;
+            };
+            if *port < BRIDGE_PORT_MIN && lowest.is_none_or(|low| *port < low) {
+                lowest = Some(*port);
+            }
+        }
+        assert!(lowest.is_none() || self.bridged_ports().is_none());
+        lowest
+    }
+
     /// True when, on Linux, this agent looks host names up over TCP: the setting is
     /// `TcpOnly` and its limited network names a remote on any host. It then may reach TCP
     /// port 53 and gets `RES_OPTIONS=use-vc`; loopback-only and empty networks get neither.
@@ -2717,10 +3222,10 @@ impl ProjectSandbox {
         text.push_str(&self.ancestry_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
+            let [head, _] = ADMIN_WRITES.map(any_case);
             text.push_str(&format!(
-                "(deny file-write*\n  (regex #\"^{}/{}$\"))\n",
-                seatbelt_pattern(&checkout.admin),
-                any_case("HEAD")
+                "(deny file-write*\n  (regex #\"^{}/{head}$\"))\n",
+                seatbelt_pattern(&checkout.admin)
             ));
         }
         if let Some(clone) = &self.clone {
@@ -2764,6 +3269,12 @@ impl ProjectSandbox {
         }
         let launch = launch_denies(&self.agent_home);
         text.push_str(&launch);
+        let config = if self.owner_config {
+            String::new()
+        } else {
+            agent_config_denies(&self.agent_home)
+        };
+        text.push_str(&config);
         for root in self.writable_roots() {
             text.push_str(&root_pin(root));
         }
@@ -2785,6 +3296,8 @@ impl ProjectSandbox {
             .map(|rule| rule.seatbelt(&self.project_root))
             .unwrap_or_default();
         text.push_str(&agent_files);
+        let ignored = hfs_ignored_deny();
+        text.push_str(&ignored);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len() + self.granted.len()
@@ -2795,6 +3308,9 @@ impl ProjectSandbox {
             .map(|folder| format!("(deny file-write* (subpath \"{}\"))", folder.display()))
             .collect();
         last.push(launch);
+        if !config.is_empty() {
+            last.push(config);
+        }
         last.extend(self.writable_roots().map(|root| root_pin(root)));
         last.extend(
             self.fixed
@@ -2811,6 +3327,7 @@ impl ProjectSandbox {
         if !agent_files.is_empty() {
             last.push(agent_files);
         }
+        last.push(ignored);
         assert!(
             denies_follow_write_allows(&text, &last),
             "a read-only, root, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
@@ -2935,11 +3452,15 @@ impl ProjectSandbox {
     /// file and its `commondir` and `gitdir` files may be created once, as `git worktree add`
     /// does, only by a profile that adds worktrees ([`Self::adding_worktrees`] or a lead's
     /// teammates' setup), since the owner's `git worktree repair` would point a real
-    /// checkout at an admin folder planted with them; they are never rewritten or removed,
-    /// and no `config.worktree` may be written. No link
-    /// may be made anywhere in the git folder, in any letter case: git's `worktree prune`,
-    /// which the owner's next commit runs as maintenance, empties whatever folder a link at
-    /// `.git/worktrees` or `.git/worktrees/<name>` names (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
+    /// checkout at an admin folder planted with them; they are never rewritten, removed,
+    /// re-permissioned, flagged, given an ACL or a time, or hard linked under a name an agent
+    /// could change them through, so the owner's git keeps reading them (RV-DS241-185, rv-sa241
+    /// NV-1, LINUX-TEAM-TIME-CALLS: a profile adding none denies every write, since Apple's
+    /// `utimensat` sets times past `file-write-times`), and no `config.worktree` may be
+    /// written. No link may be made anywhere in the git folder, in any letter case: git's
+    /// `worktree prune`, which the owner's next commit runs as maintenance, empties whatever
+    /// folder a link at `.git/worktrees` or `.git/worktrees/<name>` names
+    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Each
     /// name below the project root, and each extra worktree's `.git` link, matches in any
     /// letter case, as in `clone_store_denies`, since the case-insensitive disk finds it
     /// however it is typed (DEC-123 rv-secreview L2, RV-DS241-15).
@@ -2955,15 +3476,14 @@ impl ProjectSandbox {
         let mut moves = format!(
             "(deny file-write-unlink\n  (literal \"{project}\")\n  (regex #\"^{pattern}/{git}/{worktrees}$\")\n  (regex #\"^{pattern}(/{state})?/{worktrees}$\")\n  (regex #\"^{admin}$\")\n  (regex #\"^{checkouts}$\")"
         );
-        let create = if self.adds_worktrees || self.setup.is_some() {
-            ""
+        let denied = if self.adds_worktrees || self.setup.is_some() {
+            "file-write-unlink file-write-data file-write-mode file-write-flags file-write-acl file-write-times file-link"
         } else {
-            " file-write-create"
+            "file-write* file-link"
         };
+        let [commondir, gitdir] = ADMIN_LINKS.map(any_case);
         let mut links = format!(
-            "(deny file-write-unlink file-write-data{create}\n  (regex #\"^{admin}/({}|{})$\")\n  (regex #\"^{checkouts}/{git}$\")",
-            any_case("commondir"),
-            any_case("gitdir")
+            "(deny {denied}\n  (regex #\"^{admin}/({commondir}|{gitdir})$\")\n  (regex #\"^{checkouts}/{git}$\")"
         );
         for worktree in &self.worktrees {
             moves.push_str(&format!("\n  (literal \"{}\")", worktree.display()));
@@ -2972,9 +3492,9 @@ impl ProjectSandbox {
                 seatbelt_pattern(worktree)
             ));
         }
+        let [_, worktree_config] = ADMIN_WRITES.map(any_case);
         let text = format!(
-            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n",
-            any_case("config.worktree")
+            "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/{worktree_config}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{pattern}/{git}/\") (vnode-type SYMLINK)))\n"
         );
         assert_eq!(
             text.matches("(regex #\"^/").count(),
@@ -3008,9 +3528,10 @@ impl ProjectSandbox {
     /// The Seatbelt rule that keeps an agent from planting a nested git repository inside a
     /// writable working tree, which the owner's own unsandboxed git (its terminal or the
     /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
-    /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
-    /// below a writable working tree, except that tree's own top-level `.git` and, only in a
-    /// profile built by [`Self::adding_worktrees`], the engine's worktree links, which any
+    /// No entry named `.git`, in every spelling a case-insensitive volume finds ([`any_case`]),
+    /// as a folder, file or link, may be created below a writable working tree, except that
+    /// tree's own top-level `.git` and, only in a profile built by [`Self::adding_worktrees`],
+    /// the engine's worktree links, given back by their exact name in either case, which any
     /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
     /// The project's own `.git` and each worktree's own `.git` sit
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
@@ -3023,7 +3544,8 @@ impl ProjectSandbox {
     /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
     /// never enters or stages. Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
-        let dot_git = "\\.[gG][iI][tT]";
+        let dot_git = any_case(".git");
+        let own_git = "\\.[gG][iI][tT]";
         let (working, other) = self.git_deny_roots();
         let mut nested = String::new();
         for root in &working {
@@ -3040,19 +3562,19 @@ impl ProjectSandbox {
         let mut exempt = String::new();
         if self.adds_worktrees {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))"
+                "\n    (require-not (regex #\"^{checkouts}/{own_git}$\"))"
             ));
         }
         if let Some(clone) = &self.clone {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
+                "\n    (require-not (regex #\"^{}/{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(clone),
                 regex_escape(crate::agent_git::TEAMMATES_FOLDER)
             ));
         }
         if let Some(setup) = &self.setup {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{}/[^/]+/{dot_git}$\"))",
+                "\n    (require-not (regex #\"^{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(&setup.folder)
             ));
         }
@@ -3102,12 +3624,11 @@ impl ProjectSandbox {
             any_case("info"),
             any_case("shallow")
         );
+        let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
         let held = format!(
-            "{}{}?(/.*)?|{}|{}",
+            "{}{}?(/.*)?|{alternates}|{http_alternates}",
             any_case("commit-graph"),
-            any_case("s"),
-            any_case("alternates"),
-            any_case("http-alternates")
+            any_case("s")
         );
         for store in &stores {
             text.push_str(&format!(
@@ -3159,6 +3680,9 @@ impl ProjectSandbox {
     /// atomically. The path must lie outside every writable root, so no agent
     /// can rewrite the profile its next launch uses. A profile holding a string Seatbelt
     /// cannot read, or longer than [`PROFILE_BYTES_MAX`], is refused as `Invalid`, never written.
+    /// An agent home first gets the folders its profile keeps it from making
+    /// ([`make_config_parents`]), unless it lies outside the engine's data root
+    /// ([`Self::anchor_home`]).
     #[cfg(unix)]
     pub fn install(&self, path: &Path) -> Result<(), SandboxError> {
         let parent = path
@@ -3176,6 +3700,9 @@ impl ProjectSandbox {
             return Err(invalid(
                 "profile must live outside the sandbox's writable roots",
             ));
+        }
+        if !self.owner_config && self.engine_home != Some(false) {
+            make_config_parents(&self.agent_home, self.engine_home == Some(true))?;
         }
         let profile = self.profile();
         if !sbpl_overlong(&profile).is_empty() {
@@ -3337,6 +3864,17 @@ pub trait Sandbox: Send + Sync {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError>;
 }
 
+/// What a run's stop checks, once its process group is killed, of the processes the run
+/// left outside that group: nothing where its boundary ends them all, its Full access
+/// lineage, or a sandboxed lineage where a confined process that starts its own session
+/// outlives the group kill (LINUX-KILL-GROUP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageCheck {
+    Unneeded,
+    FullAccess,
+    Sandboxed,
+}
+
 /// A project sandbox whose profile is already installed on disk. Launch paths take
 /// this instead of a bare command, so no agent process can start outside its
 /// boundary: Seatbelt on macOS, Landlock or bubblewrap on Linux, AppContainer with a job
@@ -3346,6 +3884,7 @@ pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
     unconfined: bool,
+    calls: LinuxSupervisor,
     #[cfg(target_os = "linux")]
     linux: linux::LinuxSandbox,
     #[cfg(target_os = "windows")]
@@ -3357,9 +3896,18 @@ impl InstalledSandbox {
     /// Linux, picks the Landlock helper next to the engine's executable or bubblewrap; on
     /// Windows, checks the helper next to the engine's executable first, then writes its
     /// boundary profile with the engine's grants folder (see
-    /// [`windows::WindowsSandbox::install`]). Output: the sandbox bound to that profile, the
-    /// install refusal, or `Unavailable` where this system has no boundary.
-    pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
+    /// [`windows::WindowsSandbox::install`]). `calls` and `strict` are the owner's "Linux call
+    /// supervisor" and [`LinuxStrict`] choices, which every launch must pass and only Linux
+    /// acts on. Output: the sandbox bound to that profile, the install refusal, or
+    /// `Unavailable` where this system has no boundary.
+    pub fn install(
+        sandbox: ProjectSandbox,
+        profile: &Path,
+        calls: LinuxSupervisor,
+        strict: LinuxStrict,
+    ) -> Result<Self, SandboxError> {
+        #[cfg(not(target_os = "linux"))]
+        let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
         {
@@ -3391,6 +3939,7 @@ impl InstalledSandbox {
                 sandbox,
                 profile: profile.to_path_buf(),
                 unconfined: false,
+                calls,
                 windows,
             })
         }
@@ -3401,12 +3950,18 @@ impl InstalledSandbox {
             #[cfg(target_os = "linux")]
             let linux = {
                 let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
-                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?
+                let data = crate::tools::engine_root();
+                linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
+            #[cfg(target_os = "linux")]
+            if strict == LinuxStrict::On && !linux.holds_fully() {
+                return Err(SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into()));
+            }
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
                 unconfined: false,
+                calls,
                 #[cfg(target_os = "linux")]
                 linux,
             })
@@ -3426,6 +3981,22 @@ impl InstalledSandbox {
     /// Whether this boundary runs its commands with no Seatbelt profile.
     pub fn is_unconfined(&self) -> bool {
         self.unconfined
+    }
+
+    /// What a run's stop inside this boundary checks of the processes it left outside its
+    /// group: its Full access lineage when unconfined, a sandboxed one on Linux where the
+    /// backend leaves a process in a session of its own running (`LinuxSandbox::ends_every_session`),
+    /// else nothing, as the warden, a process namespace or the job ends them all. Output: the
+    /// check.
+    pub fn lineage_check(&self) -> LineageCheck {
+        if self.unconfined {
+            return LineageCheck::FullAccess;
+        }
+        #[cfg(target_os = "linux")]
+        if !self.linux.ends_every_session() {
+            return LineageCheck::Sandboxed;
+        }
+        LineageCheck::Unneeded
     }
 
     /// The program every wrapped command starts: `sandbox-exec` on macOS, or the session
@@ -3459,6 +4030,12 @@ impl InstalledSandbox {
     /// Windows helper reads.
     pub fn profile(&self) -> &Path {
         &self.profile
+    }
+
+    /// The owner's "Linux call supervisor" choice this boundary was installed with; only
+    /// Linux acts on it.
+    pub fn linux_supervisor(&self) -> LinuxSupervisor {
+        self.calls
     }
 
     /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]
@@ -3500,9 +4077,12 @@ impl Checkout {
     /// objects the owner and the other agents share: no write in `info/` or `pack/`, nor of
     /// either folder entry, in any letter case, no new, moved or removed fan-out folder, no
     /// new object file by any route (create, rename or link) and no rewrite, removal or
-    /// replacement of one, and no symlink anywhere in the store. Git reads a loose object
-    /// before a packed one without checking its bytes, so any object an agent could add
-    /// would stand in for the owner's own; object writes are the engine's, at turn end.
+    /// replacement of one, no hard link of one under a name it could change it through
+    /// (rv-sa241 NV-1), no symlink anywhere in the store, and no mode, flag or ACL change
+    /// of anything in it, which would keep the owner's git and every landing from reading an
+    /// object (RV-DS241-185). Git reads a loose object before a packed one without checking
+    /// its bytes, so any object an agent could add would stand in for the owner's own;
+    /// object writes are the engine's, at turn end.
     /// Seatbelt regexes take no `{n}` counts, so the hex digits repeat. Input: the checkout.
     /// Output: the rule text.
     fn object_denies(&self) -> String {
@@ -3511,10 +4091,12 @@ impl Checkout {
         let pattern = seatbelt_pattern(&self.objects);
         let held = format!("({}|{})", any_case("info"), any_case("pack"));
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n"
+            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
         );
         assert!(text.matches("(regex #\"^/").count() == 5);
         assert!(text.contains("(vnode-type SYMLINK)"));
+        assert!(text.contains("(deny file-write-mode file-write-flags file-write-acl"));
+        assert!(text.contains("(deny file-write-unlink file-write-data file-link"));
         text
     }
 }
@@ -3614,17 +4196,16 @@ fn app_exec_denies<'a>(
 /// before each launch (`landing::ready_agent_clone`). The engine's fetch checks the same
 /// store before it runs (w-landing). Input: the clone. Output: the rule text.
 fn clone_store_denies(clone: &Path) -> String {
-    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(".git.git"));
+    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(GIT_FALLBACK));
     let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
     let objects = format!("{git}/{}", any_case("objects"));
     let info = format!("{objects}/{}", any_case("info"));
     let pack = format!("{objects}/{}", any_case("pack"));
-    let index = format!("{pack}/{}", any_case("multi-pack-index"));
+    let index = format!("{pack}/{}", any_case(MULTI_PACK_INDEX));
+    let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
+    let [commondir, _] = ADMIN_LINKS.map(any_case);
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
-        any_case("alternates"),
-        any_case("http-alternates"),
-        any_case("commondir")
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
     );
     assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
@@ -3669,59 +4250,240 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
     text
 }
 
-/// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
-/// case-insensitive volume finds however they are typed. APFS folds case by Unicode rules,
-/// so `k` also matches U+212A KELVIN SIGN and `s` U+017F LATIN SMALL LETTER LONG S, the
-/// only other letters that fold to ASCII; those two are spelled as groups, so each matches
-/// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
+/// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
+/// finds under it: each letter in both cases with every code point that folds onto it or
+/// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
+/// folds names itself (SA vid 202). A stretch with more than [`SPELLINGS_MAX`] spellings, a
+/// long run of `s` or `f` in path text, is spelled as the [`superset`], which matches more,
+/// so the result holds in a deny. Input: text without a quote or backslash. Output: the
 /// pattern text, without anchors.
 pub(crate) fn any_case(text: &str) -> String {
-    regex_escape(text)
-        .chars()
-        .map(|character| {
-            if character.eq_ignore_ascii_case(&'k') {
-                "(k|K|\u{212a})".to_owned()
-            } else if character.eq_ignore_ascii_case(&'s') {
-                "(s|S|\u{17f})".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                format!(
-                    "[{}{}]",
-                    character.to_ascii_lowercase(),
-                    character.to_ascii_uppercase()
-                )
-            } else {
-                character.to_string()
-            }
-        })
-        .collect()
+    spelled(&regex_escape(text), false)
 }
 
-/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
-/// without a quote or backslash. Output: the pattern text, without anchors.
-/// A Seatbelt regex fragment matched in any letter case, as [`any_case`] does for plain
-/// text: each ASCII letter becomes both cases, `k` also the Kelvin sign and `s` the long s,
-/// which a case-insensitive volume folds the same; every other character, regex syntax
-/// included, stays as written. Input: a fragment with no bracket class. Output: the pattern.
+/// A Seatbelt regex fragment matched as [`any_case`] matches plain text, every character
+/// that is not a letter, regex syntax included, staying as written; a letter run next to a
+/// wildcard also takes a fold reaching into it ([`spelled_run`]). Every stretch is listed
+/// whole, so a rule that gives access back stays exact. Input: a fragment with no bracket
+/// class or quote. Output: the pattern.
 pub(crate) fn fold_case(pattern: &str) -> String {
     assert!(!pattern.contains('[') && !pattern.contains('"'));
+    spelled(pattern, true)
+}
+
+/// The most spellings one stretch of letters between two places no fold spans lists one by
+/// one; past it path text takes the [`superset`] (B5 r2).
+const SPELLINGS_MAX: usize = 8;
+
+/// Spells text run by run from [`crate::instruction_files::ASCII_FOLDS`]: each run of ASCII
+/// letters through [`spelled_run`], every other character through [`spelled_char`]. In a
+/// regex fragment a letter a quantifier follows stands alone, and no fold may join it to a
+/// letter beside it. Inputs: the text and whether it is a regex fragment. Output: the pattern.
+fn spelled(text: &str, regex: bool) -> String {
+    let characters: Vec<char> = text.chars().collect();
+    let letter = |at: usize| characters.get(at).is_some_and(char::is_ascii_alphabetic);
+    let quantified =
+        |at: usize| regex && matches!(characters.get(at + 1), Some('?' | '*' | '+' | '{'));
+    let mut pattern = String::with_capacity(text.len() * 8);
+    let mut at = 0;
+    while at < characters.len() {
+        if !letter(at) || quantified(at) {
+            assert!(!letter(at) || !joins_fold(&characters, at));
+            pattern.push_str(&spelled_char(characters[at]));
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while letter(at) && !quantified(at) {
+            at += 1;
+        }
+        let before = regex && start > 0 && matches!(characters[start - 1], '*' | '+');
+        let after = regex
+            && characters.get(at) == Some(&'.')
+            && matches!(characters.get(at + 1), Some('*' | '+'));
+        pattern.push_str(&spelled_run(&characters[start..at], before, after, regex));
+    }
     pattern
-        .chars()
-        .map(|character| {
-            if character.eq_ignore_ascii_case(&'k') {
-                "(k|K|\u{212a})".to_owned()
-            } else if character.eq_ignore_ascii_case(&'s') {
-                "(s|S|\u{17f})".to_owned()
-            } else if character.is_ascii_alphabetic() {
-                format!(
-                    "[{}{}]",
-                    character.to_ascii_lowercase(),
-                    character.to_ascii_uppercase()
-                )
-            } else {
-                character.to_string()
+}
+
+/// Tells whether a fold of two or three letters would join the letter at `at` to the letter
+/// before it or to the one after its quantifier. Inputs: the characters and the letter's
+/// place. Output: true when one would.
+fn joins_fold(characters: &[char], at: usize) -> bool {
+    let joined = |left: Option<&char>, right: Option<&char>| match (left, right) {
+        (Some(left), Some(right)) if left.is_ascii_alphabetic() && right.is_ascii_alphabetic() => {
+            let pair = format!("{left}{right}").to_ascii_lowercase();
+            crate::instruction_files::ASCII_FOLDS
+                .iter()
+                .any(|(_, folded)| folded.contains(pair.as_str()))
+        }
+        _ => false,
+    };
+    let previous = at.checked_sub(1).and_then(|before| characters.get(before));
+    joined(previous, characters.get(at)) || joined(characters.get(at), characters.get(at + 2))
+}
+
+/// Spells one character as a case-insensitive volume finds it: an ASCII letter in both
+/// cases, with every code point that folds onto it alone, the non-ASCII ones in a group so
+/// each matches its whole UTF-8 sequence (LL2S-2). Input: the character. Output: the pattern.
+fn spelled_char(character: char) -> String {
+    let lower = character.to_ascii_lowercase();
+    let mut alternatives = vec![lower.to_string()];
+    if character.is_ascii_alphabetic() {
+        alternatives.push(character.to_ascii_uppercase().to_string());
+    }
+    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
+        if folded.len() == 1 && folded.starts_with(lower) {
+            alternatives.push(point.to_string());
+        }
+    }
+    if alternatives.len() == 1 {
+        character.to_string()
+    } else if alternatives
+        .iter()
+        .all(|alternative| alternative.is_ascii())
+    {
+        format!("[{}]", alternatives.concat())
+    } else {
+        format!("({})", alternatives.join("|"))
+    }
+}
+
+/// Spells one run of ASCII letters with every fold of two or three letters inside it and,
+/// next to a wildcard, every fold reaching past its first or last letter into the wildcard.
+/// The run splits where no fold spans, each stretch listing all its spellings, or past
+/// [`SPELLINGS_MAX`] taking the [`superset`] unless it must stay exact. Inputs: the letters,
+/// whether a wildcard comes before and after them and whether every stretch must be listed
+/// whole. Output: the pattern text.
+fn spelled_run(run: &[char], before: bool, after: bool, exact: bool) -> String {
+    let lower: String = run.iter().map(char::to_ascii_lowercase).collect();
+    let count = run.len();
+    let mut folds: Vec<(usize, usize, char)> = Vec::new();
+    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
+        let width = folded.len();
+        if width < 2 {
+            continue;
+        }
+        for at in (0..count).filter(|&at| lower[at..].starts_with(folded)) {
+            folds.push((at, at + width, point));
+        }
+        for split in 1..width {
+            if before && lower.starts_with(&folded[split..]) {
+                folds.push((0, width - split, point));
             }
+            if after && lower.ends_with(&folded[..split]) {
+                folds.push((count - split, count, point));
+            }
+        }
+        for inner in 1..width.saturating_sub(count) {
+            if before && after && folded[inner..inner + count] == lower {
+                folds.push((0, count, point));
+            }
+        }
+    }
+    folds.sort_unstable();
+    folds.dedup();
+    let mut pieces: Vec<(usize, usize, String)> = (0..count)
+        .map(|at| (at, at + 1, spelled_char(run[at])))
+        .collect();
+    pieces.extend(
+        folds
+            .into_iter()
+            .map(|(start, end, point)| (start, end, point.to_string())),
+    );
+    let cuts: Vec<usize> = (0..=count)
+        .filter(|&cut| {
+            !pieces
+                .iter()
+                .any(|(start, end, _)| *start < cut && cut < *end)
         })
-        .collect()
+        .collect();
+    let mut pattern = String::new();
+    for stretch in cuts.windows(2) {
+        let (at, to) = (stretch[0], stretch[1]);
+        let (count, fewest) = tally(&pieces, at, to);
+        assert!(count >= 1 && (1..=to - at).contains(&fewest));
+        if count > SPELLINGS_MAX {
+            assert!(!exact, "a pattern stretch lists every spelling");
+            pattern.push_str(&superset(&pieces, at, to, fewest));
+            continue;
+        }
+        let mut spellings = Vec::new();
+        spell_stretch(&pieces, at, to, String::new(), &mut spellings);
+        assert_eq!(spellings.len(), count);
+        if let [only] = spellings.as_slice() {
+            pattern.push_str(only);
+        } else {
+            pattern.push_str(&format!("({})", spellings.join("|")));
+        }
+    }
+    pattern
+}
+
+/// Counts the spellings of the letters from `at` to `to` that the pieces give, up to one
+/// past [`SPELLINGS_MAX`], and the fewest pieces one spelling takes, place by place from the
+/// end, so no long run is listed to be counted. Inputs: the pieces as start, end and
+/// pattern, and the stretch. Output: the count and the fewest pieces.
+fn tally(pieces: &[(usize, usize, String)], at: usize, to: usize) -> (usize, usize) {
+    assert!(at < to);
+    let mut counts = vec![0; to - at + 1];
+    let mut fewest = vec![0; to - at + 1];
+    counts[to - at] = 1;
+    for place in (at..to).rev() {
+        let ends: Vec<usize> = pieces
+            .iter()
+            .filter(|(start, end, _)| *start == place && *end <= to)
+            .map(|(_, end, _)| end - at)
+            .collect();
+        assert!(!ends.is_empty());
+        counts[place - at] = ends
+            .iter()
+            .fold(0, |sum, &end| (sum + counts[end]).min(SPELLINGS_MAX + 1));
+        fewest[place - at] = 1 + ends.iter().map(|&end| fewest[end]).min().unwrap_or(0);
+    }
+    (counts[0], fewest[0])
+}
+
+/// Spells the letters from `at` to `to` as one of the stretch's pieces at each place, at
+/// least `fewest` places and at most one per letter, the extra places optional, since
+/// Seatbelt reads no `{m,n}` count (probe 2026-11-15). It matches every spelling and more,
+/// so it holds only in a deny. Inputs: the pieces, the stretch and its fewest pieces.
+/// Output: the pattern.
+fn superset(pieces: &[(usize, usize, String)], at: usize, to: usize, fewest: usize) -> String {
+    let mut alternatives: Vec<&str> = Vec::new();
+    for (start, end, piece) in pieces {
+        if at <= *start && *end <= to && !alternatives.contains(&piece.as_str()) {
+            alternatives.push(piece);
+        }
+    }
+    let place = format!("({})", alternatives.join("|"));
+    let optional = format!("{place}?");
+    let pattern = place.repeat(fewest) + &optional.repeat(to - at - fewest);
+    assert!(fewest <= to - at && pattern.len() <= (to - at) * optional.len());
+    pattern
+}
+
+/// Lists every spelling of the letters from `at` to `to` that the pieces give, in order.
+/// Inputs: the pieces as start, end and pattern, the stretch, the spelling so far and the
+/// list it adds to. Output: none; the list grows.
+fn spell_stretch(
+    pieces: &[(usize, usize, String)],
+    at: usize,
+    to: usize,
+    so_far: String,
+    spellings: &mut Vec<String>,
+) {
+    if at == to {
+        spellings.push(so_far);
+        return;
+    }
+    assert!(at < to);
+    for (start, end, piece) in pieces {
+        if *start == at && *end <= to {
+            assert!(start < end);
+            spell_stretch(pieces, *end, to, format!("{so_far}{piece}"), spellings);
+        }
+    }
 }
 
 /// Whether `name` can be one top-level name [`ProjectSandbox::open_only_tops`] keeps open:
@@ -3781,6 +4543,8 @@ pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
     overlong
 }
 
+/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
+/// without a quote or backslash. Output: the pattern text, without anchors.
 fn regex_escape(text: &str) -> String {
     assert!(!text.contains('"') && !text.contains('\\'));
     let mut pattern = String::with_capacity(text.len() * 2);
@@ -4014,15 +4778,10 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// of, nor of the cargo cache links the launch keeps, nor a link it makes at their names
 /// ([`crate::agent_home::pinned_entries`], DEC-173), as [`root_pin`] keeps the home itself,
 /// so no link an agent plants leads one of those calls, a launch's removal of what it does
-/// not keep or a later cargo outside the home. They deny writes to cargo's, git's, npm's
-/// and yarn's own config and cargo's subcommands in the home (`.cargo/config`,
-/// `.cargo/config.toml`, `.config/git`, `.npmrc`, `.yarnrc`, `.yarnrc.yml`, `.cargo/bin`)
-/// and any file flag or ACL in it, so a run, or a process of it still alive after the next
-/// launch's reset, neither plants config or programs its own tools run nor pins what the
-/// next launch removes or writes (RV-DS241-137, -138, sec r1 F1, F2). They deny writes to
-/// the launch lock too, so no run links, removes or replaces it, since a launch refuses a
-/// lock with a second link (r3). They must follow every write allow. Input: the home.
-/// Output: the rule text.
+/// not keep or a later cargo outside the home. They deny writes to the launch lock too, so
+/// no run links, removes or replaces it, since a launch refuses a lock with a second link
+/// (r3). Every home gets them; an agent home gets [`agent_config_denies`] as well. They must
+/// follow every write allow. Input: the home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
     use crate::launch_context::{LOCK, STATE};
@@ -4037,13 +4796,6 @@ fn launch_denies(home: &Path) -> String {
         "rules",
         ".agents",
         "Library/Keychains",
-        ".cargo/config",
-        ".cargo/config.toml",
-        ".cargo/bin",
-        ".config/git",
-        ".npmrc",
-        ".yarnrc",
-        ".yarnrc.yml",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -4077,6 +4829,7 @@ fn launch_denies(home: &Path) -> String {
         .collect();
     assert!(walked.contains(&library));
     assert!(walked.contains(&format!("{home}/{}", any_case(".cargo/registry"))));
+    assert!(walked.contains(&format!("{home}/{}", any_case(".config"))));
     let spelled = |indent: &str| {
         walked
             .iter()
@@ -4084,11 +4837,113 @@ fn launch_denies(home: &Path) -> String {
             .collect::<String>()
     };
     text.push_str(&format!(
-        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n(deny file-write-flags file-write-acl (regex #\"^{home}(/.*)?$\"))\n",
+        "(deny {PINNED_WRITES}{})\n(deny file-write-create\n  (require-all\n    (require-any{})\n    (vnode-type SYMLINK)))\n",
         spelled("  "),
         spelled("      "),
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 42);
+    assert_eq!(text.matches("(regex #\"^/").count(), 20 + 2 * walked.len());
+    text
+}
+
+/// The names [`agent_config_denies`] keeps a confined agent from writing in its own home,
+/// each with all it holds: cargo's config and subcommands, git's global config in both
+/// places it reads one, and npm's and yarn's user config.
+const AGENT_CONFIG: [&str; 8] = [
+    ".cargo/config",
+    ".cargo/config.toml",
+    ".cargo/bin",
+    ".config/git",
+    ".gitconfig",
+    ".npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+];
+
+/// The folders of an agent home an [`AGENT_CONFIG`] name lies in. Each is made by
+/// [`ProjectSandbox::install`] in a home the engine made and kept by every launch, and an
+/// agent may neither make, move nor remove one, so no folder built elsewhere is moved in
+/// with config past the names (RV-DS241-186).
+const CONFIG_PARENTS: [&str; 2] = [".cargo", ".config"];
+
+/// Makes each [`CONFIG_PARENTS`] folder of an agent home a real 0700 folder where nothing
+/// holds its name, since the agent's profile keeps it from making one (RV-DS241-186). With
+/// `clear`, for a home strictly below the engine's data root ([`ProjectSandbox::anchor_home`]),
+/// what holds a name as anything else, as a link an earlier run planted, goes first, and a
+/// name that is still no folder refuses; without it nothing is ever removed and such a name
+/// stays for the launch's reset to judge (rv-code2 b8 F1). Each step goes through the home's
+/// open handle and follows no link. Inputs: the home and `clear`. Output: unit, or `Invalid`
+/// when one cannot be made.
+#[cfg(unix)]
+fn make_config_parents(home: &Path, clear: bool) -> Result<(), SandboxError> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    let refused = || invalid("a config folder of the agent home could not be made");
+    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let parent = rustix::fs::open(home, folder, Mode::empty()).map_err(|_| refused())?;
+    let is_folder = |name: &str| {
+        rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)
+            .map(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
+    };
+    let remove =
+        |name: &str| crate::team::cleanup::remove_home_entry(&parent, name).map_err(|_| refused());
+    for name in CONFIG_PARENTS {
+        match is_folder(name) {
+            Ok(true) => continue,
+            Ok(false) if !clear => continue,
+            Ok(false) => remove(name)?,
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(refused()),
+        }
+        match rustix::fs::mkdirat(&parent, name, Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err(refused()),
+        }
+        if clear && is_folder(name) != Ok(true) {
+            return Err(refused());
+        }
+    }
+    Ok(())
+}
+
+/// The Seatbelt rules an agent home gets on top of [`launch_denies`], which a home the owner
+/// keeps for their own tools does without, as the IDE terminal's does
+/// ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). No write to an [`AGENT_CONFIG`]
+/// name in any letter case, so a run, or a process of it still alive after the next
+/// launch's reset, plants no config or program its own tools or a later run with more
+/// access follow (RV-DS241-137, -138, -186). No [`CONFIG_PARENTS`] folder made, so none
+/// built elsewhere takes the name. No flag or ACL on an entry the next launch keeps and the
+/// engine uses, nor on anything in one ([`crate::agent_home::kept_entries`]), so none holds
+/// against the engine. Copies the agent's tools make elsewhere in its home and in its caches
+/// still take flags (RV-DS241-187), and the next reset clears those as it removes them.
+/// They must follow every write allow. Input: the home. Output: the rule text.
+fn agent_config_denies(home: &Path) -> String {
+    let pinned = crate::agent_home::pinned_entries();
+    assert!(
+        CONFIG_PARENTS
+            .iter()
+            .all(|parent| pinned.iter().any(|entry| entry == *parent))
+    );
+    for (parent, _) in AGENT_CONFIG.iter().filter_map(|name| name.split_once('/')) {
+        assert!(CONFIG_PARENTS.contains(&parent));
+    }
+    let home = seatbelt_pattern(home);
+    let spelled = |names: &[&str], tail: &str| {
+        names
+            .iter()
+            .map(|name| format!("\n  (regex #\"^{home}/{}{tail}\")", any_case(name)))
+            .collect::<String>()
+    };
+    let kept = crate::agent_home::kept_entries();
+    let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
+    let text = format!(
+        "(deny file-write*{})\n(deny file-write-create{})\n(deny file-write-flags file-write-acl{})\n",
+        spelled(&AGENT_CONFIG, "(/.*)?$"),
+        spelled(&CONFIG_PARENTS, "$"),
+        spelled(&kept, "(/.*)?$")
+    );
+    assert_eq!(
+        text.matches("(regex #\"^/").count(),
+        AGENT_CONFIG.len() + CONFIG_PARENTS.len() + kept.len()
+    );
     text
 }
 
@@ -4153,24 +5008,33 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in any
-/// letter case: the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
+/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in every
+/// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
 /// working tree (SM1-R). Input: the root. Output: the regex filter.
 fn any_depth_git(root: &Path) -> String {
     format!(
-        "(regex #\"^{}/(.+/)?\\.[gG][iI][tT](/.*)?$\")",
-        seatbelt_pattern(root)
+        "(regex #\"^{}/(.+/)?{}(/.*)?$\")",
+        seatbelt_pattern(root),
+        any_case(".git")
     )
 }
 
 /// The base write denies a profile gives again after it grants writes once more to the agent
 /// home and other folders, as the IDE profile does for its server's data folders: each one
-/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), and the
-/// home's launch files ([`launch_denies`]). They must follow that grant, since the last
-/// match wins. Inputs: the home and the other folders. Output: the rule text.
+/// pinned ([`root_pin`]), no `.git` at any depth in any of them ([`any_depth_git`]), the
+/// home's launch files ([`launch_denies`]) and no flag or ACL on anything in the home, which
+/// the engine walks and rewrites before each start, so none keeps the owner's IDE from
+/// starting (rv-sa241 b8 L1); never [`agent_config_denies`], since that home is one the
+/// owner keeps ([`ProjectSandbox::keep_owner_config`], RV-DS241-188). They must follow that
+/// grant, since the last match wins. Inputs: the home and the other folders. Output: the
+/// rule text.
 #[cfg(unix)]
 pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     let mut text = launch_denies(home);
+    text.push_str(&format!(
+        "(deny file-write-flags file-write-acl (regex #\"^{}(/.*)?$\"))\n",
+        seatbelt_pattern(home)
+    ));
     let mut nested = String::new();
     for root in std::iter::once(home).chain(folders.iter().copied()) {
         text.push_str(&root_pin(root));
@@ -4178,6 +5042,29 @@ pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     }
     text.push_str(&format!("(deny file-write*{nested})\n"));
     text
+}
+
+/// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part
+/// made of ASCII, [`crate::instruction_files::ASCII_FOLDS`] points and at least one code
+/// point HFS+ ignores in names, since such a volume opens `.g\u{200c}it/config` as
+/// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
+/// joiners. Output: the rule, ending in a line break.
+pub(crate) fn hfs_ignored_deny() -> String {
+    let ignored: Vec<String> = crate::instruction_files::HFS_IGNORED
+        .iter()
+        .map(char::to_string)
+        .collect();
+    let folds: Vec<String> = crate::instruction_files::ASCII_FOLDS
+        .iter()
+        .map(|(point, _)| point.to_string())
+        .collect();
+    let ignored = ignored.join("|");
+    let part = format!("([ -.0-~]|{}|{ignored})", folds.join("|"));
+    let rule = format!(
+        "(deny file-read-data file-write* file-link file-clone\n  (regex #\"^(.*/)?{part}*({ignored}){part}*(/.*)?$\"))\n"
+    );
+    assert!(rule.len() <= SBPL_STRING_MAX && rule.matches('"').count() == 2);
+    rule
 }
 
 /// Whether every deny rule comes after the profile's last write allow, since Seatbelt applies
@@ -4260,8 +5147,8 @@ fn clean_absolute(path: &Path) -> bool {
 /// joined by `\`, each neither `.` nor `..` nor ending in a space or dot, without control
 /// characters, quotes, `/`, `:` or the characters Windows forbids in names, at most 1024
 /// bytes. Input: the text. Output: true when plain.
-#[cfg(any(target_os = "windows", test))]
-fn windows_clean_text(text: &str) -> bool {
+#[cfg(any(not(unix), test))]
+pub(crate) fn windows_clean_text(text: &str) -> bool {
     let bytes = text.as_bytes();
     if text.len() > PATH_BYTES_MAX
         || bytes.len() < 4
@@ -4529,6 +5416,124 @@ mod linux_sockets_tests {
     }
 
     #[test]
+    fn only_a_nested_supervised_launch_with_its_network_held_is_full() {
+        let case = case();
+        let tcp = |network| sandbox(&case, network, LinuxSockets::TcpOnly);
+        for held in [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            local(),
+        ] {
+            let held = tcp(held);
+            assert!(linux_holds_fully(true, true, false, &held));
+            assert!(
+                !linux_holds_fully(false, true, false, &held),
+                "no process space"
+            );
+            assert!(
+                !linux_holds_fully(true, false, false, &held),
+                "no supervisor"
+            );
+        }
+        let hosted = tcp(model());
+        assert!(linux_holds_fully(true, true, true, &hosted), "routed");
+        assert!(
+            !linux_holds_fully(true, true, false, &hosted),
+            "a port on any host from this computer's network"
+        );
+        let low = tcp(SandboxNetwork::Only(vec![
+            SandboxRemote::AnyHost(443),
+            SandboxRemote::Loopback(80),
+        ]));
+        assert!(low.routed().is_none());
+        assert!(
+            !linux_holds_fully(true, true, true, &low),
+            "a loopback port below the bridge keeps it on this computer's network"
+        );
+        for sockets in [LinuxSockets::TcpPorts, LinuxSockets::Refuse] {
+            let other = sandbox(&case, local(), sockets);
+            assert!(!linux_holds_fully(true, true, true, &other), "{sockets:?}");
+        }
+        let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::TcpPorts);
+        assert!(
+            linux_holds_fully(true, true, false, &open),
+            "an open network has no limit to hold"
+        );
+        let below = tcp(SandboxNetwork::Only(vec![SandboxRemote::Loopback(80)]));
+        assert!(
+            !linux_holds_fully(true, true, false, &below),
+            "a loopback port below the bridge is not bridged"
+        );
+    }
+
+    #[test]
+    fn a_full_launch_is_one_no_network_line_names_on_a_host_that_holds_everything() {
+        let case = case();
+        let host = LinuxHost {
+            nested: true,
+            scoped: true,
+            supervised: true,
+            root: false,
+            armored: false,
+            routed: true,
+        };
+        let networks = [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(Vec::new()),
+            local(),
+            model(),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(80)]),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(80),
+            ]),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(8080),
+            ]),
+        ];
+        for network in networks {
+            let launched = sandbox(&case, network, LinuxSockets::TcpOnly);
+            let routed = launched.routed().is_some();
+            let full = linux_holds_fully(true, true, routed, &launched);
+            for choice in [
+                policy::AgentNetwork::None,
+                policy::AgentNetwork::Https,
+                policy::AgentNetwork::Open,
+            ] {
+                let line = linux_unbridged_notice_on(Some(host), choice, &launched);
+                assert_eq!(
+                    full,
+                    line.is_none(),
+                    "{:?} under {choice:?}: {line:?}",
+                    launched.network
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
+        assert!(linux_not_full(&SandboxError::Unavailable(
+            LINUX_NOT_FULL_LINE.into()
+        )));
+        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
+        assert!(!linux_not_full(&SandboxError::Invalid(
+            LINUX_NOT_FULL_LINE.into()
+        )));
+        let line = crate::config::plain_problem(LINUX_NOT_FULL);
+        assert!(line.is_some(), "the strict refusal has a plain sentence");
+        let line = line.unwrap();
+        for part in [
+            "Refuse agents without the full Linux sandbox",
+            "Agent access",
+            "Settings",
+        ] {
+            assert!(line.contains(part), "{line}");
+        }
+    }
+
+    #[test]
     fn each_refusal_reads_plainly_and_names_the_setting() {
         let udp = crate::config::plain_problem(LINUX_RESOLVER_NEEDS_UDP).unwrap();
         for part in [
@@ -4569,6 +5574,27 @@ mod linux_sockets_tests {
                 None,
                 "{program}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod held_stop_tests {
+    use super::*;
+
+    /// A Linux run the call supervisor stopped because it could not take back an entry
+    /// read as a held name is told so; the same code on another system, and every other
+    /// code on Linux (125, the supervisor's other stops, among them) stays the harness's
+    /// own (DEC-185 S2a, rv-sec3 F1).
+    #[test]
+    fn a_linux_run_stopped_with_a_held_name_not_put_back_is_told_so() {
+        let said = held_stop("linux", HELD_NOT_PUT_BACK_EXIT);
+        assert_eq!(said, Some(HELD_NOT_PUT_BACK));
+        for code in [0, 1, 3, 125, 126, 137] {
+            assert_eq!(held_stop("linux", code), None, "{code}");
+        }
+        for os in ["macos", "windows"] {
+            assert_eq!(held_stop(os, HELD_NOT_PUT_BACK_EXIT), None, "{os}");
         }
     }
 }
@@ -4785,6 +5811,73 @@ mod profile_string_tests {
         assert_eq!(sbpl_overlong(&text), vec![long.as_str(), longer.as_str()]);
         assert!(sbpl_overlong(&format!("(literal \"{fits}\")")).is_empty());
         assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
+    }
+
+    /// SA vid 202: a name is spelled with every code point the case-insensitive volume folds
+    /// onto its letters, also those for two or three letters (U+00DF and U+1E9E for `ss`,
+    /// U+FB00 to U+FB06 for `ff`, `fi`, `fl`, `ffi`, `ffl` and `st`), and the Greek question
+    /// mark and varia for `;` and the backtick, and U+0131 for `i` as NTFS maps it. In a
+    /// pattern a fold reaches into a wildcard
+    /// next to the letters, never into a literal or an alternation, so the env templates the
+    /// secret rule gives back stay exact.
+    #[test]
+    fn a_name_is_spelled_with_every_fold_of_the_volume_also_for_two_or_three_letters() {
+        let spelled = [
+            ("config", "[cC][oO][nN]([fF](i|I|\u{131})|\u{fb01})[gG]"),
+            (
+                "instructions.md",
+                concat!(
+                    "(i|I|\u{131})[nN]((s|S|\u{17f})[tT]|\u{fb05}|\u{fb06})",
+                    "[rR][uU][cC][tT](i|I|\u{131})[oO][nN](s|S|\u{17f})\\.[mM][dD]",
+                ),
+            ),
+            (
+                ".ssh",
+                "\\.((s|S|\u{17f})(s|S|\u{17f})|\u{df}|\u{1e9e})[hH]",
+            ),
+            (
+                "ffi",
+                "([fF][fF](i|I|\u{131})|[fF]\u{fb01}|\u{fb00}(i|I|\u{131})|\u{fb03})",
+            ),
+            (".git", "\\.[gG](i|I|\u{131})[tT]"),
+            ("k", "(k|K|\u{212a})"),
+            (";`", "(;|\u{37e})(`|\u{1fef})"),
+        ];
+        for (name, pattern) in spelled {
+            assert_eq!(any_case(name), pattern, "{name}");
+        }
+        assert_eq!(
+            fold_case(".*service"),
+            ".*((s|S|\u{17f})|\u{df}|\u{1e9e})[eE][rR][vV](i|I|\u{131})[cC][eE]"
+        );
+        assert_eq!(
+            fold_case("of.*"),
+            "[oO]([fF]|\u{fb00}|\u{fb01}|\u{fb02}|\u{fb03}|\u{fb04}).*"
+        );
+        assert_eq!(
+            fold_case("secrets?"),
+            "(s|S|\u{17f})[eE][cC][rR][eE][tT](s|S|\u{17f})?"
+        );
+        let templates = fold_case(shared_folders::SECRET_TEMPLATES);
+        assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
+    }
+
+    /// B5 r2 (rv-sec3 F1, rv-code4 F1): path text with a long fold run, such as a project
+    /// folder named with 7 `s` or 10 `f` or a top-level folder with 60, is spelled with no
+    /// panic and no runaway list: a stretch past the spelling limit takes one of its pieces
+    /// at each place, its fewest pieces' worth of places and the rest up to one per letter
+    /// optional, since Seatbelt reads no `{m,n}` count. A pattern keeps every stretch exact.
+    #[test]
+    fn a_long_fold_run_in_path_text_is_spelled_in_bounded_length_never_a_panic() {
+        let s = "((s|S|\u{17f})|\u{df}|\u{1e9e})";
+        assert_eq!(any_case("ssss"), format!("{s}{s}{s}?{s}?"));
+        let f = "([fF]|\u{fb00})";
+        assert_eq!(any_case("ffffff"), format!("{f}{f}{f}{f}?{f}?{f}?"));
+        let root = format!("/Users/o/Glasssssss/{}/{}", "f".repeat(10), "s".repeat(60));
+        let spelled = any_case(&root);
+        assert!(spelled.len() <= 20 * root.len(), "{}", spelled.len());
+        assert!(!spelled.contains('{'), "{spelled}");
+        assert!(std::panic::catch_unwind(|| fold_case("sssss")).is_err());
     }
 
     /// The default secret rule and 64 long open top-level names give a profile with no string

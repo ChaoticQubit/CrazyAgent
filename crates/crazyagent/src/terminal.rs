@@ -206,6 +206,36 @@ pub struct TerminalStream {
     pub history: Vec<u8>,
     pub screen: Vec<u8>,
     pub(crate) chunks: buffer::Chunks,
+    #[cfg(unix)]
+    pub(crate) at: Option<PaneAt>,
+}
+
+/// The pane a view was attached to and the serial of the host connection that found it, so
+/// the view's keys can go straight to that pane while that same connection still serves it.
+/// Fields: the pane id and the connection serial, unique within the process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneAt {
+    pub pane: String,
+    pub serial: u64,
+}
+
+/// Types a view's keys: straight into the pane its stream was attached to when the host can
+/// still use it, else by the agent's name as `input` does. Takes the host the view was
+/// attached through, the view's pane, the agent and at most `INPUT_BYTES_MAX` bytes.
+/// Returns as `input`.
+#[cfg(unix)]
+pub(crate) fn type_into(
+    host: &dyn Host,
+    at: Option<&PaneAt>,
+    agent: &AgentId,
+    bytes: &[u8],
+) -> Result<(), HostError> {
+    if let Some(at) = at
+        && host.input_at(agent, at, bytes)?
+    {
+        return Ok(());
+    }
+    host.input(agent, bytes)
 }
 
 impl TerminalStream {
@@ -290,6 +320,14 @@ pub trait Host: Send + Sync {
     /// Returns once the host accepted them.
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError>;
 
+    /// Types bytes straight into the pane a view of this agent was attached to, with no
+    /// lookup, while the connection that found that pane still serves it. Takes the name,
+    /// the pane from the view's stream and at most `INPUT_BYTES_MAX` bytes. Returns true
+    /// once typed, false when this host cannot use that pane and the caller types by name.
+    fn input_at(&self, _agent: &AgentId, _at: &PaneAt, _bytes: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
     /// go through the terminal's line editing, which turns Enter into a newline.
@@ -365,15 +403,16 @@ pub trait Host: Send + Sync {
         Err(failure("terminal_unavailable"))
     }
 
-    /// Starts a native-mode lead in a tmux server of its own, started inside the Seatbelt
-    /// profile its sandboxed command names, so every pane it splits off for a teammate runs
-    /// under that profile and the lead never reaches the engine's own server. Takes the
-    /// name and the command. Returns where it runs, or `terminal_own_server_unavailable`
-    /// where no such server can run.
+    /// Starts a native-mode lead in a tmux server of its own inside the Seatbelt profile its
+    /// sandboxed command names, so every teammate pane it splits off runs under that profile
+    /// and the lead never reaches the engine's own server. Takes the name, the command and
+    /// whether the lead is on an engine key relay, whose server keepers then hold the engine's
+    /// lifeline (B6b). Returns where it runs, or `terminal_own_server_unavailable`.
     fn spawn_own_server(
         &self,
         _agent: &AgentId,
         _command: &InteractiveCommand,
+        _relayed: bool,
     ) -> Result<PaneRef, HostError> {
         Err(failure(OWN_SERVER_UNAVAILABLE))
     }
@@ -413,6 +452,11 @@ pub trait Host: Send + Sync {
         Vec::new()
     }
 
+    /// Closes the engine's end of the lifelines this host's server keepers hold for an agent,
+    /// as the engine's death does, for rows only (B6b). Takes the name.
+    #[cfg(test)]
+    fn sever_lifelines(&self, _agent: &AgentId) {}
+
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
@@ -442,24 +486,34 @@ pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
 /// server that no longer accepts connections; its pane ids are never read on another server.
 pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
 
+/// Whether a host's code says the terminal a view or a call asked for ended for good: no
+/// server holds the agent (`terminal_agent_unknown`), or the teammates' server a native
+/// lead's team panes were on ended ([`TEAMMATES_SERVER_ENDED`]), as once both of that lead's
+/// servers ended. Takes the code. Returns the answer.
+pub fn ended_code(code: &str) -> bool {
+    matches!(code, "terminal_agent_unknown" | TEAMMATES_SERVER_ENDED)
+}
+
 /// The refusal for a native lead's teammates' socket answered by a server under another pid
 /// than the one the engine first reached there (PLC c).
 pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
 
 /// A host that starts each agent through `Host::spawn_own_server`, in a tmux server of its
-/// own inside the agent's sandbox; every other call goes to the host unchanged.
-struct OwnServer(Arc<dyn Host>);
+/// own inside the agent's sandbox, saying whether the agent is on an engine key relay; every
+/// other call goes to the host unchanged.
+struct OwnServer(Arc<dyn Host>, bool);
 
 /// Wraps a host so the agents it spawns start as native-mode leads, each in its own tmux
-/// server inside its sandbox (see `Host::spawn_own_server`). Takes the engine's host.
-/// Returns the wrapped host; the engine routes every later call to the lead's own server.
-pub fn own_server(host: Arc<dyn Host>) -> Arc<dyn Host> {
-    Arc::new(OwnServer(host))
+/// server inside its sandbox (see `Host::spawn_own_server`). Takes the engine's host and
+/// whether the agents are on an engine key relay (B6b). Returns the wrapped host; the engine
+/// routes every later call to the lead's own server.
+pub fn own_server(host: Arc<dyn Host>, relayed: bool) -> Arc<dyn Host> {
+    Arc::new(OwnServer(host, relayed))
 }
 
 impl Host for OwnServer {
     fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
-        self.0.spawn_own_server(agent, command)
+        self.0.spawn_own_server(agent, command, self.1)
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
@@ -480,6 +534,9 @@ impl Host for OwnServer {
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.0.input(agent, bytes)
+    }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        self.0.input_at(agent, at, bytes)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
@@ -518,6 +575,11 @@ impl Host for OwnServer {
         self.0.server_keepers(agent)
     }
 
+    #[cfg(test)]
+    fn sever_lifelines(&self, agent: &AgentId) {
+        self.0.sever_lifelines(agent);
+    }
+
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
         self.0.kill_pane(agent, pane)
     }
@@ -546,8 +608,9 @@ impl Host for OwnServer {
         &self,
         agent: &AgentId,
         command: &InteractiveCommand,
+        relayed: bool,
     ) -> Result<PaneRef, HostError> {
-        self.0.spawn_own_server(agent, command)
+        self.0.spawn_own_server(agent, command, relayed)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -599,6 +662,12 @@ impl Host for PaneView {
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.host.input_pane(agent, &self.pane, bytes)
+    }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        if at.pane != self.pane {
+            return Ok(false);
+        }
+        self.host.input_at(agent, at, bytes)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {

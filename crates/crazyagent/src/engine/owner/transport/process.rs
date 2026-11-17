@@ -2,6 +2,7 @@ use super::*;
 use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, Repeated, TEXT_BYTES_MAX};
 pub use crate::coord::adoption::Adoption;
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
+use crate::instruction_check::{Finding, FindingKind};
 use crate::instruction_cleanup as cleanup;
 pub use crate::instruction_files::{
     AppSettings as AppInstructionSettings, ImportCommit, ImportFile, Mode as InstructionMode,
@@ -31,6 +32,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "instructions_cleanup_busy",
     "instructions_cleanup_empty",
     "instructions_cleanup_failed",
+    "instructions_cleanup_master_harness",
     "instructions_cleanup_no_account",
     "instructions_cleanup_no_network",
     "instructions_cleanup_no_proposal",
@@ -174,6 +176,13 @@ enum Reply {
     Current {
         bytes: u32,
         version: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        outside: bool,
+    },
+    Proposed {
+        bytes: u32,
+        version: u64,
+        findings: Vec<Finding>,
     },
     Saved {
         version: u64,
@@ -184,6 +193,8 @@ enum Reply {
         current: u64,
         writer: LastWriter,
         bytes: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        outside: bool,
     },
     Received {
         agent: i64,
@@ -258,23 +269,39 @@ pub struct InstructionView {
     pub repeats: u32,
 }
 
-/// A cleaned instructions file a model proposed and the version of the saved file it was
-/// made from, which accepting it names as the version read, so a save that landed since
-/// answers stale. Nothing is saved by a proposal.
+/// A cleaned instructions file a model proposed, the version of the saved file it was made
+/// from, which accepting it names as the version read, so a save that landed since answers
+/// stale, and what the check found in that saved file (DEC-172). Nothing is saved by a
+/// proposal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Proposal {
     pub text: String,
     pub base_version: u64,
+    #[serde(default)]
+    pub findings: Vec<Finding>,
+}
+
+/// One Edit with AI proposal as the engine makes it: the proposed text, the version of the
+/// saved text it was made from and the findings of the check, the engine's first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProposedText {
+    text: String,
+    version: u64,
+    findings: Vec<Finding>,
 }
 
 /// One instructions text and the version it was read at. A save names that version, so it
-/// never replaces a text saved since without the owner seeing that text first.
+/// never replaces a text saved since without the owner seeing that text first. `outside`
+/// says a project's text is not what CrazyAgent last saved there, so agents get it under the
+/// Imported heading and Process shows [`crate::instruction_files::OUTSIDE_NOTICE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessText {
     pub text: String,
     pub version: u64,
+    #[serde(default)]
+    pub outside: bool,
 }
 
 /// What a save of instructions did: stored as the next version, or refused as stale because
@@ -342,6 +369,7 @@ fn kilobytes(bytes: u32) -> String {
 enum Answer {
     Text(String),
     Current(ProcessText),
+    Proposed(ProposedText),
     Saved(SavedText),
     Agent(AgentInstructions),
     Settings(InstructionView),
@@ -399,7 +427,16 @@ impl OwnerClient {
             .process_exchange(Action::Read { project }, None)
             .await?
         {
-            (Reply::Current { version, .. }, Some(text)) => Ok(ProcessText { text, version }),
+            (
+                Reply::Current {
+                    version, outside, ..
+                },
+                Some(text),
+            ) => Ok(ProcessText {
+                text,
+                version,
+                outside,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -438,6 +475,7 @@ impl OwnerClient {
                     version,
                     current,
                     writer,
+                    outside,
                     ..
                 },
                 Some(text),
@@ -446,6 +484,7 @@ impl OwnerClient {
                 current: ProcessText {
                     text,
                     version: current,
+                    outside,
                 },
                 writer,
             }),
@@ -577,7 +616,16 @@ impl OwnerClient {
             .process_exchange(Action::AgentText { project, agent }, None)
             .await?
         {
-            (Reply::Current { version, .. }, Some(text)) => Ok(ProcessText { text, version }),
+            (
+                Reply::Current {
+                    version, outside, ..
+                },
+                Some(text),
+            ) => Ok(ProcessText {
+                text,
+                version,
+                outside,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -715,12 +763,16 @@ impl OwnerClient {
             .process_exchange_within(Action::Propose { project, pool }, None, limit)
             .await?
         {
-            (Reply::Current { version, .. }, Some(text)) if !text.trim().is_empty() => {
-                Ok(Proposal {
-                    text,
-                    base_version: version,
-                })
-            }
+            (
+                Reply::Proposed {
+                    version, findings, ..
+                },
+                Some(text),
+            ) if !text.trim().is_empty() => Ok(Proposal {
+                text,
+                base_version: version,
+                findings,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -848,15 +900,38 @@ impl OwnerClient {
                     let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
                     Ok((Reply::Text { bytes }, Some(text)))
                 }
-                Reply::Current { bytes, version } => {
+                Reply::Current {
+                    bytes,
+                    version,
+                    outside,
+                } => {
                     let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
-                    Ok((Reply::Current { bytes, version }, Some(text)))
+                    let reply = Reply::Current {
+                        bytes,
+                        version,
+                        outside,
+                    };
+                    Ok((reply, Some(text)))
+                }
+                Reply::Proposed {
+                    bytes,
+                    version,
+                    findings,
+                } => {
+                    let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
+                    let reply = Reply::Proposed {
+                        bytes,
+                        version,
+                        findings,
+                    };
+                    Ok((reply, Some(text)))
                 }
                 Reply::Stale {
                     version,
                     current,
                     writer,
                     bytes,
+                    outside,
                 } => {
                     let text = read_text(&mut stream, bytes).await.map_err(|_| unknown())?;
                     let reply = Reply::Stale {
@@ -864,6 +939,7 @@ impl OwnerClient {
                         current,
                         writer,
                         bytes,
+                        outside,
                     };
                     Ok((reply, Some(text)))
                 }
@@ -977,8 +1053,19 @@ pub(super) async fn serve(
             let reply = Reply::Current {
                 bytes: current.text.len() as u32,
                 version: current.version,
+                outside: current.outside,
             };
             (reply, Some(current.text))
+        }
+        Ok(Answer::Proposed(proposed)) => {
+            assert!(proposed.text.len() <= TEXT_BYTES_MAX);
+            assert!(proposed.findings.len() <= crate::instruction_check::FINDINGS_MAX);
+            let reply = Reply::Proposed {
+                bytes: proposed.text.len() as u32,
+                version: proposed.version,
+                findings: proposed.findings,
+            };
+            (reply, Some(proposed.text))
         }
         Ok(Answer::Saved(SavedText::Saved { version, size })) => {
             (Reply::Saved { version, size }, None)
@@ -994,6 +1081,7 @@ pub(super) async fn serve(
                 current: current.version,
                 writer,
                 bytes: current.text.len() as u32,
+                outside: current.outside,
             };
             (reply, Some(current.text))
         }
@@ -1137,9 +1225,10 @@ async fn handle(
                     project: project.as_ref(),
                     pool: pool.as_ref(),
                     prompt,
+                    agent: "instructions-cleanup",
                 })
             })
-            .map(Answer::Current)
+            .map(Answer::Proposed)
         }
         Action::AppSettings if text.is_none() => app_settings(&root, None).map(Answer::AppSettings),
         Action::SaveAppSettings { settings } if text.is_none() => {
@@ -1157,9 +1246,6 @@ async fn handle(
         Action::PendingImport { project } if text.is_none() => {
             crate::instruction_files::pending(&project_folder(&root, &project)?)
                 .map(Answer::Imports)
-        }
-        Action::ConfirmImport { project } if text.is_none() => {
-            crate::instruction_files::import(&project_folder(&root, &project)?).map(Answer::Imports)
         }
         Action::UncommittedImport { project } if text.is_none() => {
             crate::instruction_files::uncommitted_import(&project_folder(&root, &project)?)
@@ -1207,6 +1293,10 @@ fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, Engi
             Answer::Text(crate::instruction_files::read_picked(&path)?)
         }
         (Action::Default, None) => Answer::Text(crate::agent_home::DEFAULT_PROCESS.to_owned()),
+        (Action::ConfirmImport { project }, None) => {
+            let folder = project_folder(root, &project)?;
+            Answer::Imports(crate::instruction_files::import_marked(root, &folder)?)
+        }
         (Action::Given { project }, None) => Answer::Text(given_text(root, &project)?),
         (Action::AgentText { project, agent }, None) => {
             Answer::Current(current_agent_text(root, &project, agent)?)
@@ -1274,7 +1364,11 @@ fn current_agent_text(
         .map_err(|_| failure("process_unavailable"))?;
     let (text, version) = crate::storage::agent_text::read(&tx, project, agent)
         .map_err(|_| failure("process_unavailable"))?;
-    Ok(ProcessText { text, version })
+    Ok(ProcessText {
+        text,
+        version,
+        outside: false,
+    })
 }
 
 /// Saves the owner's own instructions for one team agent as their next version only when
@@ -1323,6 +1417,7 @@ fn save_agent_text(
                 current: ProcessText {
                     text,
                     version: current,
+                    outside: false,
                 },
                 writer: stale.writer,
             })
@@ -1349,7 +1444,12 @@ fn current_text(root: &Path, project: Option<&ProjectId>) -> Result<ProcessText,
         .version;
     drop(tx);
     let text = stored_text(root, folder.as_deref())?;
-    Ok(ProcessText { text, version })
+    let outside = arrived(root, folder.as_deref(), &text);
+    Ok(ProcessText {
+        text,
+        version,
+        outside,
+    })
 }
 
 /// Saves the instructions as their next version only when the save names the current one.
@@ -1395,11 +1495,13 @@ fn save_text(
         Err(Refusal::Stale(stale)) => {
             assert_ne!(stale.current, version);
             let text = stored_text(root, folder.as_deref())?;
+            let outside = arrived(root, folder.as_deref(), &text);
             Ok(SavedText::Stale {
                 version: stale.version,
                 current: ProcessText {
                     text,
                     version: stale.current,
+                    outside,
                 },
                 writer: stale.writer,
             })
@@ -1514,14 +1616,33 @@ fn stored_text(root: &Path, folder: Option<&Path>) -> Result<String, EngineError
     .map_err(|problem| EngineError(problem.0))
 }
 
-/// Writes the instructions whole. Inputs: the engine root, the project folder (none for
-/// the app) and the text. Output: unit, or a plain code.
+/// Writes the instructions whole and records a project's text as CrazyAgent's, so launches
+/// give it as it is; a record that cannot be written leaves it given as arrived, which is
+/// safe. Inputs: the engine root, the project folder (none for the app) and the text.
+/// Output: unit, or a plain code.
 fn store_text(root: &Path, folder: Option<&Path>, text: &str) -> Result<(), EngineError> {
     match folder {
         None => crate::agent_home::save_app(root, text),
-        Some(folder) => crate::agent_home::save_project(folder, text),
+        Some(folder) => {
+            let saved = crate::agent_home::save_project(folder, text);
+            if saved.is_ok() {
+                let _ = crate::agent_home::mark_written(root, folder, text);
+            }
+            saved
+        }
     }
     .map_err(|problem| EngineError(problem.0))
+}
+
+/// Whether stored instructions reach agents as arrived: never the app text, and a project's
+/// text when CrazyAgent did not save it there last ([`crate::agent_home::outside`]).
+/// Inputs: the engine root, the project folder (none for the app) and the text. Output:
+/// the answer Process shows its notice for.
+fn arrived(root: &Path, folder: Option<&Path>, text: &str) -> bool {
+    match folder {
+        Some(folder) => crate::agent_home::outside(root, folder, text),
+        None => false,
+    }
 }
 
 /// The most set-up projects an app-wide save reads for its Claude warning, as many as Home
@@ -1791,21 +1912,17 @@ fn app_settings(
     Ok(stored)
 }
 
-/// Makes one Edit with AI proposal (DEC-132 Q6, Q8): checks the pool rule and the scope's
-/// Edit with AI setting, reads the saved text and its version, hands the prompt to the model
-/// run and reads the proposed file out of the reply. A project's prompt also holds the app
-/// text, so the model drops what it repeats, unless the project's agents get the project
-/// file alone or the app-wide Edit with AI setting is off, which keeps the app text from
-/// every model run made for editing. Inputs: the engine root, none for the app text or the
-/// project, the pool the owner picked for this run and the model run, given the prompt.
-/// Output: the proposed text with the version of the saved text it was made from, or an
-/// `instructions_cleanup_*` code. Nothing is written.
+/// Makes one Edit with AI proposal (DEC-132 Q6, Q8; DEC-172): checks the pool rule, the
+/// scope's setting and a project's master harness, runs the engine's checks of the saved
+/// text, and sends a project's run the app text only when its agents get both texts and the
+/// app-wide setting is on. Inputs: the engine root, the project or none, the picked pool and
+/// the model run. Output: the proposal and its findings, or a code. Nothing is written.
 fn propose(
     root: &Path,
     project: Option<&ProjectId>,
     pool: Option<&CredentialRef>,
     run: impl FnOnce(&str) -> Result<String, &'static str>,
-) -> Result<ProcessText, EngineError> {
+) -> Result<ProposedText, EngineError> {
     cleanup::cleanup_pool(project, pool).map_err(failure)?;
     let compared = {
         let connection = read_only(root)?;
@@ -1823,6 +1940,7 @@ fn propose(
                 if !settings.edit_with_ai {
                     return Err(failure(cleanup::OFF));
                 }
+                cleanup::master_harness(&connection, project).map_err(failure)?;
                 settings.mode != InstructionMode::ProjectOnly
                     && crate::instruction_files::load_app(&connection)
                         .map_err(failure)?
@@ -1834,23 +1952,94 @@ fn propose(
     if saved.text.trim().is_empty() {
         return Err(failure(cleanup::EMPTY));
     }
+    let app = match (project, compared) {
+        (Some(_), true) => current_text(root, None)?.text,
+        _ => String::new(),
+    };
+    let found = checks(root, project, &saved.text, compared.then_some(app.as_str()));
     let prompt = match project {
-        None => cleanup::prompt(cleanup::Scope::App, &saved.text, ""),
-        Some(_) => {
-            let app = match compared {
-                true => current_text(root, None)?.text,
-                false => String::new(),
-            };
-            cleanup::prompt(cleanup::Scope::Project, &app, &saved.text)
-        }
+        None => cleanup::prompt(cleanup::Scope::App, &saved.text, "", &found),
+        Some(_) => cleanup::prompt(cleanup::Scope::Project, &app, &saved.text, &found),
     };
     let reply = run(&prompt).map_err(failure)?;
     let text = cleanup::proposal(&reply).map_err(failure)?;
     assert!(!text.trim().is_empty() && text.len() <= TEXT_BYTES_MAX);
-    Ok(ProcessText {
+    let mut findings = found;
+    findings.extend(cleanup::findings(&reply, &saved.text));
+    findings.truncate(crate::instruction_check::FINDINGS_MAX);
+    Ok(ProposedText {
         text,
         version: saved.version,
+        findings,
     })
+}
+
+/// Runs the engine's checks of one saved instructions text before Edit with AI's model run
+/// (DEC-172): agents getting more than a Claude master takes, lines said twice and
+/// references these agents do not have; a check whose facts cannot be read finds nothing.
+/// Inputs: the engine root, the project or none, the saved text and the app text when the
+/// run may see it. Output: at most `FINDINGS_MAX` findings, over budget first.
+fn checks(root: &Path, project: Option<&ProjectId>, text: &str, app: Option<&str>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let size = sized(root, project, text);
+    if size.bytes > size.claude_bytes_max {
+        let note = format!(
+            "Agents get {} of app and project instructions; a Claude master takes at most {}.",
+            kilobytes(size.bytes),
+            kilobytes(size.claude_bytes_max)
+        );
+        findings.push(Finding::new(FindingKind::OverBudget, Vec::new(), &note));
+    }
+    let (folder, skills, servers) = inventory(root, project);
+    let places = crate::tools::Places::from_environment(Some(root));
+    let pending = crate::tools::probe::mark().first_run_pending;
+    let program = |name: &str| {
+        if pending {
+            return None;
+        }
+        match crate::tools::resolve(name, &places) {
+            Ok(_) => Some(true),
+            Err(missing) => missing.refused.is_none().then_some(false),
+        }
+    };
+    let known = crate::instruction_check::Known {
+        folder: folder.as_deref(),
+        skills: skills.as_deref(),
+        servers: servers.as_deref(),
+        program: &program,
+    };
+    findings.extend(crate::instruction_check::broken(text, &known));
+    findings.extend(crate::instruction_check::repeats(text, app));
+    findings.truncate(crate::instruction_check::FINDINGS_MAX);
+    findings
+}
+
+/// Reads what Edit with AI's reference check knows of the agents a text is written for:
+/// the project's canonical folder, and the skills and MCP servers they get, the CrazyAgent
+/// server always among them. A fact that cannot be read is none. Inputs: the engine root
+/// and the project, none for the app text. Output: the folder, skills and servers.
+fn inventory(
+    root: &Path,
+    project: Option<&ProjectId>,
+) -> (Option<PathBuf>, Option<Vec<String>>, Option<Vec<String>>) {
+    use crate::storage::plugins::check_names;
+    let Ok(connection) = read_only(root) else {
+        return (None, None, None);
+    };
+    let folder = project.and_then(|project| {
+        let stored = project_folder(root, project).ok()?;
+        let folder = stored.canonicalize().ok()?;
+        folder.is_dir().then_some(folder)
+    });
+    let names = connection
+        .unchecked_transaction()
+        .ok()
+        .and_then(|tx| check_names(&tx, root, project).ok());
+    let Some((skills, mut servers)) = names else {
+        return (folder, None, None);
+    };
+    servers.push(crate::coord::tool_switches::CRAZYAGENT_SERVER.to_owned());
+    (folder, Some(skills), Some(servers))
 }
 
 /// Counts the project's lines the app text already has, for the note beside the repeated

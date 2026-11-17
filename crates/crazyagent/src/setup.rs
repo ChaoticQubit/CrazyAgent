@@ -2,6 +2,7 @@
 pub mod bundled;
 #[cfg(unix)]
 pub mod fetch;
+pub mod launch;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 pub mod linux;
 #[cfg(target_os = "macos")]
@@ -15,7 +16,7 @@ pub mod pinned;
 pub(crate) mod process;
 pub mod progress;
 #[cfg(any(target_os = "linux", target_os = "windows", test))]
-mod run;
+pub(crate) mod run;
 #[cfg(any(target_os = "windows", test))]
 pub mod windows;
 
@@ -424,10 +425,12 @@ pub fn tool_lock(package: &str, version: &str) -> Option<ToolLock<'static>> {
 }
 
 /// The two uv commands that install a locked tool into a fresh virtual environment: the
-/// first creates it with the pinned Python, the second installs exactly the lock's
-/// wheels and refuses any file whose SHA-256 the lock lacks and any source build. Both
-/// ignore uv configuration files. Inputs: the Python version, the environment folder,
-/// its Python and the lock file. Output: each command's arguments.
+/// first creates it with the pinned Python, only one uv manages itself and never one it
+/// would find on the PATH, which another account may have planted (RV-DS241-200); the
+/// second installs exactly the lock's wheels and refuses any file whose SHA-256 the lock
+/// lacks and any source build. Both ignore uv configuration files. Inputs: the Python
+/// version, the environment folder, its Python and the lock file. Output: each command's
+/// arguments.
 pub fn locked_tool_args(
     python: &str,
     venv: &std::path::Path,
@@ -439,6 +442,7 @@ pub fn locked_tool_args(
             "venv".into(),
             "--no-project".into(),
             "--no-config".into(),
+            "--managed-python".into(),
             "--python".into(),
             python.into(),
             venv.into(),
@@ -980,6 +984,9 @@ mod tests {
         assert_eq!(tool_lock("headroom-ai", "0.41.1"), None);
     }
 
+    /// A locked tool installs with required hashes and no source builds, into a virtual
+    /// environment on a Python uv manages itself, never one a lookup finds on the PATH, where
+    /// another account may have planted one (RV-DS241-200).
     #[test]
     fn a_locked_tool_installs_with_required_hashes_and_no_source_builds() {
         let [venv, install] = locked_tool_args(
@@ -992,6 +999,7 @@ mod tests {
             "venv",
             "--no-project",
             "--no-config",
+            "--managed-python",
             "--python",
             "3.12",
             "/e/venv"
@@ -1213,8 +1221,8 @@ mod tests {
 
     /// DEC-141, ds-setup r4: every code setup names a sentence for reaches the desktop by
     /// name, in the bridge's setup codes and in the window's words, so a refusal such as
-    /// setup_homebrew_unsafe is never shown as a bare "setup failed". The codes no desktop
-    /// table lists yet are named here, and a code added to the tables must leave this list.
+    /// setup_homebrew_unsafe or setup_pin_unlocked is never shown as a bare "setup failed".
+    /// No code is left out as a known gap.
     #[test]
     fn every_setup_reason_is_named_by_the_desktop_bridge_and_window() {
         let read = |path: &str| {
@@ -1234,19 +1242,11 @@ mod tests {
             .unwrap();
         let words = &window[start..];
         let words = &words[..words.find("\n};").unwrap()];
-        let unlisted = [
-            "setup_archive_unsafe",
-            "setup_pin_unlocked",
-            "setup_local_app_data_missing",
-            PLATFORM_UNSUPPORTED,
-            AGENT_GIT_NEEDS_TOOLS,
-        ];
         for (code, _) in REASONS {
             let in_bridge = codes.contains(&format!("\"{code}\","));
             let in_window = words.contains(&format!("\n  {code}: \""));
-            let listed = !unlisted.contains(&code);
-            assert_eq!(in_bridge, listed, "{code} in the bridge's setup codes");
-            assert_eq!(in_window, listed, "{code} in the window's words");
+            assert!(in_bridge, "{code} in the bridge's setup codes");
+            assert!(in_window, "{code} in the window's words");
         }
         assert!(codes.contains("\"setup_homebrew_unsafe\","));
     }

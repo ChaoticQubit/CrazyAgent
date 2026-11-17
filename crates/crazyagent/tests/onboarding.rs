@@ -149,7 +149,7 @@ fn rejection(response: &OwnerResponse) -> Option<String> {
     match response {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
             match &operation.result {
-                OwnerResult::Applied => None,
+                OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => None,
                 OwnerResult::Rejected { code } => Some(code.clone()),
                 other => panic!("unexpected owner result: {other:?}"),
             }
@@ -745,6 +745,7 @@ fn agent_runs(agents: &Path, prefix: &str) -> usize {
 
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:7b and Codex and graphify installed"]
 async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
     require_model();
     let mut bench = Bench::start(|_| {}).await;
@@ -1299,6 +1300,45 @@ async fn a_draft_brief_or_overview_the_folder_came_with_is_never_taken_as_the_en
         ["Rust"],
         "the draft this engine saved is reused when the folder is added again"
     );
+    bench.stop().await;
+}
+
+/// rv-sec2 N2 (DEC-178 addendum 1): a project removed from the dashboard comes back from its
+/// own folder, and a draft written into its `.crazyagent/setup/draft.json` after the removal is
+/// not taken as the engine's, since the seal rule holds on the return.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_return_does_not_take_a_draft_changed_after_removal() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    bench.generation += 1;
+    let removed = bench
+        .owner
+        .remove_project(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&removed), None, "{removed:?}");
+    fs::create_dir_all(bench.repo.join(".crazyagent/setup")).unwrap();
+    fs::write(bench.repo.join(".crazyagent/setup/draft.json"), SAVED_DRAFT).unwrap();
+
+    let repo = bench.repo.clone();
+    let response = bench.start_onboarding_at(&repo).await;
+    let (OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) = &response
+    else {
+        panic!("the return is recorded: {response:?}");
+    };
+    assert_eq!(
+        operation.result,
+        OwnerResult::OnboardingStarted {
+            project_id: project.clone()
+        },
+        "the folder brings its own project back"
+    );
+    let back = bench.view(&project).await;
+    assert_eq!(
+        back.draft.about, "",
+        "a draft changed after the removal is not the engine's"
+    );
+    assert!(back.draft.tech_stack.is_empty(), "{back:?}");
     bench.stop().await;
 }
 
@@ -2508,6 +2548,37 @@ async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them
     bench.stop().await;
 }
 
+/// RV-DS241-202: a folder that came with a `.crazyagent/instructions.md` CrazyAgent cannot
+/// read, here not UTF-8, refuses the onboarding start with its own plain code and leaves the
+/// file as it is, so its text is never taken as the owner's once it is made readable; the
+/// next start after the file is fixed labels it under the Imported heading.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_arrived_project_file_that_cannot_be_read_refuses_the_start_until_it_can_be_labelled() {
+    const UNREADABLE: &[u8] = b"ARRIVED-RULE-202 \xff\xfe\n";
+    let mut bench = Bench::start_without_graphify(|repo| {
+        fs::create_dir_all(repo.join(".crazyagent")).unwrap();
+        fs::write(repo.join(".crazyagent").join("instructions.md"), UNREADABLE).unwrap();
+    })
+    .await;
+    bench.use_repos_as_home().await;
+    let file = bench.repo.join(".crazyagent").join("instructions.md");
+    let repo = bench.repo.clone();
+    let refused = bench.start_onboarding_at(&repo).await;
+    assert_eq!(
+        rejection(&refused).as_deref(),
+        Some("onboarding_instructions_unreadable"),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), UNREADABLE);
+    fs::write(&file, "ARRIVED-RULE-202\n").unwrap();
+    bench.start_onboarding().await;
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "### Imported from .crazyagent/instructions.md\n\nARRIVED-RULE-202\n"
+    );
+    bench.stop().await;
+}
+
 /// A project onboarded from an existing folder runs its agents in their own clones, as a
 /// New Project does: onboarding saves the New Project access level wherever this computer
 /// can run it, and starting the same folder's onboarding again keeps the level the owner
@@ -2541,6 +2612,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
+                home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
                 ..Default::default()
@@ -2897,7 +2969,7 @@ async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
     );
     assert_eq!(
         job.error.as_deref(),
-        Some("Waiting for the projects home move to finish")
+        Some("Waiting for the projects home move")
     );
     db.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
         .unwrap();

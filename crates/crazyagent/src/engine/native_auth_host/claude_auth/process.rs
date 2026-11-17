@@ -21,14 +21,15 @@ const CHECK: Duration = Duration::from_millis(100);
 
 /// The longest one official `claude` command may run, inside its operation's own deadline. A
 /// status may use the whole account check bound: under build load a cold start passed 2 s and
-/// cut checks of signed-in accounts (v2.4.0 owner update). Input: the command. Output: its
-/// bound.
+/// cut checks of signed-in accounts (v2.4.0 owner update). A logout starts the same cold
+/// `claude`, so it may too, and is never cut partway through removing a sign-in
+/// (RV-DS241-55). Input: the command. Output: its bound.
 pub(super) fn command_bound(action: ClaudeAuthCommand) -> Duration {
     match action {
         ClaudeAuthCommand::Login => Duration::from_secs(575),
         ClaudeAuthCommand::Renew => RENEWAL_TIME,
         ClaudeAuthCommand::Status => CHECK_TIME,
-        ClaudeAuthCommand::Logout => Duration::from_secs(2),
+        ClaudeAuthCommand::Logout => CHECK_TIME,
     }
 }
 
@@ -135,15 +136,20 @@ struct PrivateInput {
 
 impl Drop for PrivateInput {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        crate::credentials::wipe(&mut self.bytes);
     }
 }
 
-pub(super) struct ChildOutput {
+pub(in crate::engine) struct ChildOutput {
     pub(super) stdout: Vec<u8>,
     pub(super) exit: Option<i32>,
 }
 
+/// Runs one Claude Code auth child to its end: reads its output, answers the custody checks
+/// and hands it the owner's code. The deadline is checked between steps and bounds only the
+/// poll wait, never a custody exchange, so an exchange in flight finishes and the channel can
+/// still report the failure (RV-DS241-53). Inputs: the session, channel, pipes, action and
+/// deadline. Output: the child's output, or the failure.
 async fn drive(
     session: &mut CustodySession,
     channel: &mut NativeAuthCustodyChannel,
@@ -231,11 +237,11 @@ async fn drive(
                 exit: exit.code(),
             });
         }
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(POLL.min(deadline.saturating_duration_since(Instant::now()))).await;
     }
 }
 
-pub(super) async fn run_child(
+pub(in crate::engine) async fn run_child(
     session: &mut CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     executable: &RegisteredNativeAuthHost,
@@ -275,13 +281,7 @@ pub(super) async fn run_child(
         .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
     let deadline = operation_deadline.min(Instant::now() + command_bound(action));
     let result = match Pipes::take(session.child_mut()?, action) {
-        Ok(mut pipes) => tokio::time::timeout(
-            deadline.saturating_duration_since(Instant::now()),
-            drive(session, channel, &mut pipes, action, deadline),
-        )
-        .await
-        .map_err(|_| failure("native_auth_claude_deadline"))
-        .and_then(|result| result),
+        Ok(mut pipes) => drive(session, channel, &mut pipes, action, deadline).await,
         Err(error) => Err(error),
     };
     if !cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP)

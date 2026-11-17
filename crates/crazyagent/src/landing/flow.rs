@@ -8,6 +8,7 @@ use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
+use crate::instruction_files::ASCII_FOLDS;
 use crate::protocol::ProjectId;
 use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
@@ -785,10 +786,10 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 }
 
 /// Says whether an agent worktree holds exactly a commit: nothing staged or changed in
-/// tracked files and no untracked file outside its ignore rules. A submodule counts by
-/// the commit it records, never by its own content, so no git runs inside it under
-/// config the engine did not write. Inputs: the worktree and the commit. Output: true
-/// when it holds nothing else.
+/// tracked files and no untracked file outside its ignore rules, the owner's ignore file
+/// included, all as its confined reading step reads them ([`Repo::reading`]). A submodule counts by the commit it records, never by its own
+/// content, so no git runs inside it under config the engine did not write. Inputs: the
+/// worktree and the commit. Output: true when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
     holds_only_except(repo, commit, &[])
 }
@@ -803,8 +804,9 @@ pub(super) fn holds_only_except(
     commit: &str,
     excluded: &[&str],
 ) -> Result<bool, EngineError> {
-    repo.run(&["update-index", "-q", "--refresh"])?;
-    if !repo.test(&[
+    let reading = repo.reading()?;
+    reading.run(&["update-index", "-q", "--refresh"])?;
+    if !reading.test(&[
         "diff-index",
         "--quiet",
         "--ignore-submodules=all",
@@ -819,7 +821,7 @@ pub(super) fn holds_only_except(
         .collect();
     let mut listing = vec!["ls-files", "-z", "--others", "--exclude-standard"];
     listing.extend(exclude.iter().map(String::as_str));
-    let untracked = repo.exec(&listing, None, &[], 1)?;
+    let untracked = reading.exec(&listing, None, &[], 1)?;
     if untracked.code != 0 {
         return Err(failure("changes_git_failed"));
     }
@@ -898,9 +900,11 @@ pub(super) fn reset_agent(agent: &Agent, from: &str, target: &str) -> Result<boo
     if agent.head()? != from {
         return Ok(false);
     }
-    let refreshed = agent
-        .repo
-        .exec(&["update-index", "-q", "--refresh"], None, &[], 4096)?;
+    let refreshed =
+        agent
+            .repo
+            .reading()?
+            .exec(&["update-index", "-q", "--refresh"], None, &[], 4096)?;
     if refreshed.code != 0 {
         return Ok(false);
     }
@@ -955,8 +959,8 @@ pub(super) fn reset_settling(agent: &Agent, from: &str, target: &str) -> Result<
 }
 
 /// Puts an agent worktree's index and files back after its reset did not hold, moving them
-/// from `target` to whatever HEAD now holds, named by its id so the index the engine rebuilds
-/// after the step reads the same trees (SA vid 3), with the same two-tree read-tree, path by path:
+/// from `target` to whatever HEAD now holds, named by its id so every git of the split move
+/// reads the same trees (SA vid 3 A), with the same two-tree read-tree, path by path:
 /// a path the agent committed meanwhile is at HEAD already and stays, so no reversal of
 /// that commit is staged, and the rest go back to the commit HEAD holds. An edit the agent
 /// made meanwhile is never overwritten: git refuses, writing nothing, and the refusal is
@@ -1720,25 +1724,6 @@ fn fresh_link_inside(
     !entered(&walk, agents) && !walk.iter().any(|part| part.eq_ignore_ascii_case(".git"))
 }
 
-/// The code points outside ASCII that a case-insensitive APFS volume folds onto ASCII,
-/// with the ASCII they fold onto: the full case fold of their canonical decomposition,
-/// each checked on the volume (probe 2026-10-28). Every other code point stays outside ASCII.
-const ASCII_FOLDS: [(char, &str); 13] = [
-    ('\u{DF}', "ss"),
-    ('\u{17F}', "s"),
-    ('\u{37E}', ";"),
-    ('\u{1E9E}', "ss"),
-    ('\u{1FEF}', "`"),
-    ('\u{212A}', "k"),
-    ('\u{FB00}', "ff"),
-    ('\u{FB01}', "fi"),
-    ('\u{FB02}', "fl"),
-    ('\u{FB03}', "ffi"),
-    ('\u{FB04}', "ffl"),
-    ('\u{FB05}', "st"),
-    ('\u{FB06}', "st"),
-];
-
 /// Folds one path part the way the volume compares names, when the result is ASCII.
 /// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
 /// the code points HFS+ ignores in names left out
@@ -1904,14 +1889,15 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
 /// tree but the teammates' folder ([`teammates_left_out`]), less each untracked path only the
 /// owner's ignore file excludes: what this unconfined git lists as ignored under the owner's
 /// file, an ignored folder once with a closing `/`, but not under the add's own rules (no
-/// excludes file, [`super::git::NO_EXCLUDES`]). The confined add on Linux may not read that file,
-/// since a link swapped in during the add would copy it into the object store (SA vid 2), so
-/// it gets the file's patterns as names, which tell it nothing the agent's own listing does
-/// not; it still applies the work tree's `.gitignore` and `info/exclude` itself, and git's add
-/// exits 1 when a pathspec names a path it ignores (rv-code2 F1). Elsewhere the add still
-/// applies the owner's file itself, so no listing runs there. Input: the agent's repository.
-/// Output: the pathspecs, `changes_too_large` past the listing bound or `changes_git_failed`.
-#[cfg(target_os = "linux")]
+/// excludes file, [`super::git::NO_EXCLUDES`]). The confined add on macOS and Linux may not
+/// read that file, since a link swapped in during the add would copy it into the object store
+/// (SA vid 2, LINUX-LANDING note 1), so it gets the file's patterns as names, which tell it
+/// nothing the agent's own listing does not; it still applies the work tree's `.gitignore` and
+/// `info/exclude` itself, and git's add exits 1 when a pathspec names a path it ignores
+/// (rv-code2 F1). Elsewhere the add runs unconfined and applies the owner's file itself, so no
+/// listing runs there. Input: the agent's repository. Output: the pathspecs,
+/// `changes_too_large` past the listing bound or `changes_git_failed`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn add_pathspecs(repo: &Repo) -> Result<Vec<u8>, EngineError> {
     let teammates = teammates_left_out();
     let args = [
@@ -1975,7 +1961,7 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let pathspecs = add_pathspecs(repo)?;
         let added = repo.confined(Writes::Objects)?.exec(
@@ -1988,7 +1974,7 @@ fn commit_worktree(
             return Err(failure("changes_git_failed"));
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     repo.confined(Writes::Objects)?
         .run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;

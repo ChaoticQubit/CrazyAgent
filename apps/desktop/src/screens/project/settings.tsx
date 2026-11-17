@@ -2,10 +2,12 @@ import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api"
 import type { Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type HiddenPaths, type ReadPaths } from "../../api-projects";
-import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
-import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
-import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type HiddenRunKind, type ReadPaths } from "../../api-projects";
+import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
+import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
+import { loadIntakeJob } from "../../api-intake";
+import { refusalLine } from "../intake/intake";
+import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -18,6 +20,7 @@ import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { MoveHome } from "./move-home";
+import { GitHubRulesSection } from "./github-section";
 import { RemoveDialogView, deleteReady, removeChoices, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
@@ -41,6 +44,7 @@ const SECTIONS = [
   { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
   { id: "messages", label: "Messages" },
+  { id: "github", label: "GitHub" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -211,7 +215,7 @@ export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | 
  * null when the project has no saved setup. Output: one plain paragraph. */
 export function removeLine(folder: string | null): string {
   const where = folder ? `at ${folderLabel(folder)}` : "where it is";
-  return `Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk ${where}, with every file in it.`;
+  return `Its master conversation ends, its agents stop and what its research found is forgotten. CrazyAgent keeps your notes, imports and saved selections for it, and brings them back if you add this same folder again. The project folder stays on disk ${where}, with every file in it.`;
 }
 
 /** Takes the ask a route to Remove project carries, once: the choice the Remove dialog opens on,
@@ -236,6 +240,17 @@ export function watchRemoveAsk(projectId: string, onAsk: (choice: RemoveChoice) 
   take();
   window.addEventListener("hashchange", take);
   return () => window.removeEventListener("hashchange", take);
+}
+
+/** Starts the engine's job that deletes a project once its exact name is typed (DEC-177 add.1).
+ * Inputs: the project id, the typed name, the start and the job read a busy refusal names the
+ * running job from. Output: the started job, or the note the dialog's section shows. */
+export async function deleteStart(id: string, typed: string, start = startDeleteJob,
+  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<{ kind: "started"; job: IntakeJob } | { kind: "refused"; note: string }> {
+  const result = await start(id, typed);
+  if (result.kind === "ok") return { kind: "started", job: result.value };
+  if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: deleting a project isn't in this build." };
+  return { kind: "refused", note: await refusalLine(result.code, failureCopy(result), read) };
 }
 
 /** Settings' Remove project: the section, and its dialog, opened by the button or by a route
@@ -268,8 +283,9 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
   async function remove() {
     const deleting = choice === "everything" && removeChoices(read).includes("everything");
     if (deleting && !deleteReady(read, typed)) return;
+    if (deleting) return void deleteEverything();
     setBusy(true);
-    const result = await removeProject(data.id, nextGeneration(), deleting ? typed : null);
+    const result = await removeProject(data.id, nextGeneration());
     setBusy(false);
     setConfirming(false);
     if (result.kind === "not_ready") return setNote("Not ready yet: removing a project isn't in this build.");
@@ -277,12 +293,21 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     const state = receiptState(result.value);
     if (state.kind === "applied") {
       await session?.refreshProjects();
-      const name = data.name || "The project";
-      data.notify(deleting ? `${name} was deleted. Its folder is in the Trash.` : `${name} was removed. Its folder stays on disk.`);
+      data.notify(`${data.name || "The project"} was removed. Its folder stays on disk.`);
       data.navigate("/home");
       return;
     }
     setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and try again.");
+  }
+  async function deleteEverything() {
+    setBusy(true);
+    const started = await deleteStart(data.id, typed);
+    setBusy(false);
+    setConfirming(false);
+    if (started.kind === "refused") return setNote(started.note);
+    session?.refreshIntake(started.job);
+    data.notify(`Deleting ${data.name || "the project"}. Follow it on Home; you can keep working.`);
+    data.navigate("/home");
   }
   return <div className="pj-stack">
     <h2>Remove project</h2>
@@ -477,19 +502,65 @@ function SandboxSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** What the hidden folders section says its list of agents that can still open a hidden
+ * folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A r1): team
+ * agents, taken-over ones included, and the engine runs that started before (SA-VID14-R2-N2). */
+export const HIDDEN_SEERS_COVER = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named here with Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named here too, and keep their access until they end.";
+
+/** The running agents a team status lists as able to open a folder hidden after they
+ * started (SA-VID14-A). Input: the team status, or null before it is read. Output: those
+ * agents in the status order. */
+export function hiddenSeers(status: TeamStatus | null): TeamAgent[] {
+  return status === null ? [] : status.agents.filter((agent) => agent.sees_hidden === true);
+}
+
+/** How often the hidden folders section reads the folders again while an engine run is
+ * listed, so a run that ended leaves the page (SA-VID14-R2-N2), the TUI's refresh. */
+export const HIDDEN_RUNS_POLL_MS = 3000;
+
+const RUN_WORDS: Record<HiddenRunKind, string> = {
+  master: "master turn",
+  research: "research job",
+  overview: "overview run",
+  roadmap: "roadmap run",
+  onboarding: "onboarding run",
+  code_graph: "code graph build",
+  lockfiles: "lockfile rebuild run",
+};
+
+/** What the hidden folders section says about the engine runs still running that started
+ * before a folder was hidden (SA-VID14-R2-N2), each kind once; a kind this app does not know
+ * is still named. Input: the saved folders, or null before they are read. Output: the line,
+ * or null while none is listed. */
+export function hiddenRunsLine(saved: HiddenPaths | null): string | null {
+  const runs = saved?.runs ?? [];
+  if (runs.length === 0) return null;
+  const named = new Set(runs.map((kind) => Object.hasOwn(RUN_WORDS, kind) ? RUN_WORDS[kind] : "another CrazyAgent run"));
+  return `Runs that can still open a hidden folder until they end: ${[...named].join(", ")}.`;
+}
+
+/** What the hidden folders section says about the agents that can still open a hidden
+ * folder. Input: the agents, at least one. Output: the line naming them. */
+export function seersLine(agents: TeamAgent[]): string {
+  return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
+}
+
 function HiddenSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<HiddenPaths | null>(null);
+  const [latest, setLatest] = useState<HiddenPaths | null>(null);
   const [paths, setPaths] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [fullAccess, setFullAccess] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const seers = hiddenSeers(data.team.result?.kind === "ok" ? data.team.result.value : null);
   const notReady = "Not ready yet: hidden folders aren't in this build.";
   useEffect(() => {
     let live = true;
     void loadHiddenPaths(data.id).then((result) => {
       if (!live) return;
-      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value.paths); }
+      if (result.kind === "ok") { setSaved(result.value); setLatest(result.value); setPaths(result.value.paths); }
       else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
     });
     void loadAgentPolicy(data.id).then((result) => {
@@ -498,6 +569,18 @@ function HiddenSection({ data }: { data: ProjectData }) {
     });
     return () => { live = false; };
   }, [data.id]);
+
+  const listed = (latest?.runs ?? []).length > 0;
+  useEffect(() => {
+    if (!listed) return;
+    let live = true;
+    const timer = setInterval(() => {
+      void loadHiddenPaths(data.id).then((result) => {
+        if (live && result.kind === "ok") setLatest(result.value);
+      });
+    }, HIDDEN_RUNS_POLL_MS);
+    return () => { live = false; clearInterval(timer); };
+  }, [data.id, listed]);
 
   function add() {
     const next = addHiddenPath(paths, typed);
@@ -511,6 +594,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     const fresh = await loadHiddenPaths(data.id);
     if (fresh.kind !== "ok") return false;
     setSaved(fresh.value);
+    setLatest(fresh.value);
     setPaths(fresh.value.paths);
     return true;
   }
@@ -534,11 +618,29 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.notify("Hidden folders saved. Agents started from now on can't open them.");
   }
 
+  async function restart() {
+    setRestarting(true);
+    const result = await restartHiddenSeers(data.id, nextGeneration());
+    setRestarting(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm the restart. Check the agents and try again.");
+    setNote("");
+    data.notify("Restarting them. Each starts again in its own worktree and conversation, kept out of every hidden folder.");
+    data.reloadTeam();
+  }
+
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
     {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
+    {!fullAccess && <p className="pj-secondary">{HIDDEN_SEERS_COVER}</p>}
+    {!fullAccess && seers.length > 0 && <div className="pj-note warn" role="status">
+      <p>{seersLine(seers)}</p>
+      <Button pending={restarting} pendingLabel="Restarting..." disabled={restarting} onClick={() => void restart()}>Restart them</Button>
+    </div>}
+    {!fullAccess && hiddenRunsLine(latest) !== null && <p className="pj-note warn" role="status">{hiddenRunsLine(latest)}</p>}
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
       {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}
@@ -577,6 +679,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
   const [network, setNetwork] = useState<AgentNetwork>("open");
   const [toolCache, setToolCache] = useState<ToolCacheScope>("shared");
+  const [homeCaches, setHomeCaches] = useState<HomeCaches>("clear_when_raised");
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [ideGitHooks, setIdeGitHooks] = useState(false);
   const [ideAgentFiles, setIdeAgentFiles] = useState<IdeAgentFiles>("allow_all");
@@ -593,6 +696,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     setAccess(next.access);
     setNetwork(next.network);
     setToolCache(next.tool_cache);
+    setHomeCaches(next.home_caches ?? "clear_when_raised");
     setAllowed(next.toolchains.map((row) => row.allowed));
     setIdeGitHooks(next.ide_git_hooks);
     setIdeAgentFiles(next.ide_agent_files);
@@ -615,7 +719,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants));
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants, homeCaches));
     setBusy(false);
     if (saved.fresh) seed(saved.fresh);
     setNote(saved.note);
@@ -625,22 +729,23 @@ function AccessSection({ data }: { data: ProjectData }) {
   const sharedFolders: SharedFolders = { ...shared, secrets: sharedSecretsOf(secretsText) };
   const sharedValid = sharedFolders.secrets.length <= SHARED_SECRETS_MAX;
   const grantsChanged = view !== null && grants.map(grantLabel).join("\n") !== savedGrants(view).map(grantLabel).join("\n");
-  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || applyChanges !== (view.apply_changes ?? "when_idle") || grantsChanged || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || homeCaches !== (view.home_caches ?? "clear_when_raised") || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || applyChanges !== (view.apply_changes ?? "when_idle") || grantsChanged || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
-    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
+    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} gaps={(level) => view.levels.find((item) => item.access === level)?.gaps ?? []} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <p className="pj-help">{POLICY_RESTARTS_IDE}</p>}
-    {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
+    {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} gap={networkGap(view, network)} />}
     {view && <ToolCacheChoices name="ps-tool-cache" value={toolCache} access={access} onChange={setToolCache} />}
+    {view && <HomeCachesChoices name="ps-home-caches" value={homeCaches} onChange={setHomeCaches} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {view && <IdeAgentFilesChoices name="ps-agent-files" value={ideAgentFiles} access={access} onChange={setIdeAgentFiles} />}
     {view && <SharedFoldersChoices prefix="ps" value={shared} secretsText={secretsText} local={view.local_folders} access={access} onChange={setShared} onSecretsText={setSecretsText} />}
-    {view && <GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} />}
+    {view && <GrantsEditor prefix="ps" view={view} grants={grants} access={access} network={network} onChange={setGrants} />}
     {view && <ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} />}
     {view && <GrantLog rows={view.grant_log ?? []} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
@@ -805,7 +910,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Overview, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages and Remove project. A setup
+/** Project Settings tab: General, Overview, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages, GitHub and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -833,6 +938,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
       {active === "messages" && <MessagesSection data={data} />}
+      {active === "github" && <GitHubRulesSection data={data} />}
       {active === "remove" && <div className="pj-stack">
         {setup && <MoveHome data={data} setup={setup} />}
         <RemoveSection data={data} setup={setup} />

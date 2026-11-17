@@ -54,7 +54,7 @@ enum WorkerMode {
 enum Job {
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
-    Reconnect,
+    Reconnect(Option<Box<(crate::paths::Layout, crate::service::Service)>>),
     Conversation(Box<ConversationJob>),
     Master(Box<master_session::Job>),
     ModelAccess(Box<model_access::Job>),
@@ -236,6 +236,7 @@ pub(super) struct Connection {
     pending: Option<Pending>,
     client_id: ClientId,
     sequence: u64,
+    engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
 }
 
 impl Connection {
@@ -249,6 +250,19 @@ impl Connection {
             .into_unbound_configuration()
             .map_err(|e| e.to_string())?;
         Self::spawn(WorkerMode::Paired { socket, timeout })
+    }
+
+    /// Opens the paired connection whose start ask starts the engine, or repairs its login
+    /// service, before it reconnects. Inputs: the unbound client and the default engine's
+    /// layout and service, none for a TUI opened on an explicit socket, whose start ask
+    /// only reconnects. Output: the connection.
+    pub fn connect_starting(
+        client: Client,
+        engine: Option<(crate::paths::Layout, crate::service::Service)>,
+    ) -> Result<Self, String> {
+        let mut connection = Self::connect_paired(client)?;
+        connection.engine = engine.map(Box::new);
+        Ok(connection)
     }
 
     fn spawn(mode: WorkerMode) -> Result<Self, String> {
@@ -360,11 +374,28 @@ impl Connection {
                                 break;
                             }
                         }
-                        Job::Reconnect => {
+                        Job::Reconnect(engine) => {
                             let native = native
                                 .as_mut()
                                 .expect("paired reconnect requires native configuration");
-                            let (ordinary, event) = runtime.block_on(native.attach());
+                            let started = match engine {
+                                Some(engine) => {
+                                    runtime.block_on(start_engine(&engine, &worker_stop))
+                                }
+                                None => Ok(()),
+                            };
+                            let (ordinary, event) = match started {
+                                Ok(()) => runtime.block_on(native.attach()),
+                                Err(problem) => {
+                                    native.detach();
+                                    let event = OwnerEvent::Access {
+                                        ready: false,
+                                        problem,
+                                        identity: None,
+                                    };
+                                    (native.ordinary(), event)
+                                }
+                            };
                             client = ordinary;
                             if owner_replies
                                 .send(OwnerReply {
@@ -653,6 +684,20 @@ impl Connection {
                                 })
                                 .is_err()
                             {
+                                break;
+                            }
+                        }
+                        Job::Intake(job)
+                            if native.is_some()
+                                && matches!(
+                                    job.as_ref(),
+                                    intake::IntakeJob::Query(
+                                        intake::IntakeQuery::GitHubRuleSet { .. }
+                                    )
+                                ) =>
+                        {
+                            let native = native.as_mut().expect("the guard saw the owner");
+                            if !native.rule_lane(*job, &owner_replies) {
                                 break;
                             }
                         }
@@ -982,6 +1027,7 @@ impl Connection {
             pending: None,
             client_id,
             sequence: 0,
+            engine: None,
         })
     }
 
@@ -1097,7 +1143,16 @@ impl Connection {
     }
 
     pub fn reconnect(&mut self) -> Result<(), String> {
-        self.owner_job(Job::Reconnect)
+        self.owner_job(Job::Reconnect(None))
+    }
+
+    /// Asks the worker to start the engine, or repair its login service, and then
+    /// reconnect, without waiting here, as `r` on the engine-down screen does (DS-118); a
+    /// connection with no default engine only reconnects. Input: none. Output: Ok once
+    /// the worker has the ask.
+    pub fn start_engine(&mut self) -> Result<(), String> {
+        let engine = self.engine.clone();
+        self.owner_job(Job::Reconnect(engine))
     }
 
     pub(super) fn conversation(&mut self, job: ConversationJob) -> Result<(), String> {
@@ -1191,6 +1246,7 @@ struct NativeOwner {
     conversation_operation: Option<(RequestId, String)>,
     model_pending: Option<model_access::Submission>,
     model_operation: Option<(RequestId, String)>,
+    rule_lane: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NativeOwner {
@@ -1210,6 +1266,7 @@ impl NativeOwner {
             conversation_operation: None,
             model_pending: None,
             model_operation: None,
+            rule_lane: None,
         }
     }
 
@@ -1291,11 +1348,7 @@ impl NativeOwner {
         };
         match response {
             Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
-                Some(match operation.result {
-                    OwnerResult::Applied => Ok(()),
-                    OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
-                    _ => Err("change_outcome_unknown".into()),
-                })
+                Some(stray_outcome(operation.result))
             }
             Ok(_) => None,
             Err(error) => {
@@ -2396,6 +2449,41 @@ fn report_loss(
         .is_ok()
 }
 
+/// Starts the engine, or repairs its login service, as `crazyagent tui` does before it
+/// opens, and gives up once the TUI stops so a quit never waits on it (DS-118). Inputs:
+/// the default layout and service and the stop flag. Output: Ok once the engine answers,
+/// else `engine_backup_failed` when its upgrade backup failed or `engine_start_failed`.
+async fn start_engine(
+    engine: &(crate::paths::Layout, crate::service::Service),
+    stopped: &AtomicBool,
+) -> Result<(), String> {
+    let (layout, service) = engine;
+    let path = std::env::var_os("PATH");
+    let start = crate::service::ensure_running(
+        layout,
+        service,
+        &service.executable,
+        path.as_deref(),
+        crate::service::READY_TIMEOUT,
+    );
+    let stop = async {
+        while !stopped.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let started = tokio::select! {
+        started = start => started.is_ok(),
+        () = stop => false,
+    };
+    if started {
+        return Ok(());
+    }
+    if crate::service::backup_failure(layout).is_some() {
+        return Err("engine_backup_failed".into());
+    }
+    Err("engine_start_failed".into())
+}
+
 /// The connection problem the TUI shows when it cannot attach: the plain line for a
 /// locator an engine that stopped left behind, with its code (F35), else the bounded code.
 /// Input: the connect failure. Output: the problem text.
@@ -2417,6 +2505,17 @@ fn bounded_problem(problem: &str) -> String {
         problem.to_owned()
     } else {
         "trusted_owner_connection_failed".into()
+    }
+}
+
+/// What a settled stray change tells the owner, from the engine's result for it: done, its
+/// refusal, or an unknown outcome for a result no stray change can have. Input: the result.
+/// Output: Ok when the change was made, else the plain code.
+fn stray_outcome(result: OwnerResult) -> Result<(), String> {
+    match result {
+        OwnerResult::Applied | OwnerResult::OnboardingStarted { .. } => Ok(()),
+        OwnerResult::Rejected { code } => Err(bounded_problem(&code)),
+        _ => Err("change_outcome_unknown".into()),
     }
 }
 
@@ -3241,6 +3340,25 @@ mod tests {
     use super::*;
     use crate::engine::{Engine, Server};
 
+    /// rv-code2 RS1-2: a StartOnboarding whose answer came late and was settled afterwards
+    /// reads as done when the engine answers the project it started, not as unknown.
+    #[test]
+    fn a_settled_stray_onboarding_start_reads_as_done() {
+        assert_eq!(
+            stray_outcome(OwnerResult::OnboardingStarted {
+                project_id: ProjectId::new("my-app-2").unwrap(),
+            }),
+            Ok(())
+        );
+        assert_eq!(stray_outcome(OwnerResult::Applied), Ok(()));
+        assert_eq!(
+            stray_outcome(OwnerResult::Rejected {
+                code: "project_exists".into()
+            }),
+            Err("project_exists".into())
+        );
+    }
+
     #[test]
     fn a_tui_that_cannot_attach_to_a_stopped_engine_says_so_plainly() {
         assert_eq!(
@@ -3497,5 +3615,134 @@ mod tests {
         assert!(
             matches!(observed.unwrap().outcome, Outcome::Snapshot { projects, .. } if projects.is_empty())
         );
+    }
+
+    /// A login service no manager knows and whose definition is never written, so a start
+    /// runs `executable` detached for the layout. Inputs: the test folder, the layout and
+    /// the program. Output: the service.
+    fn idle_service(
+        folder: &std::path::Path,
+        layout: &crate::paths::Layout,
+        executable: PathBuf,
+    ) -> crate::service::Service {
+        crate::service::Service {
+            platform: crate::paths::Platform::CURRENT,
+            name: format!("dev.crazyagent.test.tui-start.{}", std::process::id()),
+            executable,
+            root: layout.root().to_path_buf(),
+            path: "/usr/bin:/bin".into(),
+            definition: folder.join("not-installed.plist"),
+            user: None,
+        }
+    }
+
+    /// Makes a test folder under the real /tmp that only this user can open, as engine
+    /// data roots must be.
+    /// Input: the name prefix. Output: the folder.
+    fn private_folder(prefix: &str) -> tempfile::TempDir {
+        let root = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        root
+    }
+
+    /// Waits up to 5 s for the connection's next owner event, polling as the TUI's loop
+    /// does, and fails the row when none comes.
+    /// Input: the connection. Output: the event.
+    async fn next_owner_event(connection: &mut Connection) -> OwnerEvent {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(event) = connection.poll_owner().unwrap() {
+                return event;
+            }
+            assert!(Instant::now() < deadline, "no owner event within 5 s");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// DS-118: a start ask that finds the engine answering starts nothing and reconnects;
+    /// the service's program here would fail at once had it run, so a ready reconnect
+    /// shows the attach followed a good start.
+    #[tokio::test]
+    async fn a_start_ask_finding_the_engine_answering_starts_nothing_and_reconnects() {
+        let root = private_folder("ca-tui-start-ready-");
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut engine = crate::engine::bootstrap::EngineService::start(
+            root.path(),
+            "engine.sock",
+            &config,
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let layout = crate::paths::Layout::new(root.path().to_path_buf()).unwrap();
+        let login = idle_service(root.path(), &layout, PathBuf::from("/usr/bin/false"));
+        let client = Client::new(layout.socket(), Duration::from_secs(1)).unwrap();
+        let mut connection = Connection::connect_starting(client, Some((layout, login))).unwrap();
+        let first = next_owner_event(&mut connection).await;
+        assert!(matches!(first, OwnerEvent::Access { ready: true, .. }));
+        connection.start_engine().unwrap();
+        let again = next_owner_event(&mut connection).await;
+        drop(connection);
+        engine.shutdown().await.unwrap();
+        assert!(matches!(again, OwnerEvent::Access { ready: true, .. }));
+    }
+
+    /// DS-118: a start ask still waiting on its engine leaves the screen free, as the worker
+    /// runs it, and a quit ends it at once instead of waiting out the start's bound; the
+    /// program here never opens the engine socket.
+    #[tokio::test]
+    async fn a_start_ask_still_waiting_leaves_the_screen_free_and_a_quit_ends_it() {
+        let root = private_folder("ca-tui-start-parked-");
+        let layout = crate::paths::Layout::new(root.path().join("engine")).unwrap();
+        let parked = root.path().join("parked");
+        std::fs::write(&parked, "#!/bin/sh\nexec /bin/sleep 10\n").unwrap();
+        std::fs::set_permissions(&parked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let login = idle_service(root.path(), &layout, parked);
+        let client = Client::new(layout.socket(), Duration::from_secs(1)).unwrap();
+        let mut connection = Connection::connect_starting(client, Some((layout, login))).unwrap();
+        let first = next_owner_event(&mut connection).await;
+        assert!(matches!(first, OwnerEvent::Access { ready: false, .. }));
+        let asked = Instant::now();
+        connection.start_engine().unwrap();
+        assert!(asked.elapsed() < Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            connection.poll_owner().unwrap().is_none(),
+            "the start still waits"
+        );
+        assert!(connection.busy());
+        let quit = Instant::now();
+        drop(connection);
+        assert!(
+            quit.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            quit.elapsed()
+        );
+    }
+
+    /// DS-118: a TUI opened on an explicit socket has no engine of its own to start, so its
+    /// start ask only reconnects: the data folder is never prepared and no start failure
+    /// comes back.
+    #[tokio::test]
+    async fn a_start_ask_without_the_default_engine_only_reconnects() {
+        let root = private_folder("ca-tui-start-none-");
+        let layout = crate::paths::Layout::new(root.path().join("engine")).unwrap();
+        let client = Client::new(layout.socket(), Duration::from_secs(1)).unwrap();
+        let mut connection = Connection::connect_paired(client).unwrap();
+        let first = next_owner_event(&mut connection).await;
+        assert!(matches!(first, OwnerEvent::Access { ready: false, .. }));
+        connection.start_engine().unwrap();
+        let again = next_owner_event(&mut connection).await;
+        drop(connection);
+        let OwnerEvent::Access { ready, problem, .. } = again else {
+            panic!("an access event");
+        };
+        assert!(!ready && problem != "engine_start_failed", "{problem}");
+        assert!(!layout.root().exists(), "nothing was prepared or started");
     }
 }

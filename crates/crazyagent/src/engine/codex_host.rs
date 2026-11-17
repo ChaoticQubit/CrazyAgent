@@ -82,7 +82,7 @@ impl CodexHost {
             &budget,
             run_time,
             Some((profile, project)),
-            sandbox.is_unconfined(),
+            sandbox.lineage_check(),
         )
         .await?;
         process.limit_input(frames.bytes());
@@ -229,6 +229,12 @@ impl CodexHost {
     pub(in crate::engine) async fn close(&mut self) -> Result<(), EngineError> {
         self.process.close().await?;
         self.process.operation_result()
+    }
+
+    /// Says whether the harness completed with no cleanup ever in doubt, whatever fault
+    /// the turn reports (SA-VID14-R2 F2). Input: the host. Output: the answer.
+    pub(in crate::engine) fn settled(&self) -> bool {
+        self.process.settled()
     }
 
     async fn wait_for(&mut self, expected: State) -> Result<(), EngineError> {

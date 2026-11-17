@@ -47,6 +47,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         hookless: false,
         message_note: None,
         started_ms: None,
+        sees_hidden: false,
     }
 }
 
@@ -1010,6 +1011,27 @@ fn an_attach_refused_for_a_dead_agent_says_it_stopped() {
     assert!(requests(&mut shell).is_empty());
 }
 
+/// v242 MRR2-2 (rv-code2 r2): an attach refused because the teammates' server a native
+/// lead's team panes were on ended, as once both of that lead's servers ended, reads as the
+/// agent's end, as `terminal_agent_unknown` does, not as a terminal that only closed.
+#[test]
+fn an_attach_refused_as_its_teammates_server_ended_says_it_stopped() {
+    let mut shell = team();
+    shell.key(Key::Enter);
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Rejected {
+            code: crate::terminal::TEAMMATES_SERVER_ENDED.into(),
+        },
+    });
+    let rows = render(&mut shell);
+    assert_eq!(pane_row(&rows, 3), padded("This agent has stopped."));
+    assert_eq!(pane_row(&rows, 4), padded("Its terminal is closed."));
+    shell.key(Key::Char('x'));
+    assert!(requests(&mut shell).is_empty());
+}
+
 #[test]
 fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
     let mut shell = team();
@@ -1156,6 +1178,7 @@ fn finished_team() -> crate::team::TeamStatus {
         hookless: false,
         instructions_changed: false,
         message_note: None,
+        sees_hidden: false,
     };
     TeamStatus {
         project_id: project(),
@@ -1965,6 +1988,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 hookless: false,
                 instructions_changed: false,
                 message_note: None,
+                sees_hidden: false,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -2456,6 +2480,7 @@ fn harnessed_status(
             hookless: false,
             instructions_changed: false,
             message_note: None,
+            sees_hidden: false,
         })
         .collect();
     status

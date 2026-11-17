@@ -1203,14 +1203,18 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
 /// The graph step's installer finds the graphify setup put in `<engine root>/setup/bin`, a
 /// stand-in here, and looks again on each step: once it is gone it finds none. The installer
 /// looks only in that folder, not this Mac's own installs, which come first on the engine's
-/// places, so the row reads the same in any HOME. macOS only: by DEC-094 a Linux host
+/// places, so the row reads the same in any HOME. The stand-in sits under the real temp
+/// folder, not the `/tmp` link: the resolver judges every link on a tool's way (0be8ec608),
+/// and `/tmp` leads into a folder every user can write. macOS only: by DEC-094 a Linux host
 /// installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     use crate::setup::Installer;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
     let bin = root.path().join("setup/bin");
     let installer = crate::setup::pinned::PinnedInstaller::with_places(
         root.path(),
@@ -2666,4 +2670,96 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
     assert!(service::GRAPHIFY_REFUSED.len() <= 256);
     let missing = crate::setup::Dependency::Graphify.not_found();
     assert_eq!(service::graphify_failure(&missing), graph::GRAPHIFY_MISSING);
+}
+
+/// DS-148 code F1: an engine folder spelled with a code point HFS+ ignores in names, or in
+/// another letter case, stays out of the top-level entries like the plain name, since such
+/// a volume opens it as the engine's own folder. The folder is then made a repository, so on
+/// a case-insensitive volume `.GIT` holds its working `.git` and git answers for the folder.
+#[test]
+fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
+    let dir = rust_repo();
+    let spelled = [
+        "\u{feff}.git",
+        ".GIT",
+        ".crazy\u{200c}agent",
+        "Graphify-Out",
+    ];
+    for name in spelled {
+        std::fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    git_init(dir.path());
+    let evidence = draft::gather(dir.path(), &[]);
+    for name in spelled {
+        assert!(
+            evidence
+                .entries
+                .iter()
+                .all(|entry| entry.trim_end_matches('/') != name),
+            "{name}: {:?}",
+            evidence.entries
+        );
+    }
+    assert!(evidence.entries.contains(&"src/".to_owned()));
+}
+
+/// B17 (-44): while a project move is pending, its destination and every folder inside it
+/// are refused before anything is registered, also through a link that resolves there,
+/// since the move's record would replace an onboarding row there with the moved project's;
+/// a folder elsewhere, and the destination once the move is forgotten, go on to the usual
+/// checks (here the missing pool).
+#[test]
+fn a_folder_a_pending_project_move_lands_in_is_not_registered() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let target = root.join("home").join("alpha");
+    let inner = target.join("web");
+    let elsewhere = root.join("other");
+    let link = root.join("link");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    symlink(&target, &link).unwrap();
+    let mut connection = Connection::open_in_memory().unwrap();
+    crate::projects_home::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO projects_home_project_move VALUES (1,'request-1',1,'alpha',?1,?2,'move')",
+            params![
+                root.join("repos").join("alpha").to_str().unwrap(),
+                target.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let database = root.join("engine.db");
+    let mut start = |folder: &Path| {
+        let tx = connection.transaction().unwrap();
+        let action = OnboardingAction::Start {
+            path: folder.to_str().unwrap().to_owned(),
+            pool: pool(),
+        };
+        let outcome = execute(&tx, &config, &database, &action).unwrap();
+        tx.rollback().unwrap();
+        outcome
+    };
+    let moving = Outcome::Rejected {
+        code: "move_project_in_progress".into(),
+    };
+    let usual = Outcome::Rejected {
+        code: "pool_missing".into(),
+    };
+    for folder in [&target, &inner, &link] {
+        assert_eq!(start(folder.as_path()), moving, "{}", folder.display());
+    }
+    assert_eq!(start(elsewhere.as_path()), usual);
+    assert_eq!(start(root.join("home").as_path()), usual);
+    connection
+        .execute("DELETE FROM projects_home_project_move", [])
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    let action = OnboardingAction::Start {
+        path: target.to_str().unwrap().to_owned(),
+        pool: pool(),
+    };
+    assert_eq!(execute(&tx, &config, &database, &action).unwrap(), usual);
 }

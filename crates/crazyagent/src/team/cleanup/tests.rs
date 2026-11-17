@@ -1123,6 +1123,594 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
     );
 }
 
+/// Sets `entry` on each path through one `/bin/chmod +a` and asserts it took. Inputs: the
+/// ACL entry and the paths.
+#[cfg(target_os = "macos")]
+fn add_acl(entry: &str, paths: &[PathBuf]) {
+    let added =
+        crate::spawn_gate::collected(Command::new("/bin/chmod").arg("+a").arg(entry).args(paths))
+            .unwrap();
+    assert!(added.status.success(), "{added:?}");
+}
+
+/// Whether a path's ACL listing names a deny entry. Input: the path. Output: the answer.
+#[cfg(target_os = "macos")]
+fn denies(path: &Path) -> bool {
+    let listed =
+        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(path)).unwrap();
+    String::from_utf8_lossy(&listed.stdout).contains("deny")
+}
+
+/// RV-DS241-181: removing an agent's tree while a process of its keeps swapping folders in
+/// it for links to an owner folder never clears an ACL there or opens up a mode there, since
+/// ACLs and modes change only through entries reached from the tree's own handles. A later
+/// removal with nothing swapping still finishes.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_to() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    let tree = root.join("tree");
+    let names: Vec<String> = (0..16).map(|index| format!("c{index:02}")).collect();
+    let parents: Vec<String> = (0..12).map(|index| format!("p{index:02}")).collect();
+    let owned: Vec<PathBuf> = names.iter().map(|name| owner.join(name)).collect();
+    for folder in &owned {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let _owned: Vec<AclCleared> = owned.iter().cloned().map(AclCleared).collect();
+    add_acl("everyone deny delete", &owned);
+    for parent in &parents {
+        for name in &names {
+            let shut = tree.join(parent).join(name);
+            write(&shut.join("f"), b"the agent's\n");
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+    }
+    for folder in &owned {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, tree, owner, parents) = (
+            Arc::clone(&stop),
+            tree.clone(),
+            owner.clone(),
+            parents.clone(),
+        );
+        std::thread::spawn(move || {
+            let pause = std::time::Duration::from_micros(100);
+            while !stop.load(Ordering::Relaxed) {
+                for parent in &parents {
+                    let (real, held) = (tree.join(parent), tree.join(format!("{parent}.held")));
+                    if std::fs::rename(&real, &held).is_err() {
+                        continue;
+                    }
+                    if std::os::unix::fs::symlink(&owner, &real).is_ok() {
+                        std::thread::sleep(pause);
+                        let _ = std::fs::remove_file(&real);
+                    }
+                    let _ = std::fs::rename(&held, &real);
+                    std::thread::sleep(pause);
+                }
+            }
+        })
+    };
+
+    let _ = remove_agent_tree(&tree);
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let again = remove_agent_tree(&tree);
+
+    assert_eq!(again, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    for folder in &owned {
+        let mode = std::fs::symlink_metadata(folder)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(denies(folder), "{folder:?} lost its ACL");
+        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+    }
+}
+
+/// RV-DS241-204: the owner's IDE terminal home is reset with no warden, so a process left in
+/// a terminal may keep swapping the folders its own cargo `git` cache holds, each at mode
+/// 000, for links to owner folders while the next terminal's launch gives that cache's name
+/// to the owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]). No ACL or mode of an
+/// owner folder changes, since each clear goes through an entry read from the walk's own
+/// handles (ds181), and a launch with nothing swapping still links the owner's cache.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let account = root.join("account");
+    std::fs::create_dir_all(account.join(".cargo/git/db")).unwrap();
+    std::fs::create_dir_all(account.join(".cargo/registry/cache")).unwrap();
+    let owner = root.join("owner");
+    let git = root.join("ide/home/.cargo/git");
+    let names: Vec<String> = (0..16).map(|index| format!("c{index:02}")).collect();
+    let parents: Vec<String> = (0..8).map(|index| format!("p{index:02}")).collect();
+    let owned: Vec<PathBuf> = names.iter().map(|name| owner.join(name)).collect();
+    for folder in &owned {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let _owned: Vec<AclCleared> = owned.iter().cloned().map(AclCleared).collect();
+    add_acl("everyone deny delete", &owned);
+    for parent in &parents {
+        for name in &names {
+            let shut = git.join(parent).join(name);
+            write(&shut.join("f"), b"left by a terminal\n");
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+    }
+    for folder in &owned {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let planted = Arc::new(AtomicUsize::new(0));
+    let swapper = {
+        let (stop, planted, git, owner, parents, names) = (
+            Arc::clone(&stop),
+            Arc::clone(&planted),
+            git.clone(),
+            owner.clone(),
+            parents.clone(),
+            names.clone(),
+        );
+        std::thread::spawn(move || {
+            let pause = std::time::Duration::from_micros(100);
+            while !stop.load(Ordering::Relaxed) {
+                for parent in &parents {
+                    for name in &names {
+                        let real = git.join(parent).join(name);
+                        let held = git.join(parent).join(format!("{name}.held"));
+                        if std::fs::rename(&real, &held).is_err() {
+                            continue;
+                        }
+                        if std::os::unix::fs::symlink(owner.join(name), &real).is_ok() {
+                            planted.fetch_add(1, Ordering::Relaxed);
+                            std::thread::sleep(pause);
+                            let _ = std::fs::remove_file(&real);
+                        }
+                        let _ = std::fs::rename(&held, &real);
+                    }
+                    std::thread::sleep(pause);
+                }
+            }
+        })
+    };
+    let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+    let home = root.join("ide/home");
+
+    let before = planted.load(Ordering::Relaxed);
+    let _ = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes);
+    let landed = planted.load(Ordering::Relaxed) - before;
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+    let cargo = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes).unwrap();
+
+    assert!(landed > 0, "no link was planted while the reset ran");
+    assert_eq!(
+        std::fs::read_link(cargo.join("git")).unwrap(),
+        account.join(".cargo/git")
+    );
+    for folder in &owned {
+        let mode = std::fs::symlink_metadata(folder)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert!(denies(folder), "{folder:?} lost its ACL");
+        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+    }
+}
+
+/// rv-sec3 F1 (B12, RV-DS241-204's flag leg): an agent-home entry at mode 000 that will not
+/// open has its immutable flag cleared through its parent's open handle, never on a path, so
+/// a process that swaps its folder for a link to an owner folder holding an entry of the same
+/// name before the clear leaves the owner's flag, and the agent's entry, moved aside, still
+/// loses its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_entry_that_will_not_open_is_unpinned_by_its_inode_never_through_a_swapped_folder() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let immutable = nix::sys::stat::FileFlag::UF_IMMUTABLE.bits();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner");
+    write(&owner.join("f"), b"the owner's\n");
+    assert!(chflags("uchg", &owner.join("f")));
+    let _owner = Unlocked(owner.join("f"));
+    let git = root.join("home/.cargo/git");
+    let shut = git.join("x");
+    write(&shut.join("f"), b"left by a terminal\n");
+    std::fs::set_permissions(shut.join("f"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(chflags("uchg", &shut.join("f")));
+    let aside = git.join("aside");
+    let _agent = Unlocked(aside.join("f"));
+    let _left = Unlocked(shut.join("f"));
+    let parent = rustix::fs::openat(
+        rustix::fs::CWD,
+        &shut,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    let (moved, held, target) = (shut.clone(), aside.clone(), owner.clone());
+    BEFORE_HOME_ENTRY_FLAGS.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&moved, &held).unwrap();
+            std::os::unix::fs::symlink(&target, &moved).unwrap();
+        }));
+    });
+
+    let cleared = unpin_home_entry(&parent, c"f");
+
+    assert!(
+        BEFORE_HOME_ENTRY_FLAGS.with(|step| step.borrow().is_none()),
+        "the entry opened, so no flag was cleared without a handle"
+    );
+    assert!(cleared, "the clear did not take on the entry it read");
+    let flags = |file: &Path| std::fs::symlink_metadata(file).unwrap().st_flags();
+    assert_eq!(
+        flags(&owner.join("f")) & immutable,
+        immutable,
+        "the owner's file lost its flag"
+    );
+    assert_eq!(
+        flags(&aside.join("f")) & immutable,
+        0,
+        "the agent's entry kept its flag"
+    );
+}
+
+/// rv-sec3 r2 F1 (B12): an agent-home entry at mode 000 has its immutable flag cleared
+/// through its parent's open handle alone, with no path walked above that parent, so a
+/// folder above it that a process swaps for a link inside the clear is never followed. The
+/// row shuts the folder above the parent: a clear that walks a path, as a `/.vol` name
+/// does, is refused there, while one through the handle is not.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_entry_under_a_shut_folder_is_unpinned_through_its_parents_handle_alone() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let immutable = nix::sys::stat::FileFlag::UF_IMMUTABLE.bits();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let git = root.join("home/.cargo/git");
+    let shut = git.join("x");
+    write(&shut.join("f"), b"left by a terminal\n");
+    std::fs::set_permissions(shut.join("f"), std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(chflags("uchg", &shut.join("f")));
+    let _left = Unlocked(shut.join("f"));
+    let parent = rustix::fs::openat(
+        rustix::fs::CWD,
+        &shut,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    unpin_home_entry(&parent, c"f");
+
+    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let flags = std::fs::symlink_metadata(shut.join("f"))
+        .unwrap()
+        .st_flags();
+    assert_eq!(flags & immutable, 0, "the entry kept its flag");
+}
+
+/// RV-DS241-182: removing an agent's tree of many folders that one read-only folder keeps
+/// from a plain delete starts no child process: the read-only folder opens up through its
+/// handle, and no ACL clear runs for a folder that opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_a_large_agent_tree_one_read_only_folder_holds_starts_no_child() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    for index in 0..2_000 {
+        let folder = tree.join(format!("d{:02}/e{index:04}", index % 40));
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let shut = tree.join("shut");
+    write(&shut.join("f"), b"the agent's\n");
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let before = crate::spawn_gate::spawned();
+
+    let outcome = remove_agent_tree(&tree);
+
+    let started = crate::spawn_gate::spawned() - before;
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert_eq!(
+        started, 0,
+        "a removal a mode change was enough for started children"
+    );
+}
+
+/// RV-DS241-182, ds181 N3: removing an agent's tree whose files all carry a deny-delete ACL
+/// clears them through the walk's own handles, starting no child, and the tree goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_of_acl_pinned_files_clears_them_without_a_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let files: Vec<PathBuf> = (0..1_200)
+        .map(|index| tree.join(format!("a/f{index:04}")))
+        .collect();
+    for file in &files {
+        write(file, b"the agent's\n");
+    }
+    let _files: Vec<AclCleared> = files.iter().cloned().map(AclCleared).collect();
+    add_acl("everyone deny delete", &files);
+    let before = crate::spawn_gate::spawned();
+
+    let outcome = remove_agent_tree(&tree);
+
+    let started = crate::spawn_gate::spawned() - before;
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert_eq!(started, 0, "{started} children for {} entries", files.len());
+}
+
+/// RV-DS241-181 guard: a folder two deep whose ACL denies listing and searching, under one
+/// that does the same, still goes, each opened once its ACL is cleared through its parent's
+/// handle.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_clears_folders_two_deep_that_deny_listing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let (outer, inner) = (tree.join("a"), tree.join("a/b"));
+    write(&inner.join("f"), b"the agent's\n");
+    let _cleared = [AclCleared(inner.clone()), AclCleared(outer.clone())];
+    add_acl(
+        "everyone deny list,search,delete_child",
+        std::slice::from_ref(&inner),
+    );
+    add_acl(
+        "everyone deny list,search,delete_child",
+        std::slice::from_ref(&outer),
+    );
+
+    let outcome = remove_agent_tree(&tree);
+
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+}
+
+/// Clears the ACLs of test folders in one `/bin/chmod -N` when dropped, so their temporary
+/// folder can always be deleted, whatever the test asserted. Holds the folders.
+#[cfg(target_os = "macos")]
+struct AclsCleared(Vec<PathBuf>);
+
+#[cfg(target_os = "macos")]
+impl Drop for AclsCleared {
+    fn drop(&mut self) {
+        let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").arg("-N").args(&self.0));
+    }
+}
+
+/// ds181 r2 (rv-code4 F1, rv-sec3 F1): a folder whose ACL denies only searching it still
+/// lists, but no entry in it can be reached by name until that ACL goes; its read-only
+/// folder below still goes in one removal.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_reaches_below_a_folder_that_denies_only_searching_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let (searched, shut) = (tree.join("p"), tree.join("p/shut"));
+    write(&shut.join("f"), b"the agent's\n");
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let _cleared = AclCleared(searched.clone());
+    add_acl("everyone deny search", &[searched]);
+
+    let outcome = remove_agent_tree(&tree);
+
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+}
+
+/// ds181 N3 (rv-sec3 B12 r2): a folder whose ACL denies listing it has that ACL cleared
+/// through its parent's open handle alone, with no path walked above that parent, so a
+/// folder above it that a process swaps for a link inside the clear is never followed. The
+/// row shuts a folder above the walk's top just before the clear: a clear that walks a
+/// path, as a `/.vol` name does, is refused there, while one through the handle is not.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_that_denies_listing_has_its_acl_cleared_through_its_parents_handle_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let above = root.join("above");
+    let tree = above.join("tree");
+    let denied = tree.join("a");
+    write(&denied.join("f"), b"the agent's\n");
+    let _cleared = AclCleared(denied.clone());
+    add_acl("everyone deny list,search", std::slice::from_ref(&denied));
+    let shut = above.clone();
+    BEFORE_ACL_CLEAR.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }));
+    });
+
+    writable(&tree, Flags::Kept, Acls::Stuck);
+
+    std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        BEFORE_ACL_CLEAR.with(|step| step.borrow().is_none()),
+        "no ACL clear ran"
+    );
+    assert!(!denies(&denied), "the folder kept its ACL");
+}
+
+/// Opens a test folder as a walk holds one: read only, never through a link. Input: the
+/// folder. Output: its handle.
+#[cfg(unix)]
+fn walk_handle(folder: &Path) -> std::os::fd::OwnedFd {
+    use rustix::fs::{Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    rustix::fs::open(folder, flags, Mode::empty()).unwrap()
+}
+
+/// ds181 N3 r2 (residual 1 of DONE-0219): an entry a walk read by name, which a process an
+/// agent left swaps for a hard link to an owner file before its ACL clear, never costs the
+/// owner file its ACL: an entry that opens is cleared through its own handle, and only when
+/// that handle holds the entry that was read.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_entry_swapped_for_a_link_to_an_owner_file_before_its_acl_clear_leaves_the_owner_acl() {
+    use rustix::fs::AtFlags;
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner/g");
+    write(&owner, b"the owner's\n");
+    let home = root.join("home");
+    let left = home.join("f");
+    write(&left, b"left by a terminal\n");
+    let aside = home.join("aside");
+    let _cleared = [AclCleared(owner.clone()), AclCleared(aside.clone())];
+    add_acl("everyone deny delete", std::slice::from_ref(&owner));
+    let parent = walk_handle(&home);
+    let found = rustix::fs::statat(&parent, c"f", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    let (moved, held, linked) = (left.clone(), aside.clone(), owner.clone());
+    BEFORE_ACL_CLEAR.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            std::fs::rename(&moved, &held).unwrap();
+            std::fs::hard_link(&linked, &moved).unwrap();
+        }));
+    });
+    let mut clears = AclClears::new();
+
+    let taken = clears.add(parent.as_fd(), Some(c"f"), &found);
+
+    assert!(
+        BEFORE_ACL_CLEAR.with(|step| step.borrow().is_none()),
+        "no ACL clear ran"
+    );
+    assert!(!taken, "a clear of another entry counted as taken");
+    assert!(denies(&owner), "the owner's file lost its ACL");
+}
+
+/// ds181 N3 r2 guard: a link with one link that a walk reads by name loses its own ACL
+/// through its own handle, and the owner file it names keeps its ACL.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_in_an_agent_tree_loses_its_own_acl_and_its_target_keeps_its_own() {
+    use rustix::fs::AtFlags;
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let owner = root.join("owner/g");
+    write(&owner, b"the owner's\n");
+    let home = root.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let link = home.join("l");
+    std::os::unix::fs::symlink(&owner, &link).unwrap();
+    let _cleared = AclCleared(owner.clone());
+    add_acl("everyone deny delete", std::slice::from_ref(&owner));
+    let added = crate::spawn_gate::collected(
+        Command::new("/bin/chmod")
+            .args(["-h", "+a", "everyone deny delete"])
+            .arg(&link),
+    )
+    .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let parent = walk_handle(&home);
+    let found = rustix::fs::statat(&parent, c"l", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+    let mut clears = AclClears::new();
+
+    let taken = clears.add(parent.as_fd(), Some(c"l"), &found);
+
+    assert!(taken, "the link's clear did not take");
+    assert!(!denies(&link), "the link kept its ACL");
+    assert!(denies(&owner), "the owner's file lost its ACL");
+}
+
+/// ds181 r2 (rv-code4 F2): removing an agent's tree of 300 folders that each hold one folder
+/// whose ACL denies listing never holds more than a few dozen of them waiting for their ACL
+/// clear at once, each with its parent's open handle, and the tree still goes.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_a_wide_tree_of_folders_that_deny_listing_holds_few_handles_at_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let denied: Vec<PathBuf> = (0..300)
+        .map(|index| tree.join(format!("d{index:03}/c")))
+        .collect();
+    for folder in &denied {
+        write(&folder.join("f"), b"the agent's\n");
+    }
+    let _cleared = AclsCleared(denied.clone());
+    add_acl("everyone deny list,search", &denied);
+    STUCK_PEAK.set(0);
+
+    let outcome = remove_agent_tree(&tree);
+
+    let peak = STUCK_PEAK.get();
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert!(peak <= 64, "{peak} stuck folders held at once");
+}
+
+/// ds181 r2 (rv-sec3 F1), ds181 N3: removing an agent's tree that is one long chain of
+/// folders, each with an ACL that denies listing it, clears each through the walk's own
+/// handles, so the chain goes and no child starts however long it is.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_a_long_chain_of_folders_that_deny_listing_goes_without_a_child() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let tree = root.join("tree");
+    let mut levels = Vec::new();
+    let mut folder = tree.clone();
+    for _ in 0..150 {
+        folder.push("d");
+        levels.push(folder.clone());
+    }
+    write(&folder.join("f"), b"the agent's\n");
+    let _cleared = AclsCleared(levels.clone());
+    let deepest_first: Vec<PathBuf> = levels.iter().rev().cloned().collect();
+    add_acl("everyone deny list,search,delete_child", &deepest_first);
+    let before = crate::spawn_gate::spawned();
+
+    let outcome = remove_agent_tree(&tree);
+
+    let started = crate::spawn_gate::spawned() - before;
+    assert_eq!(outcome, Ok(()));
+    assert!(!tree.exists(), "the tree stayed");
+    assert_eq!(
+        started,
+        0,
+        "{started} children for a chain of {}",
+        levels.len()
+    );
+}
+
 #[test]
 fn a_claim_an_engine_stop_interrupted_is_offered_again_or_handed_back_when_it_changed() {
     let case = Case::new();
@@ -1921,4 +2509,68 @@ fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_on
         assert!(left(name) && left(&format!("{name}.primed")), "{name}");
     }
     assert!(case.history_kept(1) && case.kept(2));
+}
+
+/// Plants `tree` in a test home: folders `a` and `b` of three files each, so one reset walk
+/// of it lists eight names. Input: the home.
+#[cfg(unix)]
+fn plant_walk_tree(home: &Path) {
+    for folder in ["a", "b"] {
+        let at = home.join("tree").join(folder);
+        std::fs::create_dir_all(&at).unwrap();
+        for file in ["1", "2", "3"] {
+            std::fs::write(at.join(file), b"").unwrap();
+        }
+    }
+}
+
+/// RESET-WALK-F1: one removal's walk spends its budget across every folder it empties and
+/// refuses as `cleanup_walk_too_long` once a listing returns more names than are left, though
+/// no folder gained an entry, so a process filling folders the walk has not reached yet,
+/// which no folder's own bound sees, cannot stretch it past a fixed bound.
+#[cfg(unix)]
+#[test]
+fn a_reset_walk_whose_listings_return_more_names_than_its_budget_refuses_as_too_long() {
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(tmp.path()).unwrap();
+    plant_walk_tree(&home);
+    let parent = walk_handle(&home);
+    let mut left = 7;
+
+    let removed = remove_home_below(parent.as_fd(), c"tree", 0, &mut left).map_err(|e| e.0);
+
+    assert_eq!(removed, Err("cleanup_walk_too_long".to_string()));
+    assert!(home.join("tree").exists());
+}
+
+/// RESET-WALK-F1 guard: a walk spends one unit per name its listings return, so a budget of
+/// exactly the names a tree holds removes all of it and ends at zero.
+#[cfg(unix)]
+#[test]
+fn a_reset_walk_spends_one_unit_per_listed_name_and_a_budget_of_exactly_those_clears_the_tree() {
+    use std::os::fd::AsFd;
+    let tmp = tempfile::tempdir().unwrap();
+    let home = std::fs::canonicalize(tmp.path()).unwrap();
+    plant_walk_tree(&home);
+    let parent = walk_handle(&home);
+    let mut left = 8;
+
+    let removed = remove_home_below(parent.as_fd(), c"tree", 0, &mut left).map_err(|e| e.0);
+
+    assert_eq!(removed, Ok(()));
+    assert_eq!(left, 0);
+    assert!(std::fs::symlink_metadata(home.join("tree")).is_err());
+}
+
+/// RESET-WALK-CODE: a caller of a home removal keeps `cleanup_walk_too_long` as it is, so the
+/// owner learns another try gets further, and gives every other error its own code.
+#[cfg(unix)]
+#[test]
+fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own() {
+    let walked = home_code(&walk_too_long(), "agent_home_unwritable");
+    let failed = home_code(&folder_failed(), "agent_home_unwritable");
+
+    assert_eq!(walked, "cleanup_walk_too_long");
+    assert_eq!(failed, "agent_home_unwritable");
 }

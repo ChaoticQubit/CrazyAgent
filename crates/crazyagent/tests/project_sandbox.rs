@@ -3,8 +3,8 @@
 use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{
-    InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
-    agent_env, tool_cache,
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, Sandbox, SandboxError,
+    SandboxNetwork, SandboxRemote, agent_env, tool_cache,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -117,7 +117,7 @@ fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
         .unwrap();
     let rule = |text: &str| -> Vec<String> {
         text.lines()
-            .filter(|line| line.contains("[gG][iI][tT](/.*)?$"))
+            .filter(|line| line.contains("[gG](i|I|\u{131})[tT](/.*)?$"))
             .map(|line| line.trim_end_matches(')').to_owned())
             .collect()
     };
@@ -1619,18 +1619,21 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     );
     let text = sandbox.profile();
     let pattern = case.project.display().to_string().replace('.', "\\.");
-    let dot_git = "\\.[gG][iI][tT]";
+    let any_i = "(i|I|\u{131})";
+    let dot_git = format!("\\.[gG]{any_i}[tT]");
     let state = "\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]";
     let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?";
     let any_k = "(k|K|\u{212a})";
     let any_s = "(s|S|\u{17f})";
+    let st = format!("({any_s}[tT]|\u{fb05}|\u{fb06})");
+    let fi = format!("([fF]{any_i}|\u{fb01})");
     for path in [
         context.to_owned(),
         format!("{state}/{context}"),
-        format!("{state}/[iI][nN]{any_s}[tT][rR][uU][cC][tT][iI][oO][nN]{any_s}\\.[mM][dD]"),
+        format!("{state}/{any_i}[nN]{st}[rR][uU][cC][tT]{any_i}[oO][nN]{any_s}\\.[mM][dD]"),
         format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}(/.*)?"),
-        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]"),
-        format!("{dot_git}/[cC][oO][nN][fF][iI][gG]\\.[lL][oO][cC]{any_k}"),
+        format!("{dot_git}/[cC][oO][nN]{fi}[gG]"),
+        format!("{dot_git}/[cC][oO][nN]{fi}[gG]\\.[lL][oO][cC]{any_k}"),
         format!(
             "{dot_git}(/[wW][oO][rR]{any_k}[tT][rR][eE][eE]{any_s}/[^/]+)?/[mM][oO][dD][uU][lL][eE]{any_s}(/.*)?"
         ),
@@ -1638,7 +1641,10 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
         let rule = format!("(regex #\"^{pattern}/{path}$\")");
         assert!(text.contains(&rule), "{rule}\n{text}");
     }
-    let installed = InstalledSandbox::install(sandbox, &case.profiles.join("seam.sb")).unwrap();
+    let profile = case.profiles.join("seam.sb");
+    let installed =
+        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off)
+            .unwrap();
     let seam: &dyn Sandbox = &installed;
     let mut harness = std::process::Command::new("/bin/sh");
     harness
@@ -2054,6 +2060,161 @@ fn a_confined_agent_cannot_add_shadow_or_link_a_git_object_in_the_shared_store()
     );
     assert_eq!(String::from_utf8_lossy(&wrote.stdout), "wrote\n");
     assert_eq!(fs::read_to_string(one.join("mine.txt")).unwrap(), "mine");
+}
+
+/// A confined agent changes no mode, flag or ACL of the git objects the owner and the other
+/// agents share, nor of its worktree's git links, so the owner's git and every landing keep
+/// reading them (RV-DS241-185): `chmod 000`, `chflags uchg` and `chmod +a` on a fan-out
+/// folder, a loose object, the admin folder's `commondir` and `gitdir` and the worktree's
+/// `.git` all fail, as does a hard link of each into the worktree, a name it could change
+/// one through (rv-sa241 NV-1), and the owner's git still reads the object. What a try
+/// changed is put back before the row checks, so its folder can be removed.
+#[test]
+fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_links() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let source = case.root.join("loose.txt");
+    fs::write(&source, "loose\n").unwrap();
+    let git = |arguments: &[&str]| {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+        String::from_utf8(made.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let loose = git(&["hash-object", "-w", source.to_str().unwrap()]);
+    let one = case.project.join("worktrees").join("one");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        one.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let fan_out = case.project.join(".git").join("objects").join(&loose[..2]);
+    let admin = case.project.join(".git").join("worktrees").join("one");
+    let targets = [
+        fan_out.clone(),
+        fan_out.join(&loose[2..]),
+        admin.join("commondir"),
+        admin.join("gitdir"),
+        one.join(".git"),
+    ];
+    let state = |path: &PathBuf| {
+        fs::symlink_metadata(path)
+            .ok()
+            .map(|metadata| (metadata.st_mode(), metadata.st_flags()))
+    };
+    let before: Vec<Option<(u32, u32)>> = targets.iter().map(state).collect();
+    assert!(before.iter().all(Option::is_some));
+    let linked = one.join("linked");
+    let script = targets
+        .iter()
+        .flat_map(|target| {
+            let target = quoted(target);
+            [
+                format!("/bin/chmod 000 {target}"),
+                format!("/usr/bin/chflags uchg {target}"),
+                format!("/bin/chmod +a 'everyone deny read' {target}"),
+                format!("/bin/ln {target} {}", quoted(&linked)),
+            ]
+        })
+        .map(|step| format!("{step} 2>/dev/null && echo \"changed: {step}\"\n"))
+        .collect::<String>();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&one)
+        .unwrap();
+    let profile = case.profiles.join("object-modes.sb");
+    let tried = run(&sandbox, &profile, &format!("{script}echo tried"));
+    let after: Vec<Option<(u32, u32)>> = targets.iter().map(state).collect();
+    let listed = crazyagent::spawn_gate::output(
+        std::process::Command::new("/bin/ls")
+            .arg("-led")
+            .args(&targets)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    for (target, found) in targets.iter().zip(&before) {
+        let mode = found.map_or(0o700, |(mode, _)| mode & 0o7777);
+        for (program, argument) in [("/usr/bin/chflags", "nouchg"), ("/bin/chmod", "-N")] {
+            let _ = crazyagent::spawn_gate::status(
+                std::process::Command::new(program)
+                    .arg(argument)
+                    .arg(target),
+            );
+        }
+        let _ = fs::set_permissions(target, fs::Permissions::from_mode(mode));
+    }
+    let stdout = String::from_utf8_lossy(&tried.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&tried.stderr).into_owned();
+    assert_eq!(stdout, "tried\n", "{errors}");
+    assert_eq!(after, before);
+    assert!(fs::symlink_metadata(&linked).is_err());
+    let acls = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(!acls.contains("deny"), "{acls}");
+    assert_eq!(git(&["cat-file", "-p", &loose]), "loose");
+}
+
+/// A confined agent sets no time on its worktree's git links, whose `gitdir` time git's
+/// worktree prune reads (LINUX-TEAM-TIME-CALLS, Seatbelt side): `touch` with a set time and
+/// with now fails on the admin `commondir` and `gitdir` and the worktree's `.git`, each
+/// time kept, while the agent's own file in the worktree takes the set time.
+#[test]
+fn a_confined_agent_sets_no_time_on_its_git_links() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let git = |arguments: &[&str]| {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let one = case.project.join("worktrees").join("one");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        one.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let admin = case.project.join(".git").join("worktrees").join("one");
+    let links = [
+        admin.join("commondir"),
+        admin.join("gitdir"),
+        one.join(".git"),
+    ];
+    let own = one.join("own.txt");
+    fs::write(&own, "own\n").unwrap();
+    let set = "/usr/bin/touch -d 2000-01-02T03:04:05Z";
+    let script = links
+        .iter()
+        .flat_map(|link| {
+            let link = quoted(link);
+            [format!("{set} {link}"), format!("/usr/bin/touch {link}")]
+        })
+        .map(|step| format!("{step} 2>/dev/null && echo \"changed: {step}\"\n"))
+        .collect::<String>();
+    let script = format!("{script}{set} {} && echo tried", quoted(&own));
+    let modified = |path: &PathBuf| fs::symlink_metadata(path).unwrap().mtime();
+    let before: Vec<i64> = links.iter().map(modified).collect();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&one)
+        .unwrap();
+    let tried = run(&sandbox, &case.profiles.join("link-times.sb"), &script);
+    let stdout = String::from_utf8_lossy(&tried.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&tried.stderr).into_owned();
+    assert_eq!(stdout, "tried\n", "{errors}");
+    assert_eq!(links.iter().map(modified).collect::<Vec<i64>>(), before);
+    assert_eq!(
+        modified(&own),
+        946_782_245,
+        "the agent's own file took the set time"
+    );
 }
 
 const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
@@ -3850,6 +4011,37 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}
+
+/// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
+/// gets a profile Seatbelt reads, so the agent starts, and the folder's own app deny still
+/// holds under the bounded spelling of its name: a framework Python app planted there,
+/// which the profile runs anywhere else, does not run.
+#[test]
+fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_planted_there() {
+    let case = case();
+    let project = case.root.join("Glasssssss-ffffffffff");
+    let bundle = project.join("Py.framework/Versions/3/Resources/Python.app/Contents/MacOS");
+    fs::create_dir_all(&bundle).unwrap();
+    fs::copy("/usr/bin/true", bundle.join("Python")).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let profile = case.profiles.join("runs.sb");
+    let started = run(&sandbox, &profile, "/usr/bin/true");
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let planted = run(&sandbox, &profile, &quoted(&bundle.join("Python")));
+    assert!(!planted.status.success(), "the planted app ran");
+    let stderr = String::from_utf8_lossy(&planted.stderr);
+    assert!(stderr.contains("Operation not permitted"), "{stderr}");
 }
 
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither

@@ -1158,6 +1158,7 @@ fn a_status_run_names_only_its_own_folder_and_profile_for_removal() {
         let run = ReadOnlyRun {
             name,
             agent: "roadmap-status",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Roadmap),
             project: Some(&project),
             folder: &folder,
             prompt: "Check the roadmap.",
@@ -1411,4 +1412,44 @@ fn a_status_check_whose_provider_refuses_connections_fails_at_once_with_the_reac
             .map_or(true, |mut entries| entries.next().is_none()),
         "no agent folder was made"
     );
+}
+
+/// RV-DS241-80/81: an engine start forgets the roadmap status rows of a project that is no
+/// longer recorded, left by a removal from before they went with it; a recorded project
+/// keeps its rows, and with no project record to check against nothing is forgotten.
+#[test]
+fn an_engine_start_forgets_the_roadmap_status_rows_of_projects_that_are_gone() {
+    let db = db();
+    db.execute_batch(
+        "INSERT INTO roadmap_status(project, stale) VALUES ('alpha', 1), ('gone', 1);
+         INSERT INTO roadmap_status_settings(project, refresh) VALUES
+           ('alpha', 'refresh_only'), ('gone', 'refresh_only');",
+    )
+    .unwrap();
+    let rows = |db: &Connection| -> Vec<String> {
+        db.prepare(
+            "SELECT project FROM roadmap_status UNION ALL
+             SELECT project FROM roadmap_status_settings ORDER BY 1",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    };
+
+    close_orphans(&db).unwrap();
+    assert_eq!(
+        rows(&db),
+        ["alpha", "alpha", "gone", "gone"],
+        "no project record, nothing forgotten"
+    );
+    db.execute_batch(
+        "CREATE TABLE projects(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO projects VALUES ('alpha', '{}');",
+    )
+    .unwrap();
+    close_orphans(&db).unwrap();
+
+    assert_eq!(rows(&db), ["alpha", "alpha"]);
 }

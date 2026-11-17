@@ -159,6 +159,29 @@ fn claude_rate_limit_errors_and_rejections_report_a_rate_limited_turn_error() {
     assert!(turn_errors(&events).is_empty());
 }
 
+/// A rate-limit status, limit type or overage reason a newer Claude Code adds is neither a
+/// rate-limited turn error nor a protocol fault, so a team agent's turn goes on and a later
+/// rejection still reads as one (RV-DS241-49).
+#[test]
+fn claude_unknown_rate_limit_status_is_not_a_rejection_and_keeps_the_turn() {
+    let mut driver = claude_driver();
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"rate_limit_event", "uuid":"rate-future", "session_id":"native-session",
+            "rate_limit_info":{"status":"future_status","rateLimitType":"ten_day",
+                "overageDisabledReason":"future_reason"}
+        })))
+        .unwrap();
+    assert!(turn_errors(&events).is_empty());
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"rate_limit_event", "uuid":"rate-after", "session_id":"native-session",
+            "rate_limit_info":{"status":"rejected"}
+        })))
+        .unwrap();
+    assert_eq!(turn_errors(&events), [true]);
+}
+
 #[test]
 fn claude_assistant_errors_other_than_rate_limits_are_not_rate_limited() {
     let mut driver = claude_driver();
@@ -1314,5 +1337,122 @@ fn a_harness_launch_takes_the_owner_retry_option_for_its_provider() {
                 .collect::<Vec<_>>(),
             "{retry:?}"
         );
+    }
+}
+
+/// rv-secreview b6 r2 F1: a headless agent on pipes whose harness reaches its model through
+/// an engine key relay ends when that engine dies, a crash included, as a keyed pane does,
+/// so nothing is left to dial the relay's freed port. Closing the lifeline's pipe without
+/// `done` stands in for the engine's death.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut launch = team_launch("claude-code");
+    let base = launch.work.parent().unwrap().to_path_buf();
+    let (harness, pid) = (base.join("pid-harness"), base.join("harness-pid"));
+    std::fs::write(
+        &harness,
+        format!(
+            "#!/bin/sh\necho $$ > {}\nexec /bin/cat > /dev/null\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let token = format!(
+        "{}{}",
+        crate::model_gateway::relay::TOKEN_PREFIX,
+        "a".repeat(64)
+    );
+    launch.request.executable = harness;
+    launch.request.tools = false;
+    launch.request.account = AccountBinding::Url {
+        home: launch.request.account.home().to_path_buf(),
+        base_url: "http://127.0.0.1:9/v1".into(),
+        key: Some(super::Secret::new(token).unwrap()),
+    };
+    let mut session = super::Session::start(launch.request).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let started = loop {
+        let text = std::fs::read_to_string(&pid).unwrap_or_default();
+        let read = text.trim().parse::<i32>().ok();
+        if let Some(started) = read.and_then(rustix::process::Pid::from_raw) {
+            break started;
+        }
+        assert!(std::time::Instant::now() < until, "the harness starts");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert!(session.child.try_wait().unwrap().is_none());
+    assert!(
+        session.lifeline.is_some(),
+        "a headless agent on an engine key relay has no lifeline"
+    );
+    if let Some(lifeline) = session.lifeline.as_mut() {
+        lifeline.sever();
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while session.child.try_wait().unwrap().is_none()
+        || rustix::process::test_kill_process(started).is_ok()
+    {
+        assert!(
+            std::time::Instant::now() < until,
+            "the keyed harness outlived the engine that held its relay"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// RV-DS241-205: a piped Claude Code agent runs with auto-memory off, in its settings and in
+/// its environment, with tools on or off, so a memory file one run left in its home is never
+/// loaded by a later run as standing instructions.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_piped_claude_agent_runs_with_auto_memory_off() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-memory-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+
+    for tools in [true, false] {
+        let request = LaunchRequest {
+            harness: "claude-code".into(),
+            executable: PathBuf::from("/usr/bin/true"),
+            working_dir: work.clone(),
+            account: AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools,
+            sandbox_profile: Some(profile.clone()),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        };
+        let command = super::command(&request).unwrap();
+        let arguments: Vec<String> = command
+            .get_args()
+            .map(|argument| argument.to_str().unwrap().to_owned())
+            .collect();
+        let at = arguments
+            .iter()
+            .position(|argument| argument == "--settings")
+            .unwrap();
+        let settings: Value = serde_json::from_str(&arguments[at + 1]).unwrap();
+        let memory: Vec<Option<&std::ffi::OsStr>> = command
+            .get_envs()
+            .filter(|(name, _)| *name == "CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+            .map(|(_, value)| value)
+            .collect();
+
+        assert_eq!(settings["autoMemoryEnabled"], json!(false), "tools {tools}");
+        assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
     }
 }

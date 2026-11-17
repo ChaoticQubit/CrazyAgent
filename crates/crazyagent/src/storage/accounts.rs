@@ -23,7 +23,8 @@ pub(crate) enum Command {
     Remove(CredentialRef),
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
-    KeyReplaced(CredentialRef),
+    /// A new key replaced an account's key: the account and its key reference.
+    KeyReplaced(CredentialRef, CredentialRef),
     Held,
 }
 
@@ -33,11 +34,12 @@ pub(crate) struct Listed {
     pub(crate) sign_in: Option<NativeAuthPhase>,
     pub(crate) launchable: bool,
     pub(crate) rejected: bool,
+    pub(crate) rechecking: bool,
 }
 
 pub(crate) enum ResultValue {
     Account(Box<Listed>),
-    Removed(Box<ModelConnection>),
+    Removed,
     Page(Vec<Listed>, Option<CredentialRef>),
     Held(Vec<CredentialRef>),
 }
@@ -142,7 +144,7 @@ pub(crate) fn read_key_file(
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
     if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
-        bytes.fill(0);
+        crate::credentials::wipe(&mut bytes);
         return Err(error("account_key_store_unavailable"));
     }
     crate::credentials::SecretString::new(bytes)
@@ -269,13 +271,23 @@ pub(super) fn execute(
                 &tx, admission, connection, details,
             )?)))
         }
-        Command::KeyReplaced(id) => {
+        Command::KeyReplaced(id, credential) => {
             let tx = db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(error)?;
             check_owner_admission(&tx, admission)?;
-            let (connection, details) =
-                find(&tx, config, &id)?.ok_or_else(|| error("account_not_found"))?;
+            let Some((connection, details)) = find(&tx, config, &id)? else {
+                super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential.as_str())?;
+                tx.commit().map_err(error)?;
+                #[cfg(unix)]
+                settle_removed(
+                    db,
+                    config.settings.model_access.as_ref(),
+                    super::trash::ACCOUNT_KEY,
+                    credential.as_str(),
+                );
+                return Err(error("account_not_found"));
+            };
             if !matches!(connection.auth, ModelAuthentication::ApiKey { .. }) {
                 return Err(error("account_key_not_allowed"));
             }
@@ -368,49 +380,75 @@ pub(super) fn execute(
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(error)?;
             check_owner_admission(&tx, admission)?;
+            #[cfg(unix)]
+            let saved = registered(&tx, &id)?.map(|(_, record)| record.connection.auth);
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
             crate::usage::forget_limits(&tx, &id)?;
+            #[cfg(not(unix))]
             if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
                 super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
             }
             #[cfg(unix)]
-            let left = account_files(&connection.auth);
+            let left: std::collections::BTreeSet<(&str, &str)> = account_files(&connection.auth)
+                .into_iter()
+                .chain(saved.iter().flat_map(account_files))
+                .collect();
             #[cfg(unix)]
-            if let Some((kind, name)) = left {
+            for (kind, name) in &left {
                 super::trash::put(&tx, kind, name)?;
             }
             tx.commit().map_err(error)?;
             #[cfg(unix)]
-            if let Some((kind, name)) = left {
+            for (kind, name) in &left {
                 settle_removed(db, config.settings.model_access.as_ref(), kind, name);
             }
-            Ok(ResultValue::Removed(Box::new(connection)))
+            Ok(ResultValue::Removed)
         }
     }
 }
 
-/// Names the files a removed account leaves to delete beside its key: a native account's
-/// sign-in or an API key account's generated SDK home. Input: the account's authentication.
-/// Output: the trash kind and reference, none for an account with neither.
+/// Names the files an account's authentication leaves to delete once nothing names it: an
+/// API key account's key and generated SDK home, or a native account's sign-in.
+/// Input: the authentication. Output: each trash kind with its reference, none for others.
 #[cfg(unix)]
-fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
+fn account_files(auth: &ModelAuthentication) -> Vec<(&'static str, &str)> {
     match auth {
-        ModelAuthentication::ApiKey { credential_ref } => {
-            Some((super::trash::GENERATED_HOME, credential_ref.as_str()))
-        }
+        ModelAuthentication::ApiKey { credential_ref } => vec![
+            (super::trash::ACCOUNT_KEY, credential_ref.as_str()),
+            (super::trash::GENERATED_HOME, credential_ref.as_str()),
+        ],
         ModelAuthentication::NativeManaged { profile_ref } => {
-            Some((super::trash::NATIVE_SIGN_IN, profile_ref.as_str()))
+            vec![(super::trash::NATIVE_SIGN_IN, profile_ref.as_str())]
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
-/// Deletes a removed account's files straight after its removal commits; what cannot go
-/// now stays noted for the next start. Inputs: the connection, the catalog left after the
-/// removal, the kind and the reference.
+/// Names the files a settings change leaves no connection naming: each file of a connection
+/// before the change that no connection after it names with the same kind and reference.
+/// Inputs: the catalogs before and after. Output: those kinds with their references, once each.
 #[cfg(unix)]
-fn settle_removed(
+pub(super) fn dropped_files(
+    before: Option<&crate::config::ModelAccess>,
+    after: Option<&crate::config::ModelAccess>,
+) -> std::collections::BTreeSet<(&'static str, String)> {
+    let files = |catalog: Option<&crate::config::ModelAccess>| {
+        catalog
+            .into_iter()
+            .flat_map(|access| &access.connections)
+            .flat_map(|connection| account_files(&connection.auth))
+            .map(|(kind, name)| (kind, name.to_owned()))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    files(before).difference(&files(after)).cloned().collect()
+}
+
+/// Deletes a removed account's files, or a dropped connection's, straight after the change
+/// commits; what cannot go now stays noted for the next start. Inputs: the connection, the
+/// catalog left after the change, the kind and the reference.
+#[cfg(unix)]
+pub(super) fn settle_removed(
     db: &Connection,
     catalog: Option<&crate::config::ModelAccess>,
     kind: &str,
@@ -461,6 +499,123 @@ fn find(
         }
         (None, None) => None,
     })
+}
+
+/// Takes a project Delete everything removed out of every pool in the saved settings, as
+/// choosing no pool for it does, so no pool lists it or counts it toward its project cap
+/// (rv-sec2 bgjobs-3b F2). A delete that kept the project's records keeps its pool too.
+/// Inputs: the database, the config, the settings sources, the owner's admission and the
+/// project. Output: Ok once no pool lists a removed project, else the error.
+pub(super) fn forget_pool_project(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    admission: &Admission,
+    project: &ProjectId,
+) -> Result<(), EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if kept {
+        return Ok(());
+    }
+    let reference = CredentialRef::new(project.as_str()).map_err(error)?;
+    let pooled = |config: &EffectiveConfig| {
+        config.settings.model_access.as_ref().is_some_and(|access| {
+            access
+                .pools
+                .iter()
+                .any(|pool| pool.projects.contains(&reference))
+        })
+    };
+    if !pooled(&*config) {
+        return Ok(());
+    }
+    publish(
+        db,
+        config,
+        sources,
+        admission,
+        ModelAccessEdit::AssignProjectPool {
+            project: reference.clone(),
+            pool: None,
+        },
+    )?;
+    assert!(
+        !pooled(&*config),
+        "a published no-pool edit leaves no pool listing the project"
+    );
+    Ok(())
+}
+
+/// Gives a demo just made exactly the pool its Create picked when another pool still lists
+/// an earlier demo of the same id, so that pool never serves the new one (rv-sa241 LOW-1);
+/// when the picked pool can't take it, the demo leaves every pool. With no such pool it
+/// changes nothing and the client assigns the pool as before. Inputs: the database, the
+/// config, the settings sources, the owner's admission, the demo and the picked pool.
+/// Output: Ok, else the error, with the demo in no pool.
+pub(super) fn settle_demo_pool(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    admission: &Admission,
+    project: &ProjectId,
+    pool: &CredentialRef,
+) -> Result<(), EngineError> {
+    let reference = CredentialRef::new(project.as_str()).map_err(error)?;
+    let listing = |config: &EffectiveConfig| -> Vec<CredentialRef> {
+        config
+            .settings
+            .model_access
+            .as_ref()
+            .map(|access| {
+                access
+                    .pools
+                    .iter()
+                    .filter(|listed| listed.projects.contains(&reference))
+                    .map(|listed| listed.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if listing(&*config).iter().all(|listed| listed == pool) {
+        return Ok(());
+    }
+    let assigned = publish(
+        db,
+        config,
+        sources,
+        admission,
+        ModelAccessEdit::AssignProjectPool {
+            project: reference.clone(),
+            pool: Some(pool.clone()),
+        },
+    );
+    if let Err(problem) = assigned {
+        if !listing(&*config).is_empty() {
+            publish(
+                db,
+                config,
+                sources,
+                admission,
+                ModelAccessEdit::AssignProjectPool {
+                    project: reference.clone(),
+                    pool: None,
+                },
+            )?;
+        }
+        assert!(
+            listing(&*config).is_empty(),
+            "a refused assign leaves the demo in no pool"
+        );
+        return Err(problem);
+    }
+    assert_eq!(listing(&*config), std::slice::from_ref(pool));
+    Ok(())
 }
 
 fn publish(
@@ -566,10 +721,12 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
-/// Lists one account with its latest sign-in, whether the provider rejected it, and whether
-/// it passes the launch check every master, team and research turn uses on this engine run,
-/// so status never shows an account as signed in when a launch or the master would refuse
-/// it. Inputs: the transaction, the admitted owner, the connection and its details.
+/// Lists one account with its latest sign-in, whether the provider rejected it, whether it
+/// passes the launch check every master, team and research turn uses on this engine run, so
+/// status never shows an account as signed in when a launch or the master would refuse it,
+/// and whether a sign-in that fails only that check waits for this run's re-check (DEC-108);
+/// a re-check that cannot be read counts as none, so one account never fails the list.
+/// Inputs: the transaction, the admitted owner, the connection and its details.
 /// Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
@@ -590,12 +747,18 @@ fn listed(
         && !rejected
         && crate::storage::native_sign_in(tx, &host, &connection, None).is_ok();
     assert!(!launchable || sign_in == Some(NativeAuthPhase::AuthenticatedObserved));
+    let rechecking = sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
+        && !launchable
+        && !rejected
+        && crate::storage::sign_in_rechecking(tx, &host, &connection).unwrap_or(false);
+    assert!(!(launchable && rechecking));
     Ok(Listed {
         connection,
         details,
         sign_in,
         launchable,
         rejected,
+        rechecking,
     })
 }
 

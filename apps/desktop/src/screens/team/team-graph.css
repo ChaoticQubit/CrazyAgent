@@ -565,9 +565,41 @@
 }
 
 .tg-terminal-screen {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 360px;
   padding: var(--space-2);
+}
+
+.tg-terminal-screen[hidden] {
+  display: none;
+}
+
+.tg-terminal-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tg-terminal-parking {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.tg-terminal-parking > .tg-terminal-host {
+  position: absolute;
+  left: 0;
+  top: 0;
+  flex: none;
 }
 
 .tg-terminal-note {

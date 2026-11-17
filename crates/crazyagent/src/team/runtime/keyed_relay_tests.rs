@@ -220,3 +220,158 @@ fn a_full_access_claude_agent_on_a_key_account_gets_its_own_default_keychain() {
         true,
     );
 }
+
+/// A stand-in Codex that, once ready, dials the relay port its own `-c` settings name every
+/// 100 ms from a loop in its pane, as a harness sending its next model request does, and
+/// counts each dial that connected in `dialed` in its home. Output: the script.
+fn dialing_codex() -> String {
+    let ready = r#"printf '\033[?2004hCodex stand-in ready\n'"#;
+    let script = RESUMING_CODEX.replacen(
+        ready,
+        &format!(
+            r#"port=$(printf '%s' "$*" | /usr/bin/sed -n 's/.*base_url="http:\/\/127\.0\.0\.1:\([0-9]*\).*/\1/p')
+( while :; do /usr/bin/nc -z -G 1 127.0.0.1 "$port" 2>/dev/null && echo x >> "$CODEX_HOME/dialed"; /bin/sleep 0.1; done ) &
+{ready}"#
+        ),
+        1,
+    );
+    assert_ne!(script, RESUMING_CODEX);
+    script
+}
+
+/// SA vid 9: a keyed live master is never left running when the engine quits with Keep
+/// running on, the default. Its key relay lives in the engine and ends with it, and a later
+/// listener on the relay's port, such as another local user's process, would get the
+/// master's next model request in plain text. The quit stops the master's pane, so nothing
+/// dials the old port, and the master is not among the panes left running.
+#[test]
+fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port() {
+    let mut fixture = Fixture::new(1);
+    fixture.access.connections[0].endpoint = ModelEndpoint::Http {
+        url: "https://api.example.org/v1".into(),
+    };
+    fixture.access.connections[0].auth = ModelAuthentication::ApiKey {
+        credential_ref: reference(KEY_REF),
+    };
+    save_key(&fixture.base);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &dialing_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the keyed live master runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let dialed = fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{master}"))
+        .join("home/dialed");
+    fixture.until(&mut team, "the stand-in reaches its relay", |_| {
+        dialed.exists()
+    });
+    fixture.until(&mut team, "the master's pane is recorded", |f| {
+        f.recorded(master)
+    });
+    let launched = launches(&fixture, master);
+    let port: u16 = launched[0]
+        .split("base_url=\"http://127.0.0.1:")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|port| port.parse().ok())
+        .expect("the master runs on its key relay");
+    assert!(crate::sandbox::model_proxy::RELAY_PORTS.contains(&port));
+
+    let left = team.shutdown().unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", port)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut reached = 0;
+    while Instant::now() < deadline {
+        reached += usize::from(crate::spawn_gate::accept_tcp_std(&listener).is_ok());
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pane = AgentId::team(master).unwrap();
+    let running = host.alive().unwrap().contains(&pane);
+    host.close(&[]).unwrap();
+    assert_eq!(reached, 0, "the master dialed its ended relay's port");
+    assert!(
+        left.is_empty(),
+        "the keyed master is left running: {left:?}"
+    );
+    assert!(!running, "the keyed master's pane runs on");
+}
+
+/// A native Claude Code lead on a keyed endpoint account is refused at prepare, with the
+/// owner sentence and `native_team_needs_hooks`, since such an account starts Claude Code
+/// bare and no hook fires (DEC-104 BARE-1). The refusal names no key, and no worktree, own
+/// server, server keeper or teammates' server name is made for the lead.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_on_a_keyed_endpoint_is_refused_before_any_server_starts() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    save_key(&fixture.base);
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "https://api.example.org/v1".into(),
+            model: "claude-test".into(),
+            key: Some(reference(KEY_REF)),
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        id,
+        AgentRole::Sub,
+        "claude-code",
+        true,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    ) else {
+        panic!("a native lead on a keyed endpoint account started");
+    };
+    assert!(refused.contains(NATIVE_NEEDS_HOOKS), "{refused}");
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_team_needs_hooks")),
+        "{refused}"
+    );
+    assert!(!refused.contains(PROVIDER_KEY), "{refused}");
+    assert!(hookless_saved(&fixture, id));
+    let root = fixture.setup.project_folder().canonicalize().unwrap();
+    let worktree = crate::projects_home::state_folder(&root)
+        .join("worktrees")
+        .join(format!("agent-{id}"));
+    assert!(!worktree.exists(), "no worktree is made for a refused lead");
+    let lead = AgentId::team(id).unwrap();
+    assert_eq!(host.server_keepers(&lead), Vec::new());
+    let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+    assert!(
+        crate::spawn_gate::connect_unix_std(&socket).is_err(),
+        "a refused lead's own server runs"
+    );
+    assert!(
+        crate::terminal::teammates_socket(&fixture.base, &lead).is_err(),
+        "a refused lead's teammates' server is named"
+    );
+}

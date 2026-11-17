@@ -90,13 +90,7 @@ impl RcliCustody {
                 error.0
             )));
         }
-        if let Err(error) = host.shutdown() {
-            self.uncertain = true;
-            return Err(EngineError(format!(
-                "master_runtime_cleanup_uncertain:{}",
-                error.0
-            )));
-        }
+        self.shut_down()?;
         self.host.take();
         assert!(!self.uncertain);
         assert!(self.host.is_none());
@@ -104,14 +98,44 @@ impl RcliCustody {
     }
 }
 
+impl RcliCustody {
+    /// Shuts the host down. What its stop left running once its group ended
+    /// (LINUX-KILL-GROUP r1 F1) is held with the profile, as a Claude host turn's hold keeps
+    /// its lease, so the account goes once none run, and the turn ends with that code; any
+    /// other failure keeps both as in doubt. Input: the custody. Output: Ok, the leftover
+    /// code, or `master_runtime_cleanup_uncertain` with the host's refusal.
+    fn shut_down(&mut self) -> Result<(), EngineError> {
+        let host = self.host.as_mut().expect("retained RCLI host");
+        let shut = host.shutdown();
+        if let Some(left) = host.left_code() {
+            #[cfg(unix)]
+            {
+                let profile = self
+                    .profile
+                    .take()
+                    .expect("retained RCLI execution custody");
+                let account = profile.account().clone();
+                host.hold_leftovers(Some(account), profile);
+                assert!(host.left_code().is_none());
+            }
+            return Err(failure(left));
+        }
+        shut.map_err(|error| {
+            self.uncertain = true;
+            EngineError(format!("master_runtime_cleanup_uncertain:{}", error.0))
+        })
+    }
+}
+
 impl Drop for RcliCustody {
     fn drop(&mut self) {
-        if !self.uncertain
-            && let Some(host) = self.host.as_mut()
-        {
-            self.uncertain = host.shutdown().is_err();
+        if !self.uncertain && self.host.is_some() {
+            let _ = self.shut_down();
         }
         if self.uncertain {
+            if let Some(host) = self.host.as_mut() {
+                host.hold_leftovers(None, ());
+            }
             let retained = (self.host.take(), self.profile.take());
             std::mem::forget(retained);
         }

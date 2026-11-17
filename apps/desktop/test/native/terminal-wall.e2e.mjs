@@ -382,7 +382,7 @@ test("a project removed with its wall window open: the wall's next read finds it
       assert.ok(Date.now() < deadline, `the wall never drew its terminals: ${JSON.stringify(await wallShown(page))}`);
     }
     const mark = log.trail.length;
-    const removed = await value(bridge, "desktop_remove_project", { id: project, generation: 10, deleteName: null });
+    const removed = await value(bridge, "desktop_remove_project", { id: project, generation: 10 });
     assert.equal(removed.outcome, "applied", `the engine removed the project: ${JSON.stringify(removed)}`);
     const closes = () => log.trail.slice(mark).filter((call) => call.cmd === "desktop_close_project_walls");
     for (const deadline = Date.now() + STEP_MS; closes().length === 0; await pause(POLL_MS)) {

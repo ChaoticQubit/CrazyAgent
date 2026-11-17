@@ -2,7 +2,7 @@ use crate::credentials::{SecretString, Store};
 use crate::engine::EngineError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +10,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 mod api;
 mod clone;
+mod draft;
 pub(crate) mod http;
+mod job;
+mod plan;
+mod prompt;
+pub mod proposals;
+mod publish;
+mod rules;
+mod settings;
 mod state;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "github/test_server.rs"]
@@ -20,9 +28,28 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
+pub use job::{
+    GitHubDraft, GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
+    GitHubPublishStep,
+};
+pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_problem};
+pub use prompt::{GitHubPromptAnswer, SNOOZE_MS};
+pub(crate) use prompt::{carry_publish, forget_job, forget_prompt};
+#[cfg(all(test, unix))]
+pub(crate) use prompt::{keep_job, keep_prompt_answer, kept_job, kept_prompt_answer};
+#[cfg(all(test, unix))]
+pub(crate) use publish::START_GIT_TIME;
+pub(crate) use publish::START_TIME;
+pub use publish::{
+    GitHubCommitted, GitHubHistory, GitHubLocal, GitHubPrepare, GitHubSecretFinding,
+    GitHubSecretKind, GitHubSecretScan,
+};
+pub use rules::{
+    GitHubCi, GitHubRepoFacts, GitHubRepoRules, GitHubRule, GitHubRuleOutcome, GitHubRuleState,
+};
 
 pub const CLIENT_ID: &str = "Ov23liHICPRkMyS5sNMV";
-pub const SCOPES: &str = "repo read:user";
+pub const SCOPES: &str = "repo read:user read:org workflow";
 pub const REPOS_PER_PAGE: u32 = 100;
 pub const REPO_PAGE_MAX: u32 = 100;
 
@@ -89,6 +116,44 @@ pub struct CloneReceipt {
     pub path: String,
 }
 
+/// One account a new repository can be made under: the signed-in owner's own account
+/// (`personal`) or an organization they are an active member of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubOwner {
+    pub login: String,
+    pub personal: bool,
+}
+
+/// The accounts the publish form offers, the owner's own account first, and a plain
+/// sentence when the organizations could not be listed, such as a sign-in without
+/// `read:org`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubOwners {
+    pub owners: Vec<GitHubOwner>,
+    pub problem: Option<String>,
+}
+
+/// A repository to make on GitHub: the account it goes under, its name, the description
+/// and whether it is private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubNewRepo {
+    pub owner: String,
+    pub name: String,
+    pub description: String,
+    pub private: bool,
+}
+
+/// A repository GitHub made: `owner/name` as GitHub spells it, GitHub's node id, which
+/// tells this repository apart from another of the same name, and whether it is private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubCreated {
+    pub full_name: String,
+    pub node_id: String,
+    pub private: bool,
+}
+
 const SERVICE_LEAF: &str = "github";
 const TOKEN_ACCOUNT: &str = "token";
 const CLI_ENV: [&str; 3] = ["HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"];
@@ -100,6 +165,7 @@ struct Pending {
 }
 
 static PENDING: Mutex<BTreeMap<PathBuf, Pending>> = Mutex::new(BTreeMap::new());
+static RECORDS: Mutex<()> = Mutex::new(());
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
@@ -220,6 +286,18 @@ pub fn problem(code: &str) -> String {
         "github_reply_invalid" => "GitHub sent a reply the engine could not read. Try again.",
         "github_cli_missing" => "The GitHub CLI (gh) is not installed.",
         "github_cli_not_signed_in" => "The GitHub CLI is not signed in. Run gh auth login first.",
+        "github_scope_missing_read_org" => {
+            "Listing your GitHub organizations needs the read:org permission, which this \
+             sign-in lacks. Sign in to GitHub again, or run gh auth refresh -s read:org and \
+             use the GitHub CLI again."
+        }
+        "github_orgs_cut" => {
+            "Only your first 1,000 GitHub organizations are offered; GitHub lists more."
+        }
+        "github_orgs_refused" => {
+            "GitHub refused to list your organizations, so only your own account is offered. \
+             Try again later."
+        }
         "credential_missing" => {
             "The saved GitHub token is gone from the credential store. Sign in again."
         }
@@ -511,6 +589,164 @@ impl GitHub {
             &self.endpoints,
             home,
             full_name,
+        )
+    }
+
+    /// Lists the accounts a new repository can go under, the owner's own account first.
+    /// Output: the accounts and a problem sentence, or `github_not_signed_in`.
+    pub fn owners(&self) -> Result<GitHubOwners, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        api::owners(&self.endpoints, &token)
+    }
+
+    /// Checks whether `owner/name` is still free on GitHub. Inputs: the account and the
+    /// name. Output: true when free, or `github_repo_name_invalid`, `github_not_signed_in`.
+    pub fn name_free(&self, owner: &str, name: &str) -> Result<bool, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        api::name_free(&self.endpoints, &token, owner, name)
+    }
+
+    /// Makes an empty repository on GitHub with CrazyAgent's standard settings.
+    /// Input: the repository to make. Output: what GitHub made, or the refusal code.
+    pub fn create_repo(&self, repo: &GitHubNewRepo) -> Result<GitHubCreated, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        api::create(&self.endpoints, &token, repo)
+    }
+
+    /// Sets CrazyAgent's rules on a repository with the owner's sign-in: each rule in `on`
+    /// is turned on and every other one off. Inputs: `owner/name`, the rules on and the
+    /// facts. Output: one outcome per rule GitHub holds, or `github_not_signed_in`.
+    pub fn apply_rules(
+        &self,
+        full_name: &str,
+        on: &BTreeSet<GitHubRule>,
+        facts: &GitHubRepoFacts,
+    ) -> Result<Vec<GitHubRuleOutcome>, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        self.with_record(full_name, |made| {
+            rules::apply(&self.endpoints, &token, full_name, on, facts, made)
+        })
+    }
+
+    /// Runs one rules pass on a repository's record of CrazyAgent's rulesets, one pass at
+    /// a time, and saves the record afterwards even when the pass stopped part way, so a
+    /// ruleset made before the stop stays CrazyAgent's. Inputs: `owner/name` and the
+    /// pass. Output: the pass's result, or the record's load or save failure.
+    fn with_record<T>(
+        &self,
+        full_name: &str,
+        pass: impl FnOnce(&mut rules::RepoRecord) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let _held = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut made = state::load_record(&self.root, full_name)?;
+        let result = pass(&mut made);
+        state::save_record(&self.root, full_name, &made)?;
+        result
+    }
+
+    /// Sets one rule on a repository, as `apply_rules` does for each. Inputs:
+    /// `owner/name`, the rule, the rules on and the facts. Output: the rule's outcome.
+    pub fn set_rule(
+        &self,
+        full_name: &str,
+        rule: GitHubRule,
+        on: &BTreeSet<GitHubRule>,
+        facts: &GitHubRepoFacts,
+    ) -> Result<GitHubRuleOutcome, EngineError> {
+        let token = self.store.get(&self.saved()?.credential)?;
+        self.with_record(full_name, |made| {
+            rules::set(&self.endpoints, &token, full_name, rule, on, facts, made)
+        })
+    }
+
+    /// Reads how a project's git stands before it is published: whether it is a
+    /// repository, its branch and what its history holds. Needs no sign-in. Input: the
+    /// project folder. Output: the state, or the refusal for a remote, a detached HEAD or
+    /// a `.git` that is not a plain folder.
+    pub fn publish_inspect(&self, project: &Path) -> Result<GitHubLocal, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::inspect(
+            &publish::git()?,
+            home.path(),
+            project,
+            self.endpoints.web_host(),
+        )
+    }
+
+    /// Gets a project ready for its first publish commit: git init on main when it has no
+    /// repository, CrazyAgent's folders hidden from git, the docs and approved .gitignore
+    /// lines added, and the security policy and Dependabot files written where missing.
+    /// Inputs: the project folder, its state and the owner's choices. Output: the paths
+    /// publish wrote.
+    pub fn publish_prepare(
+        &self,
+        project: &Path,
+        local: &GitHubLocal,
+        choices: &GitHubPrepare,
+    ) -> Result<Vec<String>, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::prepare(&publish::git()?, home.path(), project, local, choices)
+    }
+
+    /// Finds the lines a publish would push that hold a secret, by file and line, at
+    /// most 20 a file and 1000 in all, saying when the list was cut there.
+    /// Inputs: the project folder and its history. Output: the scan, or
+    /// `github_publish_not_plain_repo`, `github_publish_too_large` or `github_publish_failed`.
+    pub fn publish_secrets(
+        &self,
+        project: &Path,
+        history: GitHubHistory,
+    ) -> Result<GitHubSecretScan, EngineError> {
+        let home = publish::GitHome::new(&self.root)?;
+        publish::secret_findings(&publish::git()?, home.path(), project, history)
+    }
+
+    /// Makes the publish commit with the identity the owner's own git uses in the
+    /// project, else the GitHub account's noreply address, which needs the sign-in.
+    /// Inputs: the project folder, the owner's home folder, whose git settings name that
+    /// identity, and the paths `publish_prepare` wrote. Output: the commit to push.
+    pub fn publish_commit(
+        &self,
+        project: &Path,
+        owner_home: &Path,
+        written: &[String],
+    ) -> Result<GitHubCommitted, EngineError> {
+        let git = publish::git()?;
+        let home = publish::GitHome::new(&self.root)?;
+        let author = match publish::configured_author(&git, owner_home, project) {
+            Some(author) => author,
+            None => {
+                let token = self.store.get(&self.saved()?.credential)?;
+                let (login, id) = api::identity(&self.endpoints, &token)?;
+                publish::noreply_author(&login, id)
+            }
+        };
+        publish::commit(&git, home.path(), project, written, &author)
+    }
+
+    /// Pushes the publish commit to its new GitHub repository through the store's git
+    /// helper, then points the project at it. Inputs: the project folder, `owner/name`
+    /// and the commit `publish_commit` made. Output: `()`, or the refusal.
+    pub fn publish_push(
+        &self,
+        project: &Path,
+        full_name: &str,
+        committed: &GitHubCommitted,
+    ) -> Result<(), EngineError> {
+        let saved = self.saved()?;
+        let helper = self
+            .store
+            .git_credential_helper(&saved.credential, clone::GIT_USER)?;
+        let git = publish::git()?;
+        let home = publish::GitHome::new(&self.root)?;
+        publish::push(
+            &self.endpoints,
+            &helper,
+            &git,
+            home.path(),
+            project,
+            full_name,
+            committed,
         )
     }
 }

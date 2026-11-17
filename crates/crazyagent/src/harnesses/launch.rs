@@ -105,7 +105,13 @@ const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROU
 /// context-mode from the engine's shared install answers in about 1 s; the margin covers a
 /// machine busy with builds, and a server that never answers delays the start by 60 s only.
 pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
-const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
+/// Turns Claude Code's auto-memory off for every agent launch, beside `autoMemoryEnabled`
+/// false in its settings (RV-DS241-205): the home reset keeps `projects` for transcripts and
+/// clears each `projects/<key>/memory` only at the next reset (B20), so a `MEMORY.md` one
+/// session wrote would otherwise load into every later session of that launch, teammates
+/// included, as standing instructions.
+pub(crate) const CLAUDE_AUTO_MEMORY_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"autoMemoryEnabled\":false,\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -137,12 +143,14 @@ pub(crate) const CLAUDE_TOOLS_OFF: [&str; 5] = [
 ];
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
-/// serialization, arguments or reports and is handed to the child only as an environment value.
+/// serialization, arguments or reports, is handed to the child only as an environment value,
+/// and is zeroed when it is dropped.
 pub struct Secret(String);
 
 impl Secret {
-    /// Wraps a key after bounds checks. Input: the key text. Output: the secret, or
-    /// `launch_secret_invalid` when it is empty, oversized or contains whitespace or controls.
+    /// Wraps a key after bounds checks; a refused key is zeroed. Input: the key text. Output:
+    /// the secret, or `launch_secret_invalid` when it is empty, oversized or contains
+    /// whitespace or controls.
     pub fn new(value: String) -> Result<Self, LaunchError> {
         if value.is_empty()
             || value.len() > 4096
@@ -150,6 +158,7 @@ impl Secret {
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
         {
+            crate::credentials::wipe(&mut value.into_bytes());
             return Err(failure("launch_secret_invalid"));
         }
         Ok(Self(value))
@@ -161,6 +170,12 @@ impl Secret {
 
     pub(super) fn reveal(&self) -> &str {
         &self.0
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        crate::credentials::wipe(&mut std::mem::take(&mut self.0).into_bytes());
     }
 }
 
@@ -963,6 +978,10 @@ fn claude_invocation(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
             OsString::from("1"),
         ),
+        (
+            CLAUDE_AUTO_MEMORY_OFF.0,
+            OsString::from(CLAUDE_AUTO_MEMORY_OFF.1),
+        ),
     ];
     if let Some((name, value)) = request.limits.provider_retry.claude_env() {
         environment.push((name, OsString::from(value)));
@@ -1431,11 +1450,11 @@ impl Driver {
     }
 }
 
-/// A running harness process driven through its headless interface.
-/// The process leads its own process group, and a harness on pipes has a warden in its
-/// sandbox, so stop reaches every descendant, those in their own sessions included.
+/// A running harness process driven through its headless interface, leading its own process
+/// group with a warden in its sandbox, so stop reaches every descendant, sessions included.
 /// `uncertain` is set once its warden did not confirm that sandbox empty; `follower` follows a
-/// Full access run's processes, which no warden reaches, from its start to its stop.
+/// Full access run's processes, which no warden reaches. One on an engine key relay holds the
+/// engine's lifeline, so its group ends with the engine (b6 r2 F1), released once stopped.
 pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
@@ -1452,6 +1471,8 @@ pub struct Session {
     _context: Option<Installed>,
     _relay: Option<Relay>,
     _key: Option<KeyFile>,
+    #[cfg(unix)]
+    lifeline: Option<crate::research::runner::Lifeline>,
 }
 
 impl Session {
@@ -1480,10 +1501,10 @@ impl Session {
         Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
-    /// Spawns a harness that outlives the engine: its input is a FIFO it holds open for
-    /// reading and writing, so it never sees end of input when the engine dies, and its
-    /// output goes to a private log whose lock it holds for as long as any process of its
-    /// group lives. Input: the request, the project context for a project agent and the
+    /// Spawns a harness that outlives the engine, unless it is on an engine key relay it needs
+    /// (b6 r2 F1): its input is a FIFO it holds open, so it never sees end of input when the
+    /// engine dies, and its output goes to a private log whose lock it holds while any process
+    /// of its group lives. Input: the request, the project context for a project agent and the
     /// agent's empty 0700 state directory. Output: a running session, or a plain refusal.
     pub fn start_durable(
         request: LaunchRequest,
@@ -1565,9 +1586,12 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
-        let follower = request
-            .unconfined
-            .then(|| Follower::start(child.id(), Some(token)));
+        let check = if request.unconfined {
+            crate::sandbox::LineageCheck::FullAccess
+        } else {
+            crate::sandbox::LineageCheck::Unneeded
+        };
+        let follower = Follower::start(child.id(), Some(token), check);
         let mut session = Self {
             child,
             warden,
@@ -1584,7 +1608,19 @@ impl Session {
             _context: context,
             _relay: relay,
             _key: key,
+            #[cfg(unix)]
+            lifeline: None,
         };
+        #[cfg(unix)]
+        if request
+            .account
+            .key()
+            .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()))
+        {
+            let lifeline = crate::research::runner::Lifeline::watch(session.child.id())
+                .map_err(|_| failure("launch_spawn_failed"))?;
+            session.lifeline = Some(lifeline);
+        }
         for bytes in startup {
             session.write(&bytes)?;
         }
@@ -1746,6 +1782,9 @@ impl Session {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
         let _ = self.child.kill();
         let status = self.child.wait().ok();
+        if let Some(mut lifeline) = self.lifeline.take() {
+            lifeline.release();
+        }
         self.uncertain =
             crate::sandbox::warden::fire_reported(self.warden.take(), "harness").is_err();
         assert!(self.stdin.is_none());

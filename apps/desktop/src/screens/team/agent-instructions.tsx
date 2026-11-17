@@ -71,7 +71,7 @@ export function AgentSide({ projectId, node, harness, onClose, onStop, children 
   const [read] = useLoad(() => agent === undefined ? Promise.resolve(NO_AGENT) : loadAgentInstructions(projectId, agent), [projectId, node.id]);
   const [catalog] = useLoad(() => listSkills(projectId), [projectId]);
   return <div className="tg-side">
-    <TerminalPanel node={node} harness={harness} onClose={onClose} onStop={onStop} swaps reported={agent === undefined ? undefined : headReport(read)} />
+    <TerminalPanel node={node} harness={harness} projectId={projectId} onClose={onClose} onStop={onStop} swaps reported={agent === undefined ? undefined : headReport(read)} />
     {agent !== undefined && <AgentInstructionsView read={read} skills={catalogOf(catalog)} />}
     {children}
   </div>;

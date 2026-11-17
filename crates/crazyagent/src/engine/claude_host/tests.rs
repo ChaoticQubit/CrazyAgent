@@ -120,10 +120,23 @@ fn claude_launch_sets_only_selected_profile_environment() {
         OsStr::new("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
         Some(directories.home.as_os_str())
     )));
+    assert!(
+        environment.contains(&(
+            OsStr::new("CLAUDE_CODE_DISABLE_AUTO_MEMORY"),
+            Some(OsStr::new("1"))
+        )),
+        "auto-memory is an instruction load the engine did not choose (DEC-106)"
+    );
     assert!(environment.iter().all(|(key, _)| {
         matches!(
             key.to_str(),
-            Some("HOME" | "CLAUDE_CONFIG_DIR" | "CLAUDE_SECURESTORAGE_CONFIG_DIR" | "TERM")
+            Some(
+                "HOME"
+                    | "CLAUDE_CONFIG_DIR"
+                    | "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+                    | "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+                    | "TERM"
+            )
         )
     }));
 }
@@ -424,7 +437,10 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
     use crate::engine::owner::{HostStamp, NativeProfileBinding};
     use crate::protocol::{ConfigId, Cursor, SessionId};
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
+    use crate::sandbox::{
+        InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork,
+        SandboxRemote,
+    };
 
     let reference = |value: &str| CredentialRef::new(value).unwrap();
     let root = tempfile::Builder::new()
@@ -495,7 +511,14 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     .unwrap()
     .allow_read(installed_claude().parent().unwrap())
     .unwrap();
-    let sandbox = InstalledSandbox::install(sandbox, &root.path().join("master.sb")).unwrap();
+    let sandbox_profile = root.path().join("master.sb");
+    let sandbox = InstalledSandbox::install(
+        sandbox,
+        &sandbox_profile,
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    )
+    .unwrap();
     assert!(
         !sandbox
             .sandbox()
@@ -733,6 +756,53 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "the harness group was never emptied"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    processes.assert_gone();
+}
+
+/// SA-VID14-R2 F2: a master its clock ended closes with that turn fault. With its group
+/// emptied it is settled, so its turn leaves the hidden folders list; when its cleanup is
+/// then in doubt it closes with the same first fault yet is not settled, so the turn stays.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever_fault_came_first()
+{
+    use crate::engine::master_host_fixture::{
+        HarnessProcesses, MasterFixture, ZOMBIE_HOLDING_HARNESS,
+    };
+
+    let clock = Duration::from_secs(2);
+    let mut fixture = MasterFixture::new("claude");
+    let quiet = "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n";
+    let mut claude = stand_in_master_under(&mut fixture, quiet, false, Some(clock)).await;
+    tokio::time::sleep(clock + Duration::from_secs(1)).await;
+    let closed = claude.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err("claude_host_deadline".to_owned())
+    );
+    assert!(claude.settled(), "an emptied group leaves no doubt");
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude =
+        stand_in_master_under(&mut fixture, ZOMBIE_HOLDING_HARNESS, false, Some(clock)).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    tokio::time::sleep(clock + Duration::from_secs(1)).await;
+    let closed = claude.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err("claude_host_deadline".to_owned()),
+        "the clock's fault came first"
+    );
+    assert!(!claude.settled(), "a cleanup in doubt is never settled");
+    let started = std::time::Instant::now();
     while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
     {
         assert!(
@@ -1050,7 +1120,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
             "--disable-slash-commands",
             "--no-session-persistence",
         ]
@@ -1067,6 +1137,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
     assert_eq!(
         environment,
         [
+            ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
             ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1"),
             ("CLAUDE_CONFIG_DIR", home),
             ("CLAUDE_SECURESTORAGE_CONFIG_DIR", home),
@@ -1094,7 +1165,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
             "--disable-slash-commands",
             "--no-session-persistence",
             "--max-turns",
@@ -1423,6 +1494,161 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
     }
     assert_eq!(fs::read_to_string(&seen).unwrap(), "shell=/bin/zsh\n");
     claude.close().await.unwrap();
+}
+
+/// The owner's connection-retry choice reaches the running Claude Code master, not only the
+/// command the engine builds: under Stop at once the process reads
+/// `CLAUDE_CODE_MAX_RETRIES=0`, under Harness default the variable is not set
+/// (RV-DS241-48).
+#[tokio::test]
+async fn the_retry_choice_reaches_the_running_claude_master() {
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::provider_retry::ProviderRetry;
+
+    for (retry, wanted) in [
+        (ProviderRetry::StopAtOnce, "retries=0\n"),
+        (ProviderRetry::HarnessDefault, "retries=\n"),
+    ] {
+        let mut fixture = MasterFixture::new("claude");
+        let profile = fixture.lease("claude-retry-seen", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in(
+            "claude",
+            "#!/bin/sh\nprintf 'retries=%s\\n' \"$(/usr/bin/printenv CLAUDE_CODE_MAX_RETRIES)\" > run/retries.txt\n/bin/cat > /dev/null\nexit 1\n",
+        );
+        let engine = fixture.root.path().join("crazyagent");
+        let drop = home.join(crate::team::tool::DROP_FILE);
+        let mut command = tools_launch_command(
+            &harness,
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            MasterTools {
+                engine: &engine,
+                drop: &drop,
+                mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                off: &[],
+            },
+        )
+        .unwrap();
+        limit_retries(&mut command, retry);
+        let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+        let mut claude = ClaudeHost::spawn(
+            command,
+            sandbox,
+            profile,
+            home,
+            NativeAction::Launch {
+                session_id: crate::protocol::SessionId::new("claude-retry-session").unwrap(),
+                harness: NativeHarness::Claude,
+                profile_ref: CredentialRef::new("retry-master-profile").unwrap(),
+                worktree_lease: RequestId::new("claude-retry-lease").unwrap(),
+            },
+            fixture.connection.account_ref.clone(),
+            fixture.project_id.clone(),
+            Some(Duration::from_secs(60)),
+            ResourceBudget::unit(),
+            crate::master_frame_limit::FrameSize::default(),
+        )
+        .await
+        .unwrap();
+        let seen = fixture.project.join("run/retries.txt");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_to_string(&seen).map_or(true, |text| !text.ends_with('\n')) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stand-in never started under {retry:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fs::read_to_string(&seen).unwrap(), wanted, "{retry:?}");
+        claude.close().await.unwrap();
+    }
+}
+
+/// A stand-in Claude Code that records, as it starts, whether its auto-memory switch
+/// variable is set and the `--settings` value it was given, then waits for its input to end.
+const MEMORY_HARNESS: &str = r#"#!/bin/sh
+settings=
+while [ $# -gt 0 ]; do
+  if [ "$1" = --settings ]; then settings=$2; fi
+  shift
+done
+printf 'memory=%s settings=%s\n' "$(/usr/bin/printenv CLAUDE_CODE_DISABLE_AUTO_MEMORY)" "$settings" > run/memory.txt
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// RV-DS241-205 on the master host (leader 01:51): Claude Code's auto-memory is an
+/// instruction load the engine did not choose (DEC-106), so the running Claude master, tools
+/// on or off, starts with both switches: `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` in its
+/// environment and `"autoMemoryEnabled":false` in its `--settings`.
+#[tokio::test]
+async fn a_claude_master_runs_with_auto_memory_off_with_tools_on_or_off() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    for tools_on in [true, false] {
+        let mut fixture = MasterFixture::new("claude");
+        let profile = fixture.lease("claude-memory-seen", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in("claude", MEMORY_HARNESS);
+        let engine = fixture.root.path().join("crazyagent");
+        let drop = home.join(crate::team::tool::DROP_FILE);
+        let command = if tools_on {
+            tools_launch_command(
+                &harness,
+                &fixture.project,
+                &home,
+                "native-default",
+                None,
+                MasterTools {
+                    engine: &engine,
+                    drop: &drop,
+                    mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                    off: &[],
+                },
+            )
+        } else {
+            launch_command(&harness, &fixture.project, &home, "native-default", None)
+        }
+        .unwrap();
+        let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+        let mut claude = ClaudeHost::spawn(
+            command,
+            sandbox,
+            profile,
+            home,
+            NativeAction::Launch {
+                session_id: crate::protocol::SessionId::new("claude-memory-session").unwrap(),
+                harness: NativeHarness::Claude,
+                profile_ref: CredentialRef::new("memory-master-profile").unwrap(),
+                worktree_lease: RequestId::new("claude-memory-lease").unwrap(),
+            },
+            fixture.connection.account_ref.clone(),
+            fixture.project_id.clone(),
+            Some(Duration::from_secs(60)),
+            ResourceBudget::unit(),
+            crate::master_frame_limit::FrameSize::default(),
+        )
+        .await
+        .unwrap();
+        let seen = fixture.project.join("run/memory.txt");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_to_string(&seen).map_or(true, |text| !text.ends_with('\n')) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stand-in never started with tools on {tools_on}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            fs::read_to_string(&seen).unwrap(),
+            "memory=1 settings={\"autoMemoryEnabled\":false,\"disableAllHooks\":true}\n",
+            "tools on {tools_on}"
+        );
+        claude.close().await.unwrap();
+    }
 }
 
 const TOOL_STEP_HARNESS: &str = r#"#!/bin/sh
@@ -1896,6 +2122,101 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             EventKind::AssistantText { text, .. } if text.contains("background task finished"))),
         "{kinds:?}"
     );
+}
+
+/// A stand-in Claude Code that takes its turn, writes half a line and exits with the Linux
+/// call supervisor's held-stop code, as a harness ends when its supervisor stops.
+#[cfg(target_os = "linux")]
+const HELD_STOP_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"assistant"'
+exit 122
+"#;
+
+/// DEC-185 S2a (rv-sec3 F1): a Claude master whose harness ends with the held-stop code
+/// ends its turn with the sandbox cause, not a protocol fault for the half line nor the
+/// native exit code, and closes clean, so the master runtime stores SandboxStopped rather
+/// than an uncertain cleanup (#101 r1, rv-code4 F1).
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_claude_master_the_sandbox_stopped_for_a_held_name_says_so() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(&mut fixture, HELD_STOP_HARNESS).await;
+    claude
+        .start_turn(RequestId::new("claude-held-turn").unwrap(), "Reply")
+        .await
+        .unwrap();
+    let failed = loop {
+        match claude.next_event().await {
+            Ok(_) => continue,
+            Err(error) => break error.0,
+        }
+    };
+    assert_eq!(failed, crate::sandbox::HELD_STOP_CAUSE);
+    assert_eq!(claude.close().await.map_err(|error| error.0), Ok(()));
+}
+
+/// A stand-in Claude Code that leaves a descendant in its own group holding its output,
+/// waits until that descendant has left and the row has seen the host start, then exits
+/// with the Linux call supervisor's held-stop code.
+#[cfg(target_os = "linux")]
+const HELD_STOP_LEAVING_HARNESS: &str = r#"#!/bin/sh
+/usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "run/descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' &
+echo $$ > run/leader.pid
+while [ ! -s run/descendant.pid ] || [ ! -e run/go ]; do /bin/sleep 0.01; done
+exit 122
+"#;
+
+/// #101 r1 (rv-sec3 N1): a held stop that leaves a process holding the harness's output
+/// ends the host on its own, without waiting on that output. Where the backend leaves such
+/// a process running (plain Landlock), close keeps the cleanup's own fault, so the run
+/// stays uncertain; where a process namespace ends it (bubblewrap), close is clean.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
+    use crate::engine::master_host_fixture::{HarnessProcesses, MasterFixture, RUN_FOLDER};
+    use crate::sandbox::LineageCheck;
+
+    let mut fixture = MasterFixture::new("claude");
+    let check = {
+        let profile = fixture.lease("claude-group-turn", 1).unwrap();
+        let home = profile.profile_path().unwrap();
+        let harness = fixture.stand_in("claude", HELD_STOP_LEAVING_HARNESS);
+        fixture
+            .sandbox(&home, harness.parent().unwrap())
+            .lineage_check()
+    };
+    assert_ne!(check, LineageCheck::FullAccess);
+    let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
+    fs::write(fixture.project.join(RUN_FOLDER).join("go"), "").unwrap();
+    let own_end = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if !matches!(
+                claude.status.borrow().phase,
+                Phase::Starting | Phase::Running
+            ) {
+                return true;
+            }
+            if claude.status.changed().await.is_err() {
+                return false;
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(own_end, Ok(true)),
+        "the host did not end on the held exit by itself: {own_end:?}"
+    );
+    let closed = claude.close().await.map_err(|error| error.0);
+    if check == LineageCheck::Sandboxed {
+        let _processes = HarnessProcesses::wait(&fixture.project);
+        assert!(closed.is_err(), "{closed:?}");
+        assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
+    } else {
+        assert_eq!(closed, Ok(()));
+    }
 }
 
 const EARLY_ASSISTANT_HARNESS: &str = r#"#!/bin/sh

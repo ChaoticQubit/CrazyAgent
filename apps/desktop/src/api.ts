@@ -54,6 +54,7 @@ const COPY: Record<string, string> = {
   linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
   linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_sandbox_not_full: "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
@@ -82,6 +83,8 @@ const COPY: Record<string, string> = {
   account_key_not_allowed: "This sign-in method doesn't use an API key.",
   account_url_required: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
   account_url_invalid: "Enter a full URL that starts with https://, or http://127.0.0.1 for this Mac.",
+  account_url_port_refused:
+    "Use the server's https port, such as 443. Ports 80, 988 and 32526 on another machine are refused, since cloud metadata services answer there.",
   account_local_url_required: "Enter a URL on this Mac, such as http://127.0.0.1:11434.",
   account_url_not_allowed: "This sign-in method doesn't use a URL.",
   account_url_unreachable: "Can't reach this URL. Check the address and that the server is running.",
@@ -283,6 +286,7 @@ export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
   stuck_sign_in: string | null;
+  engine_updated: boolean;
 }
 
 /** Connects this window to the engine. Output: whether it is connected and whether an earlier
@@ -475,19 +479,36 @@ export function saveProfile(profile: OwnerProfile): Promise<Result<void>> {
 /** How a limited-network agent's sockets are held on Linux, the engine's `LinuxSockets`. */
 export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
 
+/** Whether the call supervisor guards agents on Linux, the engine's `LinuxSupervisor`. */
+export type LinuxSupervisor = "on" | "off";
+
+/** Whether a Linux launch without the full Linux sandbox is refused, the engine's `LinuxStrict`. */
+export type LinuxStrict = "off" | "on";
+
 /** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
 export interface SandboxSettings {
   linux_sockets: LinuxSockets;
+  linux_supervisor: LinuxSupervisor;
+  linux_strict: LinuxStrict;
 }
 
-/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
-export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
-  return call<SandboxSettings>("desktop_sandbox_settings");
+/** The owner's sandbox settings with the version of the read that showed them, the engine's
+ * `StoredSandboxSettings`; a save names the version, 0 before the first save. */
+export interface StoredSandboxSettings {
+  settings: SandboxSettings;
+  version: number;
 }
 
-/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
-export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
-  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
+/** Reads the owner's sandbox settings. Output: the stored settings and their version, or the
+ * defaults at version 0 before the first save. */
+export function getSandboxSettings(): Promise<Result<StoredSandboxSettings>> {
+  return call<StoredSandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Inputs: the full settings and the version of the read
+ * they change. Output: ok once saved, or `stale_revision` once they changed since that read. */
+export function saveSandboxSettings(settings: SandboxSettings, version: number): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, version, generation: nextGeneration() });
 }
 
 /** When the engine removes a finished agent's worktree on its own, the engine's `CleanupMode`. */
@@ -1387,24 +1408,26 @@ export function attachTerminal(agent: string, output: Channel<TerminalMessage>, 
   return call<number>("desktop_terminal_attach", { agent, pane, output, id: project });
 }
 
-/** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name, 1 to
- * 4096 bytes and whether the view made them from the mouse wheel, which the engine never
- * counts as the owner typing. Output: ok once queued in order. */
-export function typeIntoTerminal(agent: string, bytes: number[], wheel: boolean = false): Promise<Result<void>> {
-  return call<void>("desktop_terminal_input", { agent, bytes, wheel });
+/** Types one chunk of bytes into an attached agent terminal, into exactly the view of that
+ * pane when one is named. Inputs: the terminal name, 1 to 4096 bytes, whether the view made
+ * them from the mouse wheel, which the engine never counts as the owner typing, and the pane
+ * the view shows, if any. Output: ok once queued in order. */
+export function typeIntoTerminal(agent: string, bytes: number[], wheel: boolean = false, pane: string | null = null): Promise<Result<void>> {
+  return call<void>("desktop_terminal_input", { agent, bytes, wheel, pane });
 }
 
 /** Sends the owner's explicit prompt to an attached agent terminal: the engine types it as one
- * submission and tells a sub-agent's master. Inputs: the terminal name and the prompt, up to
- * 4096 bytes. Output: ok once queued in order with typed keys. */
-export function promptTerminal(agent: string, text: string): Promise<Result<void>> {
-  return call<void>("desktop_terminal_prompt", { agent, text });
+ * submission and tells a sub-agent's master. Inputs: the terminal name, the prompt, up to
+ * 4096 bytes, and the pane the view shows, if any. Output: ok once queued in order with typed
+ * keys. */
+export function promptTerminal(agent: string, text: string, pane: string | null = null): Promise<Result<void>> {
+  return call<void>("desktop_terminal_prompt", { agent, text, pane });
 }
 
-/** Sets an attached agent terminal's size. Inputs: the terminal name, columns and rows.
- * Output: ok once queued. */
-export function resizeTerminal(agent: string, cols: number, rows: number): Promise<Result<void>> {
-  return call<void>("desktop_terminal_resize", { agent, cols, rows });
+/** Sets an attached agent terminal's size. Inputs: the terminal name, columns, rows and the
+ * pane the view shows, if any. Output: ok once queued. */
+export function resizeTerminal(agent: string, cols: number, rows: number, pane: string | null = null): Promise<Result<void>> {
+  return call<void>("desktop_terminal_resize", { agent, cols, rows, pane });
 }
 
 /** Closes this window's view of an agent terminal; the agent keeps running. A newer view
@@ -1620,9 +1643,28 @@ export function focusTerminalWindow(id: string, target: "main" | number): Promis
   return call<void>("desktop_focus_terminal_window", { id, target: String(target) });
 }
 
+/** Where this app keeps the last used project's IDE for the preload at start: the project and
+ * its panel only, never an address or a token (DEC-187). */
+export const LAST_IDE_KEY = "crazyagent.ide.last";
+
+function forgetLastIde(id: string): void {
+  try {
+    const kept = window.localStorage.getItem(LAST_IDE_KEY);
+    if (kept !== null && (JSON.parse(kept) as { project?: unknown }).project === id) window.localStorage.removeItem(LAST_IDE_KEY);
+  } catch {
+    try {
+      window.localStorage.removeItem(LAST_IDE_KEY);
+    } catch {
+      return;
+    }
+  }
+}
+
 /** Closes a removed project's terminal wall windows, for the main window or a wall window of
- * that project. Input: the project id. Output: nothing, not ready, or a plain error. */
+ * that project, and its kept IDE with its server; the project is no longer the one the app
+ * preloads. Input: the project id. Output: nothing, not ready, or a plain error. */
 export function closeProjectWalls(id: string): Promise<Result<void>> {
+  forgetLastIde(id);
   return call<void>("desktop_close_project_walls", { id });
 }
 

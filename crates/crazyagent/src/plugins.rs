@@ -57,19 +57,34 @@ fn printable(text: &str) -> bool {
     !text.chars().any(char::is_control) && !crate::memory::hidden_text(text)
 }
 
+/// Whether a server command is a full path on this system: rooted at `/` on Unix. Input:
+/// the command. Output: the answer.
+#[cfg(unix)]
+pub(crate) fn absolute_command(command: &str) -> bool {
+    command.starts_with('/')
+}
+
+/// Whether a server command is a full path on this system: on Windows a plain drive path
+/// such as `C:\Program Files\nodejs\npx.cmd`, never a `/`, UNC, verbatim, device or stream
+/// path ([`crate::sandbox::windows_clean_text`]). Input: the command. Output: the answer.
+#[cfg(not(unix))]
+pub(crate) fn absolute_command(command: &str) -> bool {
+    crate::sandbox::windows_clean_text(command)
+}
+
 impl ServerSpec {
     /// Checks the command or URL before it is saved, approved or checked, refusing control and
-    /// hidden characters (`crate::memory::hidden_text`) anywhere in it.
-    /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
-    /// a relative or oversized command, too many or bad arguments, a command and
-    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
-    /// not https (plain http is allowed only for this Mac) or carries a password.
+    /// hidden characters (`crate::memory::hidden_text`) anywhere in it. Input: an untrusted
+    /// spec. Output: Ok, or a code naming the first problem: a command that is not a full path
+    /// ([`absolute_command`]) or is oversized, too many or bad arguments, a command and
+    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is not https (plain
+    /// http is allowed only for this Mac) or carries a password.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::Stdio { command, args } => {
                 if command.is_empty()
                     || command.len() > COMMAND_BYTES_MAX
-                    || !command.starts_with('/')
+                    || !absolute_command(command)
                     || !printable(command)
                 {
                     return Err(error("server_command_invalid"));
@@ -353,7 +368,9 @@ pub struct EffectivePlugins {
 pub struct SecretValue(Vec<u8>);
 
 impl SecretValue {
-    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+    /// Holds bytes read for one launch as a secret, taking the buffer without a copy.
+    /// Input: the secret bytes. Output: the value, wiped when it is dropped.
+    pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 
@@ -366,7 +383,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        self.0.fill(0);
+        crate::credentials::wipe(&mut self.0);
     }
 }
 
@@ -392,15 +409,14 @@ pub struct LaunchServer {
 /// Why a launch left the default pack's context-mode server out rather than run its npx
 /// spec: the engine's shared install is still being set up, setting it up failed or cannot
 /// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
-/// than context-mode needs, this platform has no shared install at all, or the npx a spec
-/// only shaped like that launch names is not one the engine's tool resolver finds.
+/// than context-mode needs, or the npx a spec only shaped like that launch names is not one
+/// the engine's tool resolver finds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
     Failed,
     Mismatch,
     NodeTooOld,
-    Unsupported,
     NpxNotFound,
 }
 
@@ -408,8 +424,9 @@ pub enum ContextModeOff {
 pub(crate) const CONTEXT_MODE_PACKAGE: &str = "context-mode";
 const PACKAGE_VERSION_BYTES_MAX: usize = 32;
 
-/// Reads the default pack's pinned context-mode launch from an approved spec: an absolute
-/// `npx` given exactly `-y context-mode@<version>` with an exact version. Input: the spec.
+/// Reads the default pack's pinned context-mode launch from an approved spec: a rooted
+/// `npx`, as the full path [`ServerSpec::validate`] asks for on this system, given exactly
+/// `-y context-mode@<version>` with an exact version (RV-DS241-153). Input: the spec.
 /// Output: npx's folder and the version, or none for any other spec.
 pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
     let ServerSpec::Stdio { command, args } = spec else {
@@ -423,7 +440,7 @@ pub(crate) fn pinned_context_mode(spec: &ServerSpec) -> Option<(&Path, &str)> {
         .strip_prefix(CONTEXT_MODE_PACKAGE)
         .and_then(|rest| rest.strip_prefix('@'))
         .filter(|version| flag == "-y" && exact_version(version))?;
-    let npx = command.is_absolute() && npx_program(command);
+    let npx = command.has_root() && npx_program(command);
     command.parent().filter(|_| npx).map(|bin| (bin, version))
 }
 
@@ -645,12 +662,24 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_cant_start", "The server can't start."),
     (
+        "server_stored_spec_invalid",
+        "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
+    ),
+    (
         crate::sandbox::OWNER_PORTS_UNREADABLE,
         "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
     ),
     (
         "server_cleanup_uncertain",
         "The server's processes could not be confirmed stopped.",
+    ),
+    (
+        crate::harnesses::leftovers::SANDBOX_LEFT,
+        "The server left processes running after its check. CrazyAgent ends them.",
+    ),
+    (
+        crate::harnesses::leftovers::SANDBOX_UNCHECKED,
+        "The server's processes could not be listed after its check. CrazyAgent keeps looking for them and ends them.",
     ),
     ("server_exited", "The server stopped before answering."),
     (
@@ -1048,5 +1077,49 @@ mod tests {
             known_code("server_npx_not_found"),
             Some("server_npx_not_found")
         );
+    }
+
+    /// RV-DS241-153: the pinned context-mode launch is read from the rooted npx path that
+    /// `validate` accepts on every platform, so on Windows, which counts a path with no drive
+    /// as relative, it is still the pinned launch and is never run through npx as approved.
+    #[test]
+    fn the_pinned_context_mode_launch_is_read_from_the_rooted_npx_validate_accepts() {
+        let spec = stdio("/usr/local/bin/npx", &["-y", "context-mode@1.0.169"]);
+        assert!(spec.validate().is_ok());
+        assert_eq!(
+            pinned_context_mode(&spec),
+            Some((Path::new("/usr/local/bin"), "1.0.169"))
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// WIN-PACK-SEED: on Windows a server command is a plain drive path, such as the `npx.cmd`
+    /// setup finds, never a `/` path, a bare name, or a UNC, verbatim, device, drive-relative,
+    /// forward-slash or stream path ([`crate::sandbox::windows_clean_text`]).
+    #[test]
+    fn a_windows_server_command_is_a_plain_drive_path() {
+        let stdio = |command: &str| ServerSpec::Stdio {
+            command: command.into(),
+            args: vec!["-y".into()],
+        };
+        assert!(stdio(r"C:\Program Files\nodejs\npx.cmd").validate().is_ok());
+        for command in [
+            "/usr/local/bin/npx",
+            "npx.cmd",
+            r"\nodejs\npx.cmd",
+            r"\\server\share\npx.cmd",
+            r"\\?\C:\nodejs\npx.cmd",
+            r"\\.\pipe\npx",
+            r"C:nodejs\npx.cmd",
+            "C:/nodejs/npx.cmd",
+            r"C:\nodejs\npx.cmd:stream",
+        ] {
+            let refused = stdio(command).validate().unwrap_err();
+            assert_eq!(refused.0, "server_command_invalid", "{command}");
+        }
     }
 }

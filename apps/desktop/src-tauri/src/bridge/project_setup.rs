@@ -593,42 +593,13 @@ impl NativeBridge {
         self.deliver_intent(false).await
     }
 
-    /// Removes a project from CrazyAgent. Without a name its folder stays on disk; with the
-    /// name the owner typed, the engine stops its agents and moves its folders to the Trash,
-    /// only when the name is the project's exact name. Takes the project id, the client
-    /// generation and the typed name, if any. Returns the actual commit receipt.
+    /// Removes a project from CrazyAgent; its folder stays on disk. Delete everything is the
+    /// engine's job instead (`delete_project_job`), so this never moves a folder. Takes the
+    /// project id and the client generation. Returns the actual commit receipt.
     pub async fn remove_project(
         &mut self,
         id: &str,
         generation: u64,
-        delete_name: Option<String>,
-    ) -> Result<IntentReceipt, BridgeError> {
-        self.ready_for_intent(generation)?;
-        let project_id = project(id)?;
-        self.controller()?
-            .project_setup(project_id.clone())
-            .await
-            .map_err(|e| read_failure(&e.0))?;
-        let mutation = match delete_name {
-            Some(name) => OwnerMutation::DeleteProject { project_id, name },
-            None => OwnerMutation::RemoveProject { project_id },
-        };
-        self.controller()?
-            .begin_mutation(mutation, generation)
-            .map_err(|error| caused("owner_not_ready", &error.0))?;
-        self.deliver_intent(false).await
-    }
-
-    /// Moves or copies a project kept where it is into the projects home: the engine waits
-    /// for its team to stop, moves the folder and points the project and its agents' copies
-    /// at the new place. Takes the project id, move or copy, the soft refusals the owner
-    /// chose to go past and the client generation. Returns the actual commit receipt.
-    pub async fn move_project_home(
-        &mut self,
-        id: &str,
-        mode: crazyagent::projects_home::AddMode,
-        overrides: Vec<crazyagent::projects_home::AddOverride>,
-        generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
         let project_id = project(id)?;
@@ -637,14 +608,7 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
-            .begin_mutation(
-                OwnerMutation::MoveProjectHome {
-                    project_id,
-                    mode,
-                    overrides,
-                },
-                generation,
-            )
+            .begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }

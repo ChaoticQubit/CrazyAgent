@@ -69,7 +69,8 @@ pub(crate) const REFRESH_WINDOW: std::time::Duration = std::time::Duration::from
 /// The arguments of the one print turn that renews a managed Claude Code account. Claude
 /// Code refreshes a token inside its refresh window, and waits for the refresh, before the
 /// turn's API call; `auth status` only starts it and exits about two seconds later. The
-/// turn asks Haiku for one word with no tools, MCP servers, settings, hooks or saved session.
+/// turn asks Haiku for one word with no tools, MCP servers, settings, hooks, auto-memory
+/// (RV-DS241-205, with the caller's `CLAUDE_AUTO_MEMORY_OFF`) or saved session.
 #[cfg(unix)]
 pub(crate) const RENEWAL_TURN: [&str; 18] = [
     "--print",
@@ -79,7 +80,7 @@ pub(crate) const RENEWAL_TURN: [&str; 18] = [
     "--setting-sources",
     "",
     "--settings",
-    "{\"disableAllHooks\":true}",
+    "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
     "--no-session-persistence",
     "--tools",
     "",
@@ -738,7 +739,11 @@ fn rate_limit(value: &Value) -> Result<EventKind, ProtocolError> {
     Ok(EventKind::RateLimitObserved {
         status: rate_limit_status(field(info, "status")?)?,
         resets_at_unix_secs: optional_count(info, "resetsAt")?,
-        rate_limit_type: info.get("rateLimitType").map(rate_limit_type).transpose()?,
+        rate_limit_type: info
+            .get("rateLimitType")
+            .map(rate_limit_name)
+            .transpose()?
+            .flatten(),
         utilization,
         overage_status: info
             .get("overageStatus")
@@ -747,51 +752,39 @@ fn rate_limit(value: &Value) -> Result<EventKind, ProtocolError> {
         overage_resets_at_unix_secs: optional_count(info, "overageResetsAt")?,
         overage_disabled_reason: info
             .get("overageDisabledReason")
-            .map(overage_disabled_reason)
-            .transpose()?,
+            .map(rate_limit_name)
+            .transpose()?
+            .flatten(),
     })
 }
 
+/// Reads a rate-limit status. A status a newer Claude Code adds reads as unknown, which no
+/// reader takes for a rejection, so the session goes on. Input: the field. Output: the
+/// status, or `InvalidMessage` when the field is not text.
 fn rate_limit_status(value: &Value) -> Result<RateLimitStatus, ProtocolError> {
-    match value.as_str().ok_or(ProtocolError::InvalidMessage)? {
-        "allowed" => Ok(RateLimitStatus::Allowed),
-        "allowed_warning" => Ok(RateLimitStatus::AllowedWarning),
-        "rejected" => Ok(RateLimitStatus::Rejected),
-        _ => Err(ProtocolError::Unsupported),
-    }
+    Ok(match value.as_str().ok_or(ProtocolError::InvalidMessage)? {
+        "allowed" => RateLimitStatus::Allowed,
+        "allowed_warning" => RateLimitStatus::AllowedWarning,
+        "rejected" => RateLimitStatus::Rejected,
+        _ => RateLimitStatus::Unknown,
+    })
 }
 
-fn rate_limit_type(value: &Value) -> Result<String, ProtocolError> {
-    let value = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
-    match value {
-        "five_hour"
-        | "seven_day"
-        | "seven_day_opus"
-        | "seven_day_sonnet"
-        | "seven_day_overage_included"
-        | "overage" => Ok(value.to_owned()),
-        _ => Err(ProtocolError::Unsupported),
-    }
-}
+/// The longest rate-limit type or overage reason name a Claude Code event keeps.
+const RATE_LIMIT_NAME_BYTES_MAX: usize = 64;
 
-fn overage_disabled_reason(value: &Value) -> Result<String, ProtocolError> {
+/// Reads a rate-limit type or overage reason, such as `five_hour` or `out_of_credits`. A
+/// plain name of lowercase ASCII letters, digits and `_`, known today or added by a newer
+/// Claude Code, is kept; any other text is left out, so no value ends the session.
+/// Input: the field. Output: the name or none, or `InvalidMessage` when it is not text.
+fn rate_limit_name(value: &Value) -> Result<Option<String>, ProtocolError> {
     let value = value.as_str().ok_or(ProtocolError::InvalidMessage)?;
-    match value {
-        "overage_not_provisioned"
-        | "org_level_disabled"
-        | "org_level_disabled_until"
-        | "out_of_credits"
-        | "seat_tier_level_disabled"
-        | "member_level_disabled"
-        | "seat_tier_zero_credit_limit"
-        | "group_zero_credit_limit"
-        | "member_zero_credit_limit"
-        | "org_service_level_disabled"
-        | "no_limits_configured"
-        | "fetch_error"
-        | "unknown" => Ok(value.to_owned()),
-        _ => Err(ProtocolError::Unsupported),
-    }
+    let plain = !value.is_empty()
+        && value.len() <= RATE_LIMIT_NAME_BYTES_MAX
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+    Ok(plain.then(|| value.to_owned()))
 }
 
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, ProtocolError> {

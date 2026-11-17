@@ -46,6 +46,7 @@ struct ActiveRcliMaster {
     generation: u64,
     deadline: Option<Instant>,
     reported: crate::usage::capture::Tokens,
+    granted: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 fn require_rcli_connection(connection: &ModelConnection) -> Result<(), EngineError> {
@@ -106,7 +107,7 @@ fn turn_instruction_text(
     Ok(instruction_file_text(instructions, given))
 }
 
-fn cleanup_uncertain(error: &EngineError) -> bool {
+pub(super) fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
         || error.0.split(';').any(|part| {
             matches!(
@@ -114,6 +115,17 @@ fn cleanup_uncertain(error: &EngineError) -> bool {
                 "rcli_master_cleanup_incomplete" | "rcli_master_wait_failed"
             )
         })
+}
+
+/// Says whether an RCLI turn's error, or a `;` part of it, names processes its stop left
+/// running or could not list, which the custody holds as leftovers by the project's setting
+/// while they may still run (SA-VID14-R2 F1). Input: the error. Output: the answer.
+pub(super) fn left_running(error: &EngineError) -> bool {
+    use crate::harnesses::leftovers::{
+        LEFT, SANDBOX_LEFT, SANDBOX_UNCHECKED, UNCERTAIN, UNCHECKED,
+    };
+    let held = [LEFT, UNCHECKED, UNCERTAIN, SANDBOX_LEFT, SANDBOX_UNCHECKED];
+    error.0.split(';').any(|part| held.contains(&part))
 }
 
 fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
@@ -172,8 +184,11 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
+        listed: crate::sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
-        match self.run_rcli_master_turn(prepared, turn_id).await {
+        let ran = self.run_rcli_master_turn(prepared, turn_id).await;
+        super::master_runtime::keep_listed_if_uncertain(listed, &ran);
+        match ran {
             Ok(observation) => {
                 self.observe_master_turn(prepared, turn_id, observation)
                     .await
@@ -247,6 +262,10 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
+        let homes = crate::sandbox::toolchains::ToolHomes::owner()
+            .map_err(|_| failure("master_sandbox_unavailable"))?;
+        crate::agent_home::remove_home_code(&launch.home_dir, profile.engine_root(), &homes)
+            .map_err(|error| EngineError(error.0))?;
         let text = turn_instruction_text(&prepared.instructions, &prepared.agent_project)?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
@@ -263,6 +282,7 @@ impl OwnerRuntimeHandle {
             &prepared.agent_policy,
             &prepared.hidden_paths,
         )?;
+        let granted = prepared.agent_policy.allowed(&prepared.repository);
         if !text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(
                 &self.authority.root,
@@ -310,6 +330,7 @@ impl OwnerRuntimeHandle {
             generation: current.ordinal,
             deadline,
             reported: crate::usage::capture::Tokens::default(),
+            granted,
         };
         let observed = self
             .collect_rcli_master_turn(prepared, turn_id, &mut active)
@@ -348,6 +369,7 @@ impl OwnerRuntimeHandle {
             .await?;
         let mut prompted = false;
         let mut inspect_at = Instant::now();
+        let mut policy_checked = Instant::now();
         loop {
             if late(active.deadline) {
                 return Err(failure(TURN_DEADLINE));
@@ -356,6 +378,11 @@ impl OwnerRuntimeHandle {
                 let current = self.inspect_rcli_scope(prepared, turn_id, active).await?;
                 if current.phase == MasterTurnPhase::Cancelled {
                     return Ok(MasterRuntimeObservation::Cancelled);
+                }
+                if policy_checked.elapsed() >= super::master_runtime::POLICY_CHECK_EVERY {
+                    policy_checked = Instant::now();
+                    self.rcli_policy_covers(prepared, turn_id, &active.granted)
+                        .await?;
                 }
                 inspect_at = Instant::now() + INSPECT_INTERVAL;
             }
@@ -437,6 +464,27 @@ impl OwnerRuntimeHandle {
                     return Err(failure(failed_turn_code(completion.failure)));
                 }
             }
+        }
+    }
+
+    /// Tells whether the policy the owner saved now still covers what a running RCLI master
+    /// turn's sandbox granted at launch, its access and the toolchains fixed then, as native
+    /// turns check (RCLI-NARROWING), never reading the toolchains from the folder again.
+    /// Inputs: the prepared turn, its id and its granted toolchains. Output: Ok while
+    /// covered, else the narrowing's code or the storage refusal.
+    pub(super) async fn rcli_policy_covers(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        granted: &[crate::sandbox::toolchains::Toolchain],
+    ) -> Result<(), EngineError> {
+        let access = prepared.agent_policy.access;
+        match self
+            .master_turn_narrowed(prepared, turn_id, access, granted)
+            .await?
+        {
+            Some(narrowed) => Err(failure(narrowed.code())),
+            None => Ok(()),
         }
     }
 

@@ -1,14 +1,14 @@
-use crate::file_lock::HeldLock;
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
 use crate::setup::InstallError;
-use crate::setup::process::{private_folder, run_command, staging_folder};
 use base64::Engine;
-use rustix::fs::{FlockOperation, Mode, OFlags};
+use os::{
+    NODE, lock, npm_ready, open_plain, private_folder, run_command, run_quiet, runnable,
+    staging_folder,
+};
 use sha2::{Digest, Sha512};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,6 +33,15 @@ const _: () =
     assert!(INSTALL_BACKOFF.as_secs().div_ceil(60) == crate::plugins::INSTALL_RETRY_MINUTES_MAX);
 
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+use unix as os;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows as os;
 
 /// What a server check runs for one approved spec. The check never runs the default pack's
 /// pinned context-mode npx launch, nor a spec only shaped like it whose npx the tool resolver
@@ -82,7 +91,7 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextMo
         return Ok(spec);
     };
     let folder = install_folder(root, version);
-    let node = bin.join("node");
+    let node = bin.join(NODE);
     let found = checked(&folder, version);
     if let Some(shared) = found.ok().and_then(|()| run_spec(&folder, &node)) {
         return Ok(shared);
@@ -116,7 +125,7 @@ pub fn for_check(root: &Path, spec: ServerSpec) -> ForCheck {
         }
     };
     let folder = install_folder(root, version);
-    let node = bin.join("node");
+    let node = bin.join(NODE);
     if let Some(shared) = shared(&folder, &node, version) {
         return ForCheck::Run(shared);
     }
@@ -186,7 +195,7 @@ pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, Instal
     if pin(version).is_none() || program_pin(version).is_none() {
         return Err(InstallError("context_mode_integrity_unpinned"));
     }
-    if !runnable(&bin.join("npm")) || !runnable(&bin.join("node")) {
+    if !npm_ready(bin) || !runnable(&bin.join(NODE)) {
         return Err(InstallError("context_mode_npm_missing"));
     }
     let folder = install_folder(root, version);
@@ -309,17 +318,7 @@ fn checked(folder: &Path, version: &str) -> Result<(), &'static str> {
 /// [`PROGRAM_BYTES_MAX`]. Input: the program path. Output: the hash, or none when the path is
 /// not a regular file that reads whole.
 fn program_hash(path: &Path) -> Option<String> {
-    let file = File::from(
-        rustix::fs::open(
-            path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .ok()?,
-    );
-    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
-        return None;
-    }
+    let file = open_plain(path)?;
     let mut bytes = Vec::new();
     file.take(PROGRAM_BYTES_MAX + 1)
         .read_to_end(&mut bytes)
@@ -363,9 +362,9 @@ fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
 
 /// The `node --version` command of npx's folder inside the boundary npm installs in, with no
 /// network: the scratch folder's own project, home and temp folders, the engine's secrets
-/// denied, Node's tool folders and npx's folder read, and a cleared environment
-/// (RV-DS241-150). Inputs: the engine root, the scratch folder and npx's folder. Output: the
-/// command, or `context_mode_sandbox_unavailable`.
+/// denied, Node's tool folders and npx's folder read, a cleared environment (RV-DS241-150)
+/// and, on Linux, the owner's call supervisor choice. Inputs: the engine root, the scratch
+/// folder and npx's folder. Output: the command, or `context_mode_sandbox_unavailable`.
 fn node_command(
     root: &Path,
     scratch: &Path,
@@ -373,7 +372,7 @@ fn node_command(
 ) -> Result<std::process::Command, InstallError> {
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
-    let canonical = |path: &Path| path.canonicalize().map_err(refused);
+    let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
     let mut folders = Vec::with_capacity(3);
     for name in ["project", "home", "tmp"] {
         private_folder(&scratch.join(name))?;
@@ -390,8 +389,11 @@ fn node_command(
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
-    let sandbox = InstalledSandbox::install(sandbox, &scratch.join("node.sb")).map_err(refused)?;
-    let mut node = std::process::Command::new(bin.join("node"));
+    let settings = os::boundary_settings(root)?;
+    let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
+    let profile = scratch.join("node.sb");
+    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
+    let mut node = std::process::Command::new(bin.join(NODE));
     node.arg("--version").current_dir(&folders[0]);
     sandbox.wrap(&node).map_err(refused)
 }
@@ -486,11 +488,6 @@ fn reported_version(manifest: &Path) -> Option<String> {
     manifest["version"].as_str().map(str::to_owned)
 }
 
-fn runnable(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-}
-
 fn running(folder: &Path) -> bool {
     INSTALLING
         .lock()
@@ -506,7 +503,7 @@ fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
     if pin(version).is_none() || program_pin(version).is_none() {
         return Some(Begin::Refused("context_mode_integrity_unpinned"));
     }
-    if !runnable(&bin.join("npm")) || !runnable(&bin.join("node")) {
+    if !npm_ready(bin) || !runnable(&bin.join(NODE)) {
         return Some(Begin::Refused("context_mode_npm_missing"));
     }
     match node_supported(root, bin) {
@@ -562,22 +559,6 @@ fn finish(folder: &Path) {
         .retain(|held| held != folder);
 }
 
-fn lock(path: &Path) -> Result<HeldLock, InstallError> {
-    let unavailable = InstallError("setup_store_unavailable");
-    let file = File::from(
-        rustix::fs::open(
-            path,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::RUSR | Mode::WUSR,
-        )
-        .map_err(|_| unavailable)?,
-    );
-    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
-        return Err(unavailable);
-    }
-    HeldLock::take(file, FlockOperation::LockExclusive).map_err(|_| unavailable)
-}
-
 fn remove_staged(parent: &Path, prefix: &str) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
@@ -627,7 +608,7 @@ fn fill(
             OsStr::new("--no-save"),
             source,
         ]);
-    if !run_command(command, INSTALL_TIME)?.0 {
+    if !run_quiet(command, INSTALL_TIME)? {
         return Err(InstallError("context_mode_install_failed"));
     }
     checked(staged, version).map_err(InstallError)
@@ -640,8 +621,8 @@ fn npm_command(
     bin: &Path,
     version: &str,
 ) -> Result<std::process::Command, InstallError> {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
     let parent = staged
         .parent()
         .ok_or(InstallError("setup_store_unavailable"))?;
@@ -649,35 +630,23 @@ fn npm_command(
     let tmp = work.join("tmp");
     private_folder(&home)?;
     private_folder(&tmp)?;
-    let canonical = |path: &Path| path.canonicalize().map_err(refused);
+    let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
         &canonical(staged)?,
         &canonical(&home)?,
         &canonical(&tmp)?,
-        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        os::npm_network(),
     )
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
     let profile = parent.join(format!("{PACKAGE}@{version}.sb"));
-    sandbox.install(&profile).map_err(refused)?;
-    let mut command = sandbox.command(&profile, &bin.join("npm"));
-    let path = command
-        .get_envs()
-        .find(|(name, _)| *name == "PATH")
-        .and_then(|(_, value)| value)
-        .map(|value| value.to_owned())
-        .unwrap_or_default();
-    let mut search = bin.as_os_str().to_owned();
-    search.push(":");
-    search.push(path);
-    command
-        .env("PATH", search)
-        .env("npm_config_update_notifier", "false");
-    Ok(command)
+    os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, target_os = "windows"))]
+mod windows_tests;

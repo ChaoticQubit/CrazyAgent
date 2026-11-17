@@ -299,8 +299,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 
 /// The project id a folder is onboarded as: its name in lower case, every
 /// run of other characters turned into one `-`, at most 64 bytes, or
-/// `project` when nothing is left. Clients compute the same id from the
-/// canonical path they send. Returns an error for a path with no name.
+/// `project` when nothing is left. A removal can hold it (DEC-178 addendum 1), so
+/// clients take the id from the engine's answer. Returns an error for a path with no name.
 pub fn project_id_for(folder: &Path) -> Result<ProjectId, EngineError> {
     let name = folder
         .file_name()
@@ -455,16 +455,23 @@ fn real_dir(path: &Path) -> bool {
 /// project gets the agent access New Project preselects (Own branch, or Sandboxed
 /// where this computer cannot run it), so its agents work in their own clones.
 /// Starting a folder that is already onboarding returns its project and
-/// retries only failed steps; an onboarding left by a removed project starts
-/// over as a new project, also when it was left at another folder with the
-/// same name that is gone, and is refused as `onboarding_project_mismatch`
-/// while that folder is still there. A new project's own instruction files
+/// retries only failed steps. A folder a project was removed from the dashboard at, the exact
+/// folder text CrazyAgent recorded, brings that project back under its id; any other folder
+/// gets its name's id, or the first of `-2` to `-99` no removal holds (DEC-178 addendum 1),
+/// `onboarding_project_ids_used` when every one is held. An onboarding left by a removed
+/// project starts over, also when it was left at another folder with the same name that is
+/// gone, and is refused as `onboarding_project_mismatch` while that folder is still there.
+/// A new project's own instruction files
 /// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
 /// project instructions and moved into `.crazyagent/imported/` last, after the project
 /// instructions the folder arrived with are labelled Imported (SA vid 7), a label that
-/// cannot be saved refusing the start as `onboarding_instructions_unwritable`, and the moved
+/// cannot be saved refusing the start as `onboarding_instructions_unwritable` and a file that
+/// cannot be read as `onboarding_instructions_unreadable` (RV-DS241-202), both recorded
+/// as the engine's own text, the label as it was saved (SA vid 7 residual), and the moved
 /// files are kept for the onboarding view; a file or import the engine refuses
-/// stays in place for the owner's later import. Takes the transaction,
+/// stays in place for the owner's later import. A folder a pending project move lands in,
+/// its destination or a folder inside it, is refused as `move_project_in_progress` until
+/// the move is finished or forgotten (B17 -44). Takes the transaction,
 /// configuration, engine database path and action. Returns Applied or a plain
 /// rejection.
 pub(crate) fn execute(
@@ -473,16 +480,31 @@ pub(crate) fn execute(
     database: &Path,
     action: &OnboardingAction,
 ) -> Result<Outcome, EngineError> {
+    Ok(start(tx, config, database, action)?.0)
+}
+
+/// Starts an onboarding as [`execute`] does and names the project it started, so the owner's
+/// receipt carries the id the engine gave instead of one a client guessed. Takes the
+/// transaction, configuration, engine database path and action. Returns the outcome and,
+/// when Applied, the project.
+pub(crate) fn start(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    database: &Path,
+    action: &OnboardingAction,
+) -> Result<(Outcome, Option<ProjectId>), EngineError> {
     action.validate()?;
     let OnboardingAction::Start { path, pool } = action;
+    if crate::projects_home::project_move_lands(tx, Path::new(path)).map_err(error)? {
+        return Ok((rejected("move_project_in_progress"), None));
+    }
     if !crate::project_setup::pool_exists(config, pool) {
-        return Ok(rejected("pool_missing"));
+        return Ok((rejected("pool_missing"), None));
     }
     let repo = match project_folder(Path::new(path), database) {
         Ok(repo) => repo,
-        Err(code) => return Ok(rejected(code)),
+        Err(code) => return Ok((rejected(code), None)),
     };
-    let project_id = project_id_for(&repo)?;
     let repo_text = repo
         .to_str()
         .ok_or_else(|| failure("onboarding_path_invalid"))?;
@@ -494,26 +516,41 @@ pub(crate) fn execute(
         )
         .optional()
         .map_err(error)?;
-    let exists: bool = tx
+    if let Some(known) = known {
+        let known = ProjectId::new(known).map_err(|problem| failure(&problem.0))?;
+        let live: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+                [known.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if live {
+            restart(tx, &known, pool, graph_step(tx)?)?;
+            return Ok((Outcome::Applied, Some(known)));
+        }
+        tx.execute("DELETE FROM onboarding WHERE project=?1", [known.as_str()])
+            .map_err(error)?;
+    }
+    if crate::project_setup::removed::live_at(tx, repo_text)? {
+        return Ok((rejected("project_exists"), None));
+    }
+    let project_id = match crate::project_setup::removed::returning(tx, repo_text)? {
+        Some(returning) => returning,
+        None => match crate::project_setup::removed::free_id(tx, &repo)? {
+            Ok(free) => free,
+            Err(code) => return Ok((rejected(code), None)),
+        },
+    };
+    let live: bool = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE lower(id)=lower(?1))",
             [project_id.as_str()],
             |row| row.get(0),
         )
         .map_err(error)?;
-    if let Some(known) = known {
-        if known != project_id.as_str() {
-            return Ok(rejected("onboarding_project_mismatch"));
-        }
-        if exists {
-            restart(tx, &project_id, pool, graph_step(tx)?)?;
-            return Ok(Outcome::Applied);
-        }
-        tx.execute("DELETE FROM onboarding WHERE project=?1", [known])
-            .map_err(error)?;
-    }
-    if exists {
-        return Ok(rejected("project_exists"));
+    if live {
+        return Ok((rejected("project_exists"), None));
     }
     let leftover: Option<String> = tx
         .query_row(
@@ -526,7 +563,7 @@ pub(crate) fn execute(
     if let Some(leftover) = leftover {
         assert_ne!(leftover, repo_text);
         if std::fs::symlink_metadata(&leftover).is_ok() {
-            return Ok(rejected("onboarding_project_mismatch"));
+            return Ok((rejected("onboarding_project_mismatch"), None));
         }
         tx.execute(
             "DELETE FROM onboarding WHERE project=?1",
@@ -539,10 +576,18 @@ pub(crate) fn execute(
         || !real_dir(&layout)
         || !real_dir(&layout.join(CONTEXT_DIRECTORY))
     {
-        return Ok(rejected("onboarding_layout_incomplete"));
+        return Ok((rejected("onboarding_layout_incomplete"), None));
     }
-    if crate::instruction_files::label_arrived(&repo).is_err() {
-        return Ok(rejected("onboarding_instructions_unwritable"));
+    let labelled = match crate::instruction_files::label_arrived(&repo) {
+        Ok(labelled) => labelled,
+        Err(problem) if problem.0 == "onboarding_instructions_unreadable" => {
+            return Ok((rejected("onboarding_instructions_unreadable"), None));
+        }
+        Err(_) => return Ok((rejected("onboarding_instructions_unwritable"), None)),
+    };
+    let data = database.parent().filter(|root| root.is_absolute());
+    if let Some(data) = data {
+        let _ = crate::agent_home::mark_written(data, &repo, &labelled);
     }
     let mut drafted = engine_draft(tx, repo_text, &layout)?
         .unwrap_or_else(|| draft::Drafted::new(draft::folder_name(&repo), pool));
@@ -574,7 +619,7 @@ pub(crate) fn execute(
         &layout,
     )?;
     if outcome != Outcome::Applied {
-        return Ok(outcome);
+        return Ok((outcome, None));
     }
     let access = Some(AgentAccess::NEW_PROJECT)
         .filter(|level| level.unavailable().is_none())
@@ -586,6 +631,7 @@ pub(crate) fn execute(
         network: crate::sandbox::policy::AgentNetwork::default(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
+        home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         ..Default::default()
@@ -611,11 +657,15 @@ pub(crate) fn execute(
         ],
     )
     .map_err(error)?;
-    let moved = crate::instruction_files::import(&repo).unwrap_or_default();
+    let moved = match data {
+        Some(data) => crate::instruction_files::import_marked(data, &repo),
+        None => crate::instruction_files::import(&repo),
+    }
+    .unwrap_or_default();
     if !moved.is_empty() {
         crate::instruction_files::record_moved(tx, &project_id, &moved)?;
     }
-    Ok(Outcome::Applied)
+    Ok((Outcome::Applied, Some(project_id)))
 }
 
 /// Where a new or restarted graph step begins: waiting while the Graphify

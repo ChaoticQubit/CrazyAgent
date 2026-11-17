@@ -43,6 +43,7 @@ fn wait_for(deadline: Duration, mut done: impl FnMut() -> bool) {
 
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b and Codex installed"]
 fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let runtime = EngineRuntime::with_projects(&[(
         "project-a",
@@ -411,8 +412,8 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
 #[test]
 fn a_queued_job_waiting_on_a_refusal_reports_why_in_its_progress() {
     const WAITING: [&str; 3] = [
-        "Waiting for the projects home move to finish",
-        "Waiting for another run to finish with this account's sign-in",
+        "Waiting for the projects home move",
+        "Waiting for another run on this sign-in",
         "Waiting for this account to be ready",
     ];
     const OTHER: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";

@@ -67,8 +67,39 @@ export function ideAnswers(bridge, opened) {
     },
     desktop_ide_place: none,
     desktop_ide_hide: none,
-    desktop_ide_close: none,
+    desktop_ide_show: async () => ({ value: { shown: false, left: null } }),
     desktop_ide_focus: none,
+  };
+}
+
+/** Sums up a cold workbench load for its evidence, asserting nothing: the ms until the owner
+ * saw the workbench, the requests and WebSockets to the workbench host (each one listener
+ * check in the proxy), the most open at once, and each request's time to first byte.
+ * Inputs: the timings by request, the WebSocket URLs, the workbench host and the ms to ready.
+ * Output: the summary, read from the timings as they stand when it is called. */
+export function coldLoad(timings, sockets, host, readyMs) {
+  const onHost = (url) => URL.canParse(url) && new URL(url).host === host;
+  const own = [...timings.values()].filter((seen) => onHost(seen.url));
+  const firstByte = own.map((seen) => seen.firstByte).filter((ms) => Number.isFinite(ms) && ms >= 0).sort((a, b) => a - b);
+  const at = (share) => (firstByte.length ? Math.round(firstByte[Math.min(firstByte.length - 1, Math.floor(firstByte.length * share))]) : null);
+  const ends = own.map((seen) => seen.done).filter(Number.isFinite);
+  const edges = own
+    .flatMap((seen) => (Number.isFinite(seen.done) ? [[seen.sent, 1], [seen.done, -1]] : [[seen.sent, 1]]))
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  let open = 0;
+  let most = 0;
+  for (const [, step] of edges) {
+    open += step;
+    most = Math.max(most, open);
+  }
+  return {
+    ready_ms: readyMs,
+    network_ms: own.length && ends.length ? Math.round((Math.max(...ends) - Math.min(...own.map((seen) => seen.sent))) * 1000) : null,
+    upstream_requests: own.length,
+    upstream_websockets: sockets.filter(onHost).length,
+    other_requests: timings.size - own.length,
+    most_open: most,
+    first_byte_ms: { count: firstByte.length, median: at(0.5), p90: at(0.9), max: at(1) },
   };
 }
 

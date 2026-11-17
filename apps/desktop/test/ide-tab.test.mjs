@@ -130,14 +130,14 @@ test("no capability covers the IDE webview or its window, before or after the mo
   }
 });
 
-test("the IDE tab follows its panel, hides with the tab, closes with the project and beats every minute", () => {
+test("the IDE tab follows its panel, hides with the tab and with the page, and beats every minute", () => {
   const source = read("src/screens/project/ide.tsx");
   assert.equal(client.HEARTBEAT_MS, 60_000);
   assert.match(source, /window\.requestAnimationFrame\(follow\)/);
   assert.match(source, /hideIde\(/);
   assert.match(source, /touchIde\(/);
   const index = read("src/screens/project/index.tsx");
-  assert.match(index, /useCloseIde\(projectId, data\.notify\)/, "leaving the project closes its IDE webview");
+  assert.doesNotMatch(index, /useCloseIde|closeIde/, "leaving the project hides its IDE webview and never closes it (DEC-187)");
   assert.deepEqual(client.bounds({ left: 10.4, top: 80.6, width: 900.2, height: 600.7 }, 838), { x: 10, y: 81, width: 900, height: 601, viewport: 838 }, "the native side needs the page's own height to place the panel in the window");
   assert.equal(client.bounds({ left: 0, top: 0, width: 0, height: 300 }, 838), null, "a hidden panel has no bounds");
 });
@@ -155,7 +155,7 @@ test("no native command or main-window lookup goes through the WebviewWindow typ
   }
 });
 
-test("a refused place, hide or close reaches the owner instead of vanishing", async () => {
+test("a refused place or hide reaches the owner instead of vanishing, and leaving the page never closes the IDE", async () => {
   const { bundle, withPage } = await import("./browser.mjs");
   const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
   const opened = (refused, then, missing = []) => withPage(async ({ evaluate }) => {
@@ -168,9 +168,8 @@ test("a refused place, hide or close reaches the owner instead of vanishing", as
   const left = (evaluate) => evaluate(`Fixture.leave()`).then(() => evaluate("Fixture.frames()")).then(() => evaluate("Fixture.seen()"));
   assert.match(await opened(["desktop_ide_place"], (evaluate) => evaluate("Fixture.seen()")).then((seen) => seen.alert), /couldn't move to fit/, "a failed place shows on the tab");
   assert.ok((await opened(["desktop_ide_hide"], left)).reported.some((line) => /^hide: .*couldn't be hidden/.test(line)), "a failed hide reaches the page");
-  assert.ok((await opened(["desktop_ide_close"], left)).reported.some((line) => /^close: .*didn't close/.test(line)), "a failed close reaches the owner");
-  const absent = await opened([], left, ["desktop_ide_close"]);
-  assert.deepEqual(absent.reported.filter((line) => line.startsWith("close:")), [], "a build with no IDE to close tells the owner nothing, so it never replaces the page's last toast");
+  const gone = await opened([], (evaluate) => left(evaluate).then(() => evaluate("Fixture.count('desktop_ide_close')")));
+  assert.equal(gone, 0, "leaving the page hides the IDE and keeps it loaded (DEC-187)");
   const page = read("src/screens/project/index.tsx");
   assert.ok(page.indexOf("{ideHideProblem &&") >= 0 && page.indexOf("{ideHideProblem &&") < page.indexOf('className="pj-tab-panel"'), "a failed hide shows above the tab panel, outside the box the IDE may still cover");
   const clean = await opened([], left);
@@ -384,10 +383,11 @@ test("the IDE webview follows its panel through any layout shift or scroll, and 
   assert.match(css, /\.ide-tab \{[^}]*flex: 1;/, "the tab takes the space left under the header, banner and tabs");
 });
 
-test("closing a project page stops its IDE server, ordered with any open of the same project", () => {
+test("a dropped IDE stops its server, ordered with any open of the same project", () => {
   const lib = read("src-tauri/src/lib.rs");
-  const page = command(lib, "desktop_ide_close");
-  assert.ok(page.indexOf("views.keep_for_own_window(&project)") >= 0 && page.indexOf("views.keep_for_own_window(&project)") < page.indexOf("close_ide("), "an IDE in its own window outlives its page");
+  assert.doesNotMatch(lib, /fn desktop_ide_close\b/, "no page close: leaving a page keeps the IDE (DEC-187)");
+  const walls = lib.slice(lib.indexOf("fn desktop_close_project_walls"), lib.indexOf("#[tauri::command]", lib.indexOf("fn desktop_close_project_walls")));
+  assert.match(walls, /close_ide\(/, "a removed project's kept IDE is closed and its server stopped");
   const close = lib.slice(lib.indexOf("async fn close_ide"), lib.indexOf("#[tauri::command]", lib.indexOf("async fn close_ide")));
   assert.ok(close.indexOf("views.closing(project)") >= 0 && close.indexOf("views.closing(project)") < close.indexOf("ide::close("), "the close is noted before the webview closes and before any await");
   assert.match(close, /views\s*\.stop_closed\(project, closing,/);
@@ -396,6 +396,9 @@ test("closing a project page stops its IDE server, ordered with any open of the 
   assert.match(open, /let \(ticket, turn\) = views\.begin\(&project\);/, "an open takes its ticket and its turn under one lock");
   assert.doesNotMatch(open, /views\.turn\(/, "no second lock where a close could remove the order between them");
   assert.ok(open.indexOf("turn.lock().await") < open.indexOf("ide_open(project"), "the engine opens only in the project's turn");
+  assert.ok(open.indexOf("ide::show(") >= 0 && open.indexOf("ide::show(") < open.indexOf("drop_others("), "once this project's IDE shows, every other kept IDE is dropped with its server (DEC-187: the last used only)");
+  const drop = lib.slice(lib.indexOf("async fn drop_others"), lib.indexOf("\n}\n", lib.indexOf("async fn drop_others")));
+  assert.ok(drop.indexOf("views.others(project)") >= 0 && drop.indexOf("views.others(project)") < drop.indexOf("close_ide("), "each in-panel IDE but this one closes with its server");
   const bridge = read("src-tauri/src/bridge/ide.rs");
   assert.match(bridge, /client\.ide_tab_stop\(project\)/);
   const engine = read("../../crates/crazyagent/src/engine/owner/transport/ide_tab.rs");
@@ -437,3 +440,130 @@ test("an open that names nothing shows no leftover line", () => withOpenTab("[]"
   const shown = await evaluate("Fixture.tab()");
   assert.ok(!shown.text.includes("Still running after this IDE stopped"), shown.text);
 }));
+
+test("a kept IDE shows from the page's last IDE state with one native call, no engine read and no move (DEC-187)", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/ide-tab-failures.mjs", import.meta.url).pathname);
+  await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.seed()");
+    await evaluate(`Fixture.mount([], [], false, false, null, true)`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_show")`), true, "the kept IDE is shown");
+    await evaluate("Fixture.frames()");
+    const asked = await evaluate("Fixture.asked()");
+    assert.equal(asked[0], "desktop_ide_show", `the show is the first call, before any engine read: ${JSON.stringify(asked)}`);
+    assert.equal(asked.includes("desktop_ide_open"), false, "a kept IDE is not opened again");
+    assert.equal(asked.includes("desktop_ide_place"), false, "the panel did not move, so nothing is placed and nothing lays out");
+  });
+  await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.seed()");
+    await evaluate(`Fixture.mount([], [], false, false, "node", true)`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_show")`), true);
+    await evaluate("Fixture.frames()");
+    assert.match((await evaluate("Fixture.tab()")).text, /Still running after this IDE stopped: node/, "the note a preload kept still shows once");
+    assert.equal(await evaluate(`Fixture.count("desktop_ide_open")`), 0, "a kept IDE is not opened again");
+  });
+  await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.seed()");
+    await evaluate(`Fixture.mount([], [], false, false, null, false)`);
+    assert.equal(await evaluate(`Fixture.called("desktop_ide_open")`), true, "an IDE that is not kept is opened as before");
+    const asked = await evaluate("Fixture.asked()");
+    assert.ok(asked.indexOf("desktop_ide_show") >= 0 && asked.indexOf("desktop_ide_show") < asked.indexOf("desktop_ide_open"), `the show is tried first: ${JSON.stringify(asked)}`);
+  });
+});
+
+test("the page keeps the last IDE state it read, so a page switch lists the IDE tab on its first render (DEC-187)", async () => {
+  const before = globalThis.window;
+  const ready = { state: { build: { state: "ready", version: "1.0.0", root: "/ide" }, unqualified: null }, platform: "macos" };
+  let fails = false;
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command) => {
+    if (command !== "desktop_ide_state") return null;
+    if (fails) throw { code: "engine_unavailable" };
+    return ready;
+  } } };
+  try {
+    const answer = await client.ideView();
+    assert.equal(answer.kind, "ok");
+    assert.deepEqual(client.cachedIdeView(), answer, "the last good read is kept");
+    fails = true;
+    assert.notEqual((await client.ideView()).kind, "ok");
+    assert.deepEqual(client.cachedIdeView(), answer, "a failed read does not drop it");
+  } finally {
+    globalThis.window = before;
+  }
+  const index = read("src/screens/project/index.tsx");
+  assert.match(index, /useState<Result<IdeView> \| undefined>\(cachedIdeView\)/, "the page starts from it");
+  const tab = read("src/screens/project/ide.tsx");
+  assert.match(tab, /useState<IdeTabState \| null>\(\(\) => cachedIdeView\(\)/, "and so does the tab");
+});
+
+test("the last used IDE is kept as a project and its panel only, preloads only when its build is ready, and goes with its project (DEC-187)", async () => {
+  const api = await import("../src/api.ts");
+  const before = globalThis.window;
+  const kept = new Map();
+  const asked = [];
+  let build = "ready";
+  globalThis.window = {
+    localStorage: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, String(value)), removeItem: (key) => kept.delete(key) },
+    __TAURI_INTERNALS__: { invoke: async (command, args) => {
+      asked.push([command, args]);
+      if (command === "desktop_ide_state") return { state: { build: { state: build, version: "1.0.0", root: "/ide" }, unqualified: null }, platform: "macos" };
+      if (command === "desktop_ide_preload") throw { code: "ide_project_unknown" };
+      return null;
+    } },
+  };
+  try {
+    assert.equal(await client.preloadLastIde(), "none", "nothing used yet");
+    assert.deepEqual(asked, [], "so nothing is asked");
+    const panel = { x: 0, y: 80, width: 900, height: 600, viewport: 720 };
+    client.saveLastIde("project-one", panel);
+    assert.deepEqual(Object.keys(JSON.parse(kept.get(api.LAST_IDE_KEY))).sort(), ["panel", "project"], "only the project and its panel, never an address or a token");
+    assert.equal(await client.preloadLastIde(), "asked", "a refusal is swallowed: no toast at start");
+    assert.deepEqual(asked.at(-1), ["desktop_ide_preload", { projectId: "project-one", bounds: panel }]);
+    build = "missing";
+    asked.length = 0;
+    assert.equal(await client.preloadLastIde(), "not_ready", "a preload never starts a download");
+    assert.ok(asked.every(([command]) => command !== "desktop_ide_preload"), JSON.stringify(asked));
+    await api.closeProjectWalls("project-two");
+    assert.ok(kept.has(api.LAST_IDE_KEY), "another project's removal keeps it");
+    await api.closeProjectWalls("project-one");
+    assert.equal(kept.has(api.LAST_IDE_KEY), false, "the project's removal forgets it");
+    kept.set(api.LAST_IDE_KEY, "{broken");
+    assert.equal(await client.preloadLastIde(), "none", "a damaged entry preloads nothing");
+  } finally {
+    globalThis.window = before;
+  }
+  const app = read("src/app.tsx");
+  assert.match(app, /window\.requestAnimationFrame\(\(\) => window\.requestAnimationFrame\(\(\) => void preloadLastIde\(\)\)\)/, "the preload starts after the window's first paint");
+});
+
+test("showing a kept IDE asks the engine nothing, and a preload takes no focus and no menu (DEC-187)", () => {
+  const lib = read("src-tauri/src/lib.rs");
+  const show = command(lib, "desktop_ide_show");
+  assert.match(show, /main_window\(&webview\)\?/, "only the main window may show it");
+  assert.match(show, /ide::show_kept\(/);
+  assert.ok(show.indexOf("ide::show_kept(") < show.indexOf("drop_others("), "a kept show drops every other in-panel IDE, after the reveal (#144 F3)");
+  assert.doesNotMatch(show, /read\(&state\)|lock\(&state\)|ide_open|workbench\(/, "no engine call and no token read on a show");
+  const preload = command(lib, "desktop_ide_preload");
+  assert.match(preload, /main_window\(&webview\)\?/, "only the main window may preload");
+  assert.match(preload, /let Some\(\(ticket, turn\)\) = views\.begin_preload\(&project\) else \{\s*return Ok\(false\);\s*\};/, "a preload is an open, same ticket and turn, but none begins while an IDE is loaded or opening");
+  assert.ok(preload.indexOf("views.begin_preload(&project)") < preload.indexOf("ide_open(project"), "the guard comes before any engine call");
+  assert.ok(preload.indexOf("ide::preload(") >= 0 && preload.indexOf("ide::preload(") < preload.lastIndexOf("close_ide("), "a refused preload stops the server it started");
+  const open = command(lib, "desktop_ide_open");
+  assert.match(open, /views\.take_left\(&project\)/, "an open names a note a preload gave up on (#144 F4)");
+  const build = read("src-tauri/build.rs");
+  for (const name of ["desktop_ide_show", "desktop_ide_preload"]) assert.match(build, new RegExp(`"${name}"`), `${name} is listed`);
+  assert.doesNotMatch(build, /"desktop_ide_close"/, "the page close is gone");
+  const ide = read("src-tauri/src/ide.rs");
+  const body = (name) => ide.slice(ide.indexOf(name), ide.indexOf("\n}\n", ide.indexOf(name)));
+  const loading = body("pub fn preload(");
+  assert.match(loading, /\.focused\(false\)/, "the preloaded webview never takes the focus");
+  assert.doesNotMatch(loading, /set_focus|set_menu/, "nor the window's focus or the app menu");
+  assert.match(loading, /keep_left\(/, "a preload that gives way keeps the engine's one-shot note (#144 F4)");
+  assert.ok(loading.indexOf("add_child(") >= 0 && loading.indexOf("add_child(") < loading.indexOf(".hide()"), "it is hidden as soon as it exists");
+  const kept = body("pub fn show_kept");
+  assert.ok(kept.indexOf("if kept.resize") >= 0 && kept.indexOf("if kept.resize") < kept.indexOf("set_bounds("), "a show resizes only when the panel moved");
+  assert.match(body("fn beat("), /server_gone\(/, "a kept IDE whose server is gone is dropped");
+});

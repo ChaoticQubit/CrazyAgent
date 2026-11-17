@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { input, workbench } from "./ide-harness.mjs";
+import { coldLoad, input, workbench } from "./ide-harness.mjs";
 
 /** Records each DevTools call the harness makes. Output: the calls and a send that keeps them. */
 function recorder() {
@@ -55,4 +55,34 @@ test("a pick waits for its row while Quick open still searches, then clicks it w
   await workbench(page, keys, me).pick("notes.md", "Project");
   assert.deepEqual(clicks, [{ x: 10, y: 30 }]);
   assert.equal(reads, 5, "it read the list until the row stood still");
+});
+
+test("a cold load counts only the workbench host, closes a request before one opening at the same instant, and keeps no unread time to first byte", () => {
+  const host = "127.0.0.1:5000";
+  const timings = new Map([
+    ["page", { url: "http://127.0.0.1:5000/?folder=x", sent: 10.0, done: 10.2, firstByte: 40 }],
+    ["script", { url: "http://127.0.0.1:5000/a.js", sent: 10.1, done: 10.3, firstByte: 20 }],
+    ["style", { url: "http://127.0.0.1:5000/b.css", sent: 10.2, done: 10.25, firstByte: 30 }],
+    ["pre", { url: "http://abc.localhost:5000/pre.js", sent: 10.0, done: 10.05, firstByte: 5 }],
+    ["open", { url: "http://127.0.0.1:5000/c.js", sent: 10.3, firstByte: -1 }],
+  ]);
+  const sockets = ["ws://127.0.0.1:5000/socket", "ws://abc.localhost:5000/socket"];
+  assert.deepEqual(coldLoad(timings, sockets, host, 900), {
+    ready_ms: 900,
+    network_ms: 300,
+    upstream_requests: 4,
+    upstream_websockets: 1,
+    other_requests: 1,
+    most_open: 2,
+    first_byte_ms: { count: 3, median: 30, p90: 40, max: 40 },
+  });
+  assert.deepEqual(coldLoad(new Map(), [], host, 5), {
+    ready_ms: 5,
+    network_ms: null,
+    upstream_requests: 0,
+    upstream_websockets: 0,
+    other_requests: 0,
+    most_open: 0,
+    first_byte_ms: { count: 0, median: null, p90: null, max: null },
+  });
 });

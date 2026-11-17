@@ -1,5 +1,10 @@
 use super::master_launch::error;
+use crate::harnesses::leftovers::{
+    self, Follower, HoldBy, LINEAGE_VARIABLE, Leftovers, Lineage, LineageToken, Unstopped,
+};
+use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
+use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
@@ -28,12 +33,34 @@ pub(super) struct HostProcess {
     status: Option<ExitStatus>,
     group_absent: bool,
     clean: bool,
+    follower: Option<Follower>,
+    left: Option<Leftovers>,
+    by: HoldBy,
 }
 
 impl HostProcess {
-    pub(super) fn spawn(mut command: Command) -> Result<Self, ProtocolError> {
+    /// Starts the rcli master host with its pipes open and not blocking. Inputs: the wrapped
+    /// command, what the stop checks of the processes it leaves outside its group and who to
+    /// hold those under. Output: the process, or a plain refusal.
+    pub(super) fn spawn(
+        mut command: Command,
+        check: LineageCheck,
+        by: HoldBy,
+    ) -> Result<Self, ProtocolError> {
+        let token = match check {
+            LineageCheck::Unneeded => None,
+            LineageCheck::FullAccess | LineageCheck::Sandboxed => {
+                Some(LineageToken::new().ok_or_else(|| error("rcli_master_spawn_failed"))?)
+            }
+        };
+        if let Some(token) = &token {
+            command.env(LINEAGE_VARIABLE, token.as_str());
+        }
         let (mut child, warden) =
             warden::spawn(&mut command).map_err(|_| error("rcli_master_spawn_failed"))?;
+        assert!(child.id() > 1);
+        let follower = Follower::start(child.id(), token, check);
+        assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
         let stdin = child.stdin.take().expect("configured host input pipe");
         let stdout = child.stdout.take().expect("configured host output pipe");
         let stderr = child.stderr.take().expect("configured host error pipe");
@@ -48,6 +75,9 @@ impl HostProcess {
             status: None,
             group_absent: false,
             clean: false,
+            follower,
+            left: None,
+            by,
         };
         assert!(process.child.id() > 1);
         assert!(process.pending.is_empty());
@@ -103,7 +133,7 @@ impl HostProcess {
                 Ok(0) => {
                     self.stdout = None;
                     self.reap()?;
-                    return Err(if self.pending.is_empty() {
+                    return Err(if self.pending.is_empty() || self.held() {
                         self.exit_error()
                     } else {
                         error("rcli_master_truncated_event")
@@ -176,7 +206,19 @@ impl HostProcess {
         Ok(())
     }
 
+    /// Tells whether the host was stopped by the Linux call supervisor because it could not
+    /// take back an entry read as a held name ([`crate::sandbox::held_stop`]). Input: the
+    /// process. Output: true for that exit, which outranks what the host left half written.
+    fn held(&self) -> bool {
+        let code = self.status.as_ref().and_then(ExitStatus::code);
+        code.and_then(|code| crate::sandbox::held_stop(std::env::consts::OS, code))
+            .is_some()
+    }
+
     fn exit_error(&self) -> ProtocolError {
+        if self.held() {
+            return error(crate::sandbox::HELD_STOP_CAUSE);
+        }
         error(match self.status.as_ref().and_then(ExitStatus::code) {
             Some(64) => "rcli_master_control_rejected",
             Some(70) => "rcli_master_execution_failed",
@@ -251,10 +293,55 @@ impl HostProcess {
         }
     }
 
+    /// Ends the host and everything it left in its group. At Full access, and under the plain
+    /// Linux Landlock helper, no warden reaches what left the group (LINUX-KILL-GROUP r1 F1),
+    /// so the lineage followed from the start is taken before the kill and settled after it.
+    /// What still runs once the group ended is kept for [`Self::hold_left`], so the custody
+    /// holds it with the profile; past a group that did not end it is held at once with none.
+    /// Input: the process. Output: Ok, `rcli_master_cleanup_incomplete`, or the leftover code.
     pub(super) fn cleanup(&mut self) -> Result<(), ProtocolError> {
         if self.clean {
             return Ok(());
         }
+        let lineage = self.follower.take().map(Follower::stop);
+        let ended = self.end_group();
+        let Some(Err(unstopped)) = lineage.map(|lineage| lineage.and_then(Lineage::settle)) else {
+            return ended;
+        };
+        let code = unstopped.code();
+        match unstopped {
+            Unstopped::Left(left) if ended.is_ok() => self.left = Some(left),
+            Unstopped::Left(left) => {
+                let mode = leftovers::mode_of(self.by.project.as_deref());
+                left.hold(None, (), self.by.clone(), mode);
+            }
+            Unstopped::Uncertain => {}
+        }
+        assert!(self.left.is_none() || ended.is_ok());
+        ended.and(Err(error(code)))
+    }
+
+    /// Names what the host's stop left running once its group ended, if anything. Input: the
+    /// process. Output: the leftover code, or none.
+    pub(super) fn left_code(&self) -> Option<&'static str> {
+        self.left.as_ref().map(Leftovers::code)
+    }
+
+    /// Holds what the host's stop left running with `kept` listed under `account`, by the
+    /// project's leftover setting, as a Claude host turn's hold keeps its lease until none
+    /// run; with nothing left, `kept` is dropped. Inputs: the process, the account and what
+    /// the hold keeps. Output: none.
+    pub(super) fn hold_left<T: Send + 'static>(&mut self, account: Option<CredentialRef>, kept: T) {
+        if let Some(left) = self.left.take() {
+            let mode = leftovers::mode_of(self.by.project.as_deref());
+            left.hold(account, kept, self.by.clone(), mode);
+        }
+        assert!(self.left.is_none());
+    }
+
+    fn end_group(&mut self) -> Result<(), ProtocolError> {
+        assert!(!self.clean);
+        assert!(self.follower.is_none());
         self.stdin = None;
         self.stdout = None;
         self.stderr = None;
@@ -303,6 +390,7 @@ impl Drop for HostProcess {
         if !self.clean {
             let _cleanup = self.cleanup();
         }
+        self.hold_left(None, ());
     }
 }
 
@@ -325,6 +413,64 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
+    /// Who a row's host leaves a hold under. Output: no project and a plain label.
+    fn test_by() -> HoldBy {
+        HoldBy {
+            project: None,
+            who: "an rcli master test host".to_owned(),
+        }
+    }
+
+    /// LINUX-KILL-GROUP r1 F1: an rcli master host whose boundary leaves a process in a
+    /// session of its own running, as the plain Linux Landlock helper's does, has its lineage
+    /// followed from its start, so the process it left outside its group is named as a
+    /// sandboxed run's leftover once the group is gone, and the stop ends with that code. Its
+    /// leader leaves the group it was started in and leads a session of its own, as the Linux
+    /// helper's `own_session` makes a wrapped harness, so the lineage admits its children.
+    #[test]
+    fn a_followed_rcli_master_names_what_it_left_outside_its_group() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut command = Command::new("/usr/bin/perl");
+        command
+            .args(["-mPOSIX", "-e", "POSIX::setpgid(0, getpgrp(getppid())) or exit 1; POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
+            .arg("/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30")
+            .current_dir(folder.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command, LineageCheck::Sandboxed, test_by()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            thread::sleep(Duration::from_millis(10));
+        };
+
+        let cleaned = process.cleanup();
+        if let Some(pid) = Pid::from_raw(child) {
+            let _ = rustix::process::kill_process(pid, Signal::KILL);
+        }
+
+        assert_eq!(
+            cleaned.map_err(|failure| failure.0),
+            Err(crate::harnesses::leftovers::SANDBOX_LEFT.to_owned())
+        );
+        assert!(process.clean);
+        assert!(process.group_absent);
+        assert_eq!(
+            process.left_code(),
+            Some(crate::harnesses::leftovers::SANDBOX_LEFT)
+        );
+        process.hold_left(None, ());
+        assert_eq!(process.left_code(), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn cleanup_stops_what_a_sandboxed_rcli_master_detached() {
@@ -336,7 +482,7 @@ mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         assert!(process.warden.is_some());
         let processes = run.processes();
         process.cleanup().unwrap();
@@ -356,7 +502,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rustix::process::test_kill_process_group(process.group())
             != Err(rustix::io::Errno::PERM)
@@ -388,7 +534,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let stat = format!("/proc/{}/stat", process.child.id());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !std::fs::read_to_string(&stat).is_ok_and(|stat| {
@@ -426,7 +572,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         process.exited_group().unwrap();
         assert!(process.status.is_none());
         assert!(!process.group_absent);
@@ -447,7 +593,7 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let group = i32::try_from(process.child.id()).unwrap();
         let mut member = crate::spawn_gate::spawn(
             Command::new("/bin/sh")
@@ -501,7 +647,7 @@ read -r _
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        let mut process = HostProcess::spawn(command).unwrap();
+        let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(120);
         let mut frames = 0;
         let failure = loop {
@@ -523,5 +669,35 @@ read -r _
         assert!(process.stdout_bytes > STDOUT_BYTES_MAX);
         assert!(process.stdout_bytes <= STDOUT_BYTES_MAX + 4096);
         process.cleanup().unwrap();
+    }
+
+    /// DEC-185 S2a (rv-sec3 F1): an rcli master host that exits with the Linux call
+    /// supervisor's held-stop code ends with the sandbox cause, whether it left half a frame
+    /// or nothing, never the truncated event nor the plain exit code.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_rcli_master_the_sandbox_stopped_ends_with_the_sandbox_cause() {
+        for host in [r"printf '\000\000\000\020ab'; exit 122", "exit 122"] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", host])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0);
+            let mut process =
+                HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let failure = loop {
+                assert!(Instant::now() < deadline, "{host}");
+                match process.frame() {
+                    Ok(Some(_)) => panic!("{host} wrote no whole frame"),
+                    Ok(None) => thread::sleep(Duration::from_millis(1)),
+                    Err(failure) => break failure,
+                }
+            };
+            assert_eq!(failure.0, crate::sandbox::HELD_STOP_CAUSE, "{host}");
+            process.cleanup().unwrap();
+        }
     }
 }

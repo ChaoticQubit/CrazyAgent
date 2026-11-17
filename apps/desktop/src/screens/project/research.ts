@@ -610,6 +610,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["protocol_fault", "it sent a message out of order. Send again to start a fresh turn"],
   ["frame_limit", "one message was larger than the master frame size limit. Raise it in Settings, Master, or at 1 MiB shorten the message or the instructions, then send again"],
   ["worktree_uncertain", "its copy of the project could not be checked. End the conversation, then send again"],
+  ["sandbox_stopped", "the sandbox ended it because a protected name could not be put back"],
   ["cancelled", "you stopped this turn"],
 ]);
 
@@ -639,6 +640,8 @@ export function minutesOfCause(cause: string | null | undefined): number | null 
 export function turnLine(turn: MasterTurn): string {
   const code = ` (${stopCode(turn)})`;
   if (turn.cause === "rcli_master_key_setup_required" && turn.detail) return `${turn.detail}${code}`;
+  const configChanged = turn.cause === "rcli_profile_changed_in_conversation" ? failureSentence(turn.cause) : undefined;
+  if (configChanged !== undefined) return `${configChanged}${code}`;
   const steps = turn.reason === "step_limit" ? stepsOfCause(turn.cause) : null;
   if (steps !== null) return `Stopped after ${steps} steps; reply with 'continue' to go on.${code}`;
   const minutes = turn.reason === "time_limit" ? minutesOfCause(turn.cause) : null;

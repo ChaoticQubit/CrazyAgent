@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import type { OwnerProfile, Result } from "./api";
@@ -7,7 +8,8 @@ import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
 import { loadFoundProjects, loadIntakeJob } from "./api-intake";
 import { notifyIntake } from "./notify";
-import { FOUND_POLL_MS, intakePollMs, jobEndLine } from "./screens/intake/intake";
+import { foundPollMs, intakePollMs, jobEndLine } from "./screens/intake/intake";
+import { carryFollowUps } from "./screens/new-project/carry";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
 import { QUESTIONS_SHOWN_DEFAULT, questionsShown } from "./api-questions";
@@ -39,6 +41,45 @@ export function saveQuestionsShown(choice: QuestionsShown): void {
   } catch {
     return;
   }
+}
+
+const LAST_PROJECT_KEY = "crazyagent.last-project";
+const PROJECT_ID_MAX = 256;
+
+/** Reads the project whose page the owner opened last, as kept in this app, so app start can
+ * load its views in the background (DEC-187). Output: the project id; null when none was
+ * kept, storage is unavailable or it holds something else. */
+export function readLastProject(): string | null {
+  try {
+    const value = window.localStorage.getItem(LAST_PROJECT_KEY);
+    return value && value.length <= PROJECT_ID_MAX ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remembers the project whose page the owner opened. Input: the project id. Output: none. */
+export function saveLastProject(id: string): void {
+  if (!id || id.length > PROJECT_ID_MAX) return;
+  try {
+    window.localStorage.setItem(LAST_PROJECT_KEY, id);
+  } catch {
+    return;
+  }
+}
+
+/** Runs work once the window has drawn its next frame and that frame's task is over, so work
+ * started at app start never delays what the owner sees first (DEC-187). Input: the work.
+ * Output: the call that cancels it before it runs. */
+export function afterFirstPaint(run: () => void): () => void {
+  let timer = 0;
+  const frame = window.requestAnimationFrame(() => {
+    timer = window.setTimeout(run, 0);
+  });
+  return () => {
+    window.cancelAnimationFrame(frame);
+    window.clearTimeout(timer);
+  };
 }
 
 /** Reads where the owner types to every agent's terminal, as kept in this app (not in the
@@ -86,6 +127,20 @@ export function applyTheme(choice: ThemeChoice): void {
   }
 }
 
+/** Tells the native side the appearance choice, so the window and the app icon follow it
+ * (DEC-181). It skips bridgeCall: nothing here is an engine reply. A page without the native
+ * bridge, or a window the command refuses, keeps its web theme. Input: the choice. Output: none. */
+export function mirrorTheme(choice: ThemeChoice): void {
+  void invoke<void>("desktop_set_theme", { choice }).catch(() => undefined);
+}
+
+/** Applies, remembers and mirrors a choice the owner just made in Profile.
+ * Input: the choice. Output: none. */
+export function chooseTheme(choice: ThemeChoice): void {
+  applyTheme(choice);
+  mirrorTheme(choice);
+}
+
 /** Keeps the value shown when a poll reads the same one, compared as the bridge's JSON, so a
  * poll that changed nothing never renders the app's tree again (React skips a state set to
  * the same object). Inputs: the value shown and the one read now. Output: the value to keep. */
@@ -99,6 +154,13 @@ export function keptRead<T>(shown: T, next: T): T {
 export function engineState(result: Result<api.ConnectionStatus>): EngineState {
   if (result.kind === "error" && result.code === "engine_version_mismatch") return "outdated";
   return result.kind === "ok" && result.value.connected ? "running" : "down";
+}
+
+/** The one line the owner sees after this app replaced an older engine on its own at launch
+ * (DEC-134 addendum 1). Input: the connect reply. Output: the line, or null when the reply
+ * says no engine was replaced. */
+export function engineUpdatedLine(result: Result<api.ConnectionStatus>): string | null {
+  return result.kind === "ok" && result.value.engine_updated ? "CrazyAgent's engine was updated to match this app." : null;
 }
 
 /** The refusal codes after which the session reads again whether a sign-in is stuck. */
@@ -130,6 +192,9 @@ export interface Session {
   found: Loaded<FoundProject[]>;
   retry: () => void;
   refreshIntake: (started?: IntakeJob) => void;
+  /** Names the job a page follows and says the end of itself, so the end toast stays quiet for
+   * it; null once the page lets go. */
+  followIntake: (id: string | null) => void;
   refreshFound: () => void;
   checkUnconfirmed: () => Promise<void>;
   checkProfile: () => Promise<void>;
@@ -146,8 +211,10 @@ export interface Session {
  * the unconfirmed-change banner, the toast and a revision counter screens reload on. A start
  * moves the revision once the engine runs, before the profile lands, so a screen shown on the
  * profile reads once and one kept on screen through the start reads again. A reply that leaves
- * a change unconfirmed starts a few spaced automatic checks of that change. Output: the session. */
-export function useSession(): Session {
+ * a change unconfirmed starts a few spaced automatic checks of that change. The found folders
+ * are read at Home's pace only while Home is shown, and the window taking the focus back reads
+ * them and the intake job at once. Input: whether Home is shown. Output: the session. */
+export function useSession(home: boolean): Session {
   const [engine, setEngine] = useState<EngineState>("connecting");
   const [engineProblem, setEngineProblem] = useState<string | null>(null);
   const [unconfirmed, setUnconfirmed] = useState<Unconfirmed | null>(null);
@@ -164,6 +231,7 @@ export function useSession(): Session {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [intake, setIntake] = useState<IntakeJob | null>(null);
   const intakeSeen = useRef<IntakeJob | null>(null);
+  const followed = useRef<string | null>(null);
   const [intakeTick, setIntakeTick] = useState(0);
   const [found, setFound] = useState<Loaded<FoundProject[]>>({ kind: "loading" });
   const [foundTick, setFoundTick] = useState(0);
@@ -279,6 +347,8 @@ export function useSession(): Session {
     if (state !== "running") return;
     setRevision((value) => value + 1);
     await Promise.all([refreshProfile(), refreshProjects()]);
+    const updated = engineUpdatedLine(result);
+    if (updated) showToast(updated);
   }
 
   useEffect(() => {
@@ -300,9 +370,17 @@ export function useSession(): Session {
         const job = result.value;
         setIntake((shown) => keptRead(shown, job));
         if (line && result.value) {
-          showToast(line, { name: "home" });
+          const carried = result.value.kind === "setup" && result.value.state.state === "done" && result.value.project_id !== null
+            ? carryFollowUps(result.value.id, result.value.project_id)
+            : null;
+          if (result.value.id !== followed.current) {
+            if (carried) void carried.outcome.then((message) => { showToast(message, { name: "home" }); void refreshProjects(); });
+            else showToast(line, { name: "home" });
+          }
           setFoundTick((value) => value + 1);
           void notifyIntake(result.value.id);
+          if (result.value.kind === "move_project" || result.value.kind === "delete" || result.value.kind === "setup") void refreshProjects();
+          if (result.value.kind === "delete" && result.value.state.state === "done" && result.value.project_id) void api.closeProjectWalls(result.value.project_id);
         }
       }
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));
@@ -319,11 +397,20 @@ export function useSession(): Session {
       const result = await loadFoundProjects();
       if (!live) return;
       setFound((shown) => keptRead<Loaded<FoundProject[]>>(shown, result));
-      if (result.kind !== "not_ready") timer = setTimeout(() => void read(), FOUND_POLL_MS);
+      if (result.kind !== "not_ready") timer = setTimeout(() => void read(), foundPollMs(home));
     };
     void read();
     return () => { live = false; clearTimeout(timer); };
-  }, [engine, foundTick]);
+  }, [engine, foundTick, home]);
+
+  useEffect(() => {
+    const look = () => {
+      setIntakeTick((value) => value + 1);
+      setFoundTick((value) => value + 1);
+    };
+    window.addEventListener("focus", look);
+    return () => window.removeEventListener("focus", look);
+  }, []);
 
   const ready = found.kind === "ok" ? found.value.filter((folder) => folder.state === "ready").map((folder) => folder.project_id ?? folder.path).sort().join("\n") : "";
   useEffect(() => { if (ready) void refreshProjects(); }, [ready]);
@@ -338,6 +425,7 @@ export function useSession(): Session {
       }
       setIntakeTick((value) => value + 1);
     },
+    followIntake: (id: string | null) => { followed.current = id; },
     refreshFound: () => setFoundTick((value) => value + 1),
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },

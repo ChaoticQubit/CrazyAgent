@@ -595,6 +595,8 @@ pub struct EngineService {
     temporary: Option<Identity>,
     locator: Option<PinnedLocator>,
     tasks: JoinSet<Result<(), EngineError>>,
+    /// The failure of the first listener found ended, given again by every later check.
+    listener_ended: Option<EngineError>,
     stops: Vec<oneshot::Sender<()>>,
     closed: bool,
 }
@@ -721,9 +723,26 @@ impl EngineService {
             .set_harness_search(search)
     }
 
-    /// Registers the native RCLI host for master turns and API-key writes.
-    /// Input: absolute path to the bundled `crazyagent-rcli` executable.
-    /// Output: Ok once both identities are captured before the runtime freezes.
+    /// Registers the RCLI host engine start found beside it or through the tool resolver
+    /// rather than was given by flag, pinned only once the real file pinned passes the start
+    /// checks and the entry still leads to it, as a found harness is (RV-DS241-140, DeepSec
+    /// -191), with that one capture in both roles (rv-sec2 B1 N2). Input: the absolute entry.
+    /// Output: Ok, or the refusal code.
+    pub fn register_found_rcli_executable(&mut self, entry: &Path) -> Result<(), EngineError> {
+        if self.closed {
+            return Err(fail("engine_service_closed"));
+        }
+        self.live()?;
+        let runtime = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?;
+        runtime.register_rcli_executables(runtime.capture_found(entry)?)
+    }
+
+    /// Registers the native RCLI host for master turns and API-key writes, one capture in
+    /// both roles. Input: absolute path to the bundled `crazyagent-rcli` executable.
+    /// Output: Ok once it is captured before the runtime freezes.
     pub fn register_rcli_executable(&mut self, executable: &Path) -> Result<(), EngineError> {
         if self.closed {
             return Err(fail("engine_service_closed"));
@@ -733,12 +752,9 @@ impl EngineService {
             .owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?;
-        let master =
-            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
-        let writer =
-            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
-        runtime.register_rcli_master_executable(master)?;
-        runtime.register_rcli_private_key_executable(writer)
+        runtime.register_rcli_executables(
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?,
+        )
     }
 
     pub async fn prepare_runner(
@@ -859,6 +875,7 @@ impl EngineService {
             temporary: None,
             locator: None,
             tasks: JoinSet::new(),
+            listener_ended: None,
             stops: Vec::new(),
             closed: false,
         };
@@ -1288,13 +1305,22 @@ impl EngineService {
         )
     }
 
+    /// Says whether both listeners still run. The first listener found ended is kept and
+    /// every later call gives its failure again, so a caller that goes on past one refusal
+    /// never meets a set with a listener missing. Output: Ok, or the kept failure.
     fn live(&mut self) -> Result<(), EngineError> {
         if let Some(result) = self.tasks.try_join_next() {
-            return match result {
-                Ok(Err(error)) => Err(error),
-                Err(error) => Err(io_error(error)),
-                Ok(Ok(())) => Err(fail("engine_listener_stopped_before_ready")),
+            let ended = match result {
+                Ok(Err(error)) => error,
+                Err(error) => io_error(error),
+                Ok(Ok(())) => fail("engine_listener_stopped_before_ready"),
             };
+            if self.listener_ended.is_none() {
+                self.listener_ended = Some(ended);
+            }
+        }
+        if let Some(ended) = &self.listener_ended {
+            return Err(ended.clone());
         }
         assert_eq!(self.tasks.len(), 2);
         Ok(())
@@ -1305,7 +1331,9 @@ impl EngineService {
             .owner_runtime
             .as_ref()
             .map(OwnerRuntimeHandle::reprove_in_background);
-        let result = if *shutdown.borrow() {
+        let result = if let Some(ended) = self.listener_ended.clone() {
+            Err(ended)
+        } else if *shutdown.borrow() {
             Ok(())
         } else {
             tokio::select! {
@@ -1537,6 +1565,48 @@ mod tests {
             .await
             .unwrap();
         engine.close().await.unwrap();
+    }
+
+    /// A listener that ended after the engine started keeps its first failure: every later
+    /// check, the readiness check and a run give that same failure instead of a panic, and
+    /// the run's cleanup still removes the locator (RV-DS241-56).
+    #[tokio::test]
+    async fn a_listener_that_ended_gives_its_failure_on_every_later_call() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        service.ensure_ready(&stopped).unwrap();
+        assert_eq!(service.stops.len(), 2);
+        assert!(service.stops.remove(1).send(()).is_ok());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let first = loop {
+            match service.live() {
+                Ok(()) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the listener never ended"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(first.0, "engine_listener_stopped_before_ready");
+        for _ in 0..3 {
+            assert_eq!(service.live(), Err(first.clone()));
+            assert_eq!(service.ensure_ready(&stopped), Err(first.clone()));
+        }
+        let ended = tokio::time::timeout(Duration::from_secs(5), service.run(stopped))
+            .await
+            .expect("a run gives the kept failure at once")
+            .unwrap_err();
+        assert!(ended.0.starts_with(&first.0), "{}", ended.0);
+        assert!(!root.path().join(LOCATOR).exists());
     }
 
     #[tokio::test]

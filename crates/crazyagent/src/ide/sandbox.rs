@@ -44,10 +44,12 @@ pub fn qualified() -> bool {
 }
 
 /// Builds the Seatbelt profile an IDE server process tree runs under. The base is the agent
-/// profile for the project folder: deny by default, system reads, the project writable except
-/// its git hooks, git config and context, the owner's secrets and keychain denied, the
-/// project's toolchains readable, `home` and `tmp` writable and the build readable. On top,
-/// the whole engine data root is denied, then only the grants are given back, with the base
+/// profile for the project folder, with `home` kept as the owner's own
+/// ([`ProjectSandbox::keep_owner_config`]): deny by default, system reads, the project
+/// writable except its git hooks, git config and context, the owner's secrets and keychain
+/// denied, the project's toolchains readable, `home` and `tmp` writable and the build
+/// readable. On top, the whole engine data root is denied, then only the grants are given
+/// back, with the base
 /// write denies in `home` and the writable folders given again after them
 /// ([`crate::sandbox::regranted_denies`]), then every key
 /// file directly in a folder of the data root (the owner keys) and the engine database are
@@ -56,8 +58,9 @@ pub fn qualified() -> bool {
 /// config and agent git folders in the project are denied for reading ([`agent_config`]),
 /// then the project's `.git/worktrees`, its agents' admin folders, for writing
 /// ([`agent_admin`]), then the owner's agent folders choice is held
-/// ([`AgentFilesRule::seatbelt`], DEC-124). The project's own git index and its lock stay
-/// denied: the IDE stages on a private index
+/// ([`AgentFilesRule::seatbelt`], DEC-124), then every path with a name HFS+ opens past a
+/// name deny ([`crate::sandbox::hfs_ignored_deny`]). The project's own git index and its
+/// lock stay denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
 /// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
@@ -114,6 +117,7 @@ pub fn profile(
         .and_then(|sandbox| sandbox.keep_ports(kept_ports))
         .and_then(|sandbox| sandbox.allow_read(grants.build))
         .and_then(|sandbox| sandbox.allow_tools(&Toolchains::detect(grants.root, &homes)))
+        .map(ProjectSandbox::keep_owner_config)
         .map_err(invalid)?;
     let mut text = sandbox.profile();
     let base = text.len();
@@ -157,6 +161,8 @@ pub fn profile(
     text.push_str(&agent_config(grants.root));
     text.push_str(&agent_admin(grants.root));
     text.push_str(&agent_files.seatbelt(grants.root));
+    let ignored = crate::sandbox::hfs_ignored_deny();
+    text.push_str(&ignored);
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
@@ -169,7 +175,7 @@ pub fn profile(
     assert!(!closed || !text.contains("(remote ip"));
     assert!(crate::sandbox::denies_follow_write_allows(
         &text,
-        &[regranted.trim_end().to_string()]
+        &[regranted.trim_end().to_string(), ignored]
     ));
     if text.len() > PROFILE_BYTES_MAX || !sbpl_overlong(&text).is_empty() {
         return Err(failure("ide_sandbox_invalid"));

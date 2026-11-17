@@ -1,9 +1,15 @@
 use super::canonical;
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 /// The most folders one project may keep its agents out of.
 pub const HIDDEN_PATHS_MAX: usize = 8;
+
+/// The length of one hidden folder's digest as an agent's launch records it, in hex.
+pub const DIGEST_HEX_LEN: usize = 32;
 
 const PATH_TEXT_MAX: usize = 1024;
 
@@ -13,6 +19,289 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_hidden_paths (
     path TEXT NOT NULL,
     PRIMARY KEY (project, position)
 )";
+
+const SEERS: &str = "team_hidden_seers";
+
+const SEERS_TABLE: &str = "CREATE TABLE IF NOT EXISTS team_hidden_seers (
+    agent INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    restart INTEGER NOT NULL DEFAULT 0 CHECK(restart IN (0, 1))
+)";
+
+/// Names one hidden folder as an agent's launch records it: the first 16 bytes of the
+/// SHA-256 of its canonical path in lowercase hex, so a pane record stays small.
+/// Input: the canonical folder. Output: the digest of `DIGEST_HEX_LEN` characters.
+pub fn digest(folder: &Path) -> String {
+    let bytes = Sha256::digest(folder.as_os_str().as_encoded_bytes());
+    let text: String = bytes[..DIGEST_HEX_LEN / 2]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(text.len(), DIGEST_HEX_LEN);
+    text
+}
+
+/// Tells whether a recorded digest has the shape [`digest`] writes: `DIGEST_HEX_LEN`
+/// lowercase hex characters. Input: the text. Output: the answer.
+pub fn digest_plain(text: &str) -> bool {
+    text.len() == DIGEST_HEX_LEN
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Tells whether an agent's sandbox keeps it out of every folder saved hidden now: each
+/// saved folder, or a folder above it, was hidden when the agent started. A launch that
+/// recorded no hidden folders, as a pane from before the engine kept them, hides none.
+/// Inputs: the digests its launch recorded and the saved folders. Output: the answer.
+pub fn covers(built: Option<&[String]>, saved: &[PathBuf]) -> bool {
+    assert!(saved.len() <= HIDDEN_PATHS_MAX);
+    assert!(built.is_none_or(|built| built.len() <= HIDDEN_PATHS_MAX));
+    saved.iter().all(|folder| {
+        built.is_some_and(|built| {
+            folder
+                .ancestors()
+                .any(|above| built.contains(&digest(above)))
+        })
+    })
+}
+
+/// Replaces the running agents of one project that can still open a folder hidden after
+/// they started, writing only when the set changed; an agent kept on the list keeps the
+/// owner's restart ask. Inputs: the engine connection, the project id and the agents.
+/// Output: done, or the database error.
+pub fn set_seers(
+    connection: &Connection,
+    project: &str,
+    agents: &BTreeSet<i64>,
+) -> rusqlite::Result<()> {
+    let listed = seers(connection, project)?;
+    if &listed == agents {
+        return Ok(());
+    }
+    let tx = connection.unchecked_transaction()?;
+    tx.execute(SEERS_TABLE, [])?;
+    for gone in listed.difference(agents) {
+        tx.execute(
+            "DELETE FROM team_hidden_seers WHERE agent=?1 AND project=?2",
+            params![gone, project],
+        )?;
+    }
+    for agent in agents.difference(&listed) {
+        tx.execute(
+            "INSERT OR REPLACE INTO team_hidden_seers(agent, project, restart) VALUES (?1, ?2, 0)",
+            params![agent, project],
+        )?;
+    }
+    tx.commit()
+}
+
+/// Drops one project's list of agents that can still open a hidden folder, as removing
+/// the project does. Inputs: the open transaction and the project id. Output: done, or the
+/// database error.
+pub fn forget_seers(connection: &Connection, project: &str) -> rusqlite::Result<()> {
+    if present(connection)? {
+        connection.execute("DELETE FROM team_hidden_seers WHERE project=?1", [project])?;
+    }
+    Ok(())
+}
+
+/// Tells whether the engine ever kept a list of agents that can still open a hidden
+/// folder. Input: the connection. Output: the answer, or the database error.
+fn present(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [SEERS],
+        |row| row.get(0),
+    )
+}
+
+/// Reads one project's listed agents, only those the owner asked to restart when `asked`
+/// holds. Inputs: the connection, the project id and the choice. Output: their ids, none
+/// without a list, or the database error.
+fn listed(connection: &Connection, project: &str, asked: bool) -> rusqlite::Result<BTreeSet<i64>> {
+    if !present(connection)? {
+        return Ok(BTreeSet::new());
+    }
+    let mut statement = connection.prepare(if asked {
+        "SELECT agent FROM team_hidden_seers WHERE project=?1 AND restart=1"
+    } else {
+        "SELECT agent FROM team_hidden_seers WHERE project=?1"
+    })?;
+    statement.query_map([project], |row| row.get(0))?.collect()
+}
+
+/// Reads the agents of one project listed as able to open a folder hidden after they
+/// started; a database without the list has none. Inputs: the connection and the project
+/// id. Output: their ids.
+pub fn seers(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
+    listed(connection, project, false)
+}
+
+/// Asks every listed agent of one project to restart, as the owner's Restart them does.
+/// Inputs: the open transaction and the project id. Output: how many listed agents were
+/// asked, none for a project with none listed, or the database error.
+pub fn ask_restart(connection: &Connection, project: &str) -> rusqlite::Result<usize> {
+    if !present(connection)? {
+        return Ok(0);
+    }
+    connection.execute(
+        "UPDATE team_hidden_seers SET restart=1 WHERE project=?1",
+        [project],
+    )
+}
+
+/// Reads the listed agents of one project the owner asked to restart. Inputs: the
+/// connection and the project id. Output: their ids.
+pub fn restarts(connection: &Connection, project: &str) -> rusqlite::Result<BTreeSet<i64>> {
+    listed(connection, project, true)
+}
+
+/// The most engine runs the hidden folders run list holds at once; a run that would pass it
+/// is refused as if its hidden folders could not be read, so the list never misses one.
+const RUNS_MAX: usize = 256;
+
+/// One kind of engine run, not a team agent, that hides a project's saved folders from its
+/// own start (SA-VID14-R2-N2): headless master turns (SA-VID14-MASTER-TURNS), research
+/// jobs, the overview, roadmap and onboarding agents, code graph builds and lockfile
+/// rebuilds. An instructions cleanup run reads only an empty
+/// engine folder, so it never sees a project folder and is not one.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    Master,
+    Research,
+    Overview,
+    Roadmap,
+    Onboarding,
+    CodeGraph,
+    Lockfiles,
+}
+
+/// One running engine run as the list keeps it: its project and the folders it hid as
+/// [`digest`]s, none until it has read them, and its kind. No path or project text is kept.
+struct Running {
+    project: String,
+    hidden: Option<Vec<String>>,
+    kind: RunKind,
+}
+
+/// The engine runs now running that hid folders from their start, by a key their
+/// [`HiddenRun`] holds, at most [`RUNS_MAX`].
+struct Registry {
+    runs: BTreeMap<u64, Running>,
+    next: u64,
+}
+
+impl Registry {
+    const fn new() -> Self {
+        Self {
+            runs: BTreeMap::new(),
+            next: 0,
+        }
+    }
+
+    /// Lists one run under a key never handed out before. Input: the run. Output: its key,
+    /// or none when the list is full or the keys ran out.
+    fn add(&mut self, running: Running) -> Option<u64> {
+        assert!(digest_plain(&running.project));
+        assert!(
+            running
+                .hidden
+                .as_ref()
+                .is_none_or(|hidden| hidden.len() <= HIDDEN_PATHS_MAX)
+        );
+        if self.runs.len() >= RUNS_MAX {
+            return None;
+        }
+        let key = self.next;
+        self.next = key.checked_add(1)?;
+        let fresh = self.runs.insert(key, running).is_none();
+        assert!(fresh);
+        assert!(self.runs.len() <= RUNS_MAX);
+        Some(key)
+    }
+
+    /// Takes one run off the list. Input: the key [`Registry::add`] gave it.
+    fn remove(&mut self, key: u64) {
+        let removed = self.runs.remove(&key);
+        assert!(removed.is_some());
+    }
+
+    /// Names the kinds of one project's runs whose start hid neither a saved folder nor a
+    /// folder above it, each once. Inputs: the project digest and the saved folders.
+    /// Output: the kinds in their order.
+    fn seeing(&self, project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
+        assert!(digest_plain(project));
+        let kinds: BTreeSet<RunKind> = self
+            .runs
+            .values()
+            .filter(|run| run.project == project && !covers(run.hidden.as_deref(), saved))
+            .map(|run| run.kind)
+            .collect();
+        kinds.into_iter().collect()
+    }
+}
+
+static RUNS: Mutex<Registry> = Mutex::new(Registry::new());
+
+/// Held by one engine run for its whole life, from before it reads its hidden folders until
+/// it ends; dropping it, on a return, an error or a panic, takes the run off the list.
+#[must_use = "the run is listed only while this is held"]
+#[derive(Debug)]
+pub struct HiddenRun(u64);
+
+impl HiddenRun {
+    /// Records, once, the folders this run's sandbox hides after it has read them, so from
+    /// then on only a folder saved hidden later names it (SA-VID14 r1). Input: the folders,
+    /// at most [`HIDDEN_PATHS_MAX`], none for a run that is not confined.
+    pub fn hid(&self, hidden: &[PathBuf]) {
+        assert!(hidden.len() <= HIDDEN_PATHS_MAX);
+        let digests = hidden.iter().map(|folder| digest(folder)).collect();
+        let mut runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+        let run = runs.runs.get_mut(&self.0);
+        assert!(run.as_ref().is_some_and(|run| run.hidden.is_none()));
+        if let Some(run) = run {
+            run.hidden = Some(digests);
+        }
+    }
+}
+
+impl Drop for HiddenRun {
+    fn drop(&mut self) {
+        RUNS.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(self.0);
+    }
+}
+
+/// Puts one engine run on the list as it starts, before it reads the project's saved hidden
+/// folders, keeping only a digest of its project and its kind, so a hide saved meanwhile
+/// never misses it: until [`HiddenRun::hid`] records what it hid, it hides nothing. Inputs:
+/// the kind and the project id. Output: the guard to hold until it ends, or none when full.
+pub fn starting(kind: RunKind, project: &str) -> Option<HiddenRun> {
+    let entry = Running {
+        project: digest(Path::new(project)),
+        hidden: None,
+        kind,
+    };
+    let key = RUNS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .add(entry)?;
+    Some(HiddenRun(key))
+}
+
+/// Names the kinds of one project's running engine runs that can still open a folder saved
+/// hidden now, each once: those whose start hid neither it nor a folder above it. Inputs:
+/// the project id and the saved folders. Output: the kinds in their order.
+pub fn runs_seeing(project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
+    RUNS.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .seeing(&digest(Path::new(project)), saved)
+}
 
 /// Checks one folder the owner wants this project's agents kept out of: an absolute existing
 /// folder, taken in its canonical form, that sits strictly inside the project root. A folder
@@ -220,6 +509,14 @@ pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lists one run as a seam does: before its load, then what it hid. Inputs: the kind,
+    /// the project id and the folders. Output: the guard.
+    fn listed_run(kind: RunKind, project: &str, hidden: &[PathBuf]) -> HiddenRun {
+        let run = starting(kind, project).unwrap();
+        run.hid(hidden);
+        run
+    }
     use rusqlite::Connection;
 
     fn project() -> tempfile::TempDir {
@@ -438,5 +735,324 @@ mod tests {
         assert_eq!(load(&connection, "app").unwrap(), paths);
         save(&connection, "app", &[]).unwrap();
         assert!(load(&connection, "app").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_agent_sees_a_hidden_folder_unless_it_or_a_folder_above_was_hidden_at_its_start() {
+        let secrets = PathBuf::from("/tmp/app/secrets");
+        let inner = secrets.join("keys");
+        let vendor = PathBuf::from("/tmp/app/vendor");
+        let built = vec![digest(&secrets)];
+        assert!(digest_plain(&built[0]), "{}", built[0]);
+        assert_ne!(digest(&secrets), digest(&vendor));
+        assert!(covers(Some(&built), std::slice::from_ref(&secrets)));
+        assert!(
+            covers(Some(&built), std::slice::from_ref(&inner)),
+            "a folder above it was hidden"
+        );
+        assert!(!covers(Some(&built), &[secrets.clone(), vendor.clone()]));
+        assert!(
+            !covers(Some(&[]), std::slice::from_ref(&secrets)),
+            "started before the hide"
+        );
+        assert!(
+            !covers(None, &[inner]),
+            "a launch that kept no list hides none"
+        );
+        assert!(covers(None, &[]), "nothing hidden, nothing to see");
+        assert!(
+            !digest_plain("ABCDEF"),
+            "upper case or short is not a digest"
+        );
+    }
+
+    #[test]
+    fn listed_agents_keep_their_restart_ask_until_they_leave_the_list() {
+        let connection = Connection::open_in_memory().unwrap();
+        assert!(seers(&connection, "app").unwrap().is_empty());
+        assert_eq!(ask_restart(&connection, "app").unwrap(), 0, "none listed");
+        let both = BTreeSet::from([3, 4]);
+        set_seers(&connection, "app", &both).unwrap();
+        set_seers(&connection, "web", &BTreeSet::from([9])).unwrap();
+        assert_eq!(seers(&connection, "app").unwrap(), both);
+        assert!(restarts(&connection, "app").unwrap().is_empty());
+        assert_eq!(ask_restart(&connection, "app").unwrap(), 2);
+        assert_eq!(restarts(&connection, "app").unwrap(), both);
+        assert!(
+            restarts(&connection, "web").unwrap().is_empty(),
+            "one project only"
+        );
+        set_seers(&connection, "app", &BTreeSet::from([4, 5])).unwrap();
+        assert_eq!(seers(&connection, "app").unwrap(), BTreeSet::from([4, 5]));
+        assert_eq!(restarts(&connection, "app").unwrap(), BTreeSet::from([4]));
+        set_seers(&connection, "app", &BTreeSet::new()).unwrap();
+        assert!(seers(&connection, "app").unwrap().is_empty());
+        assert_eq!(seers(&connection, "web").unwrap(), BTreeSet::from([9]));
+    }
+
+    /// SA-VID14-R2-N2: an engine run that started before a folder was hidden is listed by
+    /// its kind until it ends; one whose start hid the folder, or a folder above it, is
+    /// not, and another project's list never shows it.
+    #[test]
+    fn a_run_started_before_a_folder_was_hidden_is_listed_by_kind_until_it_ends() {
+        let project = "n2-listed";
+        let (above, inside, other) = (
+            PathBuf::from("/tmp/n2-listed/vault"),
+            PathBuf::from("/tmp/n2-listed/vault/keys"),
+            PathBuf::from("/tmp/n2-listed/dump"),
+        );
+        let research = listed_run(RunKind::Research, project, std::slice::from_ref(&above));
+        assert!(runs_seeing(project, std::slice::from_ref(&inside)).is_empty());
+        assert_eq!(
+            runs_seeing(project, &[inside.clone(), other.clone()]),
+            vec![RunKind::Research]
+        );
+        assert!(runs_seeing("n2-listed-elsewhere", std::slice::from_ref(&other)).is_empty());
+        let overview = listed_run(RunKind::Overview, project, &[above.clone(), other.clone()]);
+        let twice = listed_run(RunKind::Research, project, &[]);
+        assert_eq!(
+            runs_seeing(project, &[inside.clone(), other.clone()]),
+            vec![RunKind::Research],
+            "a kind is named once, and a run that hid both is not named"
+        );
+        drop((research, twice));
+        assert!(runs_seeing(project, &[inside, other]).is_empty());
+        drop(overview);
+    }
+
+    /// SA-VID14-R2-N2 (leader 08:04): a run leaves the list on every exit, a normal
+    /// return, an early error return and a panic.
+    #[test]
+    fn a_run_leaves_the_list_on_every_exit_path() {
+        let project = "n2-exits";
+        let saved = [PathBuf::from("/tmp/n2-exits/secret")];
+        let held = listed_run(RunKind::Roadmap, project, &[]);
+        assert_eq!(runs_seeing(project, &saved), vec![RunKind::Roadmap]);
+        drop(held);
+        assert!(runs_seeing(project, &saved).is_empty(), "a return");
+
+        let refused = || -> Result<(), &'static str> {
+            let run = starting(RunKind::Lockfiles, project).ok_or("full")?;
+            run.hid(&[]);
+            assert_eq!(runs_seeing(project, &saved), vec![RunKind::Lockfiles]);
+            Err("sandbox_refused")?;
+            Ok(())
+        };
+        assert_eq!(refused(), Err("sandbox_refused"));
+        assert!(
+            runs_seeing(project, &saved).is_empty(),
+            "an early error return"
+        );
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _run = listed_run(RunKind::Onboarding, project, &[]);
+            assert_eq!(runs_seeing(project, &saved), vec![RunKind::Onboarding]);
+            panic!("the run ended in a panic");
+        });
+        let payload = panicked.unwrap_err();
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the run ended in a panic"),
+            "the run panicked after it was listed, not in an assert"
+        );
+        assert!(runs_seeing(project, &saved).is_empty(), "a panic");
+    }
+
+    /// SA-VID14-R2-N2 (leader 08:04): the list keeps digests and the run kind only, never a
+    /// folder path or the project id.
+    #[test]
+    fn the_run_list_holds_digests_and_kinds_only() {
+        let project = "n2-plain-project";
+        let secret = PathBuf::from("/tmp/n2-plain/secret-plain");
+        let _run = listed_run(RunKind::CodeGraph, project, std::slice::from_ref(&secret));
+        let runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+        let ours: Vec<&Running> = runs
+            .runs
+            .values()
+            .filter(|run| run.project == digest(Path::new(project)))
+            .collect();
+        assert_eq!(ours.len(), 1, "the run is kept while it runs");
+        let run = ours[0];
+        assert_eq!(run.kind, RunKind::CodeGraph);
+        assert!(digest_plain(&run.project));
+        assert_eq!(run.hidden, Some(vec![digest(&secret)]));
+        for kept in std::iter::once(&run.project).chain(run.hidden.iter().flatten()) {
+            assert!(digest_plain(kept), "{kept}");
+            assert!(
+                !kept.contains("n2-plain") && !kept.contains("secret"),
+                "{kept}"
+            );
+        }
+    }
+
+    /// SA-VID14-R2-N2: the list refuses a run past its bound, so callers fail closed, and
+    /// takes one again once a run ends; keys are never reused.
+    #[test]
+    fn the_run_list_refuses_past_its_bound_and_takes_one_again_once_one_ends() {
+        let mut registry = Registry::new();
+        let entry = || Running {
+            project: digest(Path::new("n2-bound")),
+            hidden: None,
+            kind: RunKind::Research,
+        };
+        let keys: Vec<u64> = (0..RUNS_MAX)
+            .map(|_| registry.add(entry()).unwrap())
+            .collect();
+        assert_eq!(
+            keys.iter().collect::<BTreeSet<_>>().len(),
+            RUNS_MAX,
+            "every key is new"
+        );
+        assert_eq!(registry.add(entry()), None, "a full list refuses");
+        assert_eq!(registry.runs.len(), RUNS_MAX);
+        registry.remove(keys[0]);
+        let again = registry.add(entry()).unwrap();
+        assert!(!keys.contains(&again), "a key is never reused");
+        assert_eq!(registry.runs.len(), RUNS_MAX);
+    }
+
+    /// SA-VID14-R2-N2: every source file that loads a project's saved hidden folders was
+    /// checked against the run list. Those that start an engine run hold its guard for each
+    /// kind; the rest are team agents (SA-VID14-A), the master turn bundle whose guard sits in
+    /// master_runtime.rs, or reads that feed no sandbox. A new loader fails until classified.
+    #[test]
+    fn every_loader_of_saved_hidden_folders_holds_the_guard_or_is_classified() {
+        let guarded: BTreeMap<&str, &[&str]> = BTreeMap::from([
+            (
+                "landing/lockfiles.rs",
+                &["RunKind::Lockfiles", "listed.hid(&hidden)"][..],
+            ),
+            (
+                "onboarding/service.rs",
+                &[
+                    "RunKind::CodeGraph",
+                    "listed.hid(&hidden)",
+                    "std::mem::forget(listed)",
+                ][..],
+            ),
+            (
+                "research/runner.rs",
+                &["RunKind::Research", "run.kind", "listed.hid(&hidden)"][..],
+            ),
+            (
+                "engine/owner/transport/master_runtime.rs",
+                &[
+                    "RunKind::Master",
+                    "listed.hid(master_turn_hides(&prepared))",
+                    "if active.host.settled()",
+                ][..],
+            ),
+        ]);
+        let classified = BTreeSet::from([
+            "demo.rs",
+            "project_overview/agent.rs",
+            "project_overview/run.rs",
+            "research/jobs.rs",
+            "roadmap_status/run.rs",
+            "storage.rs",
+            "storage/master_session.rs",
+            "team/runtime.rs",
+        ]);
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut folders = vec![src.clone()];
+        let mut loaders = BTreeSet::new();
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    if path.file_name() != Some("tests".as_ref()) {
+                        folders.push(path);
+                    }
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_str().unwrap();
+                if path.extension() != Some("rs".as_ref())
+                    || name == "tests.rs"
+                    || name.ends_with("_tests.rs")
+                {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&src)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                if relative != "sandbox/hidden_paths.rs"
+                    && std::fs::read_to_string(&path)
+                        .unwrap()
+                        .contains("hidden_paths::load(")
+                {
+                    loaders.insert(relative);
+                }
+            }
+        }
+        assert!(
+            loaders.len() >= classified.len(),
+            "the walk read the sources"
+        );
+        for loader in &loaders {
+            assert!(
+                guarded.contains_key(loader.as_str()) || classified.contains(loader.as_str()),
+                "{loader} loads saved hidden folders: hold the run list guard or classify it"
+            );
+        }
+        for (file, kinds) in &guarded {
+            let source = std::fs::read_to_string(src.join(file)).unwrap();
+            assert!(source.contains("hidden_paths::starting("), "{file}");
+            for kind in *kinds {
+                assert!(source.contains(kind), "{file} lists {kind}");
+            }
+            assert!(
+                source.matches("std::mem::forget(listed)").count()
+                    >= source.matches("std::mem::forget(lease)").count(),
+                "{file}: every exit that keeps a lease because its processes may still run keeps its run named"
+            );
+        }
+    }
+
+    /// SA-VID14 r1 (rv-code4 F1, rv-sec2 F2): a run is listed before it reads the saved
+    /// hidden folders, so a hide saved meanwhile names it. Until it records what it hid it
+    /// counts as hiding nothing; after, only folders it did not hide name it.
+    #[test]
+    fn a_run_listed_before_its_load_is_named_for_any_saved_folder_until_it_records_its_folders() {
+        let project = "n2-before-load";
+        let (vault, dump) = (
+            PathBuf::from("/tmp/n2-before-load/vault"),
+            PathBuf::from("/tmp/n2-before-load/dump"),
+        );
+        let run = starting(RunKind::Research, project).unwrap();
+        assert!(
+            runs_seeing(project, &[]).is_empty(),
+            "nothing saved, nothing named"
+        );
+        assert_eq!(
+            runs_seeing(project, std::slice::from_ref(&vault)),
+            vec![RunKind::Research],
+            "a hide saved before its load names it"
+        );
+        run.hid(std::slice::from_ref(&vault));
+        assert!(
+            runs_seeing(project, std::slice::from_ref(&vault)).is_empty(),
+            "a folder it hid does not"
+        );
+        assert_eq!(
+            runs_seeing(project, &[vault, dump]),
+            vec![RunKind::Research],
+            "a folder hidden after its load does"
+        );
+        drop(run);
+    }
+
+    /// SA-VID14 r1 (rv-sec2 F1): a run whose stop was uncertain, or whose processes the
+    /// owner keeps, forgets its guard as it forgets its lease, so it stays named while its
+    /// processes may still run, until the engine starts again.
+    #[test]
+    fn a_run_left_running_stays_named_after_its_launch_returns() {
+        let project = "n2-left-running";
+        let saved = [PathBuf::from("/tmp/n2-left-running/secret")];
+        let run = listed_run(RunKind::Research, project, &[]);
+        std::mem::forget(run);
+        assert_eq!(runs_seeing(project, &saved), vec![RunKind::Research]);
     }
 }

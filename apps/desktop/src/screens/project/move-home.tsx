@@ -1,63 +1,29 @@
 import { useContext, useEffect, useRef, useState } from "react";
-import { nextGeneration, setTeamStopped } from "../../api";
+import { setTeamStopped } from "../../api";
 import type { Result } from "../../api";
-import { ADD_WARNINGS, cancelIcloudDownload, downloadFromIcloud, intakeCopy, loadFolderSize, loadIcloudProgress, loadProjectsHome } from "../../api-intake";
-import { moveProjectHome, receiptState } from "../../api-projects";
+import { ADD_WARNINGS, loadFolderSize, loadProjectsHome, moveCopy } from "../../api-intake";
+import { moveProjectHome } from "../../api-projects";
 import type { StoredSetup } from "../../api-projects";
-import type { AddFolderMode, AddOverride, FolderSize, IcloudProgress, IntentReceipt } from "../../engine-client";
+import type { AddFolderMode, AddOverride, FolderSize, IntakeJob, IntentReceipt } from "../../engine-client";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, Notice, Segmented } from "../../ui";
 import { displayText } from "../conversation";
-import { AnywayDialog, ICloudDialog } from "../intake/add-folder";
-import {
-  ICLOUD_PROGRESS_MS, anywayIssues, anywayOverrides, asksAgain, folderName, icloudOutcome, icloudPlaceholders, icloudRun, joinPath, sizeLine, worktreesLine,
-} from "../intake/intake";
+import { AnywayDialog } from "../intake/add-folder";
+import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, refusalLine, sizeLine, worktreesLine } from "../intake/intake";
 import { folderLabel, projectFolder } from "./overview";
 import type { ProjectData } from "./shared";
+
+export { moveCopy };
 
 const WAYS: { value: AddFolderMode; label: string; icon: "folder-input" | "copy" }[] = [
   { value: "move", label: "Move", icon: "folder-input" },
   { value: "copy", label: "Copy", icon: "copy" },
 ];
 
-const MOVE_COPY: Record<string, string> = {
-  move_project_busy: "The team is still stopping, or research or a change is still running. Move again in a few seconds.",
-  move_project_master_session: "The master is still working in its own copy of this project. Let it finish, then move.",
-  move_project_already_home: "This project is already in your CrazyAgent folder.",
-  move_project_copy_worktrees: "An agent works in a git worktree of this project, which a copy would leave behind. Move the project instead.",
-  move_project_folder_link: "This project's folder is reached through a link, so it can't be moved from here.",
-  move_project_in_progress: "A project is being moved. Try again when it is done.",
-  move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
-  move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
-  move_project_old_folder_left: "The project moved, but part of its old folder couldn't be deleted. What's left there may be newer than the copy, so check it before you delete anything.",
-  home_move_project: "Another project uses this folder too, so it can't be moved or copied.",
-};
-
-/** The code the engine answers when the project was moved and recorded in the projects folder,
- * and part of its old folder could not be deleted. It is a finished move, not a refusal. */
-export const OLD_FOLDER_LEFT = "move_project_old_folder_left";
-
-/** What the owner is told once a project is in the projects folder. Inputs: the project name,
- * move or copy, the old folder and whether part of it could not be deleted. Output: the notice,
- * which names the old folder when something is left in it. */
-export function movedNotice(name: string, way: AddFolderMode, folder: string, left: boolean): string {
-  const team = "The team is stopped; start it again from Team.";
-  if (way === "copy") return `${name} now uses the copy in your CrazyAgent folder. ${team}`;
-  if (!left) return `${name} is now in your CrazyAgent folder. ${team}`;
-  return `${name} is now in your CrazyAgent folder. Some items in the old folder couldn't be deleted and may be newer than the copy: check ${folderLabel(folder)} before you delete anything. ${team}`;
-}
-
 /** Whether a project folder is the projects folder or inside it. Inputs: the project folder and
  * the projects folder, null when the owner has not picked one. Output: the answer. */
 export function insideHome(folder: string, home: string | null): boolean {
   return home !== null && (folder === home || folder.startsWith(`${home}/`));
-}
-
-/** Plain sentence for one refusal of a project move. Input: the code, or the failure with the
- * engine cause behind it. Output: the move copy, else the add-folder and app copy. */
-export function moveCopy(failure: string | { code: string; cause?: string }): string {
-  const code = typeof failure === "string" ? failure : failure.code;
-  return Object.hasOwn(MOVE_COPY, code) ? MOVE_COPY[code] : intakeCopy(failure);
 }
 
 /** The settings row that offers moving a project kept where it is into the projects folder.
@@ -74,16 +40,18 @@ export function MoveHomeRow({ folder, home, onOpen }: { folder: string; home: st
 
 export interface MoveSteps {
   stop: (id: string, stopped: boolean) => Promise<Result<IntentReceipt>>;
-  move: (id: string, mode: AddFolderMode, overrides: AddOverride[]) => Promise<Result<IntentReceipt>>;
+  move: (id: string, mode: AddFolderMode, overrides: AddOverride[]) => Promise<Result<IntakeJob>>;
 }
 
-/** Stops the project's team, then moves or copies the project, only once the stop was applied
+/** Stops the project's team, then starts the engine's move job, only once the stop was applied
  * (DEC-132 Q11). Inputs: the project id, move or copy, the soft refusals the owner chose to go
- * past and the two engine calls. Output: whether the team was stopped and the result of the
- * step that ended the run: the stop that was not applied, else the move. */
-export async function stopThenMove(id: string, mode: AddFolderMode, overrides: AddOverride[], steps: MoveSteps): Promise<{ stopped: boolean; result: Result<IntentReceipt> }> {
+ * past and the two engine calls. Output: whether the team was stopped and the result of the step
+ * that ended the run: the stop's failure or refusal, else the started job. */
+export async function stopThenMove(id: string, mode: AddFolderMode, overrides: AddOverride[], steps: MoveSteps): Promise<{ stopped: boolean; result: Result<IntakeJob> }> {
   const stop = await steps.stop(id, true);
-  if (stop.kind !== "ok" || receiptState(stop.value).kind !== "applied") return { stopped: false, result: stop };
+  if (stop.kind !== "ok") return { stopped: false, result: stop };
+  const refusal = receiptRefusal(stop.value);
+  if (refusal !== null) return { stopped: false, result: { kind: "error", code: refusal, message: moveCopy(refusal) } };
   return { stopped: true, result: await steps.move(id, mode, overrides) };
 }
 
@@ -129,11 +97,12 @@ export function MoveHomeDialog({ open, name, folder, home, way, size, busy, prob
 }
 
 /** Move into CrazyAgent folder, for a project kept where the owner made it: the settings row,
- * the Move or Copy question, the add-folder "anyway" question for a folder with issues and the
- * iCloud download first for files only in iCloud. Confirming stops the team, then asks the engine
- * to move the folder and point the project and its agents' copies at the new place. Inputs: the
- * project data and its saved setup. Output: the row with its dialogs, or nothing for a project
- * already in the projects folder. */
+ * the Move or Copy question and the add-folder "anyway" question for a folder with issues.
+ * Confirming stops the team, then starts the engine's move job, which the owner follows on Home
+ * while they keep working: it downloads what is only in iCloud, waits for the agents, moves the
+ * folder and points the project and its agents' copies at the new place (DEC-177). The page
+ * reads the project again once that job ended. Inputs: the project data and its saved setup.
+ * Output: the row with its dialogs, or nothing for a project already in the projects folder. */
 export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name" | "notify" | "reload">; setup: StoredSetup }) {
   const session = useContext(SessionContext);
   const [home] = useLoad(loadProjectsHome, [], "projects-home");
@@ -146,13 +115,9 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   const [refused, setRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
-  const [icloud, setIcloud] = useState<{ placeholders: number | null } | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const [progress, setProgress] = useState<IcloudProgress | null>(null);
-  const [stopping, setStopping] = useState(false);
-  const run = useRef<ReturnType<typeof icloudRun> | null>(null);
-  const downloaded = useRef(false);
-  useEffect(() => () => run.current?.leave(), []);
+  const [started, setStarted] = useState<string | null>(null);
+  const seen = useRef(false);
+  const job = session?.intake ?? null;
   useEffect(() => {
     if (!open) return;
     let live = true;
@@ -160,6 +125,15 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     void loadFolderSize(folder).then((read) => { if (live) setSize(read); });
     return () => { live = false; };
   }, [open, folder]);
+  useEffect(() => {
+    if (started === null) return;
+    const ours = job !== null && job.id === started;
+    if (ours && jobRunning(job)) { seen.current = true; return; }
+    if (!ours && !seen.current) return;
+    seen.current = false;
+    setStarted(null);
+    data.reload();
+  }, [started, job]);
   if (root === null || insideHome(folder, root)) return null;
   const name = data.name || folderName(folder);
 
@@ -167,34 +141,28 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     setOpen(false);
     setAsking(false);
     setRefused(null);
-    setIcloud(null);
   };
 
   const move = async (overrides: AddOverride[], chosen: AddFolderMode = way) => {
     if (busy) return;
     setBusy(true);
     setProblem("");
-    const { stopped, result } = await stopThenMove(data.id, chosen, overrides, {
-      stop: setTeamStopped,
-      move: (id, mode, sent) => moveProjectHome(id, mode, sent, nextGeneration()),
-    });
+    const { stopped, result } = await stopThenMove(data.id, chosen, overrides, { stop: setTeamStopped, move: moveProjectHome });
     setBusy(false);
     setAsking(false);
     setRefused(null);
     const after = stopped ? " The team stays stopped; start it again from Team when you're ready." : "";
     if (result.kind === "not_ready") { setProblem("Moving a project isn't in this build."); return; }
-    const state = result.kind === "ok" ? receiptState(result.value) : null;
-    const code = result.kind === "error" ? result.code : state?.kind === "rejected" ? state.code : null;
-    if (stopped && code !== null && asksAgain(code, overrides)) { setRefused(code); setAsking(true); return; }
-    if (stopped && code === "home_icloud_not_downloaded" && !downloaded.current) { setIcloud({ placeholders: null }); return; }
-    const left = code === OLD_FOLDER_LEFT;
-    if (result.kind === "error" && !left) { setProblem(`${moveCopy(result)}${after}`); return; }
-    if (state?.kind === "rejected" && !left) { setProblem(`${moveCopy(state)}${after}`); return; }
-    if (state?.kind === "unconfirmed") { setProblem(`We couldn't confirm the move. Check the project folder before trying again.${after}`); return; }
+    if (result.kind === "error") {
+      if (stopped && asksAgain(result.code, overrides)) { setRefused(result.code); setAsking(true); return; }
+      setProblem(`${await refusalLine(result.code, moveCopy(result))}${after}`);
+      return;
+    }
     close();
-    await session?.refreshProjects();
-    data.notify(movedNotice(name, chosen, folder, left));
-    data.reload();
+    seen.current = false;
+    setStarted(result.value.id);
+    session?.refreshIntake(result.value);
+    data.notify(`Moving ${name}. Follow it on Home; you can keep working.`);
   };
 
   const proceed = (chosen: AddFolderMode) => {
@@ -202,44 +170,12 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     else void move([], chosen);
   };
 
-  const confirm = () => {
-    const placeholders = icloudPlaceholders(size);
-    if (placeholders > 0 && !downloaded.current) setIcloud({ placeholders });
-    else proceed(way);
-  };
-
-  const download = async (chosen: AddFolderMode) => {
-    if (downloading) return;
-    setWay(chosen);
-    setDownloading(true);
-    setProgress(null);
-    setProblem("");
-    const watching = icloudRun(
-      () => void cancelIcloudDownload(),
-      () => void loadIcloudProgress().then((read) => { if (read.kind === "ok" && read.value) setProgress(read.value); }),
-      ICLOUD_PROGRESS_MS,
-    );
-    run.current = watching;
-    const result = await downloadFromIcloud(folder);
-    const outcome = icloudOutcome(watching.end(), result);
-    run.current = null;
-    if (outcome.next === "none") return;
-    setDownloading(false);
-    setStopping(false);
-    setIcloud(null);
-    if (outcome.next === "add") { downloaded.current = true; proceed(chosen); return; }
-    setProblem(outcome.text);
-  };
-
   return <>
     <MoveHomeRow folder={folder} home={root} onOpen={() => { setProblem(""); setOpen(true); }} />
-    <MoveHomeDialog open={open && !asking && icloud === null} name={displayText(name)} folder={folder} home={root} way={way} size={size} busy={busy}
-      problem={problem} onWay={setWay} onConfirm={confirm} onCancel={close} />
-    <AnywayDialog open={open && asking} way={way} name={displayText(name)} size={size} refused={refused} busy={busy}
+    <MoveHomeDialog open={open && !asking} name={displayText(name)} folder={folder} home={root} way={way} size={size} busy={busy}
+      problem={problem} onWay={setWay} onConfirm={() => proceed(way)} onCancel={close} />
+    <AnywayDialog open={open && asking} way={way} name={displayText(name)} size={size} refused={refused} busy={busy} keepLabel="Keep it here"
       onUseHere={close} onAnyway={() => void move(anywayOverrides(way, anywayIssues(way, size, refused), size))}
       onCancel={() => { setAsking(false); setRefused(null); }} />
-    {icloud && <ICloudDialog open={open} name={displayText(name)} source={folder} placeholders={icloud.placeholders} way={way}
-      downloading={downloading} progress={progress} stopping={stopping} onDownload={(chosen) => void download(chosen)}
-      onStop={() => { setStopping(true); run.current?.stop(); }} onCancel={() => setIcloud(null)} />}
   </>;
 }

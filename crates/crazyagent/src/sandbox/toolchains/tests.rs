@@ -740,3 +740,102 @@ fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
     assert!(fs::symlink_metadata(without.join(".cargo/registry")).is_err());
     assert!(without.join(".cargo/git/db").is_dir());
 }
+
+/// RV-DS241-199: launches that prepare one home at once, as two IDE terminals of one project
+/// opening together do, all get its cargo home: one that finds the link another launch just
+/// made at a name it saw free takes it, and every name links to the owner's cache.
+#[cfg(unix)]
+#[test]
+fn launches_that_prepare_one_cargo_home_at_once_all_get_it() {
+    const LAUNCHES: usize = 8;
+    const HOMES: usize = 64;
+    let scratch = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(scratch.path()).unwrap();
+    let owner = root.join("owner");
+    for name in CARGO_SHARED {
+        fs::create_dir_all(owner.join(".cargo").join(name)).unwrap();
+    }
+    let homes = ToolHomes::at(&owner);
+    let mut refused = Vec::new();
+    for round in 0..HOMES {
+        let home = root.join(format!("home-{round}"));
+        fs::create_dir(&home).unwrap();
+        let start = std::sync::Barrier::new(LAUNCHES);
+        let (start, home, homes) = (&start, &home, &homes);
+        let results: Vec<io::Result<PathBuf>> = std::thread::scope(|scope| {
+            let launches: Vec<_> = (0..LAUNCHES)
+                .map(|_| {
+                    scope.spawn(move || {
+                        start.wait();
+                        prepare_cargo_home(home, homes)
+                    })
+                })
+                .collect();
+            launches
+                .into_iter()
+                .map(|launch| launch.join().unwrap())
+                .collect()
+        });
+        for error in results.iter().filter_map(|result| result.as_ref().err()) {
+            refused.push(format!("home {round}: {error}"));
+        }
+        for name in CARGO_SHARED {
+            assert_eq!(
+                fs::read_link(home.join(".cargo").join(name)).unwrap(),
+                owner.join(".cargo").join(name)
+            );
+        }
+    }
+    assert!(refused.is_empty(), "{refused:?}");
+}
+
+/// Runs only in the process the row below starts: makes an agent home with its short temp
+/// folder, then writes its launch `getconf` under umask 0277, which clears the owner's write
+/// bit, and reports what it got. Input: the folder named in `ROW_FOLDER`; without it, nothing.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore]
+fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
+    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+        return;
+    };
+    let home = tempfile::tempdir().unwrap();
+    let _scratch = ScopedTmp::make(home.path()).unwrap();
+    fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
+    let getconf_folder = getconf_folder(home.path());
+    let outcome = match write_getconf(home.path(), false) {
+        Ok(()) => format!(
+            "ok {:o} {:o}",
+            fs::metadata(&getconf_folder).unwrap().mode() & 0o777,
+            fs::metadata(getconf_folder.join(GETCONF_PROGRAM))
+                .unwrap()
+                .mode()
+                & 0o777
+        ),
+        Err(error) => format!("err {error}"),
+    };
+    fs::write(Path::new(&folder).join("outcome"), outcome).unwrap();
+}
+
+/// UMASK-MODE-ASSERTS: an engine that inherited a umask clearing the owner's write bit still
+/// writes a launch's `getconf` in a private 0700 folder as a private 0700 program, where the
+/// folder came out 0500 and the write was refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_getconf_written_under_a_narrow_umask_is_a_private_program() {
+    let folder = tempfile::tempdir().unwrap();
+    let status = crate::spawn_gate::row_alone(
+        "sandbox::toolchains::tests::a_launch_getconf_written_under_a_narrow_umask_in_its_own_process",
+        ":",
+        folder.path(),
+    );
+    assert!(
+        status.success(),
+        "the write under umask 0277 ended in {status}"
+    );
+    assert_eq!(
+        fs::read_to_string(folder.path().join("outcome")).unwrap(),
+        "ok 700 700"
+    );
+}

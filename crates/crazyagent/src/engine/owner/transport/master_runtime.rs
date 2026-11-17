@@ -33,7 +33,7 @@ use std::time::Duration;
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a running master turn checks its grants against the policy the owner saved.
-const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
+pub(super) const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
 /// SQLite's refusal when another engine connection held the database write lock past the
 /// storage wait; the write was rolled back, so the turn is driven again (LB-28).
 const STORAGE_BUSY: &str = "database is locked";
@@ -168,6 +168,13 @@ impl MasterHost {
         match self {
             Self::Codex(host) => host.close().await,
             Self::Claude(host) => host.close().await,
+        }
+    }
+
+    fn settled(&self) -> bool {
+        match self {
+            Self::Codex(host) => host.settled(),
+            Self::Claude(host) => host.settled(),
         }
     }
 
@@ -392,7 +399,7 @@ impl OwnerRuntimeHandle {
     /// turn's sandbox profile granted. Inputs: the prepared turn, its id, and the level and
     /// toolchains it runs with. Output: why it must stop, none while covered, or the storage
     /// refusal.
-    async fn master_turn_narrowed(
+    pub(super) async fn master_turn_narrowed(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
@@ -733,6 +740,7 @@ impl OwnerRuntimeHandle {
         if routed.phase == MasterTurnPhase::Queued {
             self.reprove_sign_ins(Some(session_id.clone())).await;
         }
+        let listed = listed_master_turn(project_id)?;
         let prepared = match self
             .prepare_master_turn(project_id, session_id, turn_id)
             .await?
@@ -750,6 +758,7 @@ impl OwnerRuntimeHandle {
                 return Err(failure("master_runtime_result"));
             }
         };
+        listed.hid(master_turn_hides(&prepared));
         if prepared.session.project_id != *project_id
             || prepared.session.session_id != *session_id
             || prepared.session.current_turn.as_ref() != Some(turn_id)
@@ -761,10 +770,15 @@ impl OwnerRuntimeHandle {
         }
         let result = match self.record_master_start(&prepared).await {
             Ok(()) if prepared.session.selection.backend == MasterBackend::Rcli => {
-                return self.launch_rcli_master_turn(&prepared, turn_id).await;
+                return self
+                    .launch_rcli_master_turn(&prepared, turn_id, listed)
+                    .await;
             }
-            Ok(()) => self.launch_master_turn(&prepared, turn_id).await,
-            Err(error) => Err(error),
+            Ok(()) => self.launch_master_turn(&prepared, turn_id, listed).await,
+            Err(error) => {
+                drop(listed);
+                Err(error)
+            }
         };
         match result {
             Ok(turn) => Ok(turn),
@@ -792,6 +806,7 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
+        listed: crate::sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
         let harness = match prepared.session.selection.backend {
             MasterBackend::Codex => NativeHarness::Codex,
@@ -899,6 +914,11 @@ impl OwnerRuntimeHandle {
             let _ = active.host.cancel().await;
         }
         let closed = active.host.close().await;
+        if active.host.settled() {
+            drop(listed);
+        } else {
+            std::mem::forget(listed);
+        }
         self.count_master_usage(prepared, Some(home), active.reported)
             .await;
         if let Some(diagnostic) = active.host.diagnostic()
@@ -1432,6 +1452,47 @@ pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
     }
 }
 
+/// Puts one headless master turn on its project's hidden folders list before its prepare
+/// reads the saved hidden folders, for the whole turn (SA-VID14-MASTER-TURNS, r1); the turn
+/// records [`master_turn_hides`] once prepared. Input: the project. Output: the guard, or
+/// `master_sandbox_unavailable` when the list is full.
+fn listed_master_turn(
+    project: &ProjectId,
+) -> Result<crate::sandbox::hidden_paths::HiddenRun, EngineError> {
+    crate::sandbox::hidden_paths::starting(
+        crate::sandbox::hidden_paths::RunKind::Master,
+        project.as_str(),
+    )
+    .ok_or_else(|| failure("master_sandbox_unavailable"))
+}
+
+/// The folders a headless master turn's sandbox keeps it out of, as the hidden folders list
+/// records them: the native and the RCLI sandbox hide `hidden_paths`, and under Full access
+/// the turn runs unconfined and hides none (SA-VID14 r1 sec F3). Input: the prepared turn.
+/// Output: the folders.
+fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
+    if prepared.agent_policy.access == crate::sandbox::policy::AgentAccess::Full {
+        &[]
+    } else {
+        &prepared.hidden_paths
+    }
+}
+
+/// Keeps an RCLI master turn on the hidden folders list after it returns when its
+/// retirement was uncertain or its stop left processes held as leftovers, since they may
+/// still run, until the engine starts again (SA-VID14 r1, r2 F1); a native turn asks its
+/// host whether it settled instead (r2 F2). Inputs: the guard and the result.
+pub(super) fn keep_listed_if_uncertain<T>(
+    listed: crate::sandbox::hidden_paths::HiddenRun,
+    result: &Result<T, EngineError>,
+) {
+    if result.as_ref().is_err_and(|error| {
+        super::master_rcli::cleanup_uncertain(error) || super::master_rcli::left_running(error)
+    }) {
+        std::mem::forget(listed);
+    }
+}
+
 fn cleanup_uncertain(error: &EngineError) -> bool {
     error.0.starts_with("master_runtime_cleanup_uncertain:")
 }
@@ -1520,6 +1581,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_project_scope_conflict"
         | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
         "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
+        crate::sandbox::HELD_STOP_CAUSE => MasterReason::SandboxStopped,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
@@ -2092,6 +2154,15 @@ mod tests {
                 "{code}"
             );
         }
+    }
+
+    /// DEC-185 S2a (rv-sec3 F1): a master turn whose harness the Linux call supervisor
+    /// stopped, because it could not take back an entry read as a held name, names the
+    /// sandbox as its reason, never the runtime or Unknown.
+    #[test]
+    fn a_held_name_the_sandbox_could_not_put_back_names_the_sandbox() {
+        let cause = EngineError(crate::sandbox::HELD_STOP_CAUSE.into());
+        assert_eq!(reason_for_error(&cause), MasterReason::SandboxStopped);
     }
 
     #[test]

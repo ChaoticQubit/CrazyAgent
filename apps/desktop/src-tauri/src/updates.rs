@@ -1,8 +1,9 @@
 use crate::bridge::BridgeError;
+use crazyagent::service::StartWait;
 use crazyagent::update::{self, Channel, UpdateError};
 use serde::Serialize;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel as Events;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -11,6 +12,7 @@ use tokio::sync::{Mutex, MutexGuard, Notify};
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const PROGRESS_STEP_BYTES: u64 = 512 * 1024;
+const STARTING_TICK: Duration = Duration::from_secs(5);
 const NOTES_CHARS_MAX: usize = 4000;
 
 /// The update the owner last checked for, kept until they install it or check again.
@@ -40,13 +42,35 @@ pub enum UpdateProgress {
     Verifying,
     StoppingEngine,
     Installing,
+    StartingEngine { waited_s: u64, answering: bool },
 }
 
-/// The result of an install: whether the engine service came back on the new version
-/// before the restart.
+/// The result of an install: where the engine service stands on the new version before
+/// the restart.
 #[derive(Debug, Serialize)]
 pub struct InstallOutcome {
-    pub engine_started: bool,
+    pub engine: EngineAfterUpdate,
+}
+
+/// Where the engine stands when an install returns: answering on the new version, still
+/// starting under its service manager past the wait, or not running at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineAfterUpdate {
+    Ready,
+    Starting,
+    Failed,
+}
+
+/// Names where the engine stands after an install's wait. Input: how the wait ended, none
+/// when it failed. Output: Ready when it answered, Starting when it ran out while the
+/// service manager still ran its first process, else Failed.
+fn engine_after(waited: Option<StartWait>) -> EngineAfterUpdate {
+    match waited {
+        Some(StartWait::Answered) => EngineAfterUpdate::Ready,
+        Some(StartWait::StillStarting) => EngineAfterUpdate::Starting,
+        None => EngineAfterUpdate::Failed,
+    }
 }
 
 fn refused(code: &'static str) -> BridgeError {
@@ -187,7 +211,7 @@ fn download_failure(error: tauri_plugin_updater::Error) -> BridgeError {
 /// through the bundled `crazyagent`, installs, and starts the service on the new engine,
 /// which migrates its data on start. Nothing changes when the download or signature fails;
 /// a failed install starts the old engine again. Inputs: the state and the progress channel.
-/// Output: whether the engine started, or the failure code.
+/// Output: where the engine stands, or the failure code.
 pub async fn install(
     state: &UpdateState,
     events: Events<UpdateProgress>,
@@ -230,8 +254,56 @@ pub async fn install(
         return Err(refused("update_install_failed"));
     }
     Ok(InstallOutcome {
-        engine_started: service(sidecar, "start").await.is_ok(),
+        engine: start_engine(sidecar, &events).await,
     })
+}
+
+/// Starts the engine service through the new `crazyagent`, then waits for the engine as app
+/// launch does, past that tool's own wait, while its service manager still runs the process
+/// it started, telling the window the time waited every `STARTING_TICK`. Inputs: the new
+/// sidecar and the progress channel. Output: where the engine stands.
+async fn start_engine(sidecar: PathBuf, events: &Events<UpdateProgress>) -> EngineAfterUpdate {
+    let watched = crazyagent::paths::Layout::current()
+        .ok()
+        .and_then(|layout| {
+            crazyagent::service::Service::current_user(
+                crazyagent::paths::Platform::CURRENT,
+                sidecar.clone(),
+                &layout,
+            )
+            .ok()
+            .map(|engine| (layout, engine))
+        });
+    let Some((layout, engine)) = watched else {
+        return engine_after(
+            service(sidecar, "start")
+                .await
+                .is_ok()
+                .then_some(StartWait::Answered),
+        );
+    };
+    let since = crazyagent::service::log_length(&layout);
+    let begun = Instant::now();
+    let started = async {
+        let _ = service(sidecar, "start").await;
+        crazyagent::service::wait_start(&layout, &engine, crazyagent::service::READY_TIMEOUT, since)
+            .await
+            .ok()
+    };
+    tokio::pin!(started);
+    let mut tick = tokio::time::interval(STARTING_TICK);
+    let waited = loop {
+        tokio::select! {
+            waited = &mut started => break waited,
+            _ = tick.tick() => {
+                let _ = events.send(UpdateProgress::StartingEngine {
+                    waited_s: begun.elapsed().as_secs(),
+                    answering: crazyagent::service::answering(&layout.socket()),
+                });
+            }
+        }
+    };
+    engine_after(waited)
 }
 
 /// Links the bundled `crazyagent`, or its private copy when the app runs from an AppImage
@@ -257,5 +329,41 @@ mod tests {
         assert_eq!(hold(&state).err().map(|refusal| refusal.code), Some("busy"));
         drop(installing);
         assert!(hold(&state).is_ok());
+    }
+
+    #[test]
+    fn an_engine_its_service_manager_still_runs_past_the_wait_reads_starting_not_failed() {
+        assert_eq!(
+            engine_after(Some(StartWait::Answered)),
+            EngineAfterUpdate::Ready
+        );
+        assert_eq!(
+            engine_after(Some(StartWait::StillStarting)),
+            EngineAfterUpdate::Starting
+        );
+    }
+
+    #[test]
+    fn an_engine_that_stopped_or_was_relaunched_while_starting_reads_failed_not_starting() {
+        assert_eq!(engine_after(None), EngineAfterUpdate::Failed);
+    }
+
+    #[test]
+    fn the_install_outcome_and_the_starting_step_read_as_the_window_expects() {
+        let outcome = InstallOutcome {
+            engine: EngineAfterUpdate::Starting,
+        };
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap(),
+            serde_json::json!({ "engine": "starting" })
+        );
+        let step = UpdateProgress::StartingEngine {
+            waited_s: 65,
+            answering: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&step).unwrap(),
+            serde_json::json!({ "kind": "starting_engine", "waited_s": 65, "answering": true })
+        );
     }
 }
