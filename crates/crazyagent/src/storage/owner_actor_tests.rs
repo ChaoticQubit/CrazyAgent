@@ -175,6 +175,7 @@ async fn fifo_apply_revoke_and_dropped_ack_have_real_actor_barriers() {
     {
         let (mut db, _lock) = open_database(&path, false).unwrap();
         let seeding = owner_start(&mut db).unwrap();
+        crate::state_log::fence::host_started(&seeding.host);
         for (n, command) in [
             Command::CreateProject {
                 project_id: draft.project_id.clone(),
@@ -516,7 +517,8 @@ fn a_database_with_the_b19_team_settings_revision_table_opens_and_removes_projec
 fn removing_a_project_keeps_its_change_set_numbers() {
     let (_root, path, cfg) = fixture();
     let (mut db, _lock) = open_database(&path, false).unwrap();
-    let _running = owner_start(&mut db).unwrap();
+    let running = owner_start(&mut db).unwrap();
+    crate::state_log::fence::host_started(&running.host);
     let add_project = |db: &Connection| {
         db.execute("INSERT INTO projects(id, body) VALUES ('kept', '{}')", [])
             .unwrap();
@@ -750,6 +752,7 @@ fn owner_ledger_abort_rolls_back_domain_effect_and_pages_bound_corrupt_body() {
     let (_root, path, cfg) = fixture();
     let (mut db, _lock) = open_database(&path, false).unwrap();
     let started = owner_start(&mut db).unwrap();
+    crate::state_log::fence::host_started(&started.host);
     let a = &started.owners[0].admission;
     db.execute(
         "INSERT INTO projects VALUES ('huge',?1)",
