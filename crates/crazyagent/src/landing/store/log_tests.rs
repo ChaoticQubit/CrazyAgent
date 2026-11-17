@@ -182,3 +182,23 @@ fn owner_edits_kept_settled_and_forgotten_are_logged_and_rebuild_to_the_live_row
     rebuild(&db).unwrap();
     assert!(rows(&db, "landing_owner_edits").unwrap().is_empty());
 }
+
+/// V250-L9: a landing write owns its transaction. Called inside a caller's transaction it is
+/// refused and writes nothing, so no row ever changes without its event (no landing writer
+/// runs inside the open's sweep; worktrees::reconcile settles leases only).
+#[test]
+fn a_landing_write_inside_a_caller_transaction_is_refused_and_leaves_nothing() {
+    let (root, db) = store();
+    let worktree = root.path().join("repo/.wt/one");
+    let before = revision(&db);
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let refused = set_base(&db, &worktree, &"a".repeat(40)).unwrap_err();
+    assert_eq!(refused.0, "landing_log_unavailable");
+    db.execute_batch("COMMIT").unwrap();
+    assert!(
+        rows(&db, "landing_bases").unwrap().is_empty(),
+        "no row without its event"
+    );
+    assert!(events(&db).is_empty());
+    assert_eq!(revision(&db), before);
+}
