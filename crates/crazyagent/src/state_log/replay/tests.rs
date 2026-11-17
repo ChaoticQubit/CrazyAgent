@@ -216,12 +216,12 @@ fn logged_only(_: &Connection, _: &Logged) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Records each event under the kind `Noted` with no projection. Inputs: the store and the
-/// aggregate and body of each event. Output: their seqs, in order.
-fn note(db: &mut Connection, events: &[(Aggregate, serde_json::Value)]) -> Vec<u64> {
+/// Records each event with no projection. Inputs: the store and the aggregate, kind and body
+/// of each event. Output: their seqs, in order.
+fn note(db: &mut Connection, events: &[(Aggregate, &str, serde_json::Value)]) -> Vec<u64> {
     events
         .iter()
-        .map(|(aggregate, body)| record(db, *aggregate, "Noted", body.clone(), 1, logged_only))
+        .map(|(aggregate, kind, body)| record(db, *aggregate, kind, body.clone(), 1, logged_only))
         .collect()
 }
 
@@ -798,16 +798,21 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
         &[
             (
                 sessions,
+                "Noted",
                 json!({ "project": "p-1", "session": "s-1", "text": "secret" }),
             ),
-            (team, json!({ "session": "s-1", "turn": 3 })),
-            (sessions, json!({ "session": "s-2" })),
-            (sessions, json!({ "session": "s-10" })),
-            (sessions, json!({ "turn": { "session": "s-1" } })),
-            (sessions, json!(["s-1"])),
-            (team, json!({ "session": 1, "note": "s-1" })),
-            (Aggregate::Worktrees, json!({ "session": "s-1" })),
-            (sessions, json!({ "project": "p-1", "session": "s-1" })),
+            (team, "Noted", json!({ "session": "s-1", "turn": 3 })),
+            (sessions, "Noted", json!({ "session": "s-2" })),
+            (sessions, "Noted", json!({ "session": "s-10" })),
+            (sessions, "Noted", json!({ "turn": { "session": "s-1" } })),
+            (sessions, "Noted", json!(["s-1"])),
+            (team, "Noted", json!({ "session": 1, "note": "s-1" })),
+            (Aggregate::Worktrees, "Noted", json!({ "session": "s-1" })),
+            (
+                sessions,
+                "SessionDeleted",
+                json!({ "project": "p-1", "session": "s-1" }),
+            ),
         ],
     );
     let keep = seqs[8];
@@ -819,6 +824,7 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
         redact_matching(
             &tx,
             &[sessions, team],
+            None,
             "session",
             "s-1",
             keep,
@@ -850,6 +856,7 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
         redact_matching(
             &tx,
             &[sessions, team],
+            None,
             "session",
             "s-1",
             keep,
@@ -872,46 +879,75 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
 }
 
 #[test]
-fn redact_matching_by_project_takes_only_the_exact_top_level_project_of_the_named_aggregates() {
+fn redact_matching_by_project_takes_the_exact_top_level_project_of_the_named_aggregates_and_kinds()
+{
     let mut db = store();
     let (projects, worktrees) = (Aggregate::Projects, Aggregate::Worktrees);
     let seqs = note(
         &mut db,
         &[
-            (projects, json!({ "project": "p-1", "name": "secret" })),
-            (worktrees, json!({ "project": "p-1", "task": "t-1" })),
-            (worktrees, json!({ "project": "p-12" })),
-            (worktrees, json!({ "project": "P-1" })),
-            (worktrees, json!({ "repository": "p-1" })),
+            (
+                projects,
+                "ProjectNamed",
+                json!({ "project": "p-1", "name": "secret" }),
+            ),
+            (
+                worktrees,
+                "LeaseSaved",
+                json!({ "project": "p-1", "task": "t-1" }),
+            ),
+            (
+                worktrees,
+                "WorktreeReserved",
+                json!({ "project": "p-1", "task": "t-2" }),
+            ),
+            (worktrees, "LeaseSaved", json!({ "project": "p-12" })),
+            (worktrees, "LeaseSaved", json!({ "project": "P-1" })),
+            (worktrees, "LeaseSaved", json!({ "repository": "p-1" })),
             (
                 Aggregate::Sessions,
+                "LeaseSaved",
                 json!({ "project": "p-1", "session": "s-1" }),
             ),
-            (projects, json!({ "project": "p-1" })),
+            (projects, "ProjectRemoved", json!({ "project": "p-1" })),
         ],
     );
+    let keep = seqs[7];
     let bodies: Vec<Vec<u8>> = seqs.iter().map(|seq| body_at(&db, *seq)).collect();
     let tx = db.transaction().unwrap();
     let owner = Fence::Owner(fence::test_owner());
+    let aggregates = [projects, worktrees];
+    let redacted = |gone: usize| {
+        for (index, seq) in seqs.iter().enumerate() {
+            let expected = if index < gone {
+                TOMBSTONE.to_vec()
+            } else {
+                bodies[index].clone()
+            };
+            assert_eq!(body_at(&tx, *seq), expected, "event {index}");
+        }
+    };
+    let kinds = ["ProjectNamed", "LeaseSaved"];
     assert_eq!(
         redact_matching(
             &tx,
-            &[projects, worktrees],
+            &aggregates,
+            Some(&kinds[..]),
             "project",
             "p-1",
-            seqs[6],
+            keep,
             &owner
         ),
-        Ok(2)
+        Ok(2),
+        "filtered: only the listed kinds"
     );
-    for (index, seq) in seqs.iter().enumerate() {
-        let expected = if index < 2 {
-            TOMBSTONE.to_vec()
-        } else {
-            bodies[index].clone()
-        };
-        assert_eq!(body_at(&tx, *seq), expected, "event {index}");
-    }
+    redacted(2);
+    assert_eq!(
+        redact_matching(&tx, &aggregates, None, "project", "p-1", keep, &owner),
+        Ok(1),
+        "unfiltered: every kind"
+    );
+    redacted(3);
 }
 
 #[test]
@@ -922,6 +958,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
         redact_matching(
             &tx,
             &[Aggregate::Sessions],
+            None,
             "session",
             "s-1",
             0,
@@ -934,29 +971,35 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
     drop(tx);
     let mut db = store();
     let sessions = [Aggregate::Sessions];
-    let seq = note(&mut db, &[(sessions[0], json!({ "session": "s-1" }))])[0];
+    let seq = note(
+        &mut db,
+        &[(sessions[0], "Noted", json!({ "session": "s-1" }))],
+    )[0];
     let body = body_at(&db, seq);
     let tx = db.transaction().unwrap();
     let refused = Some("state_log_redact_match".to_string());
-    for (aggregates, field, value) in [
-        (&sessions[..], "", "s-1"),
-        (&sessions[..], "session", ""),
-        (&sessions[..], "session", "s\"1"),
-        (&sessions[..], "session", "s\\1"),
-        (&sessions[..], "session", "s\n1"),
-        (&[][..], "session", "s-1"),
+    let noted = ["Noted"];
+    for (aggregates, kinds, field, value) in [
+        (&sessions[..], None, "", "s-1"),
+        (&sessions[..], None, "session", ""),
+        (&sessions[..], None, "session", "s\"1"),
+        (&sessions[..], None, "session", "s\\1"),
+        (&sessions[..], None, "session", "s\n1"),
+        (&[][..], None, "session", "s-1"),
+        (&sessions[..], Some(&noted[..0]), "session", "s-1"),
     ] {
         assert_eq!(
             code(redact_matching(
                 &tx,
                 aggregates,
+                kinds,
                 field,
                 value,
                 0,
                 &fence::engine()
             )),
             refused,
-            "{field:?} {value:?}"
+            "{kinds:?} {field:?} {value:?}"
         );
     }
     let outside = Fence::Engine(fence::HostStamp {
@@ -965,7 +1008,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
     });
     assert_eq!(
         code(redact_matching(
-            &tx, &sessions, "session", "s-1", 0, &outside
+            &tx, &sessions, None, "session", "s-1", 0, &outside
         )),
         Some("state_log_fence_out_of_process".into())
     );
@@ -975,13 +1018,21 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
     });
     assert_eq!(
         code(redact_matching(
-            &tx, &sessions, "session", "s-1", 0, &revoked
+            &tx, &sessions, None, "session", "s-1", 0, &revoked
         )),
         Some("owner_grant_stale_or_revoked".into())
     );
     assert_eq!(body_at(&tx, seq), body, "a refusal redacts nothing");
     assert_eq!(
-        redact_matching(&tx, &sessions, "session", "s-1", 0, &fence::engine()),
+        redact_matching(
+            &tx,
+            &sessions,
+            Some(&noted[..]),
+            "session",
+            "s-1",
+            0,
+            &fence::engine()
+        ),
         Ok(1)
     );
 }
@@ -1008,6 +1059,7 @@ fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
         redact_matching(
             &tx,
             &[Aggregate::Sessions],
+            None,
             "session",
             "s-1",
             0,

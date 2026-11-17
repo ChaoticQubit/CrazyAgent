@@ -178,16 +178,18 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
     updated.map(|_| ())
 }
 
-/// Redacts, for an owner delete, every event of the given aggregates whose body is a JSON
-/// object holding the top-level `field` as the string `value`, except the delete's own event
-/// `keep`, each through [`redact`]. Events are found by the quoted value's bytes, at most
-/// [`REPLAY_BATCH_MAX`] at a time, then matched exactly; `value` holds no character JSON
-/// escapes, so it is logged as its own bytes. Inputs: the delete's transaction, the
-/// aggregates, the field, the value, the kept seq and the fence. Output: how many events were
-/// redacted, a fence or [`redact`] refusal, or `state_log_redact_match`.
+/// Redacts, for an owner delete, every event of the given aggregates, and of the given kinds
+/// when a list is given, whose body is a JSON object holding the top-level `field` as the
+/// string `value`, except the delete's own event `keep`, each through [`redact`]. Events are
+/// found by the quoted value's bytes, at most [`REPLAY_BATCH_MAX`] at a time, then matched
+/// exactly; `value` holds no character JSON escapes, so it is logged as its own bytes.
+/// Inputs: the delete's transaction, the aggregates, the kinds (none for all), the field, the
+/// value, the kept seq and the fence. Output: how many events were redacted, a fence or
+/// [`redact`] refusal, or `state_log_redact_match`.
 pub fn redact_matching(
     tx: &Transaction<'_>,
     aggregates: &[Aggregate],
+    kinds: Option<&[&str]>,
     field: &str,
     value: &str,
     keep: u64,
@@ -195,6 +197,7 @@ pub fn redact_matching(
 ) -> Result<usize, EngineError> {
     fence::check(tx, fence)?;
     if aggregates.is_empty()
+        || kinds.is_some_and(|kinds| kinds.is_empty())
         || field.is_empty()
         || value.is_empty()
         || value
@@ -210,10 +213,11 @@ pub fn redact_matching(
     let (mut after, mut redacted) = (0, 0);
     loop {
         let found = hits(tx, after, needle.as_bytes())?;
-        for (seq, aggregate, body) in &found {
+        for (seq, aggregate, kind, body) in &found {
             let listed = aggregates
                 .iter()
-                .any(|wanted| wanted.name() == aggregate.as_str());
+                .any(|wanted| wanted.name() == aggregate.as_str())
+                && kinds.is_none_or(|kinds| kinds.iter().any(|wanted| *wanted == kind.as_str()));
             let named = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
                 .is_ok_and(|object| {
                     object.get(field).and_then(serde_json::Value::as_str) == Some(value)
@@ -224,7 +228,7 @@ pub fn redact_matching(
             }
         }
         match found.last() {
-            Some((seq, _, _)) if found.len() == REPLAY_BATCH_MAX => after = *seq,
+            Some((seq, _, _, _)) if found.len() == REPLAY_BATCH_MAX => after = *seq,
             _ => return Ok(redacted),
         }
     }
@@ -233,18 +237,18 @@ pub fn redact_matching(
 /// The events after `after` whose body holds the needle's bytes, at most
 /// [`REPLAY_BATCH_MAX`], in seq order, a body over [`BODY_BYTES_MAX`] refused before it is
 /// loaded. Inputs: the transaction, the last seq read and the needle. Output: each event's
-/// seq, aggregate name and body, or `state_log_replay_row`.
+/// seq, aggregate name, kind and body, or `state_log_replay_row`.
 fn hits(
     tx: &Transaction<'_>,
     after: u64,
     needle: &[u8],
-) -> Result<Vec<(u64, String, Vec<u8>)>, EngineError> {
+) -> Result<Vec<(u64, String, String, Vec<u8>)>, EngineError> {
     let row_error = || error("state_log_replay_row");
     let from = i64::try_from(after).map_err(|_| row_error())?;
     let mut statement = tx
         .prepare_cached(
-            "SELECT seq, aggregate, CASE WHEN length(body) <= ?4 THEN body END FROM state_log
-            WHERE seq>?1 AND instr(body, ?2) > 0 ORDER BY seq LIMIT ?3",
+            "SELECT seq, aggregate, kind, CASE WHEN length(body) <= ?4 THEN body END
+            FROM state_log WHERE seq>?1 AND instr(body, ?2) > 0 ORDER BY seq LIMIT ?3",
         )
         .map_err(error)?;
     let rows = statement
@@ -254,16 +258,17 @@ fn hits(
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
                 ))
             },
         )
         .map_err(error)?;
     let mut found = Vec::new();
     for row in rows {
-        let (seq, aggregate, body) = row.map_err(error)?;
+        let (seq, aggregate, kind, body) = row.map_err(error)?;
         let seq = u64::try_from(seq).map_err(|_| row_error())?;
-        found.push((seq, aggregate, body.ok_or_else(row_error)?));
+        found.push((seq, aggregate, kind, body.ok_or_else(row_error)?));
     }
     Ok(found)
 }
