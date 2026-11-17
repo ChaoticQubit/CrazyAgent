@@ -274,7 +274,7 @@ pub(super) fn add_plan(
         overrides,
         &guarded(&tx)?,
     )?;
-    if another_add_running(&tx, request)? {
+    if another_add_on(&tx, request, plan.destination())? {
         return Err(error("home_add_in_progress"));
     }
     let mode = match mode {
@@ -294,7 +294,7 @@ pub(super) fn add_plan(
     )
     .map_err(error)?;
     assert!(adding(&tx)?);
-    assert!(!another_add_running(&tx, request)?);
+    assert!(!another_add_on(&tx, request, plan.destination())?);
     tx.commit().map_err(error)?;
     Ok(plan)
 }
@@ -322,7 +322,7 @@ pub(super) fn add_check(
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     let root = engine_root(path)?;
     let plan = home::check_add(&saved, &root, source, mode, overrides, &guarded(&tx)?)?;
-    if another_add_running(&tx, request)? {
+    if another_add_on(&tx, request, plan.destination())? {
         return Err(error("home_add_in_progress"));
     }
     assert!(plan.destination().starts_with(&saved));
@@ -330,22 +330,42 @@ pub(super) fn add_check(
     tx.rollback().map_err(error)
 }
 
-/// Whether an add other than `request` is running. One add runs at a time: two adds find a
-/// destination free on disk until one lands, an engine start reads each cut add's end from
-/// its destination folder, and names the volume treats as one folder (case, Unicode form)
-/// differ as text. The asking add's own row, as a resend finds it, does not count. Inputs:
-/// the connection and the asking add's request. Output: the answer.
-fn another_add_running(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+/// Whether an add other than `request` is running onto a name the volume may not tell apart
+/// from `destination`'s ([`home::names_apart`]). Two such adds would find the destination free
+/// on disk until one lands, and an engine start reads each cut add's end from its destination
+/// folder; adds onto names apart run side by side (DEC-197). The asking add's own row, as a
+/// resend finds it, does not count. Inputs: the connection, the asking add's request and its
+/// destination. Output: the answer.
+fn another_add_on(
+    db: &Connection,
+    request: &RequestId,
+    destination: &Path,
+) -> Result<bool, EngineError> {
     assert!(!request.as_str().is_empty());
-    let running: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects_home_add WHERE ended IS NULL AND request<>?1)",
-            [request.as_str()],
-            |row| row.get(0),
+    let name = destination
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| error("home_record_invalid"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT destination FROM projects_home_add WHERE ended IS NULL AND request<>?1
+             ORDER BY rowid LIMIT ?2",
         )
         .map_err(error)?;
-    assert!(!running || adding(db)?);
-    Ok(running)
+    let running: Vec<String> = statement
+        .query_map(params![request.as_str(), ADDS_MAX as i64], |row| row.get(0))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(running.len() <= ADDS_MAX);
+    let clash = running.iter().any(|other| {
+        let other = Path::new(other)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str);
+        !other.is_some_and(|other| home::names_apart(name, other))
+    });
+    assert!(!clash || adding(db)?);
+    Ok(clash)
 }
 
 /// Whether an add is running: planned, and neither recorded nor settled yet. While one runs
@@ -359,8 +379,8 @@ fn adding(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
-/// The most running adds one engine start reads; planning admits one running add at a time
-/// ([`another_add_running`]), and the bound holds for any other rows the table has.
+/// The most running adds one engine start reads; the engine runs at most
+/// `JOBS_RUNNING_MAX` adds at once, and the bound holds for any other rows the table has.
 const ADDS_MAX: usize = 64;
 
 /// How an add a record never reached is settled. With a request (after its exchange

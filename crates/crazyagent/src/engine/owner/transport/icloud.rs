@@ -49,6 +49,7 @@ enum Reply {
     Progress { progress: Option<Progress> },
     Cancelled { running: bool },
     Job { job: Option<JobView> },
+    Jobs { jobs: Vec<JobView> },
     Stopped { running: bool },
     Dismissed { forgotten: bool },
     Rejected { code: String },
@@ -112,10 +113,11 @@ impl OwnerClient {
         }
     }
 
-    /// Reads the job, running or last ended. Output: its view, or None.
-    pub async fn job_status(&self) -> Result<Option<JobView>, EngineError> {
+    /// Reads every job: running, waiting for its turn, or ended since the last start.
+    /// Output: their views in start order.
+    pub async fn job_status(&self) -> Result<Vec<JobView>, EngineError> {
         match self.icloud_exchange(Action::Status).await? {
-            Reply::Job { job } => Ok(job),
+            Reply::Jobs { jobs } => Ok(jobs),
             _ => Err(unknown()),
         }
     }
@@ -286,8 +288,8 @@ async fn handle(
                 .await
                 .map(|job| Reply::Job { job: Some(job) })
         }
-        Action::Status => Ok(Reply::Job {
-            job: authority.intake.status(),
+        Action::Status => Ok(Reply::Jobs {
+            jobs: authority.intake.status(),
         }),
         Action::Stop { request_id } => authority
             .intake

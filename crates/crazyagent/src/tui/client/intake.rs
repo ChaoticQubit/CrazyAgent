@@ -445,7 +445,8 @@ impl NativeOwner {
                     .map_err(problem)?,
             )),
             IntakeQuery::JobStatus => {
-                IntakeView::Job(controller.job_status().await.map_err(problem)?)
+                let jobs = controller.job_status().await.map_err(problem)?;
+                IntakeView::Job(crate::projects_home::job::shown(jobs))
             }
             IntakeQuery::JobStop { id } => {
                 IntakeView::JobStopped(controller.job_stop(id).await.map_err(problem)?)

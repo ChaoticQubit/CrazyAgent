@@ -778,7 +778,8 @@ impl NativeBridge {
     pub fn intake_status(&mut self) -> Result<Unlocked<Option<JobView>>, BridgeError> {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            let view = client.job_status().await.map_err(intake_failure)?;
+            let jobs = client.job_status().await.map_err(intake_failure)?;
+            let view = crazyagent::projects_home::job::shown(jobs);
             bounded(view.map(shown))
         }))
     }

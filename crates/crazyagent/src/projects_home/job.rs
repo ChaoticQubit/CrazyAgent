@@ -66,6 +66,7 @@ impl JobSubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    Waiting,
     Downloading,
     Stopping,
     Copying,
@@ -79,10 +80,12 @@ pub enum Phase {
 /// before it counted them; a delete then moves its folders to the Trash in `Trashing`, and
 /// `CutShort` is a delete an engine stop cut short, with how many of its folders reached the
 /// Trash. A New Project reads `Building` with how many of its documents it copied once it
-/// counted them.
+/// counted them. A job waits in `Waiting` for its turn behind the job it names, with no error,
+/// and starts by itself (DEC-197).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobState {
+    Waiting { behind: String },
     Downloading { progress: Progress },
     Stopping { agents_left: u64 },
     Copying { copied: u64, checked: u64 },
@@ -114,6 +117,34 @@ pub struct JobView {
     pub state: JobState,
 }
 
+impl JobState {
+    /// Whether a job in this state has ended. Output: the answer.
+    pub fn over(&self) -> bool {
+        matches!(
+            self,
+            Self::Done
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::NeedsAnswer { .. }
+                | Self::CutShort { .. }
+        )
+    }
+}
+
+/// The one job a client that shows a single job takes from status: the newest running job,
+/// else the newest waiting one, else the newest ended one. A waiting job always waits behind
+/// a running one, so such a client never shows a wait. Input: the jobs in start order.
+/// Output: that job, or None.
+pub fn shown(jobs: Vec<JobView>) -> Option<JobView> {
+    let waits = |job: &JobView| matches!(job.state, JobState::Waiting { .. });
+    let at = jobs
+        .iter()
+        .rposition(|job| !job.state.over() && !waits(job))
+        .or_else(|| jobs.iter().rposition(|job| !job.state.over()))
+        .or_else(|| jobs.len().checked_sub(1))?;
+    jobs.into_iter().nth(at)
+}
+
 impl JobView {
     /// The subject that starts this job again, for a retry or an answer to its soft refusal.
     /// A delete has none: it starts again only from the remove ask, where the owner types the
@@ -135,6 +166,7 @@ impl JobView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Stage {
+    Waiting(String),
     Downloading,
     Copying,
     Ended(JobState),
@@ -320,6 +352,41 @@ impl IntakeJob {
         Arc::clone(&self.tally)
     }
 
+    /// The name Home gives this job in another job's waiting line: the last part of an add's
+    /// or a move's folder, a delete's or a New Project's project name. Output: the name.
+    pub fn label(&self) -> &str {
+        let label = match self.kind {
+            JobKind::Add | JobKind::MoveProject => std::path::Path::new(&self.source)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or(&self.source),
+            JobKind::Delete | JobKind::Setup => &self.source,
+        };
+        assert!(!label.is_empty());
+        label
+    }
+
+    /// Marks a job not yet started as waiting for its turn behind the job named `behind`.
+    /// Input: that job's name.
+    pub fn wait(&self, behind: &str) {
+        assert!(!behind.is_empty());
+        let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            matches!(*stage, Stage::Waiting(_) | Stage::Downloading),
+            "only a job not yet started waits"
+        );
+        *stage = Stage::Waiting(behind.to_owned());
+    }
+
+    /// Ends a job's wait for its turn; a job that never waited stays as it is.
+    pub fn go(&self) {
+        let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*stage, Stage::Waiting(_)) {
+            *stage = Stage::Downloading;
+        }
+        assert!(!matches!(*stage, Stage::Waiting(_)));
+    }
+
     /// Marks the download over and the add started.
     pub fn copying(&self) {
         let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
@@ -350,6 +417,7 @@ impl IntakeJob {
     pub fn end(&self, result: Result<(), EngineError>) {
         let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
         let phase = match *stage {
+            Stage::Waiting(_) => Phase::Waiting,
             Stage::Downloading | Stage::Copying if self.kind == JobKind::Setup => Phase::Building,
             Stage::Downloading => Phase::Downloading,
             Stage::Copying if self.tally.clearing() => Phase::Clearing,
@@ -374,6 +442,9 @@ impl IntakeJob {
     pub fn view(&self) -> JobView {
         let stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
         let state = match &*stage {
+            Stage::Waiting(behind) => JobState::Waiting {
+                behind: behind.clone(),
+            },
             Stage::Downloading | Stage::Copying if self.kind == JobKind::Setup => {
                 let (done, total) = self.tally.building();
                 JobState::Building { done, total }
@@ -417,7 +488,8 @@ impl IntakeJob {
             view.kind != JobKind::Setup
                 || matches!(
                     view.state,
-                    JobState::Building { .. }
+                    JobState::Waiting { .. }
+                        | JobState::Building { .. }
                         | JobState::Done
                         | JobState::Failed { .. }
                         | JobState::Cancelled { .. }
@@ -437,7 +509,8 @@ fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobSta
         Err(e) => e.0,
     };
     assert!(!code.is_empty());
-    let cancelled = code == "home_add_cancelled" || (stopped && phase == Phase::Downloading);
+    let cancelled = code == "home_add_cancelled"
+        || (stopped && matches!(phase, Phase::Waiting | Phase::Downloading));
     if cancelled {
         assert!(phase != Phase::Clearing, "clearing never stops");
         assert!(

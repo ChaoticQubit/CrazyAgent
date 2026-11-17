@@ -645,6 +645,14 @@ pub fn slug(name: &str) -> Option<String> {
     Some(slug)
 }
 
+/// Whether two folders brought into the home at once land under names the volume tells
+/// apart: both ASCII and different ignoring case. A name with any other character may fold
+/// into another on the volume (case, Unicode form), so it never counts as apart (DEC-197).
+/// Inputs: the two destination names. Output: the answer.
+pub fn names_apart(a: &str, b: &str) -> bool {
+    a.is_ascii() && b.is_ascii() && !a.eq_ignore_ascii_case(b)
+}
+
 /// Gives the path a folder named `name` takes in the home when it is free.
 /// Input: the canonical home and a name that passes `folder_name`. Output:
 /// the path, or `home_destination_exists` when anything already has that

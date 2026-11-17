@@ -25,7 +25,8 @@ pub(in crate::tui) enum JobAction {
 pub(in crate::tui) fn running(job: &JobView) -> bool {
     matches!(
         job.state,
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+            | JobState::Downloading { .. }
             | JobState::Stopping { .. }
             | JobState::Copying { .. }
             | JobState::Trashing { .. }
@@ -114,6 +115,7 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
         AddMode::Copy => ("Copying", "copied"),
     };
     match &job.state {
+        JobState::Waiting { behind } => waiting(behind),
         JobState::Downloading { progress } => {
             if progress.total == 0 || progress.done > progress.total {
                 format!("Downloading {name} from iCloud...")
@@ -152,10 +154,17 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
     }
 }
 
+/// The line for a job waiting for its turn, naming the job it waits behind (DEC-197). Takes
+/// that job's name. Returns one sentence.
+fn waiting(behind: &str) -> String {
+    format!("Waiting for {behind} to finish...")
+}
+
 /// What a New Project does now or how it ended, with the project's name and how many of its
 /// documents it copied. Takes the New Project and its name. Returns one sentence.
 fn setup_line(job: &JobView, name: &str) -> String {
     match &job.state {
+        JobState::Waiting { behind } => waiting(behind),
         JobState::Building { done, total } if *total > 0 && done <= total => {
             let noun = if *total == 1 { "document" } else { "documents" };
             format!("Setting up {name}: {done} of {total} {noun} copied")
@@ -182,6 +191,7 @@ fn setup_line(job: &JobView, name: &str) -> String {
 fn delete_line(job: &JobView, name: &str) -> String {
     let folders = |total: u64| if total == 1 { "folder" } else { "folders" };
     match &job.state {
+        JobState::Waiting { behind } => waiting(behind),
         JobState::Stopping { agents_left } => {
             format!("Waiting for {} of {name} to stop...", agents(*agents_left))
         }
@@ -220,7 +230,8 @@ fn delete_line(job: &JobView, name: &str) -> String {
 /// it ended. Takes the job. Returns the actions, the one Enter does first.
 pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     let offered = match &job.state {
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Building { .. }
@@ -228,7 +239,8 @@ pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
         {
             vec![]
         }
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Building { .. } => vec![JobAction::Stop],
@@ -270,6 +282,7 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
     let verb = verb(job.kind);
     let brief = match &job.state {
         _ if job.stopping => format!("Stopping {name}..."),
+        JobState::Waiting { .. } => format!("{name}: waiting"),
         JobState::Downloading { progress }
             if progress.total > 0 && progress.done <= progress.total =>
         {
@@ -309,6 +322,7 @@ pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
     let deleting = job.kind == JobKind::Delete;
     let building = job.kind == JobKind::Setup;
     let badge = match &job.state {
+        JobState::Waiting { .. } => (Status::Active, "Waiting"),
         JobState::Building { .. } => (Status::Active, "Setting up"),
         JobState::Downloading { .. } => (Status::Active, "Downloading"),
         JobState::Stopping { .. } => (Status::Active, "Waiting"),

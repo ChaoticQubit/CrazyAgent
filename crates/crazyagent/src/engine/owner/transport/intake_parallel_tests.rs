@@ -118,8 +118,9 @@ impl Jobs {
     async fn ended(&mut self, id: &str) -> JobView {
         let deadline = std::time::Instant::now() + ENGINE_WAIT * 3;
         loop {
-            let shown = self.owner.job_status().await.unwrap();
-            if let Some(job) = shown.filter(|job| job.id.as_str() == id && over(&job.state)) {
+            let jobs = self.owner.job_status().await.unwrap();
+            let found = jobs.into_iter().find(|job| job.id.as_str() == id);
+            if let Some(job) = found.filter(|job| job.state.over()) {
                 return job;
             }
             assert!(std::time::Instant::now() < deadline, "job {id} never ended");
@@ -154,18 +155,6 @@ fn private(prefix: &str) -> tempfile::TempDir {
 
 fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap()
-}
-
-/// Whether a job in this state has ended. Input: the state. Output: the answer.
-fn over(state: &JobState) -> bool {
-    matches!(
-        state,
-        JobState::Done
-            | JobState::Failed { .. }
-            | JobState::Cancelled { .. }
-            | JobState::NeedsAnswer { .. }
-            | JobState::CutShort { .. }
-    )
 }
 
 /// The note a folder holds. Input: the folder. Output: its text.

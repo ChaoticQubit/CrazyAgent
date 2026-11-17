@@ -1725,8 +1725,8 @@ async fn job_until(
     let client = owner.owner_client().unwrap();
     let deadline = std::time::Instant::now() + ENGINE_WAIT * 3;
     loop {
-        let job = client.job_status().await.unwrap();
-        if let Some(job) = job.filter(&want) {
+        let jobs = client.job_status().await.unwrap();
+        if let Some(job) = jobs.into_iter().find(|job| want(job)) {
             return job;
         }
         assert!(std::time::Instant::now() < deadline, "no such job");
@@ -1804,9 +1804,14 @@ async fn a_delete_job_with_a_name_that_is_not_exact_is_refused_with_no_job_held(
         .await
         .unwrap_err();
     assert_eq!(refused.0, "delete_name_mismatch");
-    assert_eq!(
-        owner.owner_client().unwrap().job_status().await.unwrap(),
-        None
+    assert!(
+        owner
+            .owner_client()
+            .unwrap()
+            .job_status()
+            .await
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(kept(&engine), 2);
     assert_eq!(paused(&engine), 0, "nothing was stopped");
@@ -1995,9 +2000,14 @@ async fn a_delete_mark_from_2_4_1_shows_on_the_banner_and_restores_no_job() {
     cut_short(&engine, PROJECT, 11);
     engine.restart().await;
     let owner = engine.owner().await;
-    assert_eq!(
-        owner.owner_client().unwrap().job_status().await.unwrap(),
-        None
+    assert!(
+        owner
+            .owner_client()
+            .unwrap()
+            .job_status()
+            .await
+            .unwrap()
+            .is_empty()
     );
     assert_eq!(delete_notices(&owner, &project).await.len(), 1);
     drop(owner);
