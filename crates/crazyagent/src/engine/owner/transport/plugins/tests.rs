@@ -528,6 +528,52 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     assert!(!checks.join(LIVE).exists());
 }
 
+/// At engine start a check profile the boundary cannot release stays for the next start while
+/// the check folder of its server, no longer stored, is deleted with no copy moved aside left;
+/// a stored server's profile and folder and a file that is no profile stay untouched. No
+/// boundary helper is needed.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_check_profile_that_cannot_be_released_stays_for_the_next_start() {
+    const DEAD: &str = "mcp-0123456789abcdef0123456d";
+    const LIVE: &str = "mcp-0123456789abcdef0123456e";
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("engine");
+    let checks = root.join(CHECK_FOLDER);
+    for id in [DEAD, LIVE] {
+        std::fs::create_dir_all(checks.join(id).join("home")).unwrap();
+        let profile = check_profile(&checks, id);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "(version 1)\n").unwrap();
+    }
+    let other = checks.join(CHECK_PROFILES).join("notes.txt");
+    std::fs::write(&other, "kept").unwrap();
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::plugins::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
+            [LIVE],
+        )
+        .unwrap();
+
+    crate::storage::trash::sweep_at_start(&connection, None).unwrap();
+
+    assert!(!checks.join(DEAD).exists());
+    assert!(check_profile(&checks, DEAD).is_file());
+    assert!(checks.join(LIVE).join("home").is_dir());
+    assert!(check_profile(&checks, LIVE).is_file());
+    assert!(other.is_file());
+    let left: Vec<String> = std::fs::read_dir(&checks)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !left.iter().any(|name| name.starts_with(".removed-")),
+        "{left:?}"
+    );
+}
+
 /// A server removed while one of its checks runs keeps its check folder until that check
 /// ends, so the check cannot put back what the removal cleared; a server with no check
 /// running is cleared at once.
