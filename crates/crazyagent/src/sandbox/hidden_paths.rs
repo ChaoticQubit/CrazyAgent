@@ -975,9 +975,10 @@ mod tests {
                 let relative = path
                     .strip_prefix(&src)
                     .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .to_owned();
+                    .components()
+                    .map(|part| part.as_os_str().to_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("/");
                 if relative != "sandbox/hidden_paths.rs"
                     && std::fs::read_to_string(&path)
                         .unwrap()

@@ -2,6 +2,8 @@ pub mod permission_fix;
 pub mod probe;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -609,19 +611,21 @@ pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) ->
     !inside(written) && inside(real)
 }
 
-/// The temp folders: the shared ones and this user's own, as given and with its links
-/// resolved, so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Output: the absolute folders.
+/// The temp folders: the shared ones and this user's own, as given, with its links resolved
+/// and in the plain form [`crate::sandbox::canonical`] gives (a Windows drive path without
+/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
+/// dropped. Output: the absolute folders, each once.
 pub(crate) fn temp_roots() -> Vec<PathBuf> {
     let owner = std::env::temp_dir();
     let real = owner.canonicalize().ok();
+    let plain = crate::sandbox::canonical(&owner).ok();
     let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-    roots.extend(
-        std::iter::once(owner)
-            .chain(real)
-            .filter(|root| root.is_absolute() && root.parent().is_some()),
-    );
-    assert!(roots.len() <= TEMP_FOLDERS.len() + 2);
+    for root in std::iter::once(owner).chain(real).chain(plain) {
+        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
     roots
 }
 

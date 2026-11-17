@@ -478,7 +478,7 @@ fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (kind, before) = raw_user_path();
     let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("cra'zy;$(exit 7)");
+    let folder = root.path().join("cra'zy$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
     let first = link_cli(&executable, root.path());
@@ -490,6 +490,27 @@ fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
     let shown = folder.to_str().unwrap();
     assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
     assert_eq!(raw_user_path(), (kind, before));
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() {
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("cra;zy");
+    std::fs::create_dir(&folder).unwrap();
+    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
+    let after = raw_user_path();
+    restore_raw_user_path(&kind, &before);
+    let refusal = linked.unwrap_err().to_string();
+    assert!(
+        refusal.contains("cra;zy") && refusal.contains("PATH is unchanged"),
+        "{refusal}"
+    );
+    assert_eq!(after, (kind, before));
 }
 
 #[cfg(windows)]
