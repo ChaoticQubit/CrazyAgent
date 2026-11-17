@@ -430,3 +430,53 @@ fn show_all_and_the_cap_stay_after_a_rebuild_from_the_log() {
         "Show all is kept"
     );
 }
+
+/// rv-sec2 L7 r2 N2: each `Change` variant's kind is in [`KINDS`] at the variant's place, so
+/// a removal redacts every kind and the L1-N1 row holds a body rule for each. The match has
+/// no wildcard: a new variant fails to build here until it has an arm, and a sample of it
+/// then fails until [`KINDS`] lists its kind.
+#[test]
+fn every_change_kind_is_in_kinds_at_its_variants_place() {
+    let project = ProjectId::new("app").unwrap();
+    let changes = [
+        Change::Asked(IdeAsked {
+            project: project.clone(),
+            entry: RequestId::new("m1").unwrap(),
+            version: 1,
+            decision: Decision::Approve,
+            asked_ms: NOW_MS,
+        }),
+        Change::RunModeSet(RunModeSet {
+            project: project.clone(),
+            mode: RunMode::Off,
+        }),
+        Change::FileUnlocked(FileUnlocked {
+            project: project.clone(),
+            agent: 1,
+            path: WorktreePath::try_from("src/a.rs".to_owned()).unwrap(),
+            turns: 0,
+        }),
+        Change::WorkspaceWritten(WorkspaceWritten {
+            project: project.clone(),
+            show_all: false,
+        }),
+        Change::WorkspaceForgotten(WorkspaceForgotten { project }),
+    ];
+    let mut seen = [false; KINDS.len()];
+    for change in &changes {
+        let at = match change {
+            Change::Asked(_) => 0,
+            Change::RunModeSet(_) => 1,
+            Change::FileUnlocked(_) => 2,
+            Change::WorkspaceWritten(_) => 3,
+            Change::WorkspaceForgotten(_) => 4,
+        };
+        assert!(!seen[at], "one sample of each variant");
+        seen[at] = true;
+        assert_eq!(change.kind(), KINDS[at], "{change:?}");
+    }
+    assert!(
+        seen.iter().all(|sampled| *sampled),
+        "a sample of every variant"
+    );
+}
