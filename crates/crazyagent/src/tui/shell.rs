@@ -15,6 +15,7 @@ use super::glyphs::Glyphs;
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
+use super::screens::settings::restore;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::usage::extras::{ResetWatch, reset_notice};
@@ -652,23 +653,7 @@ impl Shell {
                 self.ctx.link = Link::Ready;
                 self.ctx.identity = identity.clone();
             }
-            Arrival::Disconnected(problem) => {
-                self.ctx.identity = None;
-                let started = self
-                    .stack
-                    .first()
-                    .and_then(|screen| screen.place())
-                    .is_some();
-                if started {
-                    self.ctx.link = Link::Reconnecting;
-                    self.ctx.say(Message::error(
-                        "Lost the connection to the engine.",
-                        "Retrying in 3 s. What you typed is kept.",
-                    ));
-                } else {
-                    self.ctx.link = Link::Down(problem.clone());
-                }
-            }
+            Arrival::Disconnected(problem) => self.lose_engine(problem),
             Arrival::Profile(result) => {
                 self.ctx.store.profile = match result {
                     Ok(profile) => Load::Ready(profile.clone()),
@@ -780,6 +765,38 @@ impl Shell {
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.show();
         }
+    }
+
+    /// Takes a lost or refused connection: before the first connect the engine-down screen
+    /// shows it; later the TUI retries every 3 s, except after a restore brought the 2.4
+    /// data back, which it says in the restore's sentence as the desktop does (L5 F1).
+    /// Input: the problem code. Output: none.
+    fn lose_engine(&mut self, problem: &str) {
+        self.ctx.identity = None;
+        let started = self
+            .stack
+            .first()
+            .and_then(|screen| screen.place())
+            .is_some();
+        if !started {
+            self.ctx.link = Link::Down(problem.to_owned());
+            return;
+        }
+        if !restore::holds(problem) {
+            self.ctx.link = Link::Reconnecting;
+            self.ctx.say(Message::error(
+                "Lost the connection to the engine.",
+                "Retrying in 3 s. What you typed is kept.",
+            ));
+            return;
+        }
+        self.ctx.link = if problem == crate::restore::ENGINE_RESTORED {
+            Link::Down(problem.to_owned())
+        } else {
+            Link::Reconnecting
+        };
+        self.ctx.say(Message::error(restore::plain(problem), ""));
+        assert!(self.ctx.link != Link::Ready);
     }
 
     /// Keeps the learning read for Home, keeping the last good read over a failed one, and

@@ -54,7 +54,10 @@ enum WorkerMode {
 enum Job {
     Creation(Box<CreationJob>),
     Wire(Box<WireRequest>),
-    Reconnect(Option<Box<(crate::paths::Layout, crate::service::Service)>>),
+    Reconnect {
+        engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+        start: bool,
+    },
     Conversation(Box<ConversationJob>),
     Master(Box<master_session::Job>),
     ModelAccess(Box<model_access::Job>),
@@ -374,15 +377,15 @@ impl Connection {
                                 break;
                             }
                         }
-                        Job::Reconnect(engine) => {
+                        Job::Reconnect { engine, start } => {
                             let native = native
                                 .as_mut()
                                 .expect("paired reconnect requires native configuration");
-                            let started = match engine {
-                                Some(engine) => {
-                                    runtime.block_on(start_engine(&engine, &worker_stop))
+                            let started = match &engine {
+                                Some(engine) if start => {
+                                    runtime.block_on(start_engine(engine, &worker_stop))
                                 }
-                                None => Ok(()),
+                                _ => Ok(()),
                             };
                             let (ordinary, event) = match started {
                                 Ok(()) => runtime.block_on(native.attach()),
@@ -400,7 +403,7 @@ impl Connection {
                             if owner_replies
                                 .send(OwnerReply {
                                     finished: true,
-                                    event,
+                                    event: restore_held(event, engine.as_deref()),
                                 })
                                 .is_err()
                             {
@@ -1143,7 +1146,11 @@ impl Connection {
     }
 
     pub fn reconnect(&mut self) -> Result<(), String> {
-        self.owner_job(Job::Reconnect(None))
+        let engine = self.engine.clone();
+        self.owner_job(Job::Reconnect {
+            engine,
+            start: false,
+        })
     }
 
     /// Asks the worker to start the engine, or repair its login service, and then
@@ -1152,7 +1159,10 @@ impl Connection {
     /// the worker has the ask.
     pub fn start_engine(&mut self) -> Result<(), String> {
         let engine = self.engine.clone();
-        self.owner_job(Job::Reconnect(engine))
+        self.owner_job(Job::Reconnect {
+            engine,
+            start: true,
+        })
     }
 
     pub(super) fn conversation(&mut self, job: ConversationJob) -> Result<(), String> {
@@ -2482,6 +2492,37 @@ async fn start_engine(
         return Err("engine_backup_failed".into());
     }
     Err("engine_start_failed".into())
+}
+
+/// The access event a reconnect gives: one that failed while a restore holds the TUI's own
+/// engine names that restore, as the desktop's connect does (L5 F1); any other event is
+/// unchanged. Inputs: the event and the default engine, none on an explicit socket.
+/// Output: the event to show.
+fn restore_held(
+    event: OwnerEvent,
+    engine: Option<&(crate::paths::Layout, crate::service::Service)>,
+) -> OwnerEvent {
+    match (event, engine) {
+        (
+            OwnerEvent::Access {
+                ready: false,
+                problem,
+                identity,
+            },
+            Some((layout, service)),
+        ) => {
+            assert!(identity.is_none(), "a failed connect has no identity");
+            let running = crate::restore::service_running(service);
+            let problem = super::screens::settings::restore::held(problem, layout.root(), running);
+            assert!(!problem.is_empty());
+            OwnerEvent::Access {
+                ready: false,
+                problem,
+                identity,
+            }
+        }
+        (event, _) => event,
+    }
 }
 
 /// The connection problem the TUI shows when it cannot attach: the plain line for a

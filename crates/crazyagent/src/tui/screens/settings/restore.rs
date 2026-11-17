@@ -61,6 +61,25 @@ pub fn plain(code: &str) -> &'static str {
     said
 }
 
+/// The problem a failed connect to the TUI's own engine shows: the restore that holds the
+/// engine, as the desktop's connect names it (L5 F1), else the problem unchanged. Inputs:
+/// the problem, the engine root and whether its login service still runs a process.
+/// Output: `engine_restoring`, `engine_restored` or the problem.
+pub fn held(problem: String, root: &Path, running: bool) -> String {
+    assert!(!problem.is_empty(), "a failed connect names its problem");
+    let Some(code) = crate::restore::blocks_start(root, running) else {
+        return problem;
+    };
+    assert!(holds(code));
+    code.to_owned()
+}
+
+/// Whether a code is one a restore holds the engine with, which the TUI shows in the
+/// restore's own sentence. Input: the code. Output: the answer.
+pub fn holds(code: &str) -> bool {
+    code == crate::restore::ENGINE_RESTORING || code == crate::restore::ENGINE_RESTORED
+}
+
 /// What the page shows: whether the button is offered, the line under the tabs and the last
 /// restore's failure, if any, as the desktop's Restore 2.4 shows them.
 #[derive(Debug, PartialEq, Eq)]

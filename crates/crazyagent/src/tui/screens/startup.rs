@@ -1,10 +1,11 @@
+use super::settings::restore;
 use super::{Flow, Place, Screen, open};
 use crate::tui::brand;
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, Request};
-use crate::tui::text::styled;
+use crate::tui::text::{styled, wrap};
 use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -51,6 +52,46 @@ pub fn tilde(path: &str, home: Option<&str>) -> String {
         }
         _ => path.to_owned(),
     }
+}
+
+/// The engine-down screen's lines: a restore that holds the engine says so in the restore's
+/// own sentence, wrapped to the screen, as the desktop's engine-down view shows its problem
+/// (L5 F1); any other problem says what lives in the engine. Inputs: the context and the
+/// screen width. Output: the lines.
+fn down_lines(ctx: &Ctx, width: u16) -> Vec<Line<'static>> {
+    let theme = &ctx.theme;
+    let mut lines = vec![
+        Line::default(),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("CrazyAgent's engine isn't running", theme.heading),
+        ]),
+        Line::default(),
+    ];
+    match &ctx.link {
+        Link::Down(problem) if restore::holds(problem) => {
+            let limit = usize::from(width).saturating_sub(4).max(1);
+            let said = wrap(restore::plain(problem), limit);
+            assert!(!said.is_empty());
+            lines.extend(said.into_iter().map(|line| Line::raw(format!("  {line}"))));
+        }
+        _ => lines.push(Line::raw(
+            "  Projects, accounts and agents live in the engine.",
+        )),
+    }
+    lines.push(Line::raw(if ctx.starts_engine {
+        "  Press r to start it and try again."
+    } else {
+        "  Start it, then press r to try again."
+    }));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Looked for it at", theme.muted),
+        Span::raw(format!("  {}", tilde(&ctx.socket, ctx.home.as_deref()))),
+    ]));
+    assert!(lines.len() >= 7);
+    lines
 }
 
 /// Support details copied with `c`: the socket path and versions, never secrets.
@@ -155,26 +196,7 @@ impl Screen for Startup {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let theme = &ctx.theme;
         let lines = if Self::down(ctx) {
-            vec![
-                Line::default(),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("CrazyAgent's engine isn't running", theme.heading),
-                ]),
-                Line::default(),
-                Line::raw("  Projects, accounts and agents live in the engine."),
-                Line::raw(if ctx.starts_engine {
-                    "  Press r to start it and try again."
-                } else {
-                    "  Start it, then press r to try again."
-                }),
-                Line::default(),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled("Looked for it at", theme.muted),
-                    Span::raw(format!("  {}", tilde(&ctx.socket, ctx.home.as_deref()))),
-                ]),
-            ]
+            down_lines(ctx, area.width)
         } else if self.profile_failed {
             vec![
                 Line::default(),
