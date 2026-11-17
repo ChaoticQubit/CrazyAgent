@@ -14,7 +14,8 @@ const REMOVED: &str = "removed";
 const OTHER: &str = "other";
 
 /// The second part of the removal's projection (v2.5 L14b): activity, coordination, GitHub
-/// rule proposals, the IDE Run setting, the schedule and usage, on this module's store.
+/// rule proposals, the IDE Run setting, the schedule and usage, on this module's store,
+/// rebuilt from the log equal to the live store, and the engine's open writes off the log.
 mod areas;
 
 /// Each area the removal's projection clears, with the rows [`seed`] gives one project

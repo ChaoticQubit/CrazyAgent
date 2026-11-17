@@ -841,7 +841,7 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
 }
 
 fn root_backups(case: &Case) -> Vec<String> {
-    std::fs::read_dir(case.root.path().join(crate::storage::BACKUPS))
+    std::fs::read_dir(case.root.path().join(crate::storage::migrations::BACKUPS))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_str().unwrap().to_owned())
         .collect()
