@@ -10,7 +10,7 @@ import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { useTeamGraph } from "../team";
 import { Console, type ConsoleLine } from "./console";
-import { agentMentions } from "./console-model";
+import { agentMentions, type Seed } from "./console-model";
 import { useProjectFiles } from "./project-files";
 import { ReinstallNotice } from "./reinstall";
 import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, activityLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
@@ -150,7 +150,7 @@ export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, 
 export function ConversationTab({ data, readOnly = false, seed = null, onAsk }: {
   data: ProjectData;
   readOnly?: boolean;
-  seed?: { id: number; text: string } | null;
+  seed?: Seed | null;
   onAsk?: (draft: string) => void;
 }) {
   const [ticket, setTicket] = useState("");

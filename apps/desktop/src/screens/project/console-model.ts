@@ -265,6 +265,6 @@ export interface Seed {
  * the master area's seed. Output: the seed; its `used` clears the area's seed unless a newer
  * Ask replaced it. */
 export function seedOf(id: number, text: string, set: (update: (now: Seed | null) => Seed | null) => void): Seed {
-  void set;
-  return { id, text, used: () => {} };
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error("a seed's id is a whole number from 1");
+  return { id, text, used: () => set((now) => (now?.id === id ? null : now)) };
 }

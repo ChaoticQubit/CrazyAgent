@@ -9,10 +9,11 @@ import type { InputChoice } from "./terminal-io";
 import { afterFirstPaint, onTerminalRenderer, readLastProject, readTerminalInput, readTerminalRenderer, type Loaded, type ProjectRow } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
+import type { Seed } from "../project/console-model";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
 import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
 import { autoStartFailed, gpuStartFailed, gpuWanted, probeGpu, rendererChosen } from "./terminal-renderer";
-import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, readableScreen, selectNote, settleAfterWrites, terminalEvent, terminalSize, type GpuDrawing } from "./terminal-io";
+import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, readableScreen, seedText, selectNote, settleAfterWrites, terminalEvent, terminalSize, type GpuDrawing } from "./terminal-io";
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
@@ -934,7 +935,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   reported?: string;
   projectId?: string;
   onOpened?: (open: boolean) => void;
-  seed?: { id: number; text: string } | null;
+  seed?: Seed | null;
 }) {
   if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
   if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
@@ -967,8 +968,9 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
     const terminal = current.current?.terminal ?? null;
     if (seed === null || !open || terminal === null || pasted.current === seed.id) return;
     pasted.current = seed.id;
-    terminal.paste(pasteText(seed.text));
+    terminal.paste(seedText(seed.text, terminal.modes.bracketedPasteMode));
     terminal.focus();
+    seed.used();
   }, [seed, open]);
   const [menu, setMenu] = useState<MenuAt | null>(null);
   const [copied, setCopied] = useState<string | null>(null);

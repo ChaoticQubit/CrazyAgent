@@ -3,7 +3,7 @@ import type { Route } from "../../ui";
 import { displayText } from "../conversation";
 import {
   CONSOLE_COMMANDS, commandRoute, consoleKey, fileMentions, filterCommands, helpLines, insertMention, matchMentions,
-  mentionAt, moveChoice, promptRows, recall, remember, seededText, submitted, tagSegments, unknownLine, type ConsoleCommand,
+  mentionAt, moveChoice, promptRows, recall, remember, seededText, submitted, tagSegments, unknownLine, type ConsoleCommand, type Seed,
   type Mention,
 } from "./console-model";
 import { useLinkOpener } from "./links";
@@ -46,7 +46,7 @@ export interface ConsoleProps {
   onStop: () => void;
   onNavigate: (route: Route) => void;
   onTagQuery?: (query: string | null) => void;
-  seed?: { id: number; text: string } | null;
+  seed?: Seed | null;
 }
 
 export const CONSOLE_HINT = "Enter to send, Shift+Enter for a new line, / for commands, @ to tag.";
@@ -148,6 +148,7 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
     if (seed === null) return;
     setText(seededText(text, seed.text));
     field.current?.focus();
+    seed.used();
   }, [seed]);
   const lastLineId = () => lines.at(-1)?.id ?? null;
   const note = (texts: string[]) => setNotes((old) => [...old, ...texts.map((value) => {
