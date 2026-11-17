@@ -737,7 +737,94 @@ pub(crate) fn apply_owner(
             }
             Ok(Outcome::Applied)
         }
+        SetupAction::RestorePinned => restore_check(tx, root),
     }
+}
+
+/// Admits the owner's restore of the pinned 2.4 backup inside the owner transaction: a
+/// pinned backup still under 30 days old and no agent running. The engine stops for it once
+/// this commits. Inputs: the transaction and the engine root. Output: applied or a refusal.
+#[cfg(unix)]
+fn restore_check(tx: &Transaction<'_>, root: &Path) -> Result<Outcome, EngineError> {
+    if migrations::restorable_until(root, std::time::SystemTime::now()).is_none() {
+        return Ok(rejected(migrations::RESTORE_UNAVAILABLE));
+    }
+    if migrations::agents_running(tx)? {
+        return Ok(rejected(migrations::RESTORE_AGENTS_RUNNING));
+    }
+    Ok(Outcome::Applied)
+}
+
+/// Refuses a restore where engine storage has no backups. Inputs: unused. Output: the
+/// `storage_restore_unavailable` refusal.
+#[cfg(not(unix))]
+fn restore_check(_tx: &Transaction<'_>, _root: &Path) -> Result<Outcome, EngineError> {
+    Ok(rejected("storage_restore_unavailable"))
+}
+
+#[cfg(unix)]
+pub(crate) use super::migrations::{RECORD_FAILED, RECORD_PENDING, RECORD_RESTORED};
+
+/// Records a restore the owner asked for as pending before the engine stops for it, so no
+/// client starts the engine again while it copies. Input: the engine root. Output: Ok once
+/// the record is on disk.
+#[cfg(unix)]
+pub(crate) fn restore_pending(root: &Path) -> Result<(), EngineError> {
+    migrations::write_restore_record(root, migrations::RECORD_PENDING)
+}
+
+/// Brings back the pinned 2.4 backup once the engine has stopped and every connection it
+/// held is closed, then records how it ended: `restored <copy>` or `failed <code>`, the code
+/// alone so no path reaches the record. Inputs: the engine root and the settings files.
+/// Output: the folder of the copy kept of the 2.5 data, or the failure.
+#[cfg(unix)]
+pub(crate) fn restore_after_stop(
+    root: &Path,
+    global: &Path,
+    project: &Path,
+) -> Result<PathBuf, EngineError> {
+    let restored = super::settings::SettingsSources::open(global, project).and_then(|sources| {
+        migrations::restore_pinned(&root.join(migrations::DATABASE), Some(&sources))
+    });
+    let line = match &restored {
+        Ok(copy) => {
+            let name = copy
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            assert!(!name.is_empty());
+            format!("{} {name}", migrations::RECORD_RESTORED)
+        }
+        Err(cause) => {
+            let code = [
+                migrations::RESTORE_UNAVAILABLE,
+                migrations::RESTORE_AGENTS_RUNNING,
+                migrations::RESTORE_BUSY,
+            ]
+            .into_iter()
+            .find(|code| cause.0.starts_with(code))
+            .unwrap_or(migrations::RESTORE_FAILED);
+            format!("{} {code}", migrations::RECORD_FAILED)
+        }
+    };
+    if let Err(problem) = migrations::write_restore_record(root, &line) {
+        eprintln!("{}", problem.0);
+    }
+    restored
+}
+
+/// The restore record of the engine at `root`, read without an engine. Input: the root.
+/// Output: its line, or none.
+#[cfg(unix)]
+pub(crate) fn restore_record(root: &Path) -> Option<String> {
+    migrations::read_restore_record(root)
+}
+
+/// Until when the owner can restore the pinned 2.4 backup of the engine at `root`, read
+/// without an engine. Input: the root. Output: the pin's end, or none.
+#[cfg(unix)]
+pub(crate) fn restorable_until(root: &Path) -> Option<std::time::SystemTime> {
+    migrations::restorable_until(root, std::time::SystemTime::now())
 }
 
 /// Reads the setup screen inside an owner read: every pack entry with its state from the

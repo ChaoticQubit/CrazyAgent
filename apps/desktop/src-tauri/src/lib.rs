@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod ide;
+mod restore;
 pub mod theme;
 mod updates;
 
@@ -299,14 +300,20 @@ async fn check_default_engine(
 /// older than this app that the running login service runs is replaced once per app run
 /// through Restart engine's path, without its confirm, and once it answers on this app's
 /// version the next connect reply says so (DEC-134 addendum 1); any other version or engine,
-/// or a replacement the service refuses, is `engine_version_mismatch`. Skipped when
-/// `CRAZYAGENT_DESKTOP_SOCKET` names an engine explicitly.
+/// or a replacement the service refuses, is `engine_version_mismatch`. An engine that is not
+/// answering because a restore runs or brought the 2.4 data back is not started:
+/// `engine_restoring` or `engine_restored` (L5). Skipped when `CRAZYAGENT_DESKTOP_SOCKET`
+/// names an engine explicitly.
 async fn ensure_default_engine() -> Result<(), BridgeError> {
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
         return Ok(());
     }
     let (layout, service) = default_engine()?;
     if !crazyagent::service::answering(&layout.socket()) {
+        let running = restore::service_running(&service);
+        if let Some(code) = crazyagent::restore::blocks_start(layout.root(), running) {
+            return Err(engine_failure(code));
+        }
         start_engine(&layout, &service, false).await?;
     }
     let crazyagent::service::EngineCheck::Mismatch { version, .. } =
@@ -404,9 +411,42 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
+    if crazyagent::restore::holds_restart(layout.root(), restore::service_running(&service)) {
+        return Err(engine_failure(crazyagent::restore::ENGINE_RESTORING));
+    }
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
     bridge.connect().await
+}
+
+/// Reads what Settings shows about bringing back the default engine's 2.4 data (L5), without
+/// the engine: until when its pinned backup can be restored and how the last restore ended.
+/// Nothing to show while `CRAZYAGENT_DESKTOP_SOCKET` names another engine.
+#[tauri::command]
+async fn desktop_restore_status(webview: Webview) -> Result<restore::RestoreView, BridgeError> {
+    main_window(&webview)?;
+    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
+        return Ok(restore::RestoreView::default());
+    }
+    let layout =
+        crazyagent::paths::Layout::current().map_err(|_| engine_failure("not_configured"))?;
+    Ok(restore::view(layout.root()))
+}
+
+/// Asks the default engine to stop and bring back its pinned 2.4 backup after the owner's
+/// confirm (L5). Refused `storage_restore_unavailable` while `CRAZYAGENT_DESKTOP_SOCKET` names
+/// another engine, whose restore this window could not follow.
+#[tauri::command]
+async fn desktop_restore_pinned(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    generation: u64,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
+        return Err(engine_failure("storage_restore_unavailable"));
+    }
+    lock(&state).await?.restore_pinned(generation).await
 }
 
 #[tauri::command]
@@ -5566,6 +5606,8 @@ native_commands! {
     desktop_install_dependency,
     desktop_fix_tool_permissions,
     desktop_set_refused_tool,
+    desktop_restore_status,
+    desktop_restore_pinned,
     desktop_set_pack_entry,
     desktop_remove_pack_entry,
     desktop_project_memories,
