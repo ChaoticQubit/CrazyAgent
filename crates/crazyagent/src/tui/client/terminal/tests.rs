@@ -120,7 +120,7 @@ fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
     for over in 0..=PASTE_CLOSE.len() {
         let body = INPUT_BYTES_MAX + over - PASTE_OPEN.len() - PASTE_CLOSE.len();
         let bytes = [PASTE_OPEN, &vec![b'x'; body][..], PASTE_CLOSE].concat();
-        let parts = inputs(&bytes);
+        let parts = input_runs(&bytes, INPUT_BYTES_MAX);
         assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
         assert!(
             parts.last().is_some_and(|part| part.ends_with(PASTE_CLOSE)),
@@ -130,7 +130,11 @@ fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
         assert_eq!(parts.concat(), bytes);
     }
     let typed = vec![b'x'; 3 * INPUT_BYTES_MAX + 1];
-    assert_eq!(inputs(&typed).len(), 4, "plain bytes are cut at the limit");
+    assert_eq!(
+        input_runs(&typed, INPUT_BYTES_MAX).len(),
+        4,
+        "plain bytes are cut at the limit"
+    );
 }
 
 #[test]
