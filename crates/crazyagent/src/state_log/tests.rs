@@ -516,7 +516,8 @@ const WRITERS: [(&str, &[&str]); 5] = [
 ];
 
 /// The writers outside this module that take a snapshot, each with the only tables its runs
-/// may carry: tables whose every column is an id, a checked path or a typed record.
+/// may carry. A run copies those tables' stored columns as they stand, rows the typed events
+/// wrote; the run does not check them again.
 const SNAPSHOTS: [(&str, &[&str]); 1] = [(
     "worktrees/log.rs",
     &["repository_admissions", "worktree_leases"],
@@ -690,6 +691,122 @@ fn writer_sources() -> Vec<(String, String)> {
     found
 }
 
+/// Checks the snapshot rule of [`no_event_body_can_carry_a_secret`]: only state_log.rs and
+/// the writers [`SNAPSHOTS`] names take a snapshot, and a worktrees run carries only its
+/// named tables. Input: the writers' paths and sources. Output: none.
+fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
+    assert!(!writers.is_empty(), "the log has writers");
+    for (name, text) in writers {
+        let named = SNAPSHOTS.iter().any(|(path, _)| *path == name.as_str());
+        assert!(
+            name.as_str() == "state_log.rs" || named || !text.contains(".snapshot("),
+            "{name} takes a snapshot"
+        );
+    }
+    worktrees_runs_carry_only_their_named_tables();
+}
+
+/// Checks that a snapshot's closing body holds only its aggregate, its chunk count and its
+/// hash, 64 lowercase hex digits, so no free text rides in it. Output: none.
+fn a_closing_body_is_its_hash() {
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
+    let seq = i64::try_from(done).expect("a log seq fits in i64");
+    let body: Vec<u8> = tx
+        .query_row("SELECT body FROM state_log WHERE seq=?1", [seq], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let closing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mut keys: Vec<&str> = closing
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["aggregate", "chunks", "sha256"]);
+    let sha256 = closing["sha256"].as_str().unwrap();
+    assert_eq!(sha256.len(), 64);
+    assert!(
+        sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+}
+
+/// Checks the closed body of one worktrees kind: project or task and the typed record,
+/// refusing free text in either and any key more. Input: the kind. Output: none.
+fn worktrees_body_is_closed(kind: &str) {
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    match kind {
+        crate::worktrees::log::KIND_ADMITTED => closed_body(
+            kind,
+            |body| serde_json::from_slice::<crate::worktrees::log::Admitted>(body).is_ok(),
+            json!({"project": "app", "body": lease_sample()["admission"].clone()}),
+            &["project", "body"],
+        ),
+        crate::worktrees::log::KIND_RESERVED => closed_body(
+            kind,
+            |body| serde_json::from_slice::<crate::worktrees::log::Reserved>(body).is_ok(),
+            json!({"task": "t1", "body": lease_sample()}),
+            &["task", "body"],
+        ),
+        crate::worktrees::log::KIND_SAVED => closed_body(
+            kind,
+            |body| serde_json::from_slice::<crate::worktrees::log::Saved>(body).is_ok(),
+            json!({"task": "t1", "body": lease_sample()}),
+            &["task", "body"],
+        ),
+        other => panic!("{other} is not a worktrees kind"),
+    }
+}
+
+/// Checks the closed body of one ide kind: the project, ids, typed values and the one
+/// [`FREE_FORM`] path, refusing free text elsewhere and any key more. Input: the kind.
+/// Output: none.
+fn ide_body_is_closed(kind: &str) {
+    use crate::ide::log::WorkspaceWritten;
+    use crate::ide::log::{FileUnlocked, IdeAsked, RunModeSet, WorkspaceForgotten};
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    match kind {
+        crate::ide::log::IDE_ASKED => closed_body(
+            kind,
+            |body| serde_json::from_slice::<IdeAsked>(body).is_ok(),
+            json!({"project": "app", "entry": "m1", "version": 3, "decision": "approve",
+                   "asked_ms": 5}),
+            &["project", "entry", "version", "decision", "asked_ms"],
+        ),
+        crate::ide::log::RUN_MODE_SET => closed_body(
+            kind,
+            |body| serde_json::from_slice::<RunModeSet>(body).is_ok(),
+            json!({"project": "app", "mode": "type_only"}),
+            &["project", "mode"],
+        ),
+        crate::ide::log::FILE_UNLOCKED => closed_body(
+            kind,
+            |body| serde_json::from_slice::<FileUnlocked>(body).is_ok(),
+            json!({"project": "app", "agent": 7, "path": "src/main file.rs", "turns": 2}),
+            &["project", "agent", "path", "turns"],
+        ),
+        crate::ide::log::WORKSPACE_WRITTEN => closed_body(
+            kind,
+            |body| serde_json::from_slice::<WorkspaceWritten>(body).is_ok(),
+            json!({"project": "app", "show_all": true}),
+            &["project", "show_all"],
+        ),
+        crate::ide::log::WORKSPACE_FORGOTTEN => closed_body(
+            kind,
+            |body| serde_json::from_slice::<WorkspaceForgotten>(body).is_ok(),
+            json!({"project": "app"}),
+            &["project"],
+        ),
+        other => panic!("{other} is not an ide kind"),
+    }
+}
+
 /// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each kind's body
 /// has closed keys whose decoder refuses free text and any key more (ids: 1 to 128 safe ASCII
 /// bytes), but for one [`FREE_FORM`] path that refuses what `check_path` refuses. A closing
@@ -721,44 +838,8 @@ fn no_event_body_can_carry_a_secret() {
     }
     for kind in KINDS {
         match kind {
-            SNAPSHOT_CHUNK => {
-                for (name, text) in &writers {
-                    let named = SNAPSHOTS.iter().any(|(path, _)| *path == name.as_str());
-                    assert!(
-                        name.as_str() == "state_log.rs" || named || !text.contains(".snapshot("),
-                        "{name} takes a snapshot"
-                    );
-                }
-                worktrees_runs_carry_only_their_named_tables();
-            }
-            SNAPSHOT_DONE => {
-                let mut db = db();
-                let tx = db.transaction().unwrap();
-                let mut log = Appender::own(&tx, fence::engine()).unwrap();
-                let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
-                let seq = i64::try_from(done).expect("a log seq fits in i64");
-                let body: Vec<u8> = tx
-                    .query_row("SELECT body FROM state_log WHERE seq=?1", [seq], |row| {
-                        row.get(0)
-                    })
-                    .unwrap();
-                let closing: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut keys: Vec<&str> = closing
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .map(String::as_str)
-                    .collect();
-                keys.sort_unstable();
-                assert_eq!(keys, ["aggregate", "chunks", "sha256"]);
-                let sha256 = closing["sha256"].as_str().unwrap();
-                assert_eq!(sha256.len(), 64);
-                assert!(
-                    sha256
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                );
-            }
+            SNAPSHOT_CHUNK => only_named_writers_take_a_snapshot(&writers),
+            SNAPSHOT_DONE => a_closing_body_is_its_hash(),
             replay::PROCESS_EXITED => closed_body(
                 kind,
                 |body| serde_json::from_slice::<replay::ProcessExited>(body).is_ok(),
@@ -784,55 +865,14 @@ fn no_event_body_can_carry_a_secret() {
                 json!({"project": "app", "session": "s1"}),
                 &["project", "session"],
             ),
-            crate::ide::log::IDE_ASKED => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::ide::log::IdeAsked>(body).is_ok(),
-                json!({"project": "app", "entry": "m1", "version": 3, "decision": "approve",
-                       "asked_ms": 5}),
-                &["project", "entry", "version", "decision", "asked_ms"],
-            ),
-            crate::ide::log::RUN_MODE_SET => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::ide::log::RunModeSet>(body).is_ok(),
-                json!({"project": "app", "mode": "type_only"}),
-                &["project", "mode"],
-            ),
-            crate::ide::log::FILE_UNLOCKED => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::ide::log::FileUnlocked>(body).is_ok(),
-                json!({"project": "app", "agent": 7, "path": "src/main file.rs", "turns": 2}),
-                &["project", "agent", "path", "turns"],
-            ),
-            crate::ide::log::WORKSPACE_WRITTEN => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::ide::log::WorkspaceWritten>(body).is_ok(),
-                json!({"project": "app", "show_all": true}),
-                &["project", "show_all"],
-            ),
-            crate::ide::log::WORKSPACE_FORGOTTEN => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::ide::log::WorkspaceForgotten>(body).is_ok(),
-                json!({"project": "app"}),
-                &["project"],
-            ),
-            crate::worktrees::log::KIND_ADMITTED => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::worktrees::log::Admitted>(body).is_ok(),
-                json!({"project": "app", "body": lease_sample()["admission"].clone()}),
-                &["project", "body"],
-            ),
-            crate::worktrees::log::KIND_RESERVED => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::worktrees::log::Reserved>(body).is_ok(),
-                json!({"task": "t1", "body": lease_sample()}),
-                &["task", "body"],
-            ),
-            crate::worktrees::log::KIND_SAVED => closed_body(
-                kind,
-                |body| serde_json::from_slice::<crate::worktrees::log::Saved>(body).is_ok(),
-                json!({"task": "t1", "body": lease_sample()}),
-                &["task", "body"],
-            ),
+            crate::worktrees::log::KIND_ADMITTED
+            | crate::worktrees::log::KIND_RESERVED
+            | crate::worktrees::log::KIND_SAVED => worktrees_body_is_closed(kind),
+            crate::ide::log::IDE_ASKED
+            | crate::ide::log::RUN_MODE_SET
+            | crate::ide::log::FILE_UNLOCKED
+            | crate::ide::log::WORKSPACE_WRITTEN
+            | crate::ide::log::WORKSPACE_FORGOTTEN => ide_body_is_closed(kind),
             other => panic!("the kind {other} has no body rule"),
         }
     }
