@@ -592,11 +592,12 @@ pub fn check_add(
         "home_source_missing",
         "home_source_not_folder",
     )?;
-    if real.starts_with(home) {
+    let saved = one_spelling(home.to_path_buf());
+    if real.starts_with(&saved) {
         return Err(refused("home_source_in_home"));
     }
     let owner = owner_home()?;
-    if holds_owner_home(&real, &owner) || home.starts_with(&real) || overlaps(&real, engine_root) {
+    if holds_owner_home(&real, &owner) || saved.starts_with(&real) || overlaps(&real, engine_root) {
         return Err(refused("home_source_unsafe"));
     }
     let name = real
@@ -752,7 +753,8 @@ pub fn plan_trash(
         "home_trash_missing",
         "home_trash_not_folder",
     )?;
-    if real.parent() != Some(home) {
+    let home = one_spelling(home.to_path_buf());
+    if real.parent() != Some(home.as_path()) {
         return Err(refused("home_trash_outside"));
     }
     let name = real
@@ -763,7 +765,7 @@ pub fn plan_trash(
     if registered.iter().any(|project| in_use(&real, project)) {
         return Err(refused("home_trash_still_set_up"));
     }
-    assert!(real.starts_with(home) && real != home);
+    assert!(real.starts_with(&home) && real != home);
     Ok(real)
 }
 
@@ -785,6 +787,7 @@ pub fn trash(folder: &Path) -> Result<(), EngineError> {
 /// strictly below the home.
 pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, EngineError> {
     assert!(home.is_absolute());
+    let home = one_spelling(home.to_path_buf());
     let mut real = Vec::with_capacity(folders.len());
     for folder in folders {
         let climbs = folder
@@ -794,7 +797,7 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
             return Err(refused("delete_outside_home"));
         }
         match real_folder(folder, "delete_folder_missing", "delete_outside_home") {
-            Ok(path) if path.starts_with(home) && path != home => real.push(path),
+            Ok(path) if path.starts_with(&home) && path != home => real.push(path),
             Ok(_) => return Err(refused("delete_outside_home")),
             Err(missing) if missing.0 == "delete_folder_missing" => {}
             Err(refusal) => return Err(refusal),
@@ -812,7 +815,7 @@ pub fn plan_delete(home: &Path, folders: &[PathBuf]) -> Result<Vec<PathBuf>, Eng
     assert!(
         moved
             .iter()
-            .all(|path| path.starts_with(home) && path != home)
+            .all(|path| path.starts_with(&home) && *path != home)
     );
     Ok(moved)
 }
@@ -1192,10 +1195,11 @@ pub fn plan_move(
     engine_root: &Path,
 ) -> Result<MovePlan, EngineError> {
     let next = check_home(picked, engine_root)?;
-    if next == current {
+    let saved = one_spelling(current.to_path_buf());
+    if next == saved {
         return Err(refused("home_move_same"));
     }
-    if overlaps(&next, current) {
+    if overlaps(&next, &saved) {
         return Err(refused("home_move_nested"));
     }
     let folders = watch::scan_all(current)?.ok_or_else(|| refused("home_move_too_many"))?;

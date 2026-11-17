@@ -567,11 +567,10 @@ fn checked(
     if set_up == 0 {
         return Err(refused("project_setup_missing"));
     }
-    let home = one_spelling(home);
     let real = one_spelling(
         std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?,
     );
-    if real.starts_with(&home) {
+    if real.starts_with(one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
     if real != found.folder {
