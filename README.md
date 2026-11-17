@@ -57,7 +57,7 @@ sudo apt install ./CrazyAgent_<version>_amd64.deb
 
 ### Command line only
 
-1. Download `crazyagent-<version>-<target>.tar.gz` for your platform (`.zip` on Windows). The target is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc` or `aarch64-pc-windows-msvc`.
+1. Download `crazyagent-<version>-<target>.tar.gz` for your platform (`.zip` on Windows). The target is `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` or `x86_64-pc-windows-msvc`.
 2. Extract it into a folder on your `PATH`, such as `~/.local/bin`. Keep `crazyagent`, `crazyagent-rcli` and the helper binaries together in that folder.
 3. Install and start the engine service for your user account:
 

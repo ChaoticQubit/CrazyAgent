@@ -23,7 +23,6 @@ export const TARGETS = Object.freeze({
   "x86_64-apple-darwin": Object.freeze({ os: "macos", bundleArch: "x64", exe: "" }),
   "x86_64-unknown-linux-gnu": Object.freeze({ os: "linux", bundleArch: "amd64", exe: "" }),
   "x86_64-pc-windows-msvc": Object.freeze({ os: "windows", bundleArch: "x64", exe: ".exe" }),
-  "aarch64-pc-windows-msvc": Object.freeze({ os: "windows", bundleArch: "arm64", exe: ".exe" }),
 });
 
 function fail(message) {
