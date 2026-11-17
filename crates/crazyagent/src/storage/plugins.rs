@@ -560,7 +560,8 @@ fn grants_withdrawn(checks: &Path, id: &str) -> bool {
     }
 }
 
-/// Reports nothing granted where checks run under a profile that grants no access entries.
+/// Reports nothing granted where checks run under a profile that grants no access entries,
+/// so there is no container to release.
 /// Inputs: the check folder and the server id, unused. Output: true.
 #[cfg(not(windows))]
 fn grants_withdrawn(_checks: &Path, _id: &str) -> bool {

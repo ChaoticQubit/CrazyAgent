@@ -68,11 +68,17 @@ pub fn run(request: &Request) -> Result<u32, BoundaryError> {
 }
 
 /// Takes back every access entry the boundary recorded for the profile's container, removes
-/// the record, then deletes the container's AppContainer profile with the folder Windows gave
-/// it; a later launch creates it and grants afresh. Inputs: the profile file and the container
-/// the caller derived for it. Output: Ok, or why it stopped, with the record and container kept.
-pub fn release(profile: &Path, _container: &str) -> Result<(), BoundaryError> {
+/// the record, then deletes the container's AppContainer profile and its folder; a later launch
+/// grants afresh. A profile naming another container than the caller derived is refused first.
+/// Inputs: the profile file and that container. Output: Ok, or why it stopped, with the record
+/// and container kept.
+pub fn release(profile: &Path, container: &str) -> Result<(), BoundaryError> {
     let profile = BoundaryProfile::load(profile).map_err(BoundaryError::Profile)?;
+    if profile.container != container {
+        return Err(BoundaryError::Refused(
+            "the profile names another container than the engine derives for it",
+        ));
+    }
     plan(&profile, |_| true).map_err(BoundaryError::Refused)?;
     let sid = container::sid(&profile.container)?;
     record::Record::open(&profile.grants, &profile.container)?.release(&sid)?;
