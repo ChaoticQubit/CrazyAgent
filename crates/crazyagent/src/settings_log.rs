@@ -5,6 +5,7 @@ use crate::instruction_files::{AppSettings, Settings};
 use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
+use crate::owner_texts::TextDigest;
 use crate::protocol::{Command, Outcome, ProjectId};
 use crate::provider_retry::ProviderRetry;
 use crate::quit_settings::QuitSettings;
@@ -16,7 +17,9 @@ use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSH
 #[cfg(any(unix, test))]
 use crate::storage::opening::Opening;
 use rusqlite::types::Value as Column;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params, params_from_iter};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -45,8 +48,10 @@ pub const KIND_STEPS: &str = "MasterStepsSaved";
 pub const KIND_TIME: &str = "MasterTimeSaved";
 /// The kind of the event an owner master frame limit save appends.
 pub const KIND_FRAMES: &str = "MasterFramesSaved";
-/// Every settings kind, in [`TABLES`] order.
-pub const KINDS: [&str; 11] = [
+/// The kind of the event an owner profile save appends, carrying its kept text's digest.
+pub const KIND_PROFILE: &str = "UserProfileSaved";
+/// Every settings kind, in [`TABLES`] order, then the profile's.
+pub const KINDS: [&str; 12] = [
     KIND_SANDBOX,
     KIND_CLEANUP,
     KIND_QUIT,
@@ -58,6 +63,7 @@ pub const KINDS: [&str; 11] = [
     KIND_STEPS,
     KIND_TIME,
     KIND_FRAMES,
+    KIND_PROFILE,
 ];
 /// The schema every settings event is written and read at.
 const SCHEMA: u16 = 1;
@@ -87,6 +93,9 @@ const TABLES: [(&str, &str); 11] = [
     ("configured_master_time", "singleton,time_limit"),
     ("configured_master_frames", "singleton,frame_limit"),
 ];
+/// The owner profile table (Q5). Its text stays in owner_texts, so its snapshot rows are
+/// `[1, digest]` and it is kept out of [`TABLES`], whose rows carry their columns.
+const PROFILE: &str = "user_profile";
 /// The two per-project settings tables a project removal clears.
 const PROJECT_TABLES: [&str; 2] = ["agent_instruction_settings", "roadmap_status_settings"];
 /// The most rows one table may bring to a snapshot run: one per project at most for the
@@ -97,7 +106,7 @@ const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 /// The widest settings table, in columns.
 const COLUMNS_MAX: usize = 6;
 
-const _: () = assert!(KINDS.len() == TABLES.len());
+const _: () = assert!(KINDS.len() == TABLES.len() + 1);
 
 /// An app-wide setting saved: the setting the table's one row stores. Each setting is an
 /// enum, a bounded number or a switch, and refuses any field more, so no text rides in it.
@@ -116,8 +125,18 @@ pub struct ProjectSaved<T> {
     pub(crate) settings: T,
 }
 
+/// The owner profile saved (Q5): the digest of its body, which owner_texts keeps under
+/// [`crate::owner_profile::HOLDER`]; a digest decodes only as 64 lowercase hex digits, so
+/// no profile text rides in the log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Kept {
+    pub(crate) body: TextDigest,
+}
+
 /// One settings event, one kind per settings table. Each carries the typed setting its row
-/// stores and, for a project setting, the project id; never a secret or free text.
+/// stores and, for a project setting, the project id, or the profile's kept-text digest;
+/// never a secret or free text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Sandbox(Saved<SandboxSettings>),
@@ -131,6 +150,7 @@ pub enum Event {
     Steps(Saved<MasterStepSettings>),
     Time(Saved<MasterTimeSettings>),
     Frames(Saved<MasterFrameSettings>),
+    Profile(Kept),
 }
 
 impl Event {
@@ -148,6 +168,7 @@ impl Event {
             Self::Steps(_) => KIND_STEPS,
             Self::Time(_) => KIND_TIME,
             Self::Frames(_) => KIND_FRAMES,
+            Self::Profile(_) => KIND_PROFILE,
         }
     }
 
@@ -165,6 +186,7 @@ impl Event {
             Self::Steps(event) => serde_json::to_vec(event),
             Self::Time(event) => serde_json::to_vec(event),
             Self::Frames(event) => serde_json::to_vec(event),
+            Self::Profile(event) => serde_json::to_vec(event),
         }
         .map_err(error)
     }
@@ -261,6 +283,13 @@ pub fn record(
             at_ms,
             body: &body,
         }),
+        Event::Profile(_) => appender.append(&Draft {
+            aggregate,
+            kind: KIND_PROFILE,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
     }?;
     assert!(seq > 0, "a logged event has a seq");
     assert!(
@@ -340,9 +369,32 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
             "INSERT INTO configured_master_frames(singleton,frame_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET frame_limit=excluded.frame_limit",
             [word(row.settings.limit)?],
         ),
+        Event::Profile(row) => return profile(db, &row.body),
     }
     .map_err(error)?;
     assert_eq!(count, 1, "a settings event writes one keyed row");
+    Ok(())
+}
+
+/// Stores the owner profile whose text owner_texts keeps under a digest, the bare upsert a
+/// profile save and replay share. A text no longer kept belongs to a save a later one
+/// replaced, so replay skips it (`owner_texts::replayed` names it). Inputs: the connection
+/// and the digest. Output: Ok, or `settings_log_profile_invalid` for a text that is not UTF-8.
+fn profile(db: &Connection, digest: &TextDigest) -> Result<(), EngineError> {
+    let mut missing = Vec::new();
+    let text = crate::owner_texts::replayed(db, digest, &mut missing)?;
+    if !missing.is_empty() {
+        assert!(text.is_empty(), "a missing text replays as no bytes");
+        return Ok(());
+    }
+    let body = String::from_utf8(text).map_err(|_| error("settings_log_profile_invalid"))?;
+    let count = db
+        .execute(
+            "INSERT INTO user_profile(singleton,body) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET body=excluded.body",
+            [&body],
+        )
+        .map_err(error)?;
+    assert_eq!(count, 1, "a profile save writes the one row");
     Ok(())
 }
 
@@ -367,6 +419,7 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
         KIND_STEPS => serde_json::from_slice(body).map(Event::Steps),
         KIND_TIME => serde_json::from_slice(body).map(Event::Time),
         KIND_FRAMES => serde_json::from_slice(body).map(Event::Frames),
+        KIND_PROFILE => serde_json::from_slice(body).map(Event::Profile),
         _ => return Err(invalid()),
     }
     .map_err(|_| invalid())?;
@@ -408,20 +461,46 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     Ok(last)
 }
 
-/// Appends a snapshot run of every settings table as it stands, each in chunks that fit one
-/// event body and at least one chunk each, so replay of a run always clears and fills all of
-/// them. Inputs: the appender and the writer's clock. Output: the `seq` of the run's closing
-/// event, or `settings_log_snapshot_rows`, `settings_log_row_too_large` or the log's
-/// refusal.
+/// Appends a snapshot run of every settings table as it stands, the profile's last as its
+/// kept text's digest, each in chunks that fit one event body and at least one chunk each,
+/// so replay of a run always clears and fills all of them. Inputs: the appender and the
+/// writer's clock. Output: the `seq` of the run's closing event, or
+/// `settings_log_snapshot_rows`, `settings_log_row_too_large` or the log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
     let mut chunks = Vec::new();
     for (table, columns) in TABLES {
         let rows = appender.project(|tx| table_rows(tx, table, columns))?;
         chunks.extend(pack(table, rows)?);
     }
-    assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
+    let profile = appender.project(|tx| profile_rows(tx))?;
+    chunks.extend(pack(PROFILE, profile)?);
+    assert!(chunks.len() > TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0].0);
     appender.snapshot(Aggregate::Settings, at_ms, chunks)
+}
+
+/// The profile's snapshot rows: none with no stored profile, else `[1, digest]`, its body
+/// kept again under [`crate::owner_profile::HOLDER`] in the run's live transaction, which
+/// also keeps a body stored before the log (step 14). Input: the connection. Output: the
+/// rows, or the keep's refusal.
+fn profile_rows(db: &Connection) -> Result<Vec<Value>, EngineError> {
+    let body: Option<String> = db
+        .query_row(
+            "SELECT body FROM user_profile WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(body) = body else {
+        return Ok(Vec::new());
+    };
+    let holder = crate::owner_profile::HOLDER;
+    let digest = crate::owner_texts::keep(db, holder, None, body.as_bytes())?;
+    Ok(vec![Value::Array(vec![
+        Value::from(1),
+        Value::String(digest.as_str().to_owned()),
+    ])])
 }
 
 /// Makes every settings table that is missing. The engine's open calls it after its schema
@@ -439,6 +518,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     crate::master_step_limit::initialize(db)?;
     crate::master_time_limit::initialize(db)?;
     crate::master_frame_limit::initialize(db)?;
+    crate::owner_profile::initialize(db)?;
     Ok(())
 }
 
@@ -462,7 +542,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
     }
     initialize(tx)?;
     let mut rows = 0;
-    for (table, _) in TABLES {
+    for table in TABLES.map(|(table, _)| table).into_iter().chain([PROFILE]) {
         let count: i64 = tx
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)
@@ -482,10 +562,10 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
 }
 
 /// Writes one owner settings save inside the owner request, at its signed next revision
-/// (v2.5 L10): each check that can refuse the save runs first, so a refused save moves no
-/// revision and logs nothing; then the event is applied and logged at next. Inputs: the
-/// request's transaction, the command and the revision the request read. Output: `Applied`,
-/// the check's rejection, a check's refusal or `settings_log_command` for another command.
+/// (v2.5 L10): each check that can refuse runs first, so a refused save moves no revision,
+/// logs nothing and keeps no text; then a profile's text is kept, and the event is applied
+/// and logged at next. Inputs: the transaction, the command and the revision read. Output:
+/// `Applied`, the check's rejection or refusal, or `settings_log_command` for another command.
 pub(crate) fn owner(
     tx: &Transaction<'_>,
     command: &Command,
@@ -524,6 +604,15 @@ pub(crate) fn owner(
         Command::OwnerMasterFrames { settings } => Event::Frames(Saved {
             settings: *settings,
         }),
+        Command::OwnerProfile { profile } => {
+            let body = match crate::owner_profile::body(profile)? {
+                Ok(body) => body,
+                Err(rejected) => return Ok(rejected),
+            };
+            let holder = crate::owner_profile::HOLDER;
+            let digest = crate::owner_texts::keep(tx, holder, None, body.as_bytes())?;
+            Event::Profile(Kept { body: digest })
+        }
         _ => return Err(error("settings_log_command")),
     };
     let next = revision
@@ -761,6 +850,9 @@ fn pack(table: &str, rows: Vec<Value>) -> Result<Vec<Chunk>, EngineError> {
 /// table's columns as strings and integers, or a row the table refuses.
 fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
     let invalid = || error("settings_log_chunk_invalid");
+    if chunk.table == PROFILE {
+        return restore_profile(db, chunk);
+    }
     let (table, columns) = TABLES
         .into_iter()
         .find(|(table, _)| *table == chunk.table)
@@ -800,10 +892,32 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Deletes every row of every settings table. Input: the connection. Output: Ok or the
-/// store's refusal.
+/// Stores the profile a snapshot chunk carries as `[1, digest]`, from the text owner_texts
+/// keeps under the digest; a text no longer kept is skipped as replay skips it. Inputs: the
+/// connection and the chunk. Output: Ok, or `settings_log_chunk_invalid` for more than one
+/// row or a row that is not that pair.
+fn restore_profile(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
+    let invalid = || error("settings_log_chunk_invalid");
+    if chunk.rows.len() > 1 {
+        return Err(invalid());
+    }
+    for row in &chunk.rows {
+        let digest = match row.as_array().map(Vec::as_slice) {
+            Some([Value::Number(one), Value::String(digest)]) if one.as_i64() == Some(1) => {
+                TextDigest::new(digest.clone()).map_err(|_| invalid())?
+            }
+            _ => return Err(invalid()),
+        };
+        profile(db, &digest)?;
+    }
+    assert_eq!(chunk.table, PROFILE);
+    Ok(())
+}
+
+/// Deletes every row of every settings table, the profile's included. Input: the
+/// connection. Output: Ok or the store's refusal.
 fn clear(db: &Connection) -> Result<(), EngineError> {
-    for (table, _) in TABLES {
+    for table in TABLES.map(|(table, _)| table).into_iter().chain([PROFILE]) {
         db.execute(&format!("DELETE FROM {table}"), [])
             .map_err(error)?;
     }

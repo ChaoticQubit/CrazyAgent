@@ -1858,8 +1858,8 @@ fn execute(
         Command::OwnerConversation { mutation } => {
             crate::conversation::apply(tx, mutation, revision)
         }
-        Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
-        Command::OwnerSandbox { .. }
+        Command::OwnerProfile { .. }
+        | Command::OwnerSandbox { .. }
         | Command::OwnerAgentCleanup { .. }
         | Command::OwnerAgentQuit { .. }
         | Command::OwnerProviderRetry { .. }
