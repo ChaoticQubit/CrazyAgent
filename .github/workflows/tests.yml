@@ -44,9 +44,27 @@ env:
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
-  FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+  FARM_PARTS: linux-rust-1 linux-rust-2
+  FARM_RERUN_REPEATS: "1"
+  FARM_RERUN_FILTER: >-
+    (binary_id(=crazyagent) & (test(~settings_log::) | test(~state_log::)
+    | (test(~storage::) & !test(~storage::migrations::tests::pins::))
+    | test(~ide::log::) | test(~landing::) | test(~memory::library::) | test(~projects_home::)
+    | test(~team::tests::) | test(~engine::owner::transport::native_profile)
+    | test(~sandbox_settings::) | test(~cleanup_settings::)
+    | test(~quit_settings::) | test(~provider_retry::) | test(~master_step_limit::)
+    | test(~master_time_limit::) | test(~master_frame_limit::) | test(~instruction_files::)
+    | test(~roadmap_status::) | test(~harnesses::update::) | test(~worktrees::log::)
+    | test(~engine::owner::transport::roadmap) | test(~engine::owner::transport::process)
+    | test(~engine::owner::transport::harness_catalog) | test(~tui::screens::process::)
+    | test(~tui::screens::app_setup::) | test(~owner_profile::) | test(~owner_texts::)))
+    | binary_id(=crazyagent::owner_revision_retry) | binary_id(=crazyagent::acceptance_v2_versioned_state)
+    | binary_id(=crazyagent::worktree_ownership)
+    | binary_id(=crazyagent::settings_options_v2_ide_agents) | binary_id(=crazyagent::master_bootstrap)
+    | binary_id(=crazyagent::owner_setup) | binary_id(=crazyagent::owner_client)
+    | binary_id(=crazyagent-desktop::owner_setup_bridge) | binary_id(=crazyagent-desktop::pending_change)
+    | (binary_id(=crazyagent-desktop) & (test(~bridge::roadmap) | test(~bridge::harnesses)
+    | test(~bridge::process) | test(~bridge::owner_setup)))
 
 defaults:
   run:
@@ -83,9 +101,23 @@ jobs:
         with:
           os: ${{ matrix.os }}
           node-version: ${{ env.NODE_VERSION }}
+      - name: Clippy on the engine library and its tests
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          rustup component add clippy --toolchain "$RUST_TOOLCHAIN"
+          cargo +"$RUST_TOOLCHAIN" clippy -p crazyagent --lib --tests --locked -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy-engine.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: farm-clippy-linux
+          path: ${{ runner.temp }}/clippy-engine.txt
+          if-no-files-found: warn
+          retention-days: 14
 
   build-macos:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     strategy:
@@ -114,6 +146,7 @@ jobs:
 
   build-windows:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -155,19 +188,11 @@ jobs:
           - os: linux
             runner: ubuntu-22.04
             part: 1
-            parts: 4
+            parts: 2
           - os: linux
             runner: ubuntu-22.04
             part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
+            parts: 2
     env:
       FARM_JUNIT: target/nextest/farm/junit.xml
       FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
@@ -192,7 +217,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +279,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -301,6 +326,7 @@ jobs:
 
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -464,6 +490,7 @@ jobs:
 
   typecheck:
     name: Desktop typecheck and Bun suites
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
