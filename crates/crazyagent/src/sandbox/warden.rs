@@ -27,6 +27,11 @@ const HEAR_INTERVAL: Duration = Duration::from_millis(1);
 #[cfg(target_os = "macos")]
 const CONFINED_SIGNALS: &str = "(allow signal (target same-sandbox))";
 
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static HEARD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The engine's end of one run's warden: a process the session shim forks inside the run's
 /// Seatbelt sandbox before it starts the harness. Once this end is shut, or closed, as the
 /// kernel closes it when the engine dies, the warden sends SIGKILL to every process in that
@@ -140,6 +145,8 @@ fn hear(
 
     assert!(!buffer.is_empty());
     loop {
+        #[cfg(test)]
+        HEARD.set(HEARD.get() + 1);
         match engine.read(buffer) {
             Ok(0) => return Heard::Closed,
             Ok(count) => return Heard::Bytes(count),
