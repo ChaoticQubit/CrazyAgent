@@ -146,6 +146,13 @@ pub fn holds_restart(root: &Path, running: bool) -> bool {
     held
 }
 
+/// Whether the engine's login service still runs a process, as a restore's pending record is
+/// weighed. A status that can't be read counts as running, so a restore that may still copy
+/// is never stopped. Input: the service. Output: the answer.
+pub fn service_running(service: &crate::service::Service) -> bool {
+    service.status().map_or(true, |status| status.running)
+}
+
 /// Until when the owner can restore the pinned 2.4 backup of the engine at `root`, read
 /// without an engine and creating nothing. Input: the engine root. Output: the pin's end, or
 /// none.

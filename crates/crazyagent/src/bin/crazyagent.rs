@@ -1008,6 +1008,14 @@ fn run_tui_command(args: &[OsString]) -> Result<(), String> {
         .and_then(|client| crazyagent::tui::run_tui(client, engine).map_err(|e| e.to_string()))
 }
 
+/// Whether a restore of the pinned 2.4 backup still runs in the default engine's process, so an
+/// explicit start waits instead of stopping it in the middle of the copy (L5).
+/// Inputs: the layout and the login service. Output: the answer.
+fn restoring(layout: &crazyagent::paths::Layout, service: &crazyagent::service::Service) -> bool {
+    let running = crazyagent::restore::service_running(service);
+    crazyagent::restore::holds_restart(layout.root(), running)
+}
+
 fn default_service(
     layout: &crazyagent::paths::Layout,
 ) -> Result<crazyagent::service::Service, String> {
@@ -1026,6 +1034,10 @@ async fn prepare_engine(
     use crazyagent::service::EngineCheck;
     let service = layout.map(default_service).transpose()?;
     if let (Some(layout), Some(service)) = (layout, service.as_ref()) {
+        let running = crazyagent::restore::service_running(service);
+        if let Some(code) = crazyagent::restore::blocks_start(layout.root(), running) {
+            return Err(crazyagent::tui::restore_words(code).into());
+        }
         crazyagent::service::ensure_running(
             layout,
             service,
@@ -1161,6 +1173,11 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             println!("Removed {}", service.name);
         }
         "start" if answering => println!("The engine is already running"),
+        "start" if restoring(&layout, &service) => {
+            return Err(
+                crazyagent::tui::restore_words(crazyagent::restore::ENGINE_RESTORING).into(),
+            );
+        }
         "start" => {
             let since = crazyagent::service::log_length(&layout);
             let another = service.runs_another_program();
