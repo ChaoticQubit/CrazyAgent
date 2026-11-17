@@ -66,6 +66,7 @@ pub(crate) mod roadmap;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
+mod watch;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
@@ -507,6 +508,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    watches: watch::Watches,
     running: projects_home::RunningSet,
     controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
@@ -1371,6 +1373,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                watches: watch::Watches::new(),
                 running: Mutex::new(std::collections::HashSet::new()),
                 controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
@@ -2259,6 +2262,7 @@ enum Protocol {
     Ide,
     IdeTab,
     Icloud,
+    Watch,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -2391,6 +2395,7 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Watch => return Ok(Some(Deferred::Watch(a))),
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2519,6 +2524,11 @@ async fn serve_admitted(
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
+    if let Deferred::Watch(a) = &deferred {
+        let served = watch::serve(stream, engine, authority, auth, a, body);
+        let _ = tokio::time::timeout(watch::WATCH_TIMEOUT, served).await;
+        return;
+    }
     let Some(_deferral) = Deferral::take(&authority.deferred) else {
         let refused = refuse(stream, auth, frame, "owner_busy");
         let _ = tokio::time::timeout(engine.timeout, refused).await;
@@ -2596,6 +2606,7 @@ async fn serve_admitted(
             let served = icloud::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
         }
+        Deferred::Watch(_) => {}
     }
 }
 
@@ -2646,6 +2657,7 @@ enum Deferred {
     Usage(Admission),
     HarnessUpdates(Admission),
     Icloud(Admission),
+    Watch(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2694,6 +2706,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Ide => ide::refusal(code)?,
         Protocol::IdeTab => ide_tab::refusal(code)?,
         Protocol::Icloud => icloud::refusal(code)?,
+        Protocol::Watch => watch::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

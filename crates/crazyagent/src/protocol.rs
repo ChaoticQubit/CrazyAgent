@@ -421,6 +421,69 @@ pub struct Event {
     pub cursor: Cursor,
     pub request_id: RequestId,
     pub client_id: ClientId,
+    #[serde(default)]
+    pub topic: Topic,
+}
+
+/// What a committed change is about, so a client reloads only what shows it (v2.5 S3a): one
+/// topic per engine state group the event log orders events by, and `Unknown` for a change
+/// whose subject the engine does not know, after which a client reloads the page it shows.
+/// A closed set; an event stored before topics existed reads as `Unknown`.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Topic {
+    Worktrees,
+    Ide,
+    Memory,
+    Projects,
+    Landing,
+    Settings,
+    Plugins,
+    Sessions,
+    Intake,
+    Engine,
+    Accounts,
+    Team,
+    #[default]
+    Unknown,
+}
+
+impl Command {
+    /// The topic of the change this command commits, one per variant, so a new command
+    /// names its topic where it is added. Reads commit nothing; theirs is never logged.
+    /// Output: the topic.
+    pub fn topic(&self) -> Topic {
+        Topic::Unknown
+    }
+}
+
+/// An owner watch's reply (v2.5 S3a). `Changed`: something committed after the request's
+/// cursor or mark, with the topics the owner requests logged since the cursor named and
+/// `Unknown` once any commit may have happened since the mark; `Refresh`: the cursor is
+/// older than the retained events or ahead of the store, so the client reloads all it shows;
+/// `Quiet`: nothing committed before the wait ended. Each gives the cursor and mark the next
+/// watch sends. `Rejected` is the refusal on the wire, which the client returns as an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WatchReply {
+    Changed {
+        cursor: Cursor,
+        mark: u64,
+        topics: Vec<Topic>,
+    },
+    Refresh {
+        cursor: Cursor,
+        mark: u64,
+    },
+    Quiet {
+        cursor: Cursor,
+        mark: u64,
+    },
+    Rejected {
+        code: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

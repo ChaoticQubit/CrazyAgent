@@ -35,6 +35,7 @@ mod events;
 mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
+pub(crate) use events::{Changes, changes};
 use events::{events, persist_event, persist_event_ids};
 mod owner_fence;
 pub(crate) use owner_fence::{check_owner_admission, check_owner_host};
