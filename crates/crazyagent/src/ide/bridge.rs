@@ -1226,9 +1226,10 @@ async fn workspace(
 ) -> Result<serde_json::Value, EngineError> {
     let root = runtime.ide()?.root;
     let project = project.clone();
+    let host = runtime.identity();
     let written = tokio::task::spawn_blocking(move || match show_all {
-        Some(on) => super::workspace::show_all(&root, &project, on),
-        None => super::workspace::write(&root, &project),
+        Some(on) => super::workspace::show_all(&root, &host, &project, on),
+        None => super::workspace::write(&root, &host, &project),
     })
     .await
     .map_err(|_| failure("ide_workspace_unavailable"))??;

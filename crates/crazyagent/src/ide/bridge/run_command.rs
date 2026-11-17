@@ -1,8 +1,10 @@
 use super::reveal::REVEAL_WAIT;
 use super::{Grants, IdeEvent};
 use crate::engine::EngineError;
-use crate::engine::owner::{OwnerRuntimeHandle, failure};
+use crate::engine::owner::{HostStamp, OwnerRuntimeHandle, failure};
+use crate::ide::log::{self, Change, RunModeSet};
 use crate::protocol::{ProjectId, RequestId};
+use crate::state_log::replay::Clock;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +34,7 @@ pub const BARE: &str = "-_./:=,@+%";
 /// The characters a quoted word may not hold, since a shell still acts on them there.
 pub const QUOTED_REFUSED: &str = "$`\\!";
 const REQUEST_PREFIX: &str = "run-";
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_run_settings (
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_run_settings (
     project TEXT PRIMARY KEY,
     mode TEXT NOT NULL CHECK(mode IN ('type_and_run','type_only','off'))
 );";
@@ -161,16 +163,38 @@ pub fn mode(db: &Connection, project: &ProjectId) -> Result<RunMode, EngineError
     }
 }
 
-/// Saves a project's Run setting. Inputs: the engine database, the project and the mode.
-/// Output: Ok once the project's one row holds the mode, or `ide_unavailable`.
-pub fn set_mode(db: &Connection, project: &ProjectId, mode: RunMode) -> Result<(), EngineError> {
+/// Saves a project's Run setting, logged as one `RunModeSet` behind the engine fence of
+/// `host` (v2.5 L7). Inputs: the engine database, the engine host, the project and the
+/// mode. Output: Ok once the project's one row holds the mode, `ide_unavailable` or the
+/// fence's refusal.
+pub fn set_mode(
+    db: &Connection,
+    host: &HostStamp,
+    project: &ProjectId,
+    mode: RunMode,
+) -> Result<(), EngineError> {
     assert!(RunMode::named(mode.name()) == Some(mode));
+    let change = Change::RunModeSet(RunModeSet {
+        project: project.as_str().to_owned(),
+        mode: mode.name().to_owned(),
+    });
+    let tx = log::begin(db)?;
+    log::record(&tx, host, Clock::System.now_ms(), &change)?;
+    tx.commit().map_err(unavailable)
+}
+
+/// Applies one `RunModeSet` with the same statement live and in replay: the project's one
+/// row holds the mode. Inputs: the database and the event body. Output: Ok, or
+/// `ide_unavailable` for a mode no option has.
+pub(crate) fn apply_run_mode(db: &Connection, set: &RunModeSet) -> Result<(), EngineError> {
+    let mode = RunMode::named(&set.mode).ok_or_else(|| failure("ide_unavailable"))?;
+    assert_eq!(mode.name(), set.mode);
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     let changed = db
         .execute(
             "INSERT INTO ide_run_settings(project, mode) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
-            params![project.as_str(), mode.name()],
+            params![set.project, mode.name()],
         )
         .map_err(unavailable)?;
     assert!(changed == 1, "one project has one Run setting row");
@@ -214,9 +238,12 @@ pub(crate) async fn save_mode(
 ) -> Result<(), EngineError> {
     let root = runtime.ide()?.root;
     let asked = project.clone();
-    tokio::task::spawn_blocking(move || set_mode(&crate::landing::open(&root)?, &asked, mode))
-        .await
-        .map_err(|_| failure("ide_unavailable"))?
+    let host = runtime.identity();
+    tokio::task::spawn_blocking(move || {
+        set_mode(&crate::landing::open(&root)?, &host, &asked, mode)
+    })
+    .await
+    .map_err(|_| failure("ide_unavailable"))?
 }
 
 /// Whether the project's Install & use tab, the one tab whose commands the desktop offers

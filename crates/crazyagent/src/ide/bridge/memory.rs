@@ -1,6 +1,7 @@
 use super::{Decision, IdeReply};
 use crate::engine::EngineError;
-use crate::engine::owner::{OwnerData, OwnerRead, OwnerRuntimeHandle, failure};
+use crate::engine::owner::{HostStamp, OwnerData, OwnerRead, OwnerRuntimeHandle, failure};
+use crate::ide::log::{self, Change, IdeAsked};
 use crate::memory::{HumanReview, KnowledgeEntry, KnowledgeStatus};
 use crate::protocol::{
     ClientId, Command, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, RequestId, WireReply,
@@ -16,6 +17,16 @@ pub const REPLY: &str = "ide_reply_invalid";
 const CLIENT: &str = "crazyagent-ide";
 const ASK_TTL_MS: i64 = 10 * 60 * 1000;
 const ASKS_PER_PROJECT_MAX: i64 = 8;
+/// The table of decisions the IDE asked the owner to confirm, for the storage open and the
+/// ide projection.
+pub(crate) const ASKS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_asks (
+    project TEXT NOT NULL,
+    entry TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),
+    asked_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, entry)
+) WITHOUT ROWID;";
 
 /// Where one memory stands: waiting for the owner, approved, or set aside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,18 +226,7 @@ pub(crate) async fn decide(
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     let unavailable = |_| failure("ide_asks_unavailable");
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS ide_asks (
-                project TEXT NOT NULL,
-                entry TEXT NOT NULL,
-                version INTEGER NOT NULL CHECK (version > 0),
-                decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),
-                asked_ms INTEGER NOT NULL,
-                PRIMARY KEY (project, entry)
-            ) WITHOUT ROWID;",
-        )
-        .map_err(unavailable)?;
+    connection.execute_batch(ASKS_SCHEMA).map_err(unavailable)?;
     let decided: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ide_asks') WHERE name='decision')",
@@ -252,49 +252,68 @@ fn decision_name(decision: Decision) -> &'static str {
     }
 }
 
-/// Records that the IDE asked to approve or reject one memory revision, replacing an older
-/// ask for the same memory, dropping asks older than `ASK_TTL_MS` and keeping the project's
-/// newest `ASKS_PER_PROJECT_MAX`. Takes the connection, project, memory, revision, decision
-/// and time. Returns Ok, or `ide_asks_unavailable`.
+/// Records that the IDE asked to approve or reject one memory revision, logged as one
+/// `IdeAsked` behind the engine fence of `host` (v2.5 L7). Takes the connection, the engine
+/// host, project, memory, revision, decision and time. Returns Ok, `ide_request_invalid`,
+/// `ide_asks_unavailable` or the fence's refusal.
 pub fn ask(
     connection: &Connection,
+    host: &HostStamp,
     project: &ProjectId,
     entry_id: &RequestId,
     version: u64,
     decision: Decision,
     now_ms: i64,
 ) -> Result<(), EngineError> {
-    let unavailable = |_| failure("ide_asks_unavailable");
     let version = i64::try_from(version).map_err(|_| failure(INVALID))?;
-    let write = connection.unchecked_transaction().map_err(unavailable)?;
-    write
+    let at_ms = u64::try_from(now_ms).map_err(|_| failure(INVALID))?;
+    let change = Change::Asked(IdeAsked {
+        project: project.as_str().to_owned(),
+        entry: entry_id.as_str().to_owned(),
+        version,
+        decision: decision_name(decision).to_owned(),
+        asked_ms: now_ms,
+    });
+    let write = log::begin(connection)?;
+    log::record(&write, host, at_ms, &change)?;
+    write.commit().map_err(|_| failure("ide_asks_unavailable"))
+}
+
+/// Applies one `IdeAsked` with the same statements live and in replay: replaces an older
+/// ask for the same memory, drops asks older than `ASK_TTL_MS` before the ask's own time,
+/// never a clock, and keeps the project's newest `ASKS_PER_PROJECT_MAX`.
+/// Takes the connection and the event body. Returns Ok, or `ide_asks_unavailable`.
+pub(crate) fn apply_asked(connection: &Connection, asked: &IdeAsked) -> Result<(), EngineError> {
+    let unavailable = |_| failure("ide_asks_unavailable");
+    connection
         .execute(
             "DELETE FROM ide_asks WHERE asked_ms < ?1",
-            [now_ms.saturating_sub(ASK_TTL_MS)],
+            [asked.asked_ms.saturating_sub(ASK_TTL_MS)],
         )
         .map_err(unavailable)?;
-    write
+    let changed = connection
         .execute(
             "INSERT INTO ide_asks(project,entry,version,decision,asked_ms) VALUES (?1,?2,?3,?4,?5)
              ON CONFLICT(project,entry) DO UPDATE SET version=excluded.version,
                 decision=excluded.decision, asked_ms=excluded.asked_ms",
             params![
-                project.as_str(),
-                entry_id.as_str(),
-                version,
-                decision_name(decision),
-                now_ms
+                asked.project,
+                asked.entry,
+                asked.version,
+                asked.decision,
+                asked.asked_ms
             ],
         )
         .map_err(unavailable)?;
-    write
+    assert_eq!(changed, 1, "one ask per project and memory");
+    connection
         .execute(
             "DELETE FROM ide_asks WHERE project=?1 AND entry NOT IN
              (SELECT entry FROM ide_asks WHERE project=?1 ORDER BY asked_ms DESC, entry LIMIT ?2)",
-            params![project.as_str(), ASKS_PER_PROJECT_MAX],
+            params![asked.project, ASKS_PER_PROJECT_MAX],
         )
         .map_err(unavailable)?;
-    write.commit().map_err(unavailable)
+    Ok(())
 }
 
 /// The decisions the IDE asked the owner to confirm on memories that still wait at the
@@ -353,10 +372,12 @@ async fn asked(
 ) -> Result<(), EngineError> {
     let database = super::agents::database(runtime)?;
     let project = project.clone();
+    let host = runtime.identity();
     tokio::task::spawn_blocking(move || {
         let connection = super::agents::open(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         ask(
             &connection,
+            &host,
             &project,
             &entry_id,
             version,

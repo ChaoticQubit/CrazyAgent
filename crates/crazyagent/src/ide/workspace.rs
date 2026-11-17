@@ -1,7 +1,10 @@
+use super::log::{self, Change, WorkspaceForgotten, WorkspaceWritten};
 use crate::engine::EngineError;
-use crate::engine::owner::failure;
+use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::ProjectId;
 use crate::sandbox::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
+use crate::state_log::fence::{self, Fence};
+use crate::state_log::replay::Clock;
 use crate::team::AgentRole;
 use crate::team::names::{self, AgentName};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,7 +25,7 @@ pub(crate) const OLDER_ENTRIES_MAX: usize = 4096;
 #[cfg(unix)]
 const TEMPORARY: &str = "crazyagent.code-workspace.tmp";
 const PROJECTS_FOLLOWED_MAX: i64 = 64;
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_workspaces (
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_workspaces (
     project TEXT PRIMARY KEY,
     show_all INTEGER NOT NULL CHECK(show_all IN (0,1)),
     body TEXT NOT NULL
@@ -69,24 +72,32 @@ pub struct Written {
 }
 
 /// Writes the project's workspace file `<root>/ide/<project>/crazyagent.code-workspace`
-/// and keeps it followed, so `follow` rewrites it when its sections change.
-/// Inputs: the engine root holding `engine.db` and the project. Output: the workspace.
-pub fn write(root: &Path, project: &ProjectId) -> Result<Written, EngineError> {
+/// and keeps it followed, so `follow` rewrites it when its sections change. Inputs: the
+/// engine root holding `engine.db`, the engine host whose fence the write holds and the
+/// project. Output: the workspace.
+pub fn write(root: &Path, host: &HostStamp, project: &ProjectId) -> Result<Written, EngineError> {
     let db = open(root)?;
-    refresh(&db, root, project, None, true)
+    refresh(&db, root, host, project, None, true)
 }
 
 /// Sets whether the project's workspace lists every agent or the newest
-/// `AGENTS_SHOWN_MAX`, then writes it. Inputs: the engine root, project and switch.
-/// Output: the workspace.
-pub fn show_all(root: &Path, project: &ProjectId, on: bool) -> Result<Written, EngineError> {
+/// `AGENTS_SHOWN_MAX`, then writes it. Inputs: the engine root, the engine host, project
+/// and switch. Output: the workspace.
+pub fn show_all(
+    root: &Path,
+    host: &HostStamp,
+    project: &ProjectId,
+    on: bool,
+) -> Result<Written, EngineError> {
     let db = open(root)?;
-    refresh(&db, root, project, Some(on), true)
+    refresh(&db, root, host, project, Some(on), true)
 }
 
 /// Rewrites each followed workspace whose sections changed since it was written, and stops
-/// following projects that no longer exist. The team runtime calls it every step.
-/// Inputs: the engine database and root. Output: the first failure after trying them all.
+/// following projects that no longer exist, behind the fence of the engine host the store
+/// names as running; with none running it writes nothing. The team runtime calls it every
+/// step. Inputs: the engine database and root. Output: the first failure after trying them
+/// all.
 pub fn follow(db: &Connection, root: &Path) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     let mut statement = db
@@ -97,21 +108,84 @@ pub fn follow(db: &Connection, root: &Path) -> Result<(), EngineError> {
         .map_err(unavailable)?
         .collect::<Result<_, _>>()
         .map_err(unavailable)?;
+    if followed.is_empty() {
+        return Ok(());
+    }
+    let Some(host) = log::active_host(db)? else {
+        return Ok(());
+    };
     let mut first = Ok(());
     for project in followed {
         let outcome = ProjectId::new(&project)
             .map_err(unavailable)
-            .and_then(|id| refresh(db, root, &id, None, false));
+            .and_then(|id| refresh(db, root, &host, &id, None, false));
         match outcome {
             Ok(_) => {}
-            Err(error) if error.0 == "ide_project_unknown" => {
-                db.execute("DELETE FROM ide_workspaces WHERE project=?1", [&project])
-                    .map_err(unavailable)?;
-            }
+            Err(error) if error.0 == "ide_project_unknown" => forget(db, &host, &project)?,
             Err(error) => first = first.and(Err(error)),
         }
     }
     first
+}
+
+/// Stops following a project that no longer exists, logged as one `WorkspaceForgotten`
+/// when the store still follows it. Inputs: the database, the engine host and the project.
+/// Output: Ok, or the store's or the fence's refusal.
+fn forget(db: &Connection, host: &HostStamp, project: &str) -> Result<(), EngineError> {
+    let _writing = WRITING.lock().map_err(unavailable)?;
+    let tx = log::begin(db)?;
+    let followed: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ide_workspaces WHERE project=?1)",
+            [project],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if followed {
+        let change = Change::WorkspaceForgotten(WorkspaceForgotten {
+            project: project.to_owned(),
+        });
+        log::record(&tx, host, Clock::System.now_ms(), &change)?;
+    }
+    tx.commit().map_err(unavailable)
+}
+
+/// Applies one `WorkspaceWritten` with the same statement live and in replay: the project
+/// is followed with its switch. A new row's cached file text is empty, so the next write
+/// or follow of the project rewrites the file. Inputs: the database and the event body.
+/// Output: Ok, or `ide_workspace_unavailable`.
+pub(crate) fn apply_written(
+    db: &Connection,
+    written: &WorkspaceWritten,
+) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let changed = db
+        .execute(
+            "INSERT INTO ide_workspaces(project, show_all, body) VALUES (?1,?2,'')
+             ON CONFLICT(project) DO UPDATE SET show_all=excluded.show_all",
+            params![written.project, written.show_all],
+        )
+        .map_err(unavailable)?;
+    assert_eq!(changed, 1, "one row per followed project");
+    Ok(())
+}
+
+/// Applies one `WorkspaceForgotten` with the same statement live and in replay: the
+/// project is no longer followed. Inputs: the database and the event body.
+/// Output: Ok, or `ide_workspace_unavailable`.
+pub(crate) fn apply_forgotten(
+    db: &Connection,
+    forgotten: &WorkspaceForgotten,
+) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let removed = db
+        .execute(
+            "DELETE FROM ide_workspaces WHERE project=?1",
+            [&forgotten.project],
+        )
+        .map_err(unavailable)?;
+    assert!(removed <= 1, "one row per followed project");
+    Ok(())
 }
 
 /// Lists the folders the project's workspace shows, with the owner's stored show-all
@@ -336,11 +410,13 @@ fn open(root: &Path) -> Result<Connection, EngineError> {
 }
 
 /// Writes the project's workspace when `always` or when its switch or sections changed,
-/// one writer at a time. Inputs: the database, engine root, project, new switch (none
-/// keeps the stored one) and whether to write unchanged content. Output: the workspace.
+/// one writer at a time. Inputs: the database, engine root, engine host, project, new
+/// switch (none keeps the stored one) and whether to write unchanged content. Output: the
+/// workspace.
 fn refresh(
     db: &Connection,
     root: &Path,
+    host: &HostStamp,
     project: &ProjectId,
     show_all: Option<bool>,
     always: bool,
@@ -364,15 +440,34 @@ fn refresh(
     let body = render(&sections, &super::readonly::settings(db, project)?)?;
     let folder = root.join("ide").join(project.as_str());
     if always || kept.is_none_or(|(on, kept)| on != show_all || kept != body) {
+        let tx = log::begin(db)?;
+        fence::check(&tx, &Fence::Engine(host.clone()))?;
+        let stored: Option<bool> = tx
+            .query_row(
+                "SELECT show_all FROM ide_workspaces WHERE project=?1",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?;
+        if stored != Some(show_all) {
+            let change = Change::WorkspaceWritten(WorkspaceWritten {
+                project: project.as_str().to_owned(),
+                show_all,
+            });
+            log::record(&tx, host, Clock::System.now_ms(), &change)?;
+        }
         super::bridge::private_folder(&root.join("ide"))?;
         super::bridge::private_folder(&folder)?;
         replace(&folder, body.as_bytes())?;
-        db.execute(
-            "INSERT INTO ide_workspaces(project, show_all, body) VALUES (?1,?2,?3)
-             ON CONFLICT(project) DO UPDATE SET show_all=excluded.show_all, body=excluded.body",
-            params![project.as_str(), show_all, body],
-        )
-        .map_err(unavailable)?;
+        let cached = tx
+            .execute(
+                "UPDATE ide_workspaces SET body=?2 WHERE project=?1",
+                params![project.as_str(), body],
+            )
+            .map_err(unavailable)?;
+        assert_eq!(cached, 1, "the logged row keeps the file text as its cache");
+        tx.commit().map_err(unavailable)?;
     }
     Ok(Written {
         path: folder.join(FILE),

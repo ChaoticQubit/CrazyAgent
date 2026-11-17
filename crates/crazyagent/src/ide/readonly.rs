@@ -1,14 +1,16 @@
+use super::log::{self, Change, FileUnlocked};
 use super::workspace::WorkspaceSettings;
 use crate::engine::EngineError;
-use crate::engine::owner::failure;
+use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::ProjectId;
+use crate::state_log::replay::Clock;
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// The most files the owner may unlock in one agent's worktree during one agent turn.
 pub const UNLOCKED_PER_AGENT_MAX: i64 = 256;
 
 const AGENTS_GUARDED_MAX: i64 = 256;
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_unlocked (
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_unlocked (
     agent INTEGER NOT NULL,
     path TEXT NOT NULL,
     turns INTEGER NOT NULL,
@@ -63,34 +65,38 @@ pub fn settings(db: &Connection, project: &ProjectId) -> Result<WorkspaceSetting
     })
 }
 
-/// Unlocks one file of a running team agent's worktree until the agent's current turn
-/// ends, which moves the agent's turn count, and forgets the files unlocked in its earlier
-/// turns. Inputs: the engine database, the team agent id and the path inside its worktree.
-/// Output: Ok, or `ide_agent_not_running`, `ide_unlocked_full` past
-/// `UNLOCKED_PER_AGENT_MAX` files, or `changes_path_invalid`.
-pub fn unlock(db: &Connection, agent: i64, path: &str) -> Result<(), EngineError> {
+/// Unlocks one file of a project's running team agent's worktree until the agent's current
+/// turn ends, which moves the agent's turn count, and forgets the files unlocked in its
+/// earlier turns, logged as one `FileUnlocked` behind the engine fence of `host` (v2.5 L7).
+/// Inputs: the engine database, the engine host, the project, the team agent id and the
+/// path inside its worktree. Output: Ok, or `ide_agent_not_running`, `ide_unlocked_full`
+/// past `UNLOCKED_PER_AGENT_MAX` files before anything is logged, `changes_path_invalid`
+/// or the fence's refusal.
+pub fn unlock(
+    db: &Connection,
+    host: &HostStamp,
+    project: &ProjectId,
+    agent: i64,
+    path: &str,
+) -> Result<(), EngineError> {
     crate::landing::owner_edit::check_path(path)?;
     db.execute_batch(SCHEMA).map_err(unavailable)?;
-    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
-        .map_err(unavailable)?;
+    let tx = log::begin(db)?;
     let turns: i64 = tx
         .query_row(
-            &format!("SELECT a.turns FROM team_agents a WHERE a.id=?1 AND {RUNNING}"),
-            [agent],
+            &format!(
+                "SELECT a.turns FROM team_agents a WHERE a.id=?1 AND a.project=?2 AND {RUNNING}"
+            ),
+            params![agent, project.as_str()],
             |row| row.get(0),
         )
         .optional()
         .map_err(unavailable)?
         .ok_or_else(|| failure("ide_agent_not_running"))?;
-    tx.execute(
-        "DELETE FROM ide_unlocked WHERE agent=?1 AND turns<>?2",
-        params![agent, turns],
-    )
-    .map_err(unavailable)?;
     let kept: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM ide_unlocked WHERE agent=?1 AND path<>?2",
-            params![agent, path],
+            "SELECT COUNT(*) FROM ide_unlocked WHERE agent=?1 AND turns=?2 AND path<>?3",
+            params![agent, turns, path],
             |row| row.get(0),
         )
         .map_err(unavailable)?;
@@ -98,13 +104,48 @@ pub fn unlock(db: &Connection, agent: i64, path: &str) -> Result<(), EngineError
     if kept == UNLOCKED_PER_AGENT_MAX {
         return Err(failure("ide_unlocked_full"));
     }
-    tx.execute(
-        "INSERT INTO ide_unlocked(agent, path, turns) VALUES (?1,?2,?3)
-         ON CONFLICT(agent, path) DO UPDATE SET turns=excluded.turns",
-        params![agent, path, turns],
+    let change = Change::FileUnlocked(FileUnlocked {
+        project: project.as_str().to_owned(),
+        agent,
+        path: path.to_owned(),
+        turns,
+    });
+    log::record(&tx, host, Clock::System.now_ms(), &change)?;
+    tx.commit().map_err(unavailable)
+}
+
+/// Applies one `FileUnlocked` with the same statements live and in replay: forgets the
+/// agent's files of other turns, then keeps the file for the logged turn. The writer
+/// refused a file past the bound before it appended, so the bound holds here.
+/// Inputs: the database and the event body. Output: Ok, or `ide_workspace_unavailable`.
+pub(crate) fn apply_unlocked(db: &Connection, unlocked: &FileUnlocked) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(unavailable)?;
+    let (agent, path, turns) = (unlocked.agent, &unlocked.path, unlocked.turns);
+    db.execute(
+        "DELETE FROM ide_unlocked WHERE agent=?1 AND turns<>?2",
+        params![agent, turns],
     )
     .map_err(unavailable)?;
-    tx.commit().map_err(unavailable)
+    let kept: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM ide_unlocked WHERE agent=?1 AND path<>?2",
+            params![agent, path],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    assert!(
+        kept < UNLOCKED_PER_AGENT_MAX,
+        "the writer refuses past the bound"
+    );
+    let changed = db
+        .execute(
+            "INSERT INTO ide_unlocked(agent, path, turns) VALUES (?1,?2,?3)
+             ON CONFLICT(agent, path) DO UPDATE SET turns=excluded.turns",
+            params![agent, path, turns],
+        )
+        .map_err(unavailable)?;
+    assert_eq!(changed, 1, "one row per agent and path");
+    Ok(())
 }
 
 /// Writes a path as a glob that matches only itself: each of `*`, `?`, `[`, `{` and `}`
