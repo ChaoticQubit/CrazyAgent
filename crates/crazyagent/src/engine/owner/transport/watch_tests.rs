@@ -295,6 +295,11 @@ async fn past_its_bound_a_watch_is_refused_busy_until_one_ends() {
     );
 }
 
+/// A revoked owner gets no reply. A watch waiting at the revoke is refused at its second
+/// check with the handshake's code, `owner_authentication_failed`, or
+/// `owner_grant_stale_or_revoked`; a re-watch after it is refused at admission, which answers
+/// nothing, so the client reads `watch_outcome_unknown`, or `watch_unavailable` when the
+/// engine closed first. A fresh watch after the revoke ends at admission too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     let owner = super::super::usage_tests::Usage::start().await;
@@ -314,7 +319,7 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     .unwrap();
     let watch = tokio::spawn(async move {
         let (mut cursor, mut mark) = (cursor, mark);
-        loop {
+        let reply = loop {
             match client.watch(cursor.clone(), Some(mark), 10_000).await {
                 Ok(
                     WatchReply::Changed {
@@ -331,9 +336,10 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
                         mark: moved,
                     },
                 ) => (cursor, mark) = (next, moved),
-                other => return other,
+                other => break other,
             }
-        }
+        };
+        (reply, client)
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!watch.is_finished(), "an admitted owner keeps watching");
@@ -347,15 +353,129 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
         })
         .await
         .unwrap();
-    let reply = tokio::time::timeout(Duration::from_secs(5), watch)
+    let (reply, client) = tokio::time::timeout(Duration::from_secs(5), watch)
         .await
         .unwrap()
         .unwrap();
+    let unanswered = ["watch_outcome_unknown", "watch_unavailable"];
     let refused = reply.expect_err("a revoked owner gets no reply");
     assert!(
-        refused == failure("owner_grant_stale_or_revoked")
-            || refused == failure("owner_authentication_failed"),
+        refused == failure("owner_authentication_failed")
+            || refused == failure("owner_grant_stale_or_revoked")
+            || unanswered.contains(&refused.0.as_str()),
         "{refused:?}"
     );
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.watch(Cursor::new(0), None, 1_000),
+    )
+    .await
+    .expect("a revoked handshake is refused at once, not after the client's timeout")
+    .expect_err("a revoked owner is not admitted again");
+    assert!(unanswered.contains(&again.0.as_str()), "{again:?}");
     owner.stop().await;
+}
+
+/// The guard of rv-sec2 S3a F1: a watch parked past its first owner check when the owner is
+/// revoked is answered only the refusal of its second check, never what woke it. The row
+/// holds the owner barrier across the revoke, so no reply can be written before the second
+/// check; a reply a background commit got out before the barrier, even one sent before the
+/// watch parked, is read and the watch parks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refusal() {
+    let owner = super::super::usage_tests::Usage::start().await;
+    let runtime = owner.runtime();
+    let packet = owner.packet();
+    let admission = runtime.authority.authenticate(&packet).unwrap();
+    let first = owner
+        .client
+        .watch(Cursor::new(0), None, 1_000)
+        .await
+        .unwrap();
+    let WatchReply::Changed {
+        mut cursor,
+        mut mark,
+        ..
+    } = first
+    else {
+        panic!("a first watch returns at once, got {first:?}");
+    };
+    let waiting = || runtime.authority.watches.waiting.load(Ordering::SeqCst);
+    for _ in 0..8 {
+        let body = serde_json::to_vec(&json!({
+            "watch": { "after": cursor, "mark": mark, "wait_ms": 10_000 }
+        }))
+        .unwrap();
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
+        let admission = admission.clone();
+        let serving = tokio::spawn(async move {
+            super::serve(&mut server, &engine, &authority, &packet, &admission, &body).await
+        });
+        let parked = Clock::now() + Duration::from_secs(5);
+        while waiting() == 0 && !serving.is_finished() {
+            assert!(
+                Clock::now() < parked,
+                "the watch parks past its first check or answers"
+            );
+            tokio::task::yield_now().await;
+        }
+        let barrier = runtime.engine.owner_egress.write().await;
+        let early = tokio::time::timeout(Duration::from_millis(50), read_frame(&mut client)).await;
+        if let Ok(frame) = early {
+            let reply: WatchReply = serde_json::from_slice(&frame.unwrap()[4..]).unwrap();
+            let (WatchReply::Changed {
+                cursor: next,
+                mark: moved,
+                ..
+            }
+            | WatchReply::Refresh {
+                cursor: next,
+                mark: moved,
+            }
+            | WatchReply::Quiet {
+                cursor: next,
+                mark: moved,
+            }) = reply
+            else {
+                panic!("an owner not yet revoked is answered, got {reply:?}");
+            };
+            (cursor, mark) = (next, moved);
+            drop(barrier);
+            serving.await.unwrap().unwrap();
+            continue;
+        }
+        let control = OwnerControl {
+            operation_id: RequestId::new("revoke-parked-watch").unwrap(),
+            target: OwnerClientKind::Tui,
+            expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
+            decision: OwnerDecision::Revoke,
+        };
+        let (revoked, registration) = runtime
+            .engine
+            .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
+            .await
+            .unwrap();
+        runtime
+            .authority
+            .publish(registration, runtime.authority.next_control())
+            .unwrap();
+        assert!(!revoked.active);
+        drop(barrier);
+        let frame = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut client))
+            .await
+            .expect("the parked watch is answered once the barrier drops")
+            .unwrap();
+        let reply: WatchReply = serde_json::from_slice(&frame[4..]).unwrap();
+        assert_eq!(
+            reply,
+            WatchReply::Rejected {
+                code: "owner_authentication_failed".into()
+            }
+        );
+        serving.await.unwrap().unwrap();
+        owner.stop().await;
+        return;
+    }
+    panic!("background commits woke the watch before every revoke");
 }

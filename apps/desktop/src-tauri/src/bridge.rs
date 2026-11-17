@@ -879,6 +879,13 @@ impl NativeBridge {
             self.controller()?.reconcile_pending().await
         } else {
             let sent = self.controller()?.retry_pending().await;
+            if let Some(resent) = self
+                .controller()?
+                .resent()
+                .map(|(id, _)| id.as_str().to_owned())
+            {
+                intent.operation_id = resent;
+            }
             self.checked_once(sent).await?
         };
         let mut rejection = None;

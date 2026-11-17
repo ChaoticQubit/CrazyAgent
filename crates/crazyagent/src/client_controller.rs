@@ -2,7 +2,7 @@ use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
     NativeAuthCancel, NativeAuthLogout, NativeAuthQuery, NativeAuthReply, NativeAuthStart,
     OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor,
-    OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerView,
+    OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerResult, OwnerView,
 };
 use crate::engine::{Client, EngineError};
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
@@ -134,8 +134,26 @@ impl OwnerController {
     }
 }
 
+/// The engine's refusal of a change built from a read the engine has since moved past.
+const STALE_REVISION: &str = "stale_revision";
+
+/// Whether an owner answer is the engine's own refusal `stale_revision`, which it records as
+/// the outcome of the request sent rather than replays from an earlier send.
+/// Input: the answer. Output: true for that refusal.
+fn stale_refusal(response: &OwnerResponse) -> bool {
+    matches!(
+        response,
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+            if !operation.historical_replay
+                && matches!(&operation.result, OwnerResult::Rejected { code } if code == STALE_REVISION)
+    )
+}
+
+/// The controller's last owner read: the query it asked, the engine's reply and whether no
+/// send has gone out since, so a change built from it still names that reply's revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControllerView {
+    pub query: OwnerRead,
     pub state: OwnerReadReply,
     pub fresh: bool,
 }
@@ -145,6 +163,7 @@ pub struct OwnerController {
     identity: OwnerConnectionIdentity,
     view: Option<ControllerView>,
     pending: Option<PendingMutation>,
+    resent: Option<(RequestId, String)>,
     pending_account_profile: Option<PendingAccountProfile>,
     kind: OwnerClientKind,
     timeout: Duration,
@@ -299,6 +318,7 @@ impl OwnerController {
                 identity,
                 view: None,
                 pending: None,
+                resent: None,
                 pending_account_profile: None,
                 kind,
                 timeout,
@@ -320,6 +340,7 @@ impl OwnerController {
             identity,
             view: None,
             pending: None,
+            resent: None,
             pending_account_profile: None,
             kind,
             timeout,
@@ -380,6 +401,7 @@ impl OwnerController {
             identity: self.identity.clone(),
             view: self.view.clone(),
             pending: None,
+            resent: None,
             pending_account_profile: None,
             kind: self.kind,
             timeout: self.timeout,
@@ -486,12 +508,16 @@ impl OwnerController {
         Ok(self.pending.as_ref().unwrap())
     }
 
-    /// Sends the prepared mutation through the actual owner client.
+    /// Sends the prepared mutation through the actual owner client. A first send the engine
+    /// refuses `stale_revision` only because another write moved its revision is sent once
+    /// more, as [`Self::resend_stale`] decides; every other answer is returned as it came.
     /// Takes exclusive access and uses the stored exact request.
     /// Returns the actual typed owner response or transport error.
-    /// A refusal before sending, such as no connected client, changes no state, except a
-    /// restore sent once already: it is dropped and refused `controller_restore_not_resent`.
+    /// A refusal before sending, such as no connected client, leaves the retained change as is,
+    /// except a restore sent once already: it is dropped and refused
+    /// `controller_restore_not_resent`.
     pub async fn send_pending(&mut self) -> Result<OwnerResponse, EngineError> {
+        self.resent = None;
         if self
             .pending
             .as_ref()
@@ -500,6 +526,112 @@ impl OwnerController {
             self.pending = None;
             return Err(EngineError("controller_restore_not_resent".into()));
         }
+        let first = self
+            .pending
+            .as_ref()
+            .filter(|pending| !pending.uncertain)
+            .map(|pending| (pending.request.clone(), pending.generation));
+        let response = self.send_exact().await?;
+        match first {
+            Some((request, generation)) if stale_refusal(&response) => {
+                self.resend_stale(request, generation, response).await
+            }
+            _ => Ok(response),
+        }
+    }
+
+    /// Sends a first-send change the engine refused `stale_revision` once more, under a new
+    /// request id and the engine's current revision, when only an unrelated write moved that
+    /// revision: the view it was built from is still the last read, that read is the form's
+    /// own (not `Capabilities`, which carries no form data), and reading the same query again
+    /// gives a newer revision with the same config and data. The change itself is sent as it
+    /// was, so a version inside it is never refreshed and a real conflict stays refused; an
+    /// unmoved revision means such a version refused it. Inputs: the refused request, its
+    /// generation and the refusal. Output: the resend's answer, or the refusal.
+    async fn resend_stale(
+        &mut self,
+        refused: OwnerRequest,
+        generation: u64,
+        refusal: OwnerResponse,
+    ) -> Result<OwnerResponse, EngineError> {
+        assert!(
+            self.pending.is_none(),
+            "a change the engine answered is settled and dropped"
+        );
+        let OwnerOperation::Apply { mutation } = refused.operation else {
+            unreachable!("a pending change is an owner mutation");
+        };
+        let Some(before) = self.view.clone().filter(|view| {
+            view.state.revision == refused.expected_revision
+                && !matches!(view.query, OwnerRead::Capabilities)
+        }) else {
+            return Ok(self.refused(refusal));
+        };
+        let after = match self.read(before.query.clone()).await {
+            Ok(after)
+                if after.revision.value() > refused.expected_revision.value()
+                    && after.config_id == before.state.config_id
+                    && after.data == before.state.data =>
+            {
+                after
+            }
+            _ => return Ok(self.refused(refusal)),
+        };
+        if self.begin_mutation(mutation.clone(), generation).is_err() {
+            return Ok(self.refused(refusal));
+        }
+        let resent = self.pending.as_ref().expect("the resend was just prepared");
+        assert!(
+            resent.request.request_id != refused.request_id
+                && resent.request.expected_revision == after.revision
+                && resent.request.operation == OwnerOperation::Apply { mutation },
+            "the resend is the same change under a new id and the re-read revision"
+        );
+        self.resent = Some((resent.request.request_id.clone(), resent.hash.clone()));
+        self.send_exact().await
+    }
+
+    /// Leaves the view of a change the engine refused stale, as every send does, so the form
+    /// reads again before its next change even after the re-read `resend_stale` made.
+    /// Input: the refusal. Output: the same refusal.
+    fn refused(&mut self, refusal: OwnerResponse) -> OwnerResponse {
+        if let Some(view) = &mut self.view {
+            view.fresh = false;
+        }
+        assert!(self.pending.is_none(), "a refused change keeps no pending");
+        refusal
+    }
+
+    /// The request id and hash of the change the last `send_pending` sent again after a
+    /// stale refusal, so a caller that kept the first send's identity takes the one the
+    /// engine's receipt names. Output: that identity, or none when the last send was not
+    /// sent again.
+    pub fn resent(&self) -> Option<&(RequestId, String)> {
+        self.resent.as_ref()
+    }
+
+    /// Delivers the retained change for a client that kept its request id and hash to check
+    /// the engine's receipt: reconciles it, or sends it as `send_pending` does and, when the
+    /// change was sent again after a stale refusal, points `kept` at the resend.
+    /// Inputs: whether to reconcile, and the kept identity. Output: the engine's answer.
+    pub async fn deliver(
+        &mut self,
+        reconcile: bool,
+        kept: &mut Option<(RequestId, String)>,
+    ) -> Result<OwnerResponse, EngineError> {
+        if reconcile {
+            return self.reconcile_pending().await;
+        }
+        let answer = self.send_pending().await;
+        if let Some(resent) = &self.resent {
+            *kept = Some(resent.clone());
+        }
+        answer
+    }
+
+    /// Sends the stored exact request once through the actual owner client and settles the
+    /// answer, with no resend. Output: the actual typed owner response or transport error.
+    async fn send_exact(&mut self) -> Result<OwnerResponse, EngineError> {
         let pending = self
             .pending
             .as_mut()
@@ -622,7 +754,8 @@ impl OwnerController {
     }
 
     /// Explicitly retries the exact retained original mutation.
-    /// Takes exclusive state without rebasing revision or changing content.
+    /// Takes exclusive state without rebasing revision or changing content; only a change never
+    /// sent before is sent again after a stale refusal, as [`Self::send_pending`] says.
     /// Returns the actual replay or mutation outcome.
     pub async fn retry_pending(&mut self) -> Result<OwnerResponse, EngineError> {
         self.send_pending().await
@@ -640,7 +773,9 @@ impl OwnerController {
             request_id: RequestId::new(crate::engine::owner::random_id()?)
                 .map_err(|e| EngineError(e.to_string()))?,
             expected_revision: Cursor::new(0),
-            operation: OwnerOperation::Read { query },
+            operation: OwnerOperation::Read {
+                query: query.clone(),
+            },
         };
         let client = self
             .client
@@ -650,6 +785,7 @@ impl OwnerController {
         match reply.response {
             OwnerResponse::Read { state } => {
                 self.view = Some(ControllerView {
+                    query,
                     fresh: !matches!(state.data, OwnerData::ResyncRequired),
                     state: state.clone(),
                 });
