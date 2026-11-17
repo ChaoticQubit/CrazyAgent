@@ -847,7 +847,12 @@ impl Tmux {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
         }
-        for line in send_keys_lines(target, bytes) {
+        let lines = if crate::hop_trace::toggled(crate::hop_trace::T2_ONE_RUN_ENV) {
+            crate::hop_trace::one_run_lines(target, bytes)
+        } else {
+            send_keys_lines(target, bytes)
+        };
+        for line in lines {
             crate::hop_trace::hop("tmux_run_start", line.len(), target);
             control.run(&line)?;
             crate::hop_trace::hop("tmux_run_done", 0, target);

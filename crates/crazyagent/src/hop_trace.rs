@@ -1,4 +1,5 @@
 use crate::terminal::TerminalRequest;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -7,6 +8,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The variable naming the file the hop trace appends to (DEC-202 terminal latency research);
 /// when it is unset nothing is traced.
 pub const HOP_TRACE_ENV: &str = "CRAZYAGENT_HOP_TRACE";
+
+/// The research toggle (DEC-202 T2) that types a request as one `send-keys` command, as
+/// before 1edc18c1e, instead of runs of at most 256 bytes.
+pub const T2_ONE_RUN_ENV: &str = "CRAZYAGENT_T2_ONE_RUN";
+
+/// The research toggle (DEC-202 T5) that joins the wheel requests waiting in a view's queue
+/// into the one the engine sends next.
+pub const T5_MERGE_WHEEL_ENV: &str = "CRAZYAGENT_T5_MERGE_WHEEL";
 
 /// The most characters one hop's label carries into a trace line.
 const LABEL_CHARS_MAX: usize = 32;
@@ -47,6 +56,32 @@ pub fn hop(name: &str, bytes: usize, label: &str) {
             std::process::id()
         );
     }
+}
+
+/// Whether a research toggle is on: its variable is set to `1`. Takes the variable's name.
+/// Returns the answer.
+pub fn toggled(name: &str) -> bool {
+    assert!(name.starts_with("CRAZYAGENT_T"));
+    std::env::var_os(name).is_some_and(|value| value == "1")
+}
+
+/// The one `send-keys -H` command that types all the bytes into a target, as the engine sent
+/// a request before 1edc18c1e, or none for no bytes. Takes the target and the bytes. Returns
+/// the commands.
+pub fn one_run_lines(target: &str, bytes: &[u8]) -> Vec<String> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut line = String::with_capacity(32 + target.len() + bytes.len() * 3);
+    let _ = write!(line, "send-keys -t {target} -H");
+    for byte in bytes {
+        let _ = write!(line, " {byte:02x}");
+    }
+    assert_eq!(
+        line.len(),
+        "send-keys -t  -H".len() + target.len() + bytes.len() * 3
+    );
+    vec![line]
 }
 
 /// Traces one owner terminal request at a hop: its kind as the label and the bytes it types,
