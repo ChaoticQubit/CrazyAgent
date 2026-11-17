@@ -1,5 +1,4 @@
 {
-  "apps/desktop/src-tauri/e2e_bridge/routes.rs": 4135,
   "apps/desktop/src-tauri/src/bridge/intake.rs": 1662,
   "apps/desktop/src-tauri/src/bridge/master.rs": 1609,
   "apps/desktop/src-tauri/src/ide.rs": 1882,
