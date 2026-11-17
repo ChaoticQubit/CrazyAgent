@@ -5227,10 +5227,6 @@ pub(crate) fn windows_clean_text(text: &str) -> bool {
     })
 }
 
-/// The canonical form of an existing path. On Windows the verbatim `\\?\` prefix that
-/// `canonicalize` adds to a drive path is removed, so the result equals the plain drive path;
-/// any other verbatim form stays as it is and fails [`clean_absolute`]. Input: the path.
-/// Output: the canonical path, or the I/O error.
 /// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
 /// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
 /// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
@@ -5247,6 +5243,12 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
     (program != package.as_path() && program.starts_with(&package)).then_some(package)
 }
 
+/// The canonical form of an existing path. On macOS a path named through the data volume
+/// comes back under its short name, the only one Seatbelt matches, so a root given in the
+/// long name is not canonical. On Windows the verbatim `\\?\` prefix that `canonicalize` adds
+/// to a drive path is removed, so the result equals the plain drive path; any other verbatim
+/// form stays as it is and fails [`clean_absolute`]. Input: the path. Output: the canonical
+/// path, or the I/O error.
 pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
     #[cfg(target_os = "windows")]
@@ -5257,7 +5259,7 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     {
         return Ok(PathBuf::from(plain));
     }
-    Ok(resolved)
+    Ok(crate::projects_home::one_spelling(resolved))
 }
 
 #[cfg(test)]
