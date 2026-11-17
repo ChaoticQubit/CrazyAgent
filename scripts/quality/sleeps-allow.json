@@ -345,7 +345,6 @@
   "crates/crazyagent/tests/runner_lifetime.rs": 7,
   "crates/crazyagent/tests/sandbox_regex_compile.rs": 1,
   "crates/crazyagent/tests/sandbox_toolchains.rs": 1,
-  "crates/crazyagent/tests/settings_options_v2_ide_agents.rs": 1,
   "crates/crazyagent/tests/settings_options_v2_recovery.rs": 2,
   "crates/crazyagent/tests/settings_renumber.rs": 1,
   "crates/crazyagent/tests/setup.rs": 1,
