@@ -62,7 +62,7 @@ impl Golden {
     /// Inputs: the flow's name, the engine's global.toml text and the stand-in, if any.
     /// Output: the started flow, its first step recorded.
     async fn launch(flow: &'static str, global: &str, codex: Option<&Path>) -> Self {
-        let record = Record::new(flow);
+        let record = Record::new(flow, "engine");
         let place = scratch("ca-golden-");
         let home = place.path().join("home");
         let codex_home = home.join(".codex");
@@ -107,10 +107,7 @@ impl Golden {
     /// Input: none.
     /// Output: the record as the evidence folder holds it, or none when it holds none.
     pub fn finish(&mut self) -> Option<Value> {
-        assert!(!self.record.finished);
-        self.record.finished = true;
-        self.record.write("passed").unwrap();
-        serde_json::from_slice(&fs::read(self.record.path()).ok()?).ok()
+        self.record.finish()
     }
 
     /// Makes an owner repository a project as onboarding does, then gives it the pool and one
@@ -243,31 +240,37 @@ pub fn silent_provider() -> u16 {
     port
 }
 
-/// A flow's run record: its name, each step's name and milliseconds, and the outcome,
-/// written as `<flow>-engine.json` to `E2E_EVIDENCE` when that is an absolute folder, else
-/// to the test target's golden folder. Fields: the flow, when it started, when the last
-/// step ended, the steps and whether it was finished.
-struct Record {
+/// A flow's run record: its name, the client that ran it, each step's name and milliseconds,
+/// its measures and the outcome, written as `<flow>-<client>.json` to `E2E_EVIDENCE` when that
+/// is an absolute folder, else to the test target's golden folder. Fields: the flow, the
+/// client, when it started, when the last step ended, the steps, the measures and whether it
+/// was finished.
+pub struct Record {
     flow: &'static str,
+    client: &'static str,
     started: Instant,
     mark: Instant,
     steps: Vec<(&'static str, u64)>,
+    measures: Vec<(&'static str, u64)>,
     finished: bool,
 }
 
 impl Record {
-    /// Starts the clock and removes the record an earlier run of the flow left.
-    /// Input: the flow's name, lowercase words joined by `-`.
-    /// Output: the record, with no step.
-    fn new(flow: &'static str) -> Self {
+    /// Starts the clock and removes the record an earlier run of the flow left. Inputs: the
+    /// flow's name, lowercase words joined by `-`, and the client: `engine` for a flow on the
+    /// owner requests, `tui` for one on the real TUI. Output: the record, with no step.
+    pub fn new(flow: &'static str, client: &'static str) -> Self {
         let named = |byte: u8| byte.is_ascii_lowercase() || byte == b'-';
         assert!(!flow.is_empty() && flow.len() <= 64 && flow.bytes().all(named));
+        assert!(matches!(client, "engine" | "tui"), "{client}");
         let now = Instant::now();
         let record = Self {
             flow,
+            client,
             started: now,
             mark: now,
             steps: Vec::new(),
+            measures: Vec::new(),
             finished: false,
         };
         if let Err(error) = fs::remove_file(record.path()) {
@@ -276,10 +279,34 @@ impl Record {
         record
     }
 
+    /// Keeps one measure of the flow for its record, such as a start's time or a folder's
+    /// growth. Inputs: the measure's name, lowercase words joined by `_`, set once, and its
+    /// value. Output: none.
+    pub fn measure(&mut self, name: &'static str, value: u64) {
+        let named = |byte: u8| byte.is_ascii_lowercase() || byte == b'_';
+        assert!(!name.is_empty() && name.bytes().all(named) && !self.finished);
+        assert!(
+            self.measures.iter().all(|(kept, _)| *kept != name),
+            "{name}"
+        );
+        assert!(self.measures.len() < STEPS_MAX);
+        self.measures.push((name, value));
+    }
+
+    /// Ends the flow as passed: writes its run record, then reads it back from disk.
+    /// Input: none.
+    /// Output: the record as the evidence folder holds it, or none when it holds none.
+    pub fn finish(&mut self) -> Option<Value> {
+        assert!(!self.finished);
+        self.finished = true;
+        self.write("passed").unwrap();
+        serde_json::from_slice(&fs::read(self.path()).ok()?).ok()
+    }
+
     /// Ends one step at the time now, timed from the end of the one before.
     /// Input: the step's name.
     /// Output: none.
-    fn step(&mut self, name: &'static str) {
+    pub fn step(&mut self, name: &'static str) {
         assert!(!name.is_empty() && !self.finished);
         assert!(
             self.steps.len() < STEPS_MAX,
@@ -299,10 +326,11 @@ impl Record {
             Some(folder) if folder.is_absolute() => folder,
             _ => PathBuf::from(RECORDS),
         };
-        folder.join(format!("{}-engine.json", self.flow))
+        folder.join(format!("{}-{}.json", self.flow, self.client))
     }
 
-    /// Writes the record: the flow, the client, the outcome, the whole time and each step's.
+    /// Writes the record: the flow, the client, the outcome, the whole time, each step's, and
+    /// the measures when the flow kept any.
     /// Input: `passed` or `failed`.
     /// Output: the write's error, if any.
     fn write(&self, outcome: &str) -> std::io::Result<()> {
@@ -312,13 +340,18 @@ impl Record {
             .iter()
             .map(|(step, ms)| json!({ "step": step, "ms": ms }))
             .collect();
-        let record = json!({
+        let mut record = json!({
             "flow": self.flow,
-            "client": "engine",
+            "client": self.client,
             "outcome": outcome,
             "total_ms": millis(self.started.elapsed()),
             "steps": steps,
         });
+        if !self.measures.is_empty() {
+            let measures = self.measures.iter();
+            let measures = measures.map(|(name, value)| ((*name).to_owned(), json!(value)));
+            record["measures"] = Value::Object(measures.collect());
+        }
         let path = self.path();
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(path, serde_json::to_vec_pretty(&record)?)
