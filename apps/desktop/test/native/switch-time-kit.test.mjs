@@ -75,14 +75,15 @@ const FRAME_MS = 16;
 /** A stand-in page for `inPageSwitch`, built from the function's own text as a page gets it:
  * one terminal whose marker row is in the page from the start, a link, a clock and frames
  * the test steps by hand. `state` says whether the row is laid out, passes the visibility
- * check and is what a press at its middle hits, and from which frame after the click.
+ * check and is what a press at its middle hits, from which frame after the click, and
+ * whether its view has set up its buffer reader yet.
  * Inputs: the state and the in-page function to build, the switch by default. Output: the
  * function to run and the handles to step and read it. */
 function page(state, inPage = inPageSwitch) {
   const clock = { now: 0, frames: [], tasks: [], timers: [], clicks: 0, frame: 0 };
   const visible = () => state.shownFromFrame !== null && clock.frame >= state.shownFromFrame;
   const row = {
-    readScreen: () => ["", "Codex stand-in ready", ""],
+    ...(state.reader === false ? {} : { readScreen: () => ["", "Codex stand-in ready", ""] }),
     checkVisibility: () => state.visibility ?? visible(),
     getBoundingClientRect: () => (state.laidOut === false ? { left: 0, top: 0, width: 0, height: 0 } : { left: 10, top: 20, width: 600, height: 17 }),
   };
@@ -136,6 +137,7 @@ test("on screen means laid out, visible and hit: text kept in the page while hid
   assert.deepEqual(asked({ shownFromFrame: null }), [{ shown: false }], "another element takes the press, as over a parked terminal");
   assert.deepEqual(asked({ shownFromFrame: 0, visibility: false }), [{ shown: false }], "the browser says it is not visible");
   assert.deepEqual(asked({ shownFromFrame: 0, laidOut: false }), [{ shown: false }], "it has no box");
+  assert.deepEqual(asked({ shownFromFrame: 0, reader: false }), [{ shown: false }], "its view has not set up its buffer reader yet");
 });
 
 test("a switch is timed from the click to the task after the first frame that shows the target", () => {

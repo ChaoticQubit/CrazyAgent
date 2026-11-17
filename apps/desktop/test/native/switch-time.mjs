@@ -70,7 +70,7 @@ export function inPageSwitch(request, done) {
   const shown = () => {
     for (const scope of document.querySelectorAll(target.scope)) {
       for (const row of scope.querySelectorAll(target.rows)) {
-        if (!row.readScreen().join("\n").includes(target.text)) continue;
+        if (!(row.readScreen?.() ?? []).join("\n").includes(target.text)) continue;
         if (typeof row.checkVisibility === "function" && !row.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
         const box = row.getBoundingClientRect();
         if (!(box.width > 0 && box.height > 0)) continue;
