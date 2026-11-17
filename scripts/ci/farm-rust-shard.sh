@@ -12,6 +12,7 @@ workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}
 exe=""
 [ "${RUNNER_OS:-}" != Windows ] || exe=.exe
 filter=$(node scripts/ci/nextest-filter.mjs)
+[ -z "${FARM_ROWS:-}" ] || filter="($filter) & ($FARM_ROWS)"
 echo "filter: $filter"
 export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$workspace/target/debug/crazyagent$exe"
 run=(cargo nextest run --archive-file "$archive" --workspace-remap "$workspace" --extract-to "$workspace" --extract-overwrite --partition "slice:$part/$parts" --no-tests=warn -E "$filter")
