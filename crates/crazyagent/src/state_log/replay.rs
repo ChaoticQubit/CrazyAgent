@@ -140,10 +140,12 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
 /// Redacts one logged event in place for an owner delete: its body becomes [`TOMBSTONE`]
 /// while its seq, revision, aggregate, kind and time stay, so replay stays contiguous and
 /// skips it. The old body is overwritten with zeros (`secure_delete` on for the update, then
-/// put back); the caller checkpoints the WAL after commit. Snapshot events are refused until
-/// compaction (L1b) can rewrite their run. The delete's fence is checked first, as for an
-/// append. Inputs: the delete's transaction, the seq and the fence. Output: Ok, a fence
-/// refusal, or `state_log_redact_missing` or `state_log_redact_snapshot`.
+/// put back by its keyword, since SQLite reads the number 2 as ON and not FAST); the caller
+/// checkpoints the WAL after commit. Snapshot events are refused until compaction (L1b) can
+/// rewrite their run. The delete's fence is checked first, as for an append. Inputs: the
+/// delete's transaction, the seq and the fence. Output: Ok, a fence refusal, or
+/// `state_log_redact_missing`, `state_log_redact_snapshot` or
+/// `state_log_redact_secure_delete` for a mode SQLite does not name.
 pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
     fence::check(tx, fence)?;
     let missing = || error("state_log_redact_missing");
@@ -165,6 +167,12 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
     let secure: i64 = tx
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .map_err(error)?;
+    let mode = match secure {
+        0 => "OFF",
+        1 => "ON",
+        2 => "FAST",
+        _ => return Err(error("state_log_redact_secure_delete")),
+    };
     tx.execute_batch("PRAGMA secure_delete=ON;")
         .map_err(error)?;
     let updated = tx
@@ -173,7 +181,7 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
             params![TOMBSTONE, seq],
         )
         .map_err(error);
-    tx.execute_batch(&format!("PRAGMA secure_delete={secure};"))
+    tx.execute_batch(&format!("PRAGMA secure_delete={mode};"))
         .map_err(error)?;
     updated.map(|_| ())
 }
