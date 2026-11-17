@@ -14,6 +14,18 @@ thread_local! {
     static SPAWNED: Cell<usize> = const { Cell::new(0) };
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static ACCEPT_WAITS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test helper: how many times this thread's blocking accepts have waited for a client, so a
+/// row can bound the wakeups one accept takes. Output: the count.
+#[cfg(all(test, unix))]
+pub(crate) fn accept_waits() -> usize {
+    ACCEPT_WAITS.get()
+}
+
 /// Test helper: how many children this thread has started through the gate, so a row can
 /// bound the processes one call starts. Output: the count.
 #[cfg(all(test, target_os = "macos"))]
@@ -479,6 +491,8 @@ pub fn accept_tcp_std(
     let accepted = loop {
         match guarded(|| listener.accept()) {
             Err(error) if waits && error.kind() == io::ErrorKind::WouldBlock => {
+                #[cfg(test)]
+                ACCEPT_WAITS.set(ACCEPT_WAITS.get() + 1);
                 std::thread::sleep(ACCEPT_POLL);
             }
             other => break other,

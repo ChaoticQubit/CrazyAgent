@@ -171,6 +171,8 @@ struct Shared {
     totaled: AtomicU64,
     started: Instant,
     any_address: bool,
+    #[cfg(test)]
+    serve_passes: AtomicU64,
 }
 
 impl Shared {
@@ -262,6 +264,12 @@ impl ModelProxy {
         self.shared.refusals.load(Ordering::SeqCst)
     }
 
+    /// How many passes the accept thread has made over its listeners. Output: the count.
+    #[cfg(test)]
+    pub(crate) fn serve_passes(&self) -> u64 {
+        self.shared.serve_passes.load(Ordering::SeqCst)
+    }
+
     /// Starts the proxy [`ModelProxy::bind`] describes. Inputs: the agent, its hosts, the
     /// port, the owner's model ports, and whether its tunnels may dial addresses on this
     /// machine. Output: the running proxy, or the bind error.
@@ -292,6 +300,8 @@ impl ModelProxy {
             totaled: AtomicU64::new(0),
             started: Instant::now(),
             any_address,
+            #[cfg(test)]
+            serve_passes: AtomicU64::new(0),
         });
         let serving = shared.clone();
         let thread = std::thread::Builder::new()
@@ -410,6 +420,8 @@ impl Drop for Held {
 /// what the proxy's threads share. Output: none.
 fn serve(listeners: &[TcpListener; 2], shared: &Arc<Shared>) {
     while !shared.stop.load(Ordering::SeqCst) {
+        #[cfg(test)]
+        shared.serve_passes.fetch_add(1, Ordering::SeqCst);
         let mut waiting = false;
         for listener in listeners {
             if let Ok((client, _)) = spawn_gate::accept_tcp_std(listener) {
