@@ -28,7 +28,6 @@ pub const WAIT: Duration = Duration::from_secs(30);
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/harness");
 const FILE_NAME_BYTES_MAX: usize = 64;
 const CHUNK_BYTES: usize = 64 * 1024;
-const POLL: Duration = Duration::from_millis(20);
 
 /// One stand-in harness in a private scratch folder: `standin.sh` installed as
 /// `bin/standin-<kind>` at mode 0700, the program name its manifest lists, and its state
@@ -271,19 +270,14 @@ impl Live {
     /// Output: how it ended, with the rest of what it printed.
     pub fn finish(mut self) -> Ended {
         self.close();
-        let deadline = Instant::now() + WAIT;
-        let mut killed = false;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                killed = true;
-                let _ = self.child.kill();
-                break self.child.wait().unwrap();
-            }
-            std::thread::sleep(POLL);
-        };
+        let exited = super::poll_support::poll_until(Instant::now() + WAIT, || {
+            self.child.try_wait().unwrap().is_some()
+        });
+        let killed = !exited;
+        if killed {
+            let _ = self.child.kill();
+        }
+        let status = self.child.wait().unwrap();
         while let Ok(chunk) = self.chunks.recv_timeout(WAIT) {
             self.buffer.extend_from_slice(&chunk);
         }

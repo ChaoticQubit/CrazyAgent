@@ -339,23 +339,26 @@ fn a_research_agent_not_surely_stopped_stays_listed_after_its_run_returns() {
 fn a_research_agent_whose_stop_left_processes_stays_listed_while_they_run() {
     use crate::harnesses::leftovers::{Lineage, held_in};
     use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
-    use std::time::{Duration, Instant};
     let project = "sa-vid14-research-left";
     let saved = [PathBuf::from("/tmp/sa-vid14-research-left/vault")];
     let mut sleeper = crate::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/perl")
-            .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; sleep 60"])
+            .args([
+                "-mPOSIX",
+                "-e",
+                "POSIX::setsid() > 0 or exit 1; $| = 1; print qq(left\\n); sleep 60",
+            ])
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
     )
     .unwrap();
     let pid = rustix::process::Pid::from_child(&sleeper);
-    let until = Instant::now() + Duration::from_secs(10);
-    while rustix::process::getsid(Some(pid)) != Ok(pid) {
-        assert!(Instant::now() < until, "the sleeper never left its session");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let mut line = String::new();
+    let mut out = std::io::BufReader::new(sleeper.stdout.take().unwrap());
+    std::io::BufRead::read_line(&mut out, &mut line).unwrap();
+    assert_eq!(line, "left\n", "the sleeper never left its session");
+    assert_eq!(rustix::process::getsid(Some(pid)), Ok(pid));
     let listed = starting(RunKind::Research, project).expect("the list has room");
     listed.hid(&[]);
     let by = leftovers::HoldBy {

@@ -174,14 +174,9 @@ fn overdue() -> Duration {
 /// while after its last member is reaped. Input: the group id. Output: whether it is gone.
 fn gone(group: u32) -> bool {
     let group = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
-    loop {
-        match rustix::process::test_kill_process_group(group) {
-            Err(rustix::io::Errno::SRCH) => return true,
-            _ if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
-            _ => return false,
-        }
-    }
+    crate::poll_support::poll_until(Instant::now() + Duration::from_secs(5), || {
+        rustix::process::test_kill_process_group(group) == Err(rustix::io::Errno::SRCH)
+    })
 }
 
 fn code<T: std::fmt::Debug>(result: Result<T, LaunchError>) -> String {

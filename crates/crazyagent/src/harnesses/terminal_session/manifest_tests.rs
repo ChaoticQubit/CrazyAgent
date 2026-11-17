@@ -160,11 +160,10 @@ impl Standin {
     /// Waits until the stand-in logged a typed line holding `text`, so its turn runs.
     /// Inputs: the run's number and the text. Output: none.
     fn typed(&self, run: usize, text: &str) {
-        let until = Instant::now() + TURN_WAIT;
-        while !self.log(&format!("stdin-{run}")).contains(text) {
-            assert!(Instant::now() < until, "the stand-in never read {text}");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let read = crate::poll_support::poll_until(Instant::now() + TURN_WAIT, || {
+            self.log(&format!("stdin-{run}")).contains(text)
+        });
+        assert!(read, "the stand-in never read {text}");
     }
 }
 
@@ -296,14 +295,10 @@ fn a_stand_in_that_picks_its_own_session_id_is_named_by_its_record_and_resumed_b
     assert_eq!(first.conversation().as_ref(), Some(&conversation));
     first.leave();
     let agent = AgentId::new("manifest-own-id").unwrap();
-    let until = Instant::now() + TURN_WAIT;
-    while standin.host.alive().unwrap_or_default().contains(&agent) {
-        assert!(
-            Instant::now() < until,
-            "a pane with no record was left running"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let left = crate::poll_support::poll_until(Instant::now() + TURN_WAIT, || {
+        !standin.host.alive().unwrap_or_default().contains(&agent)
+    });
+    assert!(left, "a pane with no record was left running");
     let mut second = standin.start("manifest-own-id-again", Some(&conversation));
     assert_eq!(ready(&mut second), conversation.id);
     second.send("two").unwrap();
