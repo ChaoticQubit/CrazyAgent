@@ -806,6 +806,102 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
     assert_eq!(changeable_by_others(&gone), None);
 }
 
+/// Changes who may write `path` with icacls. Inputs: the path and the icacls arguments.
+#[cfg(windows)]
+fn icacls(path: &Path, change: &[&str]) {
+    let changed = std::process::Command::new("icacls")
+        .arg(path)
+        .args(change)
+        .output()
+        .unwrap();
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+}
+
+/// V243-WIN-CHANGEABLE-BY-OTHERS: on Windows both checks read owners and access lists, as
+/// the owner-only program check does. A file Users may write, the folder of a file where
+/// Users may add one, and the first folder above a missing part where Users may add a
+/// folder are named. A fresh file, its folders and System32 are not, nor is a folder whose
+/// parent only lets Users add a folder, as Authenticated Users may at a drive's root.
+#[cfg(windows)]
+#[test]
+fn changeable_by_others_reads_windows_owners_and_access_lists() {
+    let users = "*S-1-5-32-545";
+    let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    let above = directory.path().join("above");
+    let own = above.join("own");
+    std::fs::create_dir_all(&own).unwrap();
+    let program = own.join("tool.exe");
+    std::fs::write(&program, "").unwrap();
+    let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    for clean in [&program, &own, &above, &system32, &own.join("gone.exe")] {
+        assert_eq!(changeable_by_others(clean), None, "{}", clean.display());
+        assert_eq!(changeable_past_sticky(clean), None, "{}", clean.display());
+    }
+
+    icacls(&above, &["/grant", &format!("{users}:(AD)")]);
+    assert_eq!(changeable_by_others(&own), None);
+    assert_eq!(changeable_by_others(&program), None);
+    assert_eq!(
+        changeable_by_others(&above.join("gone").join("tool.exe")),
+        Some(above.clone())
+    );
+    icacls(&above, &["/remove:g", users]);
+
+    icacls(&program, &["/grant", &format!("{users}:(W)")]);
+    assert_eq!(changeable_by_others(&program), Some(program.clone()));
+    assert_eq!(changeable_past_sticky(&program), Some(program.clone()));
+    icacls(&program, &["/remove:g", users]);
+
+    icacls(&own, &["/grant", &format!("{users}:(WD)")]);
+    for named in [&program, &own, &own.join("gone.exe")] {
+        assert_eq!(
+            changeable_by_others(named),
+            Some(own.clone()),
+            "{}",
+            named.display()
+        );
+        assert_eq!(
+            changeable_past_sticky(named),
+            Some(own.clone()),
+            "{}",
+            named.display()
+        );
+    }
+    icacls(&own, &["/remove:g", users]);
+    assert_eq!(changeable_by_others(&program), None);
+}
+
+/// #331 sec F1: on Windows the service PATH keeps a folder that exists and drops one that
+/// does not, under a clean folder or on a drive letter no volume holds, since a drive or
+/// folder added there later would put whatever it holds on the engine's harness lookup.
+#[cfg(windows)]
+#[test]
+fn service_path_on_windows_drops_a_folder_that_does_not_exist() {
+    let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    let kept = directory.path().join("bin");
+    std::fs::create_dir(&kept).unwrap();
+    let missing = directory.path().join("gone").join("bin");
+    let absent = ('D'..='Z')
+        .map(|letter| PathBuf::from(format!("{letter}:\\")))
+        .find(|root| !root.exists())
+        .map(|root| root.join("crazyagent-gone").join("bin"));
+    let current = std::env::join_paths(
+        [kept.clone(), missing.clone()]
+            .into_iter()
+            .chain(absent.clone()),
+    )
+    .unwrap();
+    let folders: Vec<PathBuf> =
+        std::env::split_paths(&service_path(Some(&current), None, None)).collect();
+    assert_eq!(folders.first(), Some(&kept));
+    assert!(!folders.contains(&missing));
+    assert!(absent.is_none_or(|absent| !folders.contains(&absent)));
+}
+
 #[cfg(unix)]
 #[test]
 fn install_refuses_an_engine_other_users_can_change_before_writing_anything() {

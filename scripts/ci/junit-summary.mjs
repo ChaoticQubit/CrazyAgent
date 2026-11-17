@@ -47,13 +47,16 @@ export function count(xml) {
 
 /**
  * Builds the job summary for one farm run. Inputs: the expected part names, a map from part name
- * to its JUnit texts, and the needed jobs' results ({ job: { result } }). Output: { ok, text }; ok
- * only when every expected part, and no other, reported a test case, none failed, and every job succeeded.
+ * to its JUnit texts, the needed jobs' results ({ job: { result } }) and how many JUnit files
+ * belong to no part. Output: { ok, text }; ok only when every expected part, and no other,
+ * reported a test case, none failed, every job succeeded and no file is unattributed.
  */
-export function summarize(expected, files, needs) {
+export function summarize(expected, files, needs, unattributed = 0) {
   assert(needs !== null && typeof needs === "object" && !Array.isArray(needs), "needs is an object of job results");
+  assert(Number.isSafeInteger(unattributed) && unattributed >= 0, "unattributed is a file count");
   const rows = ["| part | tests | failed | skipped | seconds |", "| - | - | - | - | - |"];
   const problems = [];
+  if (unattributed > 0) problems.push(`unattributed JUnit: ${unattributed} file(s) outside farm-junit-<part> folders`);
   for (const [job, { result }] of Object.entries(needs)) {
     assert(typeof result === "string" && result.length > 0, `job ${job} has a result`);
     if (result !== "success") problems.push(`job ${job}: ${result}`);
@@ -97,7 +100,30 @@ function xmlFiles(folder) {
 }
 
 /**
- * Prints the summary of the farm-junit-<part> folders under argv[2] for the parts in FARM_PARTS
+ * Reads the downloaded JUnit files by part. download-artifact puts each artifact in its own
+ * farm-junit-<part> folder, but a lone matched artifact straight into the root, with no folder
+ * naming its part. So files outside every such folder count as the one expected part only when
+ * FARM_PARTS names exactly one and no part folder exists; otherwise they are unattributed.
+ * Inputs: the root and the expected parts. Output: { files (part -> texts), unattributed (count) }.
+ */
+export function partFiles(root, expected) {
+  const files = new Map();
+  const loose = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory() && entry.name.startsWith(PREFIX)) files.set(entry.name.slice(PREFIX.length), xmlFiles(path).map((file) => readFileSync(file, "utf8")));
+    else if (entry.isDirectory()) loose.push(...xmlFiles(path));
+    else if (entry.isFile() && entry.name.endsWith(".xml")) loose.push(path);
+  }
+  if (loose.length > 0 && files.size === 0 && expected.length === 1) {
+    files.set(expected[0], loose.map((file) => readFileSync(file, "utf8")));
+    return { files, unattributed: 0 };
+  }
+  return { files, unattributed: loose.length };
+}
+
+/**
+ * Prints the summary of the JUnit files under argv[2] ([`partFiles`]) for the parts in FARM_PARTS
  * and the jobs in FARM_NEEDS (the workflow's toJSON(needs)), and sets exit status 1 unless the run
  * is ok. Inputs: argv and the environment. Output: stdout.
  */
@@ -110,12 +136,8 @@ function main(argv, env) {
   if (needs === null || typeof needs !== "object" || Array.isArray(needs)) throw new Error("FARM_NEEDS is not an object of job results");
   for (const [job, value] of Object.entries(needs)) if (typeof value?.result !== "string") throw new Error(`FARM_NEEDS has no result for ${job}`);
   const expected = env.FARM_PARTS.split(/\s+/).filter(Boolean);
-  const files = new Map();
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !entry.name.startsWith(PREFIX)) continue;
-    files.set(entry.name.slice(PREFIX.length), xmlFiles(join(root, entry.name)).map((path) => readFileSync(path, "utf8")));
-  }
-  const { ok, text } = summarize(expected, files, needs);
+  const { files, unattributed } = partFiles(root, expected);
+  const { ok, text } = summarize(expected, files, needs, unattributed);
   process.stdout.write(text);
   process.exitCode = ok ? 0 : 1;
 }
