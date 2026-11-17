@@ -1,5 +1,9 @@
-use super::{guarded, output, spawn, status};
-use std::process::{Command, Stdio};
+use super::{guarded, spawn};
+#[cfg(unix)]
+use super::{output, status};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 #[test]
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
@@ -7,6 +11,7 @@ fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_gate_is_usable_again_after_a_reentry_panic() {
     let reentry = std::thread::spawn(|| guarded(|| status(&mut Command::new("/usr/bin/true"))));
@@ -18,6 +23,7 @@ fn the_gate_is_usable_again_after_a_reentry_panic() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn output_keeps_the_stdio_the_caller_set() {
     let captured = output(
