@@ -325,7 +325,9 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
       }
     };
     const stopHearing = onChanged(["team"], () => void read());
-    void startWatch().then(() => live && read());
+    void startWatch().then(() => {
+      if (live) void read();
+    });
     return () => {
       live = false;
       stopHearing();
@@ -363,7 +365,9 @@ function useIdeFocus(running: boolean) {
       if (focus && ideFocusMoves(parseRoute(window.location.hash), focus)) navigate(ideFocusRoute(focus));
     };
     const stopHearing = onChanged(["ide"], () => void read());
-    void startWatch().then(() => live && read());
+    void startWatch().then(() => {
+      if (live) void read();
+    });
     return () => {
       live = false;
       stopHearing();
