@@ -1035,7 +1035,9 @@ async fn prepare_engine(
     let service = layout.map(default_service).transpose()?;
     if let (Some(layout), Some(service)) = (layout, service.as_ref()) {
         let running = crazyagent::restore::service_running(service);
-        if let Some(code) = crazyagent::restore::blocks_start(layout.root(), running) {
+        if !crazyagent::service::answering(&layout.socket())
+            && let Some(code) = crazyagent::restore::blocks_start(layout.root(), running)
+        {
             return Err(crazyagent::tui::restore_words(code).into());
         }
         crazyagent::service::ensure_running(
