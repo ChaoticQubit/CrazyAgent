@@ -3,6 +3,9 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Replay of the log into projections, the compare of rebuilt tables, redaction in place, the
+/// writers' clock and the process exit event (v2.5 L2).
+pub mod replay;
 #[cfg(test)]
 mod tests;
 
@@ -13,6 +16,9 @@ pub const BODY_BYTES_MAX: usize = 65_536;
 pub const KIND_BYTES_MAX: usize = 64;
 /// The most events one appending transaction may hold, a snapshot run included.
 pub const TRANSACTION_EVENTS_MAX: usize = 65_536;
+/// The body a redacted event keeps in place of its own, so its seq and revision stay and
+/// replay skips it; no appended event may carry it.
+pub const TOMBSTONE: &[u8] = b"\0redacted\0";
 /// The kind of one chunk of a snapshot run.
 pub const SNAPSHOT_CHUNK: &str = "SnapshotChunk";
 /// The kind of the event that closes a snapshot run.
