@@ -7067,7 +7067,7 @@ auth = { method = "none" }"#;
     /// stale registration took the owner's permissive register and re-pinned it unseen.
     #[tokio::test]
     async fn a_master_turn_after_a_write_and_restore_and_a_settings_rebind_is_refused() {
-        let case = Fixture::new(true).await;
+        let case = Fixture::kept().await;
         let config = generated_master_config(&case);
         let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
         else {
@@ -7102,7 +7102,7 @@ auth = { method = "none" }"#;
     /// master_configured_receipt_stale, a sign-in gap that fails over.
     #[tokio::test]
     async fn a_master_turn_after_a_replaced_config_and_a_settings_rebind_names_the_changed_file() {
-        let case = Fixture::new(true).await;
+        let case = Fixture::kept().await;
         let config = generated_master_config(&case);
         let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
         else {

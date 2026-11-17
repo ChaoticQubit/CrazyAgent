@@ -320,7 +320,7 @@ impl GitHub {
     /// Starts a publish and runs its draft at once, as the engine's own rows do. Inputs:
     /// the project folder, the plan and `ask`. Output: the job at its lines, or the
     /// refusal `publish_begin` or the draft gave.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn publish_start(
         &self,
         project: &Path,

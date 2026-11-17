@@ -449,13 +449,16 @@ fn a_second_apply_updates_the_rulesets_crazyagent_recorded_and_posts_none_twice(
     assert_eq!(posted.len(), 3);
     assert_eq!(
         made,
-        recorded(&[
-            (GitHubRule::PullRequest, 7),
-            (GitHubRule::NoForcePush, posted[0]),
-            (GitHubRule::NoDeletion, posted[1]),
-            (GitHubRule::LinearHistory, 8),
-            (GitHubRule::TagProtection, posted[2]),
-        ])
+        RepoRecord {
+            on: Some(GitHubRule::defaults()),
+            ..recorded(&[
+                (GitHubRule::PullRequest, 7),
+                (GitHubRule::NoForcePush, posted[0]),
+                (GitHubRule::NoDeletion, posted[1]),
+                (GitHubRule::LinearHistory, 8),
+                (GitHubRule::TagProtection, posted[2]),
+            ])
+        }
     );
 }
 
@@ -790,12 +793,15 @@ fn a_ruleset_crazyagent_did_not_make_is_left_alone_and_reported() {
     );
     assert_eq!(
         made,
-        recorded(&[
-            (GitHubRule::NoForcePush, posted[0]),
-            (GitHubRule::NoDeletion, posted[1]),
-            (GitHubRule::LinearHistory, posted[2]),
-            (GitHubRule::TagProtection, posted[3]),
-        ])
+        RepoRecord {
+            on: Some(GitHubRule::defaults()),
+            ..recorded(&[
+                (GitHubRule::NoForcePush, posted[0]),
+                (GitHubRule::NoDeletion, posted[1]),
+                (GitHubRule::LinearHistory, posted[2]),
+                (GitHubRule::TagProtection, posted[3]),
+            ])
+        }
     );
 }
 
