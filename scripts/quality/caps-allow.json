@@ -142,7 +142,7 @@
   "crates/crazyagent/src/tui/screens/settings_plugins/tests.rs": 1842,
   "crates/crazyagent/src/tui/screens/team/tests.rs": 5792,
   "crates/crazyagent/src/tui/screens/usage/tests.rs": 1623,
-  "crates/crazyagent/src/usage/capture.rs": 1957,
+  "crates/crazyagent/src/usage/capture.rs": 1944,
   "crates/crazyagent/src/usage/capture/counting_tests.rs": 1858,
   "crates/crazyagent/src/usage/capture/tests.rs": 1916,
   "crates/crazyagent/src/usage/metrics/tests.rs": 2288,
