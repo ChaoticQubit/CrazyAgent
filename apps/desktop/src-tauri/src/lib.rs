@@ -2828,37 +2828,6 @@ async fn desktop_clone_repo(
 }
 
 #[tauri::command]
-async fn desktop_icloud_download(
-    webview: Webview,
-    state: State<'_, NativeState>,
-    path: String,
-) -> Result<u64, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.icloud_download(path)?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_icloud_progress(
-    webview: Webview,
-    state: State<'_, NativeState>,
-) -> Result<Option<crazyagent::projects_home::icloud::Progress>, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.icloud_progress()?;
-    call.await
-}
-
-#[tauri::command]
-async fn desktop_icloud_cancel(
-    webview: Webview,
-    state: State<'_, NativeState>,
-) -> Result<bool, BridgeError> {
-    main_window(&webview)?;
-    let call = lock(&state).await?.icloud_cancel()?;
-    call.await
-}
-
-#[tauri::command]
 async fn desktop_intake_start(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -2875,7 +2844,7 @@ async fn desktop_intake_start(
 async fn desktop_intake_status(
     webview: Webview,
     state: State<'_, NativeState>,
-) -> Result<Option<crazyagent::projects_home::job::JobView>, BridgeError> {
+) -> Result<Vec<crazyagent::projects_home::job::JobView>, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.intake_status()?;
     call.await
@@ -4550,13 +4519,11 @@ async fn desktop_notify_intake(
         return Ok(());
     }
     let call = lock(&state).await?.intake_status()?;
-    let Some(job) = call.await? else {
+    let jobs = call.await?;
+    let Some(job) = jobs.iter().find(|job| job.id.as_str() == id) else {
         return Ok(());
     };
-    if job.id.as_str() != id {
-        return Ok(());
-    }
-    let Some(notice) = bridge::notify::intake_notice(&job) else {
+    let Some(notice) = bridge::notify::intake_notice(job) else {
         return Ok(());
     };
     let Some(number) = notices.claim_job(&id)? else {
@@ -5516,9 +5483,6 @@ native_commands! {
     desktop_github_rules,
     desktop_github_rule_set,
     desktop_clone_repo,
-    desktop_icloud_download,
-    desktop_icloud_progress,
-    desktop_icloud_cancel,
     desktop_intake_start,
     desktop_intake_status,
     desktop_intake_stop,
@@ -5831,7 +5795,7 @@ mod tests {
                 cmd: command.into(),
                 callback: CallbackFn(0),
                 error: CallbackFn(1),
-                url: "tauri://localhost".parse().unwrap(),
+                url: page.url().unwrap(),
                 body: InvokeBody::Json(args),
                 headers: Default::default(),
                 invoke_key: INVOKE_KEY.to_string(),

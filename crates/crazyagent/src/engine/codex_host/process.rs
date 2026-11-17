@@ -2,6 +2,7 @@ use super::process_custody;
 use crate::adapters::codex::FRAME_BYTES_MAX;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::platform::fd_wait::{self, Wake};
 use crate::protocol::ProjectId;
 use crate::routing::ResourceBudget;
 use crate::sandbox::LineageCheck;
@@ -11,9 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 pub(super) const POLL_TIME: Duration = Duration::from_millis(10);
+/// The longest one wait of the custody worker or of the host's reader for a live harness: a
+/// missed wake or notify still lets the loop re-read its state.
+pub(super) const WAIT_MAX: Duration = Duration::from_millis(250);
 pub(super) const CLOSE_TIME: Duration = Duration::from_secs(5);
 pub(super) const OUTPUT_QUEUE_MAX: usize = 128;
 const COMMAND_QUEUE_MAX: usize = 16;
@@ -53,6 +57,16 @@ pub(super) struct ProcessShared {
     pub(super) state: Mutex<ProcessState>,
     pub(super) stop: AtomicBool,
     pub(super) close_stdin: AtomicBool,
+    pub(super) changed: Notify,
+    pub(super) ended: AtomicBool,
+    pub(super) wake: Wake,
+    pub(super) woken: Wake,
+    #[cfg(test)]
+    pub(super) custody_passes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(super) host_passes: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    pub(super) after_read: Mutex<Option<fn(&ProcessShared)>>,
 }
 
 impl ProcessShared {
@@ -62,11 +76,15 @@ impl ProcessShared {
             .map_err(|_| EngineError("codex_host_custody_poisoned".into()))
     }
 
+    /// Records the run's first fault and stops it, and tells the host's reader. It does not
+    /// rouse custody: custody calls it itself, on every pass once the clock has run out.
+    /// Input: the fault code. Output: none.
     pub(super) fn fail(&self, code: &'static str) {
         if let Ok(mut state) = self.lock() {
             state.error.get_or_insert(code);
         }
         self.stop.store(true, Ordering::Release);
+        self.changed.notify_one();
     }
 
     pub(super) fn accounting_failed(&self) {
@@ -74,6 +92,29 @@ impl ProcessShared {
             state.doubt("codex_host_pipe_accounting");
         }
         self.fail("codex_host_pipe_accounting");
+    }
+
+    /// Runs, once, the publish a row placed between a reader's state read and its check of
+    /// the custody worker's end, where a real worker's last publish and end mark can land.
+    /// Input: the state. Output: none.
+    #[cfg(test)]
+    fn run_after_read(&self) {
+        let publish = self.after_read.lock().ok().and_then(|mut hook| hook.take());
+        if let Some(publish) = publish {
+            publish(self);
+        }
+    }
+}
+
+/// Marks the custody worker's end in the shared state and tells the host's reader, however
+/// the worker ends, a panic included. It runs before the thread counts as finished, so the
+/// reader reads the mark, not only `JoinHandle::is_finished`.
+struct WorkerEnd(Arc<ProcessShared>);
+
+impl Drop for WorkerEnd {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::Release);
+        self.0.changed.notify_one();
     }
 }
 
@@ -134,6 +175,8 @@ impl CodexHostProcess {
             None => None,
         };
         assert_eq!(deadline.is_some(), run_time.is_some());
+        let (wake, woken) = fd_wait::wake_pair()
+            .map_err(|_| EngineError("codex_host_custodian_unavailable".into()))?;
         let shared = Arc::new(ProcessShared {
             state: Mutex::new(ProcessState {
                 started: None,
@@ -147,6 +190,16 @@ impl CodexHostProcess {
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),
+            changed: Notify::new(),
+            ended: AtomicBool::new(false),
+            wake,
+            woken,
+            #[cfg(test)]
+            custody_passes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            host_passes: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            after_read: Mutex::new(None),
         });
         let (input, receiver) = mpsc::channel(COMMAND_QUEUE_MAX);
         let retained = Arc::clone(&shared);
@@ -154,6 +207,7 @@ impl CodexHostProcess {
         let worker = std::thread::Builder::new()
             .name("codex-host-custody".into())
             .spawn(move || {
+                let _end = WorkerEnd(Arc::clone(&retained));
                 process_custody::run(command, lease, check, receiver, retained, deadline, limit);
             })
             .map_err(|_| EngineError("codex_host_custodian_unavailable".into()))?;
@@ -180,16 +234,21 @@ impl CodexHostProcess {
 
     async fn await_start(&mut self) -> Result<(), EngineError> {
         loop {
+            #[cfg(test)]
+            self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
+            let ended = self.worker_ended();
             let started = self.shared.lock()?.started;
             if let Some(result) = started {
                 self.pid = result.map_err(|code| EngineError(code.into()))?;
                 return Ok(());
             }
-            if self.worker.is_finished() {
+            #[cfg(test)]
+            self.shared.run_after_read();
+            if ended {
                 return Err(EngineError("codex_host_custodian_stopped".into()));
             }
             self.check_deadline()?;
-            tokio::time::sleep(POLL_TIME).await;
+            self.changed(self.deadline).await;
         }
     }
 
@@ -197,7 +256,14 @@ impl CodexHostProcess {
         self.pid
     }
 
-    #[cfg(test)]
+    /// The state the process shares with its custody worker, so a row can count the passes
+    /// of both loops while it drives the process. Output: the shared state.
+    #[cfg(all(test, unix))]
+    pub(super) fn shared(&self) -> Arc<ProcessShared> {
+        Arc::clone(&self.shared)
+    }
+
+    #[cfg(all(test, unix))]
     pub(super) fn observed_bytes(&self) -> (u64, u64) {
         match self.shared.state.lock() {
             Ok(state) => state.observed,
@@ -220,7 +286,7 @@ impl CodexHostProcess {
         assert!(self.shared.state.is_poisoned());
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn exit_status(&self) -> Option<ExitStatus> {
         match self.shared.state.lock() {
             Ok(state) => state.status,
@@ -258,6 +324,7 @@ impl CodexHostProcess {
             self.input
                 .try_send(request)
                 .map_err(|_| EngineError("codex_host_input_unavailable".into()))?;
+            self.shared.wake.rouse();
             self.pending_input = Some(PendingInput {
                 bytes: bytes.to_vec(),
                 reply,
@@ -287,6 +354,7 @@ impl CodexHostProcess {
 
     pub(super) fn close_stdin(&self) {
         self.shared.close_stdin.store(true, Ordering::Release);
+        self.shared.wake.rouse();
     }
 
     pub(super) fn request_stop(&self) {
@@ -313,6 +381,9 @@ impl CodexHostProcess {
 
     pub(super) async fn next_output(&mut self) -> Result<CodexHostOutput, EngineError> {
         loop {
+            #[cfg(test)]
+            self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
+            let ended = self.worker_ended();
             {
                 let mut state = self.shared.lock()?;
                 let held = state.complete
@@ -328,6 +399,9 @@ impl CodexHostProcess {
                     return Err(EngineError(code.into()));
                 }
                 if let Some(output) = state.output.pop_front() {
+                    if state.output.len() + 1 == OUTPUT_QUEUE_MAX {
+                        self.shared.wake.rouse();
+                    }
                     return Ok(output);
                 }
                 if state.complete {
@@ -337,11 +411,13 @@ impl CodexHostProcess {
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }
-            if self.worker.is_finished() {
+            #[cfg(test)]
+            self.shared.run_after_read();
+            if ended {
                 return Err(EngineError("codex_host_cleanup_uncertain".into()));
             }
             self.check_deadline()?;
-            tokio::time::sleep(POLL_TIME).await;
+            self.changed(self.deadline).await;
         }
     }
 
@@ -349,6 +425,9 @@ impl CodexHostProcess {
         self.request_stop();
         let deadline = Instant::now() + self.close_time;
         loop {
+            #[cfg(test)]
+            self.shared.host_passes.fetch_add(1, Ordering::SeqCst);
+            let ended = self.worker_ended();
             {
                 let mut state = self.shared.lock()?;
                 state.output.clear();
@@ -361,11 +440,34 @@ impl CodexHostProcess {
                         .ok_or_else(|| EngineError("codex_host_reap_missing".into()));
                 }
             }
-            if Instant::now() >= deadline || self.worker.is_finished() {
+            #[cfg(test)]
+            self.shared.run_after_read();
+            if Instant::now() >= deadline || ended {
                 return Err(EngineError("codex_host_cleanup_uncertain".into()));
             }
-            tokio::time::sleep(POLL_TIME).await;
+            self.changed(Some(deadline)).await;
         }
+    }
+
+    /// Waits until custody reports a change, or [`WAIT_MAX`] passes, at most until `until`, so
+    /// the caller re-reads the shared state. A change reported while no one waited is kept as
+    /// a permit and ends the next wait at once. Input: the instant to stop at, or none.
+    /// Output: none.
+    async fn changed(&self, until: Option<Instant>) {
+        let mut wait = WAIT_MAX;
+        if let Some(until) = until {
+            wait = wait.min(until.saturating_duration_since(Instant::now()));
+        }
+        assert!(wait <= WAIT_MAX);
+        let _ = tokio::time::timeout(wait, self.shared.changed.notified()).await;
+    }
+
+    /// Whether the custody worker has ended: its end mark, set before the thread counts as
+    /// finished, or the finished thread. A reader samples it before taking the state lock:
+    /// the worker publishes under the lock before its end mark, so an end seen first means
+    /// its last publish is in the state read next. Input: the process. Output: the answer.
+    fn worker_ended(&self) -> bool {
+        self.shared.ended.load(Ordering::Acquire) || self.worker.is_finished()
     }
 
     /// Fails the process once its wall clock has run out; a process with no clock never
@@ -385,5 +487,136 @@ impl CodexHostProcess {
 impl Drop for CodexHostProcess {
     fn drop(&mut self) {
         self.request_stop();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod end_race_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::AtomicU64;
+
+    const STAND_IN_PID: u32 = 4242;
+
+    /// A host over a stand-in custody worker that publishes nothing itself: it stays parked
+    /// until the returned sender drops, so only the row's publish changes the shared state.
+    /// Input: the publish to run between the reader's state read and its end check.
+    /// Output: the host and the sender that keeps the worker running.
+    fn stand_in(publish: fn(&ProcessShared)) -> (CodexHostProcess, std::sync::mpsc::Sender<()>) {
+        let (wake, woken) = fd_wait::wake_pair().expect("a wake pair");
+        let shared = Arc::new(ProcessShared {
+            state: Mutex::new(ProcessState {
+                started: None,
+                output: VecDeque::new(),
+                observed: (0, 0),
+                status: None,
+                complete: false,
+                error: None,
+                cleanup_error: None,
+                doubted: false,
+            }),
+            stop: AtomicBool::new(false),
+            close_stdin: AtomicBool::new(false),
+            changed: Notify::new(),
+            ended: AtomicBool::new(false),
+            wake,
+            woken,
+            custody_passes: AtomicU64::new(0),
+            host_passes: AtomicU64::new(0),
+            after_read: Mutex::new(Some(publish)),
+        });
+        let (input, _) = mpsc::channel(1);
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = held.recv();
+        });
+        let process = CodexHostProcess {
+            shared,
+            input,
+            worker,
+            deadline: None,
+            close_time: CLOSE_TIME,
+            pid: 0,
+            pending_input: None,
+            frame_max: FRAME_BYTES_MAX,
+        };
+        assert!(!process.worker_ended());
+        (process, hold)
+    }
+
+    /// Whether the row's publish ran, so a row cannot pass without the race it names.
+    /// Input: the host. Output: the answer.
+    fn fired(host: &CodexHostProcess) -> bool {
+        host.shared.after_read.lock().expect("the hook").is_none()
+    }
+
+    /// Ends the stand-in worker as custody ends: the end mark after its last publish, then
+    /// the notify. Input: the state. Output: none.
+    fn end(shared: &ProcessShared) {
+        shared.ended.store(true, Ordering::Release);
+        shared.changed.notify_one();
+    }
+
+    /// Publishes the harness's start, then ends the worker. Input: the state. Output: none.
+    fn start_then_end(shared: &ProcessShared) {
+        shared.lock().expect("the state").started = Some(Ok(STAND_IN_PID));
+        end(shared);
+    }
+
+    /// Publishes a clean exit, then ends the worker. Input: the state. Output: none.
+    fn exit_then_end(shared: &ProcessShared) {
+        let mut state = shared.lock().expect("the state");
+        state.status = Some(ExitStatus::from_raw(0));
+        state.complete = true;
+        drop(state);
+        end(shared);
+    }
+
+    #[tokio::test]
+    async fn a_start_published_as_custody_ends_is_the_start_not_a_stopped_custodian() {
+        let (mut host, _hold) = stand_in(start_then_end);
+        let started = host.await_start().await.map_err(|error| error.0);
+        assert!(fired(&host));
+        assert_eq!(started, Ok(()));
+        assert_eq!(host.pid(), STAND_IN_PID);
+    }
+
+    #[tokio::test]
+    async fn an_exit_published_as_custody_ends_is_the_exit_not_uncertain_cleanup() {
+        let (mut host, _hold) = stand_in(exit_then_end);
+        let output = host.next_output().await.map_err(|error| error.0);
+        assert!(fired(&host));
+        assert!(
+            matches!(output, Ok(CodexHostOutput::Exited)),
+            "{:?}",
+            output.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exit_published_as_custody_ends_closes_with_its_status_not_uncertain_cleanup() {
+        let (mut host, _hold) = stand_in(exit_then_end);
+        let closed = host.close().await.map(|status| status.code());
+        assert!(fired(&host));
+        assert_eq!(closed.map_err(|error| error.0), Ok(Some(0)));
+    }
+
+    #[tokio::test]
+    async fn a_custody_that_ends_with_nothing_published_still_ends_each_reader() {
+        let (mut host, _hold) = stand_in(end);
+        let started = host.await_start().await.map_err(|error| error.0);
+        assert!(fired(&host));
+        assert_eq!(started, Err("codex_host_custodian_stopped".to_owned()));
+        let (mut host, _hold) = stand_in(end);
+        let output = host.next_output().await.map_err(|error| error.0);
+        assert!(fired(&host));
+        assert_eq!(
+            output.err(),
+            Some("codex_host_cleanup_uncertain".to_owned())
+        );
+        let (mut host, _hold) = stand_in(end);
+        let closed = host.close().await.map_err(|error| error.0);
+        assert!(fired(&host));
+        assert_eq!(closed, Err("codex_host_cleanup_uncertain".to_owned()));
     }
 }

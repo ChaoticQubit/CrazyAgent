@@ -53,6 +53,57 @@ test("Stop the team and move stops the team before the move, and a refused stop 
   assert.equal(unconfirmed.stopped, false);
 });
 
+test("#383 code F1: the move question lists the folders a move leaves in iCloud, with Download everything, and the move sends it", () => {
+  const skipped = [{ path: "node_modules", files: 57108 }, { path: "web/.venv", files: null }];
+  const props = { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "move",
+    size: { kind: "ok", value: { bytes: 2048, same_volume: true, skipped, skipped_more: { folders: 3, files: 9 } } },
+    busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle };
+  const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, props));
+  for (const text of [/Left in iCloud, as they can be rebuilt:/, /node_modules \(57108 files\)/, /web\/\.venv \(files not counted\)/,
+    /and 3 more folders \(9 files\)/, /They stay in [^<]*TessyAI; reinstall them in the project after the move\./, /role="switch"/, /Download everything \(slow\)/]) {
+    assert.match(page, text);
+  }
+  assert.match(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, everything: true })), /Downloaded too:/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: { kind: "ok", value: { bytes: 2048 } } })), /role="switch"|Left in iCloud/);
+  assert.match(read("src/screens/project/move-home.tsx"), /stopThenMove\(data\.id, chosen, moveOverrides\(overrides, everything, size\)/);
+});
+
+test("#383 code F1 r2 (leader 16:30, B): a failed folder read makes Move and Copy download everything, and the question says so", () => {
+  const failed = { kind: "error", code: "folder_size_timeout", message: "Reading the folder took too long." };
+  const read = { kind: "ok", value: { bytes: 2048, same_volume: true, skipped: [{ path: "node_modules", files: 3 }] } };
+  assert.deepEqual(view.moveOverrides([], false, failed), ["download_everything"]);
+  assert.deepEqual(view.moveOverrides(["too_large"], false, { kind: "not_ready" }), ["too_large", "download_everything"]);
+  assert.deepEqual(view.moveOverrides([], true, failed), ["download_everything"]);
+  assert.deepEqual(view.moveOverrides([], false, read), []);
+  assert.deepEqual(view.moveOverrides([], true, read), ["download_everything"]);
+  assert.deepEqual(view.moveOverrides([], false, { kind: "loading" }), []);
+  assert.deepEqual(view.moveOverrides([], false, null), []);
+  const props = { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "copy", size: failed,
+    busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle };
+  const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, props));
+  assert.match(page, /CrazyAgent couldn(&#x27;|')t read this folder\. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow\./);
+  assert.doesNotMatch(page, /role="switch"/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: read })), /couldn(&#x27;|')t read this folder/);
+});
+
+test("V243-MOVE-SIZE-PROBLEM-DESKTOP: a folder read the engine could not finish, as the bridge sends it, makes Move and Copy download everything, and the question says so", () => {
+  for (const code of ["folder_size_timeout", "folder_size_too_large", "folder_size_unreadable"]) {
+    const unfinished = { kind: "ok", value: { bytes: null, size_problem: code, placeholders: 0, github: null, worktrees: 0, worktree_paths: [],
+      movable: true, git_link: "none", copyable: true, git: true, same_volume: true } };
+    assert.deepEqual(view.moveOverrides([], false, unfinished), ["download_everything"], code);
+    assert.deepEqual(view.moveOverrides(["worktrees"], false, unfinished), ["worktrees", "download_everything"], code);
+    for (const way of ["move", "copy"]) {
+      const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI",
+        home: "/Users/o/CrazyAgent", way, size: unfinished, busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle }));
+      assert.match(page, /CrazyAgent couldn(&#x27;|')t read this folder\. Anything in it only in iCloud is downloaded first/, `${code} ${way}`);
+      assert.doesNotMatch(page, /role="switch"/, `${code} ${way}`);
+    }
+  }
+  const measured = { kind: "ok", value: { bytes: 2048, placeholders: 0, github: null, worktrees: 0, worktree_paths: [], movable: true,
+    git_link: "none", copyable: true, git: true, same_volume: true } };
+  assert.deepEqual(view.moveOverrides([], false, measured), []);
+});
+
 test("the move question says the team stops first and work not landed follows the move", () => {
   const dialog = (patch = {}) => renderToStaticMarkup(createElement(view.MoveHomeDialog, {
     open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "move",

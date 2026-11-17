@@ -236,11 +236,13 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
     assert!(profile.contains(&format!("(subpath \"{}\")", case.project.display())));
     assert_eq!(case.crazyagent, case.project.join(".crazyagent"));
     let pattern = case.project.display().to_string().replace('.', "\\.");
-    let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?$";
-    assert!(profile.contains(&format!("(regex #\"^{pattern}/{context}\")")));
-    assert!(profile.contains(&format!(
-        "(regex #\"^{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}\")"
-    )));
+    let context = "[cC][oO][nN][tT][eE][xX][tT]";
+    for below in [
+        format!("{pattern}/{context}"),
+        format!("{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}"),
+    ] {
+        assert!(profile.contains(&format!("(regex #\"^{below}(/|$)\")")));
+    }
     assert!(
         files_containing(&case.state.join("agents"), &marker) > 0,
         "the prompt sent to the agent must carry the project brief"
@@ -1438,17 +1440,16 @@ fn a_tools_on_research_job_profile_denies_by_default_and_opens_the_project_and_i
     );
     assert_eq!(case.crazyagent, case.project.join(".crazyagent"));
     let pattern = case.project.display().to_string().replace('.', "\\.");
-    let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?$";
-    assert!(
-        profile.contains(&format!("(regex #\"^{pattern}/{context}\")")),
-        "{profile}"
-    );
-    assert!(
-        profile.contains(&format!(
-            "(regex #\"^{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}\")"
-        )),
-        "{profile}"
-    );
+    let context = "[cC][oO][nN][tT][eE][xX][tT]";
+    for below in [
+        format!("{pattern}/{context}"),
+        format!("{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}"),
+    ] {
+        assert!(
+            profile.contains(&format!("(regex #\"^{below}(/|$)\")")),
+            "{profile}"
+        );
+    }
 }
 
 /// A tools-off research job's written sandbox profile allows no network but the model

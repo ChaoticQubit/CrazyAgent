@@ -526,13 +526,16 @@ function accountLabel(connection: ModelConnection): string {
   return "URL";
 }
 
-/** Summarises a pool's accounts by kind, for example "2 ChatGPT, 1 Claude, 1 API key".
+const PLURAL_LABELS: Record<string, string> = { "API key": "API keys", "local model": "local models", URL: "URLs" };
+
+/** Summarises a pool's accounts by kind, for example "2 ChatGPT, 1 Claude, 2 API keys": a
+ * kind counted more than once reads in the plural, a provider name stays as it is.
  * Input: the member connections. Output: the summary. */
 export function poolSummary(members: ModelConnection[]): string {
   if (members.length === 0) return "No accounts";
   const counts = new Map<string, number>();
   for (const member of members) counts.set(accountLabel(member), (counts.get(accountLabel(member)) ?? 0) + 1);
-  return [...counts].map(([label, count]) => `${count} ${label}`).join(", ");
+  return [...counts].map(([label, count]) => `${count} ${count > 1 ? PLURAL_LABELS[label] ?? label : label}`).join(", ");
 }
 
 /** Counts a pool's accounts that can work now: signed in, or set up with a key or URL.
@@ -556,13 +559,16 @@ export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []
 
 /** Tells whether a pool holds an account a harness can use. A connection names its harness by
  * the catalog id or by one of the entry's aliases from the engine, such as "claude" for Claude Code.
+ * An account holding a key fits only where the engine lists API keys for the harness on this
+ * system, whatever harness it was stored with.
  * Inputs: the harness and the pool's connections. Output: true when one fits. */
 export function poolFits(harness: HarnessEntry, members: ModelConnection[]): boolean {
   const names = [harness.id, ...harness.aliases];
   return members.some((member) => {
     const same = names.includes(member.harness);
     if (member.auth.method === "native_managed") return same && harness.account_kinds.includes("subscription");
-    if (member.auth.method === "api_key" || member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
+    if (member.auth.method === "api_key") return harness.account_kinds.includes("api_key");
+    if (member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
     return same || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
   });
 }

@@ -406,10 +406,10 @@ async function main() {
     if (started?.kind !== "setup" || !started.project_id) throw new Refused("setup_job_not_started", JSON.stringify(started));
     const deadline = Date.now() + JOB_MS;
     let job = started;
-    while (job?.id === started.id && job.state.state === "building") {
+    while (job?.id === started.id && (job.state.state === "building" || job.state.state === "waiting")) {
       if (Date.now() > deadline) throw new Refused("setup_job_never_ended", JSON.stringify(job));
       await pause(250);
-      job = await value("desktop_intake_status", {}, via);
+      job = (await value("desktop_intake_status", {}, via)).find((held) => held.id === started.id) ?? null;
     }
     if (job?.id !== started.id || job.state.state !== "done") throw new Refused(job?.state?.code ?? "setup_job_lost", JSON.stringify(job));
     await value("desktop_intake_dismiss", { id: started.id }, via);

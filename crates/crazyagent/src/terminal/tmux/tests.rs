@@ -1,4 +1,5 @@
 use super::*;
+use crate::terminal::PASTE_CLOSE;
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
@@ -16,6 +17,272 @@ fn tmux_output_octal_escapes_decode_to_the_exact_bytes() {
     assert_eq!(decode(b""), b"");
 }
 
+/// V243-PASTE-CHUNKS: typed bytes go to tmux as `send-keys -H` commands of at most
+/// `SEND_KEYS_BYTES_MAX` bytes for the one target, every byte once and in order, and no
+/// command for no bytes, so a paste never holds the server in one long command parse.
+#[test]
+fn typed_bytes_go_as_send_keys_commands_of_at_most_256_bytes_in_order() {
+    assert!(send_keys_lines("%7", &[]).is_empty());
+    for length in [1, 255, 256, 257, 512, 1000, INPUT_BYTES_MAX] {
+        let bytes: Vec<u8> = (0..length).map(|at| (at * 7 % 256) as u8).collect();
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(
+            runs.len(),
+            length.div_ceil(SEND_KEYS_BYTES_MAX),
+            "{length} bytes"
+        );
+        assert!(
+            runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX),
+            "{length} bytes"
+        );
+        assert!(runs.iter().all(|run| !run.is_empty()), "{length} bytes");
+        assert_eq!(
+            runs.concat(),
+            bytes,
+            "{length} bytes arrive once each, in order"
+        );
+    }
+}
+
+/// #359 r1 F1, RV-DS241-69 one layer down: no `send-keys` run ends inside a UTF-8
+/// character or inside the closing paste marker that ends the input, which `paste()` and
+/// the TUI keep whole for a program that reads them per read.
+#[test]
+fn a_send_keys_run_never_cuts_a_character_or_the_paste_end_marker() {
+    let character = "\u{1f600}".as_bytes();
+    let lengths = [
+        INPUT_BYTES_MAX,
+        2 * SEND_KEYS_BYTES_MAX + 3,
+        5 * SEND_KEYS_BYTES_MAX + 1,
+    ];
+    for length in lengths {
+        for at in SEND_KEYS_BYTES_MAX - 3..SEND_KEYS_BYTES_MAX {
+            let mut bytes = vec![b'x'; length - PASTE_CLOSE.len()];
+            bytes[at..at + character.len()].copy_from_slice(character);
+            bytes.extend_from_slice(PASTE_CLOSE);
+            let runs = typed_runs(&send_keys_lines("%7", &bytes));
+            let case = format!("{length} bytes, a character at {at}");
+            assert_eq!(runs.concat(), bytes, "{case}");
+            assert!(
+                runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX),
+                "{case}"
+            );
+            assert!(
+                runs.iter().all(|run| std::str::from_utf8(run).is_ok()),
+                "{case}: a run cuts the character"
+            );
+            assert!(
+                runs.last().is_some_and(|run| run.ends_with(PASTE_CLOSE)),
+                "{case}: a run cuts the marker"
+            );
+        }
+    }
+}
+
+/// #359 r2: a paste end marker inside the input, as the desktop sends one when keys typed
+/// during a send join the paste's batch (`...\x1b[201~\r`), stays whole in one run too.
+#[test]
+fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
+    let mut inputs: Vec<Vec<u8>> = (SEND_KEYS_BYTES_MAX - 5..SEND_KEYS_BYTES_MAX)
+        .map(|at| {
+            [
+                &vec![b'x'; at][..],
+                PASTE_CLOSE,
+                &b"\r"[..],
+                &[b'y'; 300][..],
+            ]
+            .concat()
+        })
+        .collect();
+    inputs.push(
+        [
+            &[b'x'; 252][..],
+            PASTE_CLOSE,
+            &[b'y'; 250][..],
+            PASTE_CLOSE,
+            &b"\r"[..],
+        ]
+        .concat(),
+    );
+    for bytes in inputs {
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(runs.concat(), bytes);
+        assert!(runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX));
+        let ends: Vec<usize> = runs
+            .iter()
+            .scan(0, |end, run| {
+                *end += run.len();
+                Some(*end)
+            })
+            .collect();
+        for marker in (0..bytes.len()).filter(|&at| bytes[at..].starts_with(PASTE_CLOSE)) {
+            assert!(
+                !ends
+                    .iter()
+                    .any(|&end| marker < end && end < marker + PASTE_CLOSE.len()),
+                "{} bytes: a run cuts the marker at {marker}",
+                bytes.len()
+            );
+        }
+    }
+}
+
+/// #359 r2, rv-code2 r2 F1: the desktop joins whole events into one input, and no
+/// `send-keys` run ends inside one of them, so an app never reads half an escape sequence
+/// and takes its lone ESC for the Escape key. V243-PASTE-SS3-X10-UTF8: that holds for an SS3
+/// key whose final is a UTF-8 character, and for an X10 report past column or row 95, whose
+/// three bytes xterm.js sends raw, one byte per value up to 0xFF and never as UTF-8 (#398
+/// r1 F1), after any count of typed bytes.
+#[test]
+fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
+    let text = |times: usize| vec![&b"x"[..]; times];
+    let mut cases: Vec<(&str, Vec<&[u8]>)> = vec![
+        ("wheel reports", vec![&b"\x1b[<65;40;12M"[..]; 341]),
+        ("held arrow keys", vec![&b"\x1b[A"[..]; 300]),
+        ("held application arrow keys", vec![&b"\x1bOA"[..]; 300]),
+        ("alt keys", [text(1), vec![&b"\x1bx"[..]; 300]].concat()),
+        ("x10 mouse reports", vec![&b"\x1b[M`!!"[..]; 100]),
+        (
+            "ss3 keys with a utf-8 final",
+            [text(1), vec![&b"\x1bO\xc3\xa9"[..]; 100]].concat(),
+        ),
+        (
+            "osc replies",
+            vec![&b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07"[..]; 20],
+        ),
+        ("dcs replies", vec![&b"\x1bP1$r0;1m\x1b\\"[..]; 40]),
+        (
+            "a paste, then Enter and a key",
+            [
+                vec![&b"\x1b[200~"[..]],
+                text(245),
+                vec![PASTE_CLOSE, &b"\r"[..], &b"\x1b[B"[..]],
+            ]
+            .concat(),
+        ),
+    ];
+    for (case, report) in [
+        ("raw x10 wheel past column 95", &b"\x1b[M`\x84\x34"[..]),
+        (
+            "raw x10 click past column and row 95",
+            &b"\x1b[M \x84\x98"[..],
+        ),
+        ("raw x10 release past column 95", &b"\x1b[M#\xa2\x48"[..]),
+    ] {
+        for typed in 0..12 {
+            cases.push((case, [text(typed), vec![report; 200]].concat()));
+        }
+    }
+    for (case, events) in cases {
+        let bytes = events.concat();
+        let bounds: Vec<usize> = events
+            .iter()
+            .scan(0, |end, event| {
+                *end += event.len();
+                Some(*end)
+            })
+            .collect();
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(runs.concat(), bytes, "{case}");
+        assert!(
+            runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX),
+            "{case}"
+        );
+        let mut end = 0;
+        for run in &runs {
+            end += run.len();
+            assert!(
+                bounds.contains(&end),
+                "{case}: a run ends inside an event at {end}"
+            );
+        }
+    }
+}
+
+/// #359 r2: a run moves its end back at most `RUN_CUT_BACK_BYTES_MAX` bytes to keep an escape
+/// sequence whole. A window title that starts further back than that is the one sequence a
+/// run cuts, at the run size.
+#[test]
+fn a_send_keys_run_cuts_only_a_sequence_that_starts_past_its_back_off() {
+    let title = [&b"\x1b]0;"[..], &[b't'; 200][..], &b"\x07"[..]].concat();
+    for (before, first) in [(200, 200), (150, SEND_KEYS_BYTES_MAX)] {
+        let bytes = [&vec![b'x'; before][..], &title, &b"\x1b[A"[..]].concat();
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
+        assert_eq!(runs.concat(), bytes, "a title after {before} bytes");
+        assert_eq!(runs[0].len(), first, "a title after {before} bytes");
+    }
+}
+
+/// Reads typed bytes back out of `send-keys -H` commands for `%7`. Input: the commands.
+/// Output: each command's bytes, in order.
+fn typed_runs(lines: &[String]) -> Vec<Vec<u8>> {
+    lines
+        .iter()
+        .map(|line| {
+            let keys = line
+                .strip_prefix("send-keys -t %7 -H ")
+                .expect("send-keys -H for %7");
+            keys.split(' ')
+                .map(|key| u8::from_str_radix(key, 16).unwrap())
+                .collect()
+        })
+        .collect()
+}
+
+/// V243-PASTE-CHUNKS: a full input request typed into a real pane arrives whole and in
+/// order across its `send-keys` commands, read back from what the pane's app received.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_full_input_request_reaches_the_pane_whole_and_in_order_across_its_commands() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let ready = home.path().join("ready");
+    let received = home.path().join("received");
+    let script = format!(
+        "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+        ready.display(),
+        received.display()
+    );
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never set its terminal raw"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let bytes: Vec<u8> = (0..INPUT_BYTES_MAX)
+        .map(|at| b' ' + (at * 7 % 95) as u8)
+        .collect();
+    host.input(&agent, &bytes).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(&received).map_or(0, |file| file.len()) < bytes.len() as u64 {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never received every typed byte"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read(&received).unwrap(), bytes);
+}
+
 #[test]
 fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert_eq!(
@@ -27,14 +294,22 @@ fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert!(!quote("one\ntwo\r").contains(['\n', '\r']));
 }
 
+/// R1: the attach and the paste check read `#{bracket_paste_flag}`, which tmux has from 3.7
+/// on. An older tmux answers it empty, so every attach ran out of time; such a tmux is too
+/// old for agent terminals.
 #[test]
-fn only_tmux_three_two_and_later_is_supported() {
+fn only_tmux_three_seven_and_later_is_supported() {
     for (version, expected) in [
         ("3.8", Some(true)),
-        ("3.2", Some(true)),
-        ("3.3a", Some(true)),
-        ("next-3.6", Some(true)),
+        ("3.7", Some(true)),
+        ("3.7c", Some(true)),
+        ("next-3.8", Some(true)),
         ("10.0", Some(true)),
+        ("3.6b", Some(false)),
+        ("next-3.6", Some(false)),
+        ("3.4", Some(false)),
+        ("3.3a", Some(false)),
+        ("3.2a", Some(false)),
         ("3.1c", Some(false)),
         ("2.9", Some(false)),
         ("master", None),
@@ -42,24 +317,6 @@ fn only_tmux_three_two_and_later_is_supported() {
     ] {
         assert_eq!(supported(version), expected, "{version}");
     }
-}
-
-#[test]
-fn the_attach_screen_keeps_written_trailing_cells_from_tmux_three_four() {
-    for (version, expected) in [
-        ("3.2", CAPTURE_TRIMMED),
-        ("3.3a", CAPTURE_TRIMMED),
-        ("3.4", CAPTURE_WRITTEN),
-        ("3.8", CAPTURE_WRITTEN),
-        ("next-3.6", CAPTURE_WRITTEN),
-        ("10.0", CAPTURE_WRITTEN),
-    ] {
-        assert_eq!(capture_flags(version), Some(expected), "{version}");
-    }
-    assert_eq!(capture_flags("3.1c"), None);
-    assert_eq!(capture_flags("master"), None);
-    assert_eq!(CAPTURE_WRITTEN, "-p -e -N -T");
-    assert_eq!(CAPTURE_TRIMMED, "-p -e");
 }
 
 #[test]
@@ -1925,13 +2182,15 @@ fn probing_a_live_server_out_of_descriptors() {
     std::fs::write(home.join("answer"), format!("{answer:?}")).unwrap();
 }
 
-/// A tmux program answering as the stand-in server a lead swapped in for its own would: its
-/// session lists `agent` and every pane it reports has `pid` as its first process. Takes the
-/// folder it goes in, the agent and the pid. Returns the program.
+/// A tmux program answering as the stand-in server a lead swapped in for its own would: it
+/// reports the lowest version the host takes ([`VERSION_MIN`]), its session lists `agent` and
+/// every pane it reports has `pid` as its first process. Takes the folder it goes in, the
+/// agent and the pid. Returns the program.
 #[cfg(target_os = "macos")]
 fn forging_tmux(folder: &Path, agent: &AgentId, pid: impl std::fmt::Display) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let program = folder.join("forging-tmux");
+    let (major, minor) = VERSION_MIN;
     let script = format!(
         r#"#!/bin/sh
 printf '%%begin 1 0 1\n%%end 1 0 1\n'
@@ -1939,7 +2198,7 @@ number=1
 while IFS= read -r line; do
   printf '%%begin 1 %s 1\n' "$number"
   case "$line" in
-    *'#{{version}}'*) printf '3.5 end\n' ;;
+    *'#{{version}}'*) printf '{major}.{minor} end\n' ;;
     *list-windows*) printf '{agent} end\n' ;;
     *list-panes*) printf '%%1 {pid} 0 end\n' ;;
     *new-window*) printf '%%2 {pid} end\n' ;;

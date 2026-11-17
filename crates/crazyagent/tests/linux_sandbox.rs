@@ -270,7 +270,7 @@ mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
 ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
 ln "$admin/index" "$away/index" 2>>"$err" && echo linked
 exit 0"#;
-    let output = crazyagent::spawn_gate::output(
+    let output = crazyagent::spawn_gate::collected(
         helper_command()
             .args(["--read", "/", "--write"])
             .arg(&case.tmp)
@@ -2550,7 +2550,7 @@ fn the_helper_refuses_the_variables_that_load_code_in_every_mode() {
     let modes = [nest, vec!["--probe".into()], vec!["--scoped".into()]];
     for mode in &modes {
         for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES", "GCONV_PATH"] {
-            let output = crazyagent::spawn_gate::output(
+            let output = crazyagent::spawn_gate::collected(
                 Command::new(HELPER)
                     .args(mode)
                     .env_clear()
@@ -2639,7 +2639,10 @@ fn a_loopback_only_nested_agent_reaches_its_port_on_this_computer_and_on_no_othe
     let port = served.local_addr().unwrap().port();
     let other = outward_address();
     std::thread::spawn(move || {
-        for mut asked in served.incoming().flatten().take(16) {
+        for mut asked in crazyagent::spawn_gate::incoming_tcp_std(&served)
+            .flatten()
+            .take(16)
+        {
             let _ = asked.write_all(b"pong\n");
         }
     });
@@ -2723,7 +2726,7 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
 /// `iptables-restore` on the nf_tables backend. No input. Output: true when it has both.
 fn routing_tools() -> bool {
     let slirp = SLIRP_PATHS.iter().all(|path| Path::new(path).is_file());
-    let version = crazyagent::spawn_gate::output(
+    let version = crazyagent::spawn_gate::collected(
         Command::new("/usr/sbin/iptables-restore")
             .arg("--version")
             .stdin(Stdio::null()),
@@ -2773,7 +2776,10 @@ fn pong_everywhere() -> u16 {
     let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
     let port = served.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for mut asked in served.incoming().flatten().take(16) {
+        for mut asked in crazyagent::spawn_gate::incoming_tcp_std(&served)
+            .flatten()
+            .take(16)
+        {
             let _ = asked.write_all(b"pong\n");
         }
     });
@@ -3245,7 +3251,7 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
     );
     let case = case();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let mut check = helper_command();
     check.arg("--probe-supervised").arg(&port).arg(&case.tmp);
@@ -3290,7 +3296,7 @@ print('wide=' + (str(ctypes.get_errno()) if refused else 'ok'))
 #[test]
 fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_host() {
     let case = case();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let limited = ["--limit-network", "--connect", &port];
     let guarded = [&limited[..], &["--guard-loopback", &port][..]].concat();

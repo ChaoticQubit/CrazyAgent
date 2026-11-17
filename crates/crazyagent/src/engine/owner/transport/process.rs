@@ -32,6 +32,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "instructions_cleanup_busy",
     "instructions_cleanup_empty",
     "instructions_cleanup_failed",
+    "instructions_cleanup_full",
     "instructions_cleanup_master_harness",
     "instructions_cleanup_no_account",
     "instructions_cleanup_no_network",
@@ -1226,6 +1227,7 @@ async fn handle(
                     pool: pool.as_ref(),
                     prompt,
                     agent: "instructions-cleanup",
+                    holds_seat: true,
                 })
             })
             .map(Answer::Proposed)

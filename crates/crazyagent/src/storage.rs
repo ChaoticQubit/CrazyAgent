@@ -20,7 +20,7 @@ pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
-mod migrations;
+pub(crate) mod migrations;
 #[cfg(all(test, unix))]
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
@@ -178,7 +178,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
-    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Vec<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
     HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
@@ -214,7 +214,7 @@ pub(crate) enum Job {
         Admission,
         ProjectId,
         crate::projects_home::AddMode,
-        oneshot::Sender<Result<String, EngineError>>,
+        oneshot::Sender<Result<(String, bool), EngineError>>,
     ),
     HomeMovePlan(
         Admission,
@@ -989,8 +989,21 @@ impl Storage {
                                     mutation: OwnerMutation::RemoveProject { .. }
                                 }
                             );
+                            let team = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::Team { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if team
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied)
+                            {
+                                crate::team::runtime::wake_loops();
+                            }
                             let restart = set_home && result.is_ok();
                             let forgotten = forgetting
                                 && result
@@ -1258,7 +1271,7 @@ fn open_actor_database(
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
         let started = std::time::Instant::now();
-        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+        if let Some(held @ 1..) = crate::project_setup::removed::hold_left(&connection)? {
             eprintln!(
                 "projects_removed_backfill held={held} ms={}",
                 started.elapsed().as_millis()
@@ -3020,6 +3033,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                unavailable: crate::sandbox::hidden_paths::UNAVAILABLE,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())

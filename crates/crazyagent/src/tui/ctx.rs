@@ -71,7 +71,7 @@ pub struct Store {
         Option<crate::protocol::ProjectId>,
         crate::landing::WaitingChanges,
     )>,
-    pub intake: Option<crate::projects_home::job::JobView>,
+    pub intake: Vec<crate::projects_home::job::JobView>,
 }
 
 impl Store {
@@ -99,7 +99,7 @@ impl Default for Store {
             projects_seen: None,
             questions: Load::Idle,
             waiting: None,
-            intake: None,
+            intake: Vec::new(),
         }
     }
 }

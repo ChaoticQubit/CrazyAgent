@@ -171,7 +171,8 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
         event.result,
         Ok(IntakeView::FolderSize(crate::projects_home::Measured {
             bytes: 5,
-            placeholders: 0
+            placeholders: 0,
+            skipped: crate::projects_home::icloud::SkippedFolders::default(),
         }))
     );
 
@@ -181,6 +182,12 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_publish_question_and_its_answer_reach_a_real_engine_for_the_named_project() {
     let root = private_root("ca-tprompt-");
+    #[cfg(target_os = "macos")]
+    let _keychain = {
+        let mut keychain = crate::credentials::test_keychain::TestKeychain::temporary();
+        keychain.serve(&crate::github::namespace(root.path()));
+        keychain
+    };
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let config = crate::tui::test_home::engine_config();
     let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
@@ -262,9 +269,10 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
         let event = native
             .intake(IntakeJob::Query(IntakeQuery::JobStatus))
             .await;
-        let Ok(IntakeView::Job(Some(job))) = event.result else {
+        let Ok(IntakeView::Jobs(jobs)) = event.result else {
             panic!("the job's status required: {:?}", event.result);
         };
+        let [job] = <[JobView; 1]>::try_from(jobs).expect("one job runs");
         if job.state == crate::projects_home::job::JobState::Done {
             done = Some(job);
             break;
@@ -287,7 +295,7 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
     let event = native
         .intake(IntakeJob::Query(IntakeQuery::JobStatus))
         .await;
-    assert_eq!(event.result, Ok(IntakeView::Job(None)));
+    assert_eq!(event.result, Ok(IntakeView::Jobs(Vec::new())));
 
     service.shutdown().await.unwrap();
 }
