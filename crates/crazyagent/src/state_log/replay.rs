@@ -205,11 +205,18 @@ pub fn checkpoint(db: &Connection) -> bool {
 /// Inputs: the connection and the wait.
 /// Output: true once the WAL is empty, false when every try was busy.
 fn checkpoint_with(db: &Connection, mut wait: impl FnMut()) -> bool {
-    let _ = &mut wait;
-    let busy = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-        row.get::<_, i64>(0)
-    });
-    matches!(busy, Ok(0))
+    for attempt in 1..=CHECKPOINT_ATTEMPTS_MAX {
+        let busy = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        });
+        if matches!(busy, Ok(0)) {
+            return true;
+        }
+        if attempt < CHECKPOINT_ATTEMPTS_MAX {
+            wait();
+        }
+    }
+    false
 }
 
 /// Redacts, for an owner delete, every event of the given aggregates, and of the given kinds
