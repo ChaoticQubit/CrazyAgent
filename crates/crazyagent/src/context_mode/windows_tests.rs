@@ -13,7 +13,8 @@ struct Case {
 
 /// Makes an engine root with its `setup\npm` folder and its own `setup\bin`, a folder the
 /// engine's tool resolver looks in, holding the Windows Node layout: `npx.cmd`, `node.exe`
-/// and npm's own `node_modules\npm\bin\npm-cli.js`. Output: the case, removed when dropped.
+/// and npm's own `node_modules\npm\bin\npm-cli.js` and `npx-cli.js`. Output: the case,
+/// removed when dropped.
 fn case() -> Case {
     let directory = tempfile::tempdir().unwrap();
     let base = crate::sandbox::canonical(directory.path()).unwrap();
@@ -21,7 +22,13 @@ fn case() -> Case {
     let bin = root.join("setup").join("bin");
     fs::create_dir_all(root.join("setup").join("npm")).unwrap();
     fs::create_dir_all(npm_cli(&bin).parent().unwrap()).unwrap();
-    for file in [bin.join("npx.cmd"), bin.join("node.exe"), npm_cli(&bin)] {
+    let npx_cli = npm_cli(&bin).with_file_name("npx-cli.js");
+    for file in [
+        bin.join("npx.cmd"),
+        bin.join("node.exe"),
+        npm_cli(&bin),
+        npx_cli,
+    ] {
         fs::write(file, "").unwrap();
     }
     Case {

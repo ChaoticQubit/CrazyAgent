@@ -107,6 +107,7 @@ impl Host for ConptyHost {
         if command.argv.len() > ARGV_MAX
             || command.env.len() > ENV_MAX
             || !Path::new(program).is_absolute()
+            || crate::tools::batch_file(Path::new(program))
             || !command.cwd.is_absolute()
             || command.env.iter().any(|(name, value)| {
                 !crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
