@@ -492,6 +492,11 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
     }
 }
 
+/// Whether this system offers no hidden folders, so neither app shows the setting (DEC-194):
+/// true where the tracked-files check runs no confined git and [`git_tracks`] refuses every
+/// folder (V243-WIN-HIDDEN-GIT). The engine's refusal on a save stays the guard.
+pub const UNAVAILABLE: bool = false;
+
 /// Refuses the tracked-files check where no confined git runs. Inputs unused. Output:
 /// `Err("hidden_path_unchecked")`, so the caller fails closed.
 #[cfg(not(unix))]
@@ -601,6 +606,21 @@ mod tests {
                 Err("hidden_path_not_plain"),
                 "{bad}"
             );
+        }
+    }
+
+    /// The setting is unavailable exactly where the tracked-files check cannot answer for a
+    /// folder with no repository, and there a list holding any folder is still refused, so
+    /// an old saved setting or a forged save never gets through (DEC-194).
+    #[test]
+    fn hidden_folders_are_unavailable_exactly_where_the_git_check_cannot_answer() {
+        let root = project();
+        let base = canonical(root.path()).unwrap();
+        let folder = base.join("plain");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(UNAVAILABLE, git_tracks(&base, &folder).is_err());
+        if UNAVAILABLE {
+            assert_eq!(none_tracked(&base, &[folder]), Err("hidden_path_unchecked"));
         }
     }
 
