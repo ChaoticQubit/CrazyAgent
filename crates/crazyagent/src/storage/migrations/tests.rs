@@ -557,6 +557,8 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
     assert_eq!(rows(&root.connection()), started(before));
 }
 
+/// The rotation keeps the newest BACKUPS_KEPT backups. The upgrade from version 1 crosses
+/// 2.4's last version, so its own backup is the pinned one and stays outside the rotation.
 #[tokio::test]
 async fn only_the_newest_five_backups_are_kept() {
     let root = Root::new();
@@ -581,11 +583,18 @@ async fn only_the_newest_five_backups_are_kept() {
         .iter()
         .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
         .collect();
-    assert_eq!(names.len(), BACKUPS_KEPT, "{names:?}");
-    assert_eq!(names[0], "1-to-2-20000103T000000000Z");
-    assert!(names[BACKUPS_KEPT - 1].starts_with(&format!("1-to-{}-", latest(STEPS))));
+    assert!(latest(STEPS) > V24_VERSION_MAX);
+    assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
+    assert_eq!(names[0], "1-to-2-20000102T000000000Z");
+    let pin = &names[BACKUPS_KEPT];
+    assert!(
+        pin.starts_with(&format!("1-to-{}-", latest(STEPS))),
+        "{pin}"
+    );
+    let found = backups_in(&folder).unwrap();
+    let held = pinned(&folder, &found, SystemTime::now()).map(|index| found[index].1.as_str());
+    assert_eq!(held, Some(pin.as_str()));
     assert!(!folder.join("1-to-2-20000101T000000000Z").exists());
-    assert!(!folder.join("1-to-2-20000102T000000000Z").exists());
     assert!(folder.join("keep-me").is_dir());
     assert_eq!(
         std::fs::read(folder.join("1-to-2-notes.txt")).unwrap(),

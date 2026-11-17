@@ -481,6 +481,13 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
     assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
     let mut after = rows(&db);
     assert_eq!(after.remove("migration_probe").unwrap().len(), 1);
+    for table in ["app_plugin_secrets", "app_plugin_state", "app_plugin_trust"] {
+        assert_eq!(
+            after.remove(table),
+            Some(Vec::new()),
+            "step 12 adds {table} empty"
+        );
+    }
     assert_eq!(after, before);
     assert_eq!(names(&root).len(), 2);
     assert_eq!(
