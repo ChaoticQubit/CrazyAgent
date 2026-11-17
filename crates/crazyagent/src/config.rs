@@ -529,9 +529,9 @@ fn parse_config(bytes: &str) -> Result<ConfigFile, ConfigError> {
     Ok(config)
 }
 
-/// Refuses a connection being saved whose address is plain HTTP to another machine,
-/// with the same rule as an added account. Input: the connection. Output: Ok, or
-/// `account_url_invalid`.
+/// Refuses a connection being saved whose address is plain HTTP to another machine, or
+/// on another machine uses a cloud metadata port, with the same rule as an added account.
+/// Input: the connection. Output: Ok, `account_url_invalid` or `account_url_port_refused`.
 fn saved_endpoint(connection: &ModelConnection) -> Result<(), ConfigError> {
     match &connection.endpoint {
         ModelEndpoint::Http { url } => crate::accounts::account_url(url)
