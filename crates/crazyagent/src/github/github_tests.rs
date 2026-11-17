@@ -2282,7 +2282,7 @@ fn project_id(id: &str) -> crate::protocol::ProjectId {
 
 #[test]
 fn the_publish_prompt_asks_a_project_without_a_remote_and_not_now_waits_exactly_seven_days() {
-    let scratch = Scratch::new();
+    let scratch = Scratch::logged();
     let server = unused_server();
     let account = scratch.account(&server);
     let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
@@ -2315,7 +2315,7 @@ fn the_publish_prompt_asks_a_project_without_a_remote_and_not_now_waits_exactly_
 
 #[test]
 fn dont_ask_again_never_asks_and_a_later_not_now_does_not_undo_it() {
-    let scratch = Scratch::new();
+    let scratch = Scratch::logged();
     let server = unused_server();
     let account = scratch.account(&server);
     let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);

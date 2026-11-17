@@ -25,6 +25,21 @@ impl Scratch {
         }
     }
 
+    /// A scratch whose root's engine.db is seeded for logged landing writes with the test
+    /// engine host running, since publish prompt answers are logged (v2.5 L9). Output: the
+    /// scratch.
+    pub(super) fn logged() -> Self {
+        let scratch = Self::new();
+        let path = scratch
+            .root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("engine.db");
+        crate::landing_log::seed(&rusqlite::Connection::open(path).unwrap());
+        scratch
+    }
+
     pub(super) fn account(&self, server: &Server) -> GitHub {
         GitHub::new(
             &self.root.path().canonicalize().unwrap(),

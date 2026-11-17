@@ -908,3 +908,12 @@ fn deletes(db: &Connection) -> Result<Vec<(u64, crate::protocol::ProjectId)>, En
 pub(crate) fn seed(db: &Connection) -> crate::engine::owner::HostStamp {
     crate::ide::log::seed(db)
 }
+
+/// Seeds a test store as [`seed`] does and hands it back, for a fixture that opens its store
+/// in one expression. Input: the store. Output: the same store.
+#[cfg(test)]
+pub(crate) fn seeded(db: Connection) -> Connection {
+    let host = seed(&db);
+    assert_eq!(host.db_instance.len(), 64);
+    db
+}

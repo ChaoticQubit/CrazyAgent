@@ -129,6 +129,7 @@ fn delete_everything_forgets_the_publish_question_answer_and_remove_from_dashboa
     let engine = root.path().canonicalize().unwrap();
     let mut connection = Connection::open(engine.join("engine.db")).unwrap();
     initialize_authority_schemas(&connection).unwrap();
+    crate::landing_log::seed(&connection);
     let (kept, gone) = (
         ProjectId::new("kept").unwrap(),
         ProjectId::new("gone").unwrap(),
@@ -178,6 +179,13 @@ fn delete_everything_forgets_the_publish_question_answer_and_remove_from_dashboa
     )
     .unwrap();
     assert!(matches!(deleted, crate::protocol::Outcome::Applied));
+    for (project, notes) in [(&kept, true), (&gone, false)] {
+        let removal = crate::project_setup::removed::event::ProjectRemoved {
+            project: project.clone(),
+            kept: notes,
+        };
+        crate::project_setup::removed::event::apply(&tx, &removal.body().unwrap()).unwrap();
+    }
     tx.commit().unwrap();
     assert!(
         crate::github::kept_prompt_answer(&engine, &kept),

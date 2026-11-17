@@ -84,7 +84,7 @@ impl Case {
                 "HEAD",
             ],
         );
-        let db = open(&engine).unwrap();
+        let db = crate::landing_log::seeded(open(&engine).unwrap());
         let workspace = Workspace {
             project: ProjectId::new("project-1").unwrap(),
             agent: ChangeAgent {
