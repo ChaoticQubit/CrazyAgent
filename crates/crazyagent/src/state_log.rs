@@ -148,6 +148,18 @@ impl<'a, 'c> Appender<'a, 'c> {
         Self::begin(tx, state_revision(tx)?, fence)
     }
 
+    /// Starts appending in a transaction of the storage open or one of its schema steps,
+    /// which write before any engine host of the store starts, so they bring the open's
+    /// proof in place of a host or owner fence (v2.5 L6). It moves the `state` revision
+    /// once, as [`Self::own`]. Inputs: the transaction and the proof. Output: the appender,
+    /// `state_log_opening_host_running` or `state_log_revision_exhausted`.
+    pub(crate) fn opening(
+        tx: &'a Transaction<'c>,
+        opening: crate::storage::opening::Opening,
+    ) -> Result<Self, EngineError> {
+        Self::own(tx, Fence::Opening(opening))
+    }
+
     /// Runs one projection apply in the appender's transaction after checking the fence
     /// again, the pair of the check at the start. Input: the apply. Output: its result, or
     /// the fence refusal without running it.

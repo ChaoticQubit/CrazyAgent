@@ -41,6 +41,7 @@ pub(crate) mod setup;
 pub(crate) mod trash;
 #[cfg(unix)]
 pub(crate) use native_auth::CUSTODIAN_CODES;
+pub mod opening;
 pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
