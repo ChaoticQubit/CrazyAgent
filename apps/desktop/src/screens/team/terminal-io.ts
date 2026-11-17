@@ -1,4 +1,5 @@
-import type { IFunctionIdentifier, IParser } from "@xterm/xterm";
+import type { WebglAddon } from "@xterm/addon-webgl";
+import type { IFunctionIdentifier, IParser, Terminal } from "@xterm/xterm";
 import type { TerminalMessage } from "../../engine-client";
 
 export const INPUT_BYTES_MAX = 4096;
@@ -281,6 +282,23 @@ export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandle
   for (const id of QUERY_CSI) terminal.parser.registerCsiHandler(id, () => true);
   for (const id of QUERY_DCS) terminal.parser.registerDcsHandler(id, () => true);
   for (const id of QUERY_OSC) terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"));
+}
+
+/** Moves an opened view's drawing onto the GPU with xterm's WebGL addon, so a busy pane stops
+ * rebuilding DOM rows on every frame. A load that fails, as on a machine without WebGL2, keeps
+ * the DOM renderer; a lost GPU context disposes the addon, which hands drawing back to DOM
+ * rows. Inputs: the opened terminal and the addon class. Output: whether the GPU draws it. */
+export function drawOnGpu(terminal: Pick<Terminal, "element" | "loadAddon">, Webgl: new () => WebglAddon): boolean {
+  assert(terminal.element !== undefined, "the view is open before its GPU renderer loads");
+  const addon = new Webgl();
+  try {
+    terminal.loadAddon(addon);
+  } catch {
+    addon.dispose();
+    return false;
+  }
+  addon.onContextLoss(() => addon.dispose());
+  return true;
 }
 
 /** The text a clipboard paste may type into an agent: every control character is dropped
