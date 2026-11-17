@@ -4684,8 +4684,8 @@ fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
 fn engine_secrets_in(runtime: &Path) -> Result<Vec<PathBuf>, SandboxError> {
     let mut secrets: Vec<PathBuf> = ENGINE_SECRET_FILES
         .iter()
-        .chain(ENGINE_SECRET_FOLDERS)
         .chain(&crate::storage::accounts::KEY_FOLDERS)
+        .chain(ENGINE_SECRET_FOLDERS)
         .map(|name| runtime.join(name))
         .collect();
     for entry in bounded_entries(runtime)? {
