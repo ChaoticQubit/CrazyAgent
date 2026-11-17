@@ -9,6 +9,7 @@ fn store() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
@@ -247,6 +248,7 @@ fn opening_store(db_instance: &str) -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(&format!(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);
         CREATE TABLE owner_meta (
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -277,6 +279,7 @@ fn an_opening_writer_appends_while_no_host_of_its_store_runs() {
     let mut bare = Connection::open_in_memory().unwrap();
     bare.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,4);",
     )
     .unwrap();
