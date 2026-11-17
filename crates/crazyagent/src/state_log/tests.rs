@@ -431,3 +431,44 @@ fn a_run_short_of_its_count_or_with_chunks_out_of_order_or_of_another_aggregate_
         );
     }
 }
+
+#[test]
+fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
+    let unchecked = || {
+        let db = db();
+        db.execute_batch(
+            "CREATE TABLE state_log (seq INTEGER PRIMARY KEY, revision INTEGER, aggregate TEXT,
+            kind TEXT, schema INTEGER, at_ms INTEGER, body BLOB)",
+        )
+        .unwrap();
+        db
+    };
+    let padded = |mut body: Vec<u8>| {
+        body.resize(BODY_BYTES_MAX + 1, b' ');
+        body
+    };
+    let db = unchecked();
+    plant(&db, 1, SNAPSHOT_DONE, &padded(closing(0, &[])));
+    assert_eq!(
+        code(verify_snapshot(&db, 1)),
+        Some("state_log_snapshot_invalid".into()),
+        "a closing event over the cap"
+    );
+    let db = unchecked();
+    let chunk = padded(
+        serde_json::to_vec(&SnapshotChunk {
+            aggregate: Aggregate::Worktrees,
+            table: "worktrees".into(),
+            seq: 0,
+            rows: Vec::new(),
+        })
+        .unwrap(),
+    );
+    plant(&db, 1, SNAPSHOT_CHUNK, &chunk);
+    plant(&db, 2, SNAPSHOT_DONE, &closing(1, &[chunk.as_slice()]));
+    assert_eq!(
+        code(verify_snapshot(&db, 2)),
+        Some("state_log_snapshot_invalid".into()),
+        "a chunk over the cap"
+    );
+}
