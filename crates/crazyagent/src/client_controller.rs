@@ -2,7 +2,7 @@ use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
     NativeAuthCancel, NativeAuthLogout, NativeAuthQuery, NativeAuthReply, NativeAuthStart,
     OwnerClient, OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor,
-    OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerView,
+    OwnerRead, OwnerReadReply, OwnerRequest, OwnerResponse, OwnerResult, OwnerView,
 };
 use crate::engine::{Client, EngineError};
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
@@ -136,6 +136,18 @@ impl OwnerController {
 
 /// The engine's refusal of a change built from a read the engine has since moved past.
 const STALE_REVISION: &str = "stale_revision";
+
+/// Whether an owner answer is the engine's own refusal `stale_revision`, which it records as
+/// the outcome of the request sent rather than replays from an earlier send.
+/// Input: the answer. Output: true for that refusal.
+fn stale_refusal(response: &OwnerResponse) -> bool {
+    matches!(
+        response,
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+            if !operation.historical_replay
+                && matches!(&operation.result, OwnerResult::Rejected { code } if code == STALE_REVISION)
+    )
+}
 
 /// The controller's last owner read: the query it asked, the engine's reply and whether no
 /// send has gone out since, so a change built from it still names that reply's revision.
@@ -520,9 +532,8 @@ impl OwnerController {
             .filter(|pending| !pending.uncertain)
             .map(|pending| (pending.request.clone(), pending.generation));
         let response = self.send_exact().await?;
-        let stale = matches!(&response, OwnerResponse::Rejected { code } if code == STALE_REVISION);
         match first {
-            Some((request, generation)) if stale => {
+            Some((request, generation)) if stale_refusal(&response) => {
                 self.resend_stale(request, generation, response).await
             }
             _ => Ok(response),
@@ -545,7 +556,7 @@ impl OwnerController {
     ) -> Result<OwnerResponse, EngineError> {
         assert!(
             self.pending.is_none(),
-            "a change refused on its first send is dropped"
+            "a change the engine answered is settled and dropped"
         );
         let OwnerOperation::Apply { mutation } = refused.operation else {
             unreachable!("a pending change is an owner mutation");

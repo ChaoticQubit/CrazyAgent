@@ -57,6 +57,22 @@ async fn change_another_setting(other: &mut Owner) {
     assert_eq!(result(changed), OwnerResult::Applied);
 }
 
+/// Asserts the engine's own `stale_revision` refusal reached the form, recorded as the
+/// outcome of the request the form sent, and that the controller sent it no second time.
+/// Inputs: the form's answer and the form.
+fn assert_stale_refusal(response: &OwnerResponse, form: &OwnerController) {
+    assert!(
+        matches!(response, OwnerResponse::Applied { operation }
+            if !operation.historical_replay
+                && matches!(&operation.result, OwnerResult::Rejected { code } if code == "stale_revision")),
+        "{response:?}"
+    );
+    assert!(
+        form.resent().is_none(),
+        "a refused change is not sent again"
+    );
+}
+
 /// V250-OWN-REVISION-RETRY red row. The quit form reads its settings, the other window
 /// saves an unrelated setting, and the form's save lands: the controller reads the form
 /// again, finds it unchanged and sends the same change once more under a new request id.
@@ -108,12 +124,7 @@ async fn a_save_after_its_own_setting_changed_is_refused() {
     form.begin_mutation(OwnerMutation::SetQuitSettings { settings: MINE }, 1)
         .unwrap();
     let refused = form.send_pending().await.unwrap();
-    assert_eq!(
-        refused,
-        OwnerResponse::Rejected {
-            code: "stale_revision".into()
-        }
-    );
+    assert_stale_refusal(&refused, &form);
     assert!(form.pending().is_none());
     assert!(
         !form.view().unwrap().fresh,
@@ -147,12 +158,7 @@ async fn a_save_from_an_older_version_is_still_refused() {
         .set_sandbox_settings(mine, opened.version, 1)
         .await
         .unwrap();
-    assert_eq!(
-        refused,
-        OwnerResponse::Rejected {
-            code: "stale_revision".into()
-        }
-    );
+    assert_stale_refusal(&refused, &form);
     assert!(
         !form.view().unwrap().fresh,
         "a refused change leaves the form to read again"
@@ -177,12 +183,7 @@ async fn a_save_after_a_capabilities_read_is_refused() {
     form.begin_mutation(OwnerMutation::SetQuitSettings { settings: MINE }, 1)
         .unwrap();
     let refused = form.send_pending().await.unwrap();
-    assert_eq!(
-        refused,
-        OwnerResponse::Rejected {
-            code: "stale_revision".into()
-        }
-    );
+    assert_stale_refusal(&refused, &form);
     assert!(
         !form.view().unwrap().fresh,
         "a refused change leaves the form to read again"
