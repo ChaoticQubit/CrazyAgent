@@ -212,8 +212,8 @@ test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () =>
   const markup = html(PackSettingsView, packProps(ok(setup())));
   assert.ok(markup.includes(`${svg("blocks", 14)}superpowers<`), markup);
   assert.ok(markup.includes(`${svg("server", 14)}headroom<`), markup);
-  assert.ok(markup.includes(svg("circle-check", 12)), "On carries its status icon");
-  assert.ok(markup.includes(svg("power-off", 12)), "Off carries its status icon");
+  for (const word of ["On", "Off"]) assert.match(markup, new RegExp(`<span class="badge[^"]*">${word}</span>`), `${word} is a status word alone; the stylesheet draws its dot`);
+  assert.ok(!markup.includes(svg("circle-check", 12)) && !markup.includes(svg("power-off", 12)), "no status badge draws an icon");
   const base = { busy: false, problem: "", onChoose: forbidden, onUse: forbidden, onMove: forbidden, onCancel: forbidden, onRetry: forbidden };
   const picked = html(ProjectsHomeSettingsView, { ...base, home: ok({ path: "/Users/mira/Projects", watching: true }), picked: "/Users/mira/Work" });
   assert.ok(picked.includes(`${svg("check", 15)}Use this folder</button>`), picked);
