@@ -54,6 +54,15 @@ const LANGUAGE = {
 /** A Rust `#[cfg(...)]` attribute on its own line; groups: indent, condition. */
 const CFG = /^(\s*)#\[cfg\((.*)\)\]\s*$/;
 
+/** The deepest cfg nesting read, far past any condition in the tree (three levels). */
+const CFG_DEPTH_MAX = 16;
+
+/** A Rust module declared without a body; the group is its name. */
+const MOD = /^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/;
+
+/** A top-level `#[path = "...rs"]` attribute; the group is the path from the file's folder. */
+const PATH_ATTRIBUTE = /^#\[path\s*=\s*"([^"]+\.rs)"\]\s*$/;
+
 /** A line at an item's indent that still belongs to it: a closer, a brace, where, ->, else. */
 const CONTINUES = /^(?:[}\])]|\{|where\b|->|else\b)/;
 
@@ -85,24 +94,43 @@ function testPath(kind, file) {
 }
 
 /**
- * A cfg condition with each `not(...)` group taken out, so `not(test)` never reads as test.
- * Input: the condition. Output: what is left.
+ * The value of one cfg predicate with `test` false and every other predicate unknown: false,
+ * true, or null for unknown. Inputs: the condition's tokens, the predicate's first token and
+ * its nesting depth, at most `CFG_DEPTH_MAX`.
+ * Output: `[value, index of the token after the predicate]`.
  */
-function withoutNot(condition) {
-  let rest = condition;
-  for (let at = rest.search(/\bnot\s*\(/); at !== -1; at = rest.search(/\bnot\s*\(/)) {
-    let index = rest.indexOf("(", at) + 1;
-    for (let depth = 1; index < rest.length && depth > 0; index += 1) {
-      if (rest[index] === "(") {
-        depth += 1;
-      } else if (rest[index] === ")") {
-        depth -= 1;
-      }
-    }
-    assert.ok(index > at, "each pass takes text out");
-    rest = rest.slice(0, at) + rest.slice(index);
+function cfgValue(tokens, at, depth) {
+  assert.ok(depth <= CFG_DEPTH_MAX, `a cfg condition nests past ${CFG_DEPTH_MAX} levels`);
+  const token = tokens[at];
+  if (!["all", "any", "not"].includes(token) || tokens[at + 1] !== "(") {
+    return [token === "test" ? false : null, at + 1];
   }
-  return rest;
+  const values = [];
+  let index = at + 2;
+  while (index < tokens.length && tokens[index] !== ")") {
+    const [value, next] = cfgValue(tokens, index, depth + 1);
+    assert.ok(next > index, "each predicate takes at least one token");
+    values.push(value);
+    index = tokens[next] === "," ? next + 1 : next;
+  }
+  if (token === "not") {
+    return [values[0] === null || values[0] === undefined ? null : !values[0], index + 1];
+  }
+  const settles = token === "all" ? false : true;
+  if (values.includes(settles)) {
+    return [settles, index + 1];
+  }
+  return [values.every((value) => value === !settles) ? !settles : null, index + 1];
+}
+
+/**
+ * Whether a cfg condition compiles its item only for tests: it is false whenever `test` is
+ * false, whatever the other predicates are. `all(test, unix)` is; `any(unix, test)` and
+ * `not(test)` are not. Input: the condition. Output: the answer.
+ */
+function testOnly(condition) {
+  const tokens = condition.match(/\w+(?:\s*=\s*"[^"]*")?|[(),]/g) ?? [];
+  return tokens.length > 0 && cfgValue(tokens, 0, 0)[0] === false;
 }
 
 /**
@@ -150,21 +178,66 @@ function itemEnd(lines, start, indent) {
 }
 
 /**
- * Marks the lines of each Rust item under a `#[cfg(...)]` whose condition holds `test` outside
- * `not(...)`, from the attribute to the item's end (`itemEnd`). Input: the lines.
+ * The line of the item a test-only `#[cfg(...)]` attribute sits on, past further attributes
+ * and comments. Inputs: the lines and a line's index.
+ * Output: the item's index, `lines.length` when the file ends first, or null when the line is
+ * no test-only cfg attribute.
+ */
+function testItem(lines, index) {
+  const attribute = CFG.exec(lines[index]);
+  if (attribute === null || !testOnly(attribute[2])) {
+    return null;
+  }
+  let item = index + 1;
+  while (item < lines.length && /^\s*(?:#\[|\/\/)/.test(lines[item])) {
+    item += 1;
+  }
+  assert.ok(item > index && item <= lines.length);
+  return item;
+}
+
+/**
+ * The module paths a Rust file declares only for tests, as `mod name;` under a test-only cfg:
+ * beside the file by Rust's rules, or where a top-level `#[path]` names, from the file's
+ * folder; an indented `#[path]` is not followed. Inputs: the file's path and lines.
+ * Output: each module's path without extension; its `.rs` file and folder are test code.
+ */
+function testModules(file, lines) {
+  assert.ok(file.endsWith(".rs"), `${file} is no Rust file`);
+  const base = path.posix.basename(file);
+  const roots = ["mod.rs", "lib.rs", "main.rs"];
+  const folder = roots.includes(base) ? path.posix.dirname(file) : file.slice(0, -".rs".length);
+  const modules = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const item = testItem(lines, index);
+    const declared = item === null ? null : MOD.exec(lines[item] ?? "");
+    if (declared === null) {
+      continue;
+    }
+    const attributes = lines.slice(index, item);
+    const named = attributes.map((line) => PATH_ATTRIBUTE.exec(line)).find(Boolean);
+    if (named !== undefined) {
+      modules.push(path.posix.join(path.posix.dirname(file), named[1]).slice(0, -".rs".length));
+    } else if (!attributes.some((line) => line.includes("#[path"))) {
+      modules.push(path.posix.join(folder, declared[1]));
+    }
+  }
+  return modules;
+}
+
+/**
+ * Marks the lines of each Rust item under a test-only `#[cfg(...)]` (`testOnly`), from the
+ * attribute to the item's end (`itemEnd`). Input: the lines.
  * Output: one flag per line, true for test code.
  */
 function inlineTestLines(lines) {
   const mask = new Array(lines.length).fill(false);
   for (let index = 0; index < lines.length; index += 1) {
-    const attribute = CFG.exec(lines[index]);
-    if (attribute === null || !/\btest\b/.test(withoutNot(attribute[2]))) {
+    const item = testItem(lines, index);
+    if (item === null) {
       continue;
     }
-    let item = index + 1;
-    while (item < lines.length && /^\s*(?:#\[|\/\/)/.test(lines[item])) {
-      item += 1;
-    }
+    const attribute = CFG.exec(lines[index]);
     const last = lines.length - 1;
     const end = item <= last ? itemEnd(lines, item, attribute[1].length) : last;
     assert.ok(end >= index, "a cfg(test) region never ends before its attribute");
@@ -208,15 +281,18 @@ function callsOf(text, name) {
 }
 
 /**
- * The test-code flags of a file's lines: all of a test file, the cfg(test) items of another
- * Rust file, nothing of other JS. Inputs: the kind, path and lines.
- * Output: one flag per line, or null when the file holds no test code.
+ * The test-code flags of a file's lines: all of a test file or a test-only module, the
+ * test-only cfg items of another Rust file, nothing of other JS. Inputs: the kind, path, lines
+ * and whether a test-only `mod` declares the file. Output: one flag per line, or null when the
+ * file holds no test code.
  */
-function testLines(kind, file, lines) {
+function testLines(kind, file, lines, whole) {
   if (kind === null || (kind === "js" && !testPath(kind, file))) {
     return null;
   }
-  const mask = testPath(kind, file) ? lines.map(() => true) : inlineTestLines(lines);
+  const all = whole || testPath(kind, file);
+  assert.ok(!whole || kind === "rust", "only a Rust module is declared for tests");
+  const mask = all ? lines.map(() => true) : inlineTestLines(lines);
   return mask.some(Boolean) ? mask : null;
 }
 
@@ -242,15 +318,16 @@ function lineAt(starts, offset) {
 /**
  * Finds the sleep sites in the test code of one file: raw calls and calls of local aliases,
  * once per callee, outside comment lines and outside the body of a `wait_until` helper.
- * Inputs: the repository-relative path and the text. Output: `{ test, lines, helpers }`, with
- * one ascending 1-based line per site and the line of each helper definition.
+ * Inputs: the repository-relative path, the text, and whether a test-only `mod` declares it.
+ * Output: `{ test, lines, helpers }`, with one ascending 1-based line per site and the line of
+ * each helper definition.
  */
-export function scan(file, text) {
+export function scan(file, text, whole = false) {
   assert.equal(typeof file, "string");
   assert.equal(typeof text, "string");
   const kind = kindOf(file);
   const lines = text.split("\n");
-  const mask = testLines(kind, file, lines);
+  const mask = testLines(kind, file, lines, whole);
   if (mask === null) {
     return { test: false, lines: [], helpers: [] };
   }
@@ -375,13 +452,14 @@ function readAllowlist(root) {
 
 /**
  * Scans every tracked, regular Rust, JS or TS file of a repository and checks the test files
- * against its allowlist; untracked files are never read. Input: the repository root.
- * Output: the problems, as `check` gives them.
+ * against its allowlist; untracked files are never read. A Rust file a test-only `mod`
+ * declares, and every file in that module's folder, is test code whole.
+ * Input: the repository root. Output: the problems, as `check` gives them.
  */
 export function run(root) {
   const options = { cwd: root, encoding: "utf8", maxBuffer: LISTING_BYTES_MAX };
   const listed = execFileSync("git", ["ls-files", "-z"], options);
-  const found = new Map();
+  const texts = new Map();
   for (const file of listed.split("\0")) {
     if (file === "" || kindOf(file) === null) {
       continue;
@@ -393,8 +471,21 @@ export function run(root) {
     } catch {
       continue;
     }
-    const result = kind.isFile() ? scan(file, readFileSync(full, "utf8")) : null;
-    if (result?.test) {
+    if (kind.isFile()) {
+      texts.set(file, readFileSync(full, "utf8"));
+    }
+  }
+  const modules = [];
+  for (const [file, text] of texts) {
+    if (kindOf(file) === "rust") {
+      modules.push(...testModules(file, text.split("\n")));
+    }
+  }
+  const found = new Map();
+  for (const [file, text] of texts) {
+    const inside = (module) => file === `${module}.rs` || file.startsWith(`${module}/`);
+    const result = scan(file, text, kindOf(file) === "rust" && modules.some(inside));
+    if (result.test) {
       found.set(file, result);
     }
   }

@@ -59,7 +59,7 @@ test("a planted thread or tokio sleep in a Rust test file fails; without it, it 
   assert.deepEqual(check(new Map([[file, scan(file, "fn waits() {}\n")]]), {}), []);
 });
 
-test("Rust test code is a test file by name or folder, or a cfg(test) item", () => {
+test("Rust test code is a test file by name or folder, or an item compiled only for tests", () => {
   const body = `    std::${THREAD}(D);`;
   const fn = ["fn f() {", body, "}"].join("\n");
   const files = [
@@ -86,17 +86,51 @@ test("Rust test code is a test file by name or folder, or a cfg(test) item", () 
     "fn live() {",
     body,
     "}",
-    '#[cfg(any(test, feature = "x"))]',
+    '#[cfg(all(test, not(target_os = "macos")))]',
     "fn helper() {",
     body,
     "}",
-    "#[cfg(not(any(test, debug_assertions)))]",
-    "fn release() {",
+    "#[cfg(any(unix, test))]",
+    "fn shared() {",
+    body,
+    "}",
+    "#[cfg(not(all(unix, not(test))))]",
+    "fn elsewhere() {",
     body,
     "}",
   ].join("\n");
   const found = scan("crates/a/src/lib.rs", inline);
   assert.deepEqual(found, { test: true, lines: [7, 16], helpers: [] });
+});
+
+test("a test-only item ends at its line, its closer at its indent, or its last deeper line", () => {
+  const body = `        std::${THREAD}(D);`;
+  const text = [
+    "#[cfg(test)]",
+    "mod tests;",
+    "fn production() {",
+    `    std::${THREAD}(D);`,
+    "}",
+    "impl Runner {",
+    "    #[cfg(test)]",
+    "    fn settle(",
+    "        &self,",
+    "    ) -> bool {",
+    body,
+    "        true",
+    "    }",
+    "    fn run(&self) {",
+    body,
+    "    }",
+    "    #[cfg(test)]",
+    "    const STEP: Duration =",
+    "        Duration::from_millis(5);",
+    "    fn step(&self) {",
+    body,
+    "    }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(scan("crates/a/src/runner.rs", text).lines, [11]);
 });
 
 test("a Rust sleep imported bare or renamed counts at each call; a local one does not", () => {
@@ -292,6 +326,37 @@ test("the check reads every tracked file of a repository and fails on a planted 
     assert.deepEqual(run(root), [
       "crates/a/tests/flow.rs: 1 new sleep in test code (line 2); " +
         "wait on an event or the one shared wait_until helper",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a module declared only for tests is test code with its folder; a shared one is not", () => {
+  const sleeping = `fn f() {\n    std::${THREAD}(D);\n}\n`;
+  const root = repository({
+    "crates/a/src/lib.rs": "#[cfg(test)]\nmod fixture;\n#[cfg(any(unix, test))]\nmod live;\n",
+    "crates/a/src/fixture.rs": "mod deep;\n",
+    "crates/a/src/fixture/deep.rs": sleeping,
+    "crates/a/src/live.rs": sleeping,
+    "crates/a/src/engine.rs": [
+      "#[cfg(all(test, unix))]",
+      "pub(crate) mod host;",
+      "#[cfg(test)]",
+      '#[path = "support/stub.rs"]',
+      "mod stub;",
+    ].join("\n"),
+    "crates/a/src/engine/host.rs": sleeping,
+    "crates/a/src/support/stub.rs": sleeping,
+    "crates/a/src/engine/stub.rs": sleeping,
+    "scripts/quality/sleeps-allow.json": "{}\n",
+  });
+  try {
+    const advice = "wait on an event or the one shared wait_until helper";
+    assert.deepEqual(run(root), [
+      `crates/a/src/engine/host.rs: 1 new sleep in test code (line 2); ${advice}`,
+      `crates/a/src/fixture/deep.rs: 1 new sleep in test code (line 2); ${advice}`,
+      `crates/a/src/support/stub.rs: 1 new sleep in test code (line 2); ${advice}`,
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
