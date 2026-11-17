@@ -3,7 +3,10 @@ use super::e2e_support::{Engine, Owner, stop_tmux};
 use super::harness::{home_files, recorded, set_level};
 use super::provider::{Recorder, as_owner, engine, with_owner};
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
-use crazyagent::config::{AccountPool, ModelAccessEdit, ProviderQuotaPolicy};
+use crazyagent::config::{
+    AccountPool, ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint,
+    ModelReference, ProviderQuotaPolicy,
+};
 use crazyagent::engine::owner::{
     ModelAccessCollection, OwnerData, OwnerMutation, OwnerRead, OwnerResult,
 };
@@ -33,6 +36,18 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         scenario("engine-codex-sub-sandboxed", engine_codex_sub_sandboxed),
         scenario("engine-codex-sub-own-branch", engine_codex_sub_own_branch),
         scenario("engine-codex-sub-full-access", engine_codex_sub_full_access),
+        scenario(
+            "engine-claude-code-sub-sandboxed",
+            engine_claude_sub_sandboxed,
+        ),
+        scenario(
+            "engine-claude-code-sub-own-branch",
+            engine_claude_sub_own_branch,
+        ),
+        scenario(
+            "engine-claude-code-sub-full-access",
+            engine_claude_sub_full_access,
+        ),
         Scenario {
             kind: "provider",
             name: "pool-summaries",
@@ -57,28 +72,75 @@ fn pool_summaries(scratch: &Path) -> Result<Value, String> {
     serde_json::to_value(pools).map_err(|error| error.to_string())
 }
 
-/// Captures the launch of the Codex sub agent the owner delegates one task to, tools off,
-/// at one access level. Inputs: the scratch folder and the level. Output: the capture.
-fn engine_codex_sub(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
-    let team = Team::start(scratch, access, false)?;
+/// Captures the launch of the sub agent of one harness the owner delegates one task to,
+/// tools off, at one access level. Inputs: the scratch folder, the harness and the level.
+/// Output: the capture.
+fn engine_sub(scratch: &Path, harness: Harness, access: AgentAccess) -> Result<Value, String> {
+    let team = Team::start_with(scratch, harness, access, false)?;
     team.act(TeamAction::Delegate {
         project_id: team.project.clone(),
-        harness: Some(HARNESS.to_owned()),
+        harness: Some(harness.id().to_owned()),
         prompt: "Reply with the single word done.".to_owned(),
     })?;
     team.launched(AgentRole::Sub)
 }
 
 fn engine_codex_sub_sandboxed(scratch: &Path) -> Result<Value, String> {
-    engine_codex_sub(scratch, AgentAccess::Sandboxed)
+    engine_sub(scratch, Harness::Codex, AgentAccess::Sandboxed)
 }
 
 fn engine_codex_sub_own_branch(scratch: &Path) -> Result<Value, String> {
-    engine_codex_sub(scratch, AgentAccess::OwnBranch)
+    engine_sub(scratch, Harness::Codex, AgentAccess::OwnBranch)
 }
 
 fn engine_codex_sub_full_access(scratch: &Path) -> Result<Value, String> {
-    engine_codex_sub(scratch, AgentAccess::Full)
+    engine_sub(scratch, Harness::Codex, AgentAccess::Full)
+}
+
+fn engine_claude_sub_sandboxed(scratch: &Path) -> Result<Value, String> {
+    engine_sub(scratch, Harness::ClaudeCode, AgentAccess::Sandboxed)
+}
+
+fn engine_claude_sub_own_branch(scratch: &Path) -> Result<Value, String> {
+    engine_sub(scratch, Harness::ClaudeCode, AgentAccess::OwnBranch)
+}
+
+fn engine_claude_sub_full_access(scratch: &Path) -> Result<Value, String> {
+    engine_sub(scratch, Harness::ClaudeCode, AgentAccess::Full)
+}
+
+/// The harnesses the engine launches as team agents at 2.4.2, each answered by the
+/// stand-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Harness {
+    Codex,
+    ClaudeCode,
+}
+
+impl Harness {
+    /// The catalog id a team plan and a delegation name.
+    pub(super) fn id(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude-code",
+        }
+    }
+
+    /// The stand-in's file name, which picks the version line it answers.
+    fn program(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude",
+        }
+    }
+
+    /// The engine flag that pins this harness.
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Codex => "--codex-executable",
+            Self::ClaudeCode => "--claude-executable",
+        }
+    }
 }
 
 /// The project every engine launch scenario sets up.
@@ -90,11 +152,16 @@ const POOL: &str = "snapshot-p2-pool";
 /// The model the project's account names.
 const MODEL: &str = "snapshot-model";
 
-/// The harness every launch here runs; its stand-in answers in its place.
-const HARNESS: &str = "codex";
+/// The connection and account a Claude Code team's pool holds: an Anthropic Messages
+/// endpoint on the loopback recorder, which no account draft offers.
+const ANTHROPIC_CONNECTION: &str = "snapshot-p2-anthropic";
 
-/// What the stand-in's folder reads as in every capture: the one literal replaced.
-const HARNESS_TOKEN: &str = "<harness>";
+/// The account the Anthropic Messages connection belongs to.
+const ANTHROPIC_ACCOUNT: &str = "snapshot-p2-anthropic-account";
+
+/// What the cargo target folder reads as in every capture: the one literal replaced, only
+/// as a whole path prefix. The stand-in and the engine binary both sit below it.
+const TARGET_TOKEN: &str = "<target>";
 
 /// The folder the stand-in leaves its record in, next to the agent's own home.
 const RECORD: &str = "snapshot-v242-launch";
@@ -115,14 +182,21 @@ const SDKROOT: &str = "SDKROOT";
 /// The rule kinds that name one path on a line of their own in a Seatbelt profile.
 const PATH_RULES: [&str; 3] = ["subpath", "literal", "path-ancestors"];
 
-/// The Codex stand-in: it answers a version probe, and on a launch records its arguments
-/// (NUL separated) and its variable names, never their values, in [`RECORD`] beside its
-/// home, moved into place whole, then reads its input until the pane closes.
+/// The harness stand-in, written once per harness name: it answers that harness's version
+/// probe, and on a launch records its arguments (NUL separated) and its variable names,
+/// never their values, in [`RECORD`] beside its home, moved into place whole, then reads
+/// its input until the pane closes.
 const STAND_IN: &str = r#"#!/bin/sh
 case "$1" in
-  --version) echo 'codex-cli 0.167.1'; exit 0 ;;
+  --version)
+    case "${0##*/}" in
+      claude) echo '2.1.0 (Claude Code)' ;;
+      *) echo 'codex-cli 0.167.1' ;;
+    esac
+    exit 0 ;;
 esac
-r="${CODEX_HOME:-$HOME}/../tmp/snapshot-v242-launch"
+h="${CODEX_HOME:-${CLAUDE_CONFIG_DIR:-$HOME}}"
+r="$h/../tmp/snapshot-v242-launch"
 /bin/mkdir -p "$r.part" || exit 1
 for a in "$@"; do printf '%s\000' "$a"; done > "$r.part/argv"
 /usr/bin/awk 'BEGIN { for (name in ENVIRON) print name }' > "$r.part/env"
@@ -130,33 +204,81 @@ for a in "$@"; do printf '%s\000' "$a"; done > "$r.part/argv"
 while IFS= read -r line; do :; done
 "#;
 
-/// Writes the Codex stand-in at its one fixed place below cargo's per-target temp folder:
-/// outside every temp folder the engine refuses a harness in, and the one literal every
-/// capture replaces with [`HARNESS_TOKEN`]. Output: the canonical folder holding `codex`.
+/// Writes the stand-in as `codex` and `claude` at its one fixed place below cargo's
+/// per-target temp folder, outside every temp folder the engine refuses a harness in.
+/// Output: the canonical folder holding both.
 pub(super) fn stand_in() -> Result<PathBuf, String> {
     let folder = Path::new(env!("CARGO_TARGET_TMPDIR")).join("snapshot-v242");
     std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
         .map_err(|error| error.to_string())?;
     let folder = folder.canonicalize().map_err(|error| error.to_string())?;
-    let program = folder.join(HARNESS);
-    if std::fs::read_to_string(&program).ok().as_deref() != Some(STAND_IN) {
-        std::fs::write(&program, STAND_IN).map_err(|error| error.to_string())?;
+    for harness in [Harness::Codex, Harness::ClaudeCode] {
+        let program = folder.join(harness.program());
+        if std::fs::read_to_string(&program).ok().as_deref() != Some(STAND_IN) {
+            std::fs::write(&program, STAND_IN).map_err(|error| error.to_string())?;
+        }
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        assert!(program.is_file());
     }
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
-        .map_err(|error| error.to_string())?;
-    assert!(folder.is_absolute() && program.is_file());
+    assert!(folder.is_absolute());
     Ok(folder)
 }
 
-/// A real engine started with the Codex stand-in pinned, holding one project with a team
-/// plan of Codex agents whose pool has one keyless OpenAI-compatible account on a loopback
-/// recorder, all seeded through owner requests. Dropping it ends the engine's tmux server
-/// and every pane in it, then the engine.
+/// The canonical cargo target folder, parent of cargo's per-target temp folder and an
+/// ancestor of the engine binary the engine grants its agents. Output: the folder text.
+pub(super) fn target() -> Result<String, String> {
+    let folder = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .ok_or_else(|| "cargo's temp folder has no parent".to_owned())?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let text = folder
+        .to_str()
+        .ok_or_else(|| "the target folder is not UTF-8".to_owned())?;
+    assert!(text.starts_with('/') && !text.ends_with('/'));
+    Ok(text.to_owned())
+}
+
+/// Replaces the target folder with [`TARGET_TOKEN`] wherever it starts a path and ends at
+/// a `/` or at the path's end, never inside a longer path or name. Inputs: the text and
+/// the folder. Output: the text with those prefixes replaced.
+pub(super) fn without_target(text: &str, target: &str) -> String {
+    let path_char = |c: char| c.is_ascii_alphanumeric() || "/._-~+@%".contains(c);
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (start, _) in text.match_indices(target) {
+        let end = start + target.len();
+        if start < copied {
+            continue;
+        }
+        let starts_path = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !path_char(before));
+        let whole = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|after| after == '/' || !path_char(after));
+        if starts_path && whole {
+            out.push_str(&text[copied..start]);
+            out.push_str(TARGET_TOKEN);
+            copied = end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// A real engine started with one harness's stand-in pinned, holding one project with a
+/// team plan of that harness's agents whose pool has one keyless account on a loopback
+/// recorder that harness can run on, all seeded through owner requests. Dropping it ends
+/// the engine's tmux server and every pane in it, then the engine.
 pub(super) struct Team {
     pub(super) engine: Engine,
     pub(super) project: ProjectId,
-    stand_in: String,
+    target: String,
     projects: PathBuf,
     tmux: Option<PathBuf>,
     recorder: Recorder,
@@ -179,14 +301,10 @@ fn applied(what: &str, result: OwnerResult) -> Result<(), String> {
     }
 }
 
-/// Creates the pool holding one account for one project, as the owner's pool screen
-/// saves it against a fresh read of the pools. Inputs: the owner, the account and the
-/// project. Output: nothing, or why the pool was not created.
-async fn create_pool(
-    owner: &mut Owner,
-    member: &CredentialRef,
-    project: &ProjectId,
-) -> Result<(), String> {
+/// Sends one model access change as the owner's model access screen does, against a fresh
+/// read of the settings. Inputs: the owner, the change and what it is, for the message.
+/// Output: nothing, or why the change was not applied.
+async fn model_access(owner: &mut Owner, edit: ModelAccessEdit, what: &str) -> Result<(), String> {
     let page = owner
         .controller
         .read(OwnerRead::ModelAccessPage {
@@ -197,17 +315,7 @@ async fn create_pool(
         .await
         .map_err(|error| error.0)?;
     let OwnerData::ModelAccessPage { source_hash, .. } = &page.data else {
-        return Err("the pools page did not come back".to_owned());
-    };
-    let reference = |value: &str| CredentialRef::new(value).map_err(|error| error.to_string());
-    let pool = AccountPool {
-        id: reference(POOL)?,
-        name: None,
-        members: vec![member.clone()],
-        projects: vec![reference(project.as_str())?],
-        roles: vec![reference("project_leader")?],
-        fallback_allowed: false,
-        provider_quota_policy: ProviderQuotaPolicy::default(),
+        return Err("the model access page did not come back".to_owned());
     };
     let generation = owner.next();
     owner
@@ -216,7 +324,7 @@ async fn create_pool(
             OwnerMutation::ModelAccess {
                 expected_config_id: page.config_id.clone(),
                 expected_source_hash: source_hash.clone(),
-                edit: ModelAccessEdit::CreatePool { pool },
+                edit,
             },
             generation,
         )
@@ -226,17 +334,71 @@ async fn create_pool(
         .send_pending()
         .await
         .map_err(|error| error.0)?;
-    applied("create the pool", recorded(response)?)
+    applied(what, recorded(response)?)
 }
 
-/// The team plan every launch scenario saves: a Codex master and one Codex agent row.
-/// Input: whether the agents run with tools. Output: the plan.
-fn plan(tools: bool) -> TeamPlan {
+/// A settings reference from fixed text. Input: the text. Output: the reference.
+fn reference(value: &str) -> Result<CredentialRef, String> {
+    CredentialRef::new(value).map_err(|error| error.to_string())
+}
+
+/// Creates the pool holding one account for one project, as the owner's pool screen saves
+/// it. Inputs: the owner, the account and the project. Output: nothing, or why the pool was
+/// not created.
+async fn create_pool(
+    owner: &mut Owner,
+    member: &CredentialRef,
+    project: &ProjectId,
+) -> Result<(), String> {
+    let pool = AccountPool {
+        id: reference(POOL)?,
+        name: None,
+        members: vec![member.clone()],
+        projects: vec![reference(project.as_str())?],
+        roles: vec![reference("project_leader")?],
+        fallback_allowed: false,
+        provider_quota_policy: ProviderQuotaPolicy::default(),
+    };
+    model_access(
+        owner,
+        ModelAccessEdit::CreatePool { pool },
+        "create the pool",
+    )
+    .await
+}
+
+/// Adds the keyless Anthropic Messages connection on the loopback recorder, with its
+/// account, as the owner's model access screen adds a connected account; Claude Code runs
+/// only on that protocol and no account draft offers it off Anthropic's own host. Inputs:
+/// the owner and the endpoint address. Output: the connection, or why it was not added.
+async fn add_anthropic(owner: &mut Owner, url: String) -> Result<CredentialRef, String> {
+    let connection = ModelConnection {
+        id: reference(ANTHROPIC_CONNECTION)?,
+        provider: reference("anthropic")?,
+        harness: reference(Harness::ClaudeCode.id())?,
+        protocol: reference("anthropic-messages")?,
+        account_ref: reference(ANTHROPIC_ACCOUNT)?,
+        endpoint: ModelEndpoint::Http { url },
+        model: ModelReference {
+            id: MODEL.to_owned(),
+            author: reference("anthropic")?,
+        },
+        auth: ModelAuthentication::None {},
+    };
+    let id = connection.id.clone();
+    let edit = ModelAccessEdit::AddConnectedAccount { connection };
+    model_access(owner, edit, "add the Anthropic Messages connection").await?;
+    Ok(id)
+}
+
+/// The team plan every launch scenario saves: a master and one agent row of one harness.
+/// Inputs: the harness and whether the agents run with tools. Output: the plan.
+fn plan(harness: Harness, tools: bool) -> TeamPlan {
     TeamPlan {
-        master: HARNESS.to_owned(),
+        master: harness.id().to_owned(),
         master_tools: tools,
         sub_harnesses: vec![HarnessSlot {
-            harness: HARNESS.to_owned(),
+            harness: harness.id().to_owned(),
             agents: 1,
             tools,
         }],
@@ -246,16 +408,26 @@ fn plan(tools: bool) -> TeamPlan {
 }
 
 impl Team {
-    /// Starts the engine with the stand-in pinned and seeds the project through owner
-    /// requests: the projects home, the account, its pool, the project with its team plan
-    /// and its agent access level. Inputs: the scratch folder, the level and whether the
-    /// agents run with tools. Output: the team, or the first step that was refused.
+    /// Starts a Codex team as [`Team::start_with`] does. Inputs: the scratch folder, the
+    /// level and whether the agents run with tools. Output: the team.
     pub(super) fn start(scratch: &Path, access: AgentAccess, tools: bool) -> Result<Self, String> {
+        Self::start_with(scratch, Harness::Codex, access, tools)
+    }
+
+    /// Starts the engine with one harness's stand-in pinned and seeds the project through
+    /// owner requests: the projects home, the account (an OpenAI-compatible account draft
+    /// for Codex, a connected Anthropic Messages account for Claude Code), its pool, the
+    /// project with its team plan and its agent access level. Inputs: the scratch folder,
+    /// the harness, the level and whether the agents run with tools. Output: the team, or
+    /// the first step that was refused.
+    pub(super) fn start_with(
+        scratch: &Path,
+        harness: Harness,
+        access: AgentAccess,
+        tools: bool,
+    ) -> Result<Self, String> {
         let folder = stand_in()?;
-        let stand_in = folder
-            .to_str()
-            .ok_or_else(|| "the stand-in folder is not UTF-8".to_owned())?
-            .to_owned();
+        let target = target()?;
         let projects = scratch
             .canonicalize()
             .map_err(|error| error.to_string())?
@@ -263,34 +435,46 @@ impl Team {
         std::fs::create_dir(&projects).map_err(|error| error.to_string())?;
         let projects_home = projects.clone();
         let recorder = Recorder::start(false)?;
-        let engine = engine(scratch, Some(("--codex-executable", folder.join(HARNESS))))?;
+        let engine = engine(
+            scratch,
+            Some((harness.flag(), folder.join(harness.program()))),
+        )?;
         let tmux = installed(engine.path());
         let project = ProjectId::new(PROJECT).map_err(|error| error.to_string())?;
-        let url = format!("http://127.0.0.1:{}/v1", recorder.port);
+        let url = match harness {
+            Harness::Codex => format!("http://127.0.0.1:{}/v1", recorder.port),
+            Harness::ClaudeCode => format!("http://127.0.0.1:{}", recorder.port),
+        };
         let seeded = project.clone();
         with_owner(&engine, |mut owner| async move {
             let steps = async {
                 applied("set the projects home", owner.set_home(&projects).await)?;
-                let draft = AccountDraft {
-                    provider: Provider::OpenaiCompatible,
-                    method: SignInMethod::Url,
-                    name: "Snapshot team".to_owned(),
-                    url: Some(url),
-                    model: Some(MODEL.to_owned()),
+                let account = match harness {
+                    Harness::Codex => {
+                        let draft = AccountDraft {
+                            provider: Provider::OpenaiCompatible,
+                            method: SignInMethod::Url,
+                            name: "Snapshot team".to_owned(),
+                            url: Some(url),
+                            model: Some(MODEL.to_owned()),
+                        };
+                        owner
+                            .controller
+                            .add_account(draft, None)
+                            .await
+                            .map_err(|error| format!("add_account: {}", error.0))?
+                            .id
+                    }
+                    Harness::ClaudeCode => add_anthropic(&mut owner, url).await?,
                 };
-                let account = owner
-                    .controller
-                    .add_account(draft, None)
-                    .await
-                    .map_err(|error| format!("add_account: {}", error.0))?;
-                create_pool(&mut owner, &account.id, &seeded).await?;
+                create_pool(&mut owner, &account, &seeded).await?;
                 let setup = ProjectSetup {
                     about: "One team launch, captured.".to_owned(),
                     tech_stack: Vec::new(),
                     platforms: Vec::new(),
                     research: Vec::new(),
                     pool: Some(CredentialRef::new(POOL).map_err(|error| error.to_string())?),
-                    team: Some(plan(tools)),
+                    team: Some(plan(harness, tools)),
                     documents: Vec::new(),
                 };
                 let spec = ProjectSpec {
@@ -312,7 +496,7 @@ impl Team {
         Ok(Self {
             engine,
             project,
-            stand_in,
+            target,
             projects: projects_home,
             tmux,
             recorder,
@@ -397,8 +581,8 @@ impl Team {
 
     /// Captures one launch: the arguments and variable names the stand-in was started
     /// with, the files in the agent's own home and the Seatbelt profile the engine
-    /// installed for it (none when it installed none), with the stand-in's folder read as
-    /// [`HARNESS_TOKEN`], the rules naming this Mac's own tool installs taken out and stable
+    /// installed for it (none when it installed none), with the cargo target folder read as
+    /// [`TARGET_TOKEN`], the rules naming this Mac's own tool installs taken out and stable
     /// facts in their place, facts about its loopback remotes, and the engine root,
     /// projects home and agent home the masked paths in it stand for.
     /// Input: the agent id. Output: the capture.
@@ -406,7 +590,7 @@ impl Team {
         let record = self.record(id);
         let argv: Vec<String> = bounded(&record.join("argv"))?
             .split_terminator('\0')
-            .map(|word| word.replace(&self.stand_in, HARNESS_TOKEN))
+            .map(|word| without_target(word, &self.target))
             .collect();
         let mut env_names: Vec<String> = bounded(&record.join("env"))?
             .lines()
@@ -419,7 +603,7 @@ impl Team {
         let home = crazyagent::team::runtime::agent_home(&state, id);
         let installed = crazyagent::team::runtime::agent_profile(&state, id);
         let (profile, machine_reads, network) = if installed.exists() {
-            let text = bounded(&installed)?.replace(&self.stand_in, HARNESS_TOKEN);
+            let text = without_target(&bounded(&installed)?, &self.target);
             let (text, facts) = without_machine_reads(&text, &machine_folders()?);
             let network = loopback_facts(&text, self.recorder.port);
             (Some(text), facts, network)
@@ -619,4 +803,30 @@ fn loopback_facts_name_the_endpoint_port_and_count_the_others() {
         loopback_facts(profile, 41235),
         json!({"endpoint_allowed": false, "other_loopback_remotes": 2})
     );
+}
+
+#[test]
+fn the_target_folder_is_replaced_only_as_a_whole_path_prefix() {
+    let target = "/w/.local-state/target";
+    for (text, read) in [
+        (
+            "(subpath \"/w/.local-state/target/debug\")",
+            "(subpath \"<target>/debug\")",
+        ),
+        ("\"/w/.local-state/target\"", "\"<target>\""),
+        (
+            "/w/.local-state/target/tmp/snapshot-v242/codex",
+            "<target>/tmp/snapshot-v242/codex",
+        ),
+        (
+            "\"/w/.local-state/target2/debug\"",
+            "\"/w/.local-state/target2/debug\"",
+        ),
+        (
+            "\"/v/w/.local-state/target/debug\"",
+            "\"/v/w/.local-state/target/debug\"",
+        ),
+    ] {
+        assert_eq!(without_target(text, target), read, "{text}");
+    }
 }
