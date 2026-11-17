@@ -315,6 +315,43 @@ fn hosts_are_exact_declared_and_used() {
     assert_eq!(refused(&fragment).0, "app_plugin_url_invalid");
 }
 
+/// V250-H4 sec N4: a plugin URL whose host is a cloud metadata address, in any spelling the
+/// URL reader turns into one, is refused before any call can dial it, while a private
+/// address that is not one still reads.
+#[test]
+fn a_metadata_address_is_refused_as_a_plugin_host() {
+    let at = |url_host: &str, declared: &str| {
+        with(
+            "url: https://api.acme.example/v1/embed",
+            &format!("url: https://{url_host}/v1/embed"),
+        )
+        .replacen(
+            "hosts: [api.acme.example]",
+            &format!("hosts: [{declared}]"),
+            1,
+        )
+    };
+    for (url_host, declared) in [
+        ("169.254.169.254", "169.254.169.254"),
+        ("0xa9fea9fe", "169.254.169.254"),
+        ("100.100.100.200", "100.100.100.200"),
+        ("168.63.129.16", "168.63.129.16"),
+        ("[fd00:ec2::254]", "\"[fd00:ec2::254]\""),
+        ("[::ffff:169.254.169.254]", "\"[::ffff:a9fe:a9fe]\""),
+    ] {
+        assert_eq!(
+            refused(&at(url_host, declared)),
+            ("app_plugin_host_metadata".into(), Some("http.url".into())),
+            "{url_host}"
+        );
+    }
+    let private = parse(&at("10.0.0.5", "10.0.0.5")).expect("a private address reads");
+    let Runs::Http(http) = &private.runs else {
+        panic!("http");
+    };
+    assert_eq!(http.url.as_str(), "https://10.0.0.5/v1/embed");
+}
+
 #[test]
 fn secrets_are_declared_used_and_only_in_headers() {
     let undeclared = with("{{secret.api_key}}", "{{secret.other}}");

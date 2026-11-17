@@ -343,6 +343,10 @@ const PLAIN: &[(&str, &str)] = &[
         "a host is an exact lowercase name, with no * or port.",
     ),
     (
+        "app_plugin_host_metadata",
+        "the URL's host is a cloud metadata address, which no plugin may call.",
+    ),
+    (
         "app_plugin_host_undeclared",
         "the URL's host is not in hosts.",
     ),
