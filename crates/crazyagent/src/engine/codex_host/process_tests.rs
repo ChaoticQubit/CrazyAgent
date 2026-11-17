@@ -1172,3 +1172,189 @@ async fn every_master_backend_maps_the_master_step_limit_to_one_stop() {
     }
     assert_eq!(steps_of_cause(&cause), Some(50));
 }
+
+/// Measurement row for V243-WAKEUP-MEASURE B, run alone: a stand-in app-server answers its
+/// turn request with one line, then stays quiet for 60 s with its pipes open, so custody and
+/// the waiting reader hold a running turn. Prints `wake-row ready pid=<pid>` for a sampler and
+/// asserts only that the turn was still running when the process was closed.
+#[tokio::test]
+#[ignore = "measurement row: run alone for V243-WAKEUP-MEASURE"]
+async fn wake_idle_codex_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let mut command = selected_command("/bin/sh", root.path());
+    command.arg("-c").arg(
+        "IFS= read -r turn; printf '%s\\n' '{\"method\":\"turn/started\"}'; exec /bin/sleep 120",
+    );
+    let limits = ResourceBudget {
+        wall_time_ms: 300_000,
+        ..budget()
+    };
+    let mut process = CodexHostProcess::spawn(command, &limits).await.unwrap();
+    process
+        .send(b"{\"method\":\"turn/start\"}\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    while !answer.ends_with(b"\n") {
+        let output = tokio::time::timeout(Duration::from_secs(10), process.next_output())
+            .await
+            .expect("the stand-in never answered its turn")
+            .unwrap();
+        let CodexHostOutput::Stdout(bytes) = output else {
+            panic!("the stand-in ended before its turn went quiet");
+        };
+        answer.extend(bytes);
+    }
+    assert_eq!(answer, b"{\"method\":\"turn/started\"}\n");
+    eprintln!("wake-row ready pid={}", std::process::id());
+    let quiet = tokio::time::timeout(Duration::from_secs(60), process.next_output()).await;
+    assert!(quiet.is_err(), "the turn ended before the close");
+    let status = process.close().await.unwrap();
+    assert!(!status.success());
+}
+
+/// A stand-in Codex harness that answers one turn with `turn/started`, then stays quiet.
+const QUIET_TURN: &str =
+    "IFS= read -r turn; printf '%s\\n' '{\"method\":\"turn/started\"}'; exec /bin/sleep 120";
+
+/// Starts a stand-in Codex harness running `script` under `/bin/sh -c`, with a 300 s clock
+/// and room for 4 MiB of output. Inputs: the temporary root and the script. Output: the
+/// running process.
+async fn stand_in(root: &Path, script: &str) -> CodexHostProcess {
+    let mut command = selected_command("/bin/sh", root);
+    command.arg("-c").arg(script);
+    let limits = ResourceBudget {
+        output_bytes: 4 * 1024 * 1024,
+        wall_time_ms: 300_000,
+        ..budget()
+    };
+    CodexHostProcess::spawn(command, &limits).await.unwrap()
+}
+
+/// Sends a [`QUIET_TURN`] stand-in its turn and reads its whole answer line.
+/// Input: the process. Output: none.
+async fn start_quiet_turn(process: &mut CodexHostProcess) {
+    process
+        .send(b"{\"method\":\"turn/start\"}\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    while !answer.ends_with(b"\n") {
+        let output = tokio::time::timeout(Duration::from_secs(10), process.next_output())
+            .await
+            .expect("the stand-in never answered its turn")
+            .unwrap();
+        let CodexHostOutput::Stdout(bytes) = output else {
+            panic!("the stand-in ended before its turn went quiet");
+        };
+        answer.extend(bytes);
+    }
+    assert_eq!(answer, b"{\"method\":\"turn/started\"}\n");
+}
+
+/// Counts the passes of a process's custody worker and of its reader while the reader waits
+/// one second for output that never comes, after waiting `settle`.
+/// Inputs: the process and the settle time. Output: the custody and reader passes.
+async fn passes_while_quiet(process: &mut CodexHostProcess, settle: Duration) -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+
+    tokio::time::sleep(settle).await;
+    let shared = process.shared();
+    let custody = shared.custody_passes.load(Ordering::SeqCst);
+    let reader = shared.host_passes.load(Ordering::SeqCst);
+    let quiet = tokio::time::timeout(Duration::from_secs(1), process.next_output()).await;
+    assert!(quiet.is_err(), "the stand-in was not quiet");
+    (
+        shared.custody_passes.load(Ordering::SeqCst) - custody,
+        shared.host_passes.load(Ordering::SeqCst) - reader,
+    )
+}
+
+/// Waits until a process's custody worker makes its next pass, at most 2 s.
+/// Inputs: the shared state and the pass count to move past. Output: how long it took.
+async fn next_custody_pass(shared: &super::process::ProcessShared, before: u64) -> Duration {
+    use std::sync::atomic::Ordering;
+
+    let started = Instant::now();
+    while shared.custody_passes.load(Ordering::SeqCst) == before
+        && started.elapsed() < Duration::from_secs(2)
+    {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    started.elapsed()
+}
+
+#[tokio::test]
+async fn a_quiet_codex_turn_wakes_custody_and_its_reader_a_few_times_a_second() {
+    let root = tempfile::tempdir().unwrap();
+    let mut process = stand_in(root.path(), QUIET_TURN).await;
+    start_quiet_turn(&mut process).await;
+    let (custody, reader) = passes_while_quiet(&mut process, Duration::from_millis(300)).await;
+    assert!(custody <= 10, "{custody} custody passes in a quiet second");
+    assert!(reader <= 10, "{reader} reader passes in a quiet second");
+    let status = process.close().await.unwrap();
+    assert!(!status.success());
+}
+
+#[tokio::test]
+async fn closing_a_quiet_codex_turn_wakes_its_custody_at_once() {
+    use std::sync::atomic::Ordering;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut process = stand_in(root.path(), QUIET_TURN).await;
+    start_quiet_turn(&mut process).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let shared = process.shared();
+    let before = shared.custody_passes.load(Ordering::SeqCst);
+    let (closed, took) = tokio::join!(process.close(), next_custody_pass(&shared, before));
+    assert!(!closed.unwrap().success());
+    assert!(
+        took < Duration::from_millis(50),
+        "custody saw the stop after {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_codex_harness_that_closed_its_pipes_is_waited_for_without_spinning() {
+    let root = tempfile::tempdir().unwrap();
+    let mut process = stand_in(root.path(), "exec >&- 2>&-; exec /bin/sleep 120").await;
+    let (custody, reader) = passes_while_quiet(&mut process, Duration::from_millis(600)).await;
+    assert!(
+        custody <= 10,
+        "{custody} custody passes in a second with no pipe open"
+    );
+    assert!(
+        reader <= 10,
+        "{reader} reader passes in a second with no pipe open"
+    );
+    let status = process.close().await.unwrap();
+    assert!(!status.success());
+}
+
+#[tokio::test]
+async fn a_codex_harness_whose_output_fills_the_queue_is_waited_for_without_spinning() {
+    use std::sync::atomic::Ordering;
+
+    let root = tempfile::tempdir().unwrap();
+    let mut process = stand_in(root.path(), "exec /usr/bin/yes").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let shared = process.shared();
+    let before = shared.custody_passes.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let passes = shared.custody_passes.load(Ordering::SeqCst) - before;
+    assert!(
+        passes <= 10,
+        "{passes} custody passes in a second with the queue full"
+    );
+    let before = shared.custody_passes.load(Ordering::SeqCst);
+    let started = Instant::now();
+    let output = process.next_output().await.unwrap();
+    assert!(matches!(output, CodexHostOutput::Stdout(_)));
+    let took = started.elapsed() + next_custody_pass(&shared, before).await;
+    assert!(
+        took < Duration::from_millis(50),
+        "custody read again {took:?} after the reader made room"
+    );
+    let status = process.close().await.unwrap();
+    assert!(!status.success());
+}
