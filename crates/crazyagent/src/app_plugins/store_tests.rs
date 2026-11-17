@@ -154,6 +154,74 @@ fn cells(db: &rusqlite::Connection, table: &str) -> Vec<String> {
 }
 
 #[test]
+fn bundled_plugins_list_first_with_only_the_local_one_on() {
+    let case = case();
+    let listing = list(&case.db, &case.root).unwrap();
+    let names: Vec<&str> = listing
+        .plugins
+        .iter()
+        .map(|plugin| plugin.name.as_str())
+        .collect();
+    assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
+    assert!(!listing.more);
+    let local = plugin(&listing, "local");
+    assert_eq!(
+        (local.origin, &local.status, local.enabled),
+        (Origin::Bundled, &PluginStatus::Ready, true)
+    );
+    let openai = plugin(&listing, "openai");
+    assert_eq!(
+        (&openai.status, openai.enabled),
+        (&PluginStatus::NeedsKey, false)
+    );
+    assert_eq!(openai.secrets[0].binding, Binding::None);
+    let ollama = plugin(&listing, "ollama");
+    assert_eq!(
+        (&ollama.status, ollama.enabled),
+        (&PluginStatus::Ready, false)
+    );
+    assert!(!case.root.join(crate::app_plugins::FOLDER).exists());
+}
+
+/// H4: what an older plugin of the owner's left under a name a bundled plugin now has is
+/// dropped the next time the store is used: its binding with the key entered for it, its
+/// switch and its trust record. The bundled plugin then lists as shipped.
+#[test]
+fn leftovers_of_an_older_plugin_under_a_bundled_name_are_dropped() {
+    let case = case();
+    let reference = CredentialRef::new("plugin-key-leftover").unwrap();
+    crate::storage::accounts::replace_key_in(
+        &case.root,
+        crate::storage::accounts::PLUGIN_KEYS,
+        &reference,
+        b"sk-leftover-key-01".to_vec(),
+    )
+    .unwrap();
+    case.db
+        .execute_batch(&format!(
+            "INSERT INTO app_plugin_trust (name, sha256, hosts, trusted_ms)
+             VALUES ('openai', '{}', 'old.example', 1);
+             INSERT INTO app_plugin_state (name, enabled) VALUES ('openai', 1);
+             INSERT INTO app_plugin_secrets (plugin, secret, source, reference)
+             VALUES ('openai', 'api_key', 'key', 'plugin-key-leftover');",
+            "0".repeat(64)
+        ))
+        .unwrap();
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let listing = list(&case.db, &case.root).unwrap();
+    let openai = plugin(&listing, "openai");
+    assert_eq!(
+        (openai.origin, &openai.status, openai.enabled),
+        (Origin::Bundled, &PluginStatus::NeedsKey, false)
+    );
+    assert_eq!(openai.secrets[0].binding, Binding::None);
+    for table in ["app_plugin_trust", "app_plugin_state", "app_plugin_secrets"] {
+        assert!(cells(&case.db, table).is_empty(), "{table}");
+    }
+    assert!(plugin_keys(&case).is_empty());
+}
+
+#[test]
 fn a_preview_shows_the_trust_screen_and_saves_nothing() {
     let case = case();
     let Preview::Ready { trust } = preview(&case.root, ACME).unwrap() else {
@@ -171,6 +239,11 @@ fn a_preview_shows_the_trust_screen_and_saves_nothing() {
         (problem.code.as_str(), problem.line),
         ("app_plugin_yaml_tab", Some(2))
     );
+    let bundled_name = ACME.replace("name: acme", "name: local");
+    let Preview::Refused { problem } = preview(&case.root, &bundled_name).unwrap() else {
+        panic!("refused");
+    };
+    assert_eq!(problem.code, "app_plugin_name_taken");
 }
 
 #[test]
@@ -211,6 +284,11 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     add(&case.db, &case.root, &newer, &sha(&newer), true, 3).unwrap();
     let listing = list(&case.db, &case.root).unwrap();
     assert_eq!(plugin(&listing, "acme").version, "1.1.0");
+    let bundled = ACME.replace("name: acme", "name: openai");
+    assert_eq!(
+        code(add(&case.db, &case.root, &bundled, &sha(&bundled), true, 4)),
+        "app_plugin_name_taken"
+    );
     assert_eq!(
         code(add(
             &case.db,
@@ -269,6 +347,11 @@ fn refused_and_unsafe_files_are_listed_with_their_problem_and_other_files_ignore
     let case = case();
     drop_in(&case, "bad.yaml", "a: 1\n\tb: 2\n");
     drop_in(&case, "other.yaml", NEAR);
+    drop_in(
+        &case,
+        "local.yaml",
+        &NEAR.replace("name: near", "name: local"),
+    );
     drop_in(&case, "notes.txt", "x");
     drop_in(&case, ".hidden.yaml", NEAR);
     let folder = case.root.join(crate::app_plugins::FOLDER);
@@ -287,7 +370,17 @@ fn refused_and_unsafe_files_are_listed_with_their_problem_and_other_files_ignore
         .filter(|plugin| plugin.origin == Origin::User)
         .map(|plugin| plugin.name.as_str())
         .collect();
-    assert_eq!(users, ["bad", "linked", "other"]);
+    assert_eq!(users, ["bad", "linked", "local", "other"]);
+    let user_local = listing
+        .plugins
+        .iter()
+        .find(|plugin| plugin.origin == Origin::User && plugin.name == "local")
+        .unwrap();
+    assert!(matches!(
+        &user_local.status,
+        PluginStatus::Refused { problem } if problem.code == "app_plugin_name_taken"
+    ));
+    assert!(user_local.runs.is_none());
     assert!(plugin(&listing, "bad").runs.is_none());
 }
 
@@ -326,7 +419,7 @@ fn the_folder_lists_at_most_its_cap_and_says_there_are_more() {
 }
 
 #[test]
-fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_an_unknown_one() {
+fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_ones() {
     let case = case();
     add(&case.db, &case.root, ACME, &sha(ACME), false, 1).unwrap();
     set_key(
@@ -350,12 +443,52 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_an_unknown_one() {
     let listing = list(&case.db, &case.root).unwrap();
     assert!(listing.plugins.iter().all(|plugin| plugin.name != "acme"));
     assert_eq!(
+        code(remove(&case.db, &case.root, "openai")),
+        "app_plugin_bundled"
+    );
+    let shadowed = drop_in(
+        &case,
+        "local.yaml",
+        &NEAR.replace("name: near", "name: local"),
+    );
+    remove(&case.db, &case.root, "local").unwrap();
+    assert!(!shadowed.exists());
+    assert_eq!(
+        code(remove(&case.db, &case.root, "local")),
+        "app_plugin_bundled"
+    );
+    assert_eq!(
         code(remove(&case.db, &case.root, "missing")),
         "app_plugin_not_found"
     );
     add(&case.db, &case.root, ACME, &sha(ACME), false, 2).unwrap();
     let listing = list(&case.db, &case.root).unwrap();
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
+}
+
+#[test]
+fn bundled_plugins_turn_on_and_off_and_unknown_names_are_refused() {
+    let case = case();
+    set_enabled(&case.db, &case.root, "ollama", true).unwrap();
+    set_enabled(&case.db, &case.root, "local", false).unwrap();
+    let listing = list(&case.db, &case.root).unwrap();
+    assert!(plugin(&listing, "ollama").enabled);
+    assert!(!plugin(&listing, "local").enabled);
+    assert_eq!(
+        code(set_enabled(&case.db, &case.root, "nope", true)),
+        "app_plugin_not_found"
+    );
+    assert_eq!(code(ready(&case.db, &case.root, "local")), "app_plugin_off");
+    assert_eq!(
+        code(trust_file(
+            &case.db,
+            &case.root,
+            "openai",
+            &"0".repeat(64),
+            1
+        )),
+        "app_plugin_bundled"
+    );
 }
 
 #[test]
@@ -535,6 +668,12 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
     let case = case();
     trusted(&case, NEAR);
     trusted(&case, ACME);
+    let local = ready(&case.db, &case.root, "local").unwrap();
+    assert_eq!(
+        (local.manifest.name.as_str(), local.origin),
+        ("local", Origin::Bundled)
+    );
+    assert!(local.bindings.is_empty());
     let near = ready(&case.db, &case.root, "near").unwrap();
     assert_eq!(
         (near.manifest.name.as_str(), near.origin),
@@ -560,7 +699,7 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
 #[test]
 fn every_loopback_plugin_port_is_listed_for_the_sandbox_and_an_unsafe_folder_fails_closed() {
     let case = case();
-    assert!(loopback_ports(&case.root).unwrap().is_empty());
+    assert_eq!(loopback_ports(&case.root).unwrap(), [11434]);
     drop_in(&case, "near.yaml", NEAR);
     drop_in(
         &case,
@@ -575,7 +714,7 @@ fn every_loopback_plugin_port_is_listed_for_the_sandbox_and_an_unsafe_folder_fai
     );
     drop_in(&case, "acme.yaml", ACME);
     drop_in(&case, "bad.yaml", "a: 1\n\tb: 2\n");
-    assert_eq!(loopback_ports(&case.root).unwrap(), [1234, 9000]);
+    assert_eq!(loopback_ports(&case.root).unwrap(), [1234, 9000, 11434]);
     let folder = case.root.join(crate::app_plugins::FOLDER);
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(code(loopback_ports(&case.root)), "app_plugin_folder_unsafe");
@@ -596,7 +735,7 @@ fn a_port_zero_plugin_and_files_past_the_cap_are_refused_while_the_ports_still_l
         PluginStatus::Refused { problem } => assert_eq!(problem.code, "app_plugin_port_invalid"),
         other => panic!("expected a refused plugin, got {other:?}"),
     }
-    assert!(loopback_ports(&case.root).unwrap().is_empty());
+    assert_eq!(loopback_ports(&case.root).unwrap(), [11434]);
     let cap = crate::app_plugins::USER_PLUGINS_MAX;
     for index in 0..=cap {
         let name = format!("p{index:03}");
@@ -609,7 +748,7 @@ fn a_port_zero_plugin_and_files_past_the_cap_are_refused_while_the_ports_still_l
         );
     }
     let ports = loopback_ports(&case.root).unwrap();
-    assert_eq!(ports.len(), cap);
+    assert_eq!(ports.len(), cap + 1);
     assert!(ports.contains(&(20_000 + cap as u16 - 1)));
     assert!(!ports.contains(&(20_000 + cap as u16)));
     assert_eq!(
@@ -671,8 +810,8 @@ fn a_loopback_plugin_port_inside_the_handed_out_range_is_refused_alone_with_the_
 fn on_linux_a_plugin_on_a_port_linux_hands_out_is_refused_and_left_out_of_the_kept_ports() {
     let range = crate::sandbox::linux::read_picked_ports().expect("this Linux names its range");
     assert!(
-        *range.start() > 9_000,
-        "the test needs the near plugin's port below the range"
+        *range.start() > 11_434,
+        "the test needs the bundled port below the range"
     );
     let port = *range.start();
     let case = case();
@@ -688,7 +827,7 @@ fn on_linux_a_plugin_on_a_port_linux_hands_out_is_refused_and_left_out_of_the_ke
         other => panic!("expected a refused plugin, got {other:?}"),
     }
     assert_eq!(plugin(&listing, "near").status, PluginStatus::NeedsReview);
-    assert_eq!(loopback_ports(&case.root).unwrap(), [9000]);
+    assert_eq!(loopback_ports(&case.root).unwrap(), [9000, 11434]);
     assert_eq!(
         code(ready(&case.db, &case.root, "handed")),
         "app_plugin_refused"
@@ -713,7 +852,7 @@ fn off_linux_a_plugin_on_a_port_the_system_hands_out_stays_usable() {
     drop_in(&case, "handed.yaml", &near_on(50_000));
     let listing = list(&case.db, &case.root).unwrap();
     assert_eq!(plugin(&listing, "handed").status, PluginStatus::NeedsReview);
-    assert_eq!(loopback_ports(&case.root).unwrap(), [50000]);
+    assert_eq!(loopback_ports(&case.root).unwrap(), [11434, 50000]);
     assert!(matches!(
         preview(
             &case.root,
