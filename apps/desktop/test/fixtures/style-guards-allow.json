@@ -29,7 +29,7 @@
     "src/screens/team/agent-messages.css": 2,
     "src/screens/team/team-graph.css": 7,
     "src/screens/terminals/terminals.css": 2,
-    "src/style.css": 9
+    "src/style.css": 7
   },
   "fontSize": {
     "src/screens/changes/changes.css": 1,
@@ -45,6 +45,6 @@
     "src/screens/team/agent-messages.css": 4,
     "src/screens/team/team-graph.css": 17,
     "src/screens/terminals/terminals.css": 5,
-    "src/style.css": 22
+    "src/style.css": 19
   }
 }
