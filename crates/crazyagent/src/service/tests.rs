@@ -809,11 +809,9 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
 /// Changes who may write `path` with icacls. Inputs: the path and the icacls arguments.
 #[cfg(windows)]
 fn icacls(path: &Path, change: &[&str]) {
-    let changed = std::process::Command::new("icacls")
-        .arg(path)
-        .args(change)
-        .output()
-        .unwrap();
+    let changed =
+        crate::spawn_gate::output(std::process::Command::new("icacls").arg(path).args(change))
+            .unwrap();
     assert!(
         changed.status.success(),
         "{}",
