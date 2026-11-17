@@ -131,6 +131,16 @@ jobs:
           ref: ${{ env.RCLI_SOURCE_REVISION }}
           path: .local-state/tools/rcli-source
           persist-credentials: false
+      - name: Check this runner reads the prebuilt app icon
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          car=apps/desktop/src-tauri/icons/Assets.car
+          info="$(assetutil --info "$car")" || { echo "::error::this runner's assetutil cannot read $car, so Tauri sets no CFBundleIconName (DEC-181)"; exit 1; }
+          grep -Eq '"AssetType"[[:space:]]*:[[:space:]]*"Icon Image"' <<< "$info" || { echo "::error::this runner's assetutil lists no Icon Image in $car, so Tauri sets no CFBundleIconName (DEC-181)"; exit 1; }
+          grep -Eq '"Name"[[:space:]]*:[[:space:]]*"Icon"' <<< "$info" || { echo "::error::this runner's assetutil names no Icon in $car, so Tauri sets no CFBundleIconName (DEC-181)"; exit 1; }
+          grep -q '"NSAppearanceNameDarkAqua"' <<< "$info" || { echo "::error::this runner's assetutil shows no dark look in $car (DEC-181)"; exit 1; }
+          echo "app icon: this runner reads $car with its Icon Image and dark look"
       - if: runner.environment == 'github-hosted'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
