@@ -62,8 +62,8 @@ export async function stopThenMove(id: string, mode: AddFolderMode, overrides: A
  * (DEC-198, leader 16:30). Inputs: the overrides, the switch and the folder read. Output: the
  * overrides to send. */
 export function moveOverrides(overrides: AddOverride[], everything: boolean, size: Loaded<FolderSize> | null): AddOverride[] {
-  void size;
-  return withEverything(overrides, everything);
+  const unread = size !== null && size.kind !== "loading" && size.kind !== "ok";
+  return withEverything(overrides, everything || unread);
 }
 
 /** The question before a project moves: what happens to the team and its work, Move or Copy,
@@ -103,6 +103,7 @@ export function MoveHomeDialog({ open, name, folder, home, way, size, busy, prob
     {!ready && <p className="pj-secondary" role="status">Reading the folder...</p>}
     {ready && (line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>)}
     {leftInIcloud({ skipped: read?.skipped ?? [], skippedMore: read?.skipped_more ?? null, everything, onEverything, source: folder, job: way })}
+    {ready && read === null && <Notice tone="info">CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.</Notice>}
     {way === "copy" && <Notice tone="info">The copy becomes the project. The old folder stays where it is, with the agents' old copies in it.</Notice>}
     {way === "copy" && (read?.worktrees ?? 0) > 0 && <Notice tone="info">{worktreesLine(read?.worktrees ?? 0)}</Notice>}
     <Notice tone="warn">{loss.map((text) => <p key={text}>{text}</p>)}</Notice>
@@ -163,7 +164,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     if (busy) return;
     setBusy(true);
     setProblem("");
-    const { stopped, result } = await stopThenMove(data.id, chosen, withEverything(overrides, everything), { stop: setTeamStopped, move: moveProjectHome });
+    const { stopped, result } = await stopThenMove(data.id, chosen, moveOverrides(overrides, everything, size), { stop: setTeamStopped, move: moveProjectHome });
     setBusy(false);
     setAsking(false);
     setRefused(null);

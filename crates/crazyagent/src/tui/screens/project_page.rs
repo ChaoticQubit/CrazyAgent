@@ -26,7 +26,6 @@ use crate::github::{GitHubPublishPlan, GitHubPublishStep};
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
-use crate::projects_home::icloud::SkippedFolders;
 use crate::projects_home::job::{JobKind, JobSubject};
 use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
@@ -1466,11 +1465,12 @@ impl ProjectPage {
         }
         if self.move_read_sent.as_ref() == Some(&event.query) {
             self.move_read_sent = None;
-            let left = match &event.result {
-                Ok(IntakeView::FolderSize(measured)) => measured.skipped.clone(),
-                _ => SkippedFolders::default(),
-            };
-            self.screen.move_read(left);
+            match &event.result {
+                Ok(IntakeView::FolderSize(measured)) => {
+                    self.screen.move_read(measured.skipped.clone())
+                }
+                _ => self.screen.move_read_failed(),
+            }
             return true;
         }
         if self

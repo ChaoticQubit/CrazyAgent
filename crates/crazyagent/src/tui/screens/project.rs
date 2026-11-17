@@ -711,6 +711,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_move: bool,
     pub move_left: Option<crate::projects_home::icloud::SkippedFolders>,
     pub move_everything: bool,
+    pub move_unread: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
     remove_everything: bool,
@@ -809,6 +810,7 @@ impl ProjectScreen {
             confirm_move: false,
             move_left: None,
             move_everything: false,
+            move_unread: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
             remove_everything: false,
@@ -2505,7 +2507,12 @@ impl ProjectScreen {
 
     /// Takes a folder read for the move ask that failed: the move then downloads everything, as
     /// it never leaves folders in iCloud it did not show first (DEC-198, leader 16:30).
-    pub fn move_read_failed(&mut self) {}
+    pub fn move_read_failed(&mut self) {
+        if self.confirm_move {
+            self.move_left = Some(crate::projects_home::icloud::SkippedFolders::default());
+            self.move_unread = true;
+        }
+    }
 
     /// Answers one key in the move ask: m moves the project into the projects home, c copies
     /// it there, both only once the folder read landed, Space switches Download everything
@@ -2529,8 +2536,8 @@ impl ProjectScreen {
             KeyCode::Char('c') => AddMode::Copy,
             _ => return ProjectReply::Handled,
         };
-        let everything = self.move_everything;
-        assert!(leaves || !everything);
+        assert!(leaves || !self.move_everything);
+        let everything = self.move_everything || self.move_unread;
         self.close_move();
         ProjectReply::MoveHome(mode, everything)
     }
@@ -2540,6 +2547,7 @@ impl ProjectScreen {
         self.confirm_move = false;
         self.move_left = None;
         self.move_everything = false;
+        self.move_unread = false;
     }
 
     /// Closes the remove ask and forgets its preview, choice and typed name.
@@ -2703,12 +2711,16 @@ impl ProjectScreen {
             }
             KeyCode::Char('M') => {
                 if self.setup.is_none() {
-                    self.problem = Some("Still loading the project folder. Try again.".into());
+                    self.problem = Some(match self.setup_missing {
+                        true => plain_problem("project_setup_missing"),
+                        false => "Still loading the project folder. Try again.".into(),
+                    });
                     return ProjectReply::Handled;
                 }
                 self.confirm_move = true;
                 self.move_left = None;
                 self.move_everything = false;
+                self.move_unread = false;
                 ProjectReply::MoveRead
             }
             KeyCode::Char('i') => ProjectReply::Process,
@@ -3077,7 +3089,17 @@ impl ProjectScreen {
             self.confirm_move,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
-        assert!(self.confirm_move || (self.move_left.is_none() && !self.move_everything));
+        assert!(
+            self.confirm_move
+                || (self.move_left.is_none() && !self.move_everything && !self.move_unread)
+        );
+        assert!(
+            !self.move_unread
+                || self
+                    .move_left
+                    .as_ref()
+                    .is_some_and(crate::projects_home::icloud::SkippedFolders::is_empty)
+        );
         if self.remove_choice == RemoveChoice::Everything {
             assert!(self.confirm_remove);
             assert!(

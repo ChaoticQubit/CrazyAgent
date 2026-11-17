@@ -590,6 +590,9 @@ pub(in crate::tui) const MOVE_ASK_TEAM: &str = "Stop the team first (Stop all on
 /// What the move ask says about its two ways.
 pub(in crate::tui) const MOVE_ASK_WAYS: &str = "Move takes the folder into your CrazyAgent folder. Copy leaves the old folder where it is and the project uses the copy.";
 
+/// What the move ask says when its folder read failed, so the move downloads everything.
+pub(in crate::tui) const MOVE_ASK_UNREAD: &str = "CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.";
+
 /// Draws the move ask: that the team must be stopped and its work follows; once the folder
 /// read lands, the rebuildable folders a move leaves in iCloud, as many named as fit the
 /// rows, with the Download everything switch; then Move, Copy or keeping the project where
@@ -619,6 +622,14 @@ fn move_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) -> (
         return (body, keep.to_vec());
     };
     let mut help = vec![("m", "Move"), ("c", "Copy")];
+    if screen.move_unread {
+        body.extend(
+            wrap_words(MOVE_ASK_UNREAD, inner)
+                .iter()
+                .map(|line| Row::of(line.as_str(), look.muted)),
+        );
+        body.push(Row::default());
+    }
     if !left.is_empty() {
         let fixed = body.len() + 2;
         let place = folder(screen);
@@ -635,8 +646,11 @@ fn move_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) -> (
             }
             cap -= 1;
         };
+        let tight = fixed + lines.len() > room;
         body.extend(lines.iter().map(|line| Row::of(line.as_str(), look.muted)));
-        body.push(Row::default());
+        if !tight {
+            body.push(Row::default());
+        }
         help.push(("Space", "Download everything"));
     }
     help.extend(keep);
