@@ -212,6 +212,55 @@ fn exe(case: &Case, program: &str, args: &[&str]) -> Output {
     output(agent(&case.profile, &case.project, &system(program)), args)
 }
 
+const CALL: &str = "CRAZYAGENT_FILE_CALL";
+const CHILD: [&str; 5] = [
+    "file_call_child",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+];
+
+/// Runs one file call through the Windows API inside the case's container: this test binary,
+/// copied into the agent's home, started through the helper as [`file_call_child`]. `cmd`'s
+/// `del`, `ren` and `move` fail in any AppContainer (DEC-193 step 0c, B1), so a delete or
+/// rename the boundary allows or refuses is only seen through the API. Inputs: the case and
+/// the call, such as `["rename", from, to]`. Output: what the child printed and its exit.
+fn call(case: &Case, step: &[&str]) -> Output {
+    assert!(!step.is_empty() && step.len() <= 3);
+    let probe = case.home.join("file-call.exe");
+    if !probe.is_file() {
+        fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+    }
+    let mut command = agent(&case.profile, &case.project, &plain(&probe));
+    command.env(CALL, step.join("|"));
+    output(command, &CHILD)
+}
+
+/// The child [`call`] starts: makes the one call named in its environment and exits 1 when
+/// Windows refuses it; without that variable, as in a normal test run, it does nothing.
+/// Calls: `delete`, `rename` (replacing the target), `rmdir`, `rmtree` and `mkdir`.
+#[test]
+fn file_call_child() {
+    let Ok(line) = std::env::var(CALL) else {
+        return;
+    };
+    let parts: Vec<&str> = line.split('|').collect();
+    let done = match parts.as_slice() {
+        ["delete", path] => fs::remove_file(path),
+        ["rename", from, to] => fs::rename(from, to),
+        ["rmdir", path] => fs::remove_dir(path),
+        ["rmtree", path] => fs::remove_dir_all(path),
+        ["mkdir", path] => fs::create_dir(path),
+        _ => panic!("unknown file call {line}"),
+    };
+    if let Err(error) = done {
+        println!("CALL {line} => {error}");
+        std::process::exit(1);
+    }
+    println!("CALL {line} => done");
+}
+
 #[test]
 fn an_agent_reads_its_project_but_not_a_secret_under_the_owners_home() {
     let case = case("crazyagent.test.read");
@@ -253,7 +302,7 @@ fn an_agent_writes_in_its_roots_but_not_outside_them_or_into_protected_paths() {
     run(&case, &["/C", "echo", "home>", &plain(&home)]);
     run(&case, &["/C", "echo", "escape>", &plain(&escape)]);
     let changed = run(&case, &["/C", "echo", "changed>", &plain(&brief)]);
-    let deleted = run(&case, &["/C", "del", "/F", "/Q", &plain(&brief)]);
+    let deleted = call(&case, &["delete", &plain(&brief)]);
     assert!(fs::read_to_string(&inside).unwrap().starts_with("inside"));
     assert!(fs::read_to_string(&home).unwrap().starts_with("home"));
     assert!(!escape.exists());
@@ -358,7 +407,7 @@ fn a_narrower_profile_takes_back_what_the_one_before_granted() {
     assert!(String::from_utf8_lossy(&read.stdout).contains("first"));
     let second = case.outside.join("second.txt");
     run(&case, &["/C", "echo", "second>", &plain(&second)]);
-    run(&case, &["/C", "del", "/F", "/Q", &plain(&first)]);
+    call(&case, &["delete", &plain(&first)]);
     assert!(
         !second.exists(),
         "modify narrowed to read and run takes back writes"
@@ -447,13 +496,14 @@ fn at(case: &Case, relative: &str) -> PathBuf {
 
 /// A case whose project is a git work tree guarded the way the engine guards one on Windows:
 /// `context`, `.crazyagent\context`, `.crazyagent\instructions.md`, `.git\hooks`,
-/// `.git\config` and `.git\modules` read-only (modules missing, as in most repositories), plus
-/// a hidden `.vault`. Inputs: the container name and the project paths to remove before the
-/// first launch. Output: the case with that profile installed.
+/// `.git\config` and `.git\modules` read-only, `.git\modules` present as the engine makes it
+/// before each launch, plus a hidden `.vault`. Inputs: the container name and the project
+/// paths to remove before the first launch. Output: the case with that profile installed.
 fn repo(container: &str, missing: &[&str]) -> Case {
     let mut case = case(container);
     for folder in [
         r".git\hooks",
+        r".git\modules",
         r".git\objects\pack",
         r".git\refs\heads",
         r".git\logs",
@@ -547,11 +597,24 @@ fn read_only_paths_refuse_every_change_while_the_project_stays_writable() {
         );
     }
     let sample = path(r".git\hooks\pre-commit.sample");
-    let deleted = run(&case, &["/C", "del", "/F", "/Q", &plain(&sample)]);
+    let deleted = call(&case, &["delete", &plain(&sample)]);
     checks.expect(sample.is_file(), "a hook is not deleted", &deleted);
+    let config = path(r".git\config");
+    let lock = path(r".git\config.lock");
+    let made = run(&case, &["/C", "echo", "planted>", &plain(&lock)]);
+    checks.expect(starts(&lock, "planted"), "config.lock is made", &made);
+    let replaced = call(&case, &["rename", &plain(&lock), &plain(&config)]);
+    checks.expect(
+        reads(&config, "[core]\n\tbare = false\n"),
+        "config.lock is not renamed over config",
+        &replaced,
+    );
+    let removed = call(&case, &["delete", &plain(&config)]);
+    checks.expect(config.is_file(), "config is not deleted", &removed);
     for relative in [r".git\hooks", "context", r".crazyagent\context"] {
         let folder = path(relative);
-        let output = run(&case, &["/C", "ren", &plain(&folder), "moved"]);
+        let moved = plain(&folder.with_file_name("moved"));
+        let output = call(&case, &["rename", &plain(&folder), &moved]);
         checks.expect(
             folder.is_dir() && !folder.with_file_name("moved").exists(),
             &format!("{relative} is not renamed"),
@@ -586,7 +649,7 @@ fn anchored_folders_stay_in_place_while_git_writes_its_own_files() {
         ));
         let made = run(&case, &["/C", "echo", &format!("{mark}>"), &plain(&lock)]);
         checks.expect(starts(&lock, mark), &format!("{name}.lock is made"), &made);
-        let moved = run(&case, &["/C", "move", "/Y", &plain(&lock), &plain(&target)]);
+        let moved = call(&case, &["rename", &plain(&lock), &plain(&target)]);
         checks.expect(
             starts(&target, mark) && !lock.exists(),
             &format!("{name}.lock is renamed over {name}"),
@@ -612,11 +675,16 @@ fn anchored_folders_stay_in_place_while_git_writes_its_own_files() {
     checks.expect(rebase.is_dir(), "a rebase folder is made", &made);
     let stepped = run(&case, &["/C", "echo", "step>", &plain(&step)]);
     checks.expect(starts(&step, "step"), "a rebase step is written", &stepped);
-    let removed = run(&case, &["/C", "rd", "/S", "/Q", &plain(&rebase)]);
+    let done = call(&case, &["delete", &plain(&step)]);
+    checks.expect(!step.exists(), "a rebase step is deleted", &done);
+    let removed = call(&case, &["rmdir", &plain(&rebase)]);
     checks.expect(!rebase.exists(), "the rebase folder is removed", &removed);
+    let hooks = path(r".git\hooks");
+    let moved = call(&case, &["rename", &plain(&hooks), &plain(&path("hooks"))]);
+    checks.expect(hooks.is_dir(), "the hooks folder is not moved out", &moved);
     for (relative, name) in [(".git", "git-moved"), (".crazyagent", "crazyagent-moved")] {
         let folder = path(relative);
-        let output = run(&case, &["/C", "ren", &plain(&folder), name]);
+        let output = call(&case, &["rename", &plain(&folder), &plain(&path(name))]);
         checks.expect(
             folder.is_dir() && !path(name).exists(),
             &format!("{relative} is not renamed"),
@@ -631,7 +699,11 @@ fn anchored_folders_stay_in_place_while_git_writes_its_own_files() {
 fn a_missing_protected_path_cannot_be_made() {
     let case = repo(
         "crazyagent.test.missing",
-        &[r".git\hooks", r".crazyagent\instructions.md"],
+        &[
+            r".git\hooks",
+            r".git\modules",
+            r".crazyagent\instructions.md",
+        ],
     );
     let path = |relative: &str| at(&case, relative);
     let mut checks = Checks(Vec::new());
@@ -653,10 +725,21 @@ fn a_missing_protected_path_cannot_be_made() {
     );
     let lock = path(r".git\index.lock");
     let made = run(&case, &["/C", "echo", "staged>", &plain(&lock)]);
-    checks.expect(starts(&lock, "staged"), "index.lock is still made", &made);
-    let rebase = path(r".git\rebase-merge");
-    let folder = run(&case, &["/C", "mkdir", &plain(&rebase)]);
-    checks.expect(rebase.is_dir(), "a rebase folder is still made", &folder);
+    checks.expect(
+        !lock.exists(),
+        "no entry is added to .git, the cost the engine's pre-create avoids",
+        &made,
+    );
+    let log = path(r".git\logs\HEAD");
+    let appended = run(&case, &["/C", "echo", "entry>>", &plain(&log)]);
+    checks.expect(
+        fs::read_to_string(&log).is_ok_and(|text| text.contains("entry")),
+        "files already in .git are still written",
+        &appended,
+    );
+    let objects = path(r".git\objects\ab");
+    let folder = call(&case, &["mkdir", &plain(&objects)]);
+    checks.expect(objects.is_dir(), "work below .git goes on", &folder);
     let watched = [path(".git"), path(".crazyagent")];
     checks.done(&watched.each_ref().map(PathBuf::as_path));
 }
@@ -842,9 +925,13 @@ fn an_agent_works_normally_in_its_project_and_home() {
         "a build file is written",
         &written,
     );
-    let renamed = run(
+    let renamed = call(
         &case,
-        &["/C", "ren", &plain(&path(r"build\out")), "out-moved"],
+        &[
+            "rename",
+            &plain(&path(r"build\out")),
+            &plain(&path(r"build\out-moved")),
+        ],
     );
     checks.expect(
         path(r"build\out-moved\deep\o.txt").is_file(),
@@ -854,15 +941,15 @@ fn an_agent_works_normally_in_its_project_and_home() {
     let (old, new) = (path("old.txt"), path("new.txt"));
     run(&case, &["/C", "echo", "old>", &plain(&old)]);
     run(&case, &["/C", "echo", "new>", &plain(&new)]);
-    let replaced = run(&case, &["/C", "move", "/Y", &plain(&new), &plain(&old)]);
+    let replaced = call(&case, &["rename", &plain(&new), &plain(&old)]);
     checks.expect(
         starts(&old, "new") && !new.exists(),
         "a file is renamed over another",
         &replaced,
     );
-    let deleted = run(&case, &["/C", "del", "/Q", &plain(&old)]);
+    let deleted = call(&case, &["delete", &plain(&old)]);
     checks.expect(!old.exists(), "a file is deleted", &deleted);
-    let removed = run(&case, &["/C", "rd", "/S", "/Q", &plain(&path("build"))]);
+    let removed = call(&case, &["rmtree", &plain(&path("build"))]);
     checks.expect(!path("build").exists(), "a build tree is removed", &removed);
     let home = case.home.join("notes.txt");
     let noted = run(&case, &["/C", "echo", "home>", &plain(&home)]);

@@ -1,4 +1,5 @@
 use crate::dacl::{entries, explicit, package, without};
+use crate::plan::same;
 use crate::profile::check_path;
 
 /// The first line of the shared record of guarded paths, naming its format and version.
@@ -35,14 +36,16 @@ pub struct Release {
 
 /// The snapshot to save before a container cuts and sets a guarded path, called while the
 /// shared lock is held. A path seen for the first time keeps its protection and explicit
-/// entries as they are now. A path already guarded is marked changed when its list is neither
-/// what the boundary last wrote nor its uncut original, as when the owner edited it.
-/// Inputs: the saved snapshot if any, the path, whether its list is protected now, its list
-/// now and the list about to be written. Output: the snapshot, or the refusal when a list is
-/// malformed or longer than the boundary keeps.
+/// entries as they are now, less the container's own, such as an older boundary's deny. A path
+/// already guarded is marked changed when its list is neither what the boundary last wrote
+/// nor its uncut original, as when the owner edited it. Inputs: the saved snapshot if any, the
+/// path, the container SID, whether its list is protected now, its list now and the list
+/// about to be written. Output: the snapshot, or the refusal when a list is malformed or
+/// longer than the boundary keeps.
 pub fn guard(
     saved: Option<&Snapshot>,
     path: &str,
+    sid: &[u8],
     protected: bool,
     current: &[u8],
     target: &[u8],
@@ -51,18 +54,21 @@ pub fn guard(
     if current.len() > LIST_BYTES_MAX || target.len() > LIST_BYTES_MAX {
         return Err("a guarded path's access list is too long to keep");
     }
+    assert!(package(sid));
     entries(target)?;
+    let found = explicit(current)?;
+    let found = without(&found, sid)?.unwrap_or(found);
     let Some(saved) = saved else {
         return Ok(Snapshot {
             path: path.to_owned(),
             protected,
-            original: explicit(current)?,
+            original: found,
             set: target.to_vec(),
             changed: false,
         });
     };
     assert!(same(&saved.path, path));
-    let uncut = protected == saved.protected && explicit(current)? == saved.original;
+    let uncut = protected == saved.protected && found == saved.original;
     let changed = saved.changed || (current != saved.set.as_slice() && !uncut);
     Ok(Snapshot {
         set: target.to_vec(),
@@ -116,10 +122,6 @@ pub fn release(
         snapshot: None,
         owner_changed: false,
     })
-}
-
-fn same(a: &str, b: &str) -> bool {
-    a.to_uppercase() == b.to_uppercase()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -220,7 +222,7 @@ pub fn decode(text: &str) -> Result<Vec<Snapshot>, &'static str> {
 mod tests {
     use super::*;
     use crate::dacl::converge;
-    use crate::plan::READ_EXECUTE;
+    use crate::plan::Access;
 
     const HOOKS: &str = r"C:\Users\mira\Projects\shop\.git\hooks";
     const CONTAINER: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 7, 0, 0, 0, 9, 0, 0, 0];
@@ -255,14 +257,14 @@ mod tests {
     }
 
     fn cut() -> Vec<u8> {
-        converge(&uncut(), &CONTAINER, READ_EXECUTE, true)
+        converge(&uncut(), &CONTAINER, Access::ReadOnly, true)
             .unwrap()
             .unwrap()
     }
 
     #[test]
     fn a_first_guard_keeps_the_explicit_entries_and_protection_it_found() {
-        let snapshot = guard(None, HOOKS, false, &uncut(), &cut()).unwrap();
+        let snapshot = guard(None, HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
         assert_eq!(
             snapshot,
             Snapshot {
@@ -273,12 +275,25 @@ mod tests {
                 changed: false,
             }
         );
-        let again = guard(Some(&snapshot), HOOKS, true, &cut(), &cut()).unwrap();
+        let again = guard(Some(&snapshot), HOOKS, &CONTAINER, true, &cut(), &cut()).unwrap();
         assert_eq!(
             again, snapshot,
             "a path still at what was written stays unchanged"
         );
-        let interrupted = guard(Some(&snapshot), HOOKS, false, &uncut(), &cut()).unwrap();
+        let interrupted =
+            guard(Some(&snapshot), HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
+        let mut older = uncut();
+        older.splice(8..8, ace(1, 0, 0x000d_0156, &CONTAINER));
+        older[4] += 1;
+        let size = u16::try_from(older.len()).unwrap();
+        older[2..4].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(
+            guard(None, HOOKS, &CONTAINER, false, &older, &cut())
+                .unwrap()
+                .original,
+            snapshot.original,
+            "an older boundary's own deny is not kept to come back at release"
+        );
         assert!(
             !interrupted.changed,
             "a launch stopped before its cut finds the uncut original, not an owner edit"
@@ -287,12 +302,12 @@ mod tests {
 
     #[test]
     fn an_owner_edit_while_guarded_is_remembered_until_release() {
-        let snapshot = guard(None, HOOKS, false, &uncut(), &cut()).unwrap();
+        let snapshot = guard(None, HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
         let edited = acl(&[ace(0, 0x3, 0x001f_01ff, &OWNER)]);
-        let marked = guard(Some(&snapshot), HOOKS, true, &edited, &cut()).unwrap();
+        let marked = guard(Some(&snapshot), HOOKS, &CONTAINER, true, &edited, &cut()).unwrap();
         assert!(marked.changed);
         assert_eq!(marked.set, cut());
-        let kept = guard(Some(&marked), HOOKS, true, &cut(), &cut()).unwrap();
+        let kept = guard(Some(&marked), HOOKS, &CONTAINER, true, &cut(), &cut()).unwrap();
         assert!(
             kept.changed,
             "the mark stays after the boundary writes again"
@@ -312,7 +327,7 @@ mod tests {
 
     #[test]
     fn the_last_release_restores_an_untouched_path() {
-        let snapshot = guard(None, HOOKS, false, &uncut(), &cut()).unwrap();
+        let snapshot = guard(None, HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
         assert_eq!(
             release(&snapshot, &cut(), &CONTAINER, false).unwrap(),
             Release {
@@ -333,11 +348,11 @@ mod tests {
 
     #[test]
     fn a_release_while_a_teammate_guards_takes_only_its_own_entries() {
-        let both = converge(&cut(), &TEAMMATE, READ_EXECUTE, true)
+        let both = converge(&cut(), &TEAMMATE, Access::ReadOnly, true)
             .unwrap()
             .unwrap();
-        let first = guard(None, HOOKS, false, &uncut(), &cut()).unwrap();
-        let shared = guard(Some(&first), HOOKS, true, &cut(), &both).unwrap();
+        let first = guard(None, HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
+        let shared = guard(Some(&first), HOOKS, &TEAMMATE, true, &cut(), &both).unwrap();
         assert!(!shared.changed);
         let released = release(&shared, &both, &CONTAINER, true).unwrap();
         let left = without(&both, &CONTAINER).unwrap().unwrap();
@@ -356,7 +371,7 @@ mod tests {
 
     #[test]
     fn a_record_written_reads_back_the_same_and_damage_is_refused() {
-        let first = guard(None, HOOKS, false, &uncut(), &cut()).unwrap();
+        let first = guard(None, HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
         let second = Snapshot {
             path: r"C:\Users\mira\Projects\shop\my context".into(),
             protected: true,
@@ -408,7 +423,7 @@ mod tests {
             .collect();
         let list = acl(&long);
         assert!(list.len() > LIST_BYTES_MAX);
-        assert!(guard(None, HOOKS, false, &list, &cut()).is_err());
-        assert!(guard(None, HOOKS, false, &uncut(), &list).is_err());
+        assert!(guard(None, HOOKS, &CONTAINER, false, &list, &cut()).is_err());
+        assert!(guard(None, HOOKS, &CONTAINER, false, &uncut(), &list).is_err());
     }
 }
