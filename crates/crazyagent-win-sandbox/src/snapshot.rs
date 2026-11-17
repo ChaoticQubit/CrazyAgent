@@ -417,6 +417,34 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_record_refuses_a_guarded_path_past_its_cap_with_its_reason() {
+        let first = guard(None, HOOKS, &CONTAINER, false, &uncut(), &cut()).unwrap();
+        let full: Vec<Snapshot> = (0..PATHS_MAX)
+            .map(|n| Snapshot {
+                path: format!(r"C:\p{n}"),
+                ..first.clone()
+            })
+            .collect();
+        let text = encode(&full).unwrap();
+        assert_eq!(decode(&text).unwrap(), full);
+        let mut over = full.clone();
+        over.push(Snapshot {
+            path: format!(r"C:\p{PATHS_MAX}"),
+            ..first.clone()
+        });
+        assert_eq!(
+            encode(&over),
+            Err("too many guarded paths to record"),
+            "the launch that would guard one more path stops with this reason"
+        );
+        let extra = text.lines().nth(1).unwrap().replace(r"C:\p0", r"C:\q");
+        assert!(
+            decode(&format!("{text}{extra}\n")).is_err(),
+            "a record past the cap reads as damaged"
+        );
+    }
+
+    #[test]
     fn a_list_longer_than_the_record_keeps_is_not_guarded() {
         let long: Vec<Vec<u8>> = (0..=(LIST_BYTES_MAX / 20))
             .map(|_| ace(0, 0, 1, &OWNER))
