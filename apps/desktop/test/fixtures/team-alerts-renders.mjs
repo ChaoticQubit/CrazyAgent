@@ -1,6 +1,7 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { useTeamAlerts } from "../../src/app.tsx";
+import { COALESCE_MS } from "../../src/engine-changes.ts";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const LOOKS_MAX = 64;
@@ -11,6 +12,21 @@ let watch = null;
 let sent = 0;
 const asked = [];
 const realTimeout = window.setTimeout.bind(window);
+let hold = null;
+
+window.setTimeout = (work, ms, ...rest) => {
+  if (ms !== COALESCE_MS) return realTimeout(work, ms, ...rest);
+  hold = work;
+  return 1;
+};
+
+/** Ends the store's hold window at once, so each change the fixture sends reads on its own.
+ * Output: none. */
+function release() {
+  const work = hold;
+  hold = null;
+  work?.();
+}
 
 window.__TAURI_INTERNALS__ = {
   invoke: async (command) => {
@@ -75,7 +91,7 @@ export async function looks(projects, count) {
   for (let index = 0; index < count; index += 1) {
     const message = { index: sent, message: { topics: ["team"] } };
     sent += 1;
-    await act(async () => { watch(message); await settle(); });
+    await act(async () => { watch(message); release(); await settle(); });
   }
   return state();
 }
