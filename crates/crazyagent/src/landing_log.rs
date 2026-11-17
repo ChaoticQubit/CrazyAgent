@@ -32,7 +32,7 @@ pub const CHANGE_SET_NUMBERED: &str = "ChangeSetNumbered";
 /// An owner approval made a baseline its project's current one (`verification_current`).
 pub const BASELINE_APPROVED: &str = "BaselineApproved";
 /// A change set saved, its summary or its landing result stored (`landing_change_sets`,
-/// `landing_change_set_numbers`): the stored row is an owner text, the body its digest.
+/// `landing_change_set_numbers`): the stored row is an owner text, the body its part digests.
 pub const CHANGE_SET_SAVED: &str = "ChangeSetSaved";
 /// A Not now to a project's publish prompt, kept with the time it asks again
 /// (`github_publish_prompt`).
@@ -140,13 +140,13 @@ pub struct Approved {
 }
 
 /// A change set's stored row: its id, project and number (none for a set an engine without
-/// numbers stored) and the digest of the row's cells, kept as an owner text.
+/// numbers stored) and the digests of the row's cells, kept as an owner text in 1 to 64 parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Saved {
     pub change_set: String,
     pub project: String,
-    pub row: crate::owner_texts::TextDigest,
+    pub row: Vec<crate::owner_texts::TextDigest>,
     pub number: Option<u64>,
 }
 
@@ -243,7 +243,8 @@ impl Change {
                 crate::protocol::ProjectId::new(never.project.as_str()).is_ok()
             }
             Self::ChangeSetSaved(saved) => {
-                change_set_id(&saved.change_set)
+                (1..=ROW_PARTS_MAX).contains(&saved.row.len())
+                    && change_set_id(&saved.change_set)
                     && crate::protocol::ProjectId::new(saved.project.as_str()).is_ok()
                     && saved
                         .number
@@ -498,7 +499,7 @@ pub(crate) fn within<T>(
 /// Inputs: the transaction and the set's id. Output: whether the set has a row to log, or
 /// the refusal.
 pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineError> {
-    let Some((project, digest)) = keep_row(tx, id)? else {
+    let Some((project, parts)) = keep_row(tx, id)? else {
         return Ok(false);
     };
     let refused = || failure("landing_log_row");
@@ -517,7 +518,7 @@ pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineE
     let saved = Saved {
         change_set: id.to_owned(),
         project,
-        row: digest,
+        row: parts,
         number,
     };
     record(tx, &Change::ChangeSetSaved(saved))?;
@@ -525,14 +526,12 @@ pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineE
     Ok(true)
 }
 
-/// Keeps a change set's stored row, its cells by column name, as an owner text under the
-/// set's row holder, which lets go the text the holder had. Inputs: the writer's
-/// transaction and the set's id. Output: the set's project and the row's digest, none
-/// without the row, or `landing_log_row` or the owner text's refusal.
-fn keep_row(
-    tx: &Transaction<'_>,
-    id: &str,
-) -> Result<Option<(String, crate::owner_texts::TextDigest)>, EngineError> {
+/// Keeps a change set's stored row, its cells by column name, as an owner text in parts
+/// under the set's part holders, releasing every part an earlier save kept past them.
+/// Inputs: the writer's transaction and the set's id. Output: the set's project and the part
+/// digests, none without the row, `landing_log_change_set_too_large` past 64 MiB,
+/// `landing_log_row` or the owner text's refusal.
+fn keep_row(tx: &Transaction<'_>, id: &str) -> Result<Option<(String, Parts)>, EngineError> {
     let Some(cells) = row_cells(tx, id)? else {
         return Ok(None);
     };
@@ -544,11 +543,36 @@ fn keep_row(
         .to_owned();
     let owner = crate::protocol::ProjectId::new(project.as_str()).map_err(|_| refused())?;
     let text = serde_json::to_vec(&cells).map_err(|_| refused())?;
-    let holder = format!("{CHANGE_SETS}/{id}/row");
-    let row = crate::owner_texts::keep(tx, &holder, Some(&owner), &text)?;
+    if text.len() > ROW_BYTES_MAX {
+        return Err(failure(ROW_TOO_LARGE));
+    }
+    let mut parts = Vec::with_capacity(ROW_PARTS_MAX);
+    for (index, part) in text.chunks(crate::owner_texts::TEXT_BYTES_MAX).enumerate() {
+        let holder = format!("{CHANGE_SETS}/{id}/row/{index}");
+        parts.push(crate::owner_texts::keep(tx, &holder, Some(&owner), part)?);
+    }
+    assert!(
+        (1..=ROW_PARTS_MAX).contains(&parts.len()),
+        "a row is 1 to 64 parts"
+    );
+    for index in parts.len()..ROW_PARTS_MAX {
+        crate::owner_texts::release(tx, &format!("{CHANGE_SETS}/{id}/row/{index}"))?;
+    }
     assert_eq!(owner.as_str(), project);
-    Ok(Some((project, row)))
+    Ok(Some((project, parts)))
 }
+
+/// The part digests of one change set row's text, in order.
+type Parts = Vec<crate::owner_texts::TextDigest>;
+
+/// The most parts one change set row's text is kept in, and the most bytes it holds: 64 MiB,
+/// the cap on git's listings a row's conflicts come from (QUESTION-1115 A).
+const ROW_PARTS_MAX: usize = 64;
+const ROW_BYTES_MAX: usize = 64 << 20;
+const _: () = assert!(ROW_PARTS_MAX * crate::owner_texts::TEXT_BYTES_MAX == ROW_BYTES_MAX);
+
+/// The refusal of a change set row past [`ROW_BYTES_MAX`], at save only, never at open.
+const ROW_TOO_LARGE: &str = "landing_log_change_set_too_large";
 
 /// The change set table, logged by its rows' digests rather than by cells (QUESTION-1056 A).
 const CHANGE_SETS: &str = "landing_change_sets";
@@ -617,22 +641,29 @@ fn apply_saved(db: &Connection, saved: &Saved) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Upserts a change set row from the text kept under its digest; a text a later write
-/// released is a superseded row and is skipped. Inputs: the connection, the set's id and
-/// project and the digest. Output: whether the row was upserted, `landing_log_row` for a
-/// text that is not one row's cells, or the refusal of [`upsert_row`].
+/// Upserts a change set row from the text kept in its parts; a row with a part a later
+/// write released is superseded and is skipped. Inputs: the connection, the set's id and
+/// project and the part digests. Output: whether the row was upserted, `landing_log_row` for
+/// a part count past the bound or a text that is not one row's cells, or the refusal of
+/// [`upsert_row`].
 fn upsert_kept(
     db: &Connection,
     change_set: &str,
     project: &str,
-    row: &crate::owner_texts::TextDigest,
+    parts: &[crate::owner_texts::TextDigest],
 ) -> Result<bool, EngineError> {
+    if !(1..=ROW_PARTS_MAX).contains(&parts.len()) {
+        return Err(failure("landing_log_row"));
+    }
     let mut missing = Vec::new();
-    let text = crate::owner_texts::replayed(db, row, &mut missing)?;
+    let mut text = Vec::new();
+    for part in parts {
+        text.extend(crate::owner_texts::replayed(db, part, &mut missing)?);
+    }
     if !missing.is_empty() {
-        assert!(text.is_empty(), "a missing text reads as none");
         return Ok(false);
     }
+    assert!(text.len() <= ROW_BYTES_MAX, "kept parts are in their bound");
     let cells: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&text).map_err(|_| failure("landing_log_row"))?;
     upsert_row(db, change_set, project, &cells)?;
@@ -881,7 +912,7 @@ pub(crate) fn first_run(
 /// Appends a snapshot run of every landing table as it stands, each in chunks that fit one
 /// event body and at least one chunk each (a table the store lacks is one empty chunk), so
 /// replay of a run always clears and fills them all. Change sets lead, each as its id,
-/// project and row digest, the row kept as an owner text. Inputs: the appender and the
+/// project and part digests, the row kept as an owner text. Inputs: the appender and the
 /// writer's clock. Output: the seq of the run's closing event, or `landing_log_snapshot_rows`,
 /// `landing_log_snapshot_cell`, `landing_log_row_too_large` or the log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
@@ -895,8 +926,9 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
     appender.snapshot(Aggregate::Landing, at_ms, chunks)
 }
 
-/// Every change set as a snapshot carries it: its id, project and the digest of its row,
-/// kept as an owner text in the run's transaction; a store without the table has none.
+/// Every change set as a snapshot carries it: its id, project and the part digests of its
+/// row, kept in the run's transaction; a row past 64 MiB is left out by code, never refused,
+/// so the store opens; a store without the table has none.
 /// Input: the run's transaction. Output: the rows by id, `landing_log_snapshot_rows` past
 /// [`SNAPSHOT_ROWS_MAX`], or the refusal of [`keep_row`].
 fn kept_rows(tx: &Transaction<'_>) -> Result<Vec<serde_json::Value>, EngineError> {
@@ -920,8 +952,14 @@ fn kept_rows(tx: &Transaction<'_>) -> Result<Vec<serde_json::Value>, EngineError
     }
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
-        let (project, row) = keep_row(tx, &id)?.ok_or_else(|| failure("changes_unavailable"))?;
-        rows.push(serde_json::json!([id, project, row]));
+        match keep_row(tx, &id) {
+            Ok(Some((project, parts))) => rows.push(serde_json::json!([id, project, parts])),
+            Err(refused) if refused.0 == ROW_TOO_LARGE => {
+                eprintln!("landing_log_change_set_left_out code={ROW_TOO_LARGE}");
+            }
+            Ok(None) => return Err(failure("changes_unavailable")),
+            Err(refused) => return Err(refused),
+        }
     }
     assert!(rows.len() <= SNAPSHOT_ROWS_MAX);
     assert!(
@@ -931,20 +969,23 @@ fn kept_rows(tx: &Transaction<'_>) -> Result<Vec<serde_json::Value>, EngineError
     Ok(rows)
 }
 
-/// Upserts each change set of a snapshot chunk from the row text its digest names, skipping
+/// Upserts each change set of a snapshot chunk from the row text its parts name, skipping
 /// a row a later write released. Inputs: the connection and the chunk. Output: Ok,
-/// `landing_log_chunk_invalid` for a row that is not an id, a project and a digest, or the
-/// refusal of [`upsert_kept`].
+/// `landing_log_chunk_invalid` for a row that is not an id, a project and 1 to 64 part
+/// digests, or the refusal of [`upsert_kept`].
 fn restore_kept(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
     assert_eq!(chunk.table, CHANGE_SETS);
     if chunk.rows.len() > SNAPSHOT_ROWS_MAX {
         return Err(failure("landing_log_chunk_invalid"));
     }
     for row in &chunk.rows {
-        let (change_set, project, digest): (String, String, crate::owner_texts::TextDigest) =
+        let (change_set, project, parts): (String, String, Parts) =
             serde_json::from_value(row.clone())
                 .map_err(|_| failure("landing_log_chunk_invalid"))?;
-        upsert_kept(db, &change_set, &project, &digest)?;
+        if !(1..=ROW_PARTS_MAX).contains(&parts.len()) {
+            return Err(failure("landing_log_chunk_invalid"));
+        }
+        upsert_kept(db, &change_set, &project, &parts)?;
     }
     assert!(chunk.rows.len() <= SNAPSHOT_ROWS_MAX);
     Ok(())

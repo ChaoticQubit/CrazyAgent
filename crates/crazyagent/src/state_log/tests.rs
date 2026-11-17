@@ -912,7 +912,7 @@ fn landing_sample(kind: &str) -> serde_json::Value {
         landing::PUBLISH_PROMPT_SNOOZED => json!({"project": "app", "until_ms": 5}),
         landing::PUBLISH_PROMPT_NEVER => json!({"project": "app"}),
         landing::CHANGE_SET_SAVED => json!({
-            "change_set": change_set, "project": "app", "row": "d".repeat(64), "number": 1
+            "change_set": change_set, "project": "app", "row": ["d".repeat(64)], "number": 1
         }),
         other => panic!("{other} is not a landing kind"),
     }

@@ -482,8 +482,9 @@ fn change_set(root: &std::path::Path, digit: char) -> Record {
     }
 }
 
-/// The digest a logged change set save names. Input: the event body. Output: the digest.
-fn row_digest(body: &serde_json::Value) -> crate::owner_texts::TextDigest {
+/// The part digests a logged change set save names, in order. Input: the event body.
+/// Output: the digests.
+fn row_digests(body: &serde_json::Value) -> Vec<crate::owner_texts::TextDigest> {
     serde_json::from_value(body["row"].clone()).unwrap()
 }
 
@@ -539,14 +540,15 @@ fn a_resave_releases_the_old_row_text_and_replay_skips_the_superseded_save() {
     save(&db, &record).unwrap();
     let logged = events(&db);
     assert_eq!(logged.len(), 2);
-    let (first, last) = (row_digest(&logged[0].1), row_digest(&logged[1].1));
+    let (first, last) = (row_digests(&logged[0].1), row_digests(&logged[1].1));
+    assert_eq!((first.len(), last.len()), (1, 1));
     assert_ne!(first, last);
     assert_eq!(
-        crate::owner_texts::text(&db, &first).unwrap(),
+        crate::owner_texts::text(&db, &first[0]).unwrap(),
         None,
         "released"
     );
-    assert!(crate::owner_texts::text(&db, &last).unwrap().is_some());
+    assert!(crate::owner_texts::text(&db, &last[0]).unwrap().is_some());
     let live = change_set_rows(&db);
     rebuild(&db).unwrap();
     assert_eq!(change_set_rows(&db), live);
@@ -571,7 +573,7 @@ fn a_row_cell_the_table_lacks_fails_replay_and_a_missing_cell_takes_its_default(
     let (root, db) = store();
     let record = change_set(root.path(), 'c');
     save(&db, &record).unwrap();
-    let digest = row_digest(&events(&db)[0].1);
+    let digest = row_digests(&events(&db)[0].1).remove(0);
     let kept = crate::owner_texts::text(&db, &digest).unwrap().unwrap();
     let cells: serde_json::Value = serde_json::from_slice(&kept).unwrap();
     assert_eq!(cells["summary"], "Added the secret page");
@@ -627,8 +629,10 @@ fn the_first_run_carries_a_change_set_as_its_row_digest() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], record.id.as_str());
     assert_eq!(rows[0][1], "project-1");
-    let digest: crate::owner_texts::TextDigest =
+    let mut parts: Vec<crate::owner_texts::TextDigest> =
         serde_json::from_value(rows[0][2].clone()).unwrap();
+    assert_eq!(parts.len(), 1);
+    let digest = parts.remove(0);
     assert!(crate::owner_texts::text(&db, &digest).unwrap().is_some());
     rebuild(&db).unwrap();
     assert_eq!(change_set_rows(&db), live);
@@ -657,10 +661,61 @@ fn a_change_set_past_one_text_saves_logs_and_rebuilds() {
     record.conflicts = (0..count).map(|index| format!("{path}{index}")).collect();
     record.state = ChangeState::Conflict;
     save(&db, &record).unwrap();
-    assert_eq!(events(&db).len(), 1);
+    let parts = row_digests(&events(&db)[0].1);
+    assert!(parts.len() >= 2, "{} parts", parts.len());
     let live = change_set_rows(&db);
     rebuild(&db).unwrap();
     assert_eq!(change_set_rows(&db), live);
+
+    record.conflicts.clear();
+    record.state = ChangeState::Pending;
+    save(&db, &record).unwrap();
+    assert_eq!(row_digests(&events(&db)[1].1).len(), 1);
+    for part in &parts {
+        assert_eq!(
+            crate::owner_texts::text(&db, part).unwrap(),
+            None,
+            "every part released"
+        );
+    }
+    let resaved = change_set_rows(&db);
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), resaved);
+}
+
+/// A change set whose conflicting paths total past 64 MiB, the bound on one row's parts.
+/// Input: the root. Output: the record.
+fn past_the_bound(root: &std::path::Path) -> Record {
+    let mut record = change_set(root, 'e');
+    let path = format!("src/{}.rs", "q".repeat(1_000));
+    let count = (64 << 20) / path.len() + 64;
+    record.conflicts = (0..count).map(|index| format!("{path}{index}")).collect();
+    record.state = ChangeState::Conflict;
+    record
+}
+
+/// V250-L9 (QUESTION-1115 A): a row past 64 parts or 64 MiB is refused at save with its
+/// named error and nothing stored, and a store holding one from before the log still opens:
+/// step 14's run leaves it out instead of refusing.
+#[test]
+fn a_row_past_the_bound_is_refused_at_save_and_never_at_open() {
+    let (root, db) = store();
+    let record = past_the_bound(root.path());
+    let refused = save(&db, &record).unwrap_err();
+    assert_eq!(refused.0, "landing_log_change_set_too_large");
+    assert!(change_set_rows(&db)[0].is_empty(), "nothing stored");
+    assert!(events(&db).is_empty());
+
+    let old = unhosted();
+    write(&old, &record).unwrap();
+    assert!(first_run(&old), "the run is appended and the store opens");
+    let logged = events(&old);
+    assert_eq!(logged[0].1["table"], "landing_change_sets");
+    assert_eq!(
+        logged[0].1["rows"],
+        json!([]),
+        "the row past the bound is left out"
+    );
 }
 
 /// V250-L9: a project Delete leaves its change sets and their kept row texts, as its
