@@ -1,32 +1,32 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { ALERT_READ_MS, useTeamAlerts } from "../../src/app.tsx";
+import { useTeamAlerts } from "../../src/app.tsx";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const LOOKS_MAX = 64;
 let events = null;
-let tick = null;
 let root = null;
 let renders = 0;
+let watch = null;
+let sent = 0;
 const asked = [];
 const realTimeout = window.setTimeout.bind(window);
-
-window.setTimeout = (work, ms, ...rest) => {
-  if (ms !== ALERT_READ_MS) return realTimeout(work, ms, ...rest);
-  tick = work;
-  return 1;
-};
 
 window.__TAURI_INTERNALS__ = {
   invoke: async (command) => {
     asked.push(command);
+    if (command === "desktop_watch") return null;
     if (command === "desktop_team_events") return events;
     if (command === "desktop_question_counts") return [];
     if (command === "desktop_system_notifications") return "available";
     if (command === "desktop_team_attention") return null;
     throw { code: "unknown", message: command };
   },
-  transformCallback: () => 0,
+  transformCallback: (heard) => {
+    if (watch !== null) throw new Error("one channel, the page's watch");
+    watch = heard;
+    return 1;
+  },
 };
 
 /** The app's team events as the engine answers them: each project's unseen count and agents at
@@ -52,11 +52,11 @@ function Probe() {
 }
 
 const settle = () => new Promise((done) => realTimeout(done, 20));
-const state = () => ({ renders, asked: [...asked], armed: tick !== null });
+const state = () => ({ renders, asked: [...asked], watching: watch !== null });
 
 /** Starts the real team alert watch on a window bridge that answers its reads. Input: the
  * projects as `{ project: [unseen, agents] }`. Output: the renders, the reads and whether the
- * next look is armed. */
+ * page watches the engine. */
 export async function start(projects) {
   events = teamEvents(projects);
   document.body.innerHTML = "<div id='root'></div>";
@@ -65,16 +65,17 @@ export async function start(projects) {
   return state();
 }
 
-/** Runs the watch's next timed looks, each reading the given projects. Inputs: the projects
- * and how many looks. Output: the renders, the reads and whether a next look is armed. */
+/** Sends team changes on the page's watch channel, one look each, each reading the given
+ * projects. Inputs: the projects and how many looks. Output: the renders, the reads and
+ * whether the page watches the engine. */
 export async function looks(projects, count) {
   if (!Number.isInteger(count) || count < 1 || count > LOOKS_MAX) throw new Error(`1 to ${LOOKS_MAX} looks`);
+  if (watch === null) throw new Error("the page never watched");
   events = teamEvents(projects);
   for (let index = 0; index < count; index += 1) {
-    const work = tick;
-    if (work === null) throw new Error("no look armed");
-    tick = null;
-    await act(async () => { work(); await settle(); });
+    const message = { index: sent, message: { topics: ["team"] } };
+    sent += 1;
+    await act(async () => { watch(message); await settle(); });
   }
   return state();
 }
