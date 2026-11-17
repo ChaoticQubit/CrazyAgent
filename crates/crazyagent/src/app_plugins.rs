@@ -344,7 +344,7 @@ const PLAIN: &[(&str, &str)] = &[
     ),
     (
         "app_plugin_host_metadata",
-        "the URL's host is a cloud metadata address, which no plugin may call.",
+        "the URL's host is a link-local or cloud metadata address, which no plugin may call.",
     ),
     (
         "app_plugin_host_undeclared",
