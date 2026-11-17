@@ -3,7 +3,10 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
-use super::planning_line::{Planning, StatusLine, planning, planning_key, refreshes_status};
+use super::planning_line::{
+    Planning, RETRY_UNAVAILABLE, StatusLine, planning, planning_key, refreshes_status,
+    research_retries,
+};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
@@ -670,6 +673,7 @@ pub(in crate::tui) enum ProjectReply {
 /// Never invents data: missing reads show as loading or not ready.
 pub(in crate::tui) struct ProjectScreen {
     pub project: ProjectId,
+    pub os: &'static str,
     pub name: String,
     pub tab: Tab,
     pub width: u16,
@@ -765,6 +769,7 @@ impl ProjectScreen {
             roadmap: StatusLine::new(project.clone()),
             github_notice: false,
             sessions: Sessions::default(),
+            os: std::env::consts::OS,
             project,
             name,
             tab: Tab::Overview,
@@ -2228,13 +2233,16 @@ impl ProjectScreen {
                 let Some((job, status)) = self.focused_job().map(|job| (job.id, job.status)) else {
                     return ProjectReply::Handled;
                 };
-                if matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled) {
+                if !matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled) {
+                    self.problem = Some("Only failed or stopped research can run again.".into());
+                } else if research_retries(self.os) {
                     return ProjectReply::Change(Box::new(SetupAction::RetryResearch {
                         project_id: self.project.clone(),
                         job,
                     }));
+                } else {
+                    self.problem = Some(RETRY_UNAVAILABLE.into());
                 }
-                self.problem = Some("Only failed or stopped research can run again.".into());
             }
             _ => return ProjectReply::Ignored,
         }
@@ -2728,7 +2736,7 @@ impl ProjectScreen {
             }
             return Some(ProjectReply::Handled);
         }
-        match planning_key(&state, &self.project, key)? {
+        match planning_key(&state, &self.project, key, self.os)? {
             Ok(action) if self.plan_replaces(&state) => {
                 self.confirm_plan = Some(action);
                 Some(ProjectReply::Handled)

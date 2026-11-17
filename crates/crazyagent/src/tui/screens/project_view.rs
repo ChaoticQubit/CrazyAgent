@@ -5,7 +5,7 @@ use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, shown_tail, spread, tab_strip,
     wrap_words,
 };
-use super::planning_line::{planning, planning_value};
+use super::planning_line::{planning, planning_value, research_retries};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, OVERVIEW_TAB_LABELS, Picks, ProjectScreen,
     REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, overview_pending,
@@ -1101,7 +1101,7 @@ fn roadmap_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
     Some(
         Row::of("  ", Style::new())
             .cat(Row::of("Roadmap", look.fg).pad(24))
-            .cat(planning_value(&planning(jobs), look)),
+            .cat(planning_value(&planning(jobs), look, screen.os)),
     )
 }
 
@@ -1957,7 +1957,9 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running => {
             Some(("x", "Stop"))
         }
-        ResearchStatus::Failed | ResearchStatus::Cancelled => Some(("r", "Retry")),
+        ResearchStatus::Failed | ResearchStatus::Cancelled => {
+            research_retries(screen.os).then_some(("r", "Retry"))
+        }
         ResearchStatus::Done => None,
     }));
     help.extend([
@@ -2773,7 +2775,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry(
             "Roadmap",
             match &screen.jobs {
-                Some(jobs) => planning_value(&planning(jobs), look),
+                Some(jobs) => planning_value(&planning(jobs), look, screen.os),
                 None => Row::of("Loading...", look.muted),
             },
         ),

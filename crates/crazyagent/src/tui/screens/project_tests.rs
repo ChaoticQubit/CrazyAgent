@@ -1,4 +1,5 @@
 use super::new_project_view::{Look, Row};
+use super::planning_line::RETRY_UNAVAILABLE;
 use super::project::{
     JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, RemoveChoice, Tab,
     Transcript, memory_source, plain_problem, research_kind,
@@ -1056,6 +1057,7 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     ));
 
     let mut screen = ProjectScreen::new(project.clone(), String::new(), None);
+    screen.os = "macos";
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
@@ -1160,6 +1162,12 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     );
     assert!(shown.contains("warning: slow network"), "{shown}");
     assert_eq!(drawn.help[1], ("r", "Retry"));
+    screen.os = "windows";
+    let hidden = project_screen(&mut screen, 80, 24, &look);
+    assert!(hidden.help.iter().all(|(key, _)| *key != "r"));
+    assert_eq!(screen.key(key(KeyCode::Char('r'))), ProjectReply::Handled);
+    assert_eq!(screen.problem.as_deref(), Some(RETRY_UNAVAILABLE));
+    screen.os = "macos";
     assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
     assert_eq!(
         screen.problem.as_deref(),

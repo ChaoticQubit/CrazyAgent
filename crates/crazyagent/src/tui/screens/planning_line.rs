@@ -85,10 +85,27 @@ pub(in crate::tui) fn planning(jobs: &[ResearchJob]) -> Planning {
     }
 }
 
+/// What the TUI says when research cannot run again on this system.
+pub(in crate::tui) const RETRY_UNAVAILABLE: &str =
+    "Research does not run on Windows in this version, so it cannot run again.";
+
+/// Whether failed or stopped research can run again on a system: not on Windows, where the
+/// engine runs no research agent, so a retry could only fail again. Input: the operating
+/// system name as `std::env::consts::OS` gives it. Output: the answer.
+pub(in crate::tui) fn research_retries(os: &str) -> bool {
+    os != "windows"
+}
+
 /// Draws the planning state as one value: the status word, what the job reports, and the key
-/// of the one action; a job parked on a rate limit reads when it ends in local time and why
-/// (RV-DS241-133). Takes the state and the look. Returns the row, without a label.
-pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
+/// of the one action, with no Retry where research cannot run again; a job parked on a rate
+/// limit reads when it ends in local time and why (RV-DS241-133). Takes the state, the look
+/// and the operating system name. Returns the row, without a label.
+pub(in crate::tui) fn planning_value(state: &Planning, look: &Look, os: &str) -> Row {
+    let retry = if research_retries(os) {
+        "   r Retry"
+    } else {
+        ""
+    };
     let plan = format!("   p {PLAN_NOW}");
     match state {
         Planning::Idle => Row::of("Not planned", look.fg).push(plan, look.muted),
@@ -119,7 +136,7 @@ pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
         Planning::Done { .. } => Row::of("Done, in Context", look.success).push(plan, look.muted),
         Planning::Failed {
             cancelled: true, ..
-        } => Row::of("Stopped", look.muted).push("   r Retry", look.muted),
+        } => Row::of("Stopped", look.muted).push(retry, look.muted),
         Planning::Failed { reason, .. } => Row::of(
             format!(
                 "! Failed: {}",
@@ -129,19 +146,20 @@ pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
             ),
             look.warning,
         )
-        .push("   r Retry", look.muted),
+        .push(retry, look.muted),
     }
 }
 
 /// Answers the planning keys of the Overview and Settings tabs: `p` plans a roadmap now
-/// unless a job waits or runs, and `r` runs a failed or stopped planning job again; in any
-/// other state `r` belongs to the roadmap status line. Takes the state, the project and the
-/// key. Returns the change to send, a plain line when the state offers no such action, or
-/// none for any other key.
+/// unless a job waits or runs, and `r` runs a failed or stopped planning job again where
+/// research can run again; in any other state `r` belongs to the roadmap status line. Takes
+/// the state, the project, the key and the operating system name. Returns the change to send,
+/// a plain line when the state or the system offers no such action, or none for any other key.
 pub(in crate::tui) fn planning_key(
     state: &Planning,
     project: &ProjectId,
     key: KeyCode,
+    os: &str,
 ) -> Option<Result<SetupAction, &'static str>> {
     match (key, state) {
         (KeyCode::Char('p'), Planning::Idle | Planning::Done { .. }) => {
@@ -155,6 +173,9 @@ pub(in crate::tui) fn planning_key(
         (KeyCode::Char('p'), Planning::Active { .. }) => Some(Err(
             "A roadmap is already being planned for this project. Wait for it to finish.",
         )),
+        (KeyCode::Char('r'), Planning::Failed { .. }) if !research_retries(os) => {
+            Some(Err(RETRY_UNAVAILABLE))
+        }
         (KeyCode::Char('r'), Planning::Failed { job, .. }) => {
             Some(Ok(SetupAction::RetryResearch {
                 project_id: project.clone(),
