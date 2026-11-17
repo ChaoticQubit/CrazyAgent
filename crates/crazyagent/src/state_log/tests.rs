@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 13] = [
+const KINDS: [&str; 25] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -491,18 +491,35 @@ const KINDS: [&str; 13] = [
     crate::ide::log::FILE_UNLOCKED,
     crate::ide::log::WORKSPACE_WRITTEN,
     crate::ide::log::WORKSPACE_FORGOTTEN,
+    crate::landing_log::AGENT_BRANCH_SET,
+    crate::landing_log::AGENT_BRANCH_FORGOTTEN,
+    crate::landing_log::BASE_SET,
+    crate::landing_log::OWNER_EDIT_KEPT,
+    crate::landing_log::OWNER_EDITS_SETTLED,
+    crate::landing_log::OWNER_EDITS_DROPPED,
+    crate::landing_log::OWNER_EDITS_FORGOTTEN,
+    crate::landing_log::WORKTREE_OWNER_EDITS_FORGOTTEN,
+    crate::landing_log::CHANGE_SET_NUMBERED,
+    crate::landing_log::BASELINE_APPROVED,
+    crate::landing_log::PUBLISH_PROMPT_SNOOZED,
+    crate::landing_log::PUBLISH_PROMPT_NEVER,
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
 /// path inside a worktree, which decodes only through `landing::owner_edit::check_path`, so
 /// it is never empty, absolute, NUL-bearing, `.` or `..` in a part, or over its byte bound.
-const FREE_FORM: [(&str, &str); 1] = [(crate::ide::log::FILE_UNLOCKED, "path")];
+const FREE_FORM: [(&str, &str); 2] = [
+    (crate::ide::log::FILE_UNLOCKED, "path"),
+    (crate::landing_log::OWNER_EDIT_KEPT, "path"),
+];
 
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-/// ide/log.rs writes `change.kind()`, which maps each `Change` variant to one of its kinds.
-const WRITERS: [(&str, &[&str]); 5] = [
+/// ide/log.rs and landing_log.rs write `change.kind()`, which maps each `Change` variant to
+/// one of their kinds.
+const WRITERS: [(&str, &[&str]); 6] = [
     ("ide/log.rs", &["change.kind(),"]),
+    ("landing_log.rs", &["change.kind(),"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
     ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
     (
@@ -807,6 +824,60 @@ fn ide_body_is_closed(kind: &str) {
     }
 }
 
+/// Checks the closed body of one landing kind through `landing_log::Change::parse`, which
+/// refuses ids, absolute paths, a branch or object ids that are not closed and any key more;
+/// an owner edit's path is its [`FREE_FORM`] key. Input: the kind. Output: none.
+fn landing_body_is_closed(kind: &str) {
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    assert!(
+        crate::landing_log::KINDS.contains(&kind),
+        "{kind} is a landing kind"
+    );
+    let sample = landing_sample(kind);
+    let named: Vec<String> = sample.as_object().unwrap().keys().cloned().collect();
+    let keys: Vec<&str> = named.iter().map(String::as_str).collect();
+    let decodes = |body: &[u8]| {
+        let logged = replay::Logged {
+            seq: 1,
+            revision: 1,
+            aggregate: Aggregate::Landing,
+            kind: kind.to_owned(),
+            schema: crate::landing_log::SCHEMA,
+            at_ms: 0,
+            body: body.to_vec(),
+        };
+        crate::landing_log::Change::parse(&logged).is_ok()
+    };
+    closed_body(kind, decodes, sample, &keys);
+}
+
+/// A closed sample body of one landing kind. Input: the kind. Output: the body.
+fn landing_sample(kind: &str) -> serde_json::Value {
+    use crate::landing_log as landing;
+    let (worktree, change_set) = ("/repo/.wt/one", "c".repeat(32));
+    match kind {
+        landing::AGENT_BRANCH_SET => {
+            json!({"worktree": worktree, "repository": "/repo", "branch": "crazyagent/task-one"})
+        }
+        landing::BASE_SET => json!({"worktree": worktree, "base": "a".repeat(40)}),
+        landing::OWNER_EDIT_KEPT => {
+            json!({"worktree": worktree, "path": "src/main file.rs", "at_ms": 5})
+        }
+        landing::OWNER_EDITS_SETTLED => json!({"worktree": worktree, "change_set": change_set}),
+        landing::AGENT_BRANCH_FORGOTTEN
+        | landing::OWNER_EDITS_DROPPED
+        | landing::WORKTREE_OWNER_EDITS_FORGOTTEN => json!({"worktree": worktree}),
+        landing::OWNER_EDITS_FORGOTTEN => json!({"change_set": change_set}),
+        landing::CHANGE_SET_NUMBERED => {
+            json!({"change_set": change_set, "project": "app", "number": 1})
+        }
+        landing::BASELINE_APPROVED => json!({"project": "app", "baseline": "b".repeat(64)}),
+        landing::PUBLISH_PROMPT_SNOOZED => json!({"project": "app", "until_ms": 5}),
+        landing::PUBLISH_PROMPT_NEVER => json!({"project": "app"}),
+        other => panic!("{other} is not a landing kind"),
+    }
+}
+
 /// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each kind's body
 /// has closed keys whose decoder refuses free text and any key more (ids: 1 to 128 safe ASCII
 /// bytes), but for one [`FREE_FORM`] path that refuses what `check_path` refuses. A closing
@@ -818,6 +889,12 @@ fn no_event_body_can_carry_a_secret() {
         assert!(
             KINDS.contains(&kind),
             "the ide kind {kind} needs a body rule"
+        );
+    }
+    for kind in crate::landing_log::KINDS {
+        assert!(
+            KINDS.contains(&kind),
+            "the landing kind {kind} needs a body rule"
         );
     }
     let writers = writer_sources();
@@ -873,6 +950,7 @@ fn no_event_body_can_carry_a_secret() {
             | crate::ide::log::FILE_UNLOCKED
             | crate::ide::log::WORKSPACE_WRITTEN
             | crate::ide::log::WORKSPACE_FORGOTTEN => ide_body_is_closed(kind),
+            kind if crate::landing_log::KINDS.contains(&kind) => landing_body_is_closed(kind),
             other => panic!("the kind {other} has no body rule"),
         }
     }
