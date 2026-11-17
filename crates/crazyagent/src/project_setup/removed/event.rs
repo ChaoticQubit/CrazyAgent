@@ -76,9 +76,9 @@ pub(crate) fn append(
     Ok(seq)
 }
 
-/// The projection of a removal, live and in replay (v2.5 L14b): first the project's rule
+/// The projection of a removal, live and in replay (v2.5 L14b, L7): first the project's rule
 /// proposals, schedule override and version, coordination with its stopped and failed agents'
-/// counts, activity, Run setting and usage (to `<removed>`); then its agent texts, questions,
+/// counts, activity, IDE rows and usage (to `<removed>`); then its agent texts, questions,
 /// hidden folders, access, grants, stopped and failed agents and [`TABLES`] rows. Inputs: the
 /// transaction and the body. Output: Ok, `project_removed_body`, or a store failure.
 pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError> {
@@ -91,7 +91,7 @@ pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError
     crate::coord::forget_project(tx, &removed.project)?;
     crate::activity::forget_project(tx, &removed.project)?;
     crate::usage::forget_project(tx, project)?;
-    crate::ide::bridge::run_command::forget_project(tx, &removed.project)?;
+    crate::ide::log::forget_rows(tx, &removed.project)?;
     crate::storage::agent_text::forget_project(tx, &removed.project)?;
     crate::questions::forget_project(tx, &removed.project)?;
     crate::sandbox::hidden_paths::save(tx, project, &[]).map_err(failed)?;

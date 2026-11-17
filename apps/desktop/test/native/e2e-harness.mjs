@@ -272,24 +272,45 @@ export async function serveApp(dist, bridge, picks, log, local = {}) {
 }
 
 /** The page script that stands in for Tauri's injected internals: each invoke goes to the file
- * server, which hands it to the real bridge, and page errors are kept for the final check. */
+ * server, which hands it to the real bridge, and page errors are kept for the final check.
+ * Callbacks are kept, so once `desktop_watch` answers, the page long-polls the bridge's
+ * `e2e_watch_next` and hands each change to the watch's channel, as the app's feed does. */
 export const INTERNALS = `(() => {
   let next = 0;
+  const callbacks = new Map();
   window.__e2eErrors = [];
   window.addEventListener("error", (event) => window.__e2eErrors.push(String(event.message)));
   window.addEventListener("unhandledrejection", (event) => window.__e2eErrors.push(String(event.reason?.message ?? event.reason)));
+  const forward = async (cmd, args) => {
+    const reply = await fetch("/__invoke", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cmd, args }) });
+    const answer = await reply.json();
+    if ("value" in answer) return answer.value;
+    if ("failure" in answer) throw answer.failure;
+    if ("invalid" in answer) throw answer.invalid;
+    if ("dropped" in answer) throw new TypeError(answer.dropped);
+    throw "Command " + cmd + " not found";
+  };
+  const follow = async (id) => {
+    for (let index = 0; ; ) {
+      let change;
+      try {
+        change = await forward("e2e_watch_next", {});
+      } catch {
+        return;
+      }
+      if (change.topics.length === 0) continue;
+      callbacks.get(id)?.({ index, message: change });
+      index += 1;
+    }
+  };
   window.__TAURI_INTERNALS__ = {
     invoke: async (cmd, args = {}) => {
-      const reply = await fetch("/__invoke", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cmd, args }) });
-      const answer = await reply.json();
-      if ("value" in answer) return answer.value;
-      if ("failure" in answer) throw answer.failure;
-      if ("invalid" in answer) throw answer.invalid;
-      if ("dropped" in answer) throw new TypeError(answer.dropped);
-      throw "Command " + cmd + " not found";
+      const value = await forward(cmd, args);
+      if (cmd === "desktop_watch") void follow(args.changes.id);
+      return value;
     },
-    transformCallback: () => { next += 1; return next; },
-    unregisterCallback: () => {},
+    transformCallback: (callback) => { next += 1; callbacks.set(next, callback); return next; },
+    unregisterCallback: (id) => { callbacks.delete(id); },
     convertFileSrc: (path) => path,
     metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
   };

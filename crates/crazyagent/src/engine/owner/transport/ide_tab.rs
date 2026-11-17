@@ -325,9 +325,10 @@ async fn open(
     }
     let (build, written, folder) = tokio::task::spawn_blocking({
         let project = project.clone();
+        let host = authority.host.clone();
         move || match fetch::state(&root) {
             BuildState::Ready { root: build, .. } => {
-                let written = crate::ide::workspace::write(&root, &project)?;
+                let written = crate::ide::workspace::write(&root, &host, &project)?;
                 let folder = crate::ide::workspace::folder(&root, &project)?;
                 crate::projects_home::exclude_agents(&folder)?;
                 Ok((build, written, folder))

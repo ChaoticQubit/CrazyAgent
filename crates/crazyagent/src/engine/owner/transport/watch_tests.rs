@@ -406,7 +406,12 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
             "watch": { "after": cursor, "mark": mark, "wait_ms": 10_000 }
         }))
         .unwrap();
-        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+        for end in [&server, &client] {
+            end.set_nonblocking(true).unwrap();
+        }
+        let mut server = UnixStream::from_std(server).unwrap();
+        let mut client = UnixStream::from_std(client).unwrap();
         let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
         let admission = admission.clone();
         let serving = tokio::spawn(async move {
@@ -594,4 +599,62 @@ async fn a_followed_watch_hands_on_each_change_and_one_made_while_it_had_no_conn
     }
     following.abort();
     owner.stop().await;
+}
+
+/// v2.5 S3c: a wake answers a parked watch with its topic, and a watch made later from the
+/// mark before the wake gets it at once. Before any sampler runs a wake moves nothing, so a
+/// first watch, which has no mark, is answered `unknown` alone.
+#[tokio::test]
+async fn a_wake_names_its_topic_to_a_parked_watch_and_to_a_later_one_from_an_older_mark() {
+    let (_tmp, database, _project) = store();
+    let watches = Arc::new(Watches::new());
+    watches.wake(Topic::Ide);
+    let opened = wait(&watches, &database, request(0, None, 5_000))
+        .await
+        .unwrap();
+    let WatchReply::Changed { topics, mark, .. } = opened else {
+        panic!("a first watch is answered at once, got {opened:?}");
+    };
+    assert_eq!(
+        topics,
+        vec![Topic::Unknown],
+        "no sampler ran, so nothing was woken"
+    );
+    let watch = waiting(&watches, &database, 0, mark);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while watches.waiting.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the watch is counted while it waits");
+    watches.wake(Topic::Ide);
+    let reply = tokio::time::timeout(Duration::from_secs(5), watch)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let moved = mark_of(&reply);
+    let woken = WatchReply::Changed {
+        cursor: Cursor::new(0),
+        mark: moved,
+        topics: vec![Topic::Ide, Topic::Unknown],
+    };
+    assert_eq!(reply, woken);
+    assert_eq!(
+        wait(&watches, &database, request(0, Some(mark), 1_000))
+            .await
+            .unwrap(),
+        woken,
+        "a watch from before the wake gets it at once"
+    );
+    assert_eq!(
+        wait(&watches, &database, request(0, Some(moved), 300))
+            .await
+            .unwrap(),
+        WatchReply::Quiet {
+            cursor: Cursor::new(0),
+            mark: moved,
+        }
+    );
 }

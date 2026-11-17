@@ -330,8 +330,8 @@ impl Recorder {
     /// Starts the recorder on a free loopback port. Input: whether `/api/tags` answers.
     /// Output: the recorder, or why its port could not be opened.
     pub(super) fn start(tags: bool) -> Result<Self, String> {
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+            .map_err(|error| error.to_string())?;
         let port = listener
             .local_addr()
             .map_err(|error| error.to_string())?
@@ -339,7 +339,7 @@ impl Recorder {
         let heard_list = Arc::new(Mutex::new(Vec::new()));
         let kept = Arc::clone(&heard_list);
         std::thread::spawn(move || {
-            for stream in listener.incoming().take(HEARD_MAX) {
+            for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(HEARD_MAX) {
                 let Ok(mut stream) = stream else { continue };
                 let _ = stream.set_read_timeout(Some(HEAD_WAIT));
                 let (record, reply) = heard(&read_head(&mut stream), tags);

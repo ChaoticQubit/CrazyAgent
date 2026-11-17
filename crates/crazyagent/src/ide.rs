@@ -9,6 +9,7 @@ pub mod extensions;
 pub mod fetch;
 pub mod git;
 pub mod hide;
+pub mod log;
 pub mod manifest;
 #[cfg(unix)]
 pub mod output;
