@@ -53,7 +53,7 @@ defaults:
 
 jobs:
   pwsh-env-probe:
-    name: Windows PowerShell start time by environment on ${{ matrix.runner }}
+    name: Windows PowerShell start environment bisect on ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -68,6 +68,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Time Windows PowerShell 5.1 to its first statement, per environment, three rounds
+      - name: Find the smallest set of missing names that brings Windows PowerShell 5.1 back to a fast start
         shell: pwsh
-        run: ./.github/farm/pwsh-env-probe.ps1 -rounds 3
+        run: ./.github/farm/pwsh-env-bisect.ps1
