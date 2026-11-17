@@ -399,7 +399,7 @@ fn unreached_code(unreached: &crate::research::runner::Unreached) -> &'static st
 #[cfg(unix)]
 mod run {
     use super::{
-        BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
+        BUSY, CleanupPool, FAILED, FULL, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
         PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
         WALL_TIME,
     };
@@ -455,6 +455,9 @@ mod run {
                     .any(|held| held.root == root && held.text.as_ref() == text)
             {
                 return Err(BUSY);
+            }
+            if running.iter().filter(|held| held.root == root).count() >= super::CLEANUPS_MAX {
+                return Err(FULL);
             }
             let held = Held {
                 root: root.to_path_buf(),

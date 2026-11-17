@@ -364,6 +364,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "instructions_cleanup_no_account" => "No account in the pool can run this edit, so nothing was sent. Sign one in under Pools, then try again.".into(),
         "instructions_cleanup_paused" => "Every account in the pool hit its limit, so nothing was sent. Try again later.".into(),
         "instructions_cleanup_busy" => "Edit with AI is already running on this text. Wait for it, then try again.".into(),
+        "instructions_cleanup_full" => "Two Edit with AI runs are already going. Wait for one to finish, then try again.".into(),
         "instructions_cleanup_empty" => "There is nothing saved to clean up yet. Write the instructions first.".into(),
         "instructions_cleanup_failed" => "The model run failed, so nothing changed. Try again.".into(),
         "instructions_cleanup_timed_out" => "The model took longer than 5 minutes, so nothing changed. Try again.".into(),
