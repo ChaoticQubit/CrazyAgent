@@ -19,7 +19,7 @@ static HOSTS: Mutex<Hosts> = Mutex::new(Hosts::new());
 /// 3.2): an owner request's admission, or the engine host stamp of a writer inside the
 /// engine process.
 #[derive(Clone)]
-pub(crate) enum Fence {
+pub enum Fence {
     Owner(Admission),
     Engine(HostStamp),
 }
@@ -67,19 +67,19 @@ impl Hosts {
 
 /// Records that this process runs the engine host, so the writers it fences can append.
 /// The storage actor calls it once its owner runtime starts. Input: the host. Output: none.
-pub(crate) fn host_started(host: &HostStamp) {
+pub fn host_started(host: &HostStamp) {
     hosts().start(host);
 }
 
 /// Records that this process no longer runs the engine host, refusing its writers. The
 /// storage actor calls it when its owner runtime stops or closes. Input: the host. Output:
 /// none.
-pub(crate) fn host_stopped(host: &HostStamp) {
+pub fn host_stopped(host: &HostStamp) {
     hosts().stop(host);
 }
 
 /// Whether this process runs the engine host. Input: the host. Output: true when it does.
-pub(crate) fn hosted(host: &HostStamp) -> bool {
+pub fn hosted(host: &HostStamp) -> bool {
     hosts().holds(&host.db_instance, &host.engine_epoch)
 }
 
@@ -89,7 +89,7 @@ pub(crate) fn hosted(host: &HostStamp) -> bool {
 /// `check_owner_host`, each refusing a stale `engine_epoch`. Inputs: the transaction and
 /// the fence. Output: Ok, or `state_log_fence_out_of_process`, `owner_runtime_stale` or
 /// `owner_grant_stale_or_revoked`.
-pub(crate) fn check(tx: &Transaction<'_>, fence: &Fence) -> Result<(), EngineError> {
+pub fn check(tx: &Transaction<'_>, fence: &Fence) -> Result<(), EngineError> {
     let (db_instance, engine_epoch) = match fence {
         Fence::Owner(admission) => (&admission.db_instance, &admission.engine_epoch),
         Fence::Engine(host) => (&host.db_instance, &host.engine_epoch),

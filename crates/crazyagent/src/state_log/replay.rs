@@ -144,7 +144,7 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
 /// compaction (L1b) can rewrite their run. The delete's fence is checked first, as for an
 /// append. Inputs: the delete's transaction, the seq and the fence. Output: Ok, a fence
 /// refusal, or `state_log_redact_missing` or `state_log_redact_snapshot`.
-pub(crate) fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
+pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
     fence::check(tx, fence)?;
     let missing = || error("state_log_redact_missing");
     let seq = i64::try_from(seq).map_err(|_| missing())?;

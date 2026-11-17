@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 /// The write fence on append, one per writer class, and the engine hosts this process runs
 /// (v2.5 L3).
-pub(crate) mod fence;
+pub mod fence;
 /// Replay of the log into projections, the compare of rebuilt tables, redaction in place, the
 /// writers' clock and the process exit event (v2.5 L2).
 pub mod replay;
@@ -121,7 +121,7 @@ impl<'a, 'c> Appender<'a, 'c> {
     /// checked first, once for the transaction. Inputs: the transaction, that revision and
     /// the fence. Output: the appender, a fence refusal, `state_log_revision_stale` or
     /// `state_log_revision_not_newer`.
-    pub(crate) fn owner(
+    pub fn owner(
         tx: &'a Transaction<'c>,
         revision: u64,
         fence: Fence,
@@ -134,7 +134,7 @@ impl<'a, 'c> Appender<'a, 'c> {
     /// `state` revision once for it after its fence is checked. Inputs: the transaction and
     /// the fence. Output: the appender, a fence refusal, or `state_log_revision_exhausted`
     /// when the revision is at its largest value.
-    pub(crate) fn own(tx: &'a Transaction<'c>, fence: Fence) -> Result<Self, EngineError> {
+    pub fn own(tx: &'a Transaction<'c>, fence: Fence) -> Result<Self, EngineError> {
         fence::check(tx, &fence)?;
         let moved = tx
             .execute(
