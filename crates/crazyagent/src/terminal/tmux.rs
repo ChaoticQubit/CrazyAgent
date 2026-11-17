@@ -1096,8 +1096,17 @@ fn release(version: &str) -> Option<(u32, u32)> {
     Some((major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?))
 }
 
-fn supported(version: &str) -> Option<bool> {
+/// Whether agent terminals support a tmux version, the second word of `tmux -V`: 3.7 or
+/// later ([`VERSION_MIN`]). Input: the version. Output: the answer, or none when it is not
+/// a release number.
+pub(crate) fn supported(version: &str) -> Option<bool> {
     release(version).map(|found| found >= VERSION_MIN)
+}
+
+/// The oldest tmux version agent terminals support, as setup names it. Output: the
+/// version, such as "3.7".
+pub(crate) fn version_needed() -> String {
+    format!("{}.{}", VERSION_MIN.0, VERSION_MIN.1)
 }
 
 fn quote(text: &str) -> String {

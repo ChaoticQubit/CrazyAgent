@@ -762,14 +762,16 @@ pub struct Refused {
     pub why: Refusal,
 }
 
-/// A tool that cannot run: which one, why, the interpreter it needs when that is what is
-/// missing, the folders looked in and the first file passed over when no usable one was
-/// found, boxed so the error stays small, kept apart from the owner line so it is fixed.
+/// A tool that cannot run: which one, why, what it needs (the missing interpreter, or the
+/// version needed when the one found is too old), the version found when that is too old,
+/// the folders looked in and the first file passed over when no usable one was found,
+/// boxed so the error stays small, kept apart from the owner line so it is fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub tool: String,
     pub reason: Reason,
     pub needs: Option<String>,
+    pub found: Option<String>,
     pub looked: Vec<PathBuf>,
     pub refused: Option<Box<Refused>>,
 }
@@ -791,9 +793,12 @@ impl Missing {
                     install_hint(needs)
                 )
             }
-            (Reason::WrongVersion, tool, _) => {
-                format!("{tool} is too old for CrazyAgent. Update it, then try again.")
-            }
+            (Reason::WrongVersion, tool, needs) => match (self.found.as_deref(), needs) {
+                (Some(found), Some(needs)) => format!(
+                    "{tool} {found} is too old for CrazyAgent; it needs {needs} or newer. Update it, then try again."
+                ),
+                _ => format!("{tool} is too old for CrazyAgent. Update it, then try again."),
+            },
             (Reason::Refused, tool, _) => match &self.refused {
                 Some(refused) => refused_line(tool, refused),
                 None => format!(
@@ -889,6 +894,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: name.to_owned(),
         reason: Reason::NotFound,
         needs: None,
+        found: None,
         looked: places.folders.clone(),
         refused: None,
     };
@@ -958,6 +964,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: tool.clone(),
         reason: Reason::NotFound,
         needs: None,
+        found: None,
         looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
         refused: None,
     };
@@ -1007,6 +1014,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: tool.clone(),
         reason: Reason::NeedsInterpreter,
         needs: Some(name.to_owned()),
+        found: None,
         looked: places.folders.clone(),
         refused: None,
     };

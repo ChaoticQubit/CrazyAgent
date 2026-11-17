@@ -30,16 +30,16 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
         std::fs::write(&file, text).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
     };
-    script("tmux", "#!/bin/sh\necho 'tmux 3.5a'\n");
+    script("tmux", "#!/bin/sh\necho 'tmux 3.7a'\n");
     let launch = crate::tools::resolve("tmux", &places).unwrap();
     assert_eq!(
         installer.locate(Dependency::Tmux),
-        Some((launch.entry, Version::parse("3.5a").unwrap()))
+        Some((launch.entry, Version::parse("3.7a").unwrap()))
     );
     assert_eq!(
         installer.lookup(Dependency::Tmux).unwrap(),
         Ok(crate::setup::Located {
-            version: Version::parse("3.5a").unwrap(),
+            version: Version::parse("3.7a").unwrap(),
             bundled: false,
             note: None,
         })
@@ -100,7 +100,7 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
     std::fs::create_dir_all(&app).unwrap();
     std::fs::create_dir_all(&system).unwrap();
     let tmux = system.join("tmux");
-    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
     let places = crate::tools::Places::new(vec![system], Some(root.path().join("home")))
         .with_app_folder(app.clone());
@@ -116,7 +116,7 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
         assert_eq!(
             installer.lookup(Dependency::Tmux).unwrap(),
             Ok(crate::setup::Located {
-                version: Version::parse("3.5a").unwrap(),
+                version: Version::parse("3.7a").unwrap(),
                 bundled: false,
                 note: Some(crate::tools::BundleNote::CannotRun),
             }),
@@ -158,7 +158,7 @@ fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
     let later = root.path().join("later");
     for (folder, text) in [
         (&first, "#!/bin/sh\nexit 1\n"),
-        (&later, "#!/bin/sh\necho 'tmux 3.5a'\n"),
+        (&later, "#!/bin/sh\necho 'tmux 3.7a'\n"),
     ] {
         std::fs::create_dir_all(folder).unwrap();
         let tmux = folder.join("tmux");
@@ -200,7 +200,7 @@ fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts(
     let login = root.path().join("opt/local/bin");
     std::fs::create_dir_all(&login).unwrap();
     let tmux = login.join("tmux");
-    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     let before = crate::tools::Places::new(Vec::new(), None);
     assert_eq!(crate::terminal::tmux::installed_at(&before), None);
@@ -209,7 +209,7 @@ fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts(
     let places = before.with_probed(vec![login]);
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
     let (entry, version) = installer.locate(Dependency::Tmux).unwrap();
-    assert_eq!(version, Version::parse("3.5a").unwrap());
+    assert_eq!(version, Version::parse("3.7a").unwrap());
     let started = crate::terminal::tmux::installed_at(&places).unwrap();
     assert_eq!(started, entry.canonicalize().unwrap());
     assert_eq!(started, tmux.canonicalize().unwrap());
