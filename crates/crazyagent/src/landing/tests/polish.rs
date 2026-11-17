@@ -708,10 +708,10 @@ fn on_git_2_39_a_clone_lead_s_settle_leaves_a_worker_set_it_holds_for_the_owner(
 }
 
 /// V243-GIT-FLOOR-SIBLING-DOORS (#298 N2): on git 2.39 a master set the owner landed outside
-/// closes, and the conflicted set its fix covers waits for the owner: whether the land holds
-/// that set's work cannot be checked by merging again, so the check answers no, where it
-/// refused with `changes_git_old` and the master close logged it. On 2.40 the same check
-/// answers yes.
+/// closes, and the master close leaves the conflicted set its fix covers open: whether the
+/// land holds that set's work cannot be checked by merging again, so the check answers no,
+/// where it refused with `changes_git_old` and the master close logged it. On 2.40 the same
+/// check answers yes.
 #[test]
 fn on_git_2_39_a_master_land_read_from_outside_leaves_the_set_it_covers_for_the_owner() {
     let case = Case::new();
