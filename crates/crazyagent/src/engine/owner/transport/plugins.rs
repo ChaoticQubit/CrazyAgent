@@ -1587,6 +1587,7 @@ fn boundary_check(
     );
     let profile = check_profile(&checks, id);
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
+        .map(ProjectSandbox::as_job_folder)
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))

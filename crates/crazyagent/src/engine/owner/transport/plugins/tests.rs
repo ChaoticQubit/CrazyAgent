@@ -427,9 +427,16 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     assert_ne!(entries(), before);
     let checks = root.join(CHECK_FOLDER);
     let profile = check_profile(&checks, ID);
-    let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
-        .unwrap()
-        .container;
+    let loaded = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile).unwrap();
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .all(|item| item.guard != crazyagent_win_sandbox::profile::Guard::ReadOnly),
+        "a check folder is a job folder, with no project guards: {:?}",
+        loaded.guarded
+    );
+    let name = loaded.container;
     let container = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
         .join("Packages")
         .join(name);
