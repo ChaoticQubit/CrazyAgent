@@ -1,4 +1,4 @@
-use super::{Fixed, Roots};
+use super::{BREW_PREFIXES, CHECK_TIME, Fixed, Roots, UPDATE_TIME, VERSION_TIME};
 use crate::harnesses;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
@@ -58,6 +58,27 @@ pub(crate) fn jobs_max() -> usize {
     harnesses::specs().len() + crate::setup::Dependency::ALL.len() + 1
 }
 
+/// The longest a job waits for its turn on its folders: every other job the line can hold
+/// ahead of it running a whole harness update, both version reads and the look that
+/// follows, which no setup install outlasts. Output: the wait.
+pub(crate) fn wait_max() -> Duration {
+    let ahead = u32::try_from(jobs_max()).unwrap_or(u32::MAX);
+    (UPDATE_TIME + VERSION_TIME * 2 + CHECK_TIME).saturating_mul(ahead)
+}
+
+/// One folder as the line compares it, made or not yet: the longest part of its path that
+/// exists, in its real spelling, then the rest of the path, so two spellings of one folder
+/// through a link are one key. Input: the folder. Output: the key.
+fn key(folder: &Path) -> PathBuf {
+    folder
+        .ancestors()
+        .find_map(|base| {
+            let real = crate::sandbox::canonical(base).ok()?;
+            Some(real.join(folder.strip_prefix(base).ok()?))
+        })
+        .unwrap_or_else(|| folder.to_path_buf())
+}
+
 fn shares(one: &[PathBuf], other: &[PathBuf]) -> bool {
     one.iter().any(|folder| other.contains(folder))
 }
@@ -85,15 +106,20 @@ impl Turns {
         self.line.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Waits for a job's turn on its folders and takes them all at once; a job with no
-    /// folder takes its turn at once. Inputs: the catalog id, its folders and the longest
-    /// wait. Output: the hold, or none once the wait passed, with the job out of the line.
+    /// Waits for a job's turn on its folders, each by its [`key`], and takes them all at
+    /// once; a job with no folder takes its turn at once. Inputs: the job's id, its folders
+    /// and the longest wait. Output: the hold, or none once the wait passed, with the job out
+    /// of the line.
     pub(crate) fn take(
         &self,
         id: &'static str,
         folders: Vec<PathBuf>,
         wait_max: Duration,
     ) -> Option<Turn<'_>> {
+        let mut folders: Vec<PathBuf> = folders.iter().map(|folder| key(folder)).collect();
+        folders.sort();
+        folders.dedup();
+        assert!(folders.len() <= 1 + BREW_PREFIXES.len());
         let deadline = Instant::now() + wait_max;
         let mut line = self.line();
         assert!(

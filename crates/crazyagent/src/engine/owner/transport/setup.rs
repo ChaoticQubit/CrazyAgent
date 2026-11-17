@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::update::{Turns, Updates};
+use crate::harnesses::update::{Turns, Updates, wait_max};
 #[cfg(unix)]
 use crate::plugins::ServerSpec;
 #[cfg(unix)]
@@ -30,7 +30,19 @@ struct RunGuard(PathBuf);
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        progress::with(&self.0, |state| state.running = false);
+        progress::with(&self.0, |state| {
+            state.running = false;
+            state.step = None;
+        });
+    }
+}
+
+/// One lone install or fix's hold on its tool; dropping it frees the tool on every path.
+struct JobGuard(PathBuf, Dependency);
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        progress::with(&self.0, |state| state.jobs.remove(&self.1));
     }
 }
 
@@ -268,9 +280,52 @@ async fn dependency_rows(root: &Path, deadline: Instant) -> Vec<crate::setup::De
     }
 }
 
-/// Says on each tool row whether an install or fix of it runs now and, by name, the job it
-/// waits behind in the engine's line. Inputs: the rows, the engine root and the line.
-fn overlay(_rows: &mut [DependencyStatus], _root: &Path, _turns: &Turns) {}
+/// Says on each tool row whether an install or fix of it runs now, a lone one or the setup
+/// run's step, and by name the job it waits behind in the engine's line: the setup run,
+/// another tool or a harness. A job read waiting counts as running though the progress
+/// read just before it missed its start. Inputs: the rows, the engine root and the line.
+fn overlay(rows: &mut [DependencyStatus], root: &Path, turns: &Turns) {
+    let progress = progress::snapshot(root);
+    let name = |id: &str| -> String {
+        if id == SETUP_JOB {
+            return SETUP_JOB.to_owned();
+        }
+        Dependency::ALL
+            .iter()
+            .find(|dep| dep.program() == id)
+            .map(|dep| dep.label())
+            .or_else(|| crate::harnesses::spec(id).map(|spec| spec.name))
+            .unwrap_or(id)
+            .to_owned()
+    };
+    for row in rows {
+        let step = progress.running && progress.step == Some(row.name);
+        row.waiting = turns
+            .behind(row.name.program())
+            .or_else(|| step.then(|| turns.behind(SETUP_JOB)).flatten())
+            .map(name);
+        row.busy = step || progress.jobs.contains(&row.name) || row.waiting.is_some();
+    }
+}
+
+/// The folders one tool's install or fix changes, which no other job may change while it
+/// runs: the tool's own place under the engine's setup folder, every Homebrew prefix for a
+/// tmux install, which Homebrew does, and the harnesses' npm prefix for a Node install,
+/// whose node and npm the harness jobs run. Inputs: the engine root, the tool and whether
+/// the job installs. Output: the folders.
+fn turn_folders(root: &Path, dep: Dependency, install: bool) -> Vec<PathBuf> {
+    let mut folders = vec![root.join("setup").join(".jobs").join(dep.program())];
+    match (dep, install) {
+        (Dependency::Tmux, true) => folders.extend(
+            crate::harnesses::update::BREW_PREFIXES
+                .iter()
+                .map(PathBuf::from),
+        ),
+        (Dependency::Node, true) => folders.push(crate::setup::harness_prefix(root)),
+        _ => {}
+    }
+    folders
+}
 
 fn start_run(
     sender: mpsc::Sender<Job>,
@@ -297,16 +352,17 @@ fn start_run(
 }
 
 /// Marks a setup run as going for the owner's explicit Set up tools, Install missing or a
-/// tool row's Try again, unless one is going: every tool and the ticked pack entries start
-/// over as installing, and the background probes look for tool folders again at once.
-/// Inputs: the engine root and the ticked pack entries. Output: whether this run begins.
+/// tool row's Try again, unless one is going: the ticked pack entries start over as
+/// installing, each tool keeps its row until the run's step on it, so a lone job's row
+/// stays, and the background probes look for tool folders again at once. Inputs: the
+/// engine root and the ticked pack entries. Output: whether this run begins.
 pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
     let begun = progress::with(root, |state| {
         if state.running {
             return false;
         }
         state.running = true;
-        state.dependencies = Default::default();
+        state.step = None;
         state.pack = entries
             .iter()
             .map(|entry| (entry.id.clone(), PackState::Installing))
@@ -320,9 +376,10 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
 }
 
 /// Installs one missing dependency alone in the background, as the setup row's Install and
-/// the harness picker ask: found first and left as it is when present, then installed from
-/// its pin. Only that row changes, and the next status read checks every tool again.
-/// Inputs: the engine root and the dependency. Output: Ok once it runs, or `setup_busy`.
+/// the harness picker ask, during a setup run too, taking its turn on that tool (DEC-199):
+/// found first and left as it is when present, then installed from its pin. Only that row
+/// changes, and the next status read checks every tool again. Inputs: the engine root, the
+/// dependency and the engine's update state. Output: Ok once it runs, or `setup_busy`.
 pub(super) fn start_install(
     root: PathBuf,
     dep: Dependency,
@@ -350,31 +407,34 @@ fn start_install_with(
     Ok(())
 }
 
-/// Marks a one-dependency install or permission fix as the running setup: refused while
-/// any run goes on, else running with only that dependency's earlier row and fix failure
-/// cleared. Inputs: the engine root and the dependency. Output: the guard that ends the
-/// run, or `setup_busy`.
-fn begin_one(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
+/// Marks a one-dependency install or permission fix as running on that tool (DEC-199):
+/// refused while a lone job on the same tool goes on, else holding the tool with its fix
+/// failure cleared, and its earlier row too unless a setup run, which owns the rows, goes
+/// on. Inputs: the engine root and the dependency. Output: the guard that frees the tool,
+/// or `setup_busy`.
+fn begin_one(root: PathBuf, dep: Dependency) -> Result<JobGuard, EngineError> {
     let begun = progress::with(&root, |state| {
-        if state.running {
+        if !state.jobs.insert(dep) {
             return false;
         }
-        state.running = true;
-        state.dependencies.remove(&dep);
+        if !state.running {
+            state.dependencies.remove(&dep);
+        }
         state.fix_failed.remove(&dep);
         true
     });
     if !begun {
         return Err(failure("setup_busy"));
     }
-    assert!(progress::snapshot(&root).running);
-    Ok(RunGuard(root))
+    assert!(progress::snapshot(&root).jobs.contains(&dep));
+    Ok(JobGuard(root, dep))
 }
 
 /// Runs the owner's confirmed permission fix for one refused dependency alone in the
-/// background, as the setup row's Fix asks (DEC-162), one at a time with any other setup
-/// run. Inputs: the engine root, the dependency, the tree the owner confirmed and whether
-/// the confirm named all of it. Output: Ok once it runs, or `setup_busy`.
+/// background, as the setup row's Fix asks (DEC-162), taking its turn on that tool with a
+/// setup run's step on it (DEC-199). Inputs: the engine root, the dependency, the tree the
+/// owner confirmed and whether the confirm named all of it. Output: Ok once it runs, or
+/// `setup_busy`.
 fn start_fix(
     root: PathBuf,
     dep: Dependency,
@@ -406,23 +466,33 @@ fn start_fix_with(
     Ok(())
 }
 
-/// Removes group and other write from the confirmed tree through the installer, logs one
-/// line naming the tree and the counts or the code, keeps the failure's sentence on the
-/// dependency's row, and has the next status read check every tool again. Inputs: the
-/// installer, the engine root, the dependency, the confirmed tree and its confirmed scope.
+/// Removes group and other write from the confirmed tree through the installer once the
+/// tool's turn comes in the engine's line, logs one line naming the tree and the counts or
+/// the code, keeps the failure's sentence on the dependency's row, and has the next status
+/// read check every tool again. A turn that never comes within the line's longest wait
+/// fails as `setup_busy`. Inputs: the installer, the engine root, the dependency, the
+/// confirmed tree, its confirmed scope and the engine's update state.
 async fn fix_dependency(
     installer: Arc<dyn Installer>,
     root: &Path,
     dep: Dependency,
     tree: String,
     recursive: bool,
-    _updates: Arc<Updates>,
+    updates: Arc<Updates>,
 ) {
     let shown = tree.clone();
-    let outcome =
-        tokio::task::spawn_blocking(move || installer.fix_permissions(dep, &tree, recursive))
-            .await
-            .unwrap_or(Err(crate::tools::permission_fix::TOOL_FIX_FAILED));
+    let folders = turn_folders(root, dep, false);
+    let outcome = tokio::task::spawn_blocking(move || {
+        let turns = updates.turns();
+        let Some(turn) = turns.take(dep.program(), folders, wait_max()) else {
+            return Err("setup_busy");
+        };
+        let fixed = installer.fix_permissions(dep, &tree, recursive);
+        drop(turn);
+        fixed
+    })
+    .await
+    .unwrap_or(Err(crate::tools::permission_fix::TOOL_FIX_FAILED));
     match outcome {
         Ok(report) => eprintln!(
             "tool_fix_done tool={} tree={shown:?} changed={} shared={} skipped_foreign={} skipped_links={} skipped_other={}",
@@ -446,58 +516,72 @@ async fn fix_dependency(
     });
 }
 
-/// Installs one dependency setup did not find and stores its row: installed, unsupported, or
-/// why it failed. An install whose program then reports no usable version shows the check's
-/// own line when that version is too old, naming it and the one needed (V243-TMUX-APT-OLD).
-/// Inputs: the installer, the engine root and the dependency.
+/// Installs one dependency setup did not find and stores its row once its turn comes in the
+/// engine's line, since the job ahead may have installed it: a tool found then drops its
+/// earlier row, else the row reads installed, unsupported, or why it failed. An install
+/// whose program then reports no usable version shows the check's own line when that
+/// version is too old, naming it and the one needed (V243-TMUX-APT-OLD). A turn that never
+/// comes within the line's longest wait fails as `setup_busy`. Inputs: the installer, the
+/// engine root, the dependency, the engine's update state and the job's id in the line.
 async fn install_dependency(
     installer: Arc<dyn Installer>,
     root: &Path,
     dep: Dependency,
-    _updates: Arc<Updates>,
-    _job: &'static str,
+    updates: Arc<Updates>,
+    job: &'static str,
 ) {
-    let finder = installer.clone();
-    let found = tokio::task::spawn_blocking(move || finder.find(dep)).await;
-    if matches!(found, Ok(Ok(Some(_)))) {
-        return;
-    }
-    if let Ok(Err(code)) = &found
-        && code.0 == crate::setup::PLATFORM_UNSUPPORTED
-    {
-        progress::with(root, |state| {
-            state.dependencies.insert(dep, DependencyState::Unsupported);
-        });
-        return;
+    let (at, folders) = (root.to_path_buf(), turn_folders(root, dep, true));
+    let outcome = tokio::task::spawn_blocking(move || {
+        let turns = updates.turns();
+        let Some(turn) = turns.take(job, folders, wait_max()) else {
+            return Some(DependencyState::refused("setup_busy"));
+        };
+        let next = install_now(installer.as_ref(), &at, dep);
+        drop(turn);
+        next
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Some(DependencyState::Failed {
+            reason: plain_reason("setup_install_failed").to_owned(),
+        })
+    });
+    progress::with(root, |state| match outcome {
+        Some(next) => state.dependencies.insert(dep, next),
+        None => state.dependencies.remove(&dep),
+    });
+}
+
+/// The install itself, on the job's turn: none when the tool is found, its earlier row then
+/// to be dropped, else the row it ends with, reading installing while it runs. Inputs: the
+/// installer, the engine root and the dependency. Output: the row, or none.
+fn install_now(installer: &dyn Installer, root: &Path, dep: Dependency) -> Option<DependencyState> {
+    match installer.find(dep) {
+        Ok(Some(_)) => return None,
+        Err(code) if code.0 == crate::setup::PLATFORM_UNSUPPORTED => {
+            return Some(DependencyState::Unsupported);
+        }
+        _ => {}
     }
     progress::with(root, |state| {
         state.dependencies.insert(dep, DependencyState::Installing);
     });
-    let outcome = tokio::task::spawn_blocking(move || {
-        let installed = match crate::setup::platform_pin(dep) {
-            Some(pin) => installer.install(dep, &pin),
-            None => Err(InstallError(crate::setup::PLATFORM_UNSUPPORTED)),
-        };
-        match installed {
-            Ok(version) => DependencyState::Installed { version },
-            Err(code) if code.0 == "setup_version_unreadable" => match installer.lookup(dep) {
-                Ok(Err(missing)) if missing.reason == crate::tools::Reason::WrongVersion => {
-                    DependencyState::Missing {
-                        line: missing.line(),
-                    }
+    let installed = match crate::setup::platform_pin(dep) {
+        Some(pin) => installer.install(dep, &pin),
+        None => Err(InstallError(crate::setup::PLATFORM_UNSUPPORTED)),
+    };
+    Some(match installed {
+        Ok(version) => DependencyState::Installed { version },
+        Err(code) if code.0 == "setup_version_unreadable" => match installer.lookup(dep) {
+            Ok(Err(missing)) if missing.reason == crate::tools::Reason::WrongVersion => {
+                DependencyState::Missing {
+                    line: missing.line(),
                 }
-                _ => DependencyState::refused(code.0),
-            },
-            Err(code) => DependencyState::refused(code.0),
-        }
+            }
+            _ => DependencyState::refused(code.0),
+        },
+        Err(code) => DependencyState::refused(code.0),
     })
-    .await;
-    let next = outcome.unwrap_or_else(|_| DependencyState::Failed {
-        reason: plain_reason("setup_install_failed").to_owned(),
-    });
-    progress::with(root, |state| {
-        state.dependencies.insert(dep, next);
-    });
 }
 
 #[cfg(unix)]
