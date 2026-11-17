@@ -526,6 +526,8 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
                 "PendingImport",
                 "UncommittedImport",
                 "ReadFile",
+                "Sources",
+                "ReadSource",
                 "Default",
                 "Given",
                 "Agent",
