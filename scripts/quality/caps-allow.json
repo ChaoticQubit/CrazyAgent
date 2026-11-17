@@ -3,7 +3,7 @@
   "apps/desktop/src-tauri/src/bridge/intake.rs": 1662,
   "apps/desktop/src-tauri/src/bridge/master.rs": 1609,
   "apps/desktop/src-tauri/src/ide.rs": 1882,
-  "apps/desktop/src-tauri/src/lib.rs": 5892,
+  "apps/desktop/src-tauri/src/lib.rs": 5873,
   "apps/desktop/src-tauri/tests/native_auth.rs": 1564,
   "apps/desktop/src/api-intake.ts": 606,
   "apps/desktop/src/api-process.ts": 643,

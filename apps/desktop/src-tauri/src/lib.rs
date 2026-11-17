@@ -1,4 +1,5 @@
 pub mod bridge;
+mod engine_swap;
 pub mod ide;
 mod restore;
 pub mod theme;
@@ -18,6 +19,7 @@ use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
 use bridge::questions::{QuestionCount, QuestionPage, QuestionsDismissed};
 use bridge::terminal::Terminals;
+use bridge::watch::{Changed, Watching};
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
@@ -75,9 +77,10 @@ use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneyChoice;
 use crazyagent::usage::report::UsageReport;
 use crazyagent::usage::spend::SpendChoice;
+use engine_swap::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
@@ -239,47 +242,6 @@ fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
     } else {
         "engine_start_failed"
     }
-}
-
-/// Set once this app run has taken its one replacement of an older engine, so a swap that
-/// does not end the mismatch never turns into a restart loop (DEC-134 addendum 1).
-static ENGINE_REPLACED: AtomicBool = AtomicBool::new(false);
-
-/// Set when that replacement succeeded and no connect reply has said so yet.
-static ENGINE_UPDATE_UNTOLD: AtomicBool = AtomicBool::new(false);
-
-/// Whether an engine reporting `engine` is older than an app at `app`, so the app may replace
-/// it on its own at launch (DEC-134 addendum 1). Inputs: both versions. Output: true only
-/// when both read as versions and the app's is newer; equal, newer and unreadable give false.
-fn engine_older(engine: &str, app: &str) -> bool {
-    crazyagent::update::is_newer(app, engine).unwrap_or(false)
-}
-
-/// Whether the launch may replace the engine that answered without the owner's confirm: it
-/// is older than this app and the login service is installed and running, so the swap stops
-/// the service's engine and never installs a service beside an engine started by hand
-/// (DEC-134 addendum 1, #111 F1). Inputs: both versions and the service's status. Output:
-/// the answer.
-fn swap_on_launch(engine: &str, app: &str, service: &crazyagent::service::Status) -> bool {
-    service.installed && service.running && engine_older(engine, app)
-}
-
-/// Takes this app run's one replacement of an older engine. Input: the run's flag. Output:
-/// true the first time, false after.
-fn first_replacement(taken: &AtomicBool) -> bool {
-    !taken.swap(true, Ordering::SeqCst)
-}
-
-/// Takes a one-shot signal: true once after it was set, then false until it is set again.
-/// Input: the signal. Output: whether it was set.
-fn take_signal(signal: &AtomicBool) -> bool {
-    signal.swap(false, Ordering::SeqCst)
-}
-
-/// Whether this app replaced an older engine since the last connect reply said so. Reading
-/// it clears it, so the owner is told once. Output: the answer.
-pub(crate) fn engine_update_untold() -> bool {
-    take_signal(&ENGINE_UPDATE_UNTOLD)
 }
 
 /// Checks the default engine's version against this app's within 5 s. Input: the layout.
@@ -456,6 +418,23 @@ async fn desktop_status(
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&webview)?;
     Ok(read(&state).await?.status())
+}
+
+/// Starts the window's engine watch, or gives the running one the channel of the page that
+/// just loaded (v2.5 S3b). Inputs: the window, the app, the watch and the page's channel.
+/// Output: ok, or `window_denied` for any window but the main one.
+#[tauri::command]
+fn desktop_watch<R: Runtime>(
+    webview: Webview<R>,
+    app: AppHandle<R>,
+    watching: State<'_, Watching>,
+    changes: Channel<Changed>,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    if watching.listen(changes) {
+        bridge::watch::follow(app);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -5450,6 +5429,7 @@ macro_rules! native_commands {
 native_commands! {
     desktop_connect,
     desktop_status,
+    desktop_watch,
     desktop_harness_catalog,
     desktop_harness_versions,
     desktop_harness_update,
@@ -5827,6 +5807,7 @@ pub fn run() {
         .manage(ide::IdeViews::default())
         .manage(Notices::default())
         .manage(theme::Mirrored::default())
+        .manage(Watching::default())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(native_handler())

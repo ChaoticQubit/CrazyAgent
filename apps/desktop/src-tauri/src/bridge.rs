@@ -55,6 +55,7 @@ pub mod terminal;
 #[cfg(all(unix, feature = "native-webdriver"))]
 pub mod trial_pick;
 mod usage;
+pub mod watch;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
