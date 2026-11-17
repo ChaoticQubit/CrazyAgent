@@ -23,6 +23,7 @@ use crate::master_session::{
 use crate::model_gateway::relay::Relay;
 use crate::plugins::LaunchServer;
 use crate::protocol::RequestId;
+use crate::sandbox::hidden_paths::HiddenRun;
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use crate::usage::capture::Tokens;
 use std::ffi::OsString;
@@ -427,6 +428,13 @@ fn failure_observation(error: &EngineError) -> MasterRuntimeObservation {
     }
 }
 
+/// Settles a listed master turn's place on the hidden folders list once its run returns:
+/// taken off the list. Inputs: the listing and the run's result. Output: none.
+fn listed_turn_ended<T>(listed: HiddenRun, ran: &Result<T, EngineError>) {
+    let _ = ran;
+    drop(listed);
+}
+
 /// The SHA-256 of the program a listed master turn runs, the artifact its stored run names,
 /// read as a stream just before the harness starts. Input: the program. Output: 64
 /// lowercase hex characters, or [`NOT_INSTALLED`] for a file that cannot be read.
@@ -635,14 +643,18 @@ impl OwnerRuntimeHandle {
 
     /// Runs one prepared listed master turn and stores how it ended (DEC-180 Task 20): its
     /// reply, cancelled, or the reason it failed, a harness the engine could not be sure it
-    /// stopped stored as disconnected. Inputs: the prepared turn and its id. Output: the
-    /// stored turn, or the error that ended it.
+    /// stopped stored as disconnected. Its place on the hidden folders list is settled on the
+    /// run's own result, before that result is stored (SA-VID14). Inputs: the prepared turn,
+    /// its id and its listing. Output: the stored turn, or the error that ended it.
     pub(super) async fn launch_listed_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
+        listed: HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
-        match self.run_listed_master_turn(prepared, turn_id).await {
+        let ran = self.run_listed_master_turn(prepared, turn_id).await;
+        listed_turn_ended(listed, &ran);
+        match ran {
             Ok(observation) => {
                 self.observe_master_turn(prepared, turn_id, observation)
                     .await

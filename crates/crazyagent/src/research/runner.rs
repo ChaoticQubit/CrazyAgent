@@ -19,6 +19,7 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
+use crate::sandbox::hidden_paths::HiddenRun;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
@@ -1283,7 +1284,7 @@ impl ResearchRunner {
             let output = agent.join("output.md");
             let session = AgentSession::Piped(Box::new(session));
             return self.follow(
-                jobs, job, &granted, session, &prompt, harness, output, credential, lease,
+                jobs, job, &granted, session, &prompt, harness, output, credential, lease, listed,
             );
         };
         if let Some(host) = self.terminal() {
@@ -1309,7 +1310,7 @@ impl ResearchRunner {
             })?;
             let session = AgentSession::Terminal(Box::new(session));
             return self.follow(
-                jobs, job, &granted, session, &prompt, harness, output, credential, lease,
+                jobs, job, &granted, session, &prompt, harness, output, credential, lease, listed,
             );
         }
         if let Some(relay) = relay {
@@ -1565,9 +1566,10 @@ impl ResearchRunner {
     /// Follows a research agent's started session through its turn by
     /// [`Self::supervise_pane`] and stops it, keeping the account's credential and lease past a
     /// stop that is not confirmed, as a pane run always has (T19b 19b-4: a listed harness's
-    /// headless session too). Inputs: the job store, the job, its grants, the session, the prompt, the harness,
-    /// where the report goes, and the credential and lease. Output: how the agent ended, its
-    /// process group and the report path, or the stop's refusal.
+    /// headless session too), and settling its place on the hidden folders list by [`settled`]
+    /// (SA-VID14). Inputs: the job store, the job, its grants, the session, the prompt, the
+    /// harness, where the report goes, the credential, the lease and the listing. Output: how
+    /// the agent ended, its process group and the report path, or the stop's refusal.
     #[allow(clippy::too_many_arguments)]
     fn follow(
         &self,
@@ -1580,6 +1582,7 @@ impl ResearchRunner {
         output: PathBuf,
         credential: Option<AgentCredential>,
         lease: Option<(NativeProfileUse, Option<Hold>)>,
+        listed: HiddenRun,
     ) -> Result<(Ending, u32, PathBuf), RunError> {
         let group = session.process_group();
         #[cfg(unix)]
@@ -1589,30 +1592,13 @@ impl ResearchRunner {
         let stopped = session.stop();
         #[cfg(unix)]
         lifeline.release();
-        match stopped {
-            Ok(_) => {}
-            Err(Unstopped::Uncertain) => {
-                if let Some(credential) = credential {
-                    credential.retain();
-                }
-                std::mem::forget(lease);
-                return Err(RunError::Uncertain(leftovers::UNCERTAIN));
-            }
-            Err(Unstopped::Left(left)) => {
-                let code = left.code();
-                drop(credential);
-                let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
-                let by = leftovers::HoldBy {
-                    project: Some(job.project.clone()),
-                    who: format!("research job {}", job.id),
-                };
-                let mode = jobs.leftover_mode(&job.project);
-                left.hold(account, lease, by, mode);
-                return Err(RunError::Uncertain(code));
-            }
-        }
-        drop(credential);
-        drop(lease);
+        let by = leftovers::HoldBy {
+            project: Some(job.project.clone()),
+            who: format!("research job {}", job.id),
+        };
+        settled(stopped.map(|_| ()), credential, lease, listed, by, || {
+            jobs.leftover_mode(&job.project)
+        })?;
         Ok((ending?, group, output))
     }
 
@@ -2167,6 +2153,45 @@ impl ResearchRunner {
         let refusal = crate::sandbox::windows::capabilities(&network)
             .expect_err("an endpoint limit needs the AppContainer firewall rule");
         Err(RunError::Sandbox(refusal))
+    }
+}
+
+/// Settles what a research agent's stop leaves behind: a clean stop lets go of the
+/// credential, the lease and the hidden folders listing; a stop that is not confirmed keeps
+/// the credential and the lease; leftover processes are held under the owner's leftover
+/// setting. Inputs: the stop's result, the credential, the lease, the listing, who left it and
+/// the setting. Output: none, or the uncertain stop's code.
+fn settled(
+    stopped: Result<(), Unstopped>,
+    credential: Option<AgentCredential>,
+    lease: Option<(NativeProfileUse, Option<Hold>)>,
+    listed: HiddenRun,
+    by: leftovers::HoldBy,
+    mode: impl FnOnce() -> leftovers::LeftoverMode,
+) -> Result<(), RunError> {
+    match stopped {
+        Ok(()) => {
+            drop(credential);
+            drop(lease);
+            drop(listed);
+            Ok(())
+        }
+        Err(Unstopped::Uncertain) => {
+            if let Some(credential) = credential {
+                credential.retain();
+            }
+            std::mem::forget(lease);
+            drop(listed);
+            Err(RunError::Uncertain(leftovers::UNCERTAIN))
+        }
+        Err(Unstopped::Left(left)) => {
+            let code = left.code();
+            drop(credential);
+            let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
+            left.hold(account, lease, by, mode());
+            drop(listed);
+            Err(RunError::Uncertain(code))
+        }
     }
 }
 

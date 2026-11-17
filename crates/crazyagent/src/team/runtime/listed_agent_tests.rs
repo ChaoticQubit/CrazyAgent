@@ -488,3 +488,42 @@ fn a_listed_master_delegates_to_a_listed_sub_agent_and_its_next_turn_carries_the
     assert!(heard.contains("Message from the engine:"), "{heard}");
     team.shutdown().unwrap();
 }
+
+/// SA-VID14 on the harness layer (H5a), a pin: a team agent of a listed harness hides the
+/// project's saved hidden folders and records them at prepare, as every team launch does,
+/// so the team's own seer marking covers it once it runs.
+#[test]
+fn a_team_agent_of_a_listed_harness_hides_and_records_the_saved_hidden_folders() {
+    let fixture = Fixture::new(1);
+    let runtime = listed_runtime(&fixture);
+    let secrets = fixture.setup.project_folder().join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    crate::sandbox::hidden_paths::save(
+        &fixture.connection,
+        PROJECT,
+        std::slice::from_ref(&secrets),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "standin-acp", AgentStatus::Starting),
+        1
+    );
+
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        1,
+        AgentRole::Sub,
+        "standin-acp",
+        false,
+        &keyless_endpoint(),
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    );
+
+    let (_, plan, _) = prepared.expect("the listed agent prepares");
+    assert_eq!(
+        plan.hidden,
+        vec![crate::sandbox::hidden_paths::digest(&secrets)]
+    );
+}

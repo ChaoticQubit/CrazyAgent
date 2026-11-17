@@ -855,3 +855,37 @@ exec /bin/sleep 60
         }
     }
 }
+
+/// SA-VID14 on the harness layer (H5a): a listed master turn whose harness the engine could
+/// not be sure it stopped, or whose process thread was lost, stays on the hidden folders
+/// list after it returns, since that harness may still run; a turn that ended or failed with
+/// its harness stopped leaves the list.
+#[test]
+fn a_listed_master_turn_not_surely_stopped_stays_listed_after_it_returns() {
+    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    let saved = [PathBuf::from("/tmp/sa-vid14-listed-master/vault")];
+    for (project, ran, kept) in [
+        ("sa-vid14-listed-master-ok", Ok(()), false),
+        (
+            "sa-vid14-listed-master-failed",
+            Err(failure("master_sandbox_unavailable")),
+            false,
+        ),
+        (
+            "sa-vid14-listed-master-stop",
+            Err(failure(STOP_UNCERTAIN)),
+            true,
+        ),
+        (
+            "sa-vid14-listed-master-thread",
+            Err(failure(THREAD_LOST)),
+            true,
+        ),
+    ] {
+        let listed = starting(RunKind::Master, project).expect("the list has room");
+        listed.hid(&[]);
+        listed_turn_ended(listed, &ran);
+        let named = runs_seeing(project, &saved) == vec![RunKind::Master];
+        assert_eq!(named, kept, "{ran:?}");
+    }
+}

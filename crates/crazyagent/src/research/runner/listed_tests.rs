@@ -300,3 +300,33 @@ fn a_listed_research_run_keeps_its_harness_output_in_owner_only_logs() {
         assert_eq!(mode.ok().map(|mode| mode & 0o777), Some(0o600), "{name}");
     }
 }
+
+/// SA-VID14 on the harness layer (H5a): a listed or pane research agent whose stop the
+/// engine could not confirm stays on the hidden folders list after its run returns, with
+/// its credential and lease kept, since it may still run; a confirmed stop leaves the list.
+#[test]
+fn a_research_agent_not_surely_stopped_stays_listed_after_its_run_returns() {
+    use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
+    let saved = [PathBuf::from("/tmp/sa-vid14-research/vault")];
+    for (project, stopped, kept) in [
+        ("sa-vid14-research-stopped", Ok(()), false),
+        (
+            "sa-vid14-research-uncertain",
+            Err(Unstopped::Uncertain),
+            true,
+        ),
+    ] {
+        let listed = starting(RunKind::Research, project).expect("the list has room");
+        listed.hid(&[]);
+        let by = leftovers::HoldBy {
+            project: Some(project.into()),
+            who: "research job 1".into(),
+        };
+        let ended = settled(stopped, None, None, listed, by, || {
+            leftovers::LeftoverMode::Keep
+        });
+        assert_eq!(ended.is_err(), kept, "{project}");
+        let named = runs_seeing(project, &saved) == vec![RunKind::Research];
+        assert_eq!(named, kept, "{project}");
+    }
+}

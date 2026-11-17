@@ -775,7 +775,9 @@ impl OwnerRuntimeHandle {
                     .await;
             }
             Ok(()) if matches!(prepared.session.selection.backend, MasterBackend::Listed(_)) => {
-                return self.launch_listed_master_turn(&prepared, turn_id).await;
+                return self
+                    .launch_listed_master_turn(&prepared, turn_id, listed)
+                    .await;
             }
             Ok(()) => self.launch_master_turn(&prepared, turn_id, listed).await,
             Err(error) => {
