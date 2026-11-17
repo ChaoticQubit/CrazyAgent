@@ -100,37 +100,35 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
 
-/// Saves the owner's agents on quit setting over the stored one. Inputs: the open
-/// transaction and the settings. Output: `Applied`, a `quit_settings_invalid` rejection for
-/// hours outside 1 to 168 that changes nothing, or the database error.
+/// Checks the owner's agents on quit setting before it is saved. Input: the settings.
+/// Output: none, or a `quit_settings_invalid` rejection for hours outside 1 to 168 that
+/// changes nothing.
+pub(crate) fn check(settings: &QuitSettings) -> Option<Outcome> {
+    if (HOURS_MIN..=HOURS_MAX).contains(&settings.hours) {
+        return None;
+    }
+    Some(Outcome::Rejected {
+        code: "quit_settings_invalid".into(),
+    })
+}
+
+/// Stores the owner's agents on quit setting for a test, checked, through the settings
+/// log's projection; the engine saves it only through `settings_log::owner`, which logs the
+/// save (v2.5 L10). Inputs: the connection and the settings. Output: `Applied`, the
+/// `quit_settings_invalid` rejection, or the store's refusal.
+#[cfg(test)]
 pub(crate) fn save(
     connection: &Connection,
     settings: &QuitSettings,
 ) -> Result<Outcome, EngineError> {
-    if !(HOURS_MIN..=HOURS_MAX).contains(&settings.hours) {
-        return Ok(Outcome::Rejected {
-            code: "quit_settings_invalid".into(),
-        });
+    if let Some(rejected) = check(settings) {
+        return Ok(rejected);
     }
-    let on_quit = text(settings.on_quit)?;
-    let left_running = text(settings.left_running)?;
-    let stored = connection
-        .execute(
-            "INSERT INTO agent_quit_settings(singleton,on_quit,left_running,hours) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET on_quit=excluded.on_quit, left_running=excluded.left_running, hours=excluded.hours",
-            rusqlite::params![on_quit, left_running, settings.hours],
-        )
-        .map_err(error)?;
-    assert_eq!(stored, 1);
+    let event = crate::settings_log::Event::Quit(crate::settings_log::Saved {
+        settings: *settings,
+    });
+    crate::settings_log::apply(connection, &event)?;
     Ok(Outcome::Applied)
-}
-
-/// The stored name of one choice. Input: the choice. Output: its snake case name, or
-/// `quit_settings_invalid` when it does not serialize to text.
-fn text(choice: impl Serialize) -> Result<String, EngineError> {
-    match serde_json::to_value(choice).map_err(error)? {
-        serde_json::Value::String(name) => Ok(name),
-        _ => Err(invalid()),
-    }
 }
 
 /// Loads the owner's agents on quit setting. Input: the engine database, writable or

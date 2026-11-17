@@ -912,43 +912,36 @@ pub fn load_app(connection: &Connection) -> Result<AppSettings, &'static str> {
     }
 }
 
-/// Stores the app-wide instruction settings whole, creating the table first when it is
-/// missing. Inputs: a writable connection to `engine.db` and the settings. Output: unit.
-pub fn save_app(connection: &Connection, settings: AppSettings) -> rusqlite::Result<()> {
-    initialize(connection)?;
-    let changed = connection.execute(
-        "INSERT INTO agent_instruction_app_settings(singleton, edit_with_ai) VALUES (1, ?1)
-         ON CONFLICT(singleton) DO UPDATE SET edit_with_ai=excluded.edit_with_ai",
-        params![i64::from(settings.edit_with_ai)],
+/// Stores the app-wide instruction settings whole for a test, making the table first when
+/// it is missing; the engine saves them only through `settings_log::instruction_app`, which
+/// logs the save (v2.5 L10). Inputs: a writable connection and the settings. Output: unit.
+#[cfg(test)]
+pub fn save_app(connection: &Connection, settings: AppSettings) -> Result<(), EngineError> {
+    initialize(connection).map_err(|error| EngineError(error.to_string()))?;
+    let saved = crate::settings_log::Saved { settings };
+    crate::settings_log::apply(
+        connection,
+        &crate::settings_log::Event::InstructionApp(saved),
     )?;
-    assert_eq!(changed, 1);
     assert!(load_app(connection) == Ok(settings));
     Ok(())
 }
 
-/// Stores one project's settings whole, creating the table first when it is missing.
-/// Inputs: a writable connection to `engine.db`, the project and the settings.
-/// Output: unit.
+/// Stores one project's settings whole for a test, making the table first when it is
+/// missing; the engine saves them only through `settings_log::instruction`, which logs the
+/// save (v2.5 L10). Inputs: a writable connection, the project and the settings. Output: unit.
+#[cfg(test)]
 pub fn save(
     connection: &Connection,
     project: &ProjectId,
     settings: Settings,
-) -> rusqlite::Result<()> {
-    initialize(connection)?;
-    let changed = connection.execute(
-        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits, repeated, edit_with_ai) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits, repeated=excluded.repeated, edit_with_ai=excluded.edit_with_ai",
-        params![
-            project.as_str(),
-            settings.mode.as_str(),
-            i64::from(settings.transcripts),
-            settings.edits.as_str(),
-            settings.repeated.as_str(),
-            i64::from(settings.edit_with_ai)
-        ],
-    )?;
-    assert_eq!(changed, 1);
-    Ok(())
+) -> Result<(), EngineError> {
+    initialize(connection).map_err(|error| EngineError(error.to_string()))?;
+    let saved = crate::settings_log::ProjectSaved {
+        project: project.clone(),
+        settings,
+    };
+    crate::settings_log::apply(connection, &crate::settings_log::Event::Instruction(saved))
 }
 
 /// Keeps what an import at a project's onboarding moved, so the onboarding view can name

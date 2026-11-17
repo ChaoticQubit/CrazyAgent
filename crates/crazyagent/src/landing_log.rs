@@ -931,7 +931,7 @@ const SNAPSHOT_ROWS_MAX: usize = 65_536;
 const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 
 /// The first snapshot run of the landing tables, for the schema step that puts landing on
-/// the log (step 14): rows written before the log reach replay through it, through the
+/// the log (step 15): rows written before the log reach replay through it, through the
 /// open's proof. A store without the `state` table or with no landing row gets no run, so
 /// it moves no revision. Inputs: the step's transaction and the open's proof. Output:
 /// whether a run was appended, or the log's refusal.

@@ -11,8 +11,10 @@ pub const STACK_ITEMS_MAX: usize = 12;
 pub const STACK_ITEM_BYTES_MAX: usize = 40;
 pub const PREFACE_BYTES_MAX: usize = 2048;
 const BODY_BYTES_MAX: usize = 8192;
+/// The owner_texts holder of the stored profile's text (v2.5 L10 Q5): the one row's body.
+pub(crate) const HOLDER: &str = "user_profile/1/body";
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS user_profile (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 2 AND 8192)
@@ -195,26 +197,42 @@ pub fn stack_item_problem(item: &str) -> Option<String> {
     })
 }
 
-#[cfg(unix)]
-pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    tx.execute_batch(TABLE).map_err(error)
+/// Makes the profile table when it is missing, as the engine's open and owner start do.
+/// Input: the connection. Output: Ok, or the store's refusal.
+#[cfg(any(unix, test))]
+pub(crate) fn initialize(db: &rusqlite::Connection) -> Result<(), EngineError> {
+    db.execute_batch(TABLE).map_err(error)
 }
 
-pub(crate) fn save(tx: &Transaction<'_>, profile: &OwnerProfile) -> Result<Outcome, EngineError> {
+/// The body a profile save stores and keeps in owner_texts, checked before the save moves
+/// any revision: valid fields and at most 8192 bytes of JSON. Input: the profile. Output:
+/// the body, or the rejection the owner sees, which logs and keeps nothing.
+pub(crate) fn body(profile: &OwnerProfile) -> Result<Result<String, Outcome>, EngineError> {
     if let Err(problem) = profile.validate() {
-        return Ok(Outcome::Rejected { code: problem.0 });
+        return Ok(Err(Outcome::Rejected { code: problem.0 }));
     }
     let body = serde_json::to_string(profile).map_err(error)?;
     if body.len() > BODY_BYTES_MAX {
-        return Ok(Outcome::Rejected {
+        return Ok(Err(Outcome::Rejected {
             code: "owner_profile_bounds".into(),
-        });
+        }));
     }
-    tx.execute(
-        "INSERT INTO user_profile(singleton,body) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET body=excluded.body",
-        [&body],
-    )
-    .map_err(error)?;
+    assert!(body.len() >= 2, "a profile body is a JSON object");
+    Ok(Ok(body))
+}
+
+/// Stores a profile for the tests as the owner save does, unlogged: its checks, its text
+/// kept under [`HOLDER`], then the settings log's bare upsert from that text. Inputs: the
+/// transaction and the profile. Output: `Applied`, the rejection, or the first refusal.
+#[cfg(test)]
+pub(crate) fn save(tx: &Transaction<'_>, profile: &OwnerProfile) -> Result<Outcome, EngineError> {
+    let body = match body(profile)? {
+        Ok(body) => body,
+        Err(rejected) => return Ok(rejected),
+    };
+    let digest = crate::owner_texts::keep(tx, HOLDER, None, body.as_bytes())?;
+    let event = crate::settings_log::Event::Profile(crate::settings_log::Kept { body: digest });
+    crate::settings_log::apply(tx, &event)?;
     Ok(Outcome::Applied)
 }
 

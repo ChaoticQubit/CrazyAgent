@@ -559,7 +559,7 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 /// Each logged project removal as its `seq` and project, in log order. Input: the
 /// connection. Output: the removals, or `worktrees_log_removals` past [`REMOVALS_MAX`] or
 /// `worktrees_log_event_invalid` for a removal body that is not one.
-fn removals(db: &Connection) -> Result<Vec<(u64, String)>, EngineError> {
+pub(crate) fn removals(db: &Connection) -> Result<Vec<(u64, String)>, EngineError> {
     let mut found = Vec::new();
     replay::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {

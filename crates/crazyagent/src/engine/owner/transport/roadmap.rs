@@ -324,7 +324,7 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
             Ok(Reply::Done {})
         }
         Action::SetRefresh { project, refresh } => {
-            roadmap_status::set_refresh(&db, &project, refresh)?;
+            crate::settings_log::roadmap_refresh(&db, &project, refresh)?;
             Ok(Reply::Done {})
         }
     }

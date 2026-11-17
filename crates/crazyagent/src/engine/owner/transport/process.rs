@@ -1921,7 +1921,7 @@ fn instruction_settings(
         }
         let mode_kept = crate::instruction_files::load(&tx, project)
             .is_ok_and(|stored| stored.mode == settings.mode);
-        crate::instruction_files::save(&tx, project, settings).map_err(unavailable)?;
+        crate::settings_log::instruction(&tx, project, settings)?;
         if !mode_kept {
             let agent = crate::launch_context::agent_project(&tx, project)
                 .map_err(|_| failure("instruction_settings_unavailable"))?;
@@ -1969,7 +1969,7 @@ fn app_settings(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(unsaved)?;
-    crate::instruction_files::save_app(&tx, settings).map_err(unsaved)?;
+    crate::settings_log::instruction_app(&tx, settings)?;
     let stored = crate::instruction_files::load_app(&tx).map_err(failure)?;
     assert!(stored == settings);
     tx.commit().map_err(|_| unknown())?;

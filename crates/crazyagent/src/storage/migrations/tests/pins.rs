@@ -552,8 +552,9 @@ fn standing_of(db: &Connection) -> Standing {
 
 /// v2.5 L6 P5-upgrade row: an upgrade of the 2.4.2 fixture with a worktree row of each table
 /// runs step 13 once: one verified snapshot run at one revision with its `events` row, no
-/// row changed, and replay of the log equals the live tables. The fixture holds a publish
-/// prompt answer, so step 14 (v2.5 L9) adds the landing run at the next revision.
+/// row changed, and replay of the log equals the live tables. The fixture holds settings
+/// rows and a publish prompt answer, so step 14 (v2.5 L10) adds the settings run and step
+/// 15 (v2.5 L9) the landing run, each at the next revision.
 #[test]
 fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
     let (root, _) = fixture();
@@ -574,7 +575,7 @@ fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
 
     assert_eq!(version(&db).unwrap(), latest(STEPS));
     let after = standing_of(&db);
-    assert_eq!((after.0, after.1), (before.0 + 2, before.1 + 2));
+    assert_eq!((after.0, after.1), (before.0 + 3, before.1 + 3));
     assert_eq!((&after.2, &after.3), (&before.2, &before.3));
     let done: Vec<(i64, String)> = db
         .prepare("SELECT seq, aggregate FROM state_log WHERE kind=?1 ORDER BY seq")
@@ -586,7 +587,11 @@ fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     let aggregates: Vec<&str> = done.iter().map(|(_, name)| name.as_str()).collect();
-    assert_eq!(aggregates, ["worktrees", "landing"], "one run per step");
+    assert_eq!(
+        aggregates,
+        ["worktrees", "settings", "landing"],
+        "one run per step"
+    );
     for (seq, _) in &done {
         crate::state_log::verify_snapshot(&db, *seq as u64).unwrap();
     }

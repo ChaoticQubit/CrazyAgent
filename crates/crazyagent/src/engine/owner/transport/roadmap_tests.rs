@@ -4,8 +4,9 @@ use serde_json::json;
 
 const PROJECT: &str = "alpha";
 
-/// An engine root whose database holds the engine tables and one set-up project.
-/// Output: the temporary folder, the engine root and the project.
+/// An engine root whose database holds the engine tables, a running engine host for the
+/// logged settings writes and one set-up project. Output: the temporary folder, the engine
+/// root and the project.
 fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     let tmp = tempfile::Builder::new()
         .prefix("ca-owner-roadmap-")
@@ -19,6 +20,7 @@ fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     }
     let db = crate::questions::open(&root).unwrap();
     crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::ide::log::seed(&db);
     crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
     (tmp, root, ProjectId::new(PROJECT).unwrap())
 }

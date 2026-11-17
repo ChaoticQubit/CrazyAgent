@@ -8,6 +8,8 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod landing_step;
+mod settings_step;
 #[cfg(test)]
 mod tests;
 
@@ -108,10 +110,11 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 14,
-        run: |tx| {
-            let at_ms = crate::state_log::replay::Clock::System.now_ms();
-            crate::landing_log::first_run(tx, super::opening::Opening::new(at_ms)).map(drop)
-        },
+        run: settings_step::settings_on_the_log,
+    },
+    Step {
+        to: 15,
+        run: landing_step::landing_on_the_log,
     },
 ];
 

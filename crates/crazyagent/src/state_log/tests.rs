@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 30] = [
+const KINDS: [&str; 42] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -508,6 +508,18 @@ const KINDS: [&str; 30] = [
     crate::landing_log::RULE_REQUEST_SAVED,
     crate::landing_log::VERIFICATION_SAVED,
     crate::landing_log::VERIFICATION_FORGOTTEN,
+    crate::settings_log::KIND_SANDBOX,
+    crate::settings_log::KIND_CLEANUP,
+    crate::settings_log::KIND_QUIT,
+    crate::settings_log::KIND_RETRY,
+    crate::settings_log::KIND_HARNESS_UPDATE,
+    crate::settings_log::KIND_INSTRUCTION_APP,
+    crate::settings_log::KIND_INSTRUCTION,
+    crate::settings_log::KIND_ROADMAP,
+    crate::settings_log::KIND_STEPS,
+    crate::settings_log::KIND_TIME,
+    crate::settings_log::KIND_FRAMES,
+    crate::settings_log::KIND_PROFILE,
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
@@ -522,10 +534,27 @@ const FREE_FORM: [(&str, &str); 2] = [
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
 /// ide/log.rs and landing_log.rs write `change.kind()`, which maps each `Change` variant to
 /// one of their kinds.
-const WRITERS: [(&str, &[&str]); 6] = [
+const WRITERS: [(&str, &[&str]); 7] = [
     ("ide/log.rs", &["change.kind(),"]),
     ("landing_log.rs", &["change.kind(),"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
+    (
+        "settings_log.rs",
+        &[
+            "KIND_SANDBOX,",
+            "KIND_CLEANUP,",
+            "KIND_QUIT,",
+            "KIND_RETRY,",
+            "KIND_HARNESS_UPDATE,",
+            "KIND_INSTRUCTION_APP,",
+            "KIND_INSTRUCTION,",
+            "KIND_ROADMAP,",
+            "KIND_STEPS,",
+            "KIND_TIME,",
+            "KIND_FRAMES,",
+            "KIND_PROFILE,",
+        ],
+    ),
     ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
     (
         "storage/master_session/delete.rs",
@@ -540,7 +569,7 @@ const WRITERS: [(&str, &[&str]); 6] = [
 /// The writers outside this module that take a snapshot, each with the only tables its runs
 /// may carry. A run copies those tables' stored columns as they stand, rows the typed events
 /// wrote; the run does not check them again.
-const SNAPSHOTS: [(&str, &[&str]); 2] = [
+const SNAPSHOTS: [(&str, &[&str]); 3] = [
     (
         "worktrees/log.rs",
         &["repository_admissions", "worktree_leases"],
@@ -559,6 +588,23 @@ const SNAPSHOTS: [(&str, &[&str]); 2] = [
             "landing_change_set_numbers",
             "verification_current",
             "github_publish_prompt",
+        ],
+    ),
+    (
+        "settings_log.rs",
+        &[
+            "sandbox_settings",
+            "agent_cleanup_settings",
+            "agent_quit_settings",
+            "provider_retry_settings",
+            "harness_update_settings",
+            "agent_instruction_app_settings",
+            "agent_instruction_settings",
+            "roadmap_status_settings",
+            "configured_master_steps",
+            "configured_master_time",
+            "configured_master_frames",
+            "user_profile",
         ],
     ),
 ];
@@ -735,6 +781,7 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
     }
     worktrees_runs_carry_only_their_named_tables();
     landing_runs_carry_only_their_named_tables();
+    settings_runs_carry_only_their_named_tables();
 }
 
 /// Checks that a landing run carries only the tables [`SNAPSHOTS`] names for its writer, in
@@ -764,6 +811,111 @@ fn chunk_tables(tx: &rusqlite::Transaction<'_>) -> Vec<String> {
             chunk["table"].as_str().unwrap().to_owned()
         })
         .collect()
+}
+
+/// Checks that a settings snapshot run carries only the tables [`SNAPSHOTS`] names for
+/// settings_log.rs, one chunk each on a store holding every settings table. Output: none.
+fn settings_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[2];
+    assert_eq!(writer, "settings_log.rs");
+    let mut db = db();
+    crate::settings_log::initialize(&db).unwrap();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::settings_log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    assert_eq!(chunk_tables(&tx), named, "one chunk per table, in order");
+}
+
+/// Checks the closed body of one settings kind (v2.5 L10): the setting and, for a project
+/// setting, the project id, or the profile's kept-text digest, refusing free text in any and
+/// any key more. The settings are enums, bounded numbers and switches, and the profile text
+/// stays in owner_texts (Q5), never in a body. Input: the kind. Output: none.
+fn settings_body_is_closed(kind: &str) {
+    use crate::settings_log as settings;
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    let decodes = |body: &[u8]| {
+        settings::decode(&replay::Logged {
+            seq: 1,
+            revision: 1,
+            aggregate: Aggregate::Settings,
+            kind: kind.into(),
+            schema: 1,
+            at_ms: 1,
+            body: body.to_vec(),
+        })
+        .is_ok()
+    };
+    let value = |settings: serde_json::Value| json!({"settings": settings});
+    let (sample, keys): (serde_json::Value, &[&str]) = match kind {
+        settings::KIND_SANDBOX => (
+            value(json!(crate::sandbox_settings::SandboxSettings::default())),
+            &["settings"],
+        ),
+        settings::KIND_CLEANUP => (
+            value(json!(crate::cleanup_settings::CleanupSettings::default())),
+            &["settings"],
+        ),
+        settings::KIND_QUIT => (
+            value(json!(crate::quit_settings::QuitSettings::default())),
+            &["settings"],
+        ),
+        settings::KIND_RETRY => (
+            value(json!(crate::provider_retry::ProviderRetry::default())),
+            &["settings"],
+        ),
+        settings::KIND_HARNESS_UPDATE => (
+            value(json!(crate::harnesses::update::UpdateSettings::default())),
+            &["settings"],
+        ),
+        settings::KIND_INSTRUCTION_APP => (
+            value(json!(crate::instruction_files::AppSettings::default())),
+            &["settings"],
+        ),
+        settings::KIND_INSTRUCTION => (
+            json!({
+                "project": "app",
+                "settings": crate::instruction_files::Settings::default()
+            }),
+            &["project", "settings"],
+        ),
+        settings::KIND_ROADMAP => (
+            json!({
+                "project": "app",
+                "settings": crate::roadmap_status::Refresh::default()
+            }),
+            &["project", "settings"],
+        ),
+        settings::KIND_STEPS => (
+            value(json!(
+                crate::master_step_limit::MasterStepSettings::default()
+            )),
+            &["settings"],
+        ),
+        settings::KIND_TIME => (
+            value(json!(
+                crate::master_time_limit::MasterTimeSettings::default()
+            )),
+            &["settings"],
+        ),
+        settings::KIND_FRAMES => (
+            value(json!(
+                crate::master_frame_limit::MasterFrameSettings::default()
+            )),
+            &["settings"],
+        ),
+        settings::KIND_PROFILE => (json!({"body": "0".repeat(64)}), &["body"]),
+        other => panic!("{other} is not a settings kind"),
+    };
+    let mut nested = sample.clone();
+    if let Some(fields) = nested["settings"].as_object_mut() {
+        fields.insert("key".into(), json!("sk-ant-api03-key"));
+        assert!(
+            !decodes(&serde_json::to_vec(&nested).unwrap()),
+            "{kind}: a setting took one key more"
+        );
+    }
+    closed_body(kind, decodes, sample, keys);
 }
 
 /// Checks that a snapshot's closing body holds only its aggregate, its chunk count and its
@@ -1008,6 +1160,9 @@ fn no_event_body_can_carry_a_secret() {
             | crate::ide::log::WORKSPACE_WRITTEN
             | crate::ide::log::WORKSPACE_FORGOTTEN => ide_body_is_closed(kind),
             kind if crate::landing_log::KINDS.contains(&kind) => landing_body_is_closed(kind),
+            settings if crate::settings_log::KINDS.contains(&settings) => {
+                settings_body_is_closed(settings)
+            }
             other => panic!("the kind {other} has no body rule"),
         }
     }

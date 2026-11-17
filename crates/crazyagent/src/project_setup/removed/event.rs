@@ -75,11 +75,11 @@ pub(crate) fn removing(
     Ok(Some((removed, worktrees)))
 }
 
-/// Appends a removal and tombstones its project's earlier events, keeping its own: the
-/// admissions, the ide events and, for a Delete everything, the landing events of its agent
-/// worktrees, whose rows go in this transaction too. Inputs: the request's transaction, the
-/// moved revision, the admission, the removal and its worktrees. Output: how many events
-/// were tombstoned, or the first refusal.
+/// Appends a removal and tombstones its project's earlier events, keeping its own: its
+/// admissions, ide and settings events and, for a Delete everything, the landing events of
+/// its agent worktrees, whose rows go in this transaction too. Inputs: the request's
+/// transaction, the moved revision, the admission, the removal and its worktrees. Output:
+/// how many events were tombstoned, or the first refusal.
 pub(crate) fn settle(
     tx: &Transaction<'_>,
     revision: u64,
@@ -93,6 +93,7 @@ pub(crate) fn settle(
     let project = removed.project.as_str();
     let mut redacted = crate::worktrees::log::forget_project(tx, project, Some(seq), &fence)?;
     redacted += crate::ide::log::forget_project(tx, project, Some(seq), &fence)?;
+    redacted += crate::settings_log::forget_project(tx, project, Some(seq), &fence)?;
     redacted += crate::landing_log::forget_worktrees(tx, worktrees, &fence)?;
     Ok(redacted)
 }
