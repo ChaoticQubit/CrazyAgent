@@ -38,11 +38,11 @@ fn database(root: &Path) -> Vec<u8> {
 fn the_record_reads_back_as_each_state_and_nothing_else() {
     let dir = root();
     assert_eq!(state(dir.path()), None);
-    let copy = "replaced-20261117T001500.000Z";
+    let copy = "replaced-20261117T001500000Z";
     let cases = [
         ("pending", Some(RestoreState::Pending)),
         (
-            "restored replaced-20261117T001500.000Z",
+            "restored replaced-20261117T001500000Z",
             Some(RestoreState::Restored { copy: copy.into() }),
         ),
         (
@@ -56,6 +56,7 @@ fn the_record_reads_back_as_each_state_and_nothing_else() {
         ("failed", None),
         ("failed storage_restore_busy again", None),
         ("restored ../elsewhere", None),
+        ("restored replaced-2026.11.17", None),
         ("done storage_restore_busy", None),
         ("", None),
     ];
@@ -82,7 +83,7 @@ fn a_client_starts_no_engine_while_a_restore_is_pending_or_done_and_does_after_a
     assert_eq!(blocks_start(dir.path()), None);
     record(dir.path(), "pending", 0o600);
     assert_eq!(blocks_start(dir.path()), Some(ENGINE_RESTORING));
-    record(dir.path(), "restored replaced-20261117T001500.000Z", 0o600);
+    record(dir.path(), "restored replaced-20261117T001500000Z", 0o600);
     assert_eq!(blocks_start(dir.path()), Some(ENGINE_RESTORED));
     record(dir.path(), "failed storage_restore_busy", 0o600);
     assert_eq!(blocks_start(dir.path()), None);
