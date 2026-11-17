@@ -284,10 +284,11 @@ pub(crate) fn container_for(project_root: &Path, agent_home: &Path) -> String {
 /// roots, the protected paths kept read-only but git's config lock, and the project's root
 /// `context` while `.crazyagent` is a real folder, since the state folder then holds the
 /// context the engine reads ([`crate::projects_home::state_folder`]) and a missing root
-/// `context` would keep the project root from taking new entries; plain drive secret paths
-/// hidden, and the grants folder. The helper's plan check runs here too, so a policy it would
-/// refuse, such as a grants folder in a writable root, is refused at install. Inputs: the
-/// policy and the grants folder. Output: the profile, or the refusal.
+/// `context` would keep the project root from taking new entries; none for a job folder
+/// ([`ProjectSandbox::as_job_folder`]); plain drive secret paths hidden, and the grants folder.
+/// The helper's plan check runs here too, so a policy it would refuse, such as a grants folder
+/// in a writable root, is refused at install. Inputs: the policy and the grants folder.
+/// Output: the profile, or the refusal.
 pub fn boundary_profile(
     sandbox: &ProjectSandbox,
     grants: &Path,
@@ -305,8 +306,14 @@ pub fn boundary_profile(
     let root = sandbox.project_root();
     let config_lock = root.join(".git").join(GIT_CONFIG_LOCK);
     let unread = (crate::projects_home::state_folder(root) != root).then(|| root.join("context"));
-    let mut guarded = sandbox
-        .protected_paths()
+    let guards = sandbox.holds_project_guards();
+    assert!(guards || sandbox.confinements() == 0);
+    let protected = if guards {
+        sandbox.protected_paths()
+    } else {
+        Vec::new()
+    };
+    let mut guarded = protected
         .iter()
         .filter(|path| **path != config_lock && Some(*path) != unread.as_ref())
         .map(|path| {
@@ -341,9 +348,13 @@ pub fn boundary_profile(
 /// Makes `.git\hooks`, `.git\modules` and `.crazyagent\context` when missing, empty, in a parent
 /// that is a real folder, never replacing an entry and never making `.git` or `.crazyagent`,
 /// which would move a legacy project's state folder (DEC-193 F2): the helper keeps the entries
-/// of the folder above a missing guarded path, which would stop git's `index.lock`. Input: the
-/// policy. Output: how many were made, or the failure.
+/// of the folder above a missing guarded path, which would stop git's `index.lock`. A job
+/// folder holds no guards, so none is made there. Input: the policy. Output: how many were
+/// made, or the failure.
 fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError> {
+    if !sandbox.holds_project_guards() {
+        return Ok(0);
+    }
     let root = sandbox.project_root();
     let git = root.join(".git");
     let state = root.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
@@ -1059,5 +1070,34 @@ mod tests {
             fs::read_to_string(git.join("config")).unwrap(),
             "[core]\r\n"
         );
+    }
+
+    #[test]
+    fn a_job_folder_takes_top_level_entries_while_a_project_root_keeps_its_own() {
+        let helper = helper();
+        for job in [false, true] {
+            let folders = folders();
+            let project = &folders.project;
+            let plain = policy(&folders, SandboxNetwork::Only(Vec::new()));
+            let sandbox = if job { plain.as_job_folder() } else { plain };
+            assert_eq!(sandbox.holds_project_guards(), !job);
+            let guarded = boundary_profile(&sandbox, &folders.grants).unwrap().guarded;
+            assert_eq!(
+                guarded.iter().any(|item| item.guard == Guard::ReadOnly),
+                !job,
+                "only a project holds project guards"
+            );
+            assert!(guarded.iter().any(|item| item.guard == Guard::Hidden));
+            let profile = folders.profiles.join("agent.sb");
+            let installed =
+                WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+            let run = |line: &str| shell(&installed, &folders, line);
+            assert_eq!(run("echo new>notes.txt"), job, "job {job}");
+            assert_eq!(run("mkdir docs"), job, "job {job}");
+            assert_eq!(project.join("notes.txt").is_file(), job);
+            assert_eq!(project.join("docs").is_dir(), job);
+            assert_eq!(run(r"echo note>context\brief.md"), job, "job {job}");
+            assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
+        }
     }
 }

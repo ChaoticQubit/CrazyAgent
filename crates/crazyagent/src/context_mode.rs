@@ -644,6 +644,7 @@ fn npm_command(
         &canonical(&tmp)?,
         os::npm_network(),
     )
+    .map(ProjectSandbox::as_job_folder)
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;

@@ -1394,6 +1394,7 @@ pub struct ProjectSandbox {
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
     owner_config: bool,
+    job_folder: bool,
     #[cfg(unix)]
     engine_home: Option<bool>,
 }
@@ -1484,6 +1485,7 @@ impl ProjectSandbox {
             open_tops: None,
             node_bin: None,
             owner_config: false,
+            job_folder: false,
             #[cfg(unix)]
             engine_home: None,
         })
@@ -2857,6 +2859,23 @@ impl ProjectSandbox {
         };
         assert!(self.writes(socket.parent().unwrap_or(socket)));
         Ok(self)
+    }
+
+    /// Marks the project folder as one the engine made for one job of its own, a plugin
+    /// server's check or a context-mode install, not a project: on Windows it holds no project
+    /// guards, so the boundary leaves it writable at its top (DEC-193); Seatbelt and Landlock
+    /// are unchanged. Input: a sandbox confined to no worktree, clone or setup. Output: it, marked.
+    pub fn as_job_folder(mut self) -> Self {
+        assert_eq!(self.confinements(), 0);
+        assert!(!self.job_folder);
+        self.job_folder = true;
+        self
+    }
+
+    /// Whether the project folder holds the project guards of [`Self::protected_paths`]:
+    /// true but for a folder marked by [`Self::as_job_folder`]. Output: the answer.
+    pub fn holds_project_guards(&self) -> bool {
+        !self.job_folder
     }
 
     /// The project folder this sandbox confines writes to.
