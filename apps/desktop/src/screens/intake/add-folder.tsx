@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { pickFolder } from "../../api";
-import { ADD_WARNINGS, loadFolderSize, loadIntakeJob, loadProjectsHome, startIntake } from "../../api-intake";
+import { ADD_WARNINGS, loadFolderSize, loadIntakeJobs, loadProjectsHome, startIntake } from "../../api-intake";
 import type { AddFolderMode, AddOverride, FolderSize, IcloudProgress, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, formatRoute, navigate } from "../../ui";
@@ -8,7 +8,7 @@ import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
-  addWay, anywayIssues, anywayOverrides, anywayWarnings, busyLine, folderName, icloudCountLine, icloudMoveLine,
+  addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
   icloudPlaceholders, icloudProgressLine, joinPath, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
@@ -233,16 +233,16 @@ export function AddFolder() {
     if (!source || busy || chosen === "here") return;
     setBusy(true);
     setProblem("");
-    const before = await loadIntakeJob();
+    const before = await loadIntakeJobs();
     const result = await startIntake(source, chosen, overrides);
-    const running = result.kind === "error" ? await loadIntakeJob() : null;
+    const running = result.kind === "error" ? await loadIntakeJobs() : null;
     setBusy(false);
     setConfirming(false);
     setAsking(false);
     if (result.kind === "not_ready") { setProblem("Adding a folder isn't in this build."); return; }
-    const same = running?.kind === "ok" ? running.value : null;
-    const attached = startReached(source, same, before);
-    if (result.kind === "error" && !attached) { setProblem(result.code === "job_busy" ? busyLine(same) : result.message); return; }
+    const after = running?.kind === "ok" ? running.value : [];
+    const refused = result.kind === "error" && (result.code === "job_same_folder" || !startReached(source, after, before));
+    if (refused) { setProblem(result.message); return; }
     session.refreshIntake(result.kind === "ok" ? result.value : undefined);
     session.showToast(`Adding ${folderName(source)}. Follow it on Home; you can keep working.`, { name: "home" });
     navigate({ name: "home" });

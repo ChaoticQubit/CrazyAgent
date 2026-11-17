@@ -2875,7 +2875,7 @@ async fn desktop_intake_start(
 async fn desktop_intake_status(
     webview: Webview,
     state: State<'_, NativeState>,
-) -> Result<Option<crazyagent::projects_home::job::JobView>, BridgeError> {
+) -> Result<Vec<crazyagent::projects_home::job::JobView>, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.intake_status()?;
     call.await
@@ -4550,13 +4550,11 @@ async fn desktop_notify_intake(
         return Ok(());
     }
     let call = lock(&state).await?.intake_status()?;
-    let Some(job) = call.await? else {
+    let jobs = call.await?;
+    let Some(job) = jobs.iter().find(|job| job.id.as_str() == id) else {
         return Ok(());
     };
-    if job.id.as_str() != id {
-        return Ok(());
-    }
-    let Some(notice) = bridge::notify::intake_notice(&job) else {
+    let Some(notice) = bridge::notify::intake_notice(job) else {
         return Ok(());
     };
     let Some(number) = notices.claim_job(&id)? else {

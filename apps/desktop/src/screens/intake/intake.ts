@@ -1,4 +1,4 @@
-import { ADD_WARNINGS, intakeCopy, loadIntakeJob, measuredLine, moveCopy, newProjectCopy } from "../../api-intake";
+import { ADD_WARNINGS, intakeCopy, measuredLine, moveCopy, newProjectCopy } from "../../api-intake";
 import type { Result } from "../../api";
 import { failureCopy, receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
@@ -220,12 +220,12 @@ export const INTAKE_POLL_MS = 1000;
  * focus back reads both at once. */
 export const IDLE_POLL_MS = 30_000;
 
-/** Whether the job is still at work: downloading, waiting for agents to stop, copying, moving
- * folders to the Trash, building a New Project or clearing. Input: the job, if any. Output:
- * true while it runs. */
+/** Whether the job is still at work: waiting its turn, downloading, waiting for agents to stop,
+ * copying, moving folders to the Trash, building a New Project or clearing. Input: the job, if
+ * any. Output: true until it ends. */
 export function jobRunning(job: IntakeJob | null): boolean {
   const state = job?.state.state;
-  return state === "downloading" || state === "stopping" || state === "copying" || state === "trashing" || state === "building" || state === "clearing";
+  return state === "waiting" || state === "downloading" || state === "stopping" || state === "copying" || state === "trashing" || state === "building" || state === "clearing";
 }
 
 /** The name a job's row and lines show: a delete's or a New Project's project name whole, else
@@ -234,47 +234,35 @@ export function jobName(job: IntakeJob): string {
   return job.kind === "delete" || job.kind === "setup" ? job.source : folderName(job.source);
 }
 
-const JOB_VERBS: Record<IntakeJob["kind"], string> = { add: "Adding", move_project: "Moving", delete: "Deleting", setup: "Setting up" };
-
-/** The words for a start the engine refused job_busy: names the job that runs, as the app last
- * read it, or says another job runs when that read found none running. Input: the job read.
- * Output: the words. */
-export function busyLine(held: IntakeJob | null): string {
-  if (held === null || !jobRunning(held)) return intakeCopy("job_busy");
-  return `${JOB_VERBS[held.kind]} ${jobName(held)} is running. Wait for it to finish on Home.`;
-}
-
-/** The words for a refused job request: a busy refusal reads the engine's job and names it, any
- * other refusal keeps its own words. Inputs: the code, its words and the job read, the engine's
- * by default. Output: the words. */
-export async function refusalLine(code: string, words: string, read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<string> {
-  if (code !== "job_busy") return words;
-  const held = await read();
-  return busyLine(held.kind === "ok" ? held.value : null);
-}
-
 /** The few words for a count of agents still stopping. Input: the count. Output: the words. */
 function agentCount(left: number): string {
   return left === 1 ? "1 agent" : `${left} agents`;
 }
 
-/** Whether a start that came back with an error reached the engine all the same, read from the
- * job after it: a job adding the same folder that runs, or ended done and is not the job read
- * just before the start. Without that read an ended job may be an older add, so it never counts.
- * Inputs: the folder, the job read after and the read before. Output: true to go Home. */
-export function startReached(source: string, after: IntakeJob | null, before: Result<IntakeJob | null>): boolean {
-  if (after === null || after.source !== source) return false;
-  if (jobRunning(after)) return true;
-  if (after.state.state !== "done" || before.kind !== "ok") return false;
-  return before.value === null || before.value.id !== after.id;
+/** The line of a job waiting its turn (DEC-197). Input: the name of the job it waits behind.
+ * Output: the line. */
+function waitingLine(behind: string): string {
+  if (behind === "") throw new Error("a waiting job names the job it waits behind");
+  return `Waiting for ${behind} to finish...`;
 }
 
-/** How long until the app reads the intake job again: every second while one runs, else at
+/** Whether a start that came back with an error reached the engine all the same, read from the
+ * jobs after it: a job adding the same folder that runs or waits, or ended done and was not in
+ * the read just before the start. Without that read an ended job may be an older add, so it never
+ * counts. Inputs: the folder, the jobs read after and the read before. Output: true to go Home. */
+export function startReached(source: string, after: readonly IntakeJob[], before: Result<IntakeJob[]>): boolean {
+  const same = after.filter((job) => job.source === source);
+  if (same.some(jobRunning)) return true;
+  if (before.kind !== "ok") return false;
+  return same.some((job) => job.state.state === "done" && !before.value.some((seen) => seen.id === job.id));
+}
+
+/** How long until the app reads the jobs again: every second while one runs or waits, else at
  * the idle pace, so a job another client started shows up too. This app's own jobs and the
- * window taking the focus back read it at once. Input: the last read job. Output: the wait in
- * ms. */
-export function intakePollMs(job: IntakeJob | null): number {
-  return jobRunning(job) ? INTAKE_POLL_MS : IDLE_POLL_MS;
+ * window taking the focus back read them at once. Input: the last read jobs. Output: the wait
+ * in ms. */
+export function intakePollMs(jobs: readonly IntakeJob[]): number {
+  return jobs.some(jobRunning) ? INTAKE_POLL_MS : IDLE_POLL_MS;
 }
 
 /** How long until the app reads the found folders again: at the found-folder pace while Home
@@ -296,6 +284,8 @@ export function jobLine(job: IntakeJob): string {
   if (job.kind === "delete") return deleteLine(name, now);
   if (job.kind === "setup") return setupLine(job.id, name, now);
   switch (now.state) {
+    case "waiting":
+      return waitingLine(now.behind);
     case "downloading": {
       const { done, total } = now.progress;
       if (done > total) throw new Error(`intake download done ${done} is past total ${total}`);
@@ -342,6 +332,8 @@ function folderCount(count: number, total: number): string {
  * reached the Trash. Inputs: the name and the state. Output: one sentence. */
 function deleteLine(name: string, now: IntakeJob["state"]): string {
   switch (now.state) {
+    case "waiting":
+      return waitingLine(now.behind);
     case "stopping":
       return `Waiting for ${agentCount(now.agents_left)} of ${name} to stop...`;
     case "trashing":
@@ -380,6 +372,8 @@ export function noteSetupCarried(id: string, line: string): void {
  * Inputs: the job id, the name and the state. Output: one sentence. */
 function setupLine(id: string, name: string, now: IntakeJob["state"]): string {
   switch (now.state) {
+    case "waiting":
+      return waitingLine(now.behind);
     case "building": {
       if (now.done > now.total) throw new Error(`setup copied ${now.done} is past total ${now.total}`);
       if (now.total === 0) return `Setting up ${name}...`;
@@ -402,8 +396,8 @@ function setupLine(id: string, name: string, now: IntakeJob["state"]): string {
   }
 }
 
-/** What Home offers for the job. Stop while it downloads, waits for agents, copies or builds a
- * New Project, which the engine refuses once the project is being saved; nothing while it
+/** What Home offers for the job. Stop while it waits its turn, downloads, waits for agents, copies
+ * or builds a New Project, which the engine refuses once the project is being saved; nothing while it
  * clears or a delete moves folders to the Trash, since neither stops; Retry only when the
  * folder did not land, since a failure while clearing means it is already in the projects
  * folder, and Finish delete for a delete cut short; an answer for a soft refusal; Dismiss
@@ -411,6 +405,7 @@ function setupLine(id: string, name: string, now: IntakeJob["state"]): string {
 export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
   const now = job.state;
   switch (now.state) {
+    case "waiting":
     case "downloading":
     case "stopping":
     case "copying":
@@ -431,30 +426,32 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dism
   }
 }
 
-/** The sentence for a job that just ended, said once as a toast and a notification: only when
- * the read before showed the same job running. Inputs: the read before and the read now.
- * Output: the job's line, or null. */
-export function jobEndLine(before: IntakeJob | null, after: IntakeJob | null): string | null {
-  if (before === null || after === null || before.id !== after.id) return null;
-  return jobRunning(before) && !jobRunning(after) ? jobLine(after) : null;
+/** The jobs that just ended, each said once as a toast and a notification: a job the read before
+ * showed at work, running or waiting, that the read now shows ended, while the jobs beside it may
+ * still run (DEC-197). Inputs: the read before and the read now. Output: the ended jobs, in the
+ * read's order. */
+export function jobEnds(before: readonly IntakeJob[], after: readonly IntakeJob[]): IntakeJob[] {
+  const working = new Set(before.filter(jobRunning).map((job) => job.id));
+  return after.filter((job) => working.has(job.id) && !jobRunning(job));
 }
 
 /** The most folders not set up the sidebar lists; the rest stay on Home. */
 export const SIDEBAR_FOLDERS_MAX = 16;
 
-/** The sidebar rows for folders that are not projects yet, each opening Home: the folder the
- * intake job is adding while it runs, then the folders found in the projects folder and not set
+/** The sidebar rows for folders that are not projects yet, each opening Home: every folder an add
+ * job brings in while it runs or waits, then the folders found in the projects folder and not set
  * up, by name, at most `SIDEBAR_FOLDERS_MAX`, none that is already a listed project. Inputs: the
- * found read, the intake job and the listed project ids. Output: the rows. */
-export function sidebarFolders(found: Loaded<FoundProject[]>, job: IntakeJob | null, projects: ReadonlySet<string>): SidebarProject[] {
+ * found read, the jobs and the listed project ids. Output: the rows. */
+export function sidebarFolders(found: Loaded<FoundProject[]>, jobs: readonly IntakeJob[], projects: ReadonlySet<string>): SidebarProject[] {
   const href = formatRoute({ name: "home" });
-  const adding = job !== null && job.kind === "add" && jobRunning(job) ? folderName(job.source) : null;
-  const rows: SidebarProject[] = adding === null || job === null ? [] : [{ id: `intake:${job.id}`, name: adding, note: "Adding...", href }];
+  const adding = jobs.filter((job) => job.kind === "add" && jobRunning(job));
+  const names = new Set(adding.map((job) => folderName(job.source)));
+  const rows: SidebarProject[] = adding.map((job) => ({ id: `intake:${job.id}`, name: folderName(job.source), note: "Adding...", href }));
   const folders = found.kind === "ok" ? found.value : [];
-  const fresh = folders.filter((folder) => folder.state === "found" && folder.name !== adding && !(folder.project_id && projects.has(folder.project_id)))
+  const fresh = folders.filter((folder) => folder.state === "found" && !names.has(folder.name) && !(folder.project_id && projects.has(folder.project_id)))
     .sort((left, right) => left.name.localeCompare(right.name)).slice(0, SIDEBAR_FOLDERS_MAX);
   rows.push(...fresh.map((folder) => ({ id: `found:${folder.path}`, name: folder.name, note: "Not set up", href })));
-  if (rows.length > SIDEBAR_FOLDERS_MAX + 1) throw new Error(`sidebar folders ${rows.length} past ${SIDEBAR_FOLDERS_MAX + 1}`);
+  if (rows.length > SIDEBAR_FOLDERS_MAX + adding.length) throw new Error(`sidebar folders ${rows.length} past ${SIDEBAR_FOLDERS_MAX + adding.length}`);
   return rows;
 }
 
@@ -498,15 +495,16 @@ export function retryRoute(job: IntakeJob): string | null {
 }
 
 /** What the New Project page does next with the job it started, as Home's read of the
- * engine's job shows it: still running, done with its project, ended with New Project's
- * words, or lost when the read names another job or none. */
+ * engine's jobs shows it: still running or waiting, done with its project, ended with New
+ * Project's words, or lost when the read holds it no more. */
 export type SetupFollow = { kind: "running"; job: IntakeJob } | { kind: "done"; project: string } | { kind: "ended"; words: string } | { kind: "lost" };
 
-/** Reads the New Project job the page started from Home's read of the engine's job (DEC-177
- * add.2 Q1 A). Inputs: the job read, if any, and the started job's id. Output: what the page
+/** Reads the New Project job the page started from Home's read of the engine's jobs (DEC-177
+ * add.2 Q1 A, DEC-197). Inputs: the jobs read and the started job's id. Output: what the page
  * does next. */
-export function setupFollow(job: IntakeJob | null, id: string): SetupFollow {
-  if (job === null || job.id !== id) return { kind: "lost" };
+export function setupFollow(jobs: readonly IntakeJob[], id: string): SetupFollow {
+  const job = jobs.find((held) => held.id === id);
+  if (job === undefined) return { kind: "lost" };
   if (job.kind !== "setup") throw new Error(`job ${job.id} is a ${job.kind}, not a New Project`);
   if (jobRunning(job)) return { kind: "running", job };
   const now = job.state;

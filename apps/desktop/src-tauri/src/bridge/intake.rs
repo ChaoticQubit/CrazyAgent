@@ -28,7 +28,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 118] = [
+pub const INTAKE_CODES: [&str; 119] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -73,6 +73,7 @@ pub const INTAKE_CODES: [&str; 118] = [
     "home_add_cancelled",
     "home_add_in_progress",
     "job_busy",
+    "job_same_folder",
     "intake_failed",
     "home_record_invalid",
     "home_icloud_not_downloaded",
@@ -774,13 +775,13 @@ impl NativeBridge {
         }))
     }
 
-    /// Reads the engine's intake job, running or last ended. Output: its view, or None.
-    pub fn intake_status(&mut self) -> Result<Unlocked<Option<JobView>>, BridgeError> {
+    /// Reads every job the engine holds, running, waiting its turn or ended since the last
+    /// start (DEC-197). Output: their views in start order.
+    pub fn intake_status(&mut self) -> Result<Unlocked<Vec<JobView>>, BridgeError> {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
             let jobs = client.job_status().await.map_err(intake_failure)?;
-            let view = crazyagent::projects_home::job::shown(jobs);
-            bounded(view.map(shown))
+            bounded(jobs.into_iter().map(shown).collect::<Vec<_>>())
         }))
     }
 

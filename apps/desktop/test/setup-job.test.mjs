@@ -148,7 +148,7 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::Setup \{\s*project_id,\s*spec,\s*setup,?\s*\}/);
   const wizard = read("src/screens/new-project/index.tsx");
   assert.ok(wizard.includes("await setupStart(request.spec, request.setup)"), "Create starts the engine's job");
-  assert.match(wizard, /start = startSetupJob,/, "the start is the engine's job");
+  assert.match(wizard, /start = startSetupJob\)/, "the start is the engine's job");
   assert.ok(!wizard.includes("setupProject(request.spec"), "Create is no longer a direct change of the window");
   assert.ok(wizard.includes("session?.refreshIntake(result.job)"), "the started job shows on Home at once");
   assert.ok(wizard.includes("session?.followIntake("), "the page owns the end of the job it follows");
@@ -156,7 +156,7 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.ok(wizard.includes("mounted.current"), "the page's publish and opening stop once the owner leaves it");
   const state = read("src/state.ts");
   assert.match(state, /kind === "setup"[^;]*refreshProjects\(\)/, "a New Project that ended reads the projects again");
-  assert.match(state, /result\.value\.id !== followed\.current/, "Home's toast stays quiet for the job the page follows");
+  assert.match(state, /job\.id !== followed\.current/, "Home's toast stays quiet for the job the page follows");
   const client = read("src/engine-client.ts");
   assert.match(client, /export type ProjectJobKind = "add" \| "move_project" \| "delete" \| "setup";/);
   assert.match(client, /\| \{ state: "building"; done: number; total: number \}/);
@@ -173,12 +173,14 @@ test("a setup job New Project dismisses leaves Home at once: the page waits for 
 test("New Project opened again drops the answers of a project its job already made, read from the job or, once the job left Home, from the projects; a page closed during the follow-ups keeps none (rv-code bgjobs-3b F3)", async () => {
   const flow = await import("../src/screens/new-project/index.tsx");
   const started = { id: "setup-1", project: "notes" };
-  assert.deepEqual(flow.reopened(setupJob(building(1, 3)), started, []), { follow: "setup-1", keep: true });
-  assert.deepEqual(flow.reopened(setupJob({ state: "done" }), started, []), { follow: null, keep: false });
-  assert.deepEqual(flow.reopened(setupJob({ state: "failed", code: "home_new_project_failed", phase: "building" }), started, []), { follow: null, keep: true });
-  assert.deepEqual(flow.reopened(null, started, ["notes"]), { follow: null, keep: false }, "dismissed after Done: the project is listed");
-  assert.deepEqual(flow.reopened(setupJob(building(0, 0), { id: "setup-2", project_id: "other" }), started, ["reading", "notes"]), { follow: null, keep: false }, "a later job took the slot");
-  assert.deepEqual(flow.reopened(null, started, ["reading"]), { follow: null, keep: true }, "a lost job with no such project keeps the answers");
+  assert.deepEqual(flow.reopened([setupJob(building(1, 3))], started, []), { follow: "setup-1", keep: true });
+  assert.deepEqual(flow.reopened([setupJob(building(0, 0), { id: "setup-2", project_id: "other" }), setupJob({ state: "waiting", behind: "other" })], started, []),
+    { follow: "setup-1", keep: true }, "waiting behind another New Project");
+  assert.deepEqual(flow.reopened([setupJob({ state: "done" })], started, []), { follow: null, keep: false });
+  assert.deepEqual(flow.reopened([setupJob({ state: "failed", code: "home_new_project_failed", phase: "building" })], started, []), { follow: null, keep: true });
+  assert.deepEqual(flow.reopened([], started, ["notes"]), { follow: null, keep: false }, "dismissed after Done: the project is listed");
+  assert.deepEqual(flow.reopened([setupJob(building(0, 0), { id: "setup-2", project_id: "other" })], started, ["reading", "notes"]), { follow: null, keep: false }, "a later job replaced it");
+  assert.deepEqual(flow.reopened([], started, ["reading"]), { follow: null, keep: true }, "a lost job with no such project keeps the answers");
   const wizard = read("src/screens/new-project/index.tsx");
   const finish = wizard.slice(wizard.indexOf("async function finish("));
   assert.ok(finish.indexOf("kept = null;") >= 0 && finish.indexOf("kept = null;") < finish.indexOf("await carried.outcome"), "a made project keeps no answers before its follow-ups wait");
