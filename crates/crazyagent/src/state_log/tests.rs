@@ -71,13 +71,11 @@ fn each_own_transaction_moves_the_revision_once_and_numbers_its_events_after_the
     let mut log = Appender::own(&tx).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 2);
-    drop(log);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx).unwrap();
     assert_eq!(log.revision(), 2);
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 3);
-    drop(log);
     tx.commit().unwrap();
     assert_eq!(revision(&db), 2);
     let kind = || "WorktreeAllocated".to_string();
@@ -110,7 +108,6 @@ fn an_owner_append_takes_the_revision_its_request_moved_and_refuses_a_stale_or_l
     );
     let mut log = Appender::owner(&tx, 5).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
-    drop(log);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
     assert_eq!(
@@ -154,7 +151,6 @@ fn a_body_at_the_cap_is_kept_and_one_byte_over_is_refused() {
         code(log.append(&draft(&over))),
         Some("state_log_body_bounds".into())
     );
-    drop(log);
     assert_eq!(logged(&tx).len(), 1);
 }
 
@@ -198,7 +194,6 @@ fn a_kind_schema_or_time_out_of_bounds_is_refused_and_snapshot_kinds_are_reserve
         })),
         Some("state_log_at_ms".into())
     );
-    drop(log);
     assert_eq!(logged(&tx).len(), 1);
 }
 
@@ -239,7 +234,6 @@ fn one_transaction_holds_at_most_its_bound_of_events() {
         code(log.append(&draft(b""))),
         Some("state_log_transaction_full".into())
     );
-    drop(log);
     assert_eq!(logged(&tx).len(), TRANSACTION_EVENTS_MAX);
 }
 
@@ -249,12 +243,10 @@ fn the_log_and_the_revision_roll_back_with_their_transaction() {
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 1);
-    drop(log);
     tx.commit().unwrap();
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx).unwrap();
     assert_eq!(log.append(&draft(b"{}")).unwrap(), 2);
-    drop(log);
     drop(tx);
     assert_eq!(revision(&db), 1);
     assert_eq!(logged(&db).len(), 1);
@@ -267,7 +259,6 @@ fn a_snapshot_run_verifies_and_a_missing_or_changed_chunk_fails_its_hash() {
     let mut log = Appender::own(&tx).unwrap();
     let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
     let empty = log.snapshot(Aggregate::Ide, 9, Vec::new()).unwrap();
-    drop(log);
     tx.commit().unwrap();
     assert_eq!((done, empty), (4, 5));
     let kinds: Vec<String> = logged(&db).into_iter().map(|row| row.3).collect();
@@ -319,7 +310,6 @@ fn a_closing_event_whose_hash_covers_rows_that_are_not_its_chunks_is_refused() {
     let mut log = Appender::own(&tx).unwrap();
     log.append(&draft(b"a")).unwrap();
     log.append(&draft(b"b")).unwrap();
-    drop(log);
     let sha256 = format!("{:x}", Sha256::digest(b"ab"));
     let body =
         serde_json::to_vec(&json!({ "aggregate": "worktrees", "chunks": 2, "sha256": sha256 }))
@@ -349,7 +339,6 @@ fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
         code(log.snapshot(Aggregate::Worktrees, 9, run)),
         Some("state_log_chunk_bounds".into())
     );
-    drop(log);
     assert_eq!(logged(&tx).len(), 0);
 }
 
@@ -379,7 +368,7 @@ fn closing(chunks: u32, bodies: &[&[u8]]) -> Vec<u8> {
 fn a_closing_event_with_a_bad_body_or_a_count_no_run_can_hold_is_invalid() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    drop(Appender::own(&tx).unwrap());
+    Appender::own(&tx).unwrap();
     let impossible = u32::try_from(TRANSACTION_EVENTS_MAX).unwrap();
     plant(&tx, 1, SNAPSHOT_DONE, b"not json");
     plant(&tx, 2, SNAPSHOT_DONE, &closing(impossible, &[]));
@@ -401,7 +390,7 @@ fn a_closing_event_with_a_bad_body_or_a_count_no_run_can_hold_is_invalid() {
 fn a_run_short_of_its_count_or_with_chunks_out_of_order_or_of_another_aggregate_fails() {
     let mut db = db();
     let tx = db.transaction().unwrap();
-    drop(Appender::own(&tx).unwrap());
+    Appender::own(&tx).unwrap();
     plant(&tx, 1, SNAPSHOT_DONE, &closing(1, &[]));
     assert_eq!(
         code(verify_snapshot(&tx, 1)),
