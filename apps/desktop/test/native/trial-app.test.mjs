@@ -32,8 +32,11 @@ test("listener names the process that listens on a local port, and none once it 
   const server = createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
-  assert.equal(listener(port), process.pid);
-  await new Promise((resolve) => server.close(resolve));
+  try {
+    assert.equal(listener(port), process.pid);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
   assert.equal(listener(port), null);
   assert.throws(() => listener(0), /a TCP port/);
 });
