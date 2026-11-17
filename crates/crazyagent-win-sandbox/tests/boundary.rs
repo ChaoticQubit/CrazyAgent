@@ -194,14 +194,38 @@ fn boundary(case: &Case) -> Command {
     agent(&case.profile, &case.project, &system("cmd.exe"))
 }
 
+/// Runs one helper launch and logs it for the container-flake probe: thread, epoch ms at the
+/// start, elapsed ms, exit code and, for a launch that did not succeed, the helper's stderr.
+/// Inputs: the command and its arguments. Output: what the launch printed and its exit.
 fn output(mut command: Command, args: &[&str]) -> Output {
-    command
+    let started = std::time::SystemTime::now();
+    let epoch = started.duration_since(std::time::UNIX_EPOCH).unwrap();
+    let output = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .unwrap()
+        .unwrap();
+    let elapsed = started.elapsed().unwrap_or_default();
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let shown = if output.status.success() {
+        ""
+    } else {
+        stderr.trim()
+    };
+    eprintln!(
+        "PROBE-LAUNCH thread={thread} at_ms={} ms={} exit={:?} stderr={:?}",
+        epoch.as_millis(),
+        elapsed.as_millis(),
+        output.status.code(),
+        shown.chars().take(300).collect::<String>()
+    );
+    output
 }
 
 fn run(case: &Case, args: &[&str]) -> Output {
