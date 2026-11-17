@@ -4,8 +4,7 @@ use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUse, NativePro
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::sandbox::{
-    InstalledSandbox, LineageCheck, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork,
-    SandboxRemote,
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork, SandboxRemote,
 };
 use rustix::process::Pid;
 use std::fs;
@@ -240,22 +239,22 @@ impl MasterFixture {
     /// The check a stop of a confined master in this fixture runs on what left its group:
     /// `Sandboxed` where the Linux backend leaves such a process running, `Unneeded` where a
     /// process namespace or the platform ends it. Takes nothing. Returns the check.
-    pub(in crate::engine) fn lineage_check(&mut self) -> LineageCheck {
+    #[cfg(not(target_os = "macos"))]
+    pub(in crate::engine) fn lineage_check(&mut self) -> crate::sandbox::LineageCheck {
         let profile = self.lease("fixture-lineage-check", 1).unwrap();
         let home = profile.profile_path().unwrap();
         let readable = self.root.path().join("bin");
         fs::create_dir_all(&readable).unwrap();
         let check = self.sandbox(&home, &readable).lineage_check();
-        assert_ne!(check, LineageCheck::FullAccess);
+        assert_ne!(check, crate::sandbox::LineageCheck::FullAccess);
         check
     }
 }
 
 /// The two real processes a [`PIPE_HOLDING_HARNESS`] started, by host id: the harness itself
-/// and its descendant, with the process group the harness runs in. The harness leads that
-/// group only where it is the host's own child; inside a process namespace the host's child
-/// is the bubblewrap that leads it. Dropping it kills the descendant and the group, so a
-/// failing test leaves none.
+/// and its descendant, with the process group the harness runs in: the group of the host's
+/// child, which is the harness itself or the bubblewrap whose process namespace holds it.
+/// Dropping it kills the descendant and the group, so a failing test leaves none.
 pub(in crate::engine) struct HarnessProcesses {
     pub(in crate::engine) leader: Pid,
     pub(in crate::engine) descendant: Pid,
@@ -263,26 +262,28 @@ pub(in crate::engine) struct HarnessProcesses {
 }
 
 impl HarnessProcesses {
-    /// Waits up to five seconds until the stand-in wrote both process ids into the
-    /// [`RUN_FOLDER`] of `folder`, maps each to its host id under the host's child and reads
-    /// the harness group. Takes the stand-in's working folder and the host's child. Returns
-    /// both processes and the group.
-    pub(in crate::engine) fn wait(folder: &Path, child: u32) -> Self {
+    /// Waits up to five seconds until the host named its child and the stand-in wrote both
+    /// process ids into the [`RUN_FOLDER`] of `folder`, maps each to its host id under that
+    /// child and checks the harness runs in the child's group. Takes the stand-in's working
+    /// folder and the host's child, none before it started. Returns both processes and the
+    /// group. Panics when the harness left that group, which a stop of the host then misses.
+    pub(in crate::engine) fn wait(folder: &Path, child: impl Fn() -> Option<u32>) -> Self {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            if let (Some(leader), Some(descendant)) = (
+            if let (Some(id), Some(leader), Some(descendant)) = (
+                child(),
                 written(folder, "leader.pid"),
                 written(folder, "descendant.pid"),
             ) {
-                let leader = on_host(leader, child);
-                let descendant = on_host(descendant, child);
+                let leader = on_host(leader, id);
+                let descendant = on_host(descendant, id);
                 assert_ne!(leader, descendant);
-                let group = rustix::process::getpgid(Some(leader)).unwrap();
-                assert!(group.as_raw_nonzero().get() > 1);
+                let group = Pid::from_raw(i32::try_from(id).unwrap()).unwrap();
+                assert_eq!(rustix::process::getpgid(Some(leader)), Ok(group));
                 assert_ne!(
                     group,
                     rustix::process::getpgrp(),
-                    "the harness is in this group"
+                    "the host's child is in ours"
                 );
                 return Self {
                     leader,
@@ -295,15 +296,30 @@ impl HarnessProcesses {
         }
     }
 
-    /// Waits up to two seconds for the descendant to end, as a process namespace ends what
-    /// it holds only once its first process is gone, then asserts that nothing is left.
-    /// Takes nothing. Panics with the surviving process otherwise.
-    pub(in crate::engine) fn assert_ended(&self) {
+    /// Asserts how a stop of the host left a harness whose descendant left the harness group,
+    /// by the boundary's check. Where the backend leaves that process running (`Sandboxed`),
+    /// the stop reports `uncertain`, the harness and its group are gone and the descendant
+    /// lives on. Where a process namespace ends it, the stop is clean and within two seconds
+    /// nothing is left. Takes the check, the stop's result and the uncertain cleanup code.
+    #[cfg(not(target_os = "macos"))]
+    pub(in crate::engine) fn assert_stopped_by(
+        &self,
+        check: crate::sandbox::LineageCheck,
+        stopped: Result<(), String>,
+        uncertain: &str,
+    ) {
+        if check == crate::sandbox::LineageCheck::Sandboxed {
+            assert_eq!(stopped, Err(uncertain.to_owned()));
+            self.assert_harness_gone();
+            assert_eq!(rustix::process::test_kill_process(self.descendant), Ok(()));
+            return;
+        }
+        assert_eq!(stopped, Ok(()));
         let deadline = Instant::now() + Duration::from_secs(2);
         while rustix::process::test_kill_process(self.descendant) != Err(rustix::io::Errno::SRCH) {
             assert!(
                 Instant::now() < deadline,
-                "descendant {:?} outlived its namespace",
+                "{:?} outlived its namespace",
                 self.descendant
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -352,15 +368,21 @@ impl Drop for HarnessProcesses {
 /// host, reaps it, after which the host can never reap its harness. That child is the
 /// harness itself, or the bubblewrap whose process namespace holds it. The host polls its
 /// child too, so it can still win: the caller then starts over. Takes the stand-in's working
-/// folder and the host's child. Returns whether the waiter reaped the child.
-pub(in crate::engine) fn reap_before_the_host(folder: &Path, child: u32) -> bool {
-    let child = Pid::from_raw(i32::try_from(child).unwrap()).unwrap();
-    assert!(child.as_raw_nonzero().get() > 1);
+/// folder and the host's child, none before it started. Returns whether the waiter reaped
+/// the child.
+pub(in crate::engine) fn reap_before_the_host(
+    folder: &Path,
+    child: impl Fn() -> Option<u32>,
+) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
-    while written(folder, "leader.pid").is_none() {
+    let child = loop {
+        if let (Some(id), Some(_)) = (child(), written(folder, "leader.pid")) {
+            break Pid::from_raw(i32::try_from(id).unwrap()).unwrap();
+        }
         assert!(Instant::now() < deadline, "stand-in harness never started");
         std::thread::sleep(Duration::from_millis(10));
-    }
+    };
+    assert!(child.as_raw_nonzero().get() > 1);
     let waiter = std::thread::spawn(move || {
         rustix::process::waitpid(Some(child), rustix::process::WaitOptions::empty())
     });
