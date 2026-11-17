@@ -862,6 +862,100 @@ async fn a_started_engine_dropped_without_close_leaves_no_host_and_its_store_reo
     engine.close().await.unwrap();
 }
 
+/// Sends one wire request through a service's client and asserts it applied. Inputs: the
+/// client, the id, the expected revision and the command. Output: the reply's revision.
+async fn wired(client: &crazyagent::engine::Client, id: &str, at: u64, command: Command) -> u64 {
+    let reply = client.request(request(id, at, command)).await.unwrap();
+    assert_eq!(reply.outcome, Outcome::Applied, "{id}");
+    assert!(reply.revision.value() > at, "{id} moves the revision");
+    reply.revision.value()
+}
+
+/// v2.5 L6 with V250-OWN-REVISION-RETRY (leader 03:53): the quit form reads its settings,
+/// the engine then saves a lease through its own writes (an allocation's WorktreeReserved
+/// and LeaseSaved), and the form's save is Applied after one resend under a new request id,
+/// since the form's read holds no lease and reads the same again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_form_save_after_an_engine_lease_save_lands_after_one_resend() {
+    use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
+    use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+    let mine = QuitSettings {
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::Never,
+        hours: 12,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let repo = repository(&root, "repo");
+    let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service =
+        crazyagent::engine::bootstrap::EngineService::start(&root, "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+    let timeout = std::time::Duration::from_secs(2);
+    let (client, _owner, _) = crazyagent::engine::Client::new(root.join("e.sock"), timeout)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let project = ProjectId::new("project").unwrap();
+    let spec = ProjectSpec {
+        name: "Product".into(),
+        repositories: vec![repo.to_str().unwrap().into()],
+    };
+    let created = Command::CreateProject {
+        project_id: project.clone(),
+        spec,
+    };
+    let at = wired(&client, "project", 0, created).await;
+    let context = ExecutionContext {
+        project_id: project.clone(),
+        task_id: TaskId::new("task").unwrap(),
+        config_id: config.id.clone(),
+        snapshot_id: SnapshotId::new("snapshot").unwrap(),
+        baseline_id: BaselineId::new("baseline").unwrap(),
+        allowed_destinations: vec![],
+        budget_ref: CredentialRef::new("budget").unwrap(),
+    };
+    let at = wired(&client, "pin", at, Command::PinTask { context }).await;
+    let admission = Command::AdmitRepository {
+        project_id: project,
+        repository: repo.to_str().unwrap().into(),
+    };
+    let at = wired(&client, "admit", at, admission).await;
+    let mut form = crazyagent::client_controller::OwnerController::attach(
+        &root,
+        OwnerClientKind::Desktop,
+        timeout,
+    )
+    .await
+    .unwrap();
+    assert_ne!(
+        form.quit_settings().await.unwrap(),
+        mine,
+        "the form starts from the defaults"
+    );
+    wired(&client, "allocate", at, allocate(&repo, "owner", None)).await;
+    form.begin_mutation(OwnerMutation::SetQuitSettings { settings: mine }, 1)
+        .unwrap();
+    let first = form.pending().unwrap().request().request_id.clone();
+    let saved = form.send_pending().await.unwrap();
+    let OwnerResponse::Applied { operation } = saved else {
+        panic!("the form's save must land after one resend: {saved:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    assert_ne!(
+        operation.provenance.operation_id, first,
+        "the resend is its own request"
+    );
+    assert_eq!(form.quit_settings().await.unwrap(), mine);
+    drop(form);
+    drop(client);
+    service.shutdown().await.unwrap();
+}
+
 /// The revision and kind of each logged worktrees event other than a snapshot run, in log
 /// order. Input: the closed store's path. Output: the pairs.
 fn logged(database: &Path) -> Vec<(i64, String)> {
