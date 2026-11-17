@@ -911,7 +911,7 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
     pump(&mut shell, &mut connection).await;
     shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
-    shell.key(Key::Char('m'));
+    shell.key(Key::Char('M'));
     let shown = render(&mut shell, 120, 30);
     assert!(
         shown.contains("Move Notes CLI into your CrazyAgent folder?"),
@@ -1035,7 +1035,7 @@ async fn job_until(
     }
 }
 
-/// Opens a project's page on Settings and asks its move twice, as m opens the question and m
+/// Opens a project's page on Settings and asks its move twice, as M opens the question and m
 /// moves. Inputs: the shell, its connection, the project and its name. Output: the requests sent
 /// after the second m.
 async fn move_from_settings(
@@ -1046,7 +1046,7 @@ async fn move_from_settings(
     pump(shell, connection).await;
     shell.key(Key::ShiftLeft);
     pump(shell, connection).await;
-    shell.key(Key::Char('m'));
+    shell.key(Key::Char('M'));
     let shown = render(shell, 120, 30);
     assert!(
         shown.contains(&format!("Move {name} into your CrazyAgent folder?")),
@@ -1091,6 +1091,7 @@ async fn home_shell(connection: &mut Connection) -> Shell {
 /// card. Once its checks land, Home moves the focus to Get set up, since setup is never done
 /// here (see `home_shell`), and its key bar then starts with that panel's Enter; Tab moves it
 /// back. No reply arrives before the next key, so the focus holds. Input: the shell on Home.
+#[cfg(target_os = "macos")]
 fn list_focus(shell: &mut Shell) {
     let setup_keys = |shell: &mut Shell| {
         render(shell, 120, 30)
@@ -1173,7 +1174,7 @@ async fn a_project_move_waits_for_its_agents_says_how_many_are_left_and_moves_on
         &format!(
             "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
              INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES (43,'notes-cli','team','codex',1,'{}','working',0,0);",
+             VALUES (43,'notes-cli','sub','codex',1,'{}','working',0,0);",
             copy.to_str().unwrap()
         ),
     );
@@ -1390,7 +1391,7 @@ fn working(engine: &Engine, project: &str, agent: u32) {
         engine,
         &format!(
             "INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES ({agent},'{project}','team','codex',1,'{}','working',0,0);",
+             VALUES ({agent},'{project}','sub','codex',1,'{}','working',0,0);",
             worktree.to_str().unwrap()
         ),
     );
@@ -1821,7 +1822,7 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
         &format!(
             "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
              INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES (47,'notes-cli','team','codex',1,'{}','working',0,0);",
+             VALUES (47,'notes-cli','sub','codex',1,'{}','working',0,0);",
             copy.to_str().unwrap()
         ),
     );
@@ -8568,5 +8569,165 @@ fn a_start_whose_reply_was_lost_reads_the_publish_again_until_it_shows() {
     assert!(
         shown.contains("Drafting the .gitignore lines..."),
         "{shown}"
+    );
+}
+
+/// #177 F1: on the real project page's Settings tab, with its jobs loaded so the planning
+/// keys are live, R reaches Restart them past the plugins section and the planning keys and
+/// sends it for the project, and r still asks the roadmap status check and restarts nothing.
+/// The engine's reads are answered here in the order the page makes them, Setup first.
+#[test]
+fn settings_with_jobs_loaded_sends_restart_them_on_capital_r_and_r_still_refreshes() {
+    use crate::project_setup::{HiddenPaths, StoredSetup};
+    use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
+    use crate::tui::client::SetupEvent;
+    use crate::tui::client::roadmap::{RoadmapEvent, RoadmapQuery};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let stored = || StoredSetup {
+        project_id: project.clone(),
+        name: "Notes CLI".into(),
+        about: "Terminal-first notes.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Cli],
+        research: vec![ResearchKind::CompetitorResearch],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/private/tmp/ca-notes-cli".into(),
+        created_ms: 1_793_000_000_000,
+        revision: 4,
+    };
+    let seer = |id: &str, kind, label: &str| GraphNode {
+        id: id.into(),
+        kind,
+        parent: None,
+        label: label.into(),
+        harness: "codex".into(),
+        status: None,
+        status_label: None,
+        account: None,
+        branch: None,
+        terminal: None,
+        questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        waits_for: None,
+        owner_questions: 0,
+        no_worktree: false,
+        hookless: false,
+        message_note: None,
+        started_ms: None,
+        sees_hidden: true,
+    };
+    let graph = || TeamGraph {
+        project_id: project.clone(),
+        nodes: vec![
+            seer("master", NodeKind::Master, "Master"),
+            seer("team-1", NodeKind::Lead, "Ada"),
+        ],
+        edges: vec![],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
+        relations: Vec::new(),
+        master_live_terminal: true,
+    };
+    let mut ctx = ctx(120, 40);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut read = (false, false, false);
+    for _ in 0..64 {
+        let requests: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+        if requests.is_empty() {
+            break;
+        }
+        for request in requests {
+            match request {
+                Request::Setup(query) => {
+                    let result = match &query {
+                        SetupQuery::Setup { .. } => Ok(SetupView::Setup(Some(Box::new(stored())))),
+                        SetupQuery::Jobs { .. } => {
+                            read.0 = true;
+                            Ok(SetupView::Jobs(Vec::new()))
+                        }
+                        SetupQuery::HiddenPaths { .. } => {
+                            read.1 = true;
+                            Ok(SetupView::HiddenPaths(HiddenPaths {
+                                paths: vec!["/Users/owner/secret".into()],
+                                version: 1,
+                                runs: Vec::new(),
+                            }))
+                        }
+                        _ => Err("row_skips_this_read".to_owned()),
+                    };
+                    shell.arrive(owner_arrival(OwnerEvent::Setup(Box::new(SetupEvent {
+                        query,
+                        result,
+                    }))));
+                }
+                Request::TeamGraph { project } => {
+                    read.2 = true;
+                    shell.arrive(Arrival::TeamGraph {
+                        project,
+                        result: Ok(Box::new(graph())),
+                    });
+                }
+                Request::Roadmap(query) => {
+                    shell.arrive(owner_arrival(OwnerEvent::Roadmap(Box::new(RoadmapEvent {
+                        query: *query,
+                        result: Err("row_skips_this_read".to_owned()),
+                    }))));
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        read,
+        (true, true, true),
+        "the page read its jobs, its hidden folders and its team"
+    );
+    shell.key(Key::Char('R'));
+    let restart: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        restart.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::RestartHiddenSeers { project_id },
+                ..
+            }) if *project_id == project
+        )),
+        "R restarts the agents that can still open a hidden folder: {restart:?}"
+    );
+
+    shell.key(Key::Char('r'));
+    let refresh: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        refresh.iter().any(|request| matches!(
+            request,
+            Request::Roadmap(query) if **query == RoadmapQuery::Refresh { project: project.clone() }
+        )),
+        "r still asks the roadmap status check: {refresh:?}"
+    );
+    assert!(
+        !refresh
+            .iter()
+            .any(|request| matches!(request, Request::Setup(SetupQuery::TeamChange { .. }))),
+        "r restarts nothing: {refresh:?}"
     );
 }

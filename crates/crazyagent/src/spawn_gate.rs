@@ -16,7 +16,7 @@ thread_local! {
 
 /// Test helper: how many children this thread has started through the gate, so a row can
 /// bound the processes one call starts. Output: the count.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn spawned() -> usize {
     SPAWNED.get()
 }

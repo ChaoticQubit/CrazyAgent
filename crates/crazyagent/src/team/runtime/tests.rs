@@ -32026,7 +32026,8 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
 /// `.gitconfig`, `.cargo/config`, `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`,
 /// in any letter case, nor make `.config/git` or `.cargo/bin`, nor move a `.config` it built
 /// elsewhere into place, nor set a flag or an ACL on its home or on a file the next launch
-/// keeps, while it still writes its own caches. The next launch keeps the caches.
+/// keeps, while it still writes its own caches. Whether the next launch keeps those caches
+/// is the Tool caches in agent homes setting's call (a2a79acae), not this row's.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
@@ -32079,7 +32080,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
-             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config'\"\n\
+             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config' && test -e '{home}/.config/git/config'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
              try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
              try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
@@ -32187,13 +32188,6 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         if std::fs::symlink_metadata(home.join(entry)).is_ok() {
             problems.push(format!("{entry} kept by the launch"));
         }
-    }
-    if std::fs::read_to_string(home.join(".cache/tool/data"))
-        .ok()
-        .as_deref()
-        != Some("ok")
-    {
-        problems.push("the agent's cache removed by the launch".to_owned());
     }
     assert!(
         problems.is_empty(),

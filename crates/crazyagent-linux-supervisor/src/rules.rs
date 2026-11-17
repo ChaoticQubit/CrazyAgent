@@ -789,8 +789,11 @@ mod tests {
         for name in others {
             assert!(!is_git(OsStr::new(name)), "{name:?}");
         }
-        let broken = std::os::unix::ffi::OsStrExt::from_bytes(b".gi\xfft");
-        assert!(!is_git(broken), "bytes that are no text are no alias");
+        #[cfg(unix)]
+        {
+            let broken = std::os::unix::ffi::OsStrExt::from_bytes(b".gi\xfft");
+            assert!(!is_git(broken), "bytes that are no text are no alias");
+        }
     }
 
     #[test]
