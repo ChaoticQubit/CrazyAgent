@@ -121,7 +121,7 @@ fn a_real_claude_agent_takes_a_letter_by_its_stop_hook_once_and_reads_it_after_i
 /// The built engine executable the relay hooks run: `CRAZYAGENT_ENGINE`, or the
 /// `crazyagent` binary beside this test's build folder. Output: its canonical path, or a
 /// panic with the plain BLOCKED message when it was not built.
-fn engine_executable() -> PathBuf {
+pub(super) fn engine_executable() -> PathBuf {
     std::env::var_os("CRAZYAGENT_ENGINE")
         .map(PathBuf::from)
         .or_else(|| {

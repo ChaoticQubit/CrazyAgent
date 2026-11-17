@@ -135,7 +135,7 @@ test("Background commands at task end defaults to a 30 minute grace time, offers
   assert.match(unset, /<option value="wait">Wait for them<\/option><option value="grace" selected="">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
   assert.match(unset, /<label for="tg-grace-chores">Grace time in seconds<\/label><input id="tg-grace-chores"[^>]* value="1800"/, "with no choice saved the 30 minute default shows");
   assert.ok(unset.includes("The default is a grace time of 30 minutes (1800 seconds)."), "the setting says its default");
-  assert.ok(unset.includes("Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none."), "the setting says which agents it acts on");
+  assert.ok(unset.includes("Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an RCLI agent has no tools, so it starts none."), "the setting says which agents it acts on");
   const wait = render({ background_at_end: { mode: "wait" } });
   assert.match(wait, /<option value="wait" selected="">Wait for them<\/option><option value="grace">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
   assert.doesNotMatch(wait, /id="tg-grace-chores"/, "no grace time to type while Wait is on");
@@ -176,13 +176,17 @@ test("the idle stop says when an idle master stops, which the master's own setti
 
 test("Live terminal is a switch that shows the engine's setting and says what it does (DEC-117 Q4)", () => {
   assert.equal(typeof controls.LiveTerminalSetting, "function", "the setting exists");
-  const row = (master_live_terminal) => renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", liveHarness: true, status: status({ master_live_terminal }), reload() {} }));
+  const row = (master_live_terminal) => renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", status: status({ master_live_terminal }), reload() {} }));
   const on = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="true"/;
   const off = /id="tg-live-terminal-chores"[^>]*role="switch"[^>]*aria-checked="false"/;
   assert.match(row(undefined), on, "on with nothing saved");
   assert.match(row(true), on);
   assert.match(row(false), off);
   assert.match(row(true), /You see and type into the master(?:'|&#x27;)s own terminal\./);
+  const held = renderToStaticMarkup(createElement(controls.LiveTerminalSetting, { projectId: "chores", noLive: "The reason it cannot run live.", status: status({}), reload() {} }));
+  assert.match(held, /id="tg-live-terminal-chores"[^>]*aria-disabled="true"/, "a master that cannot run live gets the row unavailable");
+  assert.ok(held.includes("The reason it cannot run live."), "with the reason it is handed");
+  assert.doesNotMatch(held, /You see and type/);
 });
 
 test("Stop the master when idle after offers Off, 15 min and 1 h and shows the engine's choice (DEC-117 Q4)", () => {

@@ -4224,6 +4224,18 @@ async fn desktop_ide_run(
 }
 
 #[tauri::command]
+async fn desktop_ide_reveal(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    path: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.ide_reveal(project_id, path)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_ide_run_mode(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4951,6 +4963,32 @@ async fn desktop_import_instructions_file(
     };
     let call = lock(&state).await?.read_instruction_file(path)?;
     call.await.map(Some)
+}
+
+/// Lists each harness's own instructions file the engine offers for the app-wide import.
+/// Output: the sources in catalog order.
+#[tauri::command]
+async fn desktop_instruction_sources(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Vec<crazyagent::engine::owner::InstructionSource>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.instruction_sources()?;
+    call.await
+}
+
+/// Reads one harness's own instructions file for the app-wide editor's preview, by the
+/// harness's id only; the engine takes the file from the harness's manifest. Input: the
+/// harness id. Output: the text.
+#[tauri::command]
+async fn desktop_import_instruction_source(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    harness: String,
+) -> Result<String, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.read_instruction_source(harness)?;
+    call.await
 }
 
 #[tauri::command]
@@ -5706,6 +5744,8 @@ native_commands! {
     desktop_process_text,
     desktop_save_process_text,
     desktop_import_instructions_file,
+    desktop_instruction_sources,
+    desktop_import_instruction_source,
     desktop_instruction_import,
     desktop_confirm_instruction_import,
     desktop_uncommitted_instruction_import,
@@ -5757,6 +5797,7 @@ native_commands! {
     desktop_restart_engine,
     desktop_ide_focus,
     desktop_ide_run,
+    desktop_ide_reveal,
     desktop_ide_run_mode,
     desktop_ide_set_run_mode,
     desktop_overview_read,

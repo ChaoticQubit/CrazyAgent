@@ -1,6 +1,9 @@
 use super::*;
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::owner_profile::OwnerProfile;
 use crate::protocol::ProjectId;
+use crate::team::{AgentStatus, GraphNode, NodeKind, TeamGraph};
+use crate::tui::client::ide::RevealQuery;
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::{ShiftArrows, ShiftEnter};
 use crate::tui::seam::{Activity, ResearchCounts};
@@ -957,4 +960,301 @@ fn the_header_shows_the_running_intake_job_and_nothing_once_it_ended() {
     assert!(note.ends_with(": 12 of 3000"), "{note}");
     assert!(note.contains(UNICODE.ellipsis), "{note}");
     assert!(shown(Some(&long), "Ready").ends_with("  Ready"));
+}
+
+fn tidepool() -> ProjectId {
+    ProjectId::new("project-tidepool").unwrap()
+}
+
+fn sub(id: &str, label: &str, status: AgentStatus) -> GraphNode {
+    GraphNode {
+        id: id.into(),
+        kind: NodeKind::Sub,
+        parent: Some("master".into()),
+        label: label.into(),
+        harness: "codex".into(),
+        status: Some(status),
+        status_label: None,
+        account: None,
+        branch: None,
+        terminal: None,
+        questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        waits_for: None,
+        owner_questions: 0,
+        no_worktree: false,
+        hookless: false,
+        message_note: None,
+        started_ms: None,
+        sees_hidden: false,
+    }
+}
+
+fn tidepool_team() -> TeamGraph {
+    TeamGraph {
+        project_id: tidepool(),
+        nodes: vec![
+            GraphNode {
+                kind: NodeKind::Master,
+                parent: None,
+                ..sub("master", "Codex", AgentStatus::Working)
+            },
+            GraphNode {
+                kind: NodeKind::Lead,
+                ..sub("team-1", "Ada", AgentStatus::Working)
+            },
+            sub("team-2", "Grace", AgentStatus::Idle),
+            sub("team-3", "Linus", AgentStatus::Stopped),
+            sub("team-4", "Hopper", AgentStatus::Starting),
+            GraphNode {
+                kind: NodeKind::Teammate,
+                ..sub("teammate-4-12", "Teammate %12", AgentStatus::Working)
+            },
+        ],
+        edges: Vec::new(),
+        messages: Vec::new(),
+        overlaps: Vec::new(),
+        relations: Vec::new(),
+        master_live_terminal: true,
+    }
+}
+
+fn tidepool_page() -> Shell {
+    let mut ctx = ctx();
+    ctx.store.projects = Load::Ready(vec![card("Tidepool", 0)]);
+    let mut shell = at(
+        Place::Project {
+            id: tidepool(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Overview,
+        },
+        ctx,
+    );
+    drain(&mut shell);
+    shell
+}
+
+fn typed(shell: &mut Shell, text: &str) {
+    for character in text.chars() {
+        shell.key(Key::Char(character));
+    }
+}
+
+fn go_to_rows(shell: &Shell) -> Vec<(String, &'static str)> {
+    match &shell.overlay {
+        Some(Overlay::GoTo(go)) => go
+            .matches(&shell.ctx)
+            .into_iter()
+            .map(|target| (target.label, target.kind))
+            .collect(),
+        _ => panic!("Go to is not open"),
+    }
+}
+
+fn files_asked(shell: &mut Shell) -> Vec<String> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::ProjectFiles { project, query } if project == tidepool() => Some(query),
+            _ => None,
+        })
+        .collect()
+}
+
+fn files(query: &str, paths: &[&str]) -> Arrival {
+    Arrival::ProjectFiles {
+        project: tidepool(),
+        query: query.into(),
+        result: Ok(paths.iter().map(|path| (*path).to_owned()).collect()),
+    }
+}
+
+#[test]
+fn go_to_lists_the_live_role_sub_agents_of_the_team_graph_leads_included() {
+    assert_eq!(go_to_agents(&tidepool_team()), ["Ada", "Grace", "Hopper"]);
+}
+
+#[test]
+fn go_to_on_a_project_page_reads_its_agents_and_files_only_while_open() {
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    let asked: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(asked.iter().any(
+        |request| matches!(request, Request::TeamGraph { project } if *project == tidepool())
+    ));
+    assert!(asked.iter().any(|request| matches!(
+        request,
+        Request::ProjectFiles { project, query } if *project == tidepool() && query.is_empty()
+    )));
+    shell.arrive(Arrival::TeamGraph {
+        project: tidepool(),
+        result: Ok(Box::new(tidepool_team())),
+    });
+    shell.arrive(files("", &["src/main.rs", "README.md"]));
+    let rows = go_to_rows(&shell);
+    assert_eq!(rows.len(), GO_TO_ROWS_MAX);
+    assert_eq!(rows[ProjectTab::ALL.len()], ("Ada".to_owned(), "Agent"));
+
+    typed(&mut shell, "main");
+    assert_eq!(files_asked(&mut shell), ["m"], "one read at a time");
+    shell.arrive(files("ma", &["docs/main-notes.md"]));
+    assert!(
+        !go_to_rows(&shell)
+            .iter()
+            .any(|(label, _)| label == "docs/main-notes.md"),
+        "a read Go to did not ask for is not listed"
+    );
+    shell.arrive(files("m", &["src/main.rs"]));
+    assert_eq!(files_asked(&mut shell), ["main"], "the query typed since");
+    shell.arrive(files("main", &["src/main.rs", "src/domain.rs"]));
+    let rows = go_to_rows(&shell);
+    assert!(rows.contains(&("src/main.rs".to_owned(), "File")));
+    assert!(rows.contains(&("src/domain.rs".to_owned(), "File")));
+    assert!(files_asked(&mut shell).is_empty());
+
+    shell.key(Key::Backspace);
+    assert_eq!(files_asked(&mut shell), ["mai"]);
+    shell.key(Key::Esc);
+    assert!(shell.overlay.is_none());
+    shell.arrive(files("mai", &["src/main.rs"]));
+    assert!(
+        files_asked(&mut shell).is_empty(),
+        "a closed Go to reads nothing more"
+    );
+}
+
+#[test]
+fn go_to_off_a_project_page_reads_no_agents_or_files() {
+    let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+    drain(&mut shell);
+    shell.key(Key::Ctrl('k'));
+    assert!(matches!(shell.overlay, Some(Overlay::GoTo(_))));
+    let asked = drain(&mut shell);
+    assert!(
+        !asked
+            .iter()
+            .any(|request| request.starts_with("TeamGraph") || request.starts_with("ProjectFiles")),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn go_to_asks_the_ide_for_a_picked_file_and_stays_on_the_page() {
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    shell.arrive(files("", &["src/main.rs"]));
+    typed(&mut shell, "src/main");
+    assert_eq!(go_to_rows(&shell)[0], ("src/main.rs".to_owned(), "File"));
+    drain(&mut shell);
+    shell.key(Key::Enter);
+    assert!(shell.overlay.is_none());
+    assert_eq!(shell.depth(), 1);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: tidepool(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Overview,
+        })
+    );
+    let wanted = RevealQuery {
+        project: tidepool(),
+        target: RevealTarget::Project {
+            path: "src/main.rs".into(),
+        },
+    };
+    let asked: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        asked
+            .iter()
+            .any(|request| matches!(request, Request::Reveal(query) if **query == wanted)),
+        "{asked:?}"
+    );
+}
+
+#[test]
+fn go_to_opens_agents_for_a_picked_agent_and_says_how_to_read_its_messages() {
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    shell.arrive(Arrival::TeamGraph {
+        project: tidepool(),
+        result: Ok(Box::new(tidepool_team())),
+    });
+    typed(&mut shell, "grace");
+    assert_eq!(go_to_rows(&shell)[0], ("Grace".to_owned(), "Agent"));
+    shell.key(Key::Enter);
+    assert!(shell.overlay.is_none());
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: tidepool(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Agents,
+        })
+    );
+    let said = shell
+        .ctx
+        .message()
+        .expect("Go to says how to read its messages");
+    assert_eq!(said.lead, "Opened Agents.");
+    assert_eq!(
+        said.rest,
+        "Pick Grace in the agents list, then press M for its messages."
+    );
+}
+
+#[test]
+fn a_go_to_file_row_keeps_the_end_of_a_long_path() {
+    let long = "crates/crazyagent/src/tui/shell/tests.rs";
+    let ellipsis = UNICODE.ellipsis;
+    assert_eq!(path_tail("src/main.rs", 32, ellipsis), "src/main.rs");
+    assert_eq!(
+        path_tail(long, 20, ellipsis),
+        format!(
+            "{ellipsis}{}",
+            &long[long.len() - (20 - ellipsis.chars().count())..]
+        )
+    );
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    shell.arrive(files("", &[long]));
+    typed(&mut shell, "tests.rs");
+    let Some(Overlay::GoTo(go)) = &shell.overlay else {
+        panic!("Go to is not open");
+    };
+    let (modal, _) = shell.go_to_modal(go);
+    let text: Vec<String> = modal
+        .body
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert!(
+        text.iter()
+            .any(|line| line.contains("shell/tests.rs") && line.contains("File")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn go_to_keeps_its_selection_on_a_row_when_a_read_shrinks_the_list() {
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    shell.arrive(files("", &[]));
+    typed(&mut shell, "zzq");
+    shell.arrive(files("z", &["zzq/one.rs", "zzq/two.rs"]));
+    assert_eq!(go_to_rows(&shell).len(), 2);
+    shell.key(Key::Down);
+    shell.arrive(files("zzq", &["zzq/one.rs"]));
+    assert_eq!(go_to_rows(&shell), [("zzq/one.rs".to_owned(), "File")]);
+    let Some(Overlay::GoTo(go)) = &shell.overlay else {
+        panic!("Go to is not open");
+    };
+    assert_eq!(go.selected, 0);
 }

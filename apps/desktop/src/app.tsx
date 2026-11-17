@@ -222,7 +222,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
       </Banner>}
       <Screen route={page} session={session} alerts={alerts} />
       <UserDialogLayer asked={asked} under={page} back={back} />
-      <GoToLayer projects={projects ?? []} />
+      <GoToLayer projects={projects ?? []} project={page.name === "project" ? page.id : null} />
     </AppShell>
   </SessionContext.Provider>;
 }
@@ -326,6 +326,13 @@ export function ideFocusRoute(focus: IdeFocus): Route {
   return { name: "project", id: focus.project, tab: "ide" };
 }
 
+/** Whether a focus the engine handed over still has to move the page: not while that
+ * project's IDE tab already shows, whatever its section, so a reveal the desktop asked for
+ * keeps its route and its answer. Inputs: the route shown and the focus. Output: true to move. */
+export function ideFocusMoves(route: Route, focus: IdeFocus): boolean {
+  return !(route.name === "project" && route.id === focus.project && route.tab === "ide");
+}
+
 /** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
  * second it takes the waiting focus, if any, and opens that project's IDE tab; the engine
  * raises the window. The desktop asks the engine only while an IDE webview is loaded, since
@@ -338,7 +345,7 @@ function useIdeFocus(running: boolean) {
     const read = async () => {
       const focus = await ideFocus().catch(() => null);
       if (!live) return;
-      if (focus) navigate(ideFocusRoute(focus));
+      if (focus && ideFocusMoves(parseRoute(window.location.hash), focus)) navigate(ideFocusRoute(focus));
       timer = window.setTimeout(read, IDE_FOCUS_POLL_MS);
     };
     void read();

@@ -1120,6 +1120,137 @@ fn dropping_an_earlier_copy_leaves_a_later_copy_or_another_file_at_the_same_name
 #[cfg(target_os = "macos")]
 mod renewal_tests;
 
+fn chatgpt_refused(record: &Value) -> String {
+    match agent_copy::chatgpt_tokens(record.to_string().as_bytes()) {
+        Ok(_) => panic!("the record read as a ChatGPT sign-in"),
+        Err(problem) => problem.0,
+    }
+}
+
+/// T22 R8: the one ChatGPT sign-in parse reads the access token, the account id when the
+/// record has one and the access token's expiry, from the account's record or an agent's
+/// copy alike; it carries no refresh or id token, and refuses a record without usable
+/// ChatGPT tokens with the codes the agent copy uses.
+#[test]
+fn the_chatgpt_sign_in_parse_reads_the_token_account_id_and_expiry_only() {
+    let expires = now() + 3600;
+    let access = chatgpt_token(expires);
+    let mut record: Value = serde_json::from_slice(&codex_auth(expires)).unwrap();
+    record["tokens"]["access_token"] = json!(access);
+    let read = agent_copy::chatgpt_tokens(record.to_string().as_bytes());
+    assert_eq!(
+        read.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "the parse refused the record"
+    );
+    let read = read.unwrap();
+    assert_eq!(read.access.expose(), access);
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
+    assert_eq!(read.expires, Duration::from_secs(expires));
+    let mut copy = record.clone();
+    copy["tokens"]["refresh_token"] = json!("");
+    copy["tokens"]["account_id"] = Value::Null;
+    copy["OPENAI_API_KEY"] = Value::Null;
+    let read = agent_copy::chatgpt_tokens(copy.to_string().as_bytes()).unwrap();
+    assert_eq!(read.access.expose(), access);
+    assert_eq!(read.account_id, None);
+    let unreadable = "native_profile_codex_token_unreadable";
+    let mut empty = record.clone();
+    empty["tokens"]["access_token"] = json!("");
+    assert_eq!(chatgpt_refused(&empty), unreadable);
+    let mut timeless = record.clone();
+    timeless["tokens"]["access_token"] = json!("a.e30.c2ln");
+    assert_eq!(chatgpt_refused(&timeless), unreadable);
+    assert_eq!(
+        chatgpt_refused(&json!({"OPENAI_API_KEY": "sk-unit-api-key"})),
+        "native_profile_codex_api_key"
+    );
+    assert_eq!(chatgpt_refused(&json!({"tokens": null})), unreadable);
+}
+
+fn offline_codex(case: &UseCase) -> PathBuf {
+    let harness = case.root.path().join("offline-codex");
+    std::fs::write(&harness, "#!/bin/sh\n: > \"$0.ran\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+fn chatgpt_source(
+    guard: &NativeProfileUse,
+    executable: &Path,
+) -> crate::model_gateway::relay::chatgpt::ChatGptSource {
+    match guard.chatgpt_source(executable) {
+        Ok(source) => source,
+        Err(problem) => panic!("no ChatGPT source: {}", problem.0),
+    }
+}
+
+/// T22: a ChatGPT source made from the held account hands out the sign-in's access token
+/// and account id as they are while the token has time left, without running a renewal,
+/// and leaves the account's record as it was. r2 F2 (rv-code4): it names the native
+/// profile it was read from, not the account's connection, so routing and the hand-over
+/// can check a run is served its own sign-in.
+#[test]
+fn a_chatgpt_source_from_custody_hands_out_a_fresh_sign_in_without_a_renewal() {
+    let mut case = UseCase::new();
+    let harness = offline_codex(&case);
+    let expires = now() + 3 * 86_400;
+    let record = case.home().join("auth.json");
+    private_file(&record, &codex_auth(expires));
+    let guard = execution(&mut case);
+    let source = chatgpt_source(&guard, &harness);
+    assert_eq!(source.profile().as_str(), "unit-profile");
+    let handed = source
+        .current(&|| false)
+        .map(|(access, account_id)| (access.expose().to_owned(), account_id));
+    assert_eq!(
+        handed.as_ref().err().map(|problem| problem.0.as_str()),
+        None
+    );
+    assert_eq!(
+        handed.unwrap(),
+        (token(expires), Some("acct-unit".to_owned()))
+    );
+    assert!(!case.root.path().join("offline-codex.ran").exists());
+    assert_eq!(std::fs::read(&record).unwrap(), codex_auth(expires));
+}
+
+/// T22 R4: a ChatGPT source renews a lapsing sign-in only through the engine's own renewal,
+/// which runs the harness in the managed home; when that leaves the token lapsing, the
+/// source refuses with `chatgpt_sign_in_expired`. An API-key record makes no source.
+#[test]
+fn a_chatgpt_source_renews_only_through_the_engine_renewal_and_says_when_the_sign_in_expired() {
+    let mut case = UseCase::new();
+    let harness = offline_codex(&case);
+    let record = case.home().join("auth.json");
+    let lapsing = codex_auth(now() + 30);
+    private_file(&record, &lapsing);
+    let guard = execution(&mut case);
+    let source = chatgpt_source(&guard, &harness);
+    assert_eq!(
+        source.current(&|| false).err().map(|problem| problem.0),
+        Some("chatgpt_sign_in_expired".to_owned())
+    );
+    assert!(
+        case.root.path().join("offline-codex.ran").is_file(),
+        "the renewal never ran before the refusal"
+    );
+    assert_eq!(source.failed(), Some("chatgpt_sign_in_expired"));
+    assert_eq!(std::fs::read(&record).unwrap(), lapsing);
+    drop((source, guard));
+    private_file(
+        &record,
+        json!({"OPENAI_API_KEY": "sk-unit-api-key"})
+            .to_string()
+            .as_bytes(),
+    );
+    let guard = execution(&mut case);
+    match guard.chatgpt_source(&harness) {
+        Ok(_) => panic!("an API-key record made a ChatGPT source"),
+        Err(problem) => assert_eq!(problem.0, "native_profile_codex_api_key"),
+    }
+}
+
 /// Builds the copy of the account record the home holds now, as a handoff does. Inputs:
 /// the harness and the managed home. Output: the copy, or the refusal code.
 fn copy_of(harness: agent_copy::Harness, home: &Path) -> Result<Vec<u8>, String> {

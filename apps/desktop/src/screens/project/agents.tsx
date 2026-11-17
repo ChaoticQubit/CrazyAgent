@@ -20,7 +20,7 @@ import { TeamEventsPanel, WakeRulesPanel } from "../team/wake-rules";
 import { HeavyLaneQueue } from "../team/coordination";
 import { LeftoversPanel } from "../team/leftovers";
 import { QuestionsPanel, askCount, asksWords, questionsTitle, useQuestions } from "../team/questions";
-import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
+import { Badge, NotReady, ProjectEmpty, sectionAgent, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Button, ConfirmDialog, Drawer, Icon, Segmented, navigate, type Tone } from "../../ui";
 import { useLoad } from "../../state";
@@ -151,6 +151,9 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const opened = agentsView(section);
   const [shownView, setShownView] = useState<"team" | "settings">(opened.view);
   useEffect(() => { setShownView(opened.view); }, [section]);
+  const agent = sectionAgent(section);
+  const [stackOpen, setStackOpen] = useState(agent !== null);
+  useEffect(() => { if (agent !== null) setStackOpen(true); }, [agent]);
   const [filter, setFilter] = useState<"running" | "all">("running");
   const [stopping, setStopping] = useState<ResearchJob | null>(null);
   const [note, setNote] = useState("");
@@ -216,7 +219,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} focus={focus} onOpen={(node) => { setAsking(false); setFocus(null); setShownView("team"); setTerminal(node); }} />
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
   </Drawer>;
-  if (shownView === "settings") return <div className="pj-stack">
+  if (shownView === "settings") return <div className="pj-stack pj-agents">
     <SettingsToolbar projectId={data.id} name={data.name} perWindow={perWindow} {...bar} />
     {team.result === undefined && <p className="pj-muted" role="status">Loading...</p>}
     {team.result?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
@@ -224,7 +227,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} reload={data.reloadTeam} data={data} group={opened.group} />}
     {drawer}
   </div>;
-  return <div className="pj-stack">
+  return <div className="pj-stack pj-agents">
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
@@ -233,10 +236,10 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {team.result?.kind === "ok" && <LeftoversPanel projectId={data.id} status={team.result.value} nowMs={data.now} reload={data.reloadTeam} />}
     <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)}
       {...bar} />
-    <details className="pj-stack-s" aria-label="Agents and tasks">
+    <details className="pj-stack-s" aria-label="Agents and tasks" open={stackOpen} onToggle={(event) => setStackOpen(event.currentTarget.open)}>
       <summary><strong>Agents and tasks</strong> <span className="pj-small pj-muted">Stop all, Hand a task, the team's agents and tasks, wake rules and usage.</span></summary>
       {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
-      <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
+      <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} opened={agent} />
       {team.result?.kind === "ok" && <WakeRulesPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
       <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     </details>

@@ -30,8 +30,8 @@ pub use transport::overview::OVERVIEW_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
     Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile, InstructionMode,
-    InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved,
-    ProcessText, Proposal, SavedText, UncommittedImport,
+    InstructionRecord, InstructionSettings, InstructionSource, InstructionView, PROCESS_CODES,
+    ProcessSaved, ProcessText, Proposal, SavedText, UncommittedImport,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{

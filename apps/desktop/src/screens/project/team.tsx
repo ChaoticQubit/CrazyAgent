@@ -44,11 +44,11 @@ export function useTeam(id: string): [TeamRead, () => void] {
 /** Team panel for the project page: each agent's role, working folder, harness, account, status and current task,
  * then the tasks the master or the owner handed to sub-agents with status and a result summary.
  * Inputs: the project data, the latest team read, the filter, the harness catalog, the owner's
- * account names and a reload.
+ * account names, a reload and the row key of an agent Go to opened, whose Messages row starts open.
  * Output: the panel, or a loading, Not ready yet or error line. */
-export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
+export function TeamPanel({ data, team, filter, harnesses, accounts, reload, opened = null }: {
   data: ProjectData; team: TeamRead; filter: TeamFilter; harnesses: HarnessEntry[] | null;
-  accounts: { id: string; name: string }[]; reload: () => void;
+  accounts: { id: string; name: string }[]; reload: () => void; opened?: string | null;
 }) {
   const [stopping, setStopping] = useState<TeamTaskRow | null>(null);
   const [busy, setBusy] = useState(false);
@@ -56,7 +56,8 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
   const [note, setNote] = useState("");
   const [renaming, setRenaming] = useState<{ agent: number; text: string } | null>(null);
   const [halting, setHalting] = useState<TeamAgentRow | null>(null);
-  const [messages, setMessages] = useState<string | null>(null);
+  const [messages, setMessages] = useState<string | null>(opened);
+  useEffect(() => { if (opened !== null) setMessages(opened); }, [opened]);
   const openLink = useLinkOpener(data.notify);
 
   async function rename() {

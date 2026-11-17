@@ -2,7 +2,8 @@ use super::{
     AgentSession, FolderStep, KEY_FILE_BYTES_MAX, KeyFile, Resume, Screen, TerminalSession,
     codex_folder, host_failure,
 };
-use crate::harnesses::interactive::Transcript;
+use crate::harnesses::interactive::settings::TerminalSettings;
+use crate::harnesses::interactive::{self, Transcript};
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptReader};
@@ -31,14 +32,24 @@ const REPLAY_READS_MAX: u64 = 4096;
 /// RV-DS241-143).
 const REPLAY_WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
-const ESCAPE: &[u8] = b"\x1b";
 
-/// Where an agent's harness keeps its session record, in a form the engine can store.
+/// Where an agent's harness keeps its session record, in a form the engine can store. A
+/// harness run from its manifest keeps its name, its private home and its session, never a
+/// record file: a later engine finds the record again through the manifest's record path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecordSource {
-    CodexRollouts { sessions: PathBuf },
-    ClaudeSession { file: PathBuf },
+    CodexRollouts {
+        sessions: PathBuf,
+    },
+    ClaudeSession {
+        file: PathBuf,
+    },
+    Manifest {
+        harness: String,
+        home: PathBuf,
+        session: String,
+    },
 }
 
 /// What the engine keeps about one agent's live pane, so a later engine can adopt it
@@ -106,7 +117,9 @@ pub struct KeeperPin {
 impl PaneRecord {
     /// Describes a pane the engine just started. Takes the harness's session record,
     /// its canonical working folder, the start time, the pane's first process and the
-    /// key file written for it. Returns none for a harness with no session record.
+    /// key file written for it. Returns none for a harness with no session record, and for
+    /// a manifest harness that picks its own session id, whose record a later engine could
+    /// not tell from another run's.
     pub fn new(
         transcript: &Transcript,
         cwd: &Path,
@@ -121,6 +134,11 @@ impl PaneRecord {
             Transcript::ClaudeSession { file } => {
                 RecordSource::ClaudeSession { file: file.clone() }
             }
+            Transcript::Records(records) => RecordSource::Manifest {
+                harness: records.harness.clone(),
+                home: records.pattern.home().to_path_buf(),
+                session: records.session.clone()?,
+            },
             Transcript::Unavailable => return None,
         };
         let since_ms = since.duration_since(UNIX_EPOCH).ok()?.as_millis();
@@ -166,6 +184,7 @@ impl PaneRecord {
         let path = match &record.source {
             RecordSource::CodexRollouts { sessions } => sessions,
             RecordSource::ClaudeSession { file } => file,
+            RecordSource::Manifest { home, .. } => home,
         };
         let key = record.key.as_deref().is_none_or(Path::is_absolute);
         let resumed = record
@@ -231,14 +250,32 @@ impl PaneRecord {
         }
     }
 
-    fn transcript(&self) -> Transcript {
-        match &self.source {
-            RecordSource::CodexRollouts { sessions } => Transcript::CodexRollouts {
+    /// Gives the session record this pane's harness writes. A manifest pane's record is
+    /// found again through the record path of its own harness's settings, filled in for its
+    /// home and session. Takes the record and, for a manifest pane, those settings. Returns
+    /// the record's source, or `launch_harness_unsupported` for settings it cannot take.
+    pub fn transcript(
+        &self,
+        settings: Option<&TerminalSettings>,
+    ) -> Result<Transcript, LaunchError> {
+        match (&self.source, settings) {
+            (RecordSource::CodexRollouts { sessions }, None) => Ok(Transcript::CodexRollouts {
                 sessions: sessions.clone(),
-            },
-            RecordSource::ClaudeSession { file } => {
-                Transcript::ClaudeSession { file: file.clone() }
+            }),
+            (RecordSource::ClaudeSession { file }, None) => {
+                Ok(Transcript::ClaudeSession { file: file.clone() })
             }
+            (
+                RecordSource::Manifest {
+                    harness,
+                    home,
+                    session,
+                },
+                Some(settings),
+            ) if settings.harness() == harness && home.is_absolute() => {
+                settings.records(home, session).map(Transcript::Records)
+            }
+            _ => Err(failure("launch_harness_unsupported")),
         }
     }
 
@@ -258,13 +295,42 @@ impl PaneRecord {
 
     /// Guards the key file the record names, as the pane's launch wrote it. The file sits in
     /// the agent-writable account home, so it is read through one open that follows no link
-    /// and waits on no FIFO, and taken only as a regular file of at most
-    /// `KEY_FILE_BYTES_MAX` bytes. Input: the record. Output: the guard, or none.
+    /// and waits on no FIFO, a listed pane's only through [`listed_key_file`], and taken
+    /// only as a regular file of at most `KEY_FILE_BYTES_MAX` bytes. Input: the record.
+    /// Output: the guard, or none.
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
+        if let Some(files) = self.context.as_ref().filter(|files| files.listed) {
+            return listed_key_file(&files.home, path);
+        }
         let content = crate::platform::read_plain_file(path, KEY_FILE_BYTES_MAX)?;
         Some(KeyFile::new(path.clone(), content.as_bytes()))
     }
+}
+
+/// Guards a listed pane's key file, read only through the no-follow walk from the agent
+/// home ([`crate::harnesses::home::open_listed`], T18 LEAD-1), when the record names the
+/// key file of the pane's own private home. Inputs: the private home and the path the
+/// record names. Output: the guard, or none for another path, a link on the way or a file
+/// that is not plain.
+#[cfg(unix)]
+fn listed_key_file(home: &Path, path: &Path) -> Option<KeyFile> {
+    let name = path.file_name().and_then(|name| name.to_str());
+    let name = name.filter(|name| *name == interactive::KEY_FILE)?;
+    if path.parent() != Some(home) {
+        return None;
+    }
+    let (_, file) = crate::harnesses::home::open_listed(home, &[], name)?;
+    let content = crate::platform::read_plain(file, KEY_FILE_BYTES_MAX)?;
+    Some(KeyFile::listed(path.to_path_buf(), content.as_bytes()))
+}
+
+/// Takes no listed key file where none is ever written, as `put_key` refuses every listed
+/// key file there. Inputs: the private home and the path, both unused. Output: none.
+#[cfg(not(unix))]
+fn listed_key_file(home: &Path, path: &Path) -> Option<KeyFile> {
+    let _ = (home, path);
+    None
 }
 
 /// What an adoption's read of a pane's record learned of the turn at the record's end.
@@ -344,7 +410,7 @@ impl TerminalSession {
         record: &PaneRecord,
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
-        Self::adopt_as(host, agent, record, limits, false)
+        Self::adopt_as(host, agent, record, limits, false, None)
     }
 
     /// Takes over a live master's pane; see `adopt_as`, whose rule for a live master
@@ -356,12 +422,29 @@ impl TerminalSession {
         record: &PaneRecord,
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
-        Self::adopt_as(host, agent, record, limits, true)
+        Self::adopt_as(host, agent, record, limits, true, None)
+    }
+
+    /// Takes over the pane of a harness run from given terminal settings, such as a
+    /// stand-in outside the catalog; see `adopt_as`, whose rule for a pane that is no live
+    /// master applies. Takes the host, the pane name, the stored record, the limits and the
+    /// settings. Returns the idle session, or a plain code.
+    pub fn adopt_with(
+        host: Arc<dyn Host>,
+        agent: AgentId,
+        record: &PaneRecord,
+        limits: LaunchLimits,
+        settings: TerminalSettings,
+    ) -> Result<Self, LaunchError> {
+        Self::adopt_as(host, agent, record, limits, false, Some(settings))
     }
 
     /// Takes over an agent pane a previous engine left running, without starting the harness
-    /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work. An open turn whose record the harness last
+    /// again. A turn still running in it is stopped with the harness's interrupt key,
+    /// Escape unless its manifest names another, since its result can no longer be matched
+    /// to the engine's work. A manifest pane's record is found again through the given
+    /// settings, else its catalog manifest's, and its prompts are submitted with their key.
+    /// An open turn whose record the harness last
     /// wrote the launch's `stale_turn` ago, on a pane whose app works on nothing (see
     /// `waits`), is no turn: nothing is typed and the pane is taken over idle. A turn that
     /// does not end on such a pane is taken over idle as well, and either is dropped in the
@@ -386,14 +469,16 @@ impl TerminalSession {
     /// is not ready: it goes on with its launch's one Enter before any prompt is typed. A
     /// failed look at the screen counts as not on it, so it cannot end the pane. The
     /// key and context files are removed when the session stops, or at once when the pane
-    /// cannot be taken over. Takes the host, the pane name, the stored record, the limits
-    /// and whether the pane is a live master's. Returns the idle session, or a plain code.
+    /// cannot be taken over. Takes the host, the pane name, the stored record, the limits,
+    /// whether the pane is a live master's and the settings of a harness run from them, if
+    /// given. Returns the idle session, or a plain code.
     fn adopt_as(
         host: Arc<dyn Host>,
         agent: AgentId,
         record: &PaneRecord,
         limits: LaunchLimits,
         live: bool,
+        settings: Option<TerminalSettings>,
     ) -> Result<Self, LaunchError> {
         let context = record.context.as_ref().map(Installed::adopt).transpose()?;
         if let Some(code) = super::agent_pane_unavailable(std::env::consts::OS) {
@@ -402,6 +487,14 @@ impl TerminalSession {
         if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
+        let settings = match (settings, &record.source) {
+            (None, RecordSource::Manifest { harness, .. }) => {
+                Some(interactive::catalog_settings(harness)?)
+            }
+            (settings, _) => settings,
+        };
+        let transcript = record.transcript(settings.as_ref())?;
+        let (submit_key, interrupt_key) = super::keys(settings.as_ref());
         let budget = if live {
             REPLAY_WAIT
         } else {
@@ -410,9 +503,9 @@ impl TerminalSession {
         let until = Instant::now() + budget;
         let mut reader = match &record.resumed {
             Some((file, from)) => {
-                TranscriptReader::resumed(record.transcript(), &record.cwd, file, Some(*from))?
+                TranscriptReader::resumed(transcript, &record.cwd, file, Some(*from))?
             }
-            None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
+            None => TranscriptReader::adopted(transcript, &record.cwd, record.since()),
         };
         let mut replayed = replay(&mut reader, until)?;
         let open = match replayed {
@@ -427,7 +520,7 @@ impl TerminalSession {
             && super::waits(host.as_ref(), &agent, !live);
         let mut settled = false;
         if open && !stale {
-            host.input(&agent, ESCAPE).map_err(host_failure)?;
+            host.input(&agent, interrupt_key).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;
             while !settled && Instant::now() < deadline {
                 std::thread::sleep(POLL);
@@ -480,6 +573,10 @@ impl TerminalSession {
             ready: !on_menu,
             first: None,
             folder: on_menu.then_some(FolderStep::Waiting),
+            steps: VecDeque::new(),
+            harness_name: settings.as_ref().map(|settings| settings.name().to_owned()),
+            submit_key,
+            interrupt_key,
             turn: false,
             held: false,
             over_hold: false,
@@ -517,11 +614,15 @@ impl TerminalSession {
     }
 
     /// Lets go of the pane without ending it, as the engine quits with this agent kept alive.
-    /// Generated context and key files stay for the harness that still runs. A pane on an
-    /// engine key relay keeps its lifeline held until this engine exits, so it still ends
-    /// with the engine whose relay it reaches.
+    /// Generated context and key files stay for the harness that still runs, and a pane on
+    /// an engine key relay keeps its lifeline held, so it still ends with this engine. A
+    /// pane with no record, which no later engine could adopt, is stopped instead.
     /// Takes the session; a later engine adopts the pane from its record.
     pub fn leave(mut self) {
+        if self.record.is_none() {
+            let _ = self.stop();
+            return;
+        }
         self.stopped = true;
         if let Some(key) = self._key.take() {
             std::mem::forget(key);

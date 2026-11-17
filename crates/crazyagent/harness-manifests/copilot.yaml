@@ -1,0 +1,22 @@
+schema: 1
+kind: harness
+id: "copilot"
+name: "GitHub Copilot CLI"
+binaries:
+  - "copilot"
+headless: "copilot --prompt: one prompt, plain text reply"
+model_selection: true
+account_kinds:
+  - "subscription"
+update:
+  casks:
+    - "copilot-cli"
+  known_casks:
+    - "copilot-cli@prerelease"
+  npm:
+    scope: "@github"
+    name: "copilot"
+    package: "@github/copilot"
+    spec: "@github/copilot"
+  guide: "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

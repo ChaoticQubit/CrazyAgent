@@ -1726,6 +1726,56 @@ fn a_pool_with_only_an_anthropic_api_key_leads_with_claude_code_not_codex() {
     );
 }
 
+/// DEC-180 Phase 1: a written team plan whose master or agent row is one of the 15 catalog
+/// harnesses that cannot run yet is refused with today's code, and a saved plan that
+/// already names that harness in the same place still saves.
+#[test]
+fn a_written_plan_on_each_unwired_harness_is_refused_unless_the_saved_plan_names_it() {
+    const UNWIRED: [&str; 15] = [
+        "opencode",
+        "gemini-cli",
+        "fx",
+        "openclaw",
+        "pi",
+        "goose",
+        "aider",
+        "qwen-code",
+        "crush",
+        "droid",
+        "copilot",
+        "cline",
+        "continue",
+        "openhands",
+        "kimi",
+    ];
+    let plan = |master: &str, row: Option<&str>| TeamPlan {
+        master: master.into(),
+        master_tools: true,
+        sub_harnesses: row
+            .into_iter()
+            .map(|harness| HarnessSlot {
+                harness: harness.into(),
+                agents: 1,
+                tools: true,
+            })
+            .collect(),
+        min_agents: 1,
+        max_agents: 2,
+    };
+    let refused = Err("team_harness_unavailable");
+    assert_eq!(plan("codex", Some("claude")).check_writable(None), Ok(()));
+    assert_eq!(plan("rcli", Some("codex")).check_writable(None), Ok(()));
+    assert_eq!(plan("codex", Some("rcli")).check_writable(None), refused);
+    let saved = plan("codex", Some("claude-code"));
+    for harness in UNWIRED {
+        for written in [plan(harness, None), plan("codex", Some(harness))] {
+            assert_eq!(written.check_writable(None), refused, "{harness}");
+            assert_eq!(written.check_writable(Some(&saved)), refused, "{harness}");
+            assert_eq!(written.check_writable(Some(&written)), Ok(()), "{harness}");
+        }
+    }
+}
+
 /// A New Project plan for a home inside `runtime`, building `name` from the documents given,
 /// as `plan_new` makes one. Inputs: the engine folder, the home, the folder name and the
 /// documents. Output: the plan.

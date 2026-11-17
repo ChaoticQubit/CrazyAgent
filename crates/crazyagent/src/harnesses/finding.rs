@@ -30,7 +30,7 @@ const AGENT_TMP: &str = "/private/tmp/ca-";
 const AGENT_TMP: &str = "/tmp/ca-";
 /// The most links one chain may pass through, the bound Linux puts on one lookup.
 #[cfg(unix)]
-const LINK_HOPS_MAX: usize = 40;
+pub(crate) const LINK_HOPS_MAX: usize = 40;
 /// The most rows read from one table that names folders agents can write, and the most
 /// repositories one project may declare; more is refused as unreadable, so no folder is
 /// ever left out of an [`AgentSpace`].
@@ -446,6 +446,19 @@ pub fn check_file(
     if is_shim(home, path) {
         return Err(failure(PATH_SHIM));
     }
+    out_of_reach(path, space)?;
+    crate::engine::pinnable(&metadata)?;
+    assert!(path.is_absolute());
+    Ok(path.to_path_buf())
+}
+
+/// Refuses a harness file another hand could change, the one placement rule [`check_file`]
+/// and a listed harness's gate share (T19B-4-R2, T19B-SPACE-F1): the path, or any link or
+/// folder its resolution passes through, lies in a folder agents can write, or someone other
+/// than this user or root can change it. Inputs: the path and the agent space. Output: Ok,
+/// `harness_path_agent_space`, `harness_path_changeable`, or `harness_path_not_found` for a
+/// chain that does not resolve.
+pub(crate) fn out_of_reach(path: &Path, space: &AgentSpace) -> Result<(), EngineError> {
     let hops = link_hops(path).ok_or_else(|| failure(PATH_NOT_FOUND))?;
     if space.holds(path) || hops.iter().any(|hop| space.holds(hop)) {
         return Err(failure(PATH_AGENT_SPACE));
@@ -456,9 +469,7 @@ pub fn check_file(
     {
         return Err(failure(PATH_CHANGEABLE));
     }
-    crate::engine::pinnable(&metadata)?;
-    assert!(path.is_absolute());
-    Ok(path.to_path_buf())
+    Ok(())
 }
 
 /// Every link a path's resolution passes through, file and folder links alike, and every

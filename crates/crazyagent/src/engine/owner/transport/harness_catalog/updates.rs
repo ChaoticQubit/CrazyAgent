@@ -308,6 +308,43 @@ pub(crate) async fn sign_in_version(
     .flatten()
 }
 
+/// The catalog entry a listed master turn runs and its installed version, as Settings,
+/// Harnesses shows them, with the same search the catalog list uses (DEC-180 Task 20). An
+/// entry agents or other users can change is refused before its version is read
+/// ([`crate::harnesses::finding::out_of_reach`], T19B-4-R2, T19B-SPACE-F1).
+/// Inputs: the engine, the engine root, the catalog search and the catalog id. Output: the
+/// entry's file and its installed version, none for a missing or refused entry.
+pub(crate) async fn listed_install(
+    engine: &Arc<Engine>,
+    root: PathBuf,
+    search: Search,
+    id: &str,
+) -> (Option<PathBuf>, Option<String>) {
+    let Some(entry) = entry(engine, search, id, false).await.ok() else {
+        return (None, None);
+    };
+    let Some(executable) = entry.executable.clone() else {
+        return (None, None);
+    };
+    let updates = engine.harness_updates.clone();
+    let checked = tokio::task::spawn_blocking(move || {
+        let db = open(&root).ok()?;
+        let space = finding::AgentSpace::read(&root, &db).ok()?;
+        finding::out_of_reach(&executable, &space).ok()?;
+        let installed = updates
+            .versions(&db, &entry, &Roots::engine(&root), false)
+            .installed;
+        Some((executable, installed))
+    })
+    .await
+    .ok()
+    .flatten();
+    match checked {
+        Some((executable, installed)) => (Some(executable), installed),
+        None => (None, None),
+    }
+}
+
 /// Runs one blocking piece of harness update work off the request path.
 /// Input: the work. Output: its answer, or `harness_update_unavailable` when it could not
 /// finish.

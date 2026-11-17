@@ -59,6 +59,7 @@ pub fn unknown(source: &RecordSource, cwd: &Path, record: &Path) -> Vec<PendingC
         let steps = match source {
             RecordSource::CodexRollouts { .. } => codex_steps(&value),
             RecordSource::ClaudeSession { .. } => claude_steps(&value),
+            RecordSource::Manifest { .. } => Vec::new(),
         };
         for step in steps {
             match step {

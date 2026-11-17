@@ -1,0 +1,28 @@
+schema: 1
+kind: harness
+id: "standin-text-turn"
+name: "Stand-in text turn"
+binaries:
+  - "standin-text-turn"
+headless: "standin-text-turn: one process per turn, the reply is its output"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "app"
+piped:
+  driver: "text-turn"
+  argv:
+    - "--home"
+    - "{home}"
+    - "--model"
+    - "{model}"
+    - "--prompt={prompt}"
+  resume:
+    - "--resume"
+    - "{session}"

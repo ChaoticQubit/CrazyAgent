@@ -198,7 +198,9 @@ pub(crate) fn focus(runtime: &OwnerRuntimeHandle) -> Option<RevealFocus> {
 /// Finds the path the extension opens for a target: the folder the target names must be
 /// one the project's workspace lists, and a path inside it must be relative, exist and
 /// stay inside that folder after links resolve. Inputs: the engine root, project and
-/// target. Output: the folder as the workspace names it joined with the path.
+/// target. Output: the folder as the workspace names it, which the extension matches its
+/// workspace folders against, joined with the path below it after links resolve, so the IDE
+/// opens the file that was checked and not a link an agent can repoint after the check.
 fn resolve(root: &Path, project: &ProjectId, target: &RevealTarget) -> Result<String, EngineError> {
     let db = crate::landing::open(root).map_err(|_| failure("ide_reveal_unavailable"))?;
     let sections = crate::ide::workspace::listed(&db, project)?;
@@ -226,10 +228,10 @@ fn resolve(root: &Path, project: &ProjectId, target: &RevealTarget) -> Result<St
                 return Err(failure("ide_reveal_invalid"));
             }
             let found = std::fs::canonicalize(section.path.join(path)).map_err(missing)?;
-            if !found.starts_with(&base) {
-                return Err(failure("ide_reveal_outside"));
-            }
-            section.path.join(path)
+            let below = found
+                .strip_prefix(&base)
+                .map_err(|_| failure("ide_reveal_outside"))?;
+            section.path.join(below)
         }
     };
     shown

@@ -17,18 +17,21 @@ pub fn of(root: &Path, source: &str) -> String {
         &root.join(SETUP_FOLDER),
         import::home().as_deref(),
         pack_entries(),
+        ImportFrom::all(),
         source,
     )
 }
 
 /// Names where a skill came from by the folder it was added from: "Default pack: <entry id>"
-/// inside a pack entry's checkout or bundled folder, "Imported from Claude Code" or "Imported
-/// from Codex" inside that harness's skills folder, else "Added by you". Inputs: the setup
-/// folder, the owner's home when known, the pack entries and the source. Output: the label.
+/// inside a pack entry's checkout or bundled folder, "Imported from <harness>" inside the
+/// skills folder of one of the import sources, else "Added by you". Inputs: the setup
+/// folder, the owner's home when known, the pack entries, the import sources and the
+/// source. Output: the label.
 pub fn label(
     setup: &Path,
     home: Option<&Path>,
     entries: &[PackManifestEntry],
+    sources: &[ImportFrom],
     source: &str,
 ) -> String {
     let source = Path::new(source);
@@ -40,8 +43,8 @@ pub fn label(
         return format!("Default pack: {}", entry.id);
     }
     let imported = home.and_then(|home| {
-        ImportFrom::ALL
-            .into_iter()
+        sources
+            .iter()
             .find(|from| source.starts_with(home.join(from.folder())))
     });
     match imported {

@@ -3,7 +3,7 @@
   ✓ About   ✓ Stack   ✓ Documents   ✓ Work   ✓ Pool   Team   Review
 ──────────────────────────────────────────────────────━━━━──────────────────────
   Team      ┌─ Harness for the master ─────────────────────────────┐
-  Pick who l│ > rcli                           1 in pool           │.
+  Pick who l│ > RCLI                           1 in pool           │.
             │   Claude Code                    1 in pool           │
     Role    │   Codex                          1 in pool           │
     Master  │                                                      │

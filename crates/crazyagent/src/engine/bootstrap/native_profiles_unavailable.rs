@@ -151,6 +151,21 @@ impl NativeProfileUse {
     }
 }
 
+impl NativeProfileUse {
+    /// Matches the Unix ChatGPT sign-in source for a ChatGPT relay. No value is ever made
+    /// here. Input: the Codex executable, unused. Output: none.
+    #[allow(
+        dead_code,
+        reason = "the launch that starts a ChatGPT relay is wired by the listed-launch task (T22 Q1)"
+    )]
+    pub(crate) fn chatgpt_source(
+        &self,
+        _executable: &Path,
+    ) -> Result<crate::model_gateway::relay::chatgpt::ChatGptSource, EngineError> {
+        match *self {}
+    }
+}
+
 impl Drop for NativeProfileUse {
     /// Matches the Unix lease, which releases its profile locks when dropped, so the
     /// callers that end a lease at a chosen point mean the same on every target.
@@ -210,6 +225,28 @@ impl NativeProfileCustody {
         _host: &HostStamp,
         _connection: &ModelConnection,
     ) -> Result<(String, String), EngineError> {
+        match *self {}
+    }
+
+    /// Matches the Unix listed slot prepare. No custody exists here, so this never runs.
+    /// Inputs: the host and connection, unused. Output: none.
+    pub(crate) fn prepare_listed(
+        &mut self,
+        _host: &HostStamp,
+        _connection: &ModelConnection,
+    ) -> Result<(String, String), EngineError> {
+        match *self {}
+    }
+
+    /// Matches the Unix listed slot use. No custody exists here, so this never runs.
+    /// Inputs: the use request, unused. Output: none.
+    pub(crate) fn acquire_listed_use(
+        &mut self,
+        _host: &HostStamp,
+        _binding: &NativeProfileBinding,
+        _operation_id: &RequestId,
+        _generation: u64,
+    ) -> Result<NativeProfileUse, EngineError> {
         match *self {}
     }
 

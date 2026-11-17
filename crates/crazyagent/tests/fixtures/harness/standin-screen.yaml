@@ -1,0 +1,30 @@
+schema: 1
+kind: harness
+id: "standin-screen"
+name: "Stand-in screen"
+binaries:
+  - "standin-screen"
+headless: "none: standin-screen runs in a terminal pane only"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+sub_agents: "app"
+terminal:
+  argv:
+    - "--home"
+    - "{home}"
+    - "--session"
+    - "{session}"
+  resume:
+    - "--home"
+    - "{home}"
+    - "--resume"
+    - "{session}"
+  prompt_mark: "> "
+  record:
+    reader: "screen"

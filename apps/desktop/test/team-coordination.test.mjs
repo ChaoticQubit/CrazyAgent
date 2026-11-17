@@ -7,6 +7,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const coord = await import("../src/screens/team/coordination.tsx");
 
+/** The name a harness's bundled manifest gives it, the name the catalog hands the page.
+ * Input: the harness id. Output: its name. */
+function manifestName(harness) {
+  const manifest = readFileSync(new URL(`../../../crates/crazyagent/harness-manifests/${harness}.yaml`, import.meta.url), "utf8");
+  const name = manifest.match(/^name: "([^"\n]+)"$/mu);
+  assert.ok(name, `${harness}: its manifest names it`);
+  return name[1];
+}
+
 test("Overlapping edits lists every engine choice in the mockup's order, then an unknown value as it is", async () => {
   const { OVERLAP_CHOICES } = await import("../src/engine-client.ts");
   const values = (current) => coord.overlapOptions(current).map((option) => option.value);
@@ -40,16 +49,16 @@ test("the desktop defaults are the engine's counted tools", () => {
 test("Native is listed for every harness kind and chosen only where it has native sub-agents", () => {
   for (const harness of ["claude-code", "codex", "rcli"]) {
     const native = coord.NATIVE_UNAVAILABLE[harness] === null;
-    const options = coord.modeOptions(harness, native);
+    const options = coord.modeOptions(harness, native, manifestName);
     assert.deepEqual(options.map((option) => option.value), ["native", "app_spawned"], `${harness}: native comes first, as the mockup lists it`);
     assert.equal(options[0].disabledReason, native ? undefined : coord.NATIVE_UNAVAILABLE[harness], harness);
     assert.equal(options[1].disabledReason, undefined, `${harness}: CrazyAgent workers are always open`);
-    assert.ok(coord.modeHelper(harness, native).endsWith("."), harness);
+    assert.ok(coord.modeHelper(harness, native, manifestName).endsWith("."), harness);
   }
-  assert.match(coord.modeHelper("codex", true), /Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself\./);
-  assert.ok(coord.modeHelper("codex", true).includes(coord.CODEX_NATIVE_SCOPE), "the Codex helper says what the app cannot show");
-  assert.ok(!coord.modeHelper("claude-code", true).includes(coord.CODEX_NATIVE_SCOPE));
-  assert.equal(coord.modeHelper("rcli", false), coord.NATIVE_UNAVAILABLE.rcli);
+  assert.match(coord.modeHelper("codex", true, manifestName), /Codex starts them on the lead's model and offers no other, but still runs a model a sub-agent names itself\./);
+  assert.ok(coord.modeHelper("codex", true, manifestName).includes(coord.CODEX_NATIVE_SCOPE), "the Codex helper says what the app cannot show");
+  assert.ok(!coord.modeHelper("claude-code", true, manifestName).includes(coord.CODEX_NATIVE_SCOPE));
+  assert.equal(coord.modeHelper("rcli", false, manifestName), coord.NATIVE_UNAVAILABLE.rcli);
   assert.deepEqual(coord.DELIVERY_OPTIONS.map((option) => option.value), ["auto", "native_only", "typing_only"]);
 });
 
@@ -58,6 +67,19 @@ test("the desktop says why RCLI has no native sub-agents in the engine's own wor
   const engine = /pub const RCLI_NATIVE_UNAVAILABLE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
   assert.ok(engine, "the engine states RCLI's reason");
   assert.equal(coord.NATIVE_UNAVAILABLE.rcli, engine);
+});
+
+test("Task 21: a harness kind with no native sub-agents and no reason of its own reads the engine's words, in Coordination and in a refusal of Native", async () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/coord/settings.rs", import.meta.url), "utf8");
+  const engine = /pub const LISTED_NATIVE_UNAVAILABLE: &str =\s*"([^"]+)";/u.exec(source)?.[1];
+  assert.ok(engine, "the engine states the general reason");
+  assert.equal(coord.LISTED_NATIVE_UNAVAILABLE, engine);
+  for (const harness of ["claude-code", "codex"]) {
+    assert.equal(coord.modeOptions(harness, false)[0].disabledReason, engine, harness);
+    assert.equal(coord.modeHelper(harness, false), engine, harness);
+  }
+  const { failureSentence } = await import("../src/api-projects.ts");
+  assert.equal(failureSentence("coord_native_unsupported"), engine);
 });
 
 test("the desktop says what the app cannot show of Codex sub-agents in the engine's own words", () => {
@@ -125,12 +147,12 @@ test("Coordination leads with the mockup's rows, each harness's sub-agents toget
   assert.equal(typeof coord.PerHarnessControls, "function", "the per-harness rows have their own part");
   const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
   const rows = (markup) => [...markup.matchAll(/data-setting="([^"]*)"/g)].map((match) => match[1]);
-  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
-  assert.deepEqual(rows(lead), ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent questions go to", "Overlapping edits", "Terminals per window"]);
-  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
-  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]);
+  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden, name: manifestName }));
+  assert.deepEqual(rows(lead), ["Claude Code sub-agents", "Codex sub-agents", "RCLI sub-agents", "Sub-agent questions go to", "Overlapping edits", "Terminals per window"]);
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden, name: manifestName }));
+  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to RCLI agents"]);
   assert.doesNotMatch(per, /terminal display/i, "the display is one setting for every harness, not a row of one harness");
-  assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Code", "Codex", "rcli"]);
+  assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Code", "Codex", "RCLI"]);
 });
 
 const BOTH_DISPLAYS = ["classic", "fullscreen"];
@@ -160,33 +182,33 @@ test("one Terminal display row serves every harness with Fullscreen as the defau
   const status = (terminal_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, terminal_display }, harnesses: ENGINE_ROWS } });
   const words = {
     classic: /Classic: every agent draws on the normal screen, so the mouse wheel scrolls the terminal at once and a plain drag selects text\. A change applies when a terminal next starts\./,
-    fullscreen: /Fullscreen: Claude Code and Codex draw their own view and take the mouse; the wheel scrolls inside that view, and (Option|Shift)-drag selects text\. rcli has no Fullscreen view and stays Classic\. A change applies when a terminal next starts\./,
+    fullscreen: /Fullscreen: Claude Code and Codex draw their own view and take the mouse; the wheel scrolls inside that view, and (Option|Shift)-drag selects text\. RCLI has no Fullscreen view and stays Classic\. A change applies when a terminal next starts\./,
   };
   assert.deepEqual(Object.keys(words), coord.DISPLAY_OPTIONS.map((option) => option.value), "every option has its own words");
   for (const display of Object.keys(words)) {
-    const markup = renderToStaticMarkup(createElement(coord.TerminalDisplaySetting, { projectId: "p", status: status(display), reload: forbidden }));
+    const markup = renderToStaticMarkup(createElement(coord.TerminalDisplaySetting, { projectId: "p", status: status(display), reload: forbidden, name: manifestName }));
     assert.deepEqual([...markup.matchAll(/data-setting="([^"]*)"/g)].map((match) => match[1]), ["Terminal display"], display);
     assert.match(markup, /<label for="tg-display-p">Terminal display<\/label>/, display);
     assert.match(markup, new RegExp(`<option value="${display}" selected="">`), display);
     assert.match(markup, words[display], display);
     assert.doesNotMatch(markup, /Claude Code terminal/, "the row is not Claude Code's");
-    const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status: status(display), reload: forbidden }));
+    const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status: status(display), reload: forbidden, name: manifestName }));
     assert.doesNotMatch(per, /terminal display/i, "no harness group holds a display row");
   }
 });
 
 test("the Terminal display words name the key that selects on this platform and every harness kind that cannot draw Fullscreen (DEC-141)", () => {
   assert.equal(typeof coord.displayHelper, "function");
-  const classic = coord.displayHelper("classic", ENGINE_ROWS, true);
+  const classic = coord.displayHelper("classic", ENGINE_ROWS, true, manifestName);
   assert.doesNotMatch(classic, /stay|Option|Shift/, "Classic holds for every harness and needs no key");
-  assert.equal(classic, coord.displayHelper("classic", ENGINE_ROWS, false));
-  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true), /and Option-drag selects text\. rcli has no Fullscreen view and stays Classic\./);
-  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, false), /and Shift-drag selects text\. rcli has no Fullscreen view and stays Classic\./);
+  assert.equal(classic, coord.displayHelper("classic", ENGINE_ROWS, false, manifestName));
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true, manifestName), /and Option-drag selects text\. RCLI has no Fullscreen view and stays Classic\./);
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, false, manifestName), /and Shift-drag selects text\. RCLI has no Fullscreen view and stays Classic\./);
   const one = [harnessRow("claude-code", BOTH_DISPLAYS), harnessRow("codex", ["classic"]), harnessRow("rcli", ["classic"])];
-  assert.match(coord.displayHelper("fullscreen", one, true), /^Fullscreen: Claude Code draws its own view and takes the mouse; .* Codex and rcli have no Fullscreen view and stay Classic\. A change applies/);
+  assert.match(coord.displayHelper("fullscreen", one, true, manifestName), /^Fullscreen: Claude Code draws its own view and takes the mouse; .* Codex and RCLI have no Fullscreen view and stay Classic\. A change applies/);
   for (const older of [coord.COORD_HARNESSES.map((harness) => harnessRow(harness, undefined)), coord.COORD_HARNESSES.map((harness) => harnessRow(harness, []))]) {
-    const unknown = coord.displayHelper("fullscreen", older, true);
-    assert.match(unknown, /^Fullscreen: Claude Code, Codex and rcli draw their own view and take the mouse; /, "an engine that lists no displays is taken to draw every one");
+    const unknown = coord.displayHelper("fullscreen", older, true, manifestName);
+    assert.match(unknown, /^Fullscreen: Claude Code, Codex and RCLI draw their own view and take the mouse; /, "an engine that lists no displays is taken to draw every one");
     assert.doesNotMatch(unknown, /stay/);
   }
   for (const row of coord.coordination({ coordination: { settings: coord.COORD_DEFAULTS, harnesses: ENGINE_ROWS } }).harnesses) {
@@ -198,7 +220,7 @@ test("the Task-start reminder row follows Workflow nudges with On as the default
   assert.equal(coord.COORD_DEFAULTS.task_start, "on");
   for (const [option, checked] of [["on", "On"], ["off", "Off"]]) {
     const status = { project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, task_start: option }, harnesses: [] } };
-    const markup = renderToStaticMarkup(createElement(coord.ToolsControls, { projectId: "p", status, reload: forbidden }));
+    const markup = renderToStaticMarkup(createElement(coord.ToolsControls, { projectId: "p", status, reload: forbidden, name: manifestName }));
     const nudges = markup.indexOf('aria-label="Workflow nudges"');
     const reminder = markup.indexOf('aria-label="Task-start reminder"');
     const counted = markup.indexOf('aria-label="Counted tools"');
@@ -271,19 +293,25 @@ test("a coordination save keeps the value the TUI or another window set since, e
 
 test("a harness kind no sub-agent runs on keeps its rows, each saying why instead of a live control (PA-15, DEC-141)", () => {
   const team = readFileSync(new URL("../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8");
-  const start = team.indexOf("pub fn launch_harness");
-  const runs = [...team.slice(start, team.indexOf("\n}\n", start)).matchAll(/"([a-z-]+)"/gu)].map((match) => match[1]);
+  const roles = (harness) => {
+    const manifest = readFileSync(new URL(`../../../crates/crazyagent/harness-manifests/${harness}.yaml`, import.meta.url), "utf8");
+    const listed = manifest.match(/^roles:\n((?:  - "[a-z_]+"\n)+)/mu);
+    assert.ok(listed, `${harness}: its manifest lists its roles`);
+    return [...listed[1].matchAll(/"([a-z_]+)"/gu)].map((match) => match[1]);
+  };
+  const runs = coord.COORD_HARNESSES.filter((harness) => roles(harness).includes("agent"));
+  assert.ok(runs.length > 0 && runs.length < coord.COORD_HARNESSES.length, "some kinds run team agents and some do not");
   const sentence = team.match(/pub const NO_SUB_AGENTS: &str =\s*"([^"]+)";/u);
   assert.ok(sentence, "the engine names the reason once");
   const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
-  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
-  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
+  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden, name: manifestName }));
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden, name: manifestName }));
   for (const harness of coord.COORD_HARNESSES) {
     const live = runs.includes(harness);
     assert.equal(coord.subAgentsUnavailable(harness), live ? undefined : sentence[1], harness);
     assert.equal(lead.includes(`id="tg-mode-${harness}-p"`), live, `${harness} sub-agent mode control`);
     assert.equal(per.includes(`id="tg-delivery-${harness}-p"`), live, `${harness} delivery control`);
-    const name = coord.HARNESS_NAMES[harness];
+    const name = manifestName(harness);
     for (const [markup, label] of [[lead, `${name} sub-agents`], [per, `Messages to ${name} agents`]]) {
       const row = markup.slice(markup.indexOf(`data-setting="${label}"`));
       assert.ok(markup.includes(`data-setting="${label}"`), `${label} keeps its row`);
@@ -294,12 +322,30 @@ test("a harness kind no sub-agent runs on keeps its rows, each saying why instea
 
 test("each Messages to row says what its choices do on that harness, Native only included (PA-11, DEC-141)", () => {
   const status = { project_id: "p", coordination: { settings: coord.COORD_DEFAULTS, harnesses: [] } };
-  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden })).replaceAll("&#x27;", "'");
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden, name: manifestName })).replaceAll("&#x27;", "'");
   assert.deepEqual(Object.keys(coord.DELIVERY_HELPER).sort(), [...coord.COORD_HARNESSES].sort(), "every harness has its sentence");
   for (const harness of coord.COORD_HARNESSES) assert.ok(per.includes(coord.DELIVERY_HELPER[harness]), `${harness}: ${per}`);
   assert.match(coord.DELIVERY_HELPER["claude-code"], /Native only uses the relay alone and never types\./);
   assert.match(coord.DELIVERY_HELPER.codex, /Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle\./);
-  assert.match(coord.DELIVERY_HELPER.rcli, /rcli runs no team agents/);
+  assert.match(coord.DELIVERY_HELPER.rcli, /RCLI runs no team agents/);
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_team.rs", import.meta.url), "utf8");
   for (const harness of coord.COORD_HARNESSES) assert.ok(tui.includes(`"${coord.DELIVERY_HELPER[harness]}"`), `the TUI says the ${harness} sentence too`);
+});
+
+test("the coordination settings name each harness as the catalog the page hands them names it", () => {
+  const given = { "claude-code": "Claude Prime", codex: "Codex Prime", rcli: "Rocket" };
+  const name = (harness) => given[harness] ?? harness;
+  const status = { project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, terminal_display: "fullscreen" }, harnesses: ENGINE_ROWS } };
+  const rows = (markup) => [...markup.matchAll(/data-setting="([^"]*)"/g)].map((match) => match[1]);
+  const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden, name }));
+  assert.deepEqual(rows(lead).slice(0, 3), ["Claude Prime sub-agents", "Codex Prime sub-agents", "Rocket sub-agents"]);
+  const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden, name }));
+  assert.deepEqual(rows(per), ["Messages to Claude Prime agents", "Messages to Codex Prime agents", "Messages to Rocket agents"]);
+  assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Prime", "Codex Prime", "Rocket"]);
+  const display = renderToStaticMarkup(createElement(coord.TerminalDisplaySetting, { projectId: "p", status, reload: forbidden, name }));
+  assert.match(display, /Rocket has no Fullscreen view and stays Classic\./);
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true, name), /^Fullscreen: Claude Prime and Codex Prime draw their own view/);
+  assert.equal(coord.modeOptions("codex", false, name)[0].disabledReason, "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
+  assert.equal(coord.modeHelper("codex", false, name), "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.");
+  assert.equal(coord.HARNESS_NAMES, undefined, "no list of harness names of its own is left in the desktop");
 });

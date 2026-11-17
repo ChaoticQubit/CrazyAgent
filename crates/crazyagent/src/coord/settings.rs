@@ -26,32 +26,72 @@ const _: () = assert!(COUNTED_TOOLS_DEFAULT.len() <= COUNTED_TOOLS_MAX);
 /// The most skill names one team role's choice holds: every skill of both scopes.
 pub const ROLE_SKILLS_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
 
-/// The harness kinds the coordination settings are kept for, one per existing harness
-/// id that runs team agents or the master.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// The harness kinds the coordination settings are kept for, one per harness that runs
+/// team agents or the master: the three the engine drives itself, and any other harness
+/// of the registry whose manifest names one of those roles, by its catalog id. A kind is
+/// stored and sent as that id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HarnessKind {
     ClaudeCode,
     Codex,
     Rcli,
+    Listed(&'static str),
 }
 
-named!(HarnessKind { ClaudeCode => "claude-code", Codex => "codex", Rcli => "rcli" });
-
 impl HarnessKind {
-    /// Every kind, in the order settings list them.
+    /// The three kinds the engine drives itself, in the order settings list them.
     pub const ALL: [Self; 3] = [Self::ClaudeCode, Self::Codex, Self::Rcli];
 
-    /// Maps a harness id as connections and the catalog name it ("claude-code" or
-    /// "claude", "codex", "rcli") to its kind. Takes the id. Returns the kind, or None
-    /// for a harness without coordination settings.
-    pub fn from_harness(id: &str) -> Option<Self> {
-        match id {
-            "claude-code" | "claude" => Some(Self::ClaudeCode),
-            "codex" => Some(Self::Codex),
-            "rcli" => Some(Self::Rcli),
-            _ => None,
+    /// The stored name of this kind: its catalog id. Takes the kind. Returns the id.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Rcli => "rcli",
+            Self::Listed(id) => id,
         }
+    }
+
+    /// Reads a stored name: the exact catalog id of a kind, never an alias. Takes the
+    /// text. Returns the kind, or None for a name this build keeps no settings for.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::from_harness(text).filter(|kind| kind.as_str() == text)
+    }
+
+    /// Maps a harness id as connections and the catalog name it ("claude-code" or
+    /// "claude", "codex", "rcli") to its kind, by the registry. Takes the id or an alias.
+    /// Returns the kind, or None for a harness without coordination settings: one no
+    /// manifest has, or one whose manifest names neither the agent nor the master role.
+    pub fn from_harness(id: &str) -> Option<Self> {
+        crate::harnesses::registry::registry()
+            .get(id)
+            .and_then(Self::of)
+    }
+
+    /// Names the kind of one harness of a registry. Takes the harness. Returns one of the
+    /// three native kinds for a harness the engine drives itself, Listed with its id for
+    /// any other harness that runs team agents or the master, None for one that runs
+    /// neither.
+    pub fn of(harness: &'static crate::harnesses::registry::Harness) -> Option<Self> {
+        if !(harness.runnable() || harness.master()) {
+            return None;
+        }
+        let id = harness.id();
+        let native = Self::ALL.into_iter().find(|kind| kind.as_str() == id);
+        Some(native.unwrap_or(Self::Listed(id)))
+    }
+}
+
+impl Serialize for HarnessKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HarnessKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Self::parse(&name).ok_or_else(|| serde::de::Error::custom("unknown harness kind"))
     }
 }
 
@@ -109,7 +149,11 @@ impl Protection {
 pub const BARE_NO_HOOKS: &str = "Claude Code on an API key or URL account starts without hooks, so it runs none of your hooks and Block and Wait cannot hold its edits.";
 /// Why an rcli master runs no hooks: rcli has none.
 pub const RCLI_NO_HOOKS: &str =
-    "rcli has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+    "RCLI has no hooks, so it runs none of yours and Block and Wait cannot hold its edits.";
+/// Why an agent of a listed harness runs no hooks: a listed launch writes none.
+pub const LISTED_NO_HOOKS: &str = "This harness runs no hooks in this version, so it runs none of yours and Block and Wait cannot hold its edits.";
+/// Why receipts are missing for an agent of a listed harness: they ride on hooks.
+pub const LISTED_NO_RECEIPTS: &str = "Receipts are unavailable for this harness.";
 /// Which owner hooks a Codex agent runs: those on an event Codex has (PA-12).
 pub const CODEX_HOOK_EVENTS_ONLY: &str = "Codex agents run your hooks on the events Codex has.";
 /// What a Codex agent's Messages timeline shows when its app-server lists a hook the launch
@@ -120,14 +164,16 @@ pub const CODEX_HOOKS_UNTRUSTED: &str = "Codex does not trust CrazyAgent's hooks
 pub const CODEX_HOOKS_UNCHECKED: &str = "CrazyAgent could not confirm that Codex trusts its hooks for this agent, so Block and Wait may not hold its edits and your hooks may not run for it.";
 /// The short form of BARE_NO_HOOKS and RCLI_NO_HOOKS a terminal Hooks heading has room
 /// for: which agents run none of the owner's hooks.
-pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and rcli run none";
+pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and RCLI run none";
 
 impl HarnessKind {
     /// Says why this harness's agents miss one protection on one account kind, or None
     /// when they get it (DEC-141 PA-12): Claude Code on a sign-in and Codex on any account
     /// get all three; Claude Code on an API key or URL account starts bare, without hooks
-    /// or receipts; rcli has no hooks. Takes the kind, whether the account is an API key or
-    /// URL one, and the protection. Returns the sentence the settings show, or None.
+    /// or receipts; rcli has no hooks; a listed harness's launch writes no hooks, so it gets
+    /// none of the three on any account (rv-sec3 T19b F2) and its agents are counted
+    /// hookless. Takes the kind, whether the account is an API key or URL one, and the
+    /// protection. Returns the sentence the settings show, or None.
     pub fn lacks(self, endpoint: bool, protection: Protection) -> Option<&'static str> {
         match (self, endpoint, protection) {
             (Self::ClaudeCode, true, Protection::Receipts) => Some(BARE_NO_RECEIPTS),
@@ -135,6 +181,10 @@ impl HarnessKind {
                 Some(BARE_NO_HOOKS)
             }
             (Self::Rcli, _, Protection::OwnerHooks | Protection::EditGuard) => Some(RCLI_NO_HOOKS),
+            (Self::Listed(_), _, Protection::Receipts) => Some(LISTED_NO_RECEIPTS),
+            (Self::Listed(_), _, Protection::OwnerHooks | Protection::EditGuard) => {
+                Some(LISTED_NO_HOOKS)
+            }
             (Self::ClaudeCode, false, _) | (Self::Codex, _, _) | (Self::Rcli, _, _) => None,
         }
     }
@@ -615,13 +665,31 @@ pub fn native_scope(harness: HarnessKind) -> Option<&'static str> {
     }
 }
 
-/// Names how a harness kind runs native sub-agents, every kind answered (DEC-141). Takes
-/// the kind. Returns the answer.
+/// Why a lead on a listed harness has no native sub-agents: its manifest names workers the
+/// app starts.
+pub const LISTED_NATIVE_UNAVAILABLE: &str =
+    "This harness has no native sub-agents, so its sub-agents are CrazyAgent workers.";
+
+/// Names how a harness kind runs native sub-agents, every kind answered (DEC-141), from
+/// what its manifest says a lead on it gets. Takes the kind, which names a harness of the
+/// registry. Returns the answer, with the kind's own reason when it has none.
 pub fn native_sub_agents(harness: HarnessKind) -> NativeSubAgents {
-    match harness {
-        HarnessKind::ClaudeCode => NativeSubAgents::Teams,
-        HarnessKind::Codex => NativeSubAgents::Threads,
-        HarnessKind::Rcli => NativeSubAgents::Unavailable(RCLI_NATIVE_UNAVAILABLE),
+    use crate::harnesses::manifest::SubAgents;
+    let listed = crate::harnesses::registry::registry().get(harness.as_str());
+    assert!(
+        listed.is_some(),
+        "every harness kind names a harness of the registry"
+    );
+    match (listed.map(|listed| listed.sub_agents()), harness) {
+        (Some(SubAgents::Teams), _) => NativeSubAgents::Teams,
+        (Some(SubAgents::Threads), _) => NativeSubAgents::Threads,
+        (Some(SubAgents::App) | None, HarnessKind::Rcli) => {
+            NativeSubAgents::Unavailable(RCLI_NATIVE_UNAVAILABLE)
+        }
+        (
+            Some(SubAgents::App) | None,
+            HarnessKind::ClaudeCode | HarnessKind::Codex | HarnessKind::Listed(_),
+        ) => NativeSubAgents::Unavailable(LISTED_NATIVE_UNAVAILABLE),
     }
 }
 

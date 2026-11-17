@@ -108,7 +108,7 @@ test("each wall tile has the panel's head and input: name, harness and state, ro
   assert.equal(tiles.length, 2);
   const [master, sub] = tiles;
   assert.match(master, /<span class="tg-terminal-name">Master · Codex<\/span><span class="badge">(?:(?!<\/span>)[^])*Idle<\/span>/);
-  assert.match(sub, /<span class="tg-terminal-name">a1 · Codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
+  assert.match(sub, /<span class="tg-terminal-name">a1 · Codex<\/span><span class="badge tone-info" data-working="true">(?:(?!<\/span>)[^])*Working<\/span>/);
   assert.match(master, /class="tg-terminal-meta"[^]*>Master<\/span>[^]*<span class="tg-terminal-branch">main<\/span>/);
   assert.match(sub, /class="tg-terminal-meta"[^]*>Sub-agent<\/span>[^]*<span class="tg-terminal-branch">crazyagent\/calendar-api<\/span>/);
   assert.match(sub, /<span class="tg-terminal-fact">(?:(?!<\/span>)[^])*running 14 min<\/span>/);

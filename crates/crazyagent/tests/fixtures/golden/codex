@@ -1,0 +1,27 @@
+#!/bin/sh
+case "$1" in
+  --version) echo 'codex-cli 0.167.1'; exit 0 ;;
+  app-server) exit 0 ;;
+esac
+d="$CODEX_HOME/sessions/2026/11/17"
+/bin/mkdir -p "$d" || exit 1
+id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
+f="$d/rollout-2026-11-17T00-00-00-$id.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+said=
+while IFS= read -r line; do
+  case "$line" in *"$e[200~"*) open=1; said= ;; esac
+  said="$said $line"
+  case "$line" in *"$e[201~"*) open=0 ;; esac
+  [ "$open" = 1 ] && continue
+  case "$said" in
+    *golden.md*) printf 'Apples are red.\n' > golden.md ;;
+  esac
+  said=
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Wrote golden.md."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
