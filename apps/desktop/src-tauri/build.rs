@@ -158,6 +158,8 @@ fn main() {
         "desktop_install_dependency",
         "desktop_fix_tool_permissions",
         "desktop_set_refused_tool",
+        "desktop_restore_status",
+        "desktop_restore_pinned",
         "desktop_set_pack_entry",
         "desktop_remove_pack_entry",
         "desktop_project_memories",

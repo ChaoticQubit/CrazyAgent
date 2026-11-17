@@ -15,7 +15,8 @@ use crate::setup::SetupStatus;
 /// tool's confirmed permission fix and what setup offers for one (DEC-162), default-pack
 /// changes, the projects home folder, the GitHub account, the sandbox settings, when finished
 /// agents' worktrees go, what quitting does to team agents and the master step, time and frame
-/// size limits and what harnesses do when a model provider can't be reached.
+/// size limits, what harnesses do when a model provider can't be reached, and the restore of
+/// the pinned 2.4 backup from Settings, Restore 2.4 (L5).
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -89,6 +90,9 @@ pub(in crate::tui) enum AppSetupJob {
         choice: crate::setup::RefusedTool,
         generation: u64,
     },
+    Restore {
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry at the pack version the page showed.
@@ -126,6 +130,7 @@ pub(in crate::tui) enum AppSetupEvent {
     ProviderRetrySet(Result<(), String>),
     FixSet(Result<(), String>),
     RefusedToolSet(Result<(), String>),
+    Restored(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -158,6 +163,7 @@ impl AppSetupJob {
             Self::SetProviderRetry { .. } => "SetProviderRetry",
             Self::FixPermissions { .. } => "FixPermissions",
             Self::SetRefusedTool { .. } => "SetRefusedTool",
+            Self::Restore { .. } => "Restore",
         }
     }
 }
@@ -192,6 +198,7 @@ impl AppSetupEvent {
             AppSetupJob::SetProviderRetry { .. } => Self::ProviderRetrySet(Err(problem)),
             AppSetupJob::FixPermissions { .. } => Self::FixSet(Err(problem)),
             AppSetupJob::SetRefusedTool { .. } => Self::RefusedToolSet(Err(problem)),
+            AppSetupJob::Restore { .. } => Self::Restored(Err(problem)),
         }
     }
 }
@@ -395,8 +402,44 @@ impl NativeOwner {
                     lost,
                 ))
             }
+            AppSetupJob::Restore { generation } => {
+                AppSetupEvent::Restored(restored(controller.restore_pinned(generation).await, lost))
+            }
         }
     }
+}
+
+/// Reads the reply to the owner's restore of the pinned 2.4 backup, which the controller sends
+/// once and never again (L5). A send that got no answer counts as sent: the engine stops to
+/// restore, so the connection is dropped here as the desktop drops it. Inputs: the reply and
+/// the lost-connection flag. Output: Ok, or the engine's plain code for a refusal.
+pub(in crate::tui) fn restored(
+    reply: Result<Option<OwnerResponse>, crate::engine::EngineError>,
+    lost: &mut bool,
+) -> Result<(), String> {
+    let response = match reply {
+        Ok(Some(response)) => response,
+        Ok(None) => {
+            *lost = true;
+            return Ok(());
+        }
+        Err(error) => return Err(problem(&error, lost)),
+    };
+    let refused = match &response {
+        OwnerResponse::Rejected { code } => Some(code),
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            match &operation.result {
+                OwnerResult::Rejected { code } => Some(code),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let result = refused.map_or(Ok(()), |code| {
+        Err(bounded_problem(crate::protocol::plain_code(code)))
+    });
+    assert!(result.as_ref().is_ok() || refused.is_some());
+    result
 }
 
 #[cfg(all(test, unix))]

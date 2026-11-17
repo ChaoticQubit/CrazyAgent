@@ -1,6 +1,7 @@
+use super::intake::known;
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::cleanup_settings::CleanupSettings;
-use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
+use crazyagent::engine::owner::{OwnerMutation, OwnerRead, OwnerResponse, OwnerResult};
 use crazyagent::learning::{LearningProgress, MarkStep};
 use crazyagent::master_frame_limit::MasterFrameSettings;
 use crazyagent::master_step_limit::MasterStepSettings;
@@ -20,6 +21,15 @@ fn profile_code(code: &str) -> &'static str {
         _ => "owner_profile_bounds",
     }
 }
+
+/// The codes a restore of the pinned 2.4 backup reaches the window by, never as the fallback.
+const RESTORE_CODES: [&str; 5] = [
+    "not_connected",
+    "stale_revision",
+    "storage_restore_unavailable",
+    "storage_restore_agents_running",
+    "storage_restore_failed",
+];
 
 impl NativeBridge {
     /// Reads the owner's first-run profile.
@@ -404,5 +414,47 @@ impl NativeBridge {
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         assert!(pools.len() <= 64);
         Ok(pools)
+    }
+
+    /// Asks the engine to stop and bring back the pinned 2.4 backup (L5), as one owner intent
+    /// that is never kept to be sent again. Input: a fresh draft generation. Output: Ok once
+    /// sent, answered or not, since the engine stops right after it applies; a refusal comes
+    /// back as its plain code. The window reads how a sent restore ended from the engine's
+    /// restore record.
+    pub async fn restore_pinned(&mut self, generation: u64) -> Result<(), BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.ready_for_intent(generation)?;
+        let sent = self
+            .controller()?
+            .restore_pinned(generation)
+            .await
+            .map_err(|error| known(&error.0, &RESTORE_CODES, "owner_not_ready"))?;
+        assert!(self.controller()?.pending().is_none());
+        let refused = match &sent {
+            Some(OwnerResponse::Rejected { code }) => Some(code),
+            Some(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
+                match &operation.result {
+                    OwnerResult::Rejected { code } => Some(code),
+                    _ => None,
+                }
+            }
+            Some(_) => None,
+            None => {
+                self.ordinary = None;
+                self.controller()?.detach();
+                None
+            }
+        };
+        assert!(sent.is_some() || !self.status().connected);
+        match refused {
+            Some(code) => Err(known(
+                crazyagent::protocol::plain_code(code),
+                &RESTORE_CODES,
+                "storage_restore_failed",
+            )),
+            None => Ok(()),
+        }
     }
 }
