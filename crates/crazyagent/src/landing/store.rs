@@ -3,6 +3,7 @@ use super::{
     AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
 };
 use crate::engine::EngineError;
+use crate::landing_log::{self, AgentBranch, Change, Worktree};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -752,7 +753,8 @@ pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>,
 /// Stores the task branch the engine named for an agent worktree, which its clone or
 /// linked worktree then commits on in place of the branch its folder names. Inputs: the
 /// store, the owner checkout root, the worktree and the branch, one
-/// `agent_git::is_agent_branch` accepts. Output: Ok once stored.
+/// `agent_git::is_agent_branch` accepts. Logged as `AgentBranchSet` (v2.5 L9). Output: Ok
+/// once stored, or the log's refusal with nothing stored.
 pub(super) fn set_agent_branch(
     db: &Connection,
     repository: &std::path::Path,
@@ -760,12 +762,12 @@ pub(super) fn set_agent_branch(
     branch: &str,
 ) -> Result<(), EngineError> {
     assert!(crate::agent_git::is_agent_branch(branch));
-    db.execute(
-        "INSERT OR REPLACE INTO landing_agent_branches(worktree,repository,branch) VALUES (?1,?2,?3)",
-        params![path_text(worktree)?, path_text(repository)?, branch],
-    )
-    .map_err(storage)?;
-    Ok(())
+    let set = AgentBranch {
+        worktree: path_text(worktree)?.to_owned(),
+        repository: path_text(repository)?.to_owned(),
+        branch: branch.to_owned(),
+    };
+    landing_log::write(db, &Change::AgentBranchSet(set))
 }
 
 /// Reads the task branch stored for an agent worktree. Inputs: the store and the worktree
@@ -806,14 +808,14 @@ pub(super) fn agent_branch_taken(
     .map_err(storage)
 }
 
-/// Forgets the task branch of an agent worktree that is gone. Inputs: the store and the
-/// worktree path. Output: Ok.
+/// Forgets the task branch of an agent worktree that is gone, logged as
+/// `AgentBranchForgotten` (v2.5 L9). Inputs: the store and the worktree path. Output: Ok, or
+/// the log's refusal with the row kept.
 pub(super) fn forget_agent_branch(db: &Connection, worktree: &str) -> Result<(), EngineError> {
-    db.execute(
-        "DELETE FROM landing_agent_branches WHERE worktree=?1",
-        [worktree],
-    )
-    .map_err(storage)?;
+    let gone = Worktree {
+        worktree: worktree.to_owned(),
+    };
+    landing_log::write(db, &Change::AgentBranchForgotten(gone))?;
     Ok(())
 }
 
