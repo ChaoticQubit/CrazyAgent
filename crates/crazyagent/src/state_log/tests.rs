@@ -477,12 +477,17 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 25] = [
+const KINDS: [&str; 30] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
     crate::project_setup::removed::event::KIND,
     crate::master_session::SESSION_DELETED,
+    crate::sessions_log::KIND_SESSION,
+    crate::sessions_log::KIND_ENTRY,
+    crate::sessions_log::KIND_ENTRIES_DROPPED,
+    crate::sessions_log::KIND_TEXT,
+    crate::sessions_log::KIND_TEXTS_DROPPED,
     crate::worktrees::log::KIND_ADMITTED,
     crate::worktrees::log::KIND_RESERVED,
     crate::worktrees::log::KIND_SAVED,
@@ -513,9 +518,19 @@ const FREE_FORM: [(&str, &str); 1] = [(crate::ide::log::FILE_UNLOCKED, "path")];
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
 /// ide/log.rs writes `change.kind()`, which maps each `Change` variant to one of its kinds.
-const WRITERS: [(&str, &[&str]); 6] = [
+const WRITERS: [(&str, &[&str]); 7] = [
     ("ide/log.rs", &["change.kind(),"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
+    (
+        "sessions_log.rs",
+        &[
+            "KIND_SESSION,",
+            "KIND_ENTRY,",
+            "KIND_ENTRIES_DROPPED,",
+            "KIND_TEXT,",
+            "KIND_TEXTS_DROPPED,",
+        ],
+    ),
     (
         "settings_log.rs",
         &[
@@ -547,7 +562,7 @@ const WRITERS: [(&str, &[&str]); 6] = [
 /// The writers outside this module that take a snapshot, each with the only tables its runs
 /// may carry. A run copies those tables' stored columns as they stand, rows the typed events
 /// wrote; the run does not check them again.
-const SNAPSHOTS: [(&str, &[&str]); 2] = [
+const SNAPSHOTS: [(&str, &[&str]); 3] = [
     (
         "worktrees/log.rs",
         &["repository_admissions", "worktree_leases"],
@@ -568,6 +583,10 @@ const SNAPSHOTS: [(&str, &[&str]); 2] = [
             "configured_master_frames",
             "user_profile",
         ],
+    ),
+    (
+        "sessions_log.rs",
+        &["master_sessions", "conversation_entries", "agent_texts"],
     ),
 ];
 
@@ -753,6 +772,117 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
     }
     worktrees_runs_carry_only_their_named_tables();
     settings_runs_carry_only_their_named_tables();
+    sessions_runs_carry_only_their_named_tables();
+}
+
+/// Checks that a sessions snapshot run carries only the tables [`SNAPSHOTS`] names for
+/// sessions_log.rs, one chunk each in order, on a store where none of them exists yet.
+/// Output: none.
+fn sessions_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[2];
+    assert_eq!(writer, "sessions_log.rs");
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::sessions_log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    let mut statement = tx
+        .prepare("SELECT body FROM state_log WHERE kind=?1 ORDER BY seq")
+        .unwrap();
+    let tables: Vec<String> = statement
+        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| {
+            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            chunk["table"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(tables, named, "one chunk per empty table, in order");
+}
+
+/// A stored master session of project app, session s1, as a SessionSaved body carries it.
+/// Output: the session as JSON.
+fn session_view_sample() -> serde_json::Value {
+    let hex = "a".repeat(64);
+    let resources = json!({"slots": 1, "cpu_millis": 1000, "memory_mib": 512, "processes": 4,
+        "output_bytes": 1048576, "wall_time_ms": 60000, "spend_microunits": 0});
+    json!({
+        "project_id": "app",
+        "session_id": "s1",
+        "bootstrap_task_id": "t1",
+        "selection": {
+            "backend": "rcli",
+            "pool_ref": "pool",
+            "target_profile_ref": "profile",
+            "route": {"preferred_target": null, "required_target": null,
+                "required_capabilities": [], "account_ref": "account", "budget_ref": "budget",
+                "resources": resources}
+        },
+        "config_id": "c1",
+        "source_hash": hex,
+        "phase": "configured",
+        "version": "3",
+        "current_turn": null,
+        "owner": {"origin": "native_owner", "owner_id": hex, "operation_id": "r1",
+            "request_hash": hex, "engine_epoch": hex, "admitted_epoch": 1, "resulting_epoch": 1,
+            "revision_before": "2", "revision_after": "3", "event_cursor": "3"}
+    })
+}
+
+/// Checks the closed body of one sessions kind (v2.5 L13): ids, words, numbers, id lists and
+/// kept-text digests, refusing free text in any key and any key more; a session's stored
+/// view refuses one key more too, and the texts stay in owner_texts. Input: the kind.
+/// Output: none.
+fn sessions_body_is_closed(kind: &str) {
+    use crate::sessions_log as sessions;
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    let decodes = |body: &[u8]| {
+        sessions::decode(&replay::Logged {
+            seq: 1,
+            revision: 1,
+            aggregate: Aggregate::Sessions,
+            kind: kind.into(),
+            schema: 1,
+            at_ms: 1,
+            body: body.to_vec(),
+        })
+        .is_ok()
+    };
+    let digest = "0".repeat(64);
+    let (sample, keys): (serde_json::Value, &[&str]) = match kind {
+        sessions::KIND_SESSION => (
+            json!({"project": "app", "session": "s1", "created": 3,
+                "view": session_view_sample()}),
+            &["project", "session", "created", "view"],
+        ),
+        sessions::KIND_ENTRY => (
+            json!({"project": "app", "cursor": 3, "kind": "message", "version": 0,
+                "text": digest}),
+            &["project", "cursor", "kind", "version", "text"],
+        ),
+        sessions::KIND_ENTRIES_DROPPED => (
+            json!({"project": "app", "cursors": [3, 4]}),
+            &["project", "cursors"],
+        ),
+        sessions::KIND_TEXT => (
+            json!({"project": "app", "agent": 7, "text": digest}),
+            &["project", "agent", "text"],
+        ),
+        sessions::KIND_TEXTS_DROPPED => (
+            json!({"project": "app", "agents": [7]}),
+            &["project", "agents"],
+        ),
+        other => panic!("{other} is not a sessions kind"),
+    };
+    if kind == sessions::KIND_SESSION {
+        let mut nested = sample.clone();
+        nested["view"]["key"] = json!("sk-ant-api03-key");
+        assert!(
+            !decodes(&serde_json::to_vec(&nested).unwrap()),
+            "{kind}: the view took one key more"
+        );
+    }
+    closed_body(kind, decodes, sample, keys);
 }
 
 /// Checks that a settings snapshot run carries only the tables [`SNAPSHOTS`] names for
@@ -1040,6 +1170,9 @@ fn no_event_body_can_carry_a_secret() {
             | crate::ide::log::WORKSPACE_FORGOTTEN => ide_body_is_closed(kind),
             settings if crate::settings_log::KINDS.contains(&settings) => {
                 settings_body_is_closed(settings)
+            }
+            sessions if crate::sessions_log::KINDS.contains(&sessions) => {
+                sessions_body_is_closed(sessions)
             }
             other => panic!("the kind {other} has no body rule"),
         }
