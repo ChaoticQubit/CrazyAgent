@@ -64,15 +64,13 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        exclude=()
-        if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi
         if [ "$RUNNER_OS" = macOS ]; then
           export CARGO_BUILD_JOBS=2
           (while sleep 300; do echo "memory $(date +%H:%M) $(sysctl -n vm.swapusage)"; done) &
           sampler=$!
           trap 'kill "$sampler" 2> /dev/null || true' EXIT
         fi
-        cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
+        cargo nextest archive --workspace --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
     - name: Show the free disk, the target and the archive size
       if: always()
       shell: bash

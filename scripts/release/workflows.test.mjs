@@ -1071,16 +1071,15 @@ test("the test farm installs tmux only from pinned, checked sources: the Linux t
   assert(farm.includes(`  TMUX_VERSION: "${pinned}"\n`), "the Linux build and the release script pin one tmux version");
 });
 
-test("the test farm macOS build gets the hosted job's 330-minute budget and two cargo jobs, logging memory and swap, and Windows leaves only the desktop crate out of its archive, whose test exe cannot load without the app manifest (DEC-191)", async () => {
+test("the test farm macOS build gets the hosted job's 330-minute budget and two cargo jobs, logging memory and swap, and every OS archives every workspace crate, the desktop crate included (DEC-191)", async () => {
   const farm = await workflow("tests.yml");
   for (const os of FARM_OS) assert(block(block(farm, 0, "jobs").join("\n"), 2, `build-${os}`).includes(`    timeout-minutes: ${os === "macos" ? 330 : 150}`), os);
   const action = await farmAction("rust-archive");
   const archive = actionSteps(action).find((step) => step.startsWith("    - name: Build and archive every workspace test\n"));
-  assert(archive.includes('if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi'));
   assert(archive.includes("export CARGO_BUILD_JOBS=2"));
   assert(archive.includes("sysctl -n vm.swapusage"));
-  assert(archive.includes('cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline'));
-  assert.equal((farm + action).match(/--exclude /g).length, 1, "no other crate is left out of any archive");
+  assert(archive.includes('cargo nextest archive --workspace --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"'));
+  assert.equal((farm + action).match(/--exclude\b/g), null, "no crate is left out of any archive");
   const size = actionSteps(action).find((step) => step.startsWith("    - name: Show the free disk, the target and the archive size\n"));
   assert(size.includes("hw.memsize") && size.includes("free -g"), "every build prints its CPUs and memory");
 });
