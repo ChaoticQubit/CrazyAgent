@@ -321,9 +321,10 @@ fn read_launches(scratch: &Path, db: &Connection, project: &ProjectId) -> Result
     }))
 }
 
-/// The startup instruction of the engine's own project master conversation with tools off
-/// and with tools on and no team tool switched off, without model access settings.
-/// Inputs: the read-only connection and the project. Output: both texts as lines.
+/// The startup instruction of the engine's own project master conversation for each master
+/// tools setting: on (the default team plan's) with no team tool switched off, and off.
+/// No model access settings are given. Inputs: the read-only connection and the project.
+/// Output: both texts as lines.
 fn master_conversation(db: &Connection, project: &ProjectId) -> Result<Value, String> {
     let tx = db
         .unchecked_transaction()
@@ -338,10 +339,10 @@ fn master_conversation(db: &Connection, project: &ProjectId) -> Result<Value, St
 }
 
 /// Installs one team role's launch context into a fresh private home for each harness and
-/// tools switch. With tools off it keeps the harness arguments, the denied tools and every
-/// file written; with tools on only the skill folders written, since the rest follows the
-/// default pack's context-mode state on this Mac (NOTE-20:43 Q3). Inputs: the scratch
-/// folder, the context and the role. Output: the role, its skills and its launches.
+/// tools switch, and keeps the home, the harness arguments, the denied tools, every file
+/// written and the skill folders among them. The seed stores no MCP server, so no launch
+/// reads the context-mode install state. Inputs: the scratch folder, the context and the
+/// role. Output: the role, its skills and its launches.
 fn role_launch(
     scratch: &Path,
     context: &launch_context::AgentContext,
@@ -360,23 +361,20 @@ fn role_launch(
             let installed = context
                 .install(harness, &home, tools)
                 .map_err(|error| error.0)?;
-            let launch = if tools {
-                let skills_written = skills_written(&home, 0)?;
-                json!({ "harness": harness, "tools": true, "skills_written": skills_written })
-            } else {
-                let arguments: Vec<String> = installed
-                    .arguments()
-                    .iter()
-                    .map(|argument| argument.to_string_lossy().into_owned())
-                    .collect();
-                json!({
-                    "harness": harness,
-                    "tools": false,
-                    "arguments": arguments,
-                    "denied_tools": installed.denied_tools(),
-                    "files": written(&home, &home, 0)?,
-                })
-            };
+            let arguments: Vec<String> = installed
+                .arguments()
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            let launch = json!({
+                "harness": harness,
+                "tools": tools,
+                "home": home.to_string_lossy(),
+                "arguments": arguments,
+                "denied_tools": installed.denied_tools(),
+                "files": written(&home, &home, 0)?,
+                "skills_written": skills_written(&home, 0)?,
+            });
             drop(installed);
             launches.push(launch);
         }
