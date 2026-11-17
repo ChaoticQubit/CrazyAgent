@@ -558,3 +558,39 @@ fn on_git_2_39_a_turn_records_and_the_list_and_diff_read_it_while_accept_refuses
     );
     shape_git(None);
 }
+
+/// V243-CONFINED-GIT-FLOOR: a confined step on a Mac runs the Command Line Tools git, which
+/// need not be the git the repository was opened with, so the step checks the version of
+/// the git it runs against the same floors: below 2.39 it refuses with `changes_git_old`, a
+/// version git does not name stays `changes_git_unsupported`, and the version the step keeps
+/// for the 2.40 merge check is its own git's, never the one kept at open.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_confined_step_on_a_mac_checks_the_version_of_the_git_it_runs() {
+    let case = Case::new();
+    case.start();
+    let open = |printed: &str| {
+        shape_git(Some(printed));
+        git::Repo::open(
+            &case.repo,
+            &case.workspace.git_dir,
+            Some(&case.workspace.worktree),
+        )
+        .unwrap()
+    };
+    let agent = open("git version 2.40.0");
+    shape_git(Some("git version 2.38.1"));
+    assert_eq!(refused(agent.reading().map(drop)), "changes_git_old");
+    shape_git(Some("git version unknown"));
+    assert_eq!(
+        refused(agent.reading().map(drop)),
+        "changes_git_unsupported"
+    );
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    assert!(agent.reading().unwrap().old_git());
+    let agent = open("git version 2.39.5 (Apple Git-154)");
+    assert!(agent.old_git());
+    shape_git(Some("git version 2.50.1 (Apple Git-155)"));
+    assert!(!agent.reading().unwrap().old_git());
+    shape_git(None);
+}
