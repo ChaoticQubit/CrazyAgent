@@ -666,8 +666,7 @@ pub(super) fn remove(
             None,
         )?;
         let removed = std::fs::remove_dir_all(worktree);
-        db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
-            .map_err(unavailable)?;
+        store::forget_base(db, path)?;
         store::forget_agent_branch(db, path)?;
         super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
         return Ok(removed.map_err(|_| "cleanup_worktree_leftover"));
@@ -694,8 +693,7 @@ pub(super) fn remove(
         if !unregistered {
             return Ok(Err("cleanup_worktree_dirty"));
         }
-        db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
-            .map_err(unavailable)?;
+        store::forget_base(db, path)?;
         super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
         store::forget_agent_branch(db, path)?;
         if let Some((branch, head)) = named
@@ -708,8 +706,7 @@ pub(super) fn remove(
     if std::fs::symlink_metadata(worktree).is_ok() || std::fs::symlink_metadata(git_dir).is_ok() {
         return Err(failure("changes_git_failed"));
     }
-    db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
-        .map_err(unavailable)?;
+    store::forget_base(db, path)?;
     super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
     store::forget_agent_branch(db, path)?;
     if let Some((branch, head)) = named
