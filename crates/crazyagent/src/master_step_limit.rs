@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
+#[cfg(test)]
 use crate::protocol::Outcome;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -93,23 +94,18 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
 
-/// Saves the owner's master step limit over the stored one. Inputs: the open transaction
-/// and the settings. Output: `Applied`, or the database error.
+/// Stores the owner's master step limit for a test, through the settings log's projection;
+/// the engine saves it only through `settings_log::owner`, which logs the save (v2.5 L10).
+/// Inputs: the connection and the settings. Output: `Applied`, or the store's refusal.
+#[cfg(test)]
 pub(crate) fn save(
     connection: &Connection,
     settings: &MasterStepSettings,
 ) -> Result<Outcome, EngineError> {
-    let limit = match serde_json::to_value(settings.limit).map_err(error)? {
-        serde_json::Value::String(name) => name,
-        _ => return Err(invalid()),
-    };
-    let stored = connection
-        .execute(
-            "INSERT INTO configured_master_steps(singleton,step_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET step_limit=excluded.step_limit",
-            rusqlite::params![limit],
-        )
-        .map_err(error)?;
-    assert_eq!(stored, 1);
+    let event = crate::settings_log::Event::Steps(crate::settings_log::Saved {
+        settings: *settings,
+    });
+    crate::settings_log::apply(connection, &event)?;
     Ok(Outcome::Applied)
 }
 

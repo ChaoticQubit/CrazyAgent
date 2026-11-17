@@ -9,7 +9,6 @@ use super::{
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -58,14 +57,6 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(TABLE).map_err(|_| unreadable())
 }
 
-/// The stored name of one choice. Input: the choice. Output: its snake case name.
-fn text(choice: impl Serialize) -> Result<String, EngineError> {
-    match serde_json::to_value(choice) {
-        Ok(serde_json::Value::String(name)) => Ok(name),
-        _ => Err(unreadable()),
-    }
-}
-
 /// The choice a stored name stands for. Input: the name. Output: the choice, or
 /// `harness_update_settings_unreadable` for a name this engine does not know.
 fn choice<T: DeserializeOwned>(name: String) -> Result<T, EngineError> {
@@ -95,23 +86,14 @@ pub fn settings(db: &Connection) -> Result<UpdateSettings, EngineError> {
     })
 }
 
-/// Saves the owner's harness update settings over the stored ones.
-/// Inputs: the engine database with the table in place and the settings.
-/// Output: Ok once the one row is stored, or `harness_update_settings_unreadable`.
+/// Stores the owner's harness update settings for a test, through the settings log's
+/// projection; the engine saves them only through `settings_log::harness_update`, which
+/// logs the save (v2.5 L10). Inputs: the engine database with the table in place and the
+/// settings. Output: Ok once the one row is stored, or the store's refusal.
+#[cfg(test)]
 pub fn set_settings(db: &Connection, settings: UpdateSettings) -> Result<(), EngineError> {
-    let stored = db
-        .execute(
-            "INSERT INTO harness_update_settings(id,mode,check_when,online,install) VALUES(1,?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode, check_when=excluded.check_when, online=excluded.online, install=excluded.install",
-            rusqlite::params![
-                text(settings.mode)?,
-                text(settings.when)?,
-                text(settings.online)?,
-                text(settings.install)?
-            ],
-        )
-        .map_err(|_| unreadable())?;
-    assert_eq!(stored, 1);
-    Ok(())
+    let event = crate::settings_log::Event::HarnessUpdate(crate::settings_log::Saved { settings });
+    crate::settings_log::apply(db, &event)
 }
 
 impl Roots {

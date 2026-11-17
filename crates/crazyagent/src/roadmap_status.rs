@@ -98,7 +98,7 @@ pub enum Refresh {
 
 impl Refresh {
     /// The name the settings table stores. Input: the choice. Output: its name.
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::AfterLanding => "after_landing",
             Self::RefreshOnly => "refresh_only",
@@ -355,23 +355,34 @@ fn refresh_of(db: &Connection, project: &ProjectId) -> Result<Refresh, EngineErr
     }
 }
 
-/// Saves a project's refresh setting. Turning it off also drops a check that was due and
-/// takes the claim of one that runs, so that run stops and stores nothing after the owner
-/// said never. Inputs: the connection, the project and the choice. Output: unit, or
-/// `roadmap_status_unavailable`.
+/// Stores a project's refresh setting for a test and settles its status as the engine's
+/// save does; the engine saves it only through `settings_log::roadmap_refresh`, which logs
+/// the save (v2.5 L10). Inputs: the connection, the project and the choice. Output: unit,
+/// or `roadmap_status_unavailable`.
+#[cfg(test)]
 pub fn set_refresh(
     db: &Connection,
     project: &ProjectId,
     refresh: Refresh,
 ) -> Result<(), EngineError> {
-    let stored = db
-        .execute(
-            "INSERT INTO roadmap_status_settings(project,refresh) VALUES(?1,?2)
-             ON CONFLICT(project) DO UPDATE SET refresh=excluded.refresh",
-            params![project.as_str(), refresh.name()],
-        )
+    let saved = crate::settings_log::ProjectSaved {
+        project: project.clone(),
+        settings: refresh,
+    };
+    crate::settings_log::apply(db, &crate::settings_log::Event::Roadmap(saved))
         .map_err(unavailable)?;
-    assert_eq!(stored, 1);
+    settle(db, project, refresh)
+}
+
+/// Settles a project's status after its refresh setting was saved: turning it off drops a
+/// check that was due and takes the claim of one that runs, so that run stops and stores
+/// nothing after the owner said never. Replay never runs it. Inputs: the connection, the
+/// project and the saved choice. Output: unit, or `roadmap_status_unavailable`.
+pub(crate) fn settle(
+    db: &Connection,
+    project: &ProjectId,
+    refresh: Refresh,
+) -> Result<(), EngineError> {
     if refresh == Refresh::Off {
         db.execute(
             "UPDATE roadmap_status SET stale=0, running_ms=NULL WHERE project=?1",

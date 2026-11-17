@@ -49,15 +49,6 @@ fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
 }
 
-/// The stored word of one setting value, as its serde name. Input: the value. Output: the
-/// word, or `sandbox_settings_invalid` for a value that is not one word.
-fn word(value: impl Serialize) -> Result<String, EngineError> {
-    match serde_json::to_value(value).map_err(error)? {
-        serde_json::Value::String(word) => Ok(word),
-        _ => Err(error("sandbox_settings_invalid")),
-    }
-}
-
 /// The setting value a stored word names. Input: the word. Output: the value, or
 /// `sandbox_settings_invalid` for a word this engine does not know.
 fn value<T: DeserializeOwned>(word: String) -> Result<T, EngineError> {
@@ -91,40 +82,47 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Saves the owner's sandbox settings over the stored ones. Inputs: the open transaction
-/// and the settings. Output: `Applied`, or the database error.
+/// Stores the owner's sandbox settings for a test, through the settings log's projection;
+/// the engine saves them only through `settings_log::owner`, which logs the save (v2.5
+/// L10). Inputs: the connection and the settings. Output: `Applied`, or the store's refusal.
+#[cfg(test)]
 pub(crate) fn save(
     connection: &Connection,
     settings: &SandboxSettings,
 ) -> Result<Outcome, EngineError> {
-    let words = [
-        word(settings.linux_sockets)?,
-        word(settings.linux_supervisor)?,
-        word(settings.linux_strict)?,
-    ];
-    let changed = connection
-        .execute(
-            "INSERT INTO sandbox_settings(singleton,linux_sockets,linux_supervisor,linux_strict) VALUES(1,?1,?2,?3) ON CONFLICT(singleton) DO UPDATE SET linux_sockets=excluded.linux_sockets, linux_supervisor=excluded.linux_supervisor, linux_strict=excluded.linux_strict",
-            words,
-        )
-        .map_err(error)?;
-    assert_eq!(changed, 1);
+    let event = crate::settings_log::Event::Sandbox(crate::settings_log::Saved {
+        settings: *settings,
+    });
+    crate::settings_log::apply(connection, &event)?;
     Ok(Outcome::Applied)
 }
 
-/// Saves the owner's sandbox settings from a read of `version`, so a save from a screen
-/// that read older settings never replaces newer ones, as team settings do (V2SYNC-2).
-/// Inputs: the owner transaction, the settings and the version the screen showed. Output:
-/// `Applied`, the `stale_revision` rejection with the stored row unchanged, or the error.
+/// Admits a save of the owner's sandbox settings from a read of `version` and moves the
+/// stored version past it, so a save from a screen that read older settings never replaces
+/// newer ones, as team settings do (V2SYNC-2). Inputs: the owner transaction and the version
+/// the screen showed. Output: none for an admitted save, the `stale_revision` rejection
+/// with nothing changed, or the error.
+pub(crate) fn admit(tx: &Transaction<'_>, version: u64) -> Result<Option<Outcome>, EngineError> {
+    if versioned::owner_write(tx, &versioned::sandbox_settings_item(), version)?.is_err() {
+        return Ok(Some(Outcome::Rejected {
+            code: versioned::STALE_CODE.into(),
+        }));
+    }
+    Ok(None)
+}
+
+/// Stores the owner's sandbox settings for a test from a read of `version`, as the owner
+/// save does. Inputs: the owner transaction, the settings and the version the screen showed.
+/// Output: `Applied`, the `stale_revision` rejection with the stored row unchanged, or the
+/// error.
+#[cfg(test)]
 pub(crate) fn save_from(
     tx: &Transaction<'_>,
     settings: &SandboxSettings,
     version: u64,
 ) -> Result<Outcome, EngineError> {
-    if versioned::owner_write(tx, &versioned::sandbox_settings_item(), version)?.is_err() {
-        return Ok(Outcome::Rejected {
-            code: versioned::STALE_CODE.into(),
-        });
+    if let Some(rejected) = admit(tx, version)? {
+        return Ok(rejected);
     }
     save(tx, settings)
 }

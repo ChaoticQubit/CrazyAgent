@@ -1,6 +1,7 @@
 use crate::coord::settings::HarnessKind;
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
+#[cfg(test)]
 use crate::protocol::Outcome;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -135,19 +136,13 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
 
-/// Saves the owner's choice over the stored one. Inputs: the open transaction and the
-/// choice. Output: `Applied`, or the database error.
+/// Stores the owner's choice for a test, through the settings log's projection; the engine
+/// saves it only through `settings_log::owner`, which logs the save (v2.5 L10). Inputs: the
+/// connection and the choice. Output: `Applied`, or the store's refusal.
+#[cfg(test)]
 pub(crate) fn save(connection: &Connection, choice: ProviderRetry) -> Result<Outcome, EngineError> {
-    let serde_json::Value::String(name) = serde_json::to_value(choice).map_err(error)? else {
-        return Err(invalid());
-    };
-    let stored = connection
-        .execute(
-            "INSERT INTO provider_retry_settings(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
-            [name],
-        )
-        .map_err(error)?;
-    assert_eq!(stored, 1);
+    let event = crate::settings_log::Event::Retry(crate::settings_log::Saved { settings: choice });
+    crate::settings_log::apply(connection, &event)?;
     Ok(Outcome::Applied)
 }
 

@@ -105,6 +105,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 13,
         run: worktrees_on_the_log,
     },
+    Step {
+        to: 14,
+        run: settings_on_the_log,
+    },
 ];
 
 /// Step 13 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written
@@ -115,6 +119,22 @@ fn worktrees_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
     let at_ms = crate::state_log::replay::Clock::System.now_ms();
     let opening = super::opening::Opening::new(at_ms);
     crate::worktrees::log::first_run(tx, opening)?;
+    assert!(
+        !tx.is_autocommit(),
+        "a step leaves the upgrade transaction open"
+    );
+    Ok(())
+}
+
+/// Step 14 (v2.5 L10): the settings aggregate goes on the state log. Settings rows written
+/// before the log reach replay through one snapshot run of every settings table, appended
+/// through the open's proof; the step makes any settings table missing first, and a store
+/// with no settings row gets no run. Input: the open upgrade transaction. Output: Ok or the
+/// log's refusal.
+fn settings_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let at_ms = crate::state_log::replay::Clock::System.now_ms();
+    let opening = super::opening::Opening::new(at_ms);
+    crate::settings_log::first_run(tx, opening)?;
     assert!(
         !tx.is_autocommit(),
         "a step leaves the upgrade transaction open"

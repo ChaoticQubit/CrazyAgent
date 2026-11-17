@@ -1867,15 +1867,13 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
-        Command::OwnerSandbox { settings, version } => {
-            crate::sandbox_settings::save_from(tx, settings, *version)
-        }
-        Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
-        Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
-        Command::OwnerProviderRetry { choice } => crate::provider_retry::save(tx, *choice),
-        Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
-        Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
-        Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
+        Command::OwnerSandbox { .. }
+        | Command::OwnerAgentCleanup { .. }
+        | Command::OwnerAgentQuit { .. }
+        | Command::OwnerProviderRetry { .. }
+        | Command::OwnerMasterSteps { .. }
+        | Command::OwnerMasterTime { .. }
+        | Command::OwnerMasterFrames { .. } => crate::settings_log::owner(tx, command, revision),
         Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
@@ -2692,6 +2690,7 @@ fn owner_apply_with(
             let fence = crate::state_log::fence::Fence::Owner(a.clone());
             let project = removed.project.as_str();
             redacted = crate::worktrees::log::forget_project(&tx, project, seq, &fence)?;
+            redacted += crate::settings_log::forget_project(&tx, project, seq, &fence)?;
         }
     }
     let provenance = OwnerProvenance {
