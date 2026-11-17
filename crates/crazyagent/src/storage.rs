@@ -1328,6 +1328,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::removed::initialize(connection)?;
     let opened_ms = crate::state_log::replay::Clock::System.now_ms();
     crate::worktrees::log::sweep(connection, opening::Opening::new(opened_ms))?;
+    crate::memory::log::sweep(connection, opening::Opening::new(opened_ms))?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -1775,6 +1776,12 @@ fn apply(
     } else {
         revision
     };
+    crate::memory::log::close_request(
+        &transaction,
+        &request.command,
+        changed.then_some(next),
+        false,
+    )?;
     let reply = WireReply {
         request_id: request.request_id.clone(),
         revision: Cursor::new(next),
@@ -2675,6 +2682,7 @@ fn owner_apply_with(
     } else {
         revision
     };
+    crate::memory::log::close_request(&tx, &command, changed.then_some(next), deleting)?;
     let mut redacted = 0;
     if changed {
         let wire = WireRequest {

@@ -89,6 +89,7 @@ pub(crate) fn agent_remember(
         }
     };
     insert(&tx, &id, &scope, &origin, text)?;
+    crate::memory::log::record_own(&tx, crate::memory::log::Action::AgentRemembered)?;
     tx.commit().map_err(error)?;
     assert!(!narrowed || scope.project().is_some());
     Ok(Ok(AgentSaved {

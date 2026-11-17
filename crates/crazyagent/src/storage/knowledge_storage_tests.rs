@@ -10,6 +10,8 @@ fn bounded_sqlite_full_rolls_back_knowledge_and_operation_acknowledgement() {
     let config =
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
     let (mut db, _lock) = open_database(&path, false).unwrap();
+    let started = owner_start(&mut db).unwrap();
+    crate::state_log::fence::host_started(&started.host);
     let mut revision = 0;
     let mut sequence = 0;
     let project_id = ProjectId::new("p").unwrap();

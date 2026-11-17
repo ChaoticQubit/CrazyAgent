@@ -2089,14 +2089,16 @@ pub(crate) fn execute(
                 Ok(text) => text,
                 Err(code) => return Ok(rejected(code)),
             };
-            crate::memory::propose_research(
-                tx,
-                config,
-                project_id,
-                research.name(),
-                &text,
-                revision,
-            )
+            crate::memory::log::atomic(tx, || {
+                crate::memory::propose_research(
+                    tx,
+                    config,
+                    project_id,
+                    research.name(),
+                    &text,
+                    revision,
+                )
+            })
         }
     }
 }
@@ -2893,11 +2895,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
-    crate::memory::library::forget_orphan_agent_memories(tx)?;
-    if !kept {
-        crate::memory::library::forget_project_memories(tx, project_id)?;
-    }
-    crate::memory::forget_project(tx, project_id)?;
+    crate::memory::log::forget_removed(tx, project_id, kept)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     removed::record(
         tx,

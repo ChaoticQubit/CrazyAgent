@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub mod import;
 pub mod library;
+pub mod log;
 mod review;
 mod text;
 
@@ -486,7 +487,19 @@ pub(crate) fn is_mutation(action: &KnowledgeAction) -> bool {
     )
 }
 
+/// Runs one knowledge action in a savepoint, so an action that does not apply leaves no row
+/// (v2.5 L8 E5). Inputs: the transaction, the config, the action and the request's
+/// revision. Output: the action's outcome, or the store's refusal.
 pub(crate) fn execute(
+    tx: &Transaction<'_>,
+    current: &EffectiveConfig,
+    action: &KnowledgeAction,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    log::atomic(tx, || act(tx, current, action, revision))
+}
+
+fn act(
     tx: &Transaction<'_>,
     current: &EffectiveConfig,
     action: &KnowledgeAction,

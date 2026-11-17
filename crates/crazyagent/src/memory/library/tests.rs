@@ -1881,7 +1881,7 @@ fn agent_library() -> (tempfile::TempDir, rusqlite::Connection, EffectiveConfig)
     let db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
     db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}'); INSERT INTO projects VALUES ('beta','{}');")
         .unwrap();
-    crate::memory::initialize(&db).unwrap();
+    crate::memory::log::seed(&db);
     let config =
         crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
             .unwrap();

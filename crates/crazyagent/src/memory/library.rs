@@ -473,18 +473,34 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
-const ORPHAN_AGENT_ROW: &str = "project IS NOT NULL
-    AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)
-    AND (CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind') END)='agent'";
+/// A memory library row of a project the engine no longer records.
+const ORPHANED: &str = "project IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)";
+
+/// A memory library row an agent saved with its `remember` tool.
+const AGENT_ORIGIN: &str =
+    "(CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind') END)='agent'";
 
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    connection.execute_batch(TABLE).map_err(error)?;
-    let forgotten = forget_orphan_agent_memories(connection)?;
-    if forgotten > 0 {
-        eprintln!("memory_orphan_agent_rows_removed count={forgotten}");
-    }
-    Ok(())
+    connection.execute_batch(TABLE).map_err(error)
+}
+
+/// Deletes the memories agents saved for one project, as its removal does whether or not
+/// its notes are kept (v2.5 L8 R1). Inputs: the open transaction and the project. Output:
+/// the rows deleted.
+pub(crate) fn forget_agent_memories(
+    connection: &rusqlite::Connection,
+    project: &ProjectId,
+) -> Result<usize, EngineError> {
+    let forgotten = connection
+        .execute(
+            &format!("DELETE FROM memory_library WHERE project=?1 AND {AGENT_ORIGIN}"),
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    assert!(!connection.is_autocommit(), "a removal runs in its request");
+    Ok(forgotten)
 }
 
 /// Deletes the memories agents saved for projects CrazyAgent no longer has, so a trial or
@@ -497,7 +513,7 @@ pub(crate) fn forget_orphan_agent_memories(
 ) -> Result<usize, EngineError> {
     let orphans: i64 = connection
         .query_row(
-            &format!("SELECT COUNT(*) FROM memory_library WHERE {ORPHAN_AGENT_ROW}"),
+            &format!("SELECT COUNT(*) FROM memory_library WHERE {ORPHANED} AND {AGENT_ORIGIN}"),
             [],
             |row| row.get(0),
         )
@@ -507,7 +523,7 @@ pub(crate) fn forget_orphan_agent_memories(
     }
     let forgotten = connection
         .execute(
-            &format!("DELETE FROM memory_library WHERE {ORPHAN_AGENT_ROW}"),
+            &format!("DELETE FROM memory_library WHERE {ORPHANED} AND {AGENT_ORIGIN}"),
             [],
         )
         .map_err(error)?;
@@ -546,7 +562,19 @@ fn rejected(code: &str) -> Result<Outcome, EngineError> {
 /// Applies one owner change to saved memory inside the owner transaction.
 /// Input: the transaction, current config, the action and the current revision.
 /// Output: Applied, or a plain rejection that leaves storage unchanged.
+/// Runs one owner library action in a savepoint, so an action that does not apply leaves
+/// no row (v2.5 L8 E5). Inputs: the transaction, the config, the action and the request's
+/// revision. Output: the action's outcome, or the store's refusal.
 pub(crate) fn execute(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    action: &LibraryAction,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    super::log::atomic(tx, || act(tx, config, action, revision))
+}
+
+fn act(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &LibraryAction,
