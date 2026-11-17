@@ -406,7 +406,12 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
             "watch": { "after": cursor, "mark": mark, "wait_ms": 10_000 }
         }))
         .unwrap();
-        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+        for end in [&server, &client] {
+            end.set_nonblocking(true).unwrap();
+        }
+        let mut server = UnixStream::from_std(server).unwrap();
+        let mut client = UnixStream::from_std(client).unwrap();
         let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
         let admission = admission.clone();
         let serving = tokio::spawn(async move {
