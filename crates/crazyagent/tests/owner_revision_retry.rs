@@ -190,3 +190,42 @@ async fn a_save_after_a_capabilities_read_is_refused() {
     );
     assert_eq!(form.quit_settings().await.unwrap(), defaults);
 }
+
+/// V250-OWN-RETRY-BIND-QUERY red row. The quit form reads its settings and begins its save,
+/// a background read of another query replaces the controller's view at the same revision,
+/// and the other window saves the quit setting. The form's save is refused `stale_revision`
+/// and not resent: the resend checks the read the save was built from, which changed, not
+/// the controller's last read, which did not.
+/// Input: the form window's client kind, so the TUI and the desktop run the same row.
+async fn a_save_is_checked_against_its_own_read(kind: OwnerClientKind) {
+    let (_engine, mut form, mut other) = windows(kind).await;
+    form.quit_settings().await.unwrap();
+    form.begin_mutation(OwnerMutation::SetQuitSettings { settings: MINE }, 1)
+        .unwrap();
+    let built_at = form.pending().unwrap().request().expected_revision.clone();
+    let background = form.read(OwnerRead::CleanupSettings).await.unwrap();
+    assert_eq!(
+        background.revision, built_at,
+        "the background read moved nothing"
+    );
+    let generation = other.next();
+    let theirs = other
+        .controller
+        .set_quit_settings(THEIRS, generation)
+        .await
+        .unwrap();
+    assert_eq!(result(theirs), OwnerResult::Applied);
+    let refused = form.send_pending().await.unwrap();
+    assert_stale_refusal(&refused, &form);
+    assert_eq!(other.controller.quit_settings().await.unwrap(), THEIRS);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tui_save_is_checked_against_its_own_read() {
+    a_save_is_checked_against_its_own_read(OwnerClientKind::Tui).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_desktop_save_is_checked_against_its_own_read() {
+    a_save_is_checked_against_its_own_read(OwnerClientKind::Desktop).await;
+}
