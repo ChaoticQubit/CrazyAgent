@@ -37,10 +37,11 @@ pub const PUBLISH_PROMPT_SNOOZED: &str = "PublishPromptSnoozed";
 /// A Don't ask again to a project's publish prompt.
 pub const PUBLISH_PROMPT_NEVER: &str = "PublishPromptNever";
 /// Every landing event kind.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     AGENT_BRANCH_SET,
     AGENT_BRANCH_FORGOTTEN,
     BASE_SET,
+    BASE_FORGOTTEN,
     OWNER_EDIT_KEPT,
     OWNER_EDITS_SETTLED,
     OWNER_EDITS_DROPPED,
@@ -169,6 +170,7 @@ pub struct Worktree {
 pub enum Change {
     AgentBranchSet(AgentBranch),
     AgentBranchForgotten(Worktree),
+    BaseForgotten(Worktree),
     BaseSet(Base),
     OwnerEditKept(OwnerEdit),
     OwnerEditsSettled(Settled),
@@ -191,7 +193,9 @@ impl Change {
                     && absolute(&set.repository)
                     && crate::agent_git::is_agent_branch(&set.branch)
             }
-            Self::AgentBranchForgotten(gone) => absolute(&gone.worktree),
+            Self::AgentBranchForgotten(gone) | Self::BaseForgotten(gone) => {
+                absolute(&gone.worktree)
+            }
             Self::BaseSet(set) => absolute(&set.worktree) && object_id(&set.base),
             Self::OwnerEditKept(kept) => {
                 absolute(&kept.worktree)
@@ -241,6 +245,7 @@ impl Change {
             Self::AgentBranchSet(_)
             | Self::AgentBranchForgotten(_)
             | Self::BaseSet(_)
+            | Self::BaseForgotten(_)
             | Self::ChangeSetNumbered(_)
             | Self::BaselineApproved(_) => None,
         }
@@ -255,6 +260,7 @@ impl Change {
             Self::AgentBranchSet(_)
             | Self::AgentBranchForgotten(_)
             | Self::BaseSet(_)
+            | Self::BaseForgotten(_)
             | Self::OwnerEditKept(_)
             | Self::ChangeSetNumbered(_)
             | Self::BaselineApproved(_)
@@ -270,6 +276,7 @@ impl Change {
         let kind = match self {
             Self::AgentBranchSet(_) => AGENT_BRANCH_SET,
             Self::AgentBranchForgotten(_) => AGENT_BRANCH_FORGOTTEN,
+            Self::BaseForgotten(_) => BASE_FORGOTTEN,
             Self::BaseSet(_) => BASE_SET,
             Self::OwnerEditKept(_) => OWNER_EDIT_KEPT,
             Self::OwnerEditsSettled(_) => OWNER_EDITS_SETTLED,
@@ -293,7 +300,9 @@ impl Change {
         }
         let body = match self {
             Self::AgentBranchSet(set) => serde_json::to_vec(set),
-            Self::AgentBranchForgotten(gone) => serde_json::to_vec(gone),
+            Self::AgentBranchForgotten(gone) | Self::BaseForgotten(gone) => {
+                serde_json::to_vec(gone)
+            }
             Self::BaseSet(set) => serde_json::to_vec(set),
             Self::OwnerEditKept(kept) => serde_json::to_vec(kept),
             Self::OwnerEditsSettled(set) => serde_json::to_vec(set),
@@ -321,6 +330,7 @@ impl Change {
         let change = match event.kind.as_str() {
             AGENT_BRANCH_SET => serde_json::from_slice(body).map(Self::AgentBranchSet),
             AGENT_BRANCH_FORGOTTEN => serde_json::from_slice(body).map(Self::AgentBranchForgotten),
+            BASE_FORGOTTEN => serde_json::from_slice(body).map(Self::BaseForgotten),
             BASE_SET => serde_json::from_slice(body).map(Self::BaseSet),
             OWNER_EDIT_KEPT => serde_json::from_slice(body).map(Self::OwnerEditKept),
             OWNER_EDITS_SETTLED => serde_json::from_slice(body).map(Self::OwnerEditsSettled),
@@ -472,6 +482,10 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
         ),
         Change::AgentBranchForgotten(gone) => db.execute(
             "DELETE FROM landing_agent_branches WHERE worktree=?1",
+            [&gone.worktree],
+        ),
+        Change::BaseForgotten(gone) => db.execute(
+            "DELETE FROM landing_bases WHERE worktree=?1",
             [&gone.worktree],
         ),
         Change::BaseSet(set) => db.execute(

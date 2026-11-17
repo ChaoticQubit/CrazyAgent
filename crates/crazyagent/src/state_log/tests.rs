@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 25] = [
+const KINDS: [&str; 26] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -494,6 +494,7 @@ const KINDS: [&str; 25] = [
     crate::landing_log::AGENT_BRANCH_SET,
     crate::landing_log::AGENT_BRANCH_FORGOTTEN,
     crate::landing_log::BASE_SET,
+    crate::landing_log::BASE_FORGOTTEN,
     crate::landing_log::OWNER_EDIT_KEPT,
     crate::landing_log::OWNER_EDITS_SETTLED,
     crate::landing_log::OWNER_EDITS_DROPPED,
@@ -898,6 +899,7 @@ fn landing_sample(kind: &str) -> serde_json::Value {
         }
         landing::OWNER_EDITS_SETTLED => json!({"worktree": worktree, "change_set": change_set}),
         landing::AGENT_BRANCH_FORGOTTEN
+        | landing::BASE_FORGOTTEN
         | landing::OWNER_EDITS_DROPPED
         | landing::WORKTREE_OWNER_EDITS_FORGOTTEN => json!({"worktree": worktree}),
         landing::OWNER_EDITS_FORGOTTEN => json!({"change_set": change_set}),

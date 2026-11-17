@@ -850,12 +850,13 @@ pub(super) fn agent_branch_taken(
 }
 
 /// Forgets the base of an agent worktree that is gone, as retire does once the worktree is
-/// removed or left. Inputs: the store and the worktree path. Output: Ok, or
-/// `changes_unavailable` with the row kept.
+/// removed or left, logged as `BaseForgotten` (v2.5 L9). Inputs: the store and the worktree
+/// path. Output: Ok, or the log's refusal with the row kept.
 pub(super) fn forget_base(db: &Connection, worktree: &str) -> Result<(), EngineError> {
-    db.execute("DELETE FROM landing_bases WHERE worktree=?1", [worktree])
-        .map_err(|_| failure("changes_unavailable"))?;
-    Ok(())
+    let gone = Worktree {
+        worktree: worktree.to_owned(),
+    };
+    landing_log::write(db, &Change::BaseForgotten(gone))
 }
 
 /// Forgets the task branch of an agent worktree that is gone, logged as
