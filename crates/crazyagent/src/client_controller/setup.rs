@@ -117,11 +117,14 @@ impl OwnerController {
     /// the 2.5 data it replaces (L5). Takes the client generation. Returns the actual owner
     /// response; a rejection carries a plain code, `storage_restore_unavailable` after the
     /// 30 days and `storage_restore_agents_running` while an agent runs. The engine stops
-    /// right after it applies, so the reply may never come.
+    /// right after it applies, so the reply may never come: the restore is never kept to be
+    /// sent again, and the engine's restore record tells how it ended.
     pub async fn restore_pinned(&mut self, generation: u64) -> Result<OwnerResponse, EngineError> {
         self.setup_status().await?;
         self.begin_mutation(OwnerMutation::RestorePinned, generation)?;
-        self.send_pending().await
+        let sent = self.send_pending().await;
+        self.pending = None;
+        sent
     }
 
     /// Turns one installed default-pack entry on or off for every project.
