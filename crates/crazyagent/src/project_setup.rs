@@ -2969,10 +2969,10 @@ pub(crate) fn record_delete(
         }
     };
     let removed = remove(tx, project_id, revision, false)?;
-    if matches!(removed, Outcome::Applied) {
-        if let Some(folder) = &folder {
-            crate::github::forget_job(tx, folder);
-        }
+    if matches!(removed, Outcome::Applied)
+        && let Some(folder) = &folder
+    {
+        crate::github::forget_job(tx, folder);
     }
     Ok(removed)
 }
