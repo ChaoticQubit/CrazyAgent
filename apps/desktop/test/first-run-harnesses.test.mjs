@@ -44,6 +44,7 @@ test("each row says what installing it runs, or why it can't, from the engine's 
     { kind: "installed", version: "2.1.0" });
   assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { install: LINE }), ["codex"]), { kind: "waiting" });
   assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { running: true }), []), { kind: "installing" });
+  assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { running: true, waiting: "claude-code" }), []), { kind: "waiting" });
   assert.deepEqual(model.harnessRow("codex", entry("codex", "/x/codex"), versions("codex", { last: last(true, null, "0.52.0") }), []), { kind: "done", version: "0.52.0" });
   assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { last: last(false, "harness_install_failed") }), []),
     { kind: "failed", reason: api.updateCopy("harness_install_failed") });

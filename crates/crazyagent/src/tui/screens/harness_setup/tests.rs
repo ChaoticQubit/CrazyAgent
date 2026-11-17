@@ -307,6 +307,15 @@ fn each_row_says_what_installing_runs_or_why_it_cannot_in_the_desktop_words() {
         harness_row("codex", Some(entry(&none, "codex")), Some(&running), &[]),
         Row::Installing
     );
+    let held = HarnessVersions {
+        waiting: Some("claude-code".into()),
+        ..running.clone()
+    };
+    assert_eq!(
+        harness_row("codex", Some(entry(&none, "codex")), Some(&held), &[]),
+        Row::Waiting,
+        "an install held behind another harness's job waits, it is not installing yet"
+    );
     let failed = HarnessVersions {
         last: Some(ended(false, Some("harness_install_failed"), None)),
         ..codex()

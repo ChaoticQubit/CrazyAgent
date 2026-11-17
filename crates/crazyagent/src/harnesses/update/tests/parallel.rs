@@ -197,3 +197,63 @@ fn a_job_holds_its_npm_prefix_and_the_homebrew_prefix_its_tool_runs_from() {
     let own = fixed(roots.home.join(".local/bin/claude"), None);
     assert!(super::super::turn::folders(&own, &roots).is_empty());
 }
+
+/// V243-HARNESS-UPDATE-PARALLEL (owner pair): two harnesses installed with npm into one
+/// prefix that is neither Homebrew's nor the engine's, as nvm or a user npm prefix leaves
+/// them. Their updates both write that prefix, so the second waits named for the first and
+/// starts by itself once the first ends, and both finish.
+#[test]
+fn two_npm_updates_into_one_prefix_take_turns_and_both_finish() {
+    let machine = Machine::new();
+    let root = machine.root.path().to_path_buf();
+    let log = root.join("npm.log");
+    executable(
+        &root.join("node/bin/npm"),
+        &format!(
+            "#!/bin/sh\ncase \"$3\" in @anthropic-ai/*) job=claude;; @openai/*) job=codex;; esac\necho \"start $job\" >> {log}\ni=0\nwhile [ ! -e {root}/gate-$job ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done\necho \"end $job\" >> {log}\n",
+            log = log.display(),
+            root = root.display(),
+        ),
+    );
+    let claude = root.join("node/lib/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude");
+    executable(&claude, "#!/bin/sh\necho '1.0.0 (Claude Code)'\n");
+    let codex = root.join("node/lib/node_modules/@openai/codex/bin/codex.js");
+    executable(&codex, "#!/bin/sh\necho 'codex-cli 0.1.0'\n");
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let (db, roots, updates) = (db(), machine.roots(), Updates::new());
+    let logged = || std::fs::read_to_string(&log).unwrap_or_default();
+    let read = |id: &str, path: &Path| {
+        updates.versions(&db, &entry(id, Some(path.to_path_buf())), &roots, false)
+    };
+    updates
+        .start(
+            &db,
+            &entry("claude-code", Some(claude.clone())),
+            &roots,
+            |_| {},
+        )
+        .unwrap();
+    assert!(eventually(|| logged() == "start claude\n"));
+    updates
+        .start(&db, &entry("codex", Some(codex.clone())), &roots, |_| {})
+        .unwrap();
+    assert!(
+        eventually(|| read("codex", &codex).waiting.as_deref() == Some("claude-code")),
+        "{:?}",
+        read("codex", &codex)
+    );
+    assert!(read("codex", &codex).running);
+    std::fs::write(root.join("gate-codex"), "go\n").unwrap();
+    assert_eq!(logged(), "start claude\n", "Codex's npm waits");
+    std::fs::write(root.join("gate-claude"), "go\n").unwrap();
+    assert!(eventually(|| updates.idle()));
+    assert_eq!(
+        logged(),
+        "start claude\nend claude\nstart codex\nend codex\n"
+    );
+    for (id, path) in [("claude-code", &claude), ("codex", &codex)] {
+        let done = read(id, path);
+        assert_eq!(done.waiting, None);
+        assert!(done.last.unwrap().ok, "{id}");
+    }
+}
