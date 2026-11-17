@@ -677,3 +677,171 @@ async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends()
     assert!(!check_folders::checking().running.contains(&ID.to_owned()));
     drop(slot);
 }
+
+/// Probe only, never landed: times a Windows PowerShell 5.1 stand-in MCP server through the
+/// unconfined check and the real boundary check, with and without a first cmdlet, with the
+/// default and a stock module path, and a second boundary check of one id. Each line names
+/// the server's own times to its first statement and after the cmdlet and its module path
+/// count (the tool name), and whether a module analysis cache file sits in the check home.
+#[cfg(target_os = "windows")]
+#[test]
+#[ignore]
+fn probe_powershell_server_check_times() {
+    let helper = std::env::current_exe()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    assert!(
+        helper.is_file(),
+        "the boundary helper sits beside the test binary"
+    );
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    let powershell = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let stock = system
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("Modules");
+    let script = |cmdlet: bool| {
+        let first = if cmdlet {
+            "$null = ConvertFrom-Json -InputObject '[]'; "
+        } else {
+            ""
+        };
+        [
+            "$p = [Diagnostics.Process]::GetCurrentProcess().StartTime; ",
+            "$t0 = [int]([DateTime]::Now - $p).TotalMilliseconds; ",
+            first,
+            "$t1 = [int]([DateTime]::Now - $p).TotalMilliseconds; ",
+            "$n = ($env:PSModulePath -split ';').Count; ",
+            "$tool = 'ping-' + $t0 + '-' + $t1 + '-' + $n; ",
+            "$q = [char]34; $o = [Console]::Out; ",
+            "while ($null -ne ($l = [Console]::In.ReadLine())) { ",
+            "if ($l -match '.id.:(\\d+)') { $id = $Matches[1]; ",
+            "if ($l -match 'initialize') { $r = '{~jsonrpc~:~2.0~,~id~:ID,~result~:",
+            "{~protocolVersion~:~2025-06-18~,~capabilities~:{~tools~:{}},",
+            "~serverInfo~:{~name~:~stand-in~,~version~:~1~}}}' } ",
+            "else { $r = '{~jsonrpc~:~2.0~,~id~:ID,~result~:{~tools~:[{~name~:~TOOL~,",
+            "~inputSchema~:{~type~:~object~}}]}}' }; ",
+            "$o.WriteLine($r.Replace('ID', $id).Replace('TOOL', $tool).Replace('~', $q)); ",
+            "$o.Flush() } }",
+        ]
+        .concat()
+    };
+    let args = |cmdlet: bool| {
+        vec![
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            script(cmdlet),
+        ]
+    };
+    let stock_path = vec![(
+        "PSModulePath".to_owned(),
+        stock.to_str().unwrap().as_bytes().to_vec(),
+    )];
+    let directory = tempfile::tempdir().unwrap();
+    let root = crate::sandbox::canonical(directory.path())
+        .unwrap()
+        .join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let program = powershell.to_str().unwrap().to_owned();
+    let cache = |id: &str| {
+        root.join(CHECK_FOLDER)
+            .join(id)
+            .join("home")
+            .join("AppData")
+            .join("Local")
+            .join("Microsoft")
+            .join("Windows")
+            .join("PowerShell")
+            .join("ModuleAnalysisCache")
+            .is_file()
+    };
+    let wide = std::time::Duration::from_secs(90);
+    let report =
+        |label: &str, id: &str, began: std::time::Instant, result: &Result<Vec<String>, String>| {
+            eprintln!(
+                "PROBE| {label} | {} ms | {result:?} | cache in home: {} |",
+                began.elapsed().as_millis(),
+                cache(id)
+            );
+        };
+    let began = std::time::Instant::now();
+    let unconfined = crate::plugins::check::check_stdio(&program, &args(false), &[], wide)
+        .map_err(str::to_owned);
+    report("unconfined, no cmdlet", "none", began, &unconfined);
+    assert!(unconfined.is_ok(), "the stand-in answers unconfined");
+    let unconfined_runs: [(&str, bool, &[(String, Vec<u8>)]); 2] = [
+        ("unconfined, cmdlet", true, &[]),
+        (
+            "unconfined, cmdlet, stock module path",
+            true,
+            stock_path.as_slice(),
+        ),
+    ];
+    for (label, cmdlet, secrets) in unconfined_runs {
+        let began = std::time::Instant::now();
+        let checked = crate::plugins::check::check_stdio(&program, &args(cmdlet), secrets, wide)
+            .map_err(str::to_owned);
+        report(label, "none", began, &checked);
+    }
+    let network = || crate::sandbox::SandboxNetwork::Only(Vec::new());
+    let trivial = std::env::current_exe().unwrap();
+    let began = std::time::Instant::now();
+    let checked = boundary_check(
+        &root,
+        "mcp-0123456789abcdef0123456a",
+        trivial.to_str().unwrap(),
+        &["--list".to_owned()],
+        &[],
+        &[],
+        network(),
+    );
+    report(
+        "confined, trivial server that exits",
+        "mcp-0123456789abcdef0123456a",
+        began,
+        &checked,
+    );
+    let confined_runs: [(&str, &str, bool, &[(String, Vec<u8>)]); 5] = [
+        (
+            "confined, no cmdlet",
+            "mcp-0123456789abcdef0123456b",
+            false,
+            &[],
+        ),
+        (
+            "confined, cmdlet, first check",
+            "mcp-0123456789abcdef0123456c",
+            true,
+            &[],
+        ),
+        (
+            "confined, cmdlet, second check of that id",
+            "mcp-0123456789abcdef0123456c",
+            true,
+            &[],
+        ),
+        (
+            "confined, cmdlet, stock module path",
+            "mcp-0123456789abcdef0123456d",
+            true,
+            stock_path.as_slice(),
+        ),
+        (
+            "confined, no cmdlet, second id",
+            "mcp-0123456789abcdef0123456e",
+            false,
+            &[],
+        ),
+    ];
+    for (label, id, cmdlet, secrets) in confined_runs {
+        let began = std::time::Instant::now();
+        let checked = boundary_check(&root, id, &program, &args(cmdlet), secrets, &[], network());
+        report(label, id, began, &checked);
+    }
+}

@@ -1612,7 +1612,12 @@ fn boundary_check(
         process.env(name, check::env_value(value)?);
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
-    check::check_command(process, check::CHECK_TIME, sandbox.lineage_check()).map_err(String::from)
+    check::check_command(
+        process,
+        std::time::Duration::from_secs(90),
+        sandbox.lineage_check(),
+    )
+    .map_err(String::from)
 }
 
 async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineError> {

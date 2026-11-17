@@ -185,7 +185,7 @@ pub fn check_command(
     process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
     let mut child = crate::spawn_gate::spawn(&mut process).map_err(start_refused)?;
     let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
