@@ -579,12 +579,11 @@ fn backup(
 
 /// Checks a backup copy before any step runs: SQLite's integrity check must pass, the copy
 /// must hold engine.db's schema, and every table must hold as many rows as in engine.db.
-/// The copy is opened without create and without following a link. Inputs: the live
-/// connection and the copy's path. Output: Ok, or `storage_backup_failed` naming the gap.
+/// The copy is opened without create, by the same path `fill` wrote it to, which may pass a
+/// linked engine root. Inputs: the live connection and the copy's path.
+/// Output: Ok, or `storage_backup_failed` naming the gap.
 fn check_copy(db: &Connection, copy: &Path) -> Result<(), EngineError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let opened = Connection::open_with_flags(copy, flags).map_err(backup_failed)?;
     let integrity: String = opened
         .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
@@ -594,7 +593,9 @@ fn check_copy(db: &Connection, copy: &Path) -> Result<(), EngineError> {
             "the backup copy failed its integrity check: {integrity}"
         )));
     }
-    if schema(&opened)? != schema(db)? {
+    let schemas = schema(&opened).and_then(|copied| Ok((copied, schema(db)?)));
+    let (copied, live) = schemas.map_err(|cause| backup_failed(cause.0))?;
+    if copied != live {
         return Err(backup_failed("the backup copy holds another schema"));
     }
     for table in tables(db)? {
