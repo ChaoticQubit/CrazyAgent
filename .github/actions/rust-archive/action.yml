@@ -51,13 +51,23 @@ runs:
     - name: Fetch Rust dependencies
       shell: bash
       run: cargo fetch --locked
+    - name: Turn on the engine's owner trace where this tree defines it
+      shell: bash
+      run: |
+        set -euo pipefail
+        if grep -Eq '^owner-trace[[:space:]]*=' crates/crazyagent/Cargo.toml; then
+          echo "FARM_ENGINE_FEATURES=crazyagent/owner-trace" >> "$GITHUB_ENV"
+          echo "engine owner trace: on"
+        else
+          echo "engine owner trace: off, this tree's engine does not define it"
+        fi
     - name: Build the engine binaries the tests run
       shell: bash
       run: |
         set -euo pipefail
         exe=""
         if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
-        cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --features crazyagent/owner-trace --locked --offline
+        cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline
         mkdir -p target/debug/deps
         cp "target/debug/crazyagent-landlock$exe" "target/debug/deps/crazyagent-landlock$exe"
     - name: Build and archive every workspace test
@@ -72,7 +82,7 @@ runs:
           sampler=$!
           trap 'kill "$sampler" 2> /dev/null || true' EXIT
         fi
-        cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --features crazyagent/owner-trace --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
+        cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
     - name: Show the free disk, the target and the archive size
       if: always()
       shell: bash

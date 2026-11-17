@@ -778,7 +778,7 @@ test("the test farm macOS build gets the hosted job's 330-minute budget and two 
   assert(archive.includes('if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi'));
   assert(archive.includes("export CARGO_BUILD_JOBS=2"));
   assert(archive.includes("sysctl -n vm.swapusage"));
-  assert(archive.includes('cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --features crazyagent/owner-trace --locked --offline'));
+  assert(archive.includes('cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline'));
   assert.equal((farm + action).match(/--exclude /g).length, 1, "no other crate is left out of any archive");
   const size = actionSteps(action).find((step) => step.startsWith("    - name: Show the free disk, the target and the archive size\n"));
   assert(size.includes("hw.memsize") && size.includes("free -g"), "every build prints its CPUs and memory");

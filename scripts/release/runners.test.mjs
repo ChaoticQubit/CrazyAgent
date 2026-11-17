@@ -369,10 +369,16 @@ test("every test farm Linux tmux install first takes group and other write off t
   }
 });
 
-test("both test farm cargo builds turn on the engine's owner-trace feature, so a failed row's captured stderr holds one line per owner exchange, and nothing else in the farm names it (leader 02:58; clean_mac_release.rs keeps it out of every release build)", async () => {
+test("both test farm cargo builds turn on the engine's owner-trace feature only where the built tree's engine defines it, so a failed row's captured stderr holds one line per owner exchange and a tree from any other base still builds (leader 02:58, #297 F1; clean_mac_release.rs keeps it out of every release build)", async () => {
   const archive = await readFile(new URL("../../.github/actions/rust-archive/action.yml", import.meta.url), "utf8");
-  const builds = archive.split("\n").filter((line) => /^ +cargo (build|nextest archive) /.test(line));
+  const parts = archive.split(/\n(?= {4}- )/);
+  const check = parts.findIndex((step) => step.startsWith("    - name: Turn on the engine's owner trace where this tree defines it\n"));
+  assert(check >= 0 && parts[check].includes("if grep -Eq '^owner-trace[[:space:]]*=' crates/crazyagent/Cargo.toml; then\n          echo \"FARM_ENGINE_FEATURES=crazyagent/owner-trace\" >> \"$GITHUB_ENV\"\n"), "one check reads the built tree's engine manifest");
+  const builds = parts.flatMap((step, at) => step.split("\n").filter((line) => /^ +cargo (build|nextest archive) /.test(line)).map((line) => ({ at, line })));
   assert.equal(builds.length, 2, "the engine binaries and the test archive");
-  for (const build of builds) assert.match(build, / --features crazyagent\/owner-trace --locked --offline/);
-  assert.equal(archive.match(/owner-trace/g).length, 2);
+  for (const { at, line } of builds) {
+    assert(at > check, "after the check");
+    assert(line.includes(' ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline'), line);
+  }
+  assert.equal(archive.match(/owner-trace/g).length, 2, "named only by the check");
 });
