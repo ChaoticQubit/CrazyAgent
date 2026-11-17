@@ -1,5 +1,6 @@
 use super::{compare, normalise, path_char, without_placeholders};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 /// Reads a keychain lock file below `Library/Keychains/`, `.fl` and 8 hex digits that differ
 /// on every run, at the start of a string. Input: the rest of the string. Output: the matched
@@ -49,20 +50,40 @@ pub(super) fn ends_in_temp(text: &str) -> bool {
 /// Sorts each run of consecutive `(subpath "...")` lines that holds a socket generation
 /// folder, every line's closing parentheses kept in place: 2.4.2's `engine_secrets_in` adds
 /// the runtime's socket places in directory order, which follows the random generation name.
-/// Input: a masked array. Output: none; the array is reordered in place.
-pub(super) fn sort_socket_places(items: &mut [Value]) {
+/// A `<path-N>` number is given in the order lines are masked, so a run that first names two
+/// temp entries would number them in directory order; such a run is refused. Inputs: a
+/// masked array and how many temp entries were numbered before it. Output: none, the array
+/// reordered in place, or why the run cannot be read the same on every capture.
+pub(super) fn sort_socket_places(items: &mut [Value], known: usize) -> Result<(), String> {
     let mut start = 0;
     while start < items.len() {
         let len = items[start..]
             .iter()
             .take_while(|item| item.as_str().and_then(subpath_line).is_some())
             .count();
-        let run = &mut items[start..start + len];
         let generation = |item: &Value| {
             item.as_str()
                 .is_some_and(|line| line.contains("/o<generation>\""))
         };
-        if run.iter().any(generation) {
+        if items[start..start + len].iter().any(generation) {
+            let before: BTreeSet<usize> = items[..start]
+                .iter()
+                .filter_map(Value::as_str)
+                .flat_map(path_numbers)
+                .collect();
+            let fresh: BTreeSet<usize> = items[start..start + len]
+                .iter()
+                .filter_map(Value::as_str)
+                .flat_map(path_numbers)
+                .filter(|number| *number > known && !before.contains(number))
+                .collect();
+            if fresh.len() > 1 {
+                return Err(format!(
+                    "a socket run first names {} temp entries, so their <path-N> numbers follow directory order: capture them apart",
+                    fresh.len()
+                ));
+            }
+            let run = &mut items[start..start + len];
             let (mut rules, closers): (Vec<String>, Vec<String>) = run
                 .iter()
                 .filter_map(|item| item.as_str().and_then(subpath_line))
@@ -76,6 +97,18 @@ pub(super) fn sort_socket_places(items: &mut [Value]) {
         }
         start += len.max(1);
     }
+    Ok(())
+}
+
+/// Reads the numbers of the `<path-N>` placeholders in masked text, in order. Input: the
+/// text. Output: the numbers.
+fn path_numbers(text: &str) -> Vec<usize> {
+    text.match_indices("<path-")
+        .filter_map(|(at, tag)| {
+            let rest = &text[at + tag.len()..];
+            rest[..rest.find('>')?].parse().ok()
+        })
+        .collect()
 }
 
 /// Splits a `(subpath "...")` line into the rule and the parentheses after it that close its
@@ -210,4 +243,29 @@ fn socket_places_in_either_directory_order_read_the_same_and_other_runs_keep_the
     );
     assert_eq!(subpath_line("  (literal \"x\")"), None);
     assert_eq!(subpath_line("(deny file-read*"), None);
+}
+
+#[test]
+fn a_socket_run_that_first_names_two_temp_entries_is_refused_and_one_named_before_is_not() {
+    let real = std::env::temp_dir().canonicalize().unwrap();
+    let real = real.to_string_lossy();
+    let run = |before: &[String]| {
+        let mut lines: Vec<String> = before.to_vec();
+        lines.extend([
+            "(deny file-read* file-write*".to_owned(),
+            format!("  (subpath \"{real}/.tmpAb12st/o0b1988cb\")"),
+            format!("  (subpath \"{real}/.tmpCd34xy/oce310940\"))"),
+        ]);
+        normalise(&json!({ "lines": lines }))
+    };
+    let refused = run(&[]).unwrap_err();
+    assert!(refused.contains("2 temp entries"), "{refused}");
+    assert!(!refused.contains(".tmp"), "{refused}");
+    let named = run(&[format!(
+        "(allow file-read* (literal \"{real}/.tmpCd34xy\"))"
+    )])
+    .unwrap();
+    assert!(named.contains("<path-1>/o<generation>"), "{named}");
+    assert!(named.contains("<path-2>/o<generation>"), "{named}");
+    assert_eq!(path_numbers("<path-12>/a <path-> <path-3>"), vec![12, 3]);
 }

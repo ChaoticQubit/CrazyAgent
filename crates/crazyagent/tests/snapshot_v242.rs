@@ -307,11 +307,12 @@ impl Masks {
             }),
             Value::String(text) => Ok(Value::from(self.text(text))),
             Value::Array(items) => {
+                let known = self.paths.len();
                 let mut masked = items
                     .iter()
                     .map(|item| self.value(key, item))
                     .collect::<Result<Vec<_>, _>>()?;
-                random_names::sort_socket_places(&mut masked);
+                random_names::sort_socket_places(&mut masked, known)?;
                 Ok(Value::Array(masked))
             }
             Value::Object(map) => {
