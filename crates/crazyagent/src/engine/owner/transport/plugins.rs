@@ -5,7 +5,7 @@ use crate::plugins::{
     EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView, check,
 };
 use crate::protocol::encode_frame;
-use crate::storage::plugins::{Command, ResultValue};
+use crate::storage::plugins::{Command, ResultValue, check_profile};
 use check_folders::{CheckOf, removed_server_checks};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,7 @@ const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
 pub(super) const CHECK_FOLDER: &str = crate::storage::plugins::CHECK_FOLDER;
-pub(super) const CHECK_PROFILES: &str = "profiles";
+pub(super) const CHECK_PROFILES: &str = crate::storage::plugins::CHECK_PROFILES;
 pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
@@ -986,12 +986,6 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("plugin_store_unavailable"))
-}
-
-/// Names the sandbox profile file the checks of one server run under.
-/// Inputs: the engine's check folder and the server id. Output: the profile path.
-fn check_profile(checks: &Path, id: &str) -> PathBuf {
-    checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
 }
 
 async fn handle(
