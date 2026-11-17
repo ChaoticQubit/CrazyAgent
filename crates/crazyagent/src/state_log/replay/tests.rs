@@ -701,6 +701,35 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
 }
 
 #[test]
+fn redact_puts_back_the_secure_delete_mode_it_found_fast_included() {
+    for (mode, expected) in [("OFF", 0), ("ON", 1), ("FAST", 2)] {
+        let mut db = store();
+        db.execute_batch(&format!("PRAGMA secure_delete={mode};"))
+            .unwrap();
+        let tx = db.transaction().unwrap();
+        let seq = Appender::own(&tx, fence::engine())
+            .unwrap()
+            .append(&Draft {
+                aggregate: Aggregate::Worktrees,
+                kind: "Secret",
+                schema: 1,
+                at_ms: 1,
+                body: b"{}",
+            })
+            .unwrap();
+        let before: i64 = tx
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, expected, "{mode} before");
+        redact(&tx, seq, &fence::engine()).unwrap();
+        let after: i64 = tx
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, expected, "{mode} after");
+    }
+}
+
+#[test]
 fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("engine.db");
