@@ -43,6 +43,20 @@ const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// Whether `program` is the boundary program [`agent_command`] starts a confined agent from
+/// on this system: [`SANDBOX_EXEC`] on Unix, the boundary helper beside the engine's
+/// executable on Windows. Input: a command's program. Output: true for that program.
+pub fn starts_at_boundary(program: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        program == SANDBOX_EXEC
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::helper_beside_engine().is_ok_and(|helper| program == helper.as_os_str())
+    }
+}
+
 /// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
 /// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
 /// matches a local address by port only (`localhost` there matches every local address), so
@@ -3804,7 +3818,7 @@ impl ProjectSandbox {
         let base = self.base_env(true);
         let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        assert!(starts_at_boundary(command.get_program()));
         Ok(command)
     }
 
@@ -3928,9 +3942,7 @@ impl InstalledSandbox {
         }
         #[cfg(target_os = "windows")]
         {
-            let helper = windows::existing_helper(
-                &std::env::current_exe()?.with_file_name(windows::HELPER_NAME),
-            )?;
+            let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
             let grants = windows::grants_folder()?;
             let windows =
                 windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, &grants)?;
@@ -5266,7 +5278,7 @@ mod windows_path_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
     use crate::sandbox::elf::tests::executable;

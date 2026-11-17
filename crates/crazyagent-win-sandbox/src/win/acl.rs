@@ -26,7 +26,7 @@ const _: () = assert!(MODIFY & (FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER) == 
 const _: () = assert!(ANCHOR == MODIFY & !DELETE);
 const _: () = assert!(KEEP_ENTRIES == ANCHOR & !(FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY));
 
-const ACL_BYTES_MAX: usize = 64 * 1024;
+pub(super) const ACL_BYTES_MAX: usize = 64 * 1024;
 
 /// A path's access list as Windows holds it, and whether its inheritance is cut.
 struct Dacl {
@@ -225,7 +225,7 @@ fn info(protect: bool, protected: bool) -> OBJECT_SECURITY_INFORMATION {
 }
 
 /// Frees memory the system allocated with `LocalAlloc` for this caller when dropped.
-struct Local(HLOCAL);
+pub(super) struct Local(pub(super) HLOCAL);
 
 impl Drop for Local {
     /// Frees the block. Relies on it being a `LocalAlloc` block owned by this value alone.

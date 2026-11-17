@@ -454,7 +454,7 @@ fn a_narrower_profile_takes_back_what_the_one_before_granted() {
 }
 
 #[test]
-fn releasing_a_profile_takes_back_every_grant_and_its_record() {
+fn releasing_a_profile_takes_back_every_grant_its_record_and_its_container() {
     let case = case("crazyagent.test.release");
     let context = case.project.join("context");
     let before = [&case.project, &context, &case.home].map(|path| entries(path));
@@ -482,8 +482,23 @@ fn releasing_a_profile_takes_back_every_grant_and_its_record() {
     }
     let record = case.grants.join("container-crazyagent.test.release.grants");
     assert!(record.is_file());
+    let container = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("Packages")
+        .join("crazyagent.test.release");
+    assert!(container.is_dir());
     let granted_sddl = sddl(&watched);
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    assert!(matches!(
+        crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.other"),
+        Err(crazyagent_win_sandbox::BoundaryError::Refused(_))
+    ));
+    assert!(record.is_file());
+    assert!(container.is_dir());
+    assert_eq!(
+        sddl(&watched),
+        granted_sddl,
+        "a refused release changes nothing"
+    );
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.release").unwrap();
     assert_eq!(
         [&case.project, &context, &case.home].map(|path| entries(path)),
         before,
@@ -491,7 +506,11 @@ fn releasing_a_profile_takes_back_every_grant_and_its_record() {
         sddl(&watched)
     );
     assert!(!record.exists());
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    assert!(
+        !container.exists(),
+        "the container's own folder goes with it"
+    );
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.release").unwrap();
 }
 
 const REPO_FILES: [(&str, &str); 9] = [
@@ -928,7 +947,7 @@ fn two_agents_on_one_project_keep_each_others_guards() {
         "the second agent writes",
         &second_run,
     );
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.first").unwrap();
     let hook = path(r".git\hooks\post-checkout");
     let planted = as_second(&["/C", "echo", "hook>", &plain(&hook)]);
     checks.expect(
@@ -949,7 +968,7 @@ fn two_agents_on_one_project_keep_each_others_guards() {
         "the second agent still writes its project",
         &still,
     );
-    crazyagent_win_sandbox::release(&second_profile).unwrap();
+    crazyagent_win_sandbox::release(&second_profile, "crazyagent.test.second").unwrap();
     let after = watched.each_ref().map(|path| entries(path));
     if after != before {
         checks.0.push(format!(
@@ -1039,7 +1058,7 @@ fn releasing_restores_every_guarded_path_the_owner_left_alone() {
     assert!(readme.status.success(), "{}", ran(&readme));
     let granted = watched.each_ref().map(|path| entries(path));
     assert_ne!(granted, before);
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.restore").unwrap();
     let after = watched.each_ref().map(|path| entries(path));
     assert_eq!(
         after,
@@ -1067,7 +1086,7 @@ fn releasing_keeps_an_access_list_the_owner_changed_and_drops_only_the_agents_en
     assert!(granted.status.success(), "{}", ran(&granted));
     let changed = entries(&hooks);
     assert!(changed.contains(";;;LS)"), "{changed}");
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.owner").unwrap();
     let after = entries(&hooks);
     assert_eq!(
         after,

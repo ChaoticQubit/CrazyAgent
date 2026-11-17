@@ -1,0 +1,17 @@
+[profile.farm]
+fail-fast = false
+retries = 0
+failure-output = "final"
+slow-timeout = { period = "60s", terminate-after = 10 }
+archive.include = [
+    { path = "debug/deps/crazyagent-landlock", relative-to = "target", on-missing = "ignore" },
+    { path = "debug/deps/crazyagent-landlock.exe", relative-to = "target", on-missing = "ignore" },
+    { path = "debug/deps/crazyagent-win-boundary.exe", relative-to = "target", on-missing = "ignore" },
+]
+
+[profile.farm.junit]
+path = "junit.xml"
+
+[[profile.farm.overrides]]
+filter = "binary_id(=crazyagent::cargo_entrypoint)"
+slow-timeout = { period = "60s", terminate-after = 30 }

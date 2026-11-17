@@ -349,19 +349,19 @@ mod tests {
         assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
         assert_eq!(installer.find(Dependency::Tmux), Ok(None));
         let tmux = local.join("tmux");
-        std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+        std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             installer.lookup(Dependency::Tmux).unwrap(),
             Ok(crate::setup::Located {
-                version: Version::parse("3.5a").unwrap(),
+                version: Version::parse("3.7a").unwrap(),
                 bundled: false,
                 note: None,
             })
         );
         assert_eq!(
             installer.find(Dependency::Tmux),
-            Ok(Some(Version::parse("3.5a").unwrap()))
+            Ok(Some(Version::parse("3.7a").unwrap()))
         );
     }
 

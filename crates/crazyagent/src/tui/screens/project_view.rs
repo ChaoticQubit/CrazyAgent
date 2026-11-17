@@ -1957,8 +1957,8 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running => {
             Some(("x", "Stop"))
         }
-        ResearchStatus::Failed | ResearchStatus::Cancelled => Some(("r", "Retry")),
-        ResearchStatus::Done => None,
+        ResearchStatus::Failed | ResearchStatus::Cancelled if job.retryable => Some(("r", "Retry")),
+        ResearchStatus::Failed | ResearchStatus::Cancelled | ResearchStatus::Done => None,
     }));
     help.extend([
         ("Enter", "Open report"),
@@ -2747,14 +2747,16 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
-        entry("Hidden", hidden_line(screen, look)),
     ];
-    lines.extend(seers_line(screen, look).map(|row| entry("", row)));
-    lines.extend(
-        runs_lines(screen, content.saturating_sub(10), look)
-            .into_iter()
-            .map(|row| entry("", row)),
-    );
+    if screen.hidden_offered() {
+        lines.push(entry("Hidden", hidden_line(screen, look)));
+        lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+        lines.extend(
+            runs_lines(screen, content.saturating_sub(10), look)
+                .into_iter()
+                .map(|row| entry("", row)),
+        );
+    }
     lines.extend([
         entry(
             "Access",

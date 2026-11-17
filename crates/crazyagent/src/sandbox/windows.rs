@@ -224,7 +224,7 @@ pub fn agent_command<'a>(
     base: &[(&str, &OsStr)],
     harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
 ) -> Result<Command, SandboxError> {
-    let helper = existing_helper(&std::env::current_exe()?.with_file_name(HELPER_NAME))?;
+    let helper = existing_helper(&helper_beside_engine()?)?;
     if !clean_absolute(profile) || !profile.is_file() {
         return Err(invalid("boundary profile must be an existing plain file"));
     }
@@ -254,10 +254,17 @@ pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, Sandbox
 /// hold account sign-ins, is reachable by its own container only. Input: the policy.
 /// Output: a name the helper's container check accepts.
 pub fn container_name(sandbox: &ProjectSandbox) -> String {
+    container_for(sandbox.project_root(), sandbox.agent_home())
+}
+
+/// The AppContainer name [`container_name`] gives a policy with this project folder and agent
+/// home, for a release whose folders are already gone (V243-WIN-CHECK-PROFILE-BIND).
+/// Inputs: the project folder and the agent's home. Output: the container name.
+pub(crate) fn container_for(project_root: &Path, agent_home: &Path) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(sandbox.project_root().as_os_str().as_encoded_bytes());
+    hasher.update(project_root.as_os_str().as_encoded_bytes());
     hasher.update(b"\n");
-    hasher.update(sandbox.agent_home().as_os_str().as_encoded_bytes());
+    hasher.update(agent_home.as_os_str().as_encoded_bytes());
     let digest = hasher.finalize();
     let name: String = std::iter::once(CONTAINER_PREFIX.to_owned())
         .chain(
@@ -383,6 +390,12 @@ pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
     fs::create_dir_all(&grants)?;
     assert!(grants.is_dir());
     Ok(grants)
+}
+
+/// Where the boundary helper ships: beside the engine's own executable. Output: the path, or
+/// the error reading the executable's path.
+pub fn helper_beside_engine() -> std::io::Result<PathBuf> {
+    Ok(std::env::current_exe()?.with_file_name(HELPER_NAME))
 }
 
 /// The boundary helper at `helper`, when it is an existing absolute plain file. Output: the
@@ -677,6 +690,56 @@ mod tests {
                 assert_eq!(reason, APPCONTAINER_MISSING);
             }
             Err(other) => panic!("unexpected refusal {other}"),
+        }
+    }
+
+    /// V243-WIN-CONFINED-ASSERTS: a harness wrapped with a boundary profile, as the research
+    /// runner wraps its agent, starts at the boundary helper beside the engine with the
+    /// profile after `--profile`, inside the project. It needs the helper copied beside the
+    /// test binary, where the wrap looks, so it never passes without reaching the assert.
+    #[test]
+    fn a_profile_wrapped_harness_starts_at_the_helper_beside_the_engine() {
+        let folders = folders();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let profile = folders.profiles.join("agent.json");
+        fs::write(&profile, "{}").unwrap();
+        let beside = std::env::current_exe().unwrap().with_file_name(HELPER_NAME);
+        assert!(
+            beside.is_file(),
+            "copy crazyagent-win-boundary beside the test binary first: {}",
+            beside.display()
+        );
+        let mut harness = Command::new(cmd());
+        harness
+            .arg("/C")
+            .arg("exit 0")
+            .current_dir(&folders.project);
+        let command = ProjectSandbox::wrap(&sandbox, &profile, &harness).unwrap();
+        assert_eq!(command.get_program(), beside.as_os_str());
+        assert_eq!(command.get_args().nth(1), Some(profile.as_os_str()));
+        assert_eq!(command.get_current_dir(), Some(folders.project.as_path()));
+    }
+
+    /// The boundary program the confined asserts accept on Windows is only the helper beside
+    /// the engine: not the shell, not sandbox-exec and not a helper of the same name in
+    /// another folder.
+    #[test]
+    fn only_the_helper_beside_the_engine_is_the_boundary_program() {
+        let tests = std::env::current_exe().unwrap();
+        let beside = tests.with_file_name(HELPER_NAME);
+        let elsewhere = tests.parent().unwrap().with_file_name(HELPER_NAME);
+        assert_ne!(beside, elsewhere);
+        assert!(crate::sandbox::starts_at_boundary(beside.as_os_str()));
+        for program in [
+            cmd(),
+            elsewhere,
+            PathBuf::from(crate::sandbox::SANDBOX_EXEC),
+        ] {
+            assert!(
+                !crate::sandbox::starts_at_boundary(program.as_os_str()),
+                "{}",
+                program.display()
+            );
         }
     }
 
