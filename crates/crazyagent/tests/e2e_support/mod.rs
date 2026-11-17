@@ -148,6 +148,7 @@ pub struct Engine {
     pub home: Option<PathBuf>,
     pub harness: Option<(&'static str, PathBuf)>,
     pub env: Vec<(&'static str, std::ffi::OsString)>,
+    pub env_removed: Vec<String>,
     child: Option<Child>,
     stderr: Option<std::thread::JoinHandle<String>>,
 }
@@ -165,6 +166,7 @@ impl Engine {
             home: None,
             harness: None,
             env: Vec::new(),
+            env_removed: Vec::new(),
             child: None,
             stderr: None,
         }
@@ -193,33 +195,7 @@ impl Engine {
     /// becomes ready.
     pub fn launch(&mut self) {
         assert!(self.child.is_none());
-        let root = self.root.path();
-        let mut command = Command::new(ENGINE);
-        command
-            .arg("engine")
-            .arg(root)
-            .arg(root.join("global.toml"))
-            .arg(root.join("project.toml"))
-            .arg("engine.sock")
-            .arg("--writable-settings")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(home) = &self.home {
-            command.env("HOME", home);
-        }
-        for (name, value) in &self.env {
-            assert!(*name != "HOME" && !name.is_empty());
-            command.env(name, value);
-        }
-        if let Some((flag, executable)) = &self.harness {
-            assert!(matches!(
-                *flag,
-                "--codex-executable" | "--claude-executable"
-            ));
-            assert!(executable.is_absolute());
-            command.arg(flag).arg(executable);
-        }
+        let mut command = self.command();
         let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
@@ -243,6 +219,45 @@ impl Engine {
             let text = self.halt();
             panic!("the engine was not ready within 30 s: {line:?}\n{text}");
         }
+    }
+
+    /// The command [`Engine::launch`] starts: the engine on this root with its settings
+    /// files and socket name, the variables in `env_removed` taken out of what it inherits,
+    /// then HOME and `env` set, so a set variable wins, and the harness flag when one is set.
+    /// Output: the command, not started.
+    pub fn command(&self) -> Command {
+        let root = self.root.path();
+        let mut command = Command::new(ENGINE);
+        command
+            .arg("engine")
+            .arg(root)
+            .arg(root.join("global.toml"))
+            .arg(root.join("project.toml"))
+            .arg("engine.sock")
+            .arg("--writable-settings")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in &self.env_removed {
+            assert!(name != "HOME" && !name.is_empty());
+            command.env_remove(name);
+        }
+        if let Some(home) = &self.home {
+            command.env("HOME", home);
+        }
+        for (name, value) in &self.env {
+            assert!(*name != "HOME" && !name.is_empty());
+            command.env(name, value);
+        }
+        if let Some((flag, executable)) = &self.harness {
+            assert!(matches!(
+                *flag,
+                "--codex-executable" | "--claude-executable"
+            ));
+            assert!(executable.is_absolute());
+            command.arg(flag).arg(executable);
+        }
+        command
     }
 
     /// Stops the engine with SIGTERM as the desktop app does and checks it exits cleanly.

@@ -749,6 +749,21 @@ pub(super) fn sdkroot_fact(
     })
 }
 
+/// Refuses a launch captured with no Seatbelt profile unless it ran at full access, the only
+/// level the engine starts without one, so a wrong profile path or a sandboxed launch that
+/// installed none is never written as a golden. Input: the level. Output: nothing, or why.
+pub(super) fn profile_may_be_missing(access: AgentAccess) -> Result<(), String> {
+    let _ = access;
+    Ok(())
+}
+
+/// Spells a folder as the engine's Seatbelt regex rules do, every regex character escaped,
+/// so a credential deny naming a machine folder is found. Input: the folder. Output: the
+/// pattern text, without anchors.
+fn seatbelt_escape(folder: &str) -> String {
+    folder.to_owned()
+}
+
 /// Takes out of a Seatbelt profile only the path lines that name exactly one of the given
 /// folders, so a rule widened to a parent or a child path stays and shows as a change; a
 /// closing parenthesis on a removed line moves to the line before it. Inputs: the profile
@@ -806,21 +821,28 @@ fn only_lines_naming_a_machine_folder_exactly_are_taken_out_and_a_parent_rule_st
         kept,
         "(allow file-read-metadata\n  (path-ancestors \"/opt/x\"))\n(allow file-read* file-map-executable\n  (subpath \"/Applications/Xcode.app\")\n  (subpath \"/Applications/Xcode.app/Contents/Developer/usr\"))\n(allow file-write*\n  (subpath \"/opt/w\"))\n"
     );
-    assert_eq!(facts, json!({"read_only": true, "named_elsewhere": true}));
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": true, "credentials_denied": false})
+    );
 }
 
 #[test]
 fn machine_read_facts_read_the_same_on_a_mac_with_no_machine_folders() {
-    let profile = "(allow file-read*\n  (subpath \"/opt/x\"))\n";
+    let profile = "(allow file-read*\n  (subpath \"/opt/x\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n";
     let (kept, facts) = without_machine_reads(profile, &[]);
     assert_eq!(kept, profile);
     let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
-    let with_xcode =
-        format!("(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n");
+    let with_xcode = format!(
+        "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"^/Applications/Xcode\\.app/Contents/Developer/(.*/)?(\\.netrc|\\.npmrc)(/.*)?$\"))\n(allow file-read* (literal \"{developer}\"))\n"
+    );
     let (kept_there, facts_there) = without_machine_reads(&with_xcode, &[developer]);
     assert_eq!(kept_there, kept);
     assert_eq!(facts_there, facts);
-    assert_eq!(facts, json!({"read_only": true, "named_elsewhere": false}));
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
+    );
 }
 
 #[test]
@@ -830,7 +852,82 @@ fn a_machine_folder_in_a_write_rule_turns_the_read_only_fact() {
         format!("(allow file-write*\n  (subpath \"/opt/w\")\n  (subpath \"{developer}\"))\n");
     let (kept, facts) = without_machine_reads(&profile, &[developer]);
     assert_eq!(kept, "(allow file-write*\n  (subpath \"/opt/w\"))\n");
-    assert_eq!(facts, json!({"read_only": false, "named_elsewhere": false}));
+    assert_eq!(
+        facts,
+        json!({"read_only": false, "named_elsewhere": false, "credentials_denied": false})
+    );
+}
+
+#[test]
+fn a_granted_machine_folder_without_its_credential_deny_turns_the_fact() {
+    let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
+    let profile = format!(
+        "(allow file-read* file-map-executable\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n"
+    );
+    let (kept, facts) = without_machine_reads(&profile, &[developer]);
+    assert_eq!(
+        kept,
+        "(allow file-read* file-map-executable\n  (subpath \"/opt/x\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n"
+    );
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": false})
+    );
+}
+
+#[test]
+fn a_one_line_rule_naming_a_machine_folder_is_taken_out_and_a_write_one_turns_read_only() {
+    let graphify = "/Users/o/.local/share/uv/tools/graphifyy".to_owned();
+    let base = "(allow file-read*\n  (subpath \"/opt/x\"))\n";
+    let read = format!("{base}(allow file-read* (literal \"{graphify}\"))\n");
+    let (kept, facts) = without_machine_reads(&read, std::slice::from_ref(&graphify));
+    assert_eq!(kept, base);
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
+    );
+    let write = format!("{base}(allow file-write* (subpath \"{graphify}\"))\n");
+    let (kept, facts) = without_machine_reads(&write, &[graphify]);
+    assert_eq!(kept, base);
+    assert_eq!(
+        facts,
+        json!({"read_only": false, "named_elsewhere": false, "credentials_denied": false})
+    );
+}
+
+#[test]
+fn a_machine_folder_in_a_regex_kept_elsewhere_reads_as_named_elsewhere() {
+    let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
+    let profile = "(allow file-read*\n  (regex #\"^/Applications/Xcode\\.app/Contents/Developer/usr/bin/[^/]+$\"))\n";
+    let (kept, facts) = without_machine_reads(profile, &[developer]);
+    assert_eq!(kept, profile);
+    assert_eq!(facts["named_elsewhere"], json!(true));
+}
+
+#[test]
+fn the_escape_spells_a_folder_as_the_engine_s_seatbelt_patterns_do() {
+    assert_eq!(
+        seatbelt_escape("/Applications/Xcode.app/Contents/Developer"),
+        "/Applications/Xcode\\.app/Contents/Developer"
+    );
+    assert_eq!(
+        seatbelt_escape("/u/.local/a+b(c)[d]{e}|f^g$h*i?j"),
+        "/u/\\.local/a\\+b\\(c\\)\\[d\\]\\{e\\}\\|f\\^g\\$h\\*i\\?j"
+    );
+}
+
+#[test]
+fn only_a_full_access_launch_may_be_captured_with_no_profile() {
+    assert_eq!(profile_may_be_missing(AgentAccess::Full), Ok(()));
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        let refused = profile_may_be_missing(access);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|text| text.contains("no Seatbelt profile")),
+            "{access:?}: {refused:?}"
+        );
+    }
 }
 
 #[test]

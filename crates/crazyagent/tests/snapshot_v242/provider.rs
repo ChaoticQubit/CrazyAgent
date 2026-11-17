@@ -382,6 +382,7 @@ pub(super) fn engine(
     let mut engine = Engine::new("ca-snap-p2-");
     engine.home = Some(home);
     engine.harness = harness;
+    super::hermetic(&mut engine);
     engine.launch();
     Ok(engine)
 }

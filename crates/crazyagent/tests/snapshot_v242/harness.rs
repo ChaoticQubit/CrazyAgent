@@ -6,7 +6,8 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView};
+use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView, ToolchainView};
+use crazyagent::sandbox::toolchains::Toolchain;
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -876,6 +877,18 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
     Ok(captured)
 }
 
+/// The toolchain rows of a policy view as they read on any Mac: each row's family, label,
+/// use and choice, and in place of whether this Mac has the family installed, whether the
+/// row says so as the engine's own check finds it. Inputs: the rows and that check.
+/// Output: the rows as JSON, in view order.
+pub(super) fn toolchain_rows(
+    rows: &[ToolchainView],
+    installed: impl Fn(Toolchain) -> bool,
+) -> Value {
+    let _ = (rows, installed(Toolchain::Rust));
+    Value::Null
+}
+
 fn agent_policy_sandboxed(scratch: &Path) -> Result<Value, String> {
     agent_policy(scratch, AgentAccess::Sandboxed)
 }
@@ -886,4 +899,47 @@ fn agent_policy_own_branch(scratch: &Path) -> Result<Value, String> {
 
 fn agent_policy_full(scratch: &Path) -> Result<Value, String> {
     agent_policy(scratch, AgentAccess::Full)
+}
+
+#[test]
+fn toolchain_rows_read_the_same_on_a_mac_with_and_without_the_toolchains() {
+    let row = |toolchain: Toolchain, installed: bool, allowed: bool| ToolchainView {
+        toolchain,
+        label: toolchain.label().to_owned(),
+        installed,
+        used: false,
+        allowed,
+    };
+    let here = [
+        row(Toolchain::Rust, true, true),
+        row(Toolchain::Node, true, false),
+        row(Toolchain::Python, false, true),
+    ];
+    let there = [
+        row(Toolchain::Rust, false, true),
+        row(Toolchain::Node, false, false),
+        row(Toolchain::Python, true, true),
+    ];
+    let read_here = toolchain_rows(&here, |toolchain| toolchain != Toolchain::Python);
+    let read_there = toolchain_rows(&there, |toolchain| toolchain == Toolchain::Python);
+    assert_eq!(read_here, read_there);
+    let fact = |toolchain: Toolchain, allowed: bool| {
+        json!({
+            "toolchain": toolchain,
+            "label": toolchain.label(),
+            "used": false,
+            "allowed": allowed,
+            "installed_as_this_mac_has_it": true,
+        })
+    };
+    assert_eq!(
+        read_here,
+        json!([
+            fact(Toolchain::Rust, true),
+            fact(Toolchain::Node, false),
+            fact(Toolchain::Python, true),
+        ])
+    );
+    let misread = toolchain_rows(&there, |_| true);
+    assert_eq!(misread[0]["installed_as_this_mac_has_it"], json!(false));
 }
