@@ -86,6 +86,24 @@ test("#383 code F1 r2 (leader 16:30, B): a failed folder read makes Move and Cop
   assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: read })), /couldn(&#x27;|')t read this folder/);
 });
 
+test("V243-MOVE-SIZE-PROBLEM-DESKTOP: a folder read the engine could not finish, as the bridge sends it, makes Move and Copy download everything, and the question says so", () => {
+  for (const code of ["folder_size_timeout", "folder_size_too_large", "folder_size_unreadable"]) {
+    const unfinished = { kind: "ok", value: { bytes: null, size_problem: code, placeholders: 0, github: null, worktrees: 0, worktree_paths: [],
+      movable: true, git_link: "none", copyable: true, git: true, same_volume: true } };
+    assert.deepEqual(view.moveOverrides([], false, unfinished), ["download_everything"], code);
+    assert.deepEqual(view.moveOverrides(["worktrees"], false, unfinished), ["worktrees", "download_everything"], code);
+    for (const way of ["move", "copy"]) {
+      const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI",
+        home: "/Users/o/CrazyAgent", way, size: unfinished, busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle }));
+      assert.match(page, /CrazyAgent couldn(&#x27;|')t read this folder\. Anything in it only in iCloud is downloaded first/, `${code} ${way}`);
+      assert.doesNotMatch(page, /role="switch"/, `${code} ${way}`);
+    }
+  }
+  const measured = { kind: "ok", value: { bytes: 2048, placeholders: 0, github: null, worktrees: 0, worktree_paths: [], movable: true,
+    git_link: "none", copyable: true, git: true, same_volume: true } };
+  assert.deepEqual(view.moveOverrides([], false, measured), []);
+});
+
 test("the move question says the team stops first and work not landed follows the move", () => {
   const dialog = (patch = {}) => renderToStaticMarkup(createElement(view.MoveHomeDialog, {
     open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "move",

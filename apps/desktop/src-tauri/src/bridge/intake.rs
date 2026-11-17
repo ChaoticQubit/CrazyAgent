@@ -1386,6 +1386,46 @@ mod tests {
         );
     }
 
+    /// V243-MOVE-SIZE-PROBLEM-DESKTOP: a folder read the engine could not finish reaches the
+    /// window as an ok read with no bytes, its size problem, no placeholders and no skipped
+    /// list, the shape the move question's rows in move-home.test.mjs are written against.
+    #[test]
+    fn a_size_problem_reaches_the_window_as_a_read_with_no_bytes_and_no_left_folders() {
+        for code in SIZE_PROBLEMS {
+            let read = FolderSize {
+                bytes: None,
+                size_problem: Some(code),
+                placeholders: 0,
+                skipped: Vec::new(),
+                skipped_more: None,
+                github: None,
+                worktrees: 0,
+                worktree_paths: Vec::new(),
+                movable: true,
+                git_link: crazyagent::projects_home::GitLink::None,
+                copyable: true,
+                git: true,
+                same_volume: Some(true),
+            };
+            assert_eq!(
+                serde_json::to_value(&read).unwrap(),
+                serde_json::json!({
+                    "bytes": null,
+                    "size_problem": code,
+                    "placeholders": 0,
+                    "github": null,
+                    "worktrees": 0,
+                    "worktree_paths": [],
+                    "movable": true,
+                    "git_link": "none",
+                    "copyable": true,
+                    "git": true,
+                    "same_volume": true
+                })
+            );
+        }
+    }
+
     #[test]
     fn engine_codes_map_to_known_plain_codes_only() {
         assert_eq!(
