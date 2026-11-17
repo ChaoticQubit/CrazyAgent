@@ -320,12 +320,15 @@ pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Refuses a draft out of the log's bounds: a body over [`BODY_BYTES_MAX`], a kind that
-/// is not 1 to [`KIND_BYTES_MAX`] ASCII letters and digits, schema 0, or a time past the
-/// largest `i64`. Input: the draft. Output: Ok, or the refusal.
+/// Refuses a draft out of the log's bounds: a body over [`BODY_BYTES_MAX`] or equal to
+/// [`TOMBSTONE`], a kind that is not 1 to [`KIND_BYTES_MAX`] ASCII letters and digits,
+/// schema 0, or a time past the largest `i64`. Input: the draft. Output: Ok, or the refusal.
 fn check(draft: &Draft<'_>) -> Result<(), EngineError> {
     if draft.body.len() > BODY_BYTES_MAX {
         return Err(error("state_log_body_bounds"));
+    }
+    if draft.body == TOMBSTONE {
+        return Err(error("state_log_body_reserved"));
     }
     if draft.kind.is_empty()
         || draft.kind.len() > KIND_BYTES_MAX
