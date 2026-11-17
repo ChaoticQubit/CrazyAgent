@@ -1,8 +1,8 @@
 use super::Scenario;
 use super::e2e_support::{ENGINE, Owner};
-use super::workflow::{attached, engine, private_folder, seeded};
+use super::workflow::{attached, engine, private_folder, recorded, seeded};
 use crazyagent::engine::Client;
-use crazyagent::engine::owner::{OwnerMutation, OwnerRead, OwnerResponse};
+use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
 use crazyagent::protocol::{
     BaselineId, ClientId, Command, ConfigId, CredentialRef, Cursor, EnvironmentId,
     ExecutionContext, PROTOCOL_VERSION, ProjectId, RequestId, SnapshotId, TaskId, WireRequest,
@@ -180,15 +180,7 @@ async fn owner_change(owner: &mut Owner, mutation: OwnerMutation) -> Result<Valu
     if let Err(error) = owner.controller.begin_mutation(mutation, generation) {
         return Ok(json!({ "refused": error.0 }));
     }
-    let response = owner.controller.send_pending().await;
-    let recorded = match response {
-        Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
-            serde_json::to_value(&operation.result).map(|result| json!({ "result": result }))
-        }
-        Ok(other) => serde_json::to_value(&other).map(|response| json!({ "response": response })),
-        Err(error) => return Ok(json!({ "refused": error.0 })),
-    };
-    recorded.map_err(|error| error.to_string())
+    recorded(owner.controller.send_pending().await)
 }
 
 /// The engine's config id, which a pinned task must name. Input: the owner.
@@ -451,8 +443,7 @@ fn report_files(scratch: &Path) -> Result<(String, String), String> {
 }
 
 /// Admits the engine's own report for one required capability with the given source and
-/// profile, and records whether each is the report's, since the runner masks the source.
-/// Inputs: the scratch folder, the source revision and the profile.
+/// profile. Inputs: the scratch folder, the source revision and the profile.
 /// Output: the command's result.
 fn admit(scratch: &Path, source: &str, profile: &str) -> Result<Value, String> {
     let (report, evidence) = report_files(scratch)?;
@@ -469,10 +460,7 @@ fn admit(scratch: &Path, source: &str, profile: &str) -> Result<Value, String> {
         "--require",
         "confinement",
     ];
-    let mut ran = qualification(scratch, &arguments)?;
-    ran["source_is_reports"] = json!(source == SOURCE);
-    ran["profile_is_reports"] = json!(profile == PROFILE);
-    Ok(ran)
+    qualification(scratch, &arguments)
 }
 
 /// Admission of the engine's own report, where no capability is proven.

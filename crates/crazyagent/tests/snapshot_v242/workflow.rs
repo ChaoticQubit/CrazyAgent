@@ -1,7 +1,7 @@
 use super::Scenario;
 use super::e2e_support::{Engine, Owner, profile};
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::OwnerResult;
+use crazyagent::engine::owner::{OwnerResponse, OwnerResult};
 use crazyagent::instruction_check::{Finding, FindingKind};
 use crazyagent::instruction_cleanup::{Scope, prompt};
 use crazyagent::protocol::ProjectId;
@@ -102,6 +102,21 @@ pub(super) fn applied(step: &str, result: OwnerResult) -> Result<(), String> {
         OwnerResult::Applied => Ok(()),
         other => Err(format!("{step}: {other:?}")),
     }
+}
+
+/// Records one owner change's reply: the result alone when the engine applied or committed
+/// it, since the operation's provenance and revision differ per run, else the whole response,
+/// or the plain code it was refused with. Input: the reply.
+/// Output: `{"result": ..}`, `{"response": ..}` or `{"refused": code}`.
+pub(super) fn recorded(answer: Result<OwnerResponse, EngineError>) -> Result<Value, String> {
+    let recorded = match answer {
+        Ok(OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }) => {
+            serde_json::to_value(&operation.result).map(|result| json!({ "result": result }))
+        }
+        Ok(other) => serde_json::to_value(&other).map(|response| json!({ "response": response })),
+        Err(error) => return Ok(json!({ "refused": error.0 })),
+    };
+    recorded.map_err(|error| error.to_string())
 }
 
 /// Records one engine reply whole: the value it gave, or the plain code it refused with.

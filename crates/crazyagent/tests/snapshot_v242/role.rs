@@ -1,6 +1,6 @@
 use super::Scenario;
 use super::e2e_support::Owner;
-use super::workflow::{attached, engine, reply, seeded};
+use super::workflow::{attached, engine, recorded, reply, seeded};
 use crazyagent::coord::settings::{CoordSettings, RoleSkills};
 use crazyagent::coord::tool_switches::BUILTIN_TOOLS;
 use crazyagent::launch_context::team_tools_section;
@@ -71,8 +71,9 @@ async fn role_skills(owner: &mut Owner, project: &ProjectId) -> Result<Value, St
 }
 
 /// Saves one role skills choice the way the Team screen does: the coordination settings it
-/// read with only the role skills replaced. Inputs: the owner, the project and the choice.
-/// Output: the engine's reply, or the plain code it refused with.
+/// read with only the role skills replaced; the client checks the settings before sending.
+/// Inputs: the owner, the project and the choice.
+/// Output: the change's result, or the plain code the client or the engine refused with.
 async fn save_role_skills(
     owner: &mut Owner,
     project: &ProjectId,
@@ -85,7 +86,7 @@ async fn save_role_skills(
         settings,
     };
     let generation = owner.next();
-    reply(owner.controller.team_action(action, generation).await)
+    recorded(owner.controller.team_action(action, generation).await)
 }
 
 /// The skills each team role of a new project gets before the owner picks any.
@@ -119,9 +120,9 @@ fn skills_chosen_per_role(scratch: &Path) -> Result<Value, String> {
     })
 }
 
-/// Two role skills choices the engine refuses, a name that is not a skill folder name and a
-/// name chosen twice for one role, and the role skills read after them, unchanged.
-/// Input: the scratch folder. Output: both replies and the read.
+/// Two role skills choices the client refuses before sending, a name that is not a skill
+/// folder name and a name chosen twice for one role, and the role skills read after them,
+/// unchanged. Input: the scratch folder. Output: both replies and the read.
 fn skills_refused(scratch: &Path) -> Result<Value, String> {
     on_project(scratch, |mut owner, project| async move {
         let unsafe_name = RoleSkills {
