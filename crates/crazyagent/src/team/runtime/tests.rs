@@ -28191,7 +28191,6 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
-    use crate::team::StoppedBy;
     const PASSES: u64 = 40;
     let fixture = Fixture::new(1);
     let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
