@@ -2222,44 +2222,6 @@ fn a_harness_file_trusted_refuses_is_never_asked_its_version_on_macos() {
     );
 }
 
-/// A folder for a row's owner entry outside every temp folder and every folder agents can
-/// write: in `~/Library/Caches`, since this user's `getconf` cache folder lies in
-/// `/private/var/folders`, a temp folder, and the checkout and its build sit below a project
-/// folder. A HOME without `Library/Caches`, as the gate's own HOME is, gets it private, as
-/// macOS makes it for every user. A HOME inside a project, below a `.crazyagent` folder,
-/// leaves no such folder, so the rows stop here naming it rather than on a refusal they did
-/// not test. Input: the folder name's prefix. Output: the folder, removed when dropped.
-#[cfg(target_os = "macos")]
-fn outside_temp(prefix: &str) -> tempfile::TempDir {
-    use std::os::unix::fs::DirBuilderExt;
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    let caches = home.join("Library").join("Caches");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&caches)
-        .unwrap();
-    let caches = caches.canonicalize().unwrap();
-    let folder = tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir_in(caches)
-        .unwrap();
-    let place = folder.path().canonicalize().unwrap();
-    assert!(
-        !crate::tools::temp_roots()
-            .iter()
-            .any(|temp| place.starts_with(temp)),
-        "HOME lies in a temp folder: {}",
-        place.display()
-    );
-    assert!(
-        !crate::tools::Places::from_environment(None).agent_writable(&place),
-        "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
-        place.display()
-    );
-    folder
-}
-
 /// security-audit vid 1 (NEXT-02:50 step 1), on macOS: an owner entry outside every temp
 /// folder that leads to a harness file in the temp folder is refused on the engine's places
 /// as one in a temp folder, is never run for its version, and what it needs names that
@@ -2280,7 +2242,7 @@ fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
             ran.display()
         ),
     );
-    let outside = outside_temp("vid1-temp-");
+    let outside = crate::harnesses::finding::outside_temp("vid1-temp-");
     let link = outside.path().join("bin/codex");
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -2736,7 +2698,7 @@ fn a_command_is_refused_when_a_search_folder_others_or_agents_can_write_exists()
 fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos() {
     let machine = Machine::new();
     let at = machine.root.path();
-    let outside = outside_temp("vid1-hop-");
+    let outside = crate::harnesses::finding::outside_temp("vid1-hop-");
     let real = outside.path().join("real/codex");
     executable(&real, "#!/bin/sh\n");
     let middle = at.join("tools/codex");
