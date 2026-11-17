@@ -219,7 +219,7 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
     if !valid {
         return Err(InstallError("setup_pin_invalid"));
     }
-    let installer = PinnedInstaller::with_paths(engine_root, Vec::new());
+    let installer = installer(engine_root);
     let setup = installer.setup_folder().to_path_buf();
     private_folder(&setup)?;
     let staging = staging_folder(&setup, "node")?;
@@ -260,6 +260,12 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
     })();
     let _ = std::fs::remove_dir_all(&staging);
     result
+}
+
+/// The installer the Node install runs its programs through, searching `setup/bin` first.
+/// Input: the engine root. Output: the installer.
+fn installer(engine_root: &Path) -> PinnedInstaller {
+    PinnedInstaller::with_paths(engine_root, Vec::new())
 }
 
 /// Checks an unpacked tree before it is kept: only plain folders, files and links this user

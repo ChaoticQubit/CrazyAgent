@@ -598,3 +598,27 @@ fn every_mac_and_linux_target_pins_the_official_node_lts_archive_and_no_other_ta
     assert_eq!(NODE_VERSION, "26.13.1");
     assert!(crate::setup::known_reason("setup_archive_unsafe").is_some());
 }
+
+/// GNU tar starts `gzip` from its PATH to unpack a `.tar.gz`, so on Linux every pinned Node
+/// install failed (farm R4). The PATH the install gives its programs keeps `setup/bin` first
+/// and names a folder that holds an executable gzip.
+#[test]
+fn the_node_install_runs_its_programs_with_gzip_on_their_path() {
+    let root = root();
+    let env = installer(root.path()).env();
+    let path = env
+        .iter()
+        .find(|(name, _)| *name == "PATH")
+        .map(|(_, value)| value.clone())
+        .unwrap();
+    let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    assert_eq!(
+        folders.first(),
+        Some(&root.path().join("setup").join("bin"))
+    );
+    let gzip = |folder: &PathBuf| {
+        std::fs::metadata(folder.join("gzip"))
+            .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+    };
+    assert!(folders.iter().any(gzip), "{path:?}");
+}
