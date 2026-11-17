@@ -117,15 +117,19 @@ test("a parked session resumes from the Sessions list after the owner adds an ac
           assert.ok(Date.now() < deadline, "the Sessions button never became usable");
         }
         await me.follow(TOGGLE);
+        const clicked = log.trail.length;
         await me.follow(RESUME);
+        const reply = (cmd) => log.trail.slice(clicked).filter((entry) => entry.cmd === cmd).at(-1)?.answer ?? null;
         for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
           const text = await me.seen();
           if (text.includes(REFUSED)) {
             await me.capture("switch-back-refused");
-            assert.fail(`the owner's switch back was refused: ${text.slice(text.indexOf("This session"), text.indexOf(REFUSED) + REFUSED.length + 40)}`);
+            assert.fail(`the owner's switch back was refused: ${text.slice(text.indexOf("This session"), text.indexOf(REFUSED) + REFUSED.length + 40)} (engine: ${JSON.stringify(reply("desktop_resume_master_session"))})`);
           }
-          if (await live() === first) break;
-          assert.ok(Date.now() < deadline, "the first session never became live again");
+          const resumed = reply("desktop_resume_master_session");
+          const shown = reply("desktop_master_state")?.value?.session?.session_id ?? null;
+          if (resumed?.value?.outcome === "applied" && shown === first) break;
+          assert.ok(Date.now() < deadline, `the first session never became live again: resume ${JSON.stringify(resumed)}, live ${JSON.stringify(shown)}`);
         }
         await me.capture("switched-back");
         assert.equal(await page.evaluate("document.visibilityState"), "visible", "the page stayed visible");
