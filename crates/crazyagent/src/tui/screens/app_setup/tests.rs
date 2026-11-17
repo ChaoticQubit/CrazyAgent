@@ -795,6 +795,15 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     assert!(!bar(&rows).contains("g Sign out"));
 }
 
+#[cfg(unix)]
+const WORK: &str = "/Users/owner/Work";
+#[cfg(not(unix))]
+const WORK: &str = r"C:\Users\owner\Work";
+#[cfg(unix)]
+const BIG: &str = "/Volumes/Big/Projects";
+#[cfg(not(unix))]
+const BIG: &str = r"D:\Projects";
+
 #[test]
 fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
     let mut shell = settings(120, 36);
@@ -809,7 +818,7 @@ fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
     );
     assert!(jobs(&mut shell).is_empty());
     shell.key(Key::Ctrl('u'));
-    typed(&mut shell, "/Users/owner/Work");
+    typed(&mut shell, WORK);
     shell.key(Key::Enter);
     let sent = jobs(&mut shell);
     let [AppSetupJob::FolderSize { path }] = sent.as_slice() else {
@@ -818,7 +827,7 @@ fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
     assert_eq!(path, "/Users/owner/Projects");
     find(
         &render(&mut shell, 120, 36),
-        "Use /Users/owner/Work as the projects home?",
+        &format!("Use {WORK} as the projects home?"),
     );
     shell.arrive(event(AppSetupEvent::FolderSize(
         "/Users/owner/Elsewhere".into(),
@@ -847,19 +856,16 @@ fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
     else {
         panic!("one home change required")
     };
-    assert_eq!(
-        (path.as_str(), *move_projects),
-        ("/Users/owner/Work", false)
-    );
+    assert_eq!((path.as_str(), *move_projects), (WORK, false));
     shell.arrive(event(AppSetupEvent::HomeSet(Ok(()))));
     assert_eq!(
         lead(&shell),
-        "The projects home is now /Users/owner/Work. Nothing was moved."
+        format!("The projects home is now {WORK}. Nothing was moved.")
     );
 
     shell.key(Key::Char('h'));
     shell.key(Key::Ctrl('u'));
-    typed(&mut shell, "/Volumes/Big/Projects");
+    typed(&mut shell, BIG);
     shell.key(Key::Enter);
     jobs(&mut shell);
     shell.key(Key::Char('m'));
@@ -1906,9 +1912,9 @@ fn the_home_choice_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
         let mut shell = settings(width, height);
         shell.key(Key::Char('h'));
         shell.key(Key::Ctrl('u'));
-        typed(&mut shell, "/Users/owner/Work");
+        typed(&mut shell, WORK);
         shell.key(Key::Enter);
-        let first = "Use /Users/owner/Work as the projects home?";
+        let first = &format!("Use {WORK} as the projects home?");
         let last = "Measuring the projects in the current home";
         ask_in_body(&mut shell, width, height, first, last);
     }
