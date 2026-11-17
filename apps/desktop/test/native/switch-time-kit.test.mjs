@@ -68,7 +68,7 @@ test("a stamp sample is the first show at or after the click", () => {
   assert.throws(() => stampSample(1000, [NaN]), /show stamp/);
 });
 
-const TARGET = { scope: ".xterm", rows: ".xterm-rows > div", text: "ready" };
+const TARGET = { scope: ".tg-terminal", rows: ".tg-terminal-host", text: "ready" };
 const REQUEST = { click: "a#tab-conversation", target: TARGET, limit_ms: 10000 };
 const FRAME_MS = 16;
 
@@ -82,7 +82,7 @@ function page(state, inPage = inPageSwitch) {
   const clock = { now: 0, frames: [], tasks: [], timers: [], clicks: 0, frame: 0 };
   const visible = () => state.shownFromFrame !== null && clock.frame >= state.shownFromFrame;
   const row = {
-    textContent: "Codex stand-in ready",
+    readScreen: () => ["", "Codex stand-in ready", ""],
     checkVisibility: () => state.visibility ?? visible(),
     getBoundingClientRect: () => (state.laidOut === false ? { left: 0, top: 0, width: 0, height: 0 } : { left: 10, top: 20, width: 600, height: 17 }),
   };
