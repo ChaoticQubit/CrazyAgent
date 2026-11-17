@@ -294,3 +294,41 @@ async fn past_its_bound_a_watch_is_refused_busy_until_one_ends() {
             .is_ok()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_revoked_while_its_watch_waits_is_told_nothing() {
+    let owner = super::super::usage_tests::Usage::start().await;
+    let first = owner
+        .client
+        .watch(Cursor::new(0), None, 1_000)
+        .await
+        .unwrap();
+    let WatchReply::Changed { cursor, mark, .. } = first else {
+        panic!("a first watch returns at once, got {first:?}");
+    };
+    let client = OwnerClient::attach(
+        &owner.client.root.path,
+        OwnerClientKind::Tui,
+        Duration::from_secs(20),
+    )
+    .unwrap();
+    let watch = tokio::spawn(async move { client.watch(cursor, Some(mark), 10_000).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!watch.is_finished(), "nothing committed yet");
+    let runtime = owner.runtime();
+    runtime
+        .control(OwnerControl {
+            operation_id: RequestId::new("revoke-watch").unwrap(),
+            target: OwnerClientKind::Tui,
+            expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
+            decision: OwnerDecision::Revoke,
+        })
+        .await
+        .unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), watch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, Err(failure("owner_grant_stale_or_revoked")));
+    owner.stop().await;
+}
