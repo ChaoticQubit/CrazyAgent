@@ -114,10 +114,12 @@ const LEAD_SHELL: &str = "/bin/sh";
 const AGENT_TAG: &str = "@crazyagent";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
-const VERSION_MIN: (u32, u32) = (3, 2);
-const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
+const VERSION_MIN: (u32, u32) = (3, 7);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
-const CAPTURE_TRIMMED: &str = "-p -e";
+/// The most bytes one `send-keys -H` command types. tmux parses a command's arguments in time
+/// that grows faster than their count and answers nothing else meanwhile: 4096 hex keys held
+/// the server about 74 ms, 256 under 1 ms (fix11 NOTE-1032).
+const SEND_KEYS_BYTES_MAX: usize = 256;
 const REPLY_TIME: Duration = Duration::from_secs(10);
 /// Ends every format the engine has tmux expand. tmux stops expanding a format that has run
 /// for 100 ms of wall time, which a server stalled on a loaded machine reaches, and answers
@@ -181,7 +183,6 @@ struct Control {
     child: Mutex<Option<Child>>,
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<State>>,
-    capture: &'static str,
     serial: u64,
     #[cfg(test)]
     listed: std::sync::atomic::AtomicUsize,
@@ -255,9 +256,10 @@ const RAN_MAX: usize = 4;
 static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 
 /// Whether a tmux runs: `-V` reports a version within the bound and that version is one the
-/// terminal supports (3.2 or later). A read that runs out of time counts as running, since a
-/// new file can wait behind the system's first-run checks; the version read setup does next
-/// reports it. Takes the tmux. Returns the answer.
+/// terminal supports (3.7 or later, the first with the bracketed-paste flag the attach
+/// reads). A read that runs out of time counts as running, since a new file can wait behind
+/// the system's first-run checks; the version read setup does next reports it. Takes the
+/// tmux. Returns the answer.
 pub fn runs(tmux: &crate::tools::Resolved) -> bool {
     runs_within(tmux, VERSION_READ_TIME)
 }
@@ -643,11 +645,10 @@ impl Tmux {
             ..State::default()
         }));
         let reader = state.clone();
-        let mut control = Control {
+        let control = Control {
             child: Mutex::new(Some(child)),
             input: Mutex::new(Some(input)),
             state,
-            capture: CAPTURE_TRIMMED,
             serial: CONTROL_SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             #[cfg(test)]
             listed: std::sync::atomic::AtomicUsize::new(0),
@@ -663,13 +664,13 @@ impl Tmux {
         let version = control
             .ask(&format!("display-message -p '#{{version}}{FORMAT_END}'"))
             .map_err(|_| failure("terminal_unavailable"))?;
-        let Some(capture) = version
+        if version
             .first()
-            .and_then(|line| capture_flags(&String::from_utf8_lossy(line)))
-        else {
+            .and_then(|line| supported(&String::from_utf8_lossy(line)))
+            != Some(true)
+        {
             return Err(failure("terminal_tmux_unsupported"));
-        };
-        control.capture = capture;
+        }
         if let Some(pin) = &self.pin
             && let Err(refused) = pinned(&control, pin)
         {
@@ -839,20 +840,17 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys. Takes the control client, the target and
-    /// the bytes. Returns once tmux took them, or `terminal_input_bounds`.
+    /// Types bytes into one tmux target as hex keys, one command after another, in order.
+    /// Takes the control client, the target and the bytes. Returns once tmux took them all,
+    /// or `terminal_input_bounds`.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
         }
-        if bytes.is_empty() {
-            return Ok(());
+        for line in send_keys_lines(target, bytes) {
+            control.run(&line)?;
         }
-        let mut line = format!("send-keys -t {target} -H");
-        for byte in bytes {
-            let _ = write!(line, " {byte:02x}");
-        }
-        control.run(&line).map(drop)
+        Ok(())
     }
 
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
@@ -1099,23 +1097,17 @@ fn release(version: &str) -> Option<(u32, u32)> {
     Some((major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?))
 }
 
-fn supported(version: &str) -> Option<bool> {
+/// Whether agent terminals support a tmux version, the second word of `tmux -V`: 3.7 or
+/// later ([`VERSION_MIN`]). Input: the version. Output: the answer, or none when it is not
+/// a release number.
+pub(crate) fn supported(version: &str) -> Option<bool> {
     release(version).map(|found| found >= VERSION_MIN)
 }
 
-/// Picks the `capture-pane` flags for the screen sent on attach. From tmux 3.4 the screen
-/// keeps every cell the program wrote, trailing spaces included, and no unused cell; older
-/// tmux trims trailing spaces and the cursor position still shows where the program is.
-/// Takes the tmux version report. Returns the flags, or none for an unsupported tmux.
-fn capture_flags(version: &str) -> Option<&'static str> {
-    if !supported(version)? {
-        return None;
-    }
-    Some(if release(version)? >= CAPTURE_WRITTEN_MIN {
-        CAPTURE_WRITTEN
-    } else {
-        CAPTURE_TRIMMED
-    })
+/// The oldest tmux version agent terminals support, as setup names it. Output: the
+/// version, such as "3.7".
+pub(crate) fn version_needed() -> String {
+    format!("{}.{}", VERSION_MIN.0, VERSION_MIN.1)
 }
 
 fn quote(text: &str) -> String {
@@ -2127,8 +2119,7 @@ impl Tmux {
             format!("-{history}")
         };
         let asked = format!(
-            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
-            control.capture
+            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {CAPTURE_WRITTEN} -S {start} -t {target}"
         );
         let until = Instant::now() + REPLY_TIME;
         loop {
@@ -2473,6 +2464,28 @@ impl Host for Tmux {
     fn renew(&self, until: SystemTime) -> Result<(), HostError> {
         renew_socket(&self.socket, until)
     }
+}
+
+const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
+const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
+/// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
+/// bytes, so none cuts a character or an escape sequence, and none for no bytes.
+fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
+    let lines: Vec<String> = super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
+        .into_iter()
+        .map(|run| {
+            let mut line = format!("send-keys -t {target} -H");
+            for byte in run {
+                let _ = write!(line, " {byte:02x}");
+            }
+            line
+        })
+        .collect();
+    assert!(lines.len() >= bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+    assert!(lines.len() <= super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
+    lines
 }
 
 mod servers;

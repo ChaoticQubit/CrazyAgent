@@ -10,10 +10,41 @@ const job = (state, extra = {}) => ({ id: "add-1", kind: "add", source: SOURCE, 
 const downloading = (done, total) => ({ state: "downloading", progress: { done, total } });
 const copying = (copied, checked = 0) => ({ state: "copying", copied, checked });
 const failed = (code, phase) => ({ state: "failed", code, phase });
+const WAITING = { state: "waiting", behind: "garden" };
+
+test("V243-ICLOUD-MOVE-ZERO: the download line says macOS downloads, with files and bytes landed", () => {
+  const landing = (done, total, bytes_done, bytes_total) => ({ state: "downloading", progress: { done, total, bytes_done, bytes_total } });
+  assert.equal(intake.jobLine(job(landing(556, 127940, 31 * 1024 * 1024, 2 * 1024 ** 3))), "macOS is downloading shop: 556 of 127940 files (31 MB of 2 GB)");
+  assert.equal(intake.jobLine(job(landing(1, 2, 0, 0))), "macOS is downloading shop: 1 of 2 files");
+  assert.equal(intake.jobLine(job(landing(1, 2, 9, 4))), "macOS is downloading shop: 1 of 2 files", "bytes past their total are left out");
+});
+
+test("V243-ICLOUD-MOVE-ZERO: a done add says which rebuildable folders it left in iCloud and where", () => {
+  const left = [{ path: "node_modules", files: 57108 }, { path: ".venv", files: null }];
+  assert.equal(intake.jobLine(job({ state: "done" }, { left })),
+    `shop is in your projects folder. Set it up from Home. node_modules and .venv stayed in ${SOURCE}; reinstall them in the project.`);
+  assert.equal(intake.jobLine(job({ state: "done" }, { left: left.slice(0, 1), mode: "copy" })),
+    "shop is in your projects folder. Set it up from Home. node_modules was not copied; reinstall it in the project.");
+  const many = ["a", "b", "c", "d", "e"].map((name) => ({ path: `${name}/node_modules`, files: 1 }));
+  assert.match(intake.jobLine(job({ state: "done" }, { left: many, mode: "copy" })), / a\/node_modules, b\/node_modules, c\/node_modules and 2 more were not copied;/);
+  assert.equal(intake.jobLine(job({ state: "done" }, { left: [] })), "shop is in your projects folder. Set it up from Home.");
+});
+
+test("#383 F1: a done add counts the left folders the engine named no more of", () => {
+  const named = ["a", "b", "c"].map((name) => ({ path: `${name}/node_modules`, files: 1 }));
+  assert.match(intake.jobLine(job({ state: "done" }, { left: named, left_more: { folders: 1997, files: null }, mode: "copy" })),
+    / a\/node_modules, b\/node_modules, c\/node_modules and 1997 more were not copied; reinstall them/);
+});
+
+test("#383 code F1: a done project move says which rebuildable folders stayed in the old folder", () => {
+  const left = [{ path: "packages/web/node_modules", files: 57108 }];
+  assert.equal(intake.jobLine(job({ state: "done" }, { kind: "move_project", project_id: "reading", source: "/Users/mira/Code/reading-list", left })),
+    "reading-list is now in your projects folder. Start the team again from Team. packages/web/node_modules stayed in /Users/mira/Code/reading-list; reinstall it in the project.");
+});
 
 test("an intake job line says what it does now, with counts as files land", () => {
   assert.equal(intake.jobLine(job(downloading(0, 0))), "Downloading shop from iCloud...");
-  assert.equal(intake.jobLine(job(downloading(12, 3000))), "Downloading shop from iCloud: 12 of 3000 files");
+  assert.equal(intake.jobLine(job(downloading(12, 3000))), "macOS is downloading shop: 12 of 3000 files");
   assert.throws(() => intake.jobLine(job(downloading(4, 3))));
   assert.equal(intake.jobLine(job(copying(0))), "Moving shop...");
   assert.equal(intake.jobLine(job(copying(0), { mode: "copy" })), "Copying shop...");
@@ -45,12 +76,14 @@ test("an intake job offers stop while it runs, retry only when nothing landed, a
   assert.deepEqual(intake.jobActions(job({ state: "needs_answer", code: "home_move_worktrees" })), ["answer", "dismiss"]);
 });
 
-test("the app reads the job every second while it runs and every 30 s otherwise", () => {
+test("the app reads the jobs every second while one runs or waits and every 30 s otherwise", () => {
   assert.equal(intake.INTAKE_POLL_MS, 1000);
-  assert.equal(intake.intakePollMs(null), 30_000);
-  assert.equal(intake.intakePollMs(job(downloading(0, 0))), intake.INTAKE_POLL_MS);
-  assert.equal(intake.intakePollMs(job({ state: "clearing" })), intake.INTAKE_POLL_MS);
-  assert.equal(intake.intakePollMs(job({ state: "done" })), 30_000);
+  assert.equal(intake.intakePollMs([]), 30_000);
+  assert.equal(intake.intakePollMs([job(downloading(0, 0))]), intake.INTAKE_POLL_MS);
+  assert.equal(intake.intakePollMs([job({ state: "clearing" })]), intake.INTAKE_POLL_MS);
+  assert.equal(intake.intakePollMs([job({ state: "done" })]), 30_000);
+  assert.equal(intake.intakePollMs([job({ state: "done" }), job(WAITING, { id: "add-2" })]), intake.INTAKE_POLL_MS);
+  assert.equal(intake.jobRunning(job(WAITING)), true);
   assert.equal(intake.jobRunning(job(copying(1))), true);
   assert.equal(intake.jobRunning(job({ state: "cancelled", phase: "copying" })), false);
   assert.equal(intake.jobRunning(null), false);
@@ -61,31 +94,50 @@ test("the app reads the found folders every 3 s while Home shows them and every 
   assert.equal(intake.foundPollMs(false), 30_000);
 });
 
-test("a failed start goes Home only for a job adding this folder that runs, or ended done and is not the job read before the start", () => {
+test("a failed start goes Home only for a job adding this folder that runs or waits, or ended done and was not read before the start", () => {
   const read = (value) => ({ kind: "ok", value });
   const older = job({ state: "done" });
   const newer = job({ state: "done" }, { id: "add-2" });
+  const garden = job(copying(1), { id: "add-3", source: "/Users/mira/Desktop/garden" });
   const unread = { kind: "error", code: "owner_timeout", message: "The engine didn't answer in time." };
-  assert.equal(intake.startReached(SOURCE, job(copying(1)), read(older)), true);
-  assert.equal(intake.startReached(SOURCE, job(copying(1)), unread), true);
-  assert.equal(intake.startReached(SOURCE, newer, read(older)), true);
-  assert.equal(intake.startReached(SOURCE, newer, read(null)), true);
-  assert.equal(intake.startReached(SOURCE, older, read(older)), false, "the add that ended before this start");
-  assert.equal(intake.startReached(SOURCE, newer, unread), false, "no read before: an ended job may be older");
-  assert.equal(intake.startReached(SOURCE, job(failed("home_copy_failed", "copying"), { id: "add-2" }), read(null)), false);
-  assert.equal(intake.startReached("/Users/mira/Desktop/other", job(copying(1)), read(null)), false);
-  assert.equal(intake.startReached(SOURCE, null, read(null)), false);
+  assert.equal(intake.startReached(SOURCE, [job(copying(1))], read([older])), true);
+  assert.equal(intake.startReached(SOURCE, [job(copying(1))], unread), true);
+  assert.equal(intake.startReached(SOURCE, [garden, job(WAITING, { id: "add-2" })], read([garden])), true, "waiting its turn");
+  assert.equal(intake.startReached(SOURCE, [newer], read([older])), true);
+  assert.equal(intake.startReached(SOURCE, [older, newer], read([older])), true);
+  assert.equal(intake.startReached(SOURCE, [newer], read([])), true);
+  assert.equal(intake.startReached(SOURCE, [older], read([older])), false, "the add that ended before this start");
+  assert.equal(intake.startReached(SOURCE, [newer], unread), false, "no read before: an ended job may be older");
+  assert.equal(intake.startReached(SOURCE, [job(failed("home_copy_failed", "copying"), { id: "add-2" })], read([])), false);
+  assert.equal(intake.startReached("/Users/mira/Desktop/other", [job(copying(1))], read([])), false);
+  assert.equal(intake.startReached(SOURCE, [garden], read([])), false, "only another folder's job runs");
+  assert.equal(intake.startReached(SOURCE, [], read([])), false);
 });
 
-test("a job's end is said once, when the read after a running one shows that job ended", () => {
+test("each job's end is said once, when the read after shows it ended, while the jobs beside it still run (DEC-197)", () => {
   const running = job(copying(3));
   const done = job({ state: "done" });
-  assert.equal(intake.jobEndLine(running, done), "shop is in your projects folder. Set it up from Home.");
-  assert.equal(intake.jobEndLine(done, done), null);
-  assert.equal(intake.jobEndLine(null, done), null);
-  assert.equal(intake.jobEndLine(running, running), null);
-  assert.equal(intake.jobEndLine(running, null), null);
-  assert.equal(intake.jobEndLine(running, { ...done, id: "add-2" }), null);
+  const garden = job(copying(1), { id: "add-2", source: "/Users/mira/Desktop/garden" });
+  const ended = (before, after) => intake.jobEnds(before, after).map((one) => intake.jobLine(one));
+  const shopDone = "shop is in your projects folder. Set it up from Home.";
+  assert.deepEqual(ended([running], [done]), [shopDone]);
+  assert.deepEqual(ended([running, garden], [done, garden]), [shopDone]);
+  assert.deepEqual(ended([running, garden], [done, { ...garden, state: { state: "done" } }]),
+    [shopDone, "garden is in your projects folder. Set it up from Home."]);
+  assert.deepEqual(ended([done], [done]), []);
+  assert.deepEqual(ended([], [done]), []);
+  assert.deepEqual(ended([running], [running]), []);
+  assert.deepEqual(ended([running], []), []);
+  assert.deepEqual(ended([running], [{ ...done, id: "add-9" }]), []);
+  assert.deepEqual(ended([job(WAITING)], [running]), [], "a waiting job let go is still at work");
+  assert.deepEqual(ended([job(WAITING)], [job({ state: "cancelled", phase: "waiting" })]), ["Adding shop stopped. Nothing was moved or copied."]);
+});
+
+test("a job waiting its turn names the job it waits for and offers Stop (DEC-197)", () => {
+  assert.equal(intake.jobLine(job(WAITING)), "Waiting for garden to finish...");
+  assert.equal(intake.jobLine(job(WAITING, { mode: "copy" })), "Waiting for garden to finish...");
+  assert.deepEqual(intake.jobActions(job(WAITING)), ["stop"]);
+  assert.deepEqual(intake.jobActions(job(WAITING, { stopping: true })), []);
 });
 
 const folderRead = (value = {}) => ({ kind: "ok", value: { bytes: 10, worktrees: 0, worktree_paths: [], movable: true, copyable: true, git: true, same_volume: true, ...value } });
@@ -132,7 +184,7 @@ const buttons = (markup) => [...markup.matchAll(/<button[^>]*>(?:<[^>]+>)*([^<]*
 
 test("Home's job row shows the job's line and only the actions its state allows", () => {
   const running = jobRow(downloading(12, 3000));
-  assert.match(running, /Downloading shop from iCloud: 12 of 3000 files/);
+  assert.match(running, /macOS is downloading shop: 12 of 3000 files/);
   assert.match(running, /role="status"/);
   assert.deepEqual(buttons(running), ["Stop"]);
   assert.deepEqual(buttons(jobRow({ state: "clearing" })), []);
@@ -141,6 +193,24 @@ test("Home's job row shows the job's line and only the actions its state allows"
   assert.deepEqual(buttons(jobRow(failed("home_move_source_left", "clearing"))), ["Dismiss"]);
   assert.deepEqual(buttons(jobRow({ state: "needs_answer", code: "home_move_worktrees" })), ["Answer", "Dismiss"]);
   assert.match(jobRow({ state: "cancelled", phase: "copying" }), /Adding shop stopped\. Nothing was moved or copied\./);
+  const waiting = jobRow(WAITING);
+  assert.match(waiting, /role="status">Waiting for garden to finish\.\.\.</);
+  assert.match(waiting, />Waiting</);
+  assert.deepEqual(buttons(waiting), ["Stop"]);
+});
+
+test("Home shows a row for every job the engine holds, in start order, and nothing without one (DEC-197)", async () => {
+  const { SessionContext } = await import("../src/state.ts");
+  const { IntakeJobPanel } = await import("../src/screens/intake/found.tsx");
+  assert.equal(typeof IntakeJobPanel, "function");
+  const panel = (jobs) => renderToStaticMarkup(createElement(SessionContext.Provider, { value: { intake: jobs, showToast: noop, refreshIntake: noop } },
+    createElement(IntakeJobPanel, { onSetUp: noop })));
+  const garden = job({ state: "waiting", behind: "shop" }, { id: "add-2", source: "/Users/mira/Desktop/shop-copy" });
+  const both = panel([job(copying(2)), garden, job({ state: "done" }, { id: "add-3", source: "/Users/mira/Desktop/notes" })]);
+  assert.deepEqual([...both.matchAll(/role="status">([^<]*)</g)].map((match) => match[1]),
+    ["Moving shop: 2 files copied", "Waiting for shop to finish...", "notes is in your projects folder. Set it up from Home."]);
+  assert.deepEqual(buttons(both), ["Stop", "Stop", "Dismiss"]);
+  assert.equal(panel([]), "");
 });
 
 const found = (name, state, extra = {}) => ({ name, path: `/Users/mira/Projects/${name}`, git: true, known: false, state, ...extra });
@@ -149,14 +219,17 @@ const HOME = router.formatRoute({ name: "home" });
 test("the sidebar lists folders not set up at once, and the folder being added, each pointing Home", () => {
   const folders = [found("zeta", "found"), found("alpha", "found"), found("beta", "onboarding", { project_id: "p2" }),
     found("gamma", "ready", { project_id: "p3" }), found("delta", "found", { project_id: "p1" }), found("shop", "found")];
-  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: folders }, null, new Set(["p1"])).map((entry) => [entry.name, entry.note, entry.href]),
+  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: folders }, [], new Set(["p1"])).map((entry) => [entry.name, entry.note, entry.href]),
     [["alpha", "Not set up", HOME], ["shop", "Not set up", HOME], ["zeta", "Not set up", HOME]]);
-  const adding = intake.sidebarFolders({ kind: "ok", value: folders }, job(copying(4)), new Set(["p1"]));
+  const adding = intake.sidebarFolders({ kind: "ok", value: folders }, [job(copying(4))], new Set(["p1"]));
   assert.deepEqual(adding.map((entry) => [entry.id, entry.name, entry.note]),
     [["intake:add-1", "shop", "Adding..."], [`found:${folders[1].path}`, "alpha", "Not set up"], [`found:${folders[0].path}`, "zeta", "Not set up"]]);
-  assert.deepEqual(intake.sidebarFolders({ kind: "loading" }, job({ state: "done" }), new Set()), []);
+  const two = intake.sidebarFolders({ kind: "ok", value: folders }, [job(copying(4)), job(WAITING, { id: "add-2", source: "/Users/mira/Desktop/alpha" })], new Set(["p1"]));
+  assert.deepEqual(two.map((entry) => [entry.id, entry.name, entry.note]),
+    [["intake:add-1", "shop", "Adding..."], ["intake:add-2", "alpha", "Adding..."], [`found:${folders[0].path}`, "zeta", "Not set up"]]);
+  assert.deepEqual(intake.sidebarFolders({ kind: "loading" }, [job({ state: "done" })], new Set()), []);
   const many = Array.from({ length: 40 }, (_, index) => found(`f${String(index).padStart(2, "0")}`, "found"));
-  assert.equal(intake.sidebarFolders({ kind: "ok", value: many }, null, new Set()).length, intake.SIDEBAR_FOLDERS_MAX);
+  assert.equal(intake.sidebarFolders({ kind: "ok", value: many }, [], new Set()).length, intake.SIDEBAR_FOLDERS_MAX);
 });
 
 test("a sidebar folder row shows its note and opens its own page", () => {
@@ -187,7 +260,8 @@ test("a project move job says it waits for the agents, moves, and ends in the mo
   assert.deepEqual(intake.jobActions(moveJob({ state: "stopping", agents_left: 1 }, { stopping: true })), []);
   assert.deepEqual(intake.jobActions(moveJob(failed("move_project_old_folder_left", "clearing"))), ["dismiss"]);
   assert.equal(intake.jobRunning(moveJob({ state: "stopping", agents_left: 1 })), true);
-  assert.equal(intake.intakePollMs(moveJob({ state: "stopping", agents_left: 1 })), intake.INTAKE_POLL_MS);
+  assert.equal(intake.intakePollMs([moveJob({ state: "stopping", agents_left: 1 })]), intake.INTAKE_POLL_MS);
+  assert.equal(intake.jobLine(moveJob(WAITING)), "Waiting for garden to finish...");
 });
 
 test("Home's row names a project move's state in the move's words and offers Finishing, not Stop, while it clears", () => {
@@ -209,20 +283,20 @@ test("a retry or an answer starts the same kind of job again: an add by its fold
   await intake.restartJob(job(failed("home_copy_failed", "copying")), ["too_large"], steps);
   await intake.restartJob(moveJob({ state: "needs_answer", code: "home_move_worktrees" }, { mode: "move" }), ["worktrees"], steps);
   assert.deepEqual(calls, [["add", SOURCE, "move", ["too_large"]], ["move", "reading", "move", ["worktrees"]]]);
-  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, moveJob(copying(4)), new Set()), [], "a project being moved is already in the sidebar as a project");
+  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, [moveJob(copying(4))], new Set()), [], "a project being moved is already in the sidebar as a project");
 });
 
-test("a start refused job_busy names the job that runs, read from the engine, or says another job runs (DEC-177)", async () => {
-  const fixed = "Another job is running. Wait for it to finish on Home.";
-  assert.equal(intake.busyLine(moveJob({ state: "stopping", agents_left: 1 })), "Moving reading-list is running. Wait for it to finish on Home.");
-  assert.equal(intake.busyLine(job(copying(4))), "Adding shop is running. Wait for it to finish on Home.");
-  assert.equal(intake.busyLine(moveJob({ state: "done" })), fixed, "an ended job is not the one that runs");
-  assert.equal(intake.busyLine(null), fixed);
-  const reads = [];
-  const read = (answer) => async () => { reads.push(answer.kind); return answer; };
-  assert.equal(await intake.refusalLine("job_busy", "raw", read({ kind: "ok", value: job(copying(2)) })), "Adding shop is running. Wait for it to finish on Home.");
-  assert.equal(await intake.refusalLine("job_busy", "raw", read({ kind: "ok", value: null })), fixed);
-  assert.equal(await intake.refusalLine("job_busy", "raw", read({ kind: "error", code: "owner_timeout", message: "timed out" })), fixed);
-  assert.equal(await intake.refusalLine("move_project_busy", "its own words", read({ kind: "ok", value: job(copying(2)) })), "its own words");
-  assert.deepEqual(reads, ["ok", "ok", "error"], "only a busy refusal reads the job");
+test("a start past the waiting list says several folders wait, and the same folder points Home, both by name from the bridge (DEC-197)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const busy = "Several folders are already waiting. Wait for one to finish on Home.";
+  const same = "This folder is already being moved or added. See it on Home.";
+  for (const copy of [api.intakeCopy, api.moveCopy, api.newProjectCopy]) {
+    assert.equal(copy("job_busy"), busy);
+    assert.equal(copy("job_same_folder"), same);
+  }
+  assert.equal(intake.busyLine, undefined, "a busy start no longer names one running job");
+  assert.equal(intake.refusalLine, undefined);
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const listed = bridge.slice(bridge.indexOf("pub const INTAKE_CODES"), bridge.indexOf("];", bridge.indexOf("pub const INTAKE_CODES")));
+  for (const code of ["job_busy", "job_same_folder"]) assert.ok(listed.includes(`"${code}",`), `${code} reaches the window by name`);
 });

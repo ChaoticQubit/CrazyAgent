@@ -51,7 +51,8 @@ async fn start(
 async fn until(owner: &mut OwnerController, want: impl Fn(&JobView) -> bool) -> JobView {
     let deadline = std::time::Instant::now() + ENGINE_WAIT * 3;
     loop {
-        if let Some(job) = owner.job_status().await.unwrap().filter(&want) {
+        let jobs = owner.job_status().await.unwrap();
+        if let Some(job) = jobs.into_iter().find(|job| want(job)) {
             return job;
         }
         assert!(std::time::Instant::now() < deadline, "no such job");
@@ -166,7 +167,7 @@ async fn a_setup_job_for_a_project_that_exists_is_refused_at_its_start_with_no_j
         .await
         .unwrap_err();
     assert_eq!(refused.0, "project_exists");
-    assert_eq!(owner.job_status().await.unwrap(), None);
+    assert_eq!(owner.job_status().await.unwrap(), Vec::<JobView>::new());
     assert!(!engine.home().join("other").exists());
     assert_eq!(engine.rows(OPEN_MARKS), 0);
     drop(owner);
@@ -219,13 +220,14 @@ async fn a_setup_job_whose_build_fails_ends_failed_while_building_with_nothing_a
     engine.stop().await;
 }
 
-/// DEC-177 add.2 Q2 A: while a job runs, here a delete waiting for its project's agent, a New
-/// Project job is refused `job_busy`, and a direct New Project or the demo from any client is
-/// refused `job_busy` too, so one job at a time holds for every way a folder is built.
-/// Runs on macOS only, the one platform that offers Delete everything (DEC-118).
+/// DEC-197 (replacing DEC-177 add.2 Q2 A's refusal): while a job runs, here a delete waiting
+/// for its project's agent, a New Project job waits for its turn behind it with no error,
+/// while a direct New Project or the demo from any client is refused `job_busy`; once the
+/// delete stops, the New Project starts by itself and ends done. Runs on macOS only, the one
+/// platform that offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
-async fn while_a_job_runs_a_setup_job_a_direct_new_project_and_the_demo_are_refused_busy() {
+async fn while_a_job_runs_a_setup_job_waits_and_a_direct_new_project_and_the_demo_are_busy() {
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let held = ProjectId::new("setup-pooled").unwrap();
@@ -251,10 +253,15 @@ async fn while_a_job_runs_a_setup_job_a_direct_new_project_and_the_demo_are_refu
         job.state == JobState::Stopping { agents_left: 1 }
     })
     .await;
-    let refused = start(&mut owner, "setup-busy", setting_up("setup-job", NAME))
+    let waiting = start(&mut owner, "setup-busy", setting_up("setup-job", NAME))
         .await
-        .unwrap_err();
-    assert_eq!(refused.0, "job_busy");
+        .unwrap();
+    assert_eq!(
+        waiting.state,
+        JobState::Waiting {
+            behind: "Meal planner".into()
+        }
+    );
     let direct = owner
         .setup_project(ProjectId::new("setup-job").unwrap(), spec(NAME), quiet(), 3)
         .await
@@ -283,6 +290,12 @@ async fn while_a_job_runs_a_setup_job_a_direct_new_project_and_the_demo_are_refu
             .await
             .unwrap()
     );
+    let built = until(&mut owner, |job| {
+        job.id.as_str() == "setup-busy" && job.state == JobState::Done
+    })
+    .await;
+    assert_eq!(built.kind, JobKind::Setup);
+    assert!(engine.home().join("notes").is_dir());
     drop(owner);
     engine.stop().await;
 }
@@ -300,6 +313,7 @@ async fn an_engine_start_shows_a_setup_an_engine_stop_cut_short_and_dismiss_clea
         .job_status()
         .await
         .unwrap()
+        .pop()
         .expect("the New Project cut short");
     assert_eq!(shown.id.as_str(), "setup-cut-1");
     assert_eq!(shown.kind, JobKind::Setup);
@@ -319,11 +333,11 @@ async fn an_engine_start_shows_a_setup_an_engine_stop_cut_short_and_dismiss_clea
             .await
             .unwrap()
     );
-    assert_eq!(owner.job_status().await.unwrap(), None);
+    assert_eq!(owner.job_status().await.unwrap(), Vec::<JobView>::new());
     drop(owner);
     engine.restart().await;
     let mut owner = engine.owner().await;
-    assert_eq!(owner.job_status().await.unwrap(), None);
+    assert_eq!(owner.job_status().await.unwrap(), Vec::<JobView>::new());
     drop(owner);
     engine.stop().await;
 }
@@ -343,7 +357,7 @@ async fn an_engine_start_ends_the_mark_of_a_recorded_project_done_and_shows_no_j
     cut_short_setup(&engine, "setup-job", "setup-recorded", NAME);
     engine.restart().await;
     let mut owner = engine.owner().await;
-    assert_eq!(owner.job_status().await.unwrap(), None);
+    assert_eq!(owner.job_status().await.unwrap(), Vec::<JobView>::new());
     assert_eq!(engine.rows(OPEN_MARKS), 0);
     assert_eq!(
         engine.rows(

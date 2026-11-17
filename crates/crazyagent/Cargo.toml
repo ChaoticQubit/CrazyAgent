@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [features]
 clean-mac-gate = []
+owner-trace = []
 
 [dependencies]
 serde = { version = "=1.0.229", features = ["derive"] }

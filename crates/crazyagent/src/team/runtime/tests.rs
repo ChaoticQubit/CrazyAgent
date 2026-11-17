@@ -21234,6 +21234,68 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     );
 }
 
+/// V243-GIT-FLOOR-SWEEP door 5: on git 2.39 an idle linked lead's pass does not try to land a
+/// resting teammate's work, which an Accept on that git refuses `changes_git_old`: the set
+/// waits for the owner as it was, where each pass kept that refusal as its landing result and
+/// logged `teammate_landing_failed`. On 2.40 the same pass lands it.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_git_2_39_an_idle_lead_leaves_a_resting_teammate_s_work_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let waiting = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+    let kept = || {
+        let (_, set) = crate::landing::change_set(&db, &waiting.id)
+            .unwrap()
+            .expect("greet's change set is kept");
+        (set.state, set.landing_result)
+    };
+
+    crate::landing::shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "nothing lands on git 2.39"
+    );
+    assert_eq!(
+        kept(),
+        (waiting.state, waiting.landing_result),
+        "the set waits for the owner as it was, with no refusal kept"
+    );
+
+    crate::landing::shape_git(Some("git version 2.40.0"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_ne!(
+        linked.tip(&linked.branch),
+        start,
+        "greet's work lands on 2.40"
+    );
+    assert_eq!(kept().0, crate::landing::ChangeState::Accepted);
+    crate::landing::shape_git(None);
+}
+
 /// OP9B-C5: when the lead's change set cannot be recorded after its teammates' work landed
 /// on its task branch, the lead is not told to finish over work the owner cannot see yet, and
 /// the engine records it again at a later pass while the lead stays idle, instead of leaving
@@ -32026,7 +32088,8 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
 /// `.gitconfig`, `.cargo/config`, `.cargo/config.toml`, `.npmrc`, `.yarnrc` or `.yarnrc.yml`,
 /// in any letter case, nor make `.config/git` or `.cargo/bin`, nor move a `.config` it built
 /// elsewhere into place, nor set a flag or an ACL on its home or on a file the next launch
-/// keeps, while it still writes its own caches. The next launch keeps the caches.
+/// keeps, while it still writes its own caches. Whether the next launch keeps those caches
+/// is the Tool caches in agent homes setting's call (a2a79acae), not this row's.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
@@ -32079,7 +32142,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
              try cargo_config_old sh -c \"printf '[build]\\n' > '{home}/.cargo/config'\"\n\
              try git_config sh -c \"mkdir -p '{home}/.config/git' && printf '[core]\\n' > '{home}/.config/git/config'\"\n\
              try gitconfig sh -c \"printf '[core]\\n' > '{home}/.gitconfig'\"\n\
-             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config'\"\n\
+             try config_parent sh -c \"rm -rf '{home}/.config' 2>/dev/null; mkdir -p '{home}/built/git' && printf '[core]\\n' > '{home}/built/git/config' && mv '{home}/built' '{home}/.config' && test -e '{home}/.config/git/config'\"\n\
              try control_cache sh -c \"mkdir -p '{home}/.cache/tool' && printf ok > '{home}/.cache/tool/data'\"\n\
              try npmrc sh -c \"printf 'node-options=--require=x\\n' > '{home}/.npmrc'\"\n\
              try npmrc_case sh -c \"printf x > '{home}/.NPMRC'\"\n\
@@ -32187,13 +32250,6 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
         if std::fs::symlink_metadata(home.join(entry)).is_ok() {
             problems.push(format!("{entry} kept by the launch"));
         }
-    }
-    if std::fs::read_to_string(home.join(".cache/tool/data"))
-        .ok()
-        .as_deref()
-        != Some("ok")
-    {
-        problems.push("the agent's cache removed by the launch".to_owned());
     }
     assert!(
         problems.is_empty(),
@@ -34365,4 +34421,79 @@ fn a_native_leads_teammates_home_is_reset_at_each_launch() {
         );
     }
     assert!(mates.join(".claude.json").is_file());
+}
+
+/// SECRET-PARSE-COPIES R2, leader 16:05: a Codex agent whose launch left no readable hook key
+/// list, as one an earlier CrazyAgent started, fails closed. The engine never asks Codex about
+/// keys it could not read nor counts them as trusted; it keeps asking until `HOOK_TRUST_WAIT`
+/// and then keeps a notice that says why in plain words. The other answers keep their texts.
+#[test]
+fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is_told_why() {
+    use crate::coord::settings::{
+        CODEX_HOOKS_LIST_UNREADABLE, CODEX_HOOKS_UNCHECKED, CODEX_HOOKS_UNLISTED,
+        CODEX_HOOKS_UNTRUSTED,
+    };
+    use crate::launch_context::HookKeysUnread::{Absent, Unreadable};
+    let unasked = |_: &[String]| -> Result<bool, &'static str> {
+        panic!("Codex was asked about hook keys the engine could not read")
+    };
+    for unread in [Absent, Unreadable] {
+        assert_eq!(hook_trust(Err(unread), unasked, false), HookTrust::Later);
+    }
+    assert_eq!(
+        hook_trust(Err(Absent), unasked, true),
+        HookTrust::Notice(CODEX_HOOKS_UNLISTED),
+        "a missing key list says why once the wait is over"
+    );
+    assert_eq!(
+        hook_trust(Err(Unreadable), unasked, true),
+        HookTrust::Notice(CODEX_HOOKS_LIST_UNREADABLE),
+        "a key list that is there but unreadable is not blamed on an earlier CrazyAgent (#166 N0)"
+    );
+    assert!(
+        !CODEX_HOOKS_LIST_UNREADABLE.contains("before this update")
+            && CODEX_HOOKS_LIST_UNREADABLE.contains("replaced or damaged")
+            && CODEX_HOOKS_LIST_UNREADABLE.contains("until the agent restarts")
+            && !CODEX_HOOKS_LIST_UNREADABLE.contains('_'),
+        "{CODEX_HOOKS_LIST_UNREADABLE}"
+    );
+    assert!(
+        CODEX_HOOKS_UNLISTED.contains("started before this update")
+            && CODEX_HOOKS_UNLISTED.contains("until the agent restarts")
+            && !CODEX_HOOKS_UNLISTED.contains('_'),
+        "the notice names the cause and the way out in plain words: {CODEX_HOOKS_UNLISTED}"
+    );
+    assert_eq!(
+        hook_trust(Ok(Vec::new()), unasked, true),
+        HookTrust::Settled
+    );
+    let keys = vec!["/h/config.toml:pre_tool_use:0:0".to_owned()];
+    let expected = keys.clone();
+    let asked = |answer: Result<bool, &'static str>| {
+        let expected = expected.clone();
+        move |given: &[String]| {
+            assert_eq!(given, expected.as_slice());
+            answer
+        }
+    };
+    assert_eq!(
+        hook_trust(Ok(keys.clone()), asked(Ok(true)), false),
+        HookTrust::Settled
+    );
+    assert_eq!(
+        hook_trust(Ok(keys.clone()), asked(Ok(false)), false),
+        HookTrust::Notice(CODEX_HOOKS_UNTRUSTED)
+    );
+    assert_eq!(
+        hook_trust(
+            Ok(keys.clone()),
+            asked(Err("codex_bridge_peer_unknown")),
+            false
+        ),
+        HookTrust::Later
+    );
+    assert_eq!(
+        hook_trust(Ok(keys), asked(Err("codex_bridge_peer_unknown")), true),
+        HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
+    );
 }

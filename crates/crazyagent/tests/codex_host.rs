@@ -1,3 +1,5 @@
+mod path_support;
+
 use crazyagent::adapters::codex::{
     AuthAccount, AuthControl, DEVELOPER_INSTRUCTIONS_BYTES_MAX, State,
 };
@@ -5,6 +7,7 @@ use crazyagent::adapters::events::{EventKind, TokenUsage, TurnOutcome};
 use crazyagent::adapters::{LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::engine::codex_host::{CodexHostBatch, CodexHostProtocol};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
+use path_support::unit_path;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -50,7 +53,7 @@ fn initialized() -> CodexHostProtocol {
         &mut host,
         1,
         json!({
-            "userAgent":"unit-wire-input", "codexHome":"/unit/profile",
+            "userAgent":"unit-wire-input", "codexHome":unit_path("/unit/profile"),
             "platformFamily":"unix", "platformOs":"macos"
         }),
     );
@@ -68,10 +71,14 @@ fn initialized() -> CodexHostProtocol {
 
 fn idle() -> CodexHostProtocol {
     let mut host = initialized();
-    let outgoing = message(&host.start_thread(Path::new("/unit/project")).unwrap());
+    let outgoing = message(
+        &host
+            .start_thread(Path::new(&unit_path("/unit/project")))
+            .unwrap(),
+    );
     let thread = json!({
         "id":"unit-native-thread", "cliVersion":"0.163.0", "createdAt":1,
-        "updatedAt":1, "cwd":"/unit/project", "ephemeral":false,
+        "updatedAt":1, "cwd":unit_path("/unit/project"), "ephemeral":false,
         "modelProvider":"unit-provider-input", "preview":"", "projectId":null,
         "sessionId":"unit-unprojected-session", "source":"appServer",
         "status":{"type":"idle"}, "turns":[]
@@ -80,7 +87,7 @@ fn idle() -> CodexHostProtocol {
         &mut host,
         outgoing["id"].as_i64().unwrap(),
         json!({
-            "thread":thread, "cwd":"/unit/project", "model":"unit-model-input",
+            "thread":thread, "cwd":unit_path("/unit/project"), "model":"unit-model-input",
             "modelProvider":"unit-provider-input", "approvalPolicy":"on-request",
             "approvalsReviewer":"user", "sandbox":{"type":"readOnly","networkAccess":false}
         }),
@@ -124,7 +131,7 @@ fn codex_host_initialization_waits_for_complete_frame_before_initialized_notific
     assert_eq!(request["method"], "initialize");
     assert_eq!(request["params"]["capabilities"]["experimentalApi"], false);
     let bytes = wire(json!({"id":1,"result":{
-        "userAgent":"unit-wire-input","codexHome":"/unit/profile",
+        "userAgent":"unit-wire-input","codexHome":unit_path("/unit/profile"),
         "platformFamily":"unix","platformOs":"macos"
     }}));
     let partial = host.receive(&bytes[..bytes.len() - 1]).unwrap();
@@ -148,11 +155,14 @@ fn codex_host_thread_start_preserves_read_only_sandbox_and_exact_project_cwd() {
     let mut host = initialized();
     let outgoing = message(
         &host
-            .start_thread(Path::new("/unit/declared-project"))
+            .start_thread(Path::new(&unit_path("/unit/declared-project")))
             .unwrap(),
     );
     assert_eq!(outgoing["method"], "thread/start");
-    assert_eq!(outgoing["params"]["cwd"], "/unit/declared-project");
+    assert_eq!(
+        outgoing["params"]["cwd"],
+        unit_path("/unit/declared-project")
+    );
     assert_eq!(outgoing["params"]["approvalPolicy"], "on-request");
     assert_eq!(outgoing["params"]["approvalsReviewer"], "user");
     assert_eq!(outgoing["params"]["sandbox"], "read-only");
@@ -161,7 +171,8 @@ fn codex_host_thread_start_preserves_read_only_sandbox_and_exact_project_cwd() {
 
 #[test]
 fn codex_host_master_thread_carries_instructions_on_stdin_with_the_same_read_only_policy() {
-    let project = Path::new("/unit/declared-project");
+    let project = unit_path("/unit/declared-project");
+    let project = Path::new(&project);
     let instructions = "# Project context from CrazyAgent\n\nThe codename is \"BLUE-HERON-77\".\n";
     let mut host = initialized();
     let outgoing = message(
@@ -171,7 +182,10 @@ fn codex_host_master_thread_carries_instructions_on_stdin_with_the_same_read_onl
     );
     assert_eq!(outgoing["method"], "thread/start");
     assert_eq!(outgoing["params"]["developerInstructions"], instructions);
-    assert_eq!(outgoing["params"]["cwd"], "/unit/declared-project");
+    assert_eq!(
+        outgoing["params"]["cwd"],
+        unit_path("/unit/declared-project")
+    );
     assert_eq!(outgoing["params"]["approvalPolicy"], "on-request");
     assert_eq!(outgoing["params"]["approvalsReviewer"], "user");
     assert_eq!(outgoing["params"]["sandbox"], "read-only");
@@ -205,18 +219,19 @@ fn codex_host_master_thread_carries_instructions_on_stdin_with_the_same_read_onl
 
 #[test]
 fn codex_host_tools_on_master_thread_runs_tools_without_prompts_or_codex_s_own_sandbox() {
-    let project = Path::new("/unit/project");
+    let project = unit_path("/unit/project");
+    let project = Path::new(&project);
     let instructions = "# Project context from CrazyAgent\n\n## Your tools\n";
     let thread = json!({
         "id":"unit-native-thread", "cliVersion":"0.164.0", "createdAt":1,
-        "updatedAt":1, "cwd":"/unit/project", "ephemeral":false,
+        "updatedAt":1, "cwd":unit_path("/unit/project"), "ephemeral":false,
         "modelProvider":"unit-provider-input", "preview":"", "projectId":null,
         "sessionId":"unit-unprojected-session", "source":"appServer",
         "status":{"type":"idle"}, "turns":[]
     });
     let started = |approval: &str, sandbox: Value| {
         json!({
-            "thread":thread, "cwd":"/unit/project", "model":"unit-model-input",
+            "thread":thread, "cwd":unit_path("/unit/project"), "model":"unit-model-input",
             "modelProvider":"unit-provider-input", "approvalPolicy":approval,
             "approvalsReviewer":"user", "sandbox":sandbox
         })
@@ -230,7 +245,7 @@ fn codex_host_tools_on_master_thread_runs_tools_without_prompts_or_codex_s_own_s
     );
     assert_eq!(outgoing["method"], "thread/start");
     assert_eq!(outgoing["params"]["developerInstructions"], instructions);
-    assert_eq!(outgoing["params"]["cwd"], "/unit/project");
+    assert_eq!(outgoing["params"]["cwd"], unit_path("/unit/project"));
     assert_eq!(outgoing["params"]["approvalPolicy"], "never");
     assert_eq!(outgoing["params"]["approvalsReviewer"], "user");
     assert_eq!(outgoing["params"]["sandbox"], "danger-full-access");
