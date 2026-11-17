@@ -53,3 +53,10 @@ test("the badge, tone, console state and graph dot rules name no accent token, n
   assert.deepEqual(chips.filter((line) => /^\.(?:tone-|pj-console-state\.)/.test(line) && /background/.test(line)), []);
   assert.match(rules, /\.tg-dot\.tone-info \{\s*background: var\(--running\);\s*\}/);
 });
+
+test("the working badge's dot pulses only when motion is allowed, and no other badge rule animates", () => {
+  const style = sheet("../src/style.css");
+  assert.ok(style.includes("@media (prefers-reduced-motion: no-preference) { .badge.tone-info::before { animation: badge-pulse 1.2s ease-in-out infinite; } }"), "the pulse sits behind the motion preference");
+  assert.ok(style.includes("@keyframes badge-pulse { 50% { opacity: 0.4; } }"), "the dot dims to 40 percent at mid-pulse");
+  assert.deepEqual(style.split("\n").filter((line) => /^\.(?:badge|tone-)/.test(line) && /animation/.test(line)), []);
+});
