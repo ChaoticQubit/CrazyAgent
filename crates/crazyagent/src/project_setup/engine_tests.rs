@@ -2859,10 +2859,10 @@ async fn a_removed_projects_run_in_project_terminal_setting_goes_with_it() {
         .unwrap();
     assert_eq!(result(response), OwnerResult::Applied);
     let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
-    set_mode(&db, &project, RunMode::Off).unwrap();
-    set_mode(&db, &other, RunMode::TypeOnly).unwrap();
+    let host = crate::ide::log::active_host(&db).unwrap().unwrap();
+    set_mode(&db, &host, &project, RunMode::Off).unwrap();
+    set_mode(&db, &host, &other, RunMode::TypeOnly).unwrap();
     assert_eq!(mode(&db, &project).unwrap(), RunMode::Off);
-
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(

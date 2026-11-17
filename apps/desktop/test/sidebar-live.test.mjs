@@ -134,7 +134,7 @@ test("one events read per look gives every project its count, and no read is add
     const first = await evaluate(`Fixture.start(${JSON.stringify(events(working))})`);
     assert.deepEqual(first.shown.working, [["a", 2], ["b", 1], ["c", 5]]);
     assert.equal(count(first.asked, "desktop_team_events"), 1);
-    assert.equal(first.armed, true, "the same timer carries the next look");
+    assert.ok(first.asked.indexOf("desktop_watch") < first.asked.indexOf("desktop_team_events"), "the page watches before its first read");
     const second = await evaluate(`Fixture.look(${JSON.stringify(events([{ project_id: "a", agents: 1 }]))})`);
     assert.deepEqual(second.shown.working, [["a", 1]]);
     assert.equal(count(second.asked, "desktop_team_events"), 2);
@@ -155,6 +155,25 @@ test("a failed read or a stopped engine claims no agent is working and keeps the
     assert.deepEqual(back.shown.working, [["a", 2]]);
     const stopped = await evaluate("Fixture.engineStops()");
     assert.deepEqual(stopped.shown, { alerts: [["a", 4]], working: [] }, "a stopped engine has nothing working");
+    const after = await evaluate(`Fixture.look(${JSON.stringify(body)})`);
+    assert.equal(count(after.asked, "desktop_team_events"), count(stopped.asked, "desktop_team_events"), "a stopped engine is not read");
+  });
+});
+
+test("v2.5 S3c: the alerts are read once at start, then once per team or unknown change, never while idle", async () => {
+  await withPage(async ({ evaluate }) => {
+    await evaluate(alertsPage);
+    const body = events([{ project_id: "a", agents: 1 }]);
+    const reads = (seen) => [count(seen.asked, "desktop_team_events"), count(seen.asked, "desktop_question_counts")];
+    const first = await evaluate(`Fixture.start(${JSON.stringify(body)})`);
+    assert.deepEqual(reads(first), [1, 1]);
+    assert.deepEqual(reads(await evaluate("Fixture.idle()")), [1, 1], "no change, no read");
+    const other = await evaluate(`Fixture.change(["projects", "settings"], ${JSON.stringify(body)})`);
+    assert.deepEqual(reads(other), [1, 1], "a change to other views is not the alerts'");
+    assert.deepEqual(reads(await evaluate(`Fixture.change(["team"], ${JSON.stringify(body)})`)), [2, 2]);
+    assert.deepEqual(reads(await evaluate(`Fixture.change(["unknown"], ${JSON.stringify(body)})`)), [3, 3]);
+    assert.deepEqual(reads(await evaluate(`Fixture.change(["team", "unknown"], ${JSON.stringify(body)})`)), [4, 4], "one read a change");
+    assert.equal(count((await evaluate("Fixture.idle()")).asked, "desktop_watch"), 1, "one watch for the page");
   });
 });
 

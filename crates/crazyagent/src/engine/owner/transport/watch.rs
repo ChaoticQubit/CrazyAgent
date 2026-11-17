@@ -3,7 +3,7 @@ use crate::protocol::{Topic, WatchReply, encode_frame};
 use crate::storage::{Changes, changes};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -48,11 +48,13 @@ struct Request {
     wait_ms: u32,
 }
 
-/// The owner server's watches: how many wait now, at most [`WATCHES_MAX`], and the sampler
-/// of the engine store they wait on, started by the first watch.
+/// The owner server's watches: how many wait now, at most [`WATCHES_MAX`], the sampler of
+/// the engine store they wait on, started by the first watch, and the mark each topic woken
+/// without a commit moved the sampler to (v2.5 S3c).
 pub(super) struct Watches {
     waiting: AtomicUsize,
     sampler: Mutex<Option<Sampler>>,
+    woken: Mutex<BTreeMap<Topic, u64>>,
 }
 
 impl Watches {
@@ -61,7 +63,39 @@ impl Watches {
         Self {
             waiting: AtomicUsize::new(0),
             sampler: Mutex::new(None),
+            woken: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Wakes every watch for a change no commit shows, such as the desktop focus a TUI reveal
+    /// leaves (v2.5 S3c): moves the running sampler's mark as a commit does, and names `topic`
+    /// to each watch from an older mark. With no sampler running nothing moves, and the next
+    /// watch, which has no mark, is answered `unknown`. Input: a named topic. Output: none.
+    pub(super) fn wake(&self, topic: Topic) {
+        assert!(topic != Topic::Unknown, "a moved mark always names unknown");
+        let sampler = self.sampler.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(running) = sampler.as_ref().filter(|it| !it.thread.is_finished()) else {
+            return;
+        };
+        let mut woken = self.woken.lock().unwrap_or_else(PoisonError::into_inner);
+        running.mark.send_modify(|mark| {
+            *mark = mark.wrapping_add(1);
+            woken.insert(topic, *mark);
+        });
+    }
+
+    /// The topics woken since a watch's mark. Input: the mark of the watch's last reply, none
+    /// for a first watch, which `unknown` already covers. Output: the topics.
+    fn woken_since(&self, mark: Option<u64>) -> Vec<Topic> {
+        let Some(mark) = mark else {
+            return Vec::new();
+        };
+        let woken = self.woken.lock().unwrap_or_else(PoisonError::into_inner);
+        woken
+            .iter()
+            .filter(|(_, at)| mark < **at)
+            .map(|(topic, _)| *topic)
+            .collect()
     }
 
     /// The mark's receiver. The first watch starts the sampler, and a watch after it stopped
@@ -75,6 +109,10 @@ impl Watches {
         let started = Sampler::start(database)?;
         let marks = started.mark.subscribe();
         *sampler = Some(started);
+        self.woken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         Ok(marks)
     }
 }
@@ -185,6 +223,14 @@ impl Drop for Waiting<'_> {
 
 fn unknown() -> EngineError {
     failure("watch_outcome_unknown")
+}
+
+impl OwnerRuntimeHandle {
+    /// Wakes the owner server's watches for a change no commit shows (v2.5 S3c), as
+    /// [`Watches::wake`] does. Input: a named topic. Output: none.
+    pub(crate) fn wake_watches(&self, topic: Topic) {
+        self.authority.watches.wake(topic);
+    }
 }
 
 impl OwnerClient {
@@ -348,6 +394,7 @@ async fn wait(
         let mut topics: BTreeSet<Topic> = logged.into_iter().collect();
         if request.mark != Some(mark) {
             topics.insert(Topic::Unknown);
+            topics.extend(watches.woken_since(request.mark));
         }
         if !topics.is_empty() {
             let topics = topics.into_iter().collect();

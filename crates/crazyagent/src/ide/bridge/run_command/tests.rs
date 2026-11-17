@@ -80,12 +80,13 @@ fn project(name: &str) -> ProjectId {
 #[test]
 fn the_run_mode_defaults_to_type_and_run_and_is_kept_per_project() {
     let db = Connection::open_in_memory().unwrap();
+    let host = crate::ide::log::seed(&db);
     let (alpha, beta) = (project("alpha"), project("beta"));
     assert_eq!(mode(&db, &alpha).unwrap(), RunMode::TypeAndRun);
-    set_mode(&db, &alpha, RunMode::Off).unwrap();
+    set_mode(&db, &host, &alpha, RunMode::Off).unwrap();
     assert_eq!(mode(&db, &alpha).unwrap(), RunMode::Off);
     assert_eq!(mode(&db, &beta).unwrap(), RunMode::TypeAndRun);
-    set_mode(&db, &alpha, RunMode::TypeOnly).unwrap();
+    set_mode(&db, &host, &alpha, RunMode::TypeOnly).unwrap();
     assert_eq!(mode(&db, &alpha).unwrap(), RunMode::TypeOnly);
     let rows: i64 = db
         .query_row("SELECT COUNT(*) FROM ide_run_settings", [], |row| {

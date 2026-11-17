@@ -47,6 +47,7 @@ pub mod memory;
 pub mod model_gateway;
 pub mod onboarding;
 pub mod owner_profile;
+pub mod owner_texts;
 pub mod paths;
 pub mod planning;
 pub mod platform;

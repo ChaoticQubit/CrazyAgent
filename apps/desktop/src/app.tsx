@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
 import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, STUCK_SIGN_IN_LINE, type EngineVersions } from "./api";
 import { ideFocus, type IdeFocus } from "./engine-client";
+import { onChanged, startWatch } from "./engine-changes";
 import { preloadLastIde } from "./api-ide";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
@@ -241,8 +242,6 @@ function useShortcuts() {
   }, []);
 }
 
-export const ALERT_READ_MS = 10_000;
-
 const NONE_WORKING: ReadonlyMap<string, number> = new Map();
 
 /** Keeps the map shown when a look reads the same counts, so a look that changed nothing never
@@ -263,8 +262,9 @@ export interface TeamAlerts {
   working: ReadonlyMap<string, number>;
 }
 
-/** Watches the owner's team notifications and pending questions while the engine runs: every
- * 10 s it reads them, shows a new notification as a toast, with Open to the Agents tab's
+/** Watches the owner's team notifications and pending questions while the engine runs: it reads
+ * them once, then after each engine change to the team or of unknown subject (v2.5 S3c, one
+ * read at a time), shows a new notification as a toast, with Open to the Agents tab's
  * Questions for you drawer on an urgent question or an agent waiting in its terminal, keeps
  * the app icon badge at the unseen notifications plus the pending questions, and asks for
  * attention when a notification is new; a Normal question only counts toward the badge. The
@@ -285,9 +285,10 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
     let live = true;
     let last: number | null = null;
     let shown = 0;
-    let timer = 0;
+    let reading = false;
+    let again = false;
     const watch = questionWatch((line) => toast.current(line));
-    const read = async () => {
+    const look = async () => {
       const [result, questions] = await Promise.all([loadTeamEvents(), loadQuestionCounts()]);
       if (!live) return;
       const pending = questions.kind === "ok" ? pendingByProject(questions.value) : new Map<string, number>();
@@ -306,19 +307,35 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
         setWorking(NONE_WORKING);
       }
       if (questions.kind === "ok") await watch.look(questions.value);
-      if (live && (result.kind !== "not_ready" || questions.kind !== "not_ready")) timer = window.setTimeout(read, ALERT_READ_MS);
+      if (result.kind === "not_ready" && questions.kind === "not_ready") stopHearing();
     };
-    void read();
+    const read = async () => {
+      if (reading) {
+        again = true;
+        return;
+      }
+      reading = true;
+      try {
+        do {
+          again = false;
+          await look();
+        } while (again && live);
+      } finally {
+        reading = false;
+      }
+    };
+    const stopHearing = onChanged(["team"], () => void read());
+    void startWatch().then(() => {
+      if (live) void read();
+    });
     return () => {
       live = false;
-      window.clearTimeout(timer);
+      stopHearing();
       watch.stop();
     };
   }, [running]);
   return { alerts: counts, working };
 }
-
-export const IDE_FOCUS_POLL_MS = 1_000;
 
 /** The route a TUI "open in IDE" brings forward: the project's IDE tab.
  * Input: the focus the engine handed over. Output: the route. */
@@ -333,25 +350,27 @@ export function ideFocusMoves(route: Route, focus: IdeFocus): boolean {
   return !(route.name === "project" && route.id === focus.project && route.tab === "ide");
 }
 
-/** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
- * second it takes the waiting focus, if any, and opens that project's IDE tab; the engine
- * raises the window. The desktop asks the engine only while an IDE webview is loaded, since
- * only a loaded IDE can take a reveal. Input: whether the engine runs. */
+/** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, it takes
+ * the waiting focus once, then after each engine change to the IDE or of unknown subject
+ * (v2.5 S3c; a reveal wakes the watch with "ide"), and opens that project's IDE tab; the
+ * desktop raises its window. Only a loaded IDE webview can take a reveal, so the desktop
+ * asks the engine only while one is loaded. Input: whether the engine runs. */
 function useIdeFocus(running: boolean) {
   useEffect(() => {
     if (!running) return;
     let live = true;
-    let timer = 0;
     const read = async () => {
       const focus = await ideFocus().catch(() => null);
       if (!live) return;
       if (focus && ideFocusMoves(parseRoute(window.location.hash), focus)) navigate(ideFocusRoute(focus));
-      timer = window.setTimeout(read, IDE_FOCUS_POLL_MS);
     };
-    void read();
+    const stopHearing = onChanged(["ide"], () => void read());
+    void startWatch().then(() => {
+      if (live) void read();
+    });
     return () => {
       live = false;
-      window.clearTimeout(timer);
+      stopHearing();
     };
   }, [running]);
 }

@@ -115,13 +115,14 @@ pub(crate) struct Agent {
 
 /// A real engine database beside a real project repository, whose team agents each get a
 /// real git worktree in the project's `.crazyagent/worktrees/` folder, as the team runtime
-/// adds them.
+/// adds them. The database holds one running engine host, whose fence the ide writes hold.
 pub(crate) struct Case {
     _tmp: tempfile::TempDir,
     pub(crate) root: PathBuf,
     pub(crate) folder: PathBuf,
     pub(crate) db: Connection,
     pub(crate) project: ProjectId,
+    pub(crate) host: HostStamp,
     created_ms: i64,
 }
 
@@ -140,6 +141,7 @@ impl Case {
         }
         let db = Connection::open(root.join("engine.db")).unwrap();
         crate::storage::initialize_authority_schemas(&db).unwrap();
+        let host = crate::ide::log::seed(&db);
         add_project(&db, PROJECT, &folder);
         git(&folder, &["init", "-q", "--template=", "-b", "main"]);
         git(&folder, &["config", "user.name", "Repo Owner"]);
@@ -154,6 +156,7 @@ impl Case {
             folder,
             db,
             project: ProjectId::new(PROJECT).unwrap(),
+            host,
             created_ms: 1_000,
         }
     }
@@ -290,7 +293,7 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
     let mut case = Case::new();
     let master = case.agent("master", "idle");
     let subs: Vec<Agent> = (0..14).map(|_| case.agent("sub", "working")).collect();
-    let written = write(&case.root, &case.project).unwrap();
+    let written = write(&case.root, &case.host, &case.project).unwrap();
     assert_eq!(
         written,
         Written {
@@ -350,9 +353,12 @@ fn workspace_lists_project_master_and_active_agents_newest_first_capped_at_12() 
 fn show_all_agents_adds_the_rest() {
     let mut case = Case::new();
     let subs: Vec<Agent> = (0..14).map(|_| case.agent("sub", "working")).collect();
-    assert_eq!(write(&case.root, &case.project).unwrap().hidden, 2);
+    assert_eq!(
+        write(&case.root, &case.host, &case.project).unwrap().hidden,
+        2
+    );
     assert_eq!(case.names().len(), 1 + AGENTS_SHOWN_MAX);
-    let written = show_all(&case.root, &case.project, true).unwrap();
+    let written = show_all(&case.root, &case.host, &case.project, true).unwrap();
     assert_eq!(
         written,
         Written {
@@ -364,10 +370,10 @@ fn show_all_agents_adds_the_rest() {
     let mut expected = vec!["Project".to_owned()];
     expected.extend(subs.iter().rev().map(sub));
     assert_eq!(case.names(), expected);
-    let again = write(&case.root, &case.project).unwrap();
+    let again = write(&case.root, &case.host, &case.project).unwrap();
     assert!(again.show_all);
     assert_eq!(case.names(), expected);
-    let fewer = show_all(&case.root, &case.project, false).unwrap();
+    let fewer = show_all(&case.root, &case.host, &case.project, false).unwrap();
     assert_eq!((fewer.hidden, fewer.show_all), (2, false));
     assert_eq!(case.names().len(), 1 + AGENTS_SHOWN_MAX);
     assert_eq!(case.names()[1], sub(&subs[13]));
@@ -380,7 +386,7 @@ fn workspace_file_changes_when_an_agent_starts_and_stops() {
     let first = case.agent("sub", "working");
     follow(&case.db, &case.root).unwrap();
     assert!(std::fs::symlink_metadata(case.file()).is_err());
-    write(&case.root, &case.project).unwrap();
+    write(&case.root, &case.host, &case.project).unwrap();
     assert_eq!(
         case.names(),
         vec!["Project".to_owned(), "master".to_owned(), sub(&first)]
@@ -425,7 +431,7 @@ fn folder_names_follow_agent_name_and_role() {
         .unwrap()
         .unwrap();
     assert_eq!(handle, "builder");
-    write(&case.root, &case.project).unwrap();
+    write(&case.root, &case.host, &case.project).unwrap();
     assert_eq!(
         case.names(),
         vec![
@@ -454,7 +460,7 @@ fn idle_agent_without_open_change_set_is_left_out() {
     for agent in [&stopped_changed, &stopped] {
         case.status(agent, "stopped");
     }
-    write(&case.root, &case.project).unwrap();
+    write(&case.root, &case.host, &case.project).unwrap();
     assert_eq!(
         case.names(),
         vec![
