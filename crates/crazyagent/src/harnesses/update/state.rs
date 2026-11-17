@@ -300,6 +300,7 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
         last: None,
         needs: None,
         sign_in_min: None,
+        waiting: None,
     }
 }
 
@@ -711,6 +712,7 @@ impl Updates {
             last: None,
             needs: None,
             sign_in_min: None,
+            waiting: None,
         }
     }
 

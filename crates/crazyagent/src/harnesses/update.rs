@@ -2,6 +2,7 @@ mod run;
 mod state;
 #[cfg(all(test, unix))]
 mod tests;
+mod turn;
 
 pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,
@@ -110,7 +111,9 @@ pub struct LastUpdate {
 /// line of an installed harness, `install` the exact install line of a missing one, `refusal`
 /// the code for why a button is not offered, `guide` the vendor's page for that case,
 /// `needs` what an installed harness lacks before it can run, as the tool resolver reads it,
-/// and `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in.
+/// `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in,
+/// and `waiting` the catalog id of the harness whose job this running job waits behind,
+/// since the two would change the same folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {
@@ -128,6 +131,8 @@ pub struct HarnessVersions {
     pub needs: Option<HarnessNeeds>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_in_min: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 /// What an installed harness lacks before it can run, from the tool resolver

@@ -99,6 +99,7 @@ fn versions(id: &str, install: Option<&str>, refusal: Option<&str>) -> HarnessVe
         last: None,
         needs: None,
         sign_in_min: None,
+        waiting: None,
     }
 }
 
