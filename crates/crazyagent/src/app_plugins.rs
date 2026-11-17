@@ -480,14 +480,6 @@ const PLAIN: &[(&str, &str)] = &[
         "the key could not be saved; nothing was changed.",
     ),
     (
-        "app_plugin_call_failed",
-        "the plugin's host did not answer with vectors; search uses full text for now.",
-    ),
-    (
-        "app_plugin_reply_invalid",
-        "the plugin's reply was not the vectors its file declares.",
-    ),
-    (
         "app_plugin_request_invalid",
         "the request could not be read.",
     ),
