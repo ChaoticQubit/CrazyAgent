@@ -3,7 +3,8 @@ import type { Route } from "../../ui";
 import { displayText } from "../conversation";
 import {
   CONSOLE_COMMANDS, commandRoute, consoleKey, fileMentions, filterCommands, helpLines, insertMention, matchMentions,
-  mentionAt, moveChoice, promptRows, recall, remember, submitted, tagSegments, unknownLine, type ConsoleCommand, type Mention,
+  mentionAt, moveChoice, promptRows, recall, remember, seededText, submitted, tagSegments, unknownLine, type ConsoleCommand,
+  type Mention,
 } from "./console-model";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
@@ -45,6 +46,7 @@ export interface ConsoleProps {
   onStop: () => void;
   onNavigate: (route: Route) => void;
   onTagQuery?: (query: string | null) => void;
+  seed?: { id: number; text: string } | null;
 }
 
 export const CONSOLE_HINT = "Enter to send, Shift+Enter for a new line, / for commands, @ to tag.";
@@ -89,7 +91,7 @@ function tagged(text: string, known: ReadonlySet<string>): ReactNode[] {
  * and one `> ` prompt growing to eight lines. Enter sends, Shift+Enter or Ctrl+J adds a line, Up and Down recall
  * sent lines on an empty prompt, Esc clears; `/` at the start opens the command menu and `@`
  * completes agent handles and files. Input: ConsoleProps. Output: the console. */
-export function Console({ projectId, lines, agents, files = null, canSend = true, status, onSend, onStop, onNavigate, onTagQuery }: ConsoleProps) {
+export function Console({ projectId, lines, agents, files = null, canSend = true, status, onSend, onStop, onNavigate, onTagQuery, seed = null }: ConsoleProps) {
   const [text, setTextState] = useState("");
   const [caret, setCaret] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
@@ -142,6 +144,11 @@ export function Console({ projectId, lines, agents, files = null, canSend = true
     setHeld(false);
     pending.current = at;
   };
+  useEffect(() => {
+    if (seed === null) return;
+    setText(seededText(text, seed.text));
+    field.current?.focus();
+  }, [seed]);
   const lastLineId = () => lines.at(-1)?.id ?? null;
   const note = (texts: string[]) => setNotes((old) => [...old, ...texts.map((value) => {
     noteId.current += 1;

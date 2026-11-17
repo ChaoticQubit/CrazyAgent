@@ -422,9 +422,10 @@ function setupLine(id: string, name: string, now: IntakeJob["state"]): string {
  * or builds a New Project, which the engine refuses once the project is being saved; nothing while it
  * clears or a delete moves folders to the Trash, since neither stops; Retry only when the
  * folder did not land, since a failure while clearing means it is already in the projects
- * folder, and Finish delete for a delete cut short; an answer for a soft refusal; Dismiss
- * once it ended. Input: the job. Output: the actions in button order. */
-export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dismiss")[] {
+ * folder, and Finish delete for a delete cut short; an answer for a soft refusal; Reinstall in
+ * the project for a done project move that left folders; Dismiss once it ended. Input: the job.
+ * Output: the actions in button order. */
+export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "reinstall" | "dismiss")[] {
   const now = job.state;
   switch (now.state) {
     case "waiting":
@@ -437,7 +438,7 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dism
     case "trashing":
       return [];
     case "done":
-      return ["dismiss"];
+      return reinstallHere(job) ? ["reinstall", "dismiss"] : ["dismiss"];
     case "failed":
       return now.phase === "clearing" ? ["dismiss"] : ["retry", "dismiss"];
     case "cancelled":
@@ -446,6 +447,20 @@ export function jobActions(job: IntakeJob): ("stop" | "retry" | "answer" | "dism
     case "needs_answer":
       return ["answer", "dismiss"];
   }
+}
+
+/** Whether Home offers the reinstall for a done job: a project move that left rebuildable
+ * folders in iCloud, whose project the engine keeps the offer for. A done add has no project
+ * until it is set up, so its line alone says to reinstall. Input: the job. Output: the answer. */
+export function reinstallHere(job: IntakeJob): boolean {
+  return job.kind !== job.kind;
+}
+
+/** Where Home's reinstall action goes: the moved project's conversation, where its offer is.
+ * Input: a job [`reinstallHere`] accepts. Output: the route. */
+export function reinstallRoute(job: IntakeJob): string {
+  if (job.project_id === null) throw new Error("only a project move offers the reinstall");
+  return `/projects/${encodeURIComponent(job.project_id)}/conversation`;
 }
 
 /** The jobs that just ended, each said once as a toast and a notification: a job the read before

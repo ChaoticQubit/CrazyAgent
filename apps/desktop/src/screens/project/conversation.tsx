@@ -12,6 +12,7 @@ import { useTeamGraph } from "../team";
 import { Console, type ConsoleLine } from "./console";
 import { agentMentions } from "./console-model";
 import { useProjectFiles } from "./project-files";
+import { ReinstallNotice } from "./reinstall";
 import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, activityLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -146,7 +147,12 @@ export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, 
  * conversation is only read, as the one from before a live master. Output: the console and,
  * unless read-only, the conversation's actions; it polls every two seconds while a reply is
  * still coming. */
-export function ConversationTab({ data, readOnly = false }: { data: ProjectData; readOnly?: boolean }) {
+export function ConversationTab({ data, readOnly = false, seed = null, onAsk }: {
+  data: ProjectData;
+  readOnly?: boolean;
+  seed?: { id: number; text: string } | null;
+  onAsk?: (draft: string) => void;
+}) {
   const [ticket, setTicket] = useState("");
   const [master, setMaster] = useState<MasterState>();
   const [turns, setTurns] = useState<MasterTurn[]>([]);
@@ -348,11 +354,12 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
         <button type="button" className="btn" onClick={() => data.navigate(`${settings}?section=pool`)}>Choose pool</button></div>}
       {status === "Not signed in" && <div className="pj-note warn"><p>The master's accounts{data.assigned ? ` in ${displayText(poolName(data.assigned.pool))}` : ""} aren't signed in.</p>
         <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Open accounts</button></div>}
+      {onAsk && <ReinstallNotice projectId={data.id} onAsk={onAsk} onAccounts={() => data.navigate("/settings/accounts")} />}
       {note && <p className="pj-small pj-muted" role="status">{note}</p>}
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       {again !== null && <div className="pj-row"><button type="button" className="btn" disabled={blocked} onClick={() => void send(again)}>Send again</button></div>}
     </>}
-    <Console projectId={data.id} lines={lines} agents={agents} files={files} onTagQuery={setTag}
+    <Console projectId={data.id} lines={lines} agents={agents} files={files} onTagQuery={setTag} seed={seed}
       canSend={gate !== "hold"} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
       onSend={offer} onStop={() => void stopReply()} onNavigate={(route) => data.navigate(formatRoute(route).slice(1))} />
   </div>;

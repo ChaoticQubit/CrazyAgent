@@ -2873,6 +2873,28 @@ async fn desktop_intake_dismiss(
 }
 
 #[tauri::command]
+async fn desktop_reinstall_offer(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Option<crazyagent::projects_home::reinstall::Offer>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.reinstall_offer(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_reinstall_dismiss(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<bool, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.reinstall_dismiss(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_setup_status(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5487,6 +5509,8 @@ native_commands! {
     desktop_intake_status,
     desktop_intake_stop,
     desktop_intake_dismiss,
+    desktop_reinstall_offer,
+    desktop_reinstall_dismiss,
     desktop_setup_status,
     desktop_run_setup,
     desktop_install_dependency,

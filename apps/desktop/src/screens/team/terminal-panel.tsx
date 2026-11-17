@@ -922,7 +922,7 @@ const idle = () => IDLE;
  * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
  * types (the terminal, the message box under it, or both) is the one Terminal input in
  * Settings, for every agent on every screen. Output: the panel. */
-export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened }: {
+export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
@@ -934,6 +934,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   reported?: string;
   projectId?: string;
   onOpened?: (open: boolean) => void;
+  seed?: { id: number; text: string } | null;
 }) {
   if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
   if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
@@ -961,6 +962,14 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   const open = view.kind === "live";
   useEffect(() => { opened.current?.(open); }, [open]);
   useEffect(() => () => opened.current?.(false), []);
+  const pasted = useRef<number | null>(null);
+  useEffect(() => {
+    const terminal = current.current?.terminal ?? null;
+    if (seed === null || !open || terminal === null || pasted.current === seed.id) return;
+    pasted.current = seed.id;
+    terminal.paste(pasteText(seed.text));
+    terminal.focus();
+  }, [seed, open]);
   const [menu, setMenu] = useState<MenuAt | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 

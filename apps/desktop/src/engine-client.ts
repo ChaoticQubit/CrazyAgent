@@ -1922,6 +1922,25 @@ export function intakeDismiss(id: string): Promise<boolean> {
   return invoke<boolean>("desktop_intake_dismiss", { id });
 }
 
+/** A project's reinstall offer: up to three folders a job left in iCloud as rebuildable, shown
+ * plain, how many more there are, and the message the master gets on Ask. */
+export interface ReinstallOffer {
+  folders: string[];
+  more: number;
+  draft: string;
+}
+
+/** Reads the reinstall offer the engine keeps for a project's folder. Input: the project id.
+ * Output: the offer, or null when there is none. */
+export function reinstallOffer(projectId: string): Promise<ReinstallOffer | null> {
+  return invoke<ReinstallOffer | null>("desktop_reinstall_offer", { projectId });
+}
+
+/** Dismisses a project's reinstall offer. Input: the project id. Output: whether one was. */
+export function reinstallDismiss(projectId: string): Promise<boolean> {
+  return invoke<boolean>("desktop_reinstall_dismiss", { projectId });
+}
+
 /** Measures a folder before Copy and names its GitHub repository, if any.
  * Input: an absolute folder path. Output: its size and GitHub owner/name. */
 export function folderSize(path: string): Promise<FolderSize> {

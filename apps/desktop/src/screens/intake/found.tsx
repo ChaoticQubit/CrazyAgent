@@ -12,7 +12,7 @@ import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
+import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, reinstallRoute, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -37,7 +37,7 @@ const KIND_BADGES: Record<IntakeJob["kind"], Partial<Record<IntakeJobState["stat
   add: {}, move_project: { copying: "Moving", done: "Moved" }, delete: { copying: "Deleting", done: "Deleted" }, setup: { done: "Set up" },
 };
 
-const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
+const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", reinstall: "Reinstall in the project", dismiss: "Dismiss" };
 
 /** The button words a delete cut short shows in place of Try again and Dismiss (DEC-177 add.1). */
 const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], string>> = { retry: "Finish delete", dismiss: "Keep the project" };
@@ -46,18 +46,19 @@ const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], st
  * for its state, its line with the counts as files land, and only the actions its state allows,
  * with Can't stop now, disabled, while a delete moves folders to the Trash. Inputs: the job, a
  * busy flag and the four action handlers. Output: the row. */
-export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss }: {
+export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss, onReinstall = () => go(reinstallRoute(job)) }: {
   job: IntakeJob;
   busy: boolean;
   onStop: () => void;
   onRetry: () => void;
   onAnswer: () => void;
   onDismiss: () => void;
+  onReinstall?: () => void;
 }) {
   const shown = JOB_BADGES[job.state.state];
   const word = KIND_BADGES[job.kind][job.state.state];
   const badge = word === undefined ? shown : { word, tone: shown.tone };
-  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
+  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, reinstall: onReinstall, dismiss: onDismiss };
   const labels = job.state.state === "cut_short" ? { ...JOB_LABELS, ...CUT_SHORT_LABELS } : JOB_LABELS;
   return <div className="in-row">
     <span className="in-row-main">

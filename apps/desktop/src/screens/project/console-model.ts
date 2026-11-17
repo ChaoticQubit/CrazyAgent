@@ -245,3 +245,10 @@ export function tagSegments(text: string, known: ReadonlySet<string>): { text: s
 export function promptRows(text: string): number {
   return Math.min(PROMPT_ROWS_MAX, Math.max(1, text.split("\n").length));
 }
+
+/** The master's input once a drafted message is handed to it: the draft alone in an empty
+ * input, else after the owner's own text and a blank line, so nothing typed is lost. Inputs:
+ * the input's text and the draft. Output: the new text. */
+export function seededText(text: string, draft: string): string {
+  return draft.length > 0 ? text : draft;
+}

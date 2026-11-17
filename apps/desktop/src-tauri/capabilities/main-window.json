@@ -152,6 +152,8 @@
     "allow-desktop-intake-status",
     "allow-desktop-intake-stop",
     "allow-desktop-intake-dismiss",
+    "allow-desktop-reinstall-offer",
+    "allow-desktop-reinstall-dismiss",
     "allow-desktop-setup-status",
     "allow-desktop-run-setup",
     "allow-desktop-install-dependency",
