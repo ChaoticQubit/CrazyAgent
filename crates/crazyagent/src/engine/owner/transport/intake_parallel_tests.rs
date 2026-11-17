@@ -1,8 +1,8 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
-use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobState, JobSubject, JobView};
+use crate::projects_home::{AddMode, AddOverride};
 use std::os::unix::fs::PermissionsExt;
 
 const ENGINE_WAIT: Duration = Duration::from_secs(10);
@@ -126,6 +126,33 @@ impl Jobs {
             assert!(std::time::Instant::now() < deadline, "job {id} never ended");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    /// Reads the add `id` of `path` until it has ended by sending its start again, which
+    /// answers the job's view and is no status read, so no client has read the end. Inputs:
+    /// the id, the folder and the mode. Output: its ended view.
+    async fn ended_unread(&mut self, id: &str, path: &str, mode: AddMode) -> JobView {
+        let deadline = std::time::Instant::now() + ENGINE_WAIT * 3;
+        loop {
+            let view = self.add(id, path, mode).await.unwrap();
+            assert_eq!(view.id.as_str(), id, "a resend answers its own job");
+            if view.state.over() {
+                return view;
+            }
+            assert!(std::time::Instant::now() < deadline, "job {id} never ended");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// The ids status lists, in start order. Output: the ids.
+    async fn listed(&mut self) -> Vec<String> {
+        let jobs = self.owner.job_status().await.unwrap();
+        jobs.iter().map(|job| job.id.as_str().to_owned()).collect()
+    }
+
+    /// The engine's owner authority, for a row that holds what a client change holds.
+    fn authority(&self) -> Arc<Authority> {
+        Arc::clone(&self.service.owner_runtime().unwrap().authority)
     }
 
     /// The names in the home that a copy stages under, left behind by a job.
@@ -414,5 +441,172 @@ async fn every_add_an_engine_stop_cut_comes_back_ended_after_the_next_start() {
         ["add-garden"],
         "the dismiss reached storage"
     );
+    jobs.stop().await;
+}
+
+/// #380 F2: a job that ended before any client read it stays listed past another start, so a
+/// client still finds its end; once a status read listed the ends, the next start drops them.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_end_no_client_read_stays_listed_past_another_start() {
+    let mut jobs = Jobs::start().await;
+    let alpha = jobs.folder("alpha", "a");
+    let delta = jobs.folder("delta", "d");
+    let echo = jobs.folder("echo", "e");
+    jobs.add("add-alpha", &alpha, AddMode::Copy).await.unwrap();
+    let alpha_end = jobs.ended_unread("add-alpha", &alpha, AddMode::Copy).await;
+    assert_eq!(alpha_end.state, JobState::Done);
+    jobs.add("add-delta", &delta, AddMode::Copy).await.unwrap();
+    let listed = jobs.listed().await;
+    assert!(
+        listed.iter().any(|id| id == "add-alpha"),
+        "an end no client read stays listed past a start: {listed:?}"
+    );
+    assert_eq!(jobs.ended("add-delta").await.state, JobState::Done);
+    jobs.add("add-echo", &echo, AddMode::Copy).await.unwrap();
+    let listed = jobs.listed().await;
+    assert!(
+        !listed
+            .iter()
+            .any(|id| id == "add-alpha" || id == "add-delta"),
+        "a start drops the ends a status read listed: {listed:?}"
+    );
+    assert_eq!(jobs.ended("add-echo").await.state, JobState::Done);
+    jobs.stop().await;
+}
+
+/// #380 F2: an add that asks the owner stays listed past other starts after a status read
+/// listed it, so its question is never wiped; the answer, a start of the same folder with
+/// the owner's override, takes its place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_stays_listed_past_other_starts_until_its_answer_starts() {
+    let mut jobs = Jobs::start().await;
+    let linked = jobs.folder("linked", "l");
+    std::fs::write(
+        Path::new(&linked).join(".git"),
+        "gitdir: /nowhere/.git/worktrees/linked\n",
+    )
+    .unwrap();
+    let other = jobs.folder("other", "o");
+    jobs.add("add-linked", &linked, AddMode::Copy)
+        .await
+        .unwrap();
+    let asked = jobs.ended("add-linked").await;
+    let question = JobState::NeedsAnswer {
+        code: "home_copy_linked_checkout".into(),
+    };
+    assert_eq!(asked.state, question);
+    jobs.add("add-other", &other, AddMode::Copy).await.unwrap();
+    let listed = jobs.listed().await;
+    assert!(
+        listed.iter().any(|id| id == "add-linked"),
+        "another start keeps the question: {listed:?}"
+    );
+    assert_eq!(jobs.ended("add-other").await.state, JobState::Done);
+    let listed = jobs.listed().await;
+    assert!(
+        listed.iter().any(|id| id == "add-linked"),
+        "the question outlives the other job's end: {listed:?}"
+    );
+    jobs.owner
+        .job_start(
+            RequestId::new("add-linked-anyway").unwrap(),
+            JobSubject::Add {
+                path: linked.clone(),
+            },
+            AddMode::Copy,
+            vec![AddOverride::LinkedCheckout],
+        )
+        .await
+        .unwrap();
+    let listed = jobs.listed().await;
+    assert!(
+        !listed.iter().any(|id| id == "add-linked"),
+        "the answer takes the question's place: {listed:?}"
+    );
+    assert!(listed.iter().any(|id| id == "add-linked-anyway"));
+    jobs.ended("add-linked-anyway").await;
+    jobs.stop().await;
+}
+
+/// #380 F3: with three jobs running, eight waiting and every client-change place held, one
+/// more start answers `job_busy` and never trips the engine's bound on running changes; once
+/// the places and storage go free, every job ends done.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_past_the_waiting_list_is_busy_while_client_changes_hold_their_places() {
+    let mut jobs = Jobs::start().await;
+    let total = JOBS_RUNNING + JOBS_WAITING;
+    let folders: Vec<String> = (0..=total)
+        .map(|n| jobs.folder(&format!("folder-{n}"), &n.to_string()))
+        .collect();
+    let release = jobs.hold();
+    for (n, folder) in folders.iter().take(total).enumerate() {
+        jobs.add(&format!("add-{n}"), folder, AddMode::Copy)
+            .await
+            .unwrap_or_else(|e| panic!("start {n} of {total} is taken: {}", e.0));
+    }
+    let authority = jobs.authority();
+    let places: Vec<_> = (0..DEFERRED_MAX)
+        .map(|n| {
+            let id = RequestId::new(format!("client-change-{n}")).unwrap();
+            super::projects_home::Running::claim(&authority, "owner", &id)
+                .expect("a client change takes a free place")
+        })
+        .collect();
+    let past = jobs
+        .add("add-past", &folders[total], AddMode::Copy)
+        .await
+        .expect_err("a start past the waiting list is refused");
+    assert_eq!(past.0, "job_busy");
+    drop(places);
+    release.send(()).unwrap();
+    for n in 0..total {
+        assert_eq!(jobs.ended(&format!("add-{n}")).await.state, JobState::Done);
+    }
+    assert!(!jobs.home().join(format!("folder-{total}")).exists());
+    jobs.stop().await;
+}
+
+/// #380 F4: a stop reaches an add that waits for the download slot another download holds at
+/// once: it ends cancelled while that download still runs, its folder where it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_reaches_an_add_waiting_for_the_download_slot_at_once() {
+    let mut jobs = Jobs::start().await;
+    let site = jobs.folder("site", "s");
+    let authority = jobs.authority();
+    let slot = authority.intake.downloads.lock().await;
+    jobs.add("add-site", &site, AddMode::Move).await.unwrap();
+    let stopped = jobs
+        .owner
+        .job_stop(RequestId::new("add-site").unwrap())
+        .await
+        .unwrap();
+    assert!(stopped, "the stop reaches the running job");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let ended = loop {
+        let jobs_now = jobs.owner.job_status().await.unwrap();
+        let found = jobs_now
+            .into_iter()
+            .find(|job| job.id.as_str() == "add-site");
+        if let Some(job) = found.filter(|job| job.state.over()) {
+            break job;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the stop never reached the add waiting for the download slot"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert!(
+        matches!(ended.state, JobState::Cancelled { .. }),
+        "{:?}",
+        ended.state
+    );
+    assert_eq!(
+        note(Path::new(&site)),
+        "s",
+        "a stopped move leaves its folder"
+    );
+    assert!(!jobs.home().join("site").exists());
+    drop(slot);
     jobs.stop().await;
 }

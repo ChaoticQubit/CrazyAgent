@@ -36,7 +36,7 @@ pub(super) struct Asked {
 pub(super) struct Intake {
     held: Mutex<Vec<Held>>,
     direct: std::sync::atomic::AtomicUsize,
-    downloads: tokio::sync::Mutex<()>,
+    pub(super) downloads: tokio::sync::Mutex<()>,
 }
 
 /// A direct client folder add or project move under way, which keeps any job from starting
