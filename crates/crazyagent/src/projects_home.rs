@@ -1427,7 +1427,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_permission_denied" => {
             "macOS did not let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed."
         }
-        "icloud_download_busy" => "Another iCloud download is running. Wait for it to finish.",
+        "icloud_download_busy" => {
+            "Too many iCloud downloads are running at once. Wait for one to finish."
+        }
         "icloud_folder_missing" => "That folder isn't there anymore.",
         "icloud_folder_unsafe" => "That folder can't be downloaded.",
         "icloud_folder_unreadable" => "Some files in this folder can't be read.",

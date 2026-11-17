@@ -11,7 +11,6 @@ use crazyagent::github::{
 use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::project_setup::ProjectSetup;
-use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
@@ -648,36 +647,6 @@ impl NativeBridge {
             return Err(failure("not_connected"));
         }
         self.controller()?.shared_client().map_err(intake_failure)
-    }
-
-    /// Downloads every file of a folder that is only in iCloud and waits until all are on
-    /// this Mac; the folder itself is not moved or changed. Runs without the bridge lock, so
-    /// progress and cancel answer while it waits. Input: the absolute folder. Output: how many
-    /// files it downloaded, or `home_icloud_not_downloaded` after a cancel, stall or time limit.
-    pub fn icloud_download(&mut self, path: String) -> Result<Unlocked<u64>, BridgeError> {
-        crazyagent::projects_home::path_text(&path, "icloud_path_invalid")
-            .map_err(intake_failure)?;
-        let client = self.icloud_client()?;
-        Ok(Box::pin(async move {
-            bounded(client.icloud_download(path).await.map_err(intake_failure)?)
-        }))
-    }
-
-    /// Reads how far the running iCloud download has come. Output: the counts, or None when
-    /// no download runs.
-    pub fn icloud_progress(&mut self) -> Result<Unlocked<Option<Progress>>, BridgeError> {
-        let client = self.icloud_client()?;
-        Ok(Box::pin(async move {
-            bounded(client.icloud_progress().await.map_err(intake_failure)?)
-        }))
-    }
-
-    /// Stops the running iCloud download at its next check. Output: whether one was running.
-    pub fn icloud_cancel(&mut self) -> Result<Unlocked<bool>, BridgeError> {
-        let client = self.icloud_client()?;
-        Ok(Box::pin(async move {
-            bounded(client.icloud_cancel().await.map_err(intake_failure)?)
-        }))
     }
 
     /// Starts the engine's intake job for a folder: it downloads what is only in iCloud, then

@@ -99,8 +99,8 @@ pub struct Progress {
     pub bytes_done: u64,
 }
 
-/// One running download's shared state: its progress, read by progress requests, the
-/// rebuildable folders its last listing left out, and its cancel flag, set by a cancel request
+/// One running download's shared state: its progress, read through its intake job, the
+/// rebuildable folders its last listing left out, and its cancel flag, set by the job's stop
 /// or when the request that started it ends.
 #[derive(Debug, Default)]
 pub struct Download {
@@ -177,63 +177,45 @@ impl Download {
 /// by side, every one opening its files through the one paced queue.
 pub const DOWNLOADS_MAX: usize = 8;
 
-/// The engine's one download slot, so at most one iCloud download runs at a time.
+/// The engine's running iCloud downloads, one per intake job that fetches: up to
+/// `DOWNLOADS_MAX` run side by side, as the paced queue shares the open files among them. Each
+/// job reads and cancels its own download.
 #[derive(Debug, Default)]
-pub struct Downloads(Mutex<Option<Arc<Download>>>);
+pub struct Downloads(Mutex<Vec<Arc<Download>>>);
 
 impl Downloads {
-    /// Takes the slot for a new download. Output: the claim, which cancels the download and
-    /// frees the slot when dropped, or `icloud_download_busy` while another one runs.
-    pub fn claim(&self) -> Result<Claim<'_>, EngineError> {
-        self.claim_for(Arc::new(Download::default()))
-    }
-
-    /// Takes the slot for a download whose state another holder reads too, an intake job;
-    /// one already cancelled stops at its first check. Input: the download. Output: as
-    /// [`Downloads::claim`].
+    /// Holds a download whose state another holder reads too, an intake job; one already
+    /// cancelled stops at its first check. Input: the download, held at most once. Output:
+    /// the claim, which cancels the download and lets it go when dropped, or
+    /// `icloud_download_busy` while `DOWNLOADS_MAX` are held.
     pub fn claim_for(&self, download: Arc<Download>) -> Result<Claim<'_>, EngineError> {
-        let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if slot.is_some() {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            !held.iter().any(|other| Arc::ptr_eq(other, &download)),
+            "a download is held once"
+        );
+        if held.len() >= DOWNLOADS_MAX {
             return Err(refused("icloud_download_busy"));
         }
-        *slot = Some(Arc::clone(&download));
-        assert!(slot.is_some());
+        held.push(Arc::clone(&download));
+        assert!(held.len() <= DOWNLOADS_MAX);
         Ok(Claim {
-            slot: self,
+            downloads: self,
             download,
         })
     }
 
     #[cfg(test)]
     fn held(&self) -> usize {
-        let slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        usize::from(slot.is_some())
-    }
-
-    /// The running download's progress. Output: None when none runs.
-    pub fn progress(&self) -> Option<Progress> {
-        let slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        slot.as_ref().map(|download| download.progress())
-    }
-
-    /// Cancels the running download. Output: whether one was running.
-    pub fn cancel(&self) -> bool {
-        let slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        match slot.as_ref() {
-            Some(download) => {
-                download.cancel();
-                true
-            }
-            None => false,
-        }
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
     }
 }
 
-/// A held download slot. Dropping it cancels its download and frees the slot, so a request
-/// that ends for any reason never leaves a download running unwatched.
+/// A held download. Dropping it cancels the download and lets it go, so a request that ends
+/// for any reason never leaves a download running unwatched.
 #[derive(Debug)]
 pub struct Claim<'a> {
-    slot: &'a Downloads,
+    downloads: &'a Downloads,
     download: Arc<Download>,
 }
 
@@ -247,12 +229,15 @@ impl Claim<'_> {
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
         self.download.cancel();
-        let mut slot = self.slot.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let held = slot
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &self.download));
-        assert!(held, "a claim frees only its own slot");
-        *slot = None;
+        let mut held = self
+            .downloads
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let at = held
+            .iter()
+            .position(|other| Arc::ptr_eq(other, &self.download));
+        held.swap_remove(at.expect("a claim lets go only its own download"));
     }
 }
 

@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { pickFolder } from "../../api";
 import { ADD_WARNINGS, loadFolderSize, loadIntakeJobs, loadProjectsHome, startIntake } from "../../api-intake";
-import type { AddFolderMode, AddOverride, FolderSize, IcloudProgress, ProjectsHome, SkippedFolder } from "../../engine-client";
+import type { AddFolderMode, AddOverride, FolderSize, ProjectsHome, SkippedFolder } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, Switch, formatRoute, navigate } from "../../ui";
 import { displayText } from "../conversation";
@@ -9,7 +9,7 @@ import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
 import {
   addWay, anywayIssues, anywayOverrides, anywayWarnings, folderName, icloudAsks, icloudCountLine, icloudMoveLine,
-  icloudPlaceholders, icloudProgressLine, icloudSkipped, icloudSkippedLine, icloudWanted, joinPath, withEverything, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
+  icloudPlaceholders, icloudSkipped, icloudSkippedLine, icloudWanted, joinPath, withEverything, pickedFolderProblem, sizeLine, startReached, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayIssue, type AnywayWarning,
 } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -160,44 +160,37 @@ export function MoveConfirmDialog({ open, way, name, source, root, sameVolume, b
  * file counts and where they stay, the Download everything (slow) switch that downloads them too,
  * and that a move takes the folder out of iCloud on the owner's other Macs; then Download and
  * move, Download and copy (Move and Copy when nothing is downloaded) or Cancel, the owner's way
- * first in focus. While the download runs it shows the progress and Stop download instead, and
- * cannot be closed. Inputs: whether it is open, the folder name and path, the count outside the
- * left folders (null when only the engine's refusal said some are), the way, the download state,
- * the left folders, the switch and the handlers. Output: the dialog. */
-export function ICloudDialog({ open, name, source, placeholders, way, downloading, progress, stopping, skipped, everything, onEverything, onDownload, onStop, onCancel }: {
+ * first in focus; the engine's job then downloads before it moves or copies. Inputs: whether it
+ * is open, the folder name and path, the count outside the left folders (null when only the
+ * engine's refusal said some are), the way, the left folders, the switch and the handlers.
+ * Output: the dialog. */
+export function ICloudDialog({ open, name, source, placeholders, way, skipped, everything, onEverything, onDownload, onCancel }: {
   open: boolean;
   name: string;
   source: string;
   placeholders: number | null;
   way: AddFolderMode;
-  downloading: boolean;
-  progress: IcloudProgress | null;
-  stopping: boolean;
   skipped: SkippedFolder[];
   everything: boolean;
   onEverything: (everything: boolean) => void;
   onDownload: (way: AddFolderMode) => void;
-  onStop: () => void;
   onCancel: () => void;
 }) {
   const wanted = icloudWanted(placeholders, skipped, everything);
   const fetches = wanted !== 0;
   const choice = (option: AddFolderMode, label: string) => <Button variant={option === way ? "primary" : "secondary"}
     icon={option === "move" ? "folder-input" : "copy"} onClick={() => onDownload(option)} data-autofocus={option === way || undefined}>{label}</Button>;
-  const footer = downloading
-    ? <Button pending={stopping} pendingLabel="Stopping..." onClick={onStop}>Stop download</Button>
-    : <>{choice("move", fetches ? "Download and move" : "Move")}{choice("copy", fetches ? "Download and copy" : "Copy")}<Button onClick={onCancel}>Cancel</Button></>;
+  const footer = <>{choice("move", fetches ? "Download and move" : "Move")}{choice("copy", fetches ? "Download and copy" : "Copy")}<Button onClick={onCancel}>Cancel</Button></>;
   const title = fetches ? `Download ${name} from iCloud first?` : `Some of ${name} stays in iCloud`;
-  return <Dialog open={open} title={title} onClose={onCancel} busy={downloading} footer={footer}>
+  return <Dialog open={open} title={title} onClose={onCancel} footer={footer}>
     {fetches && <p>{icloudCountLine(wanted)}</p>}
     {skipped.length > 0 && <>
       <p>{everything ? "Downloaded too:" : "Left in iCloud, as they can be rebuilt:"}</p>
       <ul>{skipped.map((folder) => <li key={folder.path} className="pj-mono">{icloudSkippedLine(folder)}</li>)}</ul>
       {!everything && <p className="pj-secondary">They stay in {displayText(source)}; reinstall them in the project after the add.</p>}
-      {!downloading && <Switch id="icloud-everything" label="Download everything (slow)" checked={everything} onChecked={onEverything} />}
+      <Switch id="icloud-everything" label="Download everything (slow)" checked={everything} onChecked={onEverything} />
     </>}
     <Notice tone="info">{icloudMoveLine(source)}</Notice>
-    {downloading && <p className="pj-secondary" role="status">{stopping ? "Stopping the download..." : icloudProgressLine(progress)}</p>}
   </Dialog>;
 }
 
@@ -307,8 +300,8 @@ export function AddFolder() {
     {way !== "here" && <AnywayDialog open={asking} way={way} name={name} size={size} refused={null} busy={busy}
       onUseHere={useHere} onAnyway={anyway} onCancel={() => setAsking(false)} />}
     {way !== "here" && source && icloud && <ICloudDialog open name={name} source={source} placeholders={icloud.placeholders} way={way}
-      downloading={false} progress={null} stopping={false} skipped={icloudSkipped(size)} everything={everything}
-      onEverything={setEverything} onDownload={download} onStop={() => setIcloud(null)}
+      skipped={icloudSkipped(size)} everything={everything}
+      onEverything={setEverything} onDownload={download}
       onCancel={() => setIcloud(null)} />}
   </>;
 }

@@ -6,16 +6,10 @@ use crate::github::{
 };
 use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
-use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
 use crate::projects_home::job::{JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-const ICLOUD_PROGRESS_EVERY: Duration = Duration::from_secs(1);
-const ICLOUD_TICKS_MAX: u64 = DOWNLOAD_TIME_MAX.as_secs() / ICLOUD_PROGRESS_EVERY.as_secs() + 120;
-const _: () = assert!(ICLOUD_TICKS_MAX > DOWNLOAD_TIME_MAX.as_secs() + 60);
 
 impl OwnerController {
     /// Reads the projects home folder and whether the engine watches it.
@@ -303,39 +297,6 @@ impl OwnerController {
     /// Forgets an ended job. Takes its id. Returns whether it was forgotten.
     pub async fn job_dismiss(&mut self, id: RequestId) -> Result<bool, EngineError> {
         self.owner_client()?.job_dismiss(id).await
-    }
-
-    /// Downloads every file of a folder that is only in iCloud, reading the progress about
-    /// once a second while it runs and asking the engine to stop once `cancel` is set.
-    /// Takes the absolute folder, the cancel flag and the progress callback.
-    /// Returns how many placeholders were downloaded, or `home_icloud_not_downloaded` after
-    /// a cancel, a stall or the time limit.
-    pub async fn icloud_download(
-        &mut self,
-        path: String,
-        cancel: &AtomicBool,
-        mut report: impl FnMut(Progress),
-    ) -> Result<u64, EngineError> {
-        let client = self.owner_client()?;
-        let download = client.icloud_download(path);
-        tokio::pin!(download);
-        let mut tick = tokio::time::interval(ICLOUD_PROGRESS_EVERY);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut asked = false;
-        for _ in 0..ICLOUD_TICKS_MAX {
-            tokio::select! {
-                outcome = &mut download => return outcome,
-                _ = tick.tick() => {}
-            }
-            if cancel.load(Ordering::Relaxed) && !asked {
-                asked = matches!(client.icloud_cancel().await, Ok(true));
-            }
-            if let Ok(Some(progress)) = client.icloud_progress().await {
-                assert!(progress.done <= progress.total);
-                report(progress);
-            }
-        }
-        Err(EngineError("icloud_outcome_unknown".into()))
     }
 
     /// Reads the rules a new GitHub repository starts with. Takes nothing.

@@ -127,55 +127,6 @@ export function worktreesLine(count: number): string {
   return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
 }
 
-/** How often Add folder reads the running iCloud download's progress. */
-export const ICLOUD_PROGRESS_MS = 1000;
-
-/** What Add folder says once the owner stopped an iCloud download. */
-export const ICLOUD_STOPPED = "The download stopped. Nothing was moved or copied.";
-
-/** How a watched iCloud download ended: on its own, after Stop download, or after the owner left Add folder. */
-export type IcloudEnding = "go" | "stopped" | "left";
-
-/** One running iCloud download as Add folder watches it. Each tick reads its progress and, once the
- * owner stopped it or left the page, asks the engine to stop again, since a stop sent before the
- * engine took the download is not seen. Inputs: the stop and progress calls and the tick in ms.
- * Output: `stop`, `leave`, and `end`, which ends the ticks and says how the download ended. */
-export function icloudRun(cancel: () => void, read: () => void, everyMs: number) {
-  if (!Number.isSafeInteger(everyMs) || everyMs < 1) throw new Error(`iCloud tick must be a whole number of ms, got ${everyMs}`);
-  let ending: IcloudEnding = "go";
-  let ended = false;
-  const timer = setInterval(() => {
-    if (ending !== "go") cancel();
-    if (ending !== "left") read();
-  }, everyMs);
-  const halt = (why: IcloudEnding) => {
-    if (ended || ending === "left") return;
-    ending = why;
-    cancel();
-  };
-  return {
-    stop: () => halt("stopped"),
-    leave: () => halt("left"),
-    end: (): IcloudEnding => {
-      if (ended) throw new Error("an iCloud download ends once");
-      ended = true;
-      clearInterval(timer);
-      return ending;
-    },
-  };
-}
-
-/** What Add folder does once an iCloud download returns: the add goes on only when the download
- * finished and the owner neither stopped it nor left the page. Inputs: how it ended and the
- * download's result. Output: add, nothing (the page is gone), or the sentence to show. */
-export function icloudOutcome(ending: IcloudEnding, result: Result<number>): { next: "add" } | { next: "none" } | { next: "say"; text: string } {
-  if (ending === "left") return { next: "none" };
-  if (result.kind === "not_ready") return { next: "say", text: "Downloading from iCloud isn't in this build." };
-  if (ending === "go") return result.kind === "ok" ? { next: "add" } : { next: "say", text: result.message };
-  const ended = result.kind === "ok" || result.code === "home_icloud_not_downloaded";
-  return { next: "say", text: ended ? ICLOUD_STOPPED : result.message };
-}
-
 /** How many of a folder's files the size read found only in iCloud. Input: the read, if any.
  * Output: the count, 0 while it is not read or could not be measured. */
 export function icloudPlaceholders(size: Loaded<FolderSize> | null): number {
@@ -237,14 +188,6 @@ export function icloudMoveLine(source: string): string {
   const place = parts[1] !== "Users" || parts.length < 5 ? "iCloud Drive"
     : parts[3] === "Desktop" ? "iCloud Desktop" : parts[3] === "Documents" ? "iCloud Documents" : "iCloud Drive";
   return `Moving takes the folder out of ${place} on your other Macs too.`;
-}
-
-/** The running iCloud download's status line. Input: the last progress read, or null before the
- * first. Output: one sentence, with the counts once the engine has them. */
-export function icloudProgressLine(progress: IcloudProgress | null): string {
-  if (progress === null || progress.total === 0) return "Downloading from iCloud...";
-  if (progress.done > progress.total) throw new Error(`iCloud progress done ${progress.done} is past total ${progress.total}`);
-  return `macOS is downloading: ${landedCounts(progress)}`;
 }
 
 /** The files landed of the total, and their bytes when the engine sent them within their total.

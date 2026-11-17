@@ -1834,29 +1834,13 @@ export function foundProjects(): Promise<FoundProject[]> {
   return invoke<FoundProject[]>("desktop_found_projects");
 }
 
-/** How far the running iCloud download has come: the files only in iCloud it found so far and how
- * many of them are on this Mac now, and their bytes (absent from an older engine). */
+/** How far an intake job's iCloud download has come: the files only in iCloud it found so far and
+ * how many of them are on this Mac now, and their bytes (absent from an older engine). */
 export interface IcloudProgress {
   total: number;
   done: number;
   bytes_total?: number;
   bytes_done?: number;
-}
-
-/** Downloads every file of a folder that is only in iCloud and waits until all are on this Mac;
- * the folder itself is not moved. Input: an absolute folder path. Output: how many it downloaded. */
-export function icloudDownload(path: string): Promise<number> {
-  return invoke<number>("desktop_icloud_download", { path });
-}
-
-/** Reads the running iCloud download's progress. Output: the counts, or null when none runs. */
-export function icloudProgress(): Promise<IcloudProgress | null> {
-  return invoke<IcloudProgress | null>("desktop_icloud_progress");
-}
-
-/** Stops the running iCloud download. Output: whether one was running. */
-export function icloudCancel(): Promise<boolean> {
-  return invoke<boolean>("desktop_icloud_cancel");
 }
 
 /** The part of a job that was running when it ended. */

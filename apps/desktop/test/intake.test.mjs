@@ -1104,8 +1104,8 @@ test("a soft engine refusal asks again only when the override for it was not sen
 });
 
 const icloudProps = (extra = {}) => ({
-  open: true, name: "shop", source: "/Users/mira/Desktop/shop", placeholders: 3, way: "move", downloading: false, progress: null, stopping: false,
-  skipped: [], everything: false, onEverything: noop, onDownload: noop, onStop: noop, onCancel: noop, ...extra,
+  open: true, name: "shop", source: "/Users/mira/Desktop/shop", placeholders: 3, way: "move",
+  skipped: [], everything: false, onEverything: noop, onDownload: noop, onCancel: noop, ...extra,
 });
 const SKIPPED = [{ path: "node_modules", files: 57108 }, { path: "web/.venv", files: null }];
 const dialogParts = (dialog) => [].concat(dialog.props.children).flat(Infinity).flatMap(function walk(node) {
@@ -1215,80 +1215,16 @@ test("Cancel in the iCloud question closes it and downloads nothing", () => {
   assert.deepEqual(calls, ["cancel"]);
 });
 
-test("a running iCloud download shows its progress and only Stop download, which stops it", () => {
-  const calls = [];
-  const props = icloudProps({ downloading: true, progress: { total: 3, done: 1 }, onStop: () => calls.push("stop") });
-  const page = html(ICloudDialog, props);
-  assert.match(page, /macOS is downloading: 1 of 3 files/);
-  assert.doesNotMatch(page, /Download and move|Download and copy/);
-  const dialog = ICloudDialog(props);
-  assert.equal(dialog.props.busy, true);
-  footerButton(dialog, "Stop download").props.onClick();
-  assert.deepEqual(calls, ["stop"]);
-  assert.match(html(ICloudDialog, icloudProps({ downloading: true })), /Downloading from iCloud\.\.\./);
-  assert.match(html(ICloudDialog, icloudProps({ downloading: true, stopping: true })), /Stopping the download\.\.\./);
-});
-
-test("the iCloud lines count files, name the iCloud place and read progress", () => {
+test("the iCloud lines count files, name the iCloud place and read the size", () => {
   assert.equal(intake.icloudCountLine(1), "1 file is only in iCloud; CrazyAgent downloads them first (needs internet, can take a while).");
   assert.throws(() => intake.icloudCountLine(0));
   assert.match(intake.icloudMoveLine("/Users/mira/Documents/shop"), /out of iCloud Documents on/);
   assert.match(intake.icloudMoveLine("/Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop"), /out of iCloud Drive on/);
   assert.match(intake.icloudMoveLine("/Volumes/Work/shop"), /out of iCloud Drive on/);
-  assert.equal(intake.icloudProgressLine({ total: 0, done: 0 }), "Downloading from iCloud...");
-  assert.throws(() => intake.icloudProgressLine({ total: 1, done: 2 }));
   assert.equal(intake.icloudPlaceholders({ kind: "ok", value: { bytes: 1, placeholders: 7 } }), 7);
   assert.equal(intake.icloudPlaceholders({ kind: "ok", value: { bytes: 1 } }), 0);
   assert.equal(intake.icloudPlaceholders({ kind: "loading" }), 0);
   assert.equal(intake.icloudPlaceholders(null), 0);
-});
-
-test("a running iCloud download reads progress each tick and goes on to the add only when nobody stopped it", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
-  const calls = [];
-  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
-  t.mock.timers.tick(2000);
-  assert.deepEqual(calls, ["read", "read"]);
-  assert.equal(run.end(), "go");
-  t.mock.timers.tick(5000);
-  assert.deepEqual(calls, ["read", "read"]);
-  assert.throws(() => intake.icloudRun(() => {}, () => {}, 0));
-});
-
-test("Stop download asks the engine to stop at once and again each tick until the download returns", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
-  const calls = [];
-  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
-  run.stop();
-  assert.deepEqual(calls, ["cancel"]);
-  t.mock.timers.tick(1000);
-  assert.deepEqual(calls, ["cancel", "cancel", "read"]);
-  assert.equal(run.end(), "stopped");
-  t.mock.timers.tick(3000);
-  assert.equal(calls.length, 3);
-});
-
-test("leaving Add folder mid-download stops it and reads no more progress", (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
-  const calls = [];
-  const run = intake.icloudRun(() => calls.push("cancel"), () => calls.push("read"), 1000);
-  run.leave();
-  t.mock.timers.tick(2000);
-  assert.deepEqual(calls, ["cancel", "cancel", "cancel"]);
-  assert.equal(run.end(), "left");
-});
-
-test("after an iCloud download Add folder adds only when it finished and was neither stopped nor left", () => {
-  const ok = { kind: "ok", value: 3 };
-  const ended = { kind: "error", code: "home_icloud_not_downloaded", message: "Some files are still only in iCloud." };
-  const denied = { kind: "error", code: "home_permission_denied", message: "Allow it in System Settings." };
-  assert.deepEqual(intake.icloudOutcome("go", ok), { next: "add" });
-  assert.deepEqual(intake.icloudOutcome("stopped", ok), { next: "say", text: intake.ICLOUD_STOPPED });
-  assert.deepEqual(intake.icloudOutcome("stopped", ended), { next: "say", text: intake.ICLOUD_STOPPED });
-  assert.deepEqual(intake.icloudOutcome("stopped", denied), { next: "say", text: denied.message });
-  assert.deepEqual(intake.icloudOutcome("go", ended), { next: "say", text: ended.message });
-  assert.deepEqual(intake.icloudOutcome("go", { kind: "not_ready" }), { next: "say", text: "Downloading from iCloud isn't in this build." });
-  for (const result of [ok, ended, { kind: "not_ready" }]) assert.deepEqual(intake.icloudOutcome("left", result), { next: "none" });
 });
 
 test("the Node row says what Node is for and offers its own Install only while it is missing or failed and setup is idle", () => {
