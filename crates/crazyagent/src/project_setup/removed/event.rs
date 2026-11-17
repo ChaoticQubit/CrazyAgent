@@ -76,15 +76,11 @@ pub(crate) fn append(
     Ok(seq)
 }
 
-/// The projection of a removal, live and in replay: forgets the removed project's GitHub
-/// rule proposals, schedule override (moving the schedule's version), coordination with its
-/// stopped and failed agents' counts, activity and IDE rows with its agents' unlocked
-/// files, and moves its usage to `<removed>` (v2.5 L14b, L7); then deletes its agent texts
-/// and their instruction versions,
-/// questions, hidden folders and the agents that can see them, agent access, grants and
-/// access requests, its stopped and failed agents with their panes, and its rows in
-/// [`TABLES`]. Inputs: the transaction and the event body. Output: Ok,
-/// `project_removed_body` for a body that is not a removal, or a store failure.
+/// The projection of a removal, live and in replay (v2.5 L14b, L7): first the project's rule
+/// proposals, schedule override and version, coordination with its stopped and failed agents'
+/// counts, activity, IDE rows and usage (to `<removed>`); then its agent texts, questions,
+/// hidden folders, access, grants, stopped and failed agents and [`TABLES`] rows. Inputs: the
+/// transaction and the body. Output: Ok, `project_removed_body`, or a store failure.
 pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError> {
     let removed: ProjectRemoved =
         serde_json::from_slice(body).map_err(|_| EngineError("project_removed_body".into()))?;
