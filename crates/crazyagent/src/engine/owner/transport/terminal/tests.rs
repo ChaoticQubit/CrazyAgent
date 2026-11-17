@@ -502,6 +502,148 @@ async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
     drop(requests);
 }
 
+/// V243-TERMINAL-SLOW S1: a view's grant check never stops its output or its keys while an
+/// owner mutation holds `owner_egress`. The view's loop runs its first check at once and one
+/// every `GRANT_CHECK` after; the row holds the barrier across that first check, as a
+/// mutation does, and wants a printed chunk and a typed key through within `BOUND` each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_view_streams_and_types_while_an_owner_mutation_holds_the_barrier_at_a_grant_check() {
+    const BOUND: Duration = Duration::from_secs(1);
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-barrier-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = crate::config::resolve_config(&root.join("g"), &root.join("p")).unwrap();
+    let engine = Arc::new(
+        crate::engine::Engine::open(&root.join("db"), config.clone())
+            .await
+            .unwrap(),
+    );
+    let (server, _runtime) = super::super::OwnerServer::bind(root, engine.clone(), &config)
+        .await
+        .unwrap();
+    let authority = server.authority.clone();
+    let mut packet = [0; 37];
+    packet[..4].copy_from_slice(b"CAO1");
+    packet[5..].copy_from_slice(&std::fs::read(root.join(super::super::KEYS[0])).unwrap());
+    let admission = authority
+        .authenticate(&packet)
+        .expect("the owner's grant stands");
+
+    let (started, mut sends) = tokio::sync::mpsc::unbounded_channel();
+    let (release, released) = std::sync::mpsc::channel();
+    release.send(()).unwrap();
+    let host: Arc<dyn Host> = Arc::new(Holding {
+        started,
+        release: std::sync::Mutex::new(released),
+    });
+    let (feed, chunks) = crate::terminal::buffer::buffer();
+    let viewer = TerminalStream {
+        agent: AgentId::team(1).unwrap(),
+        cols: 80,
+        rows: 24,
+        history: Vec::new(),
+        screen: Vec::new(),
+        chunks,
+        at: None,
+    };
+    let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
+    let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
+    let (seen, mut frames) = tokio::sync::mpsc::unbounded_channel();
+    let reading = tokio::spawn(async move {
+        while let Ok(frame) = read_frame(&mut theirs).await {
+            let Ok(frame) = serde_json::from_slice::<TerminalFrame>(&frame[4..]) else {
+                break;
+            };
+            if seen.send(frame).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mutation = engine.owner_egress.write().await;
+    let mut pumping = tokio::spawn({
+        let engine = engine.clone();
+        async move {
+            let grant = Grant {
+                engine: &engine,
+                authority: &authority,
+                packet: &packet,
+                admission: &admission,
+                member: None,
+                database: None,
+            };
+            pump(&mut ours, viewer, &mut asked, host, &grant).await
+        }
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut pumping)
+            .await
+            .is_err(),
+        "the view's loop runs, its first grant check reached while the mutation holds"
+    );
+    assert!(feed.push(b"printed-during-a-mutation"));
+    requests
+        .send(TerminalRequest::Input {
+            bytes: b"k".to_vec(),
+        })
+        .await
+        .unwrap();
+    let printed_held = tokio::time::timeout(BOUND, frames.recv())
+        .await
+        .ok()
+        .flatten();
+    let typed_held = tokio::time::timeout(BOUND, sends.recv())
+        .await
+        .ok()
+        .flatten();
+    drop(mutation);
+
+    let printed = match printed_held.clone() {
+        Some(frame) => Some(frame),
+        None => tokio::time::timeout(WAIT, frames.recv())
+            .await
+            .ok()
+            .flatten(),
+    };
+    let typed = match typed_held.clone() {
+        Some(bytes) => Some(bytes),
+        None => tokio::time::timeout(WAIT, sends.recv())
+            .await
+            .ok()
+            .flatten(),
+    };
+    let printed_frame = TerminalFrame::Output {
+        bytes: b"printed-during-a-mutation".to_vec(),
+    };
+    assert_eq!(
+        printed,
+        Some(printed_frame.clone()),
+        "the chunk reaches the view once the mutation ends"
+    );
+    assert_eq!(
+        typed,
+        Some(b"k".to_vec()),
+        "the key reaches the agent once the mutation ends"
+    );
+    drop(requests);
+    assert_eq!(
+        tokio::time::timeout(WAIT, pumping).await.map(Result::ok),
+        Ok(Some("terminal_detached")),
+        "the view ends as detached once its requests end"
+    );
+    let _ = tokio::time::timeout(WAIT, reading).await;
+    drop(feed);
+
+    assert_eq!(
+        (printed_held, typed_held),
+        (Some(printed_frame), Some(b"k".to_vec())),
+        "S1: the chunk and the key went through within {BOUND:?} while the mutation held"
+    );
+}
+
 /// v242 typing timing row (BRIEF-typing-path): 50 keys typed as fast as a view sends them
 /// into a stand-in agent whose terminal echoes each key all echo back within a loose
 /// budget; prints each key's echo time at p50 and p95 and the last echo's time.
