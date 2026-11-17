@@ -258,7 +258,7 @@ pub fn redact_matching(
             let listed = aggregates
                 .iter()
                 .any(|wanted| wanted.name() == aggregate.as_str())
-                && kinds.is_none_or(|kinds| kinds.iter().any(|wanted| *wanted == kind.as_str()));
+                && kinds.is_none_or(|kinds| kinds.contains(&kind.as_str()));
             let named = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
                 .is_ok_and(|object| {
                     object.get(field).and_then(serde_json::Value::as_str) == Some(value)
@@ -275,15 +275,15 @@ pub fn redact_matching(
     }
 }
 
+/// One event a replay found the needle in: its seq, aggregate name, kind and body, as
+/// [`hits`] reads them.
+type Hit = (u64, String, String, Vec<u8>);
+
 /// The events after `after` whose body holds the needle's bytes, at most
 /// [`REPLAY_BATCH_MAX`], in seq order, a body over [`BODY_BYTES_MAX`] refused before it is
 /// loaded. Inputs: the transaction, the last seq read and the needle. Output: each event's
 /// seq, aggregate name, kind and body, or `state_log_replay_row`.
-fn hits(
-    tx: &Transaction<'_>,
-    after: u64,
-    needle: &[u8],
-) -> Result<Vec<(u64, String, String, Vec<u8>)>, EngineError> {
+fn hits(tx: &Transaction<'_>, after: u64, needle: &[u8]) -> Result<Vec<Hit>, EngineError> {
     let row_error = || error("state_log_replay_row");
     let from = i64::try_from(after).map_err(|_| row_error())?;
     let mut statement = tx
