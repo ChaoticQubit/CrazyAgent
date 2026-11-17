@@ -148,6 +148,7 @@ pub(in crate::tui) enum IntakeView {
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
+    Jobs(Vec<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
     RuleChanging,
@@ -446,7 +447,7 @@ impl NativeOwner {
             )),
             IntakeQuery::JobStatus => {
                 let jobs = controller.job_status().await.map_err(problem)?;
-                IntakeView::Job(crate::projects_home::job::shown(jobs))
+                IntakeView::Jobs(jobs)
             }
             IntakeQuery::JobStop { id } => {
                 IntakeView::JobStopped(controller.job_stop(id).await.map_err(problem)?)

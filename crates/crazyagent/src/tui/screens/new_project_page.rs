@@ -478,14 +478,10 @@ impl NewProjectPage {
             }
         } else if let Stage::Checking(code) = &creation.stage
             && event.query == IntakeQuery::JobStatus
-            && matches!(event.result, Ok(IntakeView::Job(_)))
+            && matches!(event.result, Ok(IntakeView::Jobs(_)))
         {
             let code = code.clone();
-            let found = ctx
-                .store
-                .intake
-                .as_ref()
-                .is_some_and(|job| job.id == creation.id);
+            let found = ctx.store.intake.iter().any(|job| job.id == creation.id);
             if !found {
                 self.creation = None;
                 self.wizard.failed(&code);
@@ -499,7 +495,7 @@ impl NewProjectPage {
         Flow::Handled
     }
 
-    /// Follows this page's New Project in the job the shell keeps, by its id. Once it ended,
+    /// Follows this page's New Project in the jobs the shell keeps, by its id. Once it ended,
     /// the page takes it over and dismisses it before anything else, so the empty read after
     /// that dismiss is never a lost job; a made project then gets its pool and agent access
     /// and opens, any other end keeps the draft with its code. Takes the context. Returns the
@@ -510,7 +506,7 @@ impl NewProjectPage {
             .as_mut()
             .expect("only a started creation follows its job");
         assert_eq!(creation.stage, Stage::Following);
-        let job = ctx.store.intake.as_ref();
+        let job = ctx.store.intake.iter().find(|job| job.id == creation.id);
         let Some(ended) = creation.ended(job) else {
             return Flow::Handled;
         };

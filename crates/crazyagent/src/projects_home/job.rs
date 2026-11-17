@@ -131,20 +131,6 @@ impl JobState {
     }
 }
 
-/// The one job a client that shows a single job takes from status: the newest running job,
-/// else the newest waiting one, else the newest ended one. A waiting job always waits behind
-/// a running one, so such a client never shows a wait. Input: the jobs in start order.
-/// Output: that job, or None.
-pub fn shown(jobs: Vec<JobView>) -> Option<JobView> {
-    let waits = |job: &JobView| matches!(job.state, JobState::Waiting { .. });
-    let at = jobs
-        .iter()
-        .rposition(|job| !job.state.over() && !waits(job))
-        .or_else(|| jobs.iter().rposition(|job| !job.state.over()))
-        .or_else(|| jobs.len().checked_sub(1))?;
-    jobs.into_iter().nth(at)
-}
-
 impl JobView {
     /// The subject that starts this job again, for a retry or an answer to its soft refusal.
     /// A delete has none: it starts again only from the remove ask, where the owner types the

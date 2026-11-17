@@ -1405,7 +1405,7 @@ impl ProjectPage {
         let id = match start_id() {
             Ok(id) => id,
             Err(code) => {
-                self.screen.job_refused(&code, ctx.store.intake.as_ref());
+                self.screen.job_refused(&code);
                 return;
             }
         };
@@ -1484,17 +1484,15 @@ impl ProjectPage {
                         "Follow it on Home; you can keep working.",
                     ));
                 }
-                Ok(_) => self
-                    .screen
-                    .job_refused("intake_change_outcome_unknown", ctx.store.intake.as_ref()),
-                Err(code) => self.screen.job_refused(code, ctx.store.intake.as_ref()),
+                Ok(_) => self.screen.job_refused("intake_change_outcome_unknown"),
+                Err(code) => self.screen.job_refused(code),
             }
         }
         let ended = self.moving.as_ref().is_some_and(|id| {
-            ctx.store
+            !ctx.store
                 .intake
-                .as_ref()
-                .is_none_or(|job| &job.id != id || !intake_job::running(job))
+                .iter()
+                .any(|job| &job.id == id && intake_job::running(job))
         });
         if ended {
             self.moving = None;

@@ -326,31 +326,33 @@ impl Shell {
         self.refresh();
     }
 
-    /// Reads the engine's intake job again between ticks while the stored one runs, so a
-    /// New Project page that follows its job sees the end soon, as the desktop's one-second
+    /// Reads the engine's intake jobs again between ticks while a stored one runs or waits, so
+    /// a New Project page that follows its job sees the end soon, as the desktop's one-second
     /// read does. Input: none. Output: whether it asked.
     pub fn read_running_job(&mut self) -> bool {
-        let running = self
-            .ctx
-            .store
-            .intake
-            .as_ref()
-            .is_some_and(intake_job::running);
+        let running = self.ctx.store.intake.iter().any(intake_job::running);
         if running {
             intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
         }
         running
     }
 
-    /// Keeps the engine's intake job in the store from a status read or a start, says once on
-    /// the message line when a running job ended and reads the found folders again so Home
-    /// lists the new one, and the projects too after a project move, whose folder changed; a
-    /// stop or a dismiss reads the status at once. A failed read keeps the last view. Input:
-    /// the intake reply. Output: none.
+    /// Keeps the engine's intake jobs in the store: a status read replaces them and a start
+    /// keeps its job beside the others (DEC-197). Each job that ran or waited and has ended is
+    /// said once, the newest last on the message line, and the found folders are read again so
+    /// Home lists what landed, and the projects too after a project move, delete or New
+    /// Project. A stop or a dismiss reads the status at once; a failed read keeps the last
+    /// jobs. Input: the intake reply. Output: none.
     fn intake_job(&mut self, event: &IntakeEvent) {
-        let view = match (&event.query, &event.result) {
-            (IntakeQuery::JobStatus | IntakeQuery::JobStart { .. }, Ok(IntakeView::Job(view))) => {
-                view
+        let jobs = match (&event.query, &event.result) {
+            (IntakeQuery::JobStatus, Ok(IntakeView::Jobs(jobs))) => jobs.clone(),
+            (IntakeQuery::JobStart { .. }, Ok(IntakeView::Job(Some(started)))) => {
+                let mut jobs = self.ctx.store.intake.clone();
+                match jobs.iter_mut().find(|job| job.id == started.id) {
+                    Some(kept) => *kept = started.clone(),
+                    None => jobs.push(started.clone()),
+                }
+                jobs
             }
             (IntakeQuery::JobStop { .. } | IntakeQuery::JobDismiss { .. }, _) => {
                 intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
@@ -358,26 +360,30 @@ impl Shell {
             }
             _ => return,
         };
-        let said = intake_job::end_line(self.ctx.store.intake.as_ref(), view.as_ref());
-        self.ctx.store.intake = view.clone();
-        let Some(text) = said else {
+        let said: Vec<(String, bool, JobKind)> = intake_job::ended(&self.ctx.store.intake, &jobs)
+            .into_iter()
+            .map(|job| (intake_job::line(job), job.state == JobState::Done, job.kind))
+            .collect();
+        self.ctx.store.intake = jobs;
+        assert!(said.len() <= self.ctx.store.intake.len());
+        let Some((text, landed, _)) = said.last() else {
             return;
         };
-        let landed = view.as_ref().map(|job| &job.state) == Some(&JobState::Done);
-        self.ctx.say(if landed {
-            Message::success(&text, "")
+        self.ctx.say(if *landed {
+            Message::success(text, "")
         } else {
-            Message::warning(&text, "")
+            Message::warning(text, "")
         });
         intake::ask(&mut self.ctx, IntakeQuery::Found);
-        let kind = view.as_ref().map(|job| job.kind);
-        if matches!(
-            kind,
-            Some(JobKind::MoveProject | JobKind::Delete | JobKind::Setup)
-        ) {
+        let projects = said.iter().any(|(_, _, kind)| {
+            matches!(
+                kind,
+                JobKind::MoveProject | JobKind::Delete | JobKind::Setup
+            )
+        });
+        if projects {
             self.ctx.request(Request::Projects);
         }
-        assert!(self.ctx.store.intake.is_some());
     }
 
     /// Asks for the stored extras, never the detail rows, once the watch is due, with the
@@ -1051,7 +1057,7 @@ impl Shell {
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
-        let status = with_intake(self.ctx.store.intake.as_ref(), status, &theme, glyphs);
+        let status = with_intake(&self.ctx.store.intake, status, &theme, glyphs);
         let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
@@ -1136,17 +1142,17 @@ fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -
     join([note, Line::raw("  "), status])
 }
 
-/// The header status with the running intake job's brief in front, cut to a bounded width so
-/// a long folder name never hides the crumbs, so a folder being added shows on every screen;
-/// with no running job the status is unchanged. Inputs: the job, if any, the status, the
+/// The header status with the first running intake job's brief in front, cut to a bounded
+/// width so a long folder name never hides the crumbs, so a folder being added shows on every
+/// screen; with no running job the status is unchanged. Inputs: the jobs, the status, the
 /// theme and the glyphs. Output: the line.
 fn with_intake(
-    job: Option<&JobView>,
+    jobs: &[JobView],
     status: Line<'static>,
     theme: &Theme,
     glyphs: &Glyphs,
 ) -> Line<'static> {
-    let Some(job) = job.filter(|job| intake_job::running(job)) else {
+    let Some(job) = jobs.iter().find(|job| intake_job::running(job)) else {
         return status;
     };
     let brief = intake_job::brief(job, glyphs.ellipsis);

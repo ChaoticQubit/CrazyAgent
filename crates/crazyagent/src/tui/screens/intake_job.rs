@@ -53,34 +53,6 @@ fn agents(left: u64) -> String {
     }
 }
 
-/// The line for a start the engine refused `job_busy`: names the job that runs, as the client
-/// last read it, or says another job runs when that read found none running. Takes the job
-/// read. Returns the line.
-pub(in crate::tui) fn busy(held: Option<&JobView>) -> String {
-    let line = match held.filter(|job| running(job)) {
-        Some(job) => {
-            format!(
-                "{} {} is running. Wait for it to finish on Home.",
-                verb(job.kind),
-                name(job)
-            )
-        }
-        None => copy("job_busy"),
-    };
-    assert!(line.ends_with("Wait for it to finish on Home."));
-    line
-}
-
-/// The line for a refused job request: a busy refusal names the job that runs, any other
-/// refusal says its own sentence, and a code the engine sent empty or unknown says the plain
-/// fallback. Takes the code and the job read. Returns the line.
-pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
-    match code {
-        "job_busy" => busy(held),
-        code => copy(code),
-    }
-}
-
 /// The folder's own name, or the whole path when it has none; a delete's or a New Project's
 /// project name whole.
 pub(in crate::tui) fn name(job: &JobView) -> String {
@@ -260,17 +232,17 @@ pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     offered
 }
 
-/// The sentence for a job that just ended, said once: only when the read before showed the
-/// same job running. Takes the read before and the read now. Returns the job's line, or None.
-pub(in crate::tui) fn end_line(
-    before: Option<&JobView>,
-    after: Option<&JobView>,
-) -> Option<String> {
-    let (before, after) = (before?, after?);
-    let ended = before.id == after.id && running(before) && !running(after);
-    let said = ended.then(|| line(after));
-    assert!(said.as_ref().is_none_or(|text| !text.is_empty()));
-    said
+/// The jobs that just ended, each said once: a job in the read now that the read before
+/// showed running or waiting under the same id (DEC-197). Takes the read before and the read
+/// now. Returns those jobs from the read now, in its order.
+pub(in crate::tui) fn ended<'a>(before: &[JobView], after: &'a [JobView]) -> Vec<&'a JobView> {
+    let ended: Vec<&JobView> = after
+        .iter()
+        .filter(|job| !running(job))
+        .filter(|job| before.iter().any(|was| was.id == job.id && running(was)))
+        .collect();
+    assert!(ended.len() <= after.len());
+    ended
 }
 
 /// The running job's few words for the header on every screen: what it does and its count,
