@@ -135,6 +135,34 @@ const PORT_HOSTS: [&str; 4] = ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"]
 /// The shortest lowercase hex run masked as an id: engine ids are 24, 32 or 64 characters.
 const HEX_ID_MIN: usize = 16;
 
+/// The first names below the owner home that the engine's own sandbox rules use (sandbox.rs
+/// `OWNER_SECRET_PATHS` at 2.4.2). A golden may name `<owner-home>/` only followed by one.
+const OWNER_HOME_NAMES: [&str; 15] = [
+    "Library",
+    ".ssh",
+    ".gnupg",
+    ".netrc",
+    ".git-credentials",
+    ".config",
+    ".aws",
+    ".docker",
+    ".kube",
+    ".codex",
+    ".claude",
+    ".claude.json",
+    ".cargo",
+    ".npmrc",
+    ".pypirc",
+];
+
+/// Words that mark a key holding a security value: a pin, digest, limit or timeout. Nothing
+/// under a key with one of these words is masked, so a changed pin or limit fails; a driver
+/// captures a value that cannot be stable as a stable fact, such as `"pin_matches": true`.
+const KEPT_WORDS: [&str; 12] = [
+    "pin", "pins", "pinned", "digest", "digests", "sha", "sha256", "hash", "limit", "limits",
+    "max", "timeout",
+];
+
 /// The numbering state of one capture's normalisation: every spelling of the temp folders
 /// (`$TMPDIR`, /private/tmp, /tmp) with the resolved folder it names, longest first, the owner
 /// home's spellings, and the ids and temp entries seen so far, so equal values get one
@@ -202,6 +230,9 @@ impl Masks {
     /// sits under, if any (arrays pass their own key down) and the value. Output: the masked
     /// value, or why a map key cannot be kept (it holds a value the list masks).
     fn value(&mut self, key: Option<&str>, value: &Value) -> Result<Value, String> {
+        if key.is_some_and(kept_key) {
+            return Ok(kept(value));
+        }
         match value {
             Value::Null | Value::Bool(_) => Ok(value.clone()),
             Value::Number(number) => Ok(match key.and_then(field_mask) {
@@ -315,6 +346,33 @@ fn pane_len(rest: &str) -> Option<(usize, String)> {
     let after = rest.as_bytes().get(1 + digits);
     ((1..=6).contains(&digits) && !after.is_some_and(u8::is_ascii_alphanumeric))
         .then(|| (1 + digits, "<pane>".to_owned()))
+}
+
+/// Says whether a key holds a security value the normalisation never masks.
+/// Input: the key. Output: true when one of its `_` or `-` separated words is in `KEPT_WORDS`.
+fn kept_key(key: &str) -> bool {
+    key.to_ascii_lowercase()
+        .split(['_', '-'])
+        .any(|word| KEPT_WORDS.contains(&word))
+}
+
+/// Copies a value under a kept key unmasked, with sorted keys and LF line endings.
+/// Input: the value. Output: the copy.
+fn kept(value: &Value) -> Value {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+        Value::String(text) => Value::from(text.replace("\r\n", "\n").replace('\r', "\n")),
+        Value::Array(items) => Value::Array(items.iter().map(kept).collect()),
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for name in keys {
+                sorted.insert(name.clone(), kept(&map[name]));
+            }
+            Value::Object(sorted)
+        }
+    }
 }
 
 /// Names the placeholder an integer field gets from its key: `*_at` and `*_ms` are times,
@@ -524,6 +582,15 @@ fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<
             return Err("holds a user path".to_owned());
         }
     }
+    for (start, _) in text.match_indices("<owner-home>/") {
+        let below = &text[start + "<owner-home>/".len()..];
+        let first = below.split(|c: char| !path_char(c)).next().unwrap_or("");
+        if !OWNER_HOME_NAMES.contains(&first) {
+            return Err(
+                "names a folder below the owner home outside the engine's rules".to_owned(),
+            );
+        }
+    }
     if home.is_some_and(|home| home.len() > 1 && text.contains(home)) {
         return Err("holds the home folder".to_owned());
     }
@@ -570,6 +637,23 @@ fn write_missing(path: &Path, text: &str) -> Result<bool, String> {
     }
 }
 
+/// Prints a failure line only when it holds no private text, so a diff line or a driver's
+/// error never carries a user path, name or token into a test log. Inputs: the line and this
+/// machine's HOME and USER. Output: the line, or its scenario and the kind of text withheld.
+fn withheld(line: &str, home: Option<&str>, user: Option<&str>) -> String {
+    match refuse_private(line, home, user) {
+        Ok(()) => line.to_owned(),
+        Err(kind) => {
+            let at = line
+                .split(": ")
+                .next()
+                .filter(|at| at.split('/').all(safe_name))
+                .unwrap_or("a scenario");
+            format!("{at}: failure text withheld, it {kind}")
+        }
+    }
+}
+
 /// Runs one scenario in a fresh scratch folder and normalises what it captures.
 /// Input: the scenario. Output: the golden text, or why the capture failed.
 fn capture_text(scenario: &Scenario) -> Result<String, String> {
@@ -593,7 +677,13 @@ fn orphans(scenarios: &[Scenario]) -> Vec<String> {
                 .is_some_and(|extension| extension == "json")
                 && !known.contains(&path)
             {
-                found.push(format!("{}: a golden with no scenario", path.display()));
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                found.push(format!(
+                    "{kind}/{}: a golden with no scenario",
+                    file.unwrap_or_default()
+                ));
             }
         }
     }
@@ -640,7 +730,13 @@ fn every_scenario_matches_its_2_4_2_capture() {
         .filter_map(|scenario| check(scenario, write).err())
         .collect();
     failures.extend(orphans(&all));
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let home = std::env::var("HOME").ok();
+    let user = std::env::var("USER").ok();
+    let printed: Vec<String> = failures
+        .iter()
+        .map(|line| withheld(line, home.as_deref(), user.as_deref()))
+        .collect();
+    assert!(printed.is_empty(), "{}", printed.join("\n"));
 }
 
 #[test]
@@ -790,6 +886,14 @@ fn the_golden_writer_writes_only_a_missing_file_and_refuses_private_text() {
         Ok(())
     );
     assert_eq!(
+        refuse_private("\"<owner-home>/Library/Keychains\"", names.0, names.1),
+        Ok(())
+    );
+    for below in ["Projects/plan", "Documents", "", ".sshkeys"] {
+        let text = format!("\"<owner-home>/{below}\"");
+        assert!(refuse_private(&text, names.0, names.1).is_err(), "{text}");
+    }
+    assert_eq!(
         refuse_private("\"<path-1>/projects/app\"", names.0, names.1),
         Ok(())
     );
@@ -810,4 +914,60 @@ fn the_golden_writer_writes_only_a_missing_file_and_refuses_private_text() {
     ] {
         assert!(refuse_private(leak, names.0, names.1).is_err(), "{leak}");
     }
+}
+
+#[test]
+fn kept_keys_are_never_masked_so_a_changed_pin_or_limit_fails() {
+    let pin = "0123456789abcdef0123456789abcdef";
+    let capture = |pin: &str, timeout: u64| {
+        json!({
+            "turn_timeout_ms": timeout,
+            "started_at": 7,
+            "server_pin": pin,
+            "max_files": 1000,
+            "limits": {"idle_ms": 600_000},
+        })
+    };
+    let text = normalise(&capture(pin, 30_000)).unwrap();
+    assert_eq!(
+        text,
+        "{\n  \"limits\": {\n    \"idle_ms\": 600000\n  },\n  \"max_files\": 1000,\n  \"server_pin\": \"0123456789abcdef0123456789abcdef\",\n  \"started_at\": \"<t>\",\n  \"turn_timeout_ms\": 30000\n}\n"
+    );
+    let other_pin = normalise(&capture("fedcba9876543210fedcba9876543210", 30_000)).unwrap();
+    assert!(compare(text.as_bytes(), &other_pin).is_err());
+    let other_timeout = normalise(&capture(pin, 60_000)).unwrap();
+    assert!(compare(text.as_bytes(), &other_timeout).is_err());
+    assert!(kept_key("Turn-Timeout"));
+    assert!(!kept_key("pinata"));
+}
+
+#[test]
+fn a_failure_line_with_private_text_is_withheld_and_keeps_its_scenario() {
+    let names = (Some("/Users/owner"), Some("owner"));
+    let clean = "runner/masking-example: line 2: golden \"a\", capture \"b\"";
+    assert_eq!(withheld(clean, names.0, names.1), clean);
+    assert_eq!(
+        withheld(
+            "harness/claude-code: spawn failed in /Users/owner/x",
+            names.0,
+            names.1
+        ),
+        "harness/claude-code: failure text withheld, it holds a user path"
+    );
+    assert_eq!(
+        withheld(
+            "/Users/owner/repo/x.json: a golden with no scenario",
+            names.0,
+            names.1
+        ),
+        "a scenario: failure text withheld, it holds a user path"
+    );
+    assert_eq!(
+        withheld(
+            "role/master: line 4: golden \"<owner-home>/notes\"",
+            names.0,
+            names.1
+        ),
+        "role/master: failure text withheld, it names a folder below the owner home outside the engine's rules"
+    );
 }
