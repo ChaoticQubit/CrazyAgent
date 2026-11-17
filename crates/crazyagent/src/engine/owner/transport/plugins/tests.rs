@@ -431,6 +431,103 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     assert!(!container.exists());
 }
 
+/// A check container a crash left behind is released when the engine starts if no server of
+/// its id is stored: the read entry on its program's folder is taken back and its container,
+/// profile and check folder are deleted, while a stored server's check container stays as it
+/// was until that server is gone too; without the boundary helper nothing is granted.
+#[cfg(target_os = "windows")]
+#[test]
+fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
+    const DEAD: &str = "mcp-0123456789abcdef0123456b";
+    const LIVE: &str = "mcp-0123456789abcdef0123456c";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = base.join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let entries = |folder: &std::path::Path| {
+        let listed =
+            crate::spawn_gate::output(std::process::Command::new("icacls").arg(folder)).unwrap();
+        assert!(listed.status.success(), "{listed:?}");
+        String::from_utf8_lossy(&listed.stdout).into_owned()
+    };
+    let helper = std::env::current_exe()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    let mut programs = Vec::with_capacity(2);
+    for id in [DEAD, LIVE] {
+        let folder = base.join(format!("server-{id}"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let server = folder.join("server.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
+        let before = entries(&folder);
+        let checked = boundary_check(
+            &root,
+            id,
+            server.to_str().unwrap(),
+            &["--list".to_owned()],
+            &[],
+            &[],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap_err();
+        if !helper.is_file() {
+            assert_eq!(
+                checked,
+                crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+            );
+            return;
+        }
+        assert_eq!(checked, "server_exited");
+        let granted = entries(&folder);
+        assert_ne!(granted, before);
+        programs.push((folder, before, granted));
+    }
+    let checks = root.join(CHECK_FOLDER);
+    let container = |id: &str| {
+        let name =
+            crazyagent_win_sandbox::profile::BoundaryProfile::load(&check_profile(&checks, id))
+                .unwrap()
+                .container;
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join("Packages")
+            .join(name)
+    };
+    let (dead, live) = (container(DEAD), container(LIVE));
+    assert_ne!(dead, live);
+    assert!(dead.is_dir());
+    assert!(live.is_dir());
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::plugins::initialize(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
+            [LIVE],
+        )
+        .unwrap();
+
+    crate::storage::trash::sweep_at_start(&connection, None).unwrap();
+
+    let (dead_folder, dead_before, _) = &programs[0];
+    let (live_folder, live_before, live_granted) = &programs[1];
+    assert_eq!(&entries(dead_folder), dead_before);
+    assert!(!check_profile(&checks, DEAD).exists());
+    assert!(!dead.exists());
+    assert!(!checks.join(DEAD).exists());
+    assert_eq!(&entries(live_folder), live_granted);
+    assert!(check_profile(&checks, LIVE).is_file());
+    assert!(live.is_dir());
+    assert!(checks.join(LIVE).is_dir());
+
+    connection
+        .execute("DELETE FROM plugin_items WHERE id=?1", [LIVE])
+        .unwrap();
+    crate::storage::trash::sweep_at_start(&connection, None).unwrap();
+    assert_eq!(&entries(live_folder), live_before);
+    assert!(!check_profile(&checks, LIVE).exists());
+    assert!(!live.exists());
+    assert!(!checks.join(LIVE).exists());
+}
+
 /// A server removed while one of its checks runs keeps its check folder until that check
 /// ends, so the check cannot put back what the removal cleared; a server with no check
 /// running is cleared at once.
