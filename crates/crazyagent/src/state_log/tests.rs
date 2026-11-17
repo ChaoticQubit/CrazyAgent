@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 24] = [
+const KINDS: [&str; 25] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -502,6 +502,7 @@ const KINDS: [&str; 24] = [
     crate::settings_log::KIND_STEPS,
     crate::settings_log::KIND_TIME,
     crate::settings_log::KIND_FRAMES,
+    crate::settings_log::KIND_PROFILE,
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
@@ -564,6 +565,7 @@ const SNAPSHOTS: [(&str, &[&str]); 2] = [
             "configured_master_steps",
             "configured_master_time",
             "configured_master_frames",
+            "user_profile",
         ],
     ),
 ];
@@ -778,8 +780,9 @@ fn settings_runs_carry_only_their_named_tables() {
 }
 
 /// Checks the closed body of one settings kind (v2.5 L10): the setting and, for a project
-/// setting, the project id, refusing free text in either and any key more. The settings
-/// are enums, bounded numbers and switches, never text. Input: the kind. Output: none.
+/// setting, the project id, or the profile's kept-text digest, refusing free text in any and
+/// any key more. The settings are enums, bounded numbers and switches, and the profile text
+/// stays in owner_texts (Q5), never in a body. Input: the kind. Output: none.
 fn settings_body_is_closed(kind: &str) {
     use crate::settings_log as settings;
     assert!(KINDS.contains(&kind), "{kind} is a listed kind");
@@ -853,6 +856,7 @@ fn settings_body_is_closed(kind: &str) {
             )),
             &["settings"],
         ),
+        settings::KIND_PROFILE => (json!({"body": "0".repeat(64)}), &["body"]),
         other => panic!("{other} is not a settings kind"),
     };
     let mut nested = sample.clone();

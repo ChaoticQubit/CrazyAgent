@@ -20,6 +20,9 @@ use crate::storage::opening::Opening;
 use rusqlite::Connection;
 use rusqlite::types::Value;
 
+#[path = "profile_tests.rs"]
+mod profile_tests;
+
 /// The `state` row at revision 0 and the `events` table a store holds before any write.
 const STATE: &str =
     "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
@@ -566,11 +569,11 @@ fn the_first_run_puts_settings_written_before_the_log_on_it_and_makes_a_missing_
     let tx = db.transaction().unwrap();
     assert!(first_run(&tx, Opening::for_test(3)).unwrap());
     tx.commit().unwrap();
-    let events = i64::try_from(TABLES.len()).unwrap() + 1;
+    let events = i64::try_from(TABLES.len()).unwrap() + 2;
     assert_eq!(
         moved(&db),
         (1, events, 1),
-        "one revision: a chunk per table and the closing event"
+        "one revision: a chunk per table, the profile's and the closing event"
     );
     let live = tables(&db);
     assert_eq!(
