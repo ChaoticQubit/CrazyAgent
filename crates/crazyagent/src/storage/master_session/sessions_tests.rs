@@ -2001,7 +2001,7 @@ fn a_transcript_removal_never_deletes_through_a_home_folder_swapped_for_a_link()
         std::fs::write(&record, "outside\n").unwrap();
         std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::write(&folder, "outside\n").unwrap();
-        let _ = remove_transcript(&home, &kept);
+        let _ = delete::remove_transcript(&home, &kept);
         if !record.is_file() || !folder.is_file() {
             reached.push(attempt);
         }
