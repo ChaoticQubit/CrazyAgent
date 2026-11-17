@@ -1335,7 +1335,8 @@ impl NativeOwner {
     /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
     /// reply deadline, so it stops blocking every later change: a change never sent is
     /// dropped, a recorded one is confirmed, and one the engine never recorded is sent once
-    /// more with its original identity and revision.
+    /// more with its original identity and revision, or under a new one when only an
+    /// unrelated write refused it, as `OwnerController::send_pending` says.
     /// Takes the owner; creation, master, conversation and model access settle their own.
     /// Returns the outcome to tell the owner, or none while nothing was settled.
     async fn settle_stray(&mut self) -> Option<Result<(), String>> {
