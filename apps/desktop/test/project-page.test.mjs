@@ -329,6 +329,14 @@ test("research agents offer Stop while running, Cancel while waiting and Try aga
   assert.deepEqual(actions("cancelled"), { log: false, stop: null, retry: true });
 });
 
+test("research agents offer no Try again on Windows, where the engine runs none", () => {
+  for (const status of ["failed", "cancelled"]) {
+    assert.equal(research.researchActions(job(status, { started_ms: 1_000 }), "Win32").retry, false);
+    assert.equal(research.researchActions(job(status, { started_ms: 1_000 }), "MacIntel").retry, true);
+  }
+  assert.deepEqual(research.researchActions(job("running", { started_ms: 1_000 }), "Win32"), { log: true, stop: "Stop", retry: false });
+});
+
 test("the Overview keeps Needs you above the tabs and today's activity under the Activity tab", async () => {
   const overview = await import("../src/screens/project/overview.tsx");
   const setup = { kind: "ok", value: {
