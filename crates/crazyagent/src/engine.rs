@@ -667,6 +667,30 @@ impl Engine {
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
+    /// Starts this engine's owner runtime: the storage actor's owner start, which also marks
+    /// the engine host started for the lease writers it fences (v2.5 L6 Q9). `serve` already
+    /// starts it this way at boot, so only a caller that runs the engine without `serve`, such
+    /// as a test, calls this; a second start on a running owner is refused
+    /// `owner_runtime_unavailable_or_busy`. Output: Ok, or the refusal.
+    #[cfg(unix)]
+    pub async fn start_owner_runtime(&self) -> Result<(), EngineError> {
+        let _barrier = tokio::time::timeout(self.timeout, self.owner_egress.write())
+            .await
+            .map_err(|_| EngineError("owner_start_not_submitted".into()))?;
+        let started = self.owner_job(Job::OwnerStart).await?;
+        assert_eq!(
+            started.host.db_instance.len(),
+            64,
+            "a started host names its store"
+        );
+        assert_eq!(
+            started.host.engine_epoch.len(),
+            64,
+            "a started host has its epoch"
+        );
+        Ok(())
+    }
+
     pub async fn update_config(&self, config: EffectiveConfig) -> Result<(), EngineError> {
         let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
             .await
@@ -972,5 +996,23 @@ mod tests {
             .close()
             .await
             .unwrap();
+    }
+
+    /// v2.5 L6 Q9: `start_owner_runtime` starts the owner runtime once; a second start on a
+    /// running owner is refused, never run twice.
+    #[tokio::test]
+    async fn a_second_owner_runtime_start_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cfg =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), cfg).await.unwrap();
+        engine.start_owner_runtime().await.unwrap();
+        assert_eq!(
+            engine.start_owner_runtime().await.unwrap_err().0,
+            "owner_runtime_unavailable_or_busy"
+        );
+        engine.close().await.unwrap();
     }
 }

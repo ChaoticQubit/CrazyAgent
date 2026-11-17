@@ -16,6 +16,7 @@ fn store() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(&format!(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0); {LEASES};"
     ))
     .unwrap();
@@ -765,6 +766,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     assert_eq!(mode, "wal");
     db.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
@@ -824,6 +826,7 @@ fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() 
     db.busy_timeout(Duration::from_millis(10)).unwrap();
     db.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();

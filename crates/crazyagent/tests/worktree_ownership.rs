@@ -75,7 +75,21 @@ async fn apply(engine: &Engine, id: &str, revision: u64, command: Command) -> Wi
     send(engine, request(id, revision, command)).await
 }
 
+/// Opens the engine, creates the project and pins its task, and starts the owner runtime the
+/// way `serve` does at boot, so lease writes run under the store's engine host. Inputs: the
+/// root and the repository. Output: the engine and its configuration.
 async fn setup(root: &Path, repo: &Path) -> (Engine, crazyagent::config::EffectiveConfig) {
+    let (engine, config) = setup_unstarted(root, repo).await;
+    engine.start_owner_runtime().await.unwrap();
+    (engine, config)
+}
+
+/// Opens the engine, creates the project and pins its task, with no owner runtime started.
+/// Inputs: the root and the repository. Output: the engine and its configuration.
+async fn setup_unstarted(
+    root: &Path,
+    repo: &Path,
+) -> (Engine, crazyagent::config::EffectiveConfig) {
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
     let engine = Engine::open(&root.join("db"), config.clone())
@@ -131,6 +145,15 @@ fn allocate(repo: &Path, owner: &str, native: Option<&str>) -> Command {
     }
 }
 
+/// The engine's current revision, from a read's reply; lease writes move it more than once
+/// (v2.5 L6), so requests after one read it. Input: the engine. Output: the revision.
+async fn revision(engine: &Engine) -> u64 {
+    let read = Command::WorktreeLeases {
+        task_id: TaskId::new("task").unwrap(),
+    };
+    apply(engine, "revision", 0, read).await.revision.value()
+}
+
 async fn leases(engine: &Engine) -> Vec<crazyagent::worktrees::WorktreeLease> {
     let reply = apply(
         engine,
@@ -173,7 +196,7 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     );
     let operation = request(
         "allocate",
-        3,
+        revision(&engine).await,
         allocate(&repo, "owner", Some("native-child")),
     );
     let first = send(&engine, operation.clone()).await;
@@ -187,7 +210,13 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     assert_eq!(lease.native_descendant.as_deref(), Some("native-child"));
     std::fs::write(Path::new(&lease.path).join("tracked"), b"worker dirty").unwrap();
     std::fs::write(Path::new(&lease.path).join("scratch"), b"worker scratch").unwrap();
-    let second = apply(&engine, "second", 4, allocate(&repo, "second-owner", None)).await;
+    let second = apply(
+        &engine,
+        "second",
+        revision(&engine).await,
+        allocate(&repo, "second-owner", None),
+    )
+    .await;
     assert!(matches!(second.outcome, Outcome::Rejected { .. }));
     engine.close().await.unwrap();
     let engine = Engine::open(&root.join("db"), config).await.unwrap();
@@ -200,7 +229,7 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     let release = apply(
         &engine,
         "release",
-        4,
+        revision(&engine).await,
         Command::ReleaseWorktree {
             task_id: lease.task_id.clone(),
             repository: lease.repository.clone(),
@@ -258,14 +287,15 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
     let repo = repository(&root, "repo");
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
+    let at = revision(&engine).await;
     let (first, second) = tokio::join!(
         send(
             &engine,
-            request("one", 3, allocate(&repo, "owner-one", None))
+            request("one", at, allocate(&repo, "owner-one", None))
         ),
         send(
             &engine,
-            request("two", 3, allocate(&repo, "owner-two", Some("native-two")))
+            request("two", at, allocate(&repo, "owner-two", Some("native-two")))
         )
     );
     let results = [first, second];
@@ -282,9 +312,14 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
         .unwrap();
     assert_eq!(loser.outcome, rejected("stale_revision"));
     assert_eq!(
-        apply(&engine, "third", 4, allocate(&repo, "owner-three", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "third",
+            revision(&engine).await,
+            allocate(&repo, "owner-three", None)
+        )
+        .await
+        .outcome,
         rejected("writer_already_owned")
     );
     assert_eq!(leases(&engine).await.len(), 1);
@@ -292,7 +327,7 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
         apply(
             &engine,
             "pin-two",
-            4,
+            revision(&engine).await,
             Command::PinTask {
                 context: ExecutionContext {
                     project_id: ProjectId::new("project").unwrap(),
@@ -314,7 +349,9 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
         *task_id = TaskId::new("second-task").unwrap();
     }
     assert_eq!(
-        apply(&engine, "allocate-two", 5, command).await.outcome,
+        apply(&engine, "allocate-two", revision(&engine).await, command)
+            .await
+            .outcome,
         Outcome::Applied
     );
     let listing = git(&repo, &["worktree", "list", "--porcelain"]);
@@ -390,9 +427,14 @@ async fn hostile_config_filters_and_attributes_never_execute() {
         let result = if admission.outcome == Outcome::Applied {
             (
                 "allocation",
-                apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-                    .await
-                    .outcome,
+                apply(
+                    &engine,
+                    "allocate",
+                    revision(&engine).await,
+                    allocate(&repo, "owner", None),
+                )
+                .await
+                .outcome,
             )
         } else {
             ("admission", admission.outcome)
@@ -434,9 +476,14 @@ async fn hooks_are_disabled_and_config_changes_after_admission_are_rejected() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     assert!(!marker.exists());
@@ -453,7 +500,13 @@ async fn hooks_are_disabled_and_config_changes_after_admission_are_rejected() {
             &format!("touch {}", marker.display()),
         ],
     );
-    let allocation = apply(&engine, "allocate", 3, allocate(&repo, "owner", None)).await;
+    let allocation = apply(
+        &engine,
+        "allocate",
+        revision(&engine).await,
+        allocate(&repo, "owner", None),
+    )
+    .await;
     assert!(matches!(allocation.outcome, Outcome::Rejected { .. }));
     assert!(!marker.exists());
     engine.close().await.unwrap();
@@ -482,16 +535,21 @@ async fn outside_paths_symlinks_and_metadata_swaps_fail_closed() {
     let allocation = apply(
         &engine,
         "alias",
-        3,
+        revision(&engine).await,
         allocate(&root.join("alias"), "owner", None),
     )
     .await;
     assert_eq!(allocation.outcome, rejected("repository_not_admitted"));
     assert!(leases(&engine).await.is_empty());
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -512,9 +570,14 @@ async fn outside_paths_symlinks_and_metadata_swaps_fail_closed() {
         b"committed\n"
     );
     assert!(matches!(
-        apply(&engine, "second", 4, allocate(&repo, "second", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "second",
+            revision(&engine).await,
+            allocate(&repo, "second", None)
+        )
+        .await
+        .outcome,
         Outcome::Rejected { .. }
     ));
     engine.close().await.unwrap();
@@ -531,6 +594,7 @@ async fn multiple_repositories_require_individual_admission() {
     let engine = Engine::open(&root.join("db"), config.clone())
         .await
         .unwrap();
+    engine.start_owner_runtime().await.unwrap();
     assert_eq!(
         apply(
             &engine,
@@ -556,7 +620,7 @@ async fn multiple_repositories_require_individual_admission() {
             apply(
                 &engine,
                 &format!("admit-{index}"),
-                1 + index as u64,
+                revision(&engine).await,
                 Command::AdmitRepository {
                     project_id: ProjectId::new("project").unwrap(),
                     repository: repository.to_str().unwrap().into(),
@@ -571,7 +635,7 @@ async fn multiple_repositories_require_individual_admission() {
         apply(
             &engine,
             "pin",
-            3,
+            revision(&engine).await,
             Command::PinTask {
                 context: ExecutionContext {
                     project_id: ProjectId::new("project").unwrap(),
@@ -592,7 +656,7 @@ async fn multiple_repositories_require_individual_admission() {
         apply(
             &engine,
             "allocate-one",
-            4,
+            revision(&engine).await,
             allocate(&repo, "owner-one", None)
         )
         .await
@@ -603,7 +667,7 @@ async fn multiple_repositories_require_individual_admission() {
         apply(
             &engine,
             "allocate-two",
-            5,
+            revision(&engine).await,
             allocate(&other, "owner-two", None)
         )
         .await
@@ -624,9 +688,14 @@ async fn lease_status_detects_replacement_without_restart() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -662,9 +731,14 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -717,7 +791,7 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     let readmission = apply(
         &engine,
         "readmit",
-        4,
+        revision(&engine).await,
         Command::AdmitRepository {
             project_id: ProjectId::new("project").unwrap(),
             repository: repo.to_str().unwrap().into(),
@@ -752,781 +826,270 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     engine.close().await.unwrap();
 }
 
-/// Makes a real FIFO at `path` with `mkfifo`. Input: the path.
-fn fifo(path: &Path) {
-    let output = crazyagent::spawn_gate::output(
-        Process::new("/usr/bin/mkfifo")
-            .arg(path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
-
+/// v2.5 L6: an engine host ends with its storage worker. A started engine dropped without
+/// close leaves no host in the process, so its store reopens here and the open sweep, whose
+/// opening fence refuses while a host of the store runs, marks the Ready lease
+/// RecoveryRequired. Gives up after 30 s with the last open error.
 #[tokio::test]
-async fn a_worktree_head_naming_a_ref_of_its_own_folder_is_refused_at_once_for_every_lease() {
+async fn a_started_engine_dropped_without_close_leaves_no_host_and_its_store_reopens() {
     let temporary = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(temporary.path()).unwrap();
     let repo = repository(&root, "repo");
-    git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "agent",
-            root.join("agent").to_str().unwrap(),
-        ],
-    );
-    git(
-        &repo,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            root.join("detached").to_str().unwrap(),
-        ],
-    );
-    let (engine, _) = setup(&root, &repo).await;
+    let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
+    let allocation = allocate(&repo, "owner", None);
+    let at = revision(&engine).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(&engine, "allocate", at, allocation).await.outcome,
         Outcome::Applied
     );
+    drop(engine);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let engine = loop {
+        match Engine::open(&root.join("db"), config.clone()).await {
+            Ok(engine) => break engine,
+            Err(error) if std::time::Instant::now() < until => {
+                assert!(!error.0.is_empty());
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("the dropped engine's store did not reopen: {error:?}"),
+        }
+    };
     assert_eq!(
         leases(&engine).await[0].state,
-        crazyagent::worktrees::LeaseState::Ready
+        crazyagent::worktrees::LeaseState::RecoveryRequired
     );
+    engine.close().await.unwrap();
+}
 
-    let agent = admin_folder(&root.join("agent"));
-    std::fs::create_dir_all(agent.join("refs").join("worktree")).unwrap();
-    fifo(&agent.join("refs").join("worktree").join("stuck"));
-    let head = agent.join("HEAD");
-    let kept = std::fs::read_to_string(&head).unwrap();
-    assert_eq!(kept, "ref: refs/heads/agent\n");
-    std::fs::write(&head, "ref: refs/worktree/stuck\n").unwrap();
-    let started = std::time::Instant::now();
-    assert_eq!(
-        leases(&engine).await[0].state,
-        crazyagent::worktrees::LeaseState::Uncertain
+/// Sends one wire request through a service's client and asserts it applied. Inputs: the
+/// client, the id, the expected revision and the command. Output: the reply's revision.
+async fn wired(client: &crazyagent::engine::Client, id: &str, at: u64, command: Command) -> u64 {
+    let reply = client.request(request(id, at, command)).await.unwrap();
+    assert_eq!(reply.outcome, Outcome::Applied, "{id}");
+    assert!(reply.revision.value() > at, "{id} moves the revision");
+    reply.revision.value()
+}
+
+/// A served engine a row drives: the service and its stop sender, its wire and owner
+/// clients, the quit form, and the revision after the setup's writes.
+struct Served {
+    service: crazyagent::engine::bootstrap::EngineService,
+    stop: tokio::sync::watch::Sender<bool>,
+    client: crazyagent::engine::Client,
+    owner: crazyagent::engine::owner::OwnerClient,
+    form: crazyagent::client_controller::OwnerController,
+    at: u64,
+}
+
+/// Starts a service on the root and attaches the quit form before any write, then creates
+/// the project, pins its task and admits the repository over the wire. Inputs: the root,
+/// the repository and the configuration. Output: the served engine.
+async fn served(root: &Path, repo: &Path, config: &crazyagent::config::EffectiveConfig) -> Served {
+    use crazyagent::engine::owner::OwnerClientKind;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let service =
+        crazyagent::engine::bootstrap::EngineService::start(root, "e.sock", config, &stopped)
+            .await
+            .unwrap();
+    let timeout = std::time::Duration::from_secs(10);
+    let (client, owner, _) = crazyagent::engine::Client::new(root.join("e.sock"), timeout)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let form = crazyagent::client_controller::OwnerController::attach(
+        root,
+        OwnerClientKind::Desktop,
+        timeout,
+    )
+    .await
+    .unwrap();
+    let project = ProjectId::new("project").unwrap();
+    let spec = ProjectSpec {
+        name: "Product".into(),
+        repositories: vec![repo.to_str().unwrap().into()],
+    };
+    let created = Command::CreateProject {
+        project_id: project.clone(),
+        spec,
+    };
+    let at = wired(&client, "project", 0, created).await;
+    let context = ExecutionContext {
+        project_id: project.clone(),
+        task_id: TaskId::new("task").unwrap(),
+        config_id: config.id.clone(),
+        snapshot_id: SnapshotId::new("snapshot").unwrap(),
+        baseline_id: BaselineId::new("baseline").unwrap(),
+        allowed_destinations: vec![],
+        budget_ref: CredentialRef::new("budget").unwrap(),
+    };
+    let at = wired(&client, "pin", at, Command::PinTask { context }).await;
+    let admission = Command::AdmitRepository {
+        project_id: project,
+        repository: repo.to_str().unwrap().into(),
+    };
+    let at = wired(&client, "admit", at, admission).await;
+    Served {
+        service,
+        stop,
+        client,
+        owner,
+        form,
+        at,
+    }
+}
+
+/// v2.5 L6 with V250-OWN-REVISION-RETRY (leader 03:53): the quit form reads its settings,
+/// the engine then saves a lease through its own writes (an allocation's WorktreeReserved
+/// and LeaseSaved), and the form's save is Applied after one resend under a new request id,
+/// since the form's read holds no lease and reads the same again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_form_save_after_an_engine_lease_save_lands_after_one_resend() {
+    use crazyagent::engine::owner::{OwnerMutation, OwnerResponse, OwnerResult};
+    use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+    const MINE: QuitSettings = QuitSettings {
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::Never,
+        hours: 12,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let repo = repository(&root, "repo");
+    let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
+    let Served {
+        mut service,
+        stop,
+        client,
+        owner,
+        mut form,
+        at,
+    } = served(&root, &repo, &config).await;
+    assert_ne!(
+        form.quit_settings().await.unwrap(),
+        MINE,
+        "the form starts from the defaults"
     );
-    let readmission = apply(
+    wired(&client, "allocate", at, allocate(&repo, "owner", None)).await;
+    form.begin_mutation(OwnerMutation::SetQuitSettings { settings: MINE }, 1)
+        .unwrap();
+    let first = form.pending().unwrap().request().request_id.clone();
+    let saved = form.send_pending().await.unwrap();
+    let OwnerResponse::Applied { operation } = saved else {
+        panic!("the form's save must land after one resend: {saved:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    assert_ne!(
+        operation.provenance.operation_id, first,
+        "the resend is its own request"
+    );
+    assert_eq!(form.quit_settings().await.unwrap(), MINE);
+    drop(form);
+    drop(owner);
+    drop(client);
+    service.shutdown().await.unwrap();
+    assert!(!*stop.borrow(), "the row stops the service itself");
+}
+
+/// The revision and kind of each logged worktrees event other than a snapshot run, in log
+/// order. Input: the closed store's path. Output: the pairs.
+fn logged(database: &Path) -> Vec<(i64, String)> {
+    let db = rusqlite::Connection::open(database).unwrap();
+    db.prepare(
+        "SELECT revision, kind FROM state_log WHERE aggregate='worktrees'
+         AND kind NOT IN ('SnapshotChunk','SnapshotDone') ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// Asserts that replay of the closed store's log rebuilds both worktree tables as they
+/// stand, inside a transaction that is rolled back. Input: the store's path. Output: none.
+fn replays_to_live(database: &Path) {
+    use crazyagent::state_log::replay::rows;
+    let mut db = rusqlite::Connection::open(database).unwrap();
+    let tables = |db: &rusqlite::Connection| {
+        (
+            rows(db, "repository_admissions").unwrap(),
+            rows(db, "worktree_leases").unwrap(),
+        )
+    };
+    let live = tables(&db);
+    assert!(!live.0.is_empty() && !live.1.is_empty());
+    let tx = db.transaction().unwrap();
+    crazyagent::worktrees::log::rebuild(&tx).unwrap();
+    assert_eq!(tables(&tx), live, "replay equals the live tables");
+}
+
+/// v2.5 L6 Q8 item 3: a wire admission appends RepositoryAdmitted through `own` and replies
+/// one revision later; an allocation appends WorktreeReserved, then the checkout's
+/// LeaseSaved, each through `own`, and replies one revision after the save. Replay of the
+/// store rebuilds both worktree tables as they stand.
+#[tokio::test]
+async fn wire_lease_writes_are_logged_and_replay_to_the_live_tables() {
+    let root = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(root.path()).unwrap();
+    let repo = repository(&root, "repo");
+    let (engine, _config) = setup(&root, &repo).await;
+    let admitted = apply(
         &engine,
-        "readmit",
-        4,
+        "admit",
+        2,
         Command::AdmitRepository {
             project_id: ProjectId::new("project").unwrap(),
             repository: repo.to_str().unwrap().into(),
         },
     )
     .await;
-    assert_eq!(
-        readmission.outcome,
-        rejected("untrusted_git_entry:worktrees/agent/HEAD")
-    );
-    for planted in [
-        "ref: refs/heads/../worktree/stuck\n",
-        "ref: refs/bisect/bad\n",
-        "ref: ORIG_HEAD\n",
-        "ref: refs/heads/agent\nref: refs/worktree/stuck\n",
-    ] {
-        std::fs::write(&head, planted).unwrap();
-        assert_eq!(
-            leases(&engine).await[0].state,
-            crazyagent::worktrees::LeaseState::Uncertain,
-            "{planted}"
-        );
-    }
-    assert!(
-        started.elapsed() < std::time::Duration::from_secs(4),
-        "the refusals waited on git: {:?}",
-        started.elapsed()
-    );
-    std::fs::write(&head, &kept).unwrap();
-    assert_eq!(
-        leases(&engine).await[0].state,
-        crazyagent::worktrees::LeaseState::Ready
-    );
+    assert_eq!(admitted.outcome, Outcome::Applied);
+    assert_eq!(admitted.revision.value(), 4);
+    let allocated = apply(&engine, "allocate", 4, allocate(&repo, "owner", None)).await;
+    assert_eq!(allocated.outcome, Outcome::Applied);
+    assert_eq!(allocated.revision.value(), 7);
     engine.close().await.unwrap();
+    let database = root.join("db");
+    assert_eq!(
+        logged(&database),
+        [
+            (3, "RepositoryAdmitted".to_owned()),
+            (5, "WorktreeReserved".to_owned()),
+            (6, "LeaseSaved".to_owned()),
+        ]
+    );
+    replays_to_live(&database);
 }
 
+/// v2.5 L6 Q9: before an owner runtime starts, a wire admission is refused at its fence
+/// (`owner_runtime_stale`) and writes nothing: once the runtime starts, the same request at
+/// the same revision is applied.
 #[tokio::test]
-async fn ordinary_remote_configuration_does_not_grant_network_authority() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
+async fn a_wire_admission_before_an_owner_runtime_starts_is_refused_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(root.path()).unwrap();
     let repo = repository(&root, "repo");
-    git(
-        &repo,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "https://unreachable.invalid/product.git",
-        ],
-    );
-    git(&repo, &["config", "branch.main.remote", "origin"]);
-    git(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
-    let (engine, _) = setup(&root, &repo).await;
-    admit(&engine, &repo).await;
-    assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
-        Outcome::Applied
-    );
-    engine.close().await.unwrap();
-}
-
-fn destination(root: &Path, repo: &Path) -> (PathBuf, String) {
-    use sha2::{Digest, Sha256};
-    let digest = format!(
-        "{:x}",
-        Sha256::digest(format!("{}\0task", repo.display()).as_bytes())
-    );
-    (
-        root.join("worktrees").join(&digest),
-        format!("crazyagent/{digest}"),
-    )
-}
-
-#[tokio::test]
-async fn preexisting_branch_and_path_are_preserved() {
-    for conflict in ["branch", "path", "symlink"] {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temporary.path()).unwrap();
-        let repo = repository(&root, "repo");
-        let (engine, _) = setup(&root, &repo).await;
-        admit(&engine, &repo).await;
-        let (path, branch) = destination(&root, &repo);
-        std::fs::create_dir(root.join("worktrees")).unwrap();
-        std::fs::set_permissions(
-            root.join("worktrees"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        match conflict {
-            "branch" => {
-                git(&repo, &["branch", &branch]);
-            }
-            "path" => {
-                std::fs::create_dir(&path).unwrap();
-                std::fs::write(path.join("owner-bytes"), b"preserve").unwrap();
-            }
-            "symlink" => {
-                std::os::unix::fs::symlink(&repo, &path).unwrap();
-            }
-            _ => unreachable!(),
-        }
-        assert!(matches!(
-            apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-                .await
-                .outcome,
-            Outcome::Rejected { .. }
-        ));
-        assert!(leases(&engine).await.is_empty());
-        assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
-        if conflict == "path" {
-            assert_eq!(
-                std::fs::read(path.join("owner-bytes")).unwrap(),
-                b"preserve"
-            );
-        }
-        if conflict == "branch" {
-            assert_eq!(
-                git(&repo, &["rev-parse", &branch]),
-                git(&repo, &["rev-parse", "HEAD"])
-            );
-        }
-        engine.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn interrupted_allocation_is_retained() {
-    if let Some(root) = std::env::var_os("CRAZYAGENT_T6_INTERRUPT_ROOT") {
-        let root = PathBuf::from(root);
-        let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
-        let engine = Engine::open(&root.join("db"), config).await.unwrap();
-        assert_eq!(
-            apply(
-                &engine,
-                "interrupted",
-                3,
-                allocate(&root.join("repo"), "owner", Some("native-child"))
-            )
-            .await
-            .outcome,
-            Outcome::Applied
-        );
-        engine.close().await.unwrap();
-        return;
-    }
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
-    let repo = repository(&root, "repo");
-    for index in 0..64 {
-        std::fs::write(repo.join(format!("file-{index}")), vec![index as u8; 2048]).unwrap();
-    }
-    git(&repo, &["add", "."]);
-    git(
-        &repo,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@invalid",
-            "commit",
-            "-m",
-            "bounded files",
-        ],
-    );
-    let (engine, config) = setup(&root, &repo).await;
-    admit(&engine, &repo).await;
-    engine.close().await.unwrap();
-    let mut child = crazyagent::spawn_gate::spawn(
-        Process::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "interrupted_allocation_is_retained",
-                "--nocapture",
-            ])
-            .env("CRAZYAGENT_T6_INTERRUPT_ROOT", &root)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    )
-    .unwrap();
-    let db = rusqlite::Connection::open_with_flags(
-        root.join("db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let mut observed = false;
-    for _ in 0..2000 {
-        let count: i64 = db
-            .query_row("SELECT COUNT(*) FROM worktree_leases", [], |row| row.get(0))
-            .unwrap();
-        if count == 1 {
-            observed = true;
-            break;
-        }
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "allocation exited before reservation was observed"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert!(observed, "durable reservation was not observed");
-    let body: String = db
-        .query_row("SELECT body FROM worktree_leases", [], |row| row.get(0))
-        .unwrap();
-    let record: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(
-        record["lease"]["state"], "Reserved",
-        "kill must interrupt provisioning, not follow completion"
-    );
-    drop(db);
-    let engine = Engine::open(&root.join("db"), config).await.unwrap();
-    assert_eq!(
-        leases(&engine).await[0].state,
-        crazyagent::worktrees::LeaseState::Uncertain
-    );
-    assert!(matches!(
-        apply(&engine, "retry", 3, allocate(&repo, "other-owner", None))
-            .await
-            .outcome,
-        Outcome::Rejected { .. }
-    ));
-    assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
-    engine.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn missing_branch_and_replaced_repository_are_uncertain() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
-    let repo = repository(&root, "repo");
-    let (engine, config) = setup(&root, &repo).await;
-    admit(&engine, &repo).await;
-    assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
-        Outcome::Applied
-    );
-    let lease = leases(&engine).await.remove(0);
-    git(
-        &repo,
-        &["update-ref", "-d", &format!("refs/heads/{}", lease.branch)],
-    );
-    assert_eq!(
-        leases(&engine).await[0].state,
-        crazyagent::worktrees::LeaseState::Uncertain
-    );
-    engine.close().await.unwrap();
-    std::fs::rename(repo.join(".git"), root.join("preserved-metadata")).unwrap();
-    let replacement = repository(&root, "replacement");
-    std::os::unix::fs::symlink(replacement.join(".git"), repo.join(".git")).unwrap();
-    let engine = Engine::open(&root.join("db"), config).await.unwrap();
-    assert_eq!(
-        leases(&engine).await[0].state,
-        crazyagent::worktrees::LeaseState::Uncertain
-    );
-    assert!(matches!(
-        apply(&engine, "other", 4, allocate(&repo, "other", None))
-            .await
-            .outcome,
-        Outcome::Rejected { .. }
-    ));
-    assert_eq!(
-        std::fs::read(Path::new(&lease.path).join("tracked")).unwrap(),
-        b"committed\n"
-    );
-    engine.close().await.unwrap();
-}
-
-fn commit(repo: &Path, message: &str) {
-    git(repo, &["add", "-A"]);
-    git(
-        repo,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@invalid",
-            "commit",
-            "-q",
-            "-m",
-            message,
-        ],
-    );
-}
-
-fn nested_text(module: usize, section: usize, file: usize) -> String {
-    format!("module {module} section {section} file {file}\n")
-}
-
-fn large_bytes() -> Vec<u8> {
-    (0..50 * 1024 * 1024)
-        .map(|index: usize| (index.wrapping_mul(31) % 251) as u8)
-        .collect()
-}
-
-const LFS_POINTER: &str = concat!(
-    "version https://git-lfs.github.com/spec/v1\n",
-    "oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n",
-    "size 12345\n"
-);
-
-#[tokio::test]
-async fn a_real_size_repository_gets_a_ready_lease_with_its_links_large_file_and_lfs_pointer() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
-    let repo = repository(&root, "repo");
-    for module in 0..16 {
-        for section in 0..8 {
-            let folder = repo.join(format!("src/m{module}/s{section}"));
-            std::fs::create_dir_all(&folder).unwrap();
-            for file in 0..16 {
-                std::fs::write(
-                    folder.join(format!("f{file}.txt")),
-                    nested_text(module, section, file),
-                )
-                .unwrap();
-            }
-        }
-    }
-    let deep = repo.join("deep/a/b/c/d/e/f/g/h/i/j/k/l");
-    std::fs::create_dir_all(&deep).unwrap();
-    std::fs::write(deep.join("leaf.txt"), b"deep leaf\n").unwrap();
-    std::fs::write(repo.join("big.bin"), large_bytes()).unwrap();
-    std::fs::write(repo.join("AGENTS.md"), b"agent rules\n").unwrap();
-    std::os::unix::fs::symlink("AGENTS.md", repo.join("CLAUDE.md")).unwrap();
-    std::fs::create_dir(repo.join("docs")).unwrap();
-    std::os::unix::fs::symlink("../src/m0", repo.join("docs/current")).unwrap();
-    std::fs::write(root.join("outside-file"), b"outside the lease\n").unwrap();
-    std::fs::create_dir(repo.join("links")).unwrap();
-    std::os::unix::fs::symlink("../../outside-file", repo.join("links/escape")).unwrap();
-    std::os::unix::fs::symlink(root.join("outside-file"), repo.join("links/absolute")).unwrap();
-    std::fs::write(
-        repo.join(".gitattributes"),
-        "*.psd filter=lfs diff=lfs merge=lfs -text\n",
-    )
-    .unwrap();
-    std::fs::create_dir(repo.join("art")).unwrap();
-    std::fs::write(repo.join("art/cover.psd"), LFS_POINTER).unwrap();
-    std::fs::create_dir(repo.join("bin")).unwrap();
-    std::fs::write(repo.join("bin/run.sh"), b"#!/bin/sh\necho run\n").unwrap();
-    std::fs::set_permissions(
-        repo.join("bin/run.sh"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    commit(&repo, "real size");
-    std::fs::write(root.join("global"), "version = 1\ntimeout_ms = 30000\n").unwrap();
-    let (engine, _) = setup(&root, &repo).await;
-    admit(&engine, &repo).await;
-    assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
-        Outcome::Applied
-    );
-    let lease = leases(&engine).await.remove(0);
-    assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Ready);
-    let path = Path::new(&lease.path);
-    for module in 0..16 {
-        for section in 0..8 {
-            for file in 0..16 {
-                assert_eq!(
-                    std::fs::read_to_string(
-                        path.join(format!("src/m{module}/s{section}/f{file}.txt"))
-                    )
-                    .unwrap(),
-                    nested_text(module, section, file)
-                );
-            }
-        }
-    }
-    assert_eq!(
-        std::fs::read(path.join("deep/a/b/c/d/e/f/g/h/i/j/k/l/leaf.txt")).unwrap(),
-        b"deep leaf\n"
-    );
-    assert!(std::fs::read(path.join("big.bin")).unwrap() == large_bytes());
-    assert_eq!(
-        std::fs::read_link(path.join("CLAUDE.md")).unwrap(),
-        Path::new("AGENTS.md")
-    );
-    assert_eq!(
-        std::fs::read(path.join("CLAUDE.md")).unwrap(),
-        b"agent rules\n"
-    );
-    assert_eq!(
-        std::fs::read_link(path.join("docs/current")).unwrap(),
-        Path::new("../src/m0")
-    );
-    assert!(path.join("docs/current/s0/f0.txt").is_file());
-    for link in ["links/escape", "links/absolute"] {
-        assert!(
-            std::fs::symlink_metadata(path.join(link)).is_err(),
-            "{link} must not reach outside the lease"
-        );
-    }
-    assert_eq!(
-        git(
-            path,
-            &["ls-files", "-v", "--", "links/escape", "links/absolute"]
-        ),
-        "S links/absolute\nS links/escape\n"
-    );
-    assert_eq!(
-        std::fs::read_to_string(path.join("art/cover.psd")).unwrap(),
-        LFS_POINTER
-    );
-    assert_ne!(
-        std::fs::metadata(path.join("bin/run.sh"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o100,
-        0
-    );
-    assert_eq!(git(path, &["status", "--porcelain"]), "");
-    assert_eq!(
-        std::fs::read(root.join("outside-file")).unwrap(),
-        b"outside the lease\n"
-    );
-    engine.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn submodule_entries_and_content_git_would_convert_retain_ownership_without_checkout() {
-    for kind in ["submodule", "conversion"] {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temporary.path()).unwrap();
-        let repo = repository(&root, "repo");
-        let head = git(&repo, &["rev-parse", "HEAD"]);
-        match kind {
-            "submodule" => {
-                git(
-                    &repo,
-                    &[
-                        "update-index",
-                        "--add",
-                        "--cacheinfo",
-                        &format!("160000,{},vendor/lib", head.trim_end()),
-                    ],
-                );
-                git(
-                    &repo,
-                    &[
-                        "-c",
-                        "user.name=Test",
-                        "-c",
-                        "user.email=test@invalid",
-                        "commit",
-                        "-q",
-                        "-m",
-                        "submodule",
-                    ],
-                );
-            }
-            "conversion" => {
-                std::fs::write(
-                    repo.join(".gitattributes"),
-                    "*.txt working-tree-encoding=UTF-16LE\n",
-                )
-                .unwrap();
-                let wide = "hello\n"
-                    .encode_utf16()
-                    .flat_map(u16::to_le_bytes)
-                    .collect::<Vec<_>>();
-                std::fs::write(repo.join("notes.txt"), wide).unwrap();
-                commit(&repo, "conversion");
-            }
-            _ => unreachable!(),
-        }
-        let (engine, _) = setup(&root, &repo).await;
-        admit(&engine, &repo).await;
-        let expected = match kind {
-            "submodule" => "unsupported_or_unsafe_tree_entry",
-            "conversion" => "worktree_content_differs_from_commit",
-            _ => unreachable!(),
-        };
-        assert_eq!(
-            apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-                .await
-                .outcome,
-            rejected(expected),
-            "{kind}"
-        );
-        let lease = leases(&engine).await.remove(0);
-        assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Uncertain);
-        assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
-        assert!(matches!(
-            apply(&engine, "second", 3, allocate(&repo, "other", None))
-                .await
-                .outcome,
-            Outcome::Rejected { .. }
-        ));
-        engine.close().await.unwrap();
-    }
-}
-
-fn pin(task: &str, config: &crazyagent::config::EffectiveConfig) -> Command {
-    Command::PinTask {
-        context: ExecutionContext {
+    let (engine, _config) = setup_unstarted(&root, &repo).await;
+    let admit = request(
+        "admit",
+        2,
+        Command::AdmitRepository {
             project_id: ProjectId::new("project").unwrap(),
-            task_id: TaskId::new(task).unwrap(),
-            config_id: config.id.clone(),
-            snapshot_id: SnapshotId::new("snapshot").unwrap(),
-            baseline_id: BaselineId::new("baseline").unwrap(),
-            allowed_destinations: vec![],
-            budget_ref: CredentialRef::new("budget").unwrap(),
+            repository: repo.to_str().unwrap().into(),
         },
-    }
-}
-
-async fn leases_of(engine: &Engine, task: &str) -> Vec<crazyagent::worktrees::WorktreeLease> {
-    let reply = apply(
-        engine,
-        &format!("leases-{task}"),
-        0,
-        Command::WorktreeLeases {
-            task_id: TaskId::new(task).unwrap(),
-        },
-    )
-    .await;
-    let Outcome::Worktrees { leases } = reply.outcome else {
-        panic!("leases required")
-    };
-    leases
-}
-
-fn volume(path: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).unwrap().dev()
-}
-
-fn set_devices(value: &mut serde_json::Value, device: u64) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, field) in fields.iter_mut() {
-                if key == "device" {
-                    *field = serde_json::Value::from(device);
-                } else {
-                    set_devices(field, device);
-                }
-            }
-        }
-        serde_json::Value::Array(items) => {
-            items.iter_mut().for_each(|item| set_devices(item, device))
-        }
-        _ => {}
-    }
-}
-
-enum Renumber {
-    Volume(u64),
-    VolumeBesideTheLeaseDirectory(u64),
-    LeaseDirectoryOnly(u64),
-    Nothing,
-}
-
-fn rewrite_rows(database: &Path, renumber: Renumber, uncertain: bool) {
-    let db = rusqlite::Connection::open(database).unwrap();
-    for table in ["repository_admissions", "worktree_leases"] {
-        let rows: Vec<(i64, String)> = db
-            .prepare(&format!("SELECT rowid, body FROM {table}"))
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert!(!rows.is_empty(), "{table}");
-        for (rowid, body) in rows {
-            let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
-            let lease = table == "worktree_leases";
-            match renumber {
-                Renumber::Volume(device) => set_devices(&mut value, device),
-                Renumber::VolumeBesideTheLeaseDirectory(device) => {
-                    let kept = value.get("directory").cloned();
-                    set_devices(&mut value, device);
-                    if let Some(kept) = kept.filter(|_| lease) {
-                        value["directory"] = kept;
-                    }
-                }
-                Renumber::LeaseDirectoryOnly(device) if lease => {
-                    set_devices(&mut value["directory"], device)
-                }
-                Renumber::LeaseDirectoryOnly(_) | Renumber::Nothing => {}
-            }
-            if lease && uncertain {
-                value["lease"]["state"] = serde_json::Value::from("Uncertain");
-            }
-            db.execute(
-                &format!("UPDATE {table} SET body=?2 WHERE rowid=?1"),
-                rusqlite::params![rowid, serde_json::to_string(&value).unwrap()],
-            )
-            .unwrap();
-        }
-    }
-}
-
-async fn ready_lease(
-    root: &Path,
-) -> (
-    PathBuf,
-    crazyagent::config::EffectiveConfig,
-    crazyagent::worktrees::WorktreeLease,
-) {
-    let repo = repository(root, "repo");
-    let (engine, config) = setup(root, &repo).await;
-    admit(&engine, &repo).await;
-    assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
-        Outcome::Applied
     );
-    let lease = leases(&engine).await.remove(0);
-    assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Ready);
-    std::fs::write(Path::new(&lease.path).join("scratch"), b"worker scratch").unwrap();
-    engine.close().await.unwrap();
-    (repo, config, lease)
-}
-
-#[tokio::test]
-async fn a_reboot_that_renumbers_the_volume_keeps_leases_and_admissions() {
-    use crazyagent::worktrees::LeaseState;
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
-    let (repo, config, lease) = ready_lease(&root).await;
-    let live = volume(&repo);
-    assert_eq!(volume(Path::new(&lease.path)), live);
-    rewrite_rows(&root.join("db"), Renumber::Volume(live ^ 1), true);
-
-    let engine = Engine::open(&root.join("db"), config.clone())
-        .await
-        .unwrap();
-    assert_eq!(leases(&engine).await[0].state, LeaseState::RecoveryRequired);
     assert_eq!(
-        apply(&engine, "pin-second", 4, pin("second-task", &config))
-            .await
-            .outcome,
-        Outcome::Applied
+        engine.apply(admit.clone()).await.unwrap_err().0,
+        "owner_runtime_stale"
     );
-    let second = Command::AllocateWorktree {
-        task_id: TaskId::new("second-task").unwrap(),
-        repository: repo.to_str().unwrap().into(),
-        owner_session: SessionId::new("second-owner").unwrap(),
-        native_descendant: None,
-    };
-    assert_eq!(
-        apply(&engine, "allocate-second", 5, second).await.outcome,
-        Outcome::Applied
-    );
-    let second_lease = leases_of(&engine, "second-task").await.remove(0);
-    assert_eq!(second_lease.state, LeaseState::Ready);
-    engine.close().await.unwrap();
-
-    rewrite_rows(&root.join("db"), Renumber::Volume(live ^ 2), false);
-    let engine = Engine::open(&root.join("db"), config).await.unwrap();
-    assert_eq!(leases(&engine).await[0].state, LeaseState::RecoveryRequired);
-    assert_eq!(
-        leases_of(&engine, "second-task").await[0].state,
-        LeaseState::RecoveryRequired
-    );
-    engine.close().await.unwrap();
-    assert_eq!(
-        std::fs::read(Path::new(&lease.path).join("scratch")).unwrap(),
-        b"worker scratch"
-    );
-    assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
-    assert!(Path::new(&second_lease.path).join("tracked").is_file());
-}
-
-#[tokio::test]
-async fn a_mixed_device_lease_record_is_still_refused() {
-    use crazyagent::worktrees::LeaseState;
-    for (renumber, uncertain) in [
-        (Renumber::LeaseDirectoryOnly as fn(u64) -> Renumber, false),
-        (
-            Renumber::VolumeBesideTheLeaseDirectory as fn(u64) -> Renumber,
-            true,
-        ),
-    ] {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temporary.path()).unwrap();
-        let (repo, config, lease) = ready_lease(&root).await;
-        rewrite_rows(&root.join("db"), renumber(volume(&repo) ^ 1), uncertain);
-        let engine = Engine::open(&root.join("db"), config).await.unwrap();
-        assert_eq!(
-            leases(&engine).await[0].state,
-            LeaseState::Uncertain,
-            "uncertain: {uncertain}"
-        );
-        engine.close().await.unwrap();
-        assert_eq!(
-            std::fs::read(Path::new(&lease.path).join("scratch")).unwrap(),
-            b"worker scratch"
-        );
-    }
-}
-
-#[tokio::test]
-async fn an_uncertain_lease_on_an_unrenumbered_volume_stays_uncertain() {
-    use crazyagent::worktrees::LeaseState;
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
-    let (_, config, _) = ready_lease(&root).await;
-    rewrite_rows(&root.join("db"), Renumber::Nothing, true);
-    let engine = Engine::open(&root.join("db"), config).await.unwrap();
-    assert_eq!(leases(&engine).await[0].state, LeaseState::Uncertain);
+    engine.start_owner_runtime().await.unwrap();
+    let reply = send(&engine, admit).await;
+    assert_eq!(reply.outcome, Outcome::Applied);
+    assert_eq!(reply.revision.value(), 4);
     engine.close().await.unwrap();
 }
+
+#[path = "worktree_ownership/checkouts.rs"]
+mod checkouts;

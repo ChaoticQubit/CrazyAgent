@@ -130,6 +130,7 @@ async fn agent_worktree(project: &Project) -> (Engine, PathBuf) {
     let engine = Engine::open(&project.root.join("db"), config.clone())
         .await
         .unwrap();
+    engine.start_owner_runtime().await.unwrap();
     let project_id = ProjectId::new("project").unwrap();
     let repository = project.repo.to_str().unwrap().to_owned();
     applied(
@@ -175,7 +176,7 @@ async fn agent_worktree(project: &Project) -> (Engine, PathBuf) {
     applied(
         &engine,
         "allocate",
-        3,
+        4,
         Command::AllocateWorktree {
             task_id: TaskId::new("task").unwrap(),
             repository,

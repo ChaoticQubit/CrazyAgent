@@ -9,6 +9,7 @@ fn db() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
@@ -476,24 +477,90 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 5] = [
+const KINDS: [&str; 8] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
     crate::project_setup::removed::event::KIND,
     crate::master_session::SESSION_DELETED,
+    crate::worktrees::log::KIND_ADMITTED,
+    crate::worktrees::log::KIND_RESERVED,
+    crate::worktrees::log::KIND_SAVED,
 ];
 
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-const WRITERS: [(&str, &[&str]); 3] = [
+const WRITERS: [(&str, &[&str]); 4] = [
     ("project_setup/removed/event.rs", &["KIND,"]),
     ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
     (
         "storage/master_session/delete.rs",
         &["SESSION_DELETED,", "SESSION_DELETED.into(),"],
     ),
+    (
+        "worktrees/log.rs",
+        &["KIND_ADMITTED,", "KIND_RESERVED,", "KIND_SAVED,"],
+    ),
 ];
+
+/// The writers outside this module that take a snapshot, each with the only tables its runs
+/// may carry. A run copies those tables' stored columns as they stand, rows the typed events
+/// wrote; the run does not check them again.
+const SNAPSHOTS: [(&str, &[&str]); 1] = [(
+    "worktrees/log.rs",
+    &["repository_admissions", "worktree_leases"],
+)];
+
+/// A lease record as the worktrees events carry it, of task t1 in /repo under the engine's
+/// branch. Output: the record as JSON.
+fn lease_sample() -> serde_json::Value {
+    let identity = json!({"device": 1, "inode": 2});
+    json!({
+        "lease": {
+            "project_id": "app",
+            "task_id": "t1",
+            "repository": "/repo",
+            "path": "/repo/.wt/t1",
+            "branch": format!("crazyagent/{}", "a".repeat(64)),
+            "owner_session": "s1",
+            "native_descendant": null,
+            "state": "Reserved"
+        },
+        "admission": {"repository": "/repo", "root": identity, "metadata": identity},
+        "head": "0".repeat(40),
+        "directory": null,
+        "metadata": null
+    })
+}
+
+/// Checks that a worktrees snapshot run carries only the tables [`SNAPSHOTS`] names for
+/// worktrees/log.rs, on a store holding both worktree tables. Output: none.
+fn worktrees_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[0];
+    assert_eq!(writer, "worktrees/log.rs");
+    let mut db = db();
+    crate::worktrees::initialize(&db).unwrap();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::worktrees::log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    let mut statement = tx
+        .prepare("SELECT body FROM state_log WHERE kind=?1")
+        .unwrap();
+    let tables: Vec<String> = statement
+        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| {
+            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            chunk["table"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(tables.len(), named.len(), "one chunk per empty table");
+    assert!(
+        tables.iter().all(|table| named.contains(&table.as_str())),
+        "{tables:?}"
+    );
+}
 
 /// Text no event body may hold: prose with a key in it, longer than any identity.
 /// Output: the text.
@@ -575,12 +642,82 @@ fn writer_sources() -> Vec<(String, String)> {
     found
 }
 
+/// Checks the snapshot rule of [`no_event_body_can_carry_a_secret`]: only state_log.rs and
+/// the writers [`SNAPSHOTS`] names take a snapshot, and a worktrees run carries only its
+/// named tables. Input: the writers' paths and sources. Output: none.
+fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
+    assert!(!writers.is_empty(), "the log has writers");
+    for (name, text) in writers {
+        let named = SNAPSHOTS.iter().any(|(path, _)| *path == name.as_str());
+        assert!(
+            name.as_str() == "state_log.rs" || named || !text.contains(".snapshot("),
+            "{name} takes a snapshot"
+        );
+    }
+    worktrees_runs_carry_only_their_named_tables();
+}
+
+/// Checks that a snapshot's closing body holds only its aggregate, its chunk count and its
+/// hash, 64 lowercase hex digits, so no free text rides in it. Output: none.
+fn a_closing_body_is_its_hash() {
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
+    let seq = i64::try_from(done).expect("a log seq fits in i64");
+    let body: Vec<u8> = tx
+        .query_row("SELECT body FROM state_log WHERE seq=?1", [seq], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let closing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mut keys: Vec<&str> = closing
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["aggregate", "chunks", "sha256"]);
+    let sha256 = closing["sha256"].as_str().unwrap();
+    assert_eq!(sha256.len(), 64);
+    assert!(
+        sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
+}
+
+/// Checks the closed body of one worktrees kind: project or task and the typed record,
+/// refusing free text in either and any key more. Input: the kind. Output: none.
+fn worktrees_body_is_closed(kind: &str) {
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    match kind {
+        crate::worktrees::log::KIND_ADMITTED => closed_body(
+            |body| serde_json::from_slice::<crate::worktrees::log::Admitted>(body).is_ok(),
+            json!({"project": "app", "body": lease_sample()["admission"].clone()}),
+            &["project", "body"],
+        ),
+        crate::worktrees::log::KIND_RESERVED => closed_body(
+            |body| serde_json::from_slice::<crate::worktrees::log::Reserved>(body).is_ok(),
+            json!({"task": "t1", "body": lease_sample()}),
+            &["task", "body"],
+        ),
+        crate::worktrees::log::KIND_SAVED => closed_body(
+            |body| serde_json::from_slice::<crate::worktrees::log::Saved>(body).is_ok(),
+            json!({"task": "t1", "body": lease_sample()}),
+            &["task", "body"],
+        ),
+        other => panic!("{other} is not a worktrees kind"),
+    }
+}
+
 /// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each typed kind's
 /// body holds a closed set of keys, and its decoder refuses free text in any of them and any
 /// key more; ids decode only as 1 to 128 safe ASCII bytes. A snapshot's closing hash is 64
 /// hex digits. A chunk's rows are any JSON, so no writer outside this module takes a
-/// snapshot until a rule names the tables one may carry. The writers outside tests are the
-/// files in [`WRITERS`], each appending only its own kind.
+/// snapshot until a rule names the tables one may carry ([`SNAPSHOTS`]). The writers outside
+/// tests are the files in [`WRITERS`], each appending only its own kind.
 #[test]
 fn no_event_body_can_carry_a_secret() {
     let writers = writer_sources();
@@ -601,42 +738,8 @@ fn no_event_body_can_carry_a_secret() {
     }
     for kind in KINDS {
         match kind {
-            SNAPSHOT_CHUNK => {
-                for (name, text) in &writers {
-                    assert!(
-                        name.as_str() == "state_log.rs" || !text.contains(".snapshot("),
-                        "{name} takes a snapshot"
-                    );
-                }
-            }
-            SNAPSHOT_DONE => {
-                let mut db = db();
-                let tx = db.transaction().unwrap();
-                let mut log = Appender::own(&tx, fence::engine()).unwrap();
-                let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
-                let seq = i64::try_from(done).expect("a log seq fits in i64");
-                let body: Vec<u8> = tx
-                    .query_row("SELECT body FROM state_log WHERE seq=?1", [seq], |row| {
-                        row.get(0)
-                    })
-                    .unwrap();
-                let closing: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let mut keys: Vec<&str> = closing
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                    .map(String::as_str)
-                    .collect();
-                keys.sort_unstable();
-                assert_eq!(keys, ["aggregate", "chunks", "sha256"]);
-                let sha256 = closing["sha256"].as_str().unwrap();
-                assert_eq!(sha256.len(), 64);
-                assert!(
-                    sha256
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                );
-            }
+            SNAPSHOT_CHUNK => only_named_writers_take_a_snapshot(&writers),
+            SNAPSHOT_DONE => a_closing_body_is_its_hash(),
             replay::PROCESS_EXITED => closed_body(
                 |body| serde_json::from_slice::<replay::ProcessExited>(body).is_ok(),
                 json!({"pid": 7, "code": 0, "signal": null}),
@@ -659,6 +762,9 @@ fn no_event_body_can_carry_a_secret() {
                 json!({"project": "app", "session": "s1"}),
                 &["project", "session"],
             ),
+            crate::worktrees::log::KIND_ADMITTED
+            | crate::worktrees::log::KIND_RESERVED
+            | crate::worktrees::log::KIND_SAVED => worktrees_body_is_closed(kind),
             other => panic!("the kind {other} has no body rule"),
         }
     }

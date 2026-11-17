@@ -9,6 +9,7 @@ fn store() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(
         "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
@@ -239,4 +240,93 @@ fn the_host_set_keeps_at_most_its_bound_and_drops_the_oldest() {
     );
     hosts.stop(&stamp(1));
     assert!(!held(&hosts, 1));
+}
+
+/// A store opening with its own `owner_meta` naming `db_instance`, and the `state` row at
+/// revision 0; no host is started for it here. Input: the instance. Output: the connection.
+fn opening_store(db_instance: &str) -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(&format!(
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO state VALUES (1,0);
+        CREATE TABLE owner_meta (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+            db_instance TEXT NOT NULL CHECK(length(db_instance) = 64),
+            engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),
+            runtime_state TEXT NOT NULL CHECK(runtime_state IN ('offline', 'active')));
+        INSERT INTO owner_meta VALUES (1,1,'{db_instance}','{}','offline');",
+        "f".repeat(64)
+    ))
+    .unwrap();
+    db
+}
+
+/// v2.5 L6 (leader 02:34 Q1 A): a writer of the storage open appends while no host of its
+/// store runs in this process, moving the revision once, as an own-connection writer.
+#[test]
+fn an_opening_writer_appends_while_no_host_of_its_store_runs() {
+    let mut db = opening_store(&"e".repeat(64));
+    let tx = db.transaction().unwrap();
+    let mut appender = Appender::opening(&tx, Opening::for_test(7)).unwrap();
+    assert_eq!(appender.revision(), 1);
+    assert_eq!(appender.append(&draft()).unwrap(), 1);
+    assert_eq!(appender.project(|_| Ok(3)).unwrap(), 3);
+    tx.commit().unwrap();
+    assert_eq!(revision(&db), 1);
+
+    let mut bare = Connection::open_in_memory().unwrap();
+    bare.execute_batch(
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO state VALUES (1,4);",
+    )
+    .unwrap();
+    let tx = bare.transaction().unwrap();
+    let appender = Appender::opening(&tx, Opening::for_test(7)).unwrap();
+    assert_eq!(
+        appender.revision(),
+        5,
+        "a store with no owner tables yet has no host"
+    );
+}
+
+/// v2.5 L6 (leader 02:34 Q1 A): once a host of the store runs in this process the opening
+/// class is refused, at the start and again at each projection apply, and nothing moves;
+/// a host of another store does not refuse it.
+#[test]
+fn an_opening_writer_is_refused_once_a_host_of_its_store_runs() {
+    let instance = "9".repeat(64);
+    let host = HostStamp {
+        db_instance: instance.clone(),
+        engine_epoch: "8".repeat(64),
+    };
+    let mut db = opening_store(&instance);
+    let tx = db.transaction().unwrap();
+    let appender = Appender::opening(&tx, Opening::for_test(7)).unwrap();
+    host_started(&host);
+    assert_eq!(
+        code(appender.project(|_| Ok(()))),
+        Some("state_log_opening_host_running".into()),
+        "the projection's check is the pair of the start's"
+    );
+    drop(appender);
+    assert_eq!(
+        code(Appender::opening(&tx, Opening::for_test(7))),
+        Some("state_log_opening_host_running".into())
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        revision(&db),
+        1,
+        "only the first opening moved the revision"
+    );
+    host_stopped(&host);
+
+    let tx = db.transaction().unwrap();
+    assert!(
+        Appender::opening(&tx, Opening::for_test(7)).is_ok(),
+        "a stopped host no longer refuses it"
+    );
 }

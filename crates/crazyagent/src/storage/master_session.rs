@@ -5224,7 +5224,7 @@ fn execute(
                     Some(turn)
                 }
             };
-            if moved && !super::master_bootstrap::requalify(tx, &session)? {
+            if moved && !super::master_bootstrap::requalify(tx, &session, next)? {
                 return Ok(reject("master_source_conflict"));
             }
             let Some(ordinal) = next_ordinal(tx, id)? else {
@@ -5402,9 +5402,21 @@ pub(super) fn apply(
                 }
                 OwnerResult::Applied
             }
-            Outcome::Rejected { code } => {
+            Outcome::Rejected { code } if owner_revision(&tx)? == revision => {
                 provenance.revision_after = Cursor::new(revision);
                 provenance.event_cursor = None;
+                OwnerResult::Rejected { code }
+            }
+            Outcome::Rejected { code } => {
+                let moved = provenance.revision_after.value();
+                assert_eq!(
+                    owner_revision(&tx)?,
+                    moved,
+                    "only a log write at next moves it"
+                );
+                let client = ClientId::new(format!("owner:{}", admission.owner_id));
+                let client = client.map_err(error)?;
+                persist_event_ids(&tx, config, &request.request_id, &client, moved)?;
                 OwnerResult::Rejected { code }
             }
             _ => return Err(error("master_mutation_result")),
@@ -8418,75 +8430,4 @@ mod activity_store_tests {
 }
 
 #[cfg(all(test, unix))]
-mod schema_tests {
-    use super::initialize;
-    use rusqlite::Connection;
-
-    const LANDING_BUILD_WAITING_RESOLVES: &str =
-        "CREATE TABLE IF NOT EXISTS master_waiting_resolves (
-    session TEXT PRIMARY KEY,
-    project TEXT NOT NULL,
-    operation TEXT NOT NULL,
-    input INTEGER NOT NULL CHECK(input > 0),
-    body TEXT NOT NULL
-)";
-
-    fn waiting_resolves(db: &Connection) -> bool {
-        db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='master_waiting_resolves')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn a_fresh_database_keeps_waiting_resolves_and_reopens() {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        assert!(waiting_resolves(&db));
-        initialize(&db).unwrap();
-        assert!(waiting_resolves(&db));
-    }
-
-    #[test]
-    fn a_database_from_a_build_that_made_the_table_on_first_use_reopens() {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        db.execute_batch(LANDING_BUILD_WAITING_RESOLVES).unwrap();
-        db.execute(
-            "INSERT INTO master_waiting_resolves(session,project,operation,input,body) VALUES ('s','p','o',1,'{}')",
-            [],
-        )
-        .unwrap();
-        initialize(&db).unwrap();
-        let kept: i64 = db
-            .query_row("SELECT COUNT(*) FROM master_waiting_resolves", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(kept, 1);
-    }
-
-    #[test]
-    fn a_database_from_before_waiting_resolves_gains_the_table() {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        db.execute_batch("DROP TABLE IF EXISTS master_waiting_resolves")
-            .unwrap();
-        initialize(&db).unwrap();
-        assert!(waiting_resolves(&db));
-    }
-
-    #[test]
-    fn an_unknown_master_object_is_still_a_conflict() {
-        let db = Connection::open_in_memory().unwrap();
-        initialize(&db).unwrap();
-        db.execute_batch("CREATE TABLE master_zz (x INTEGER)")
-            .unwrap();
-        assert_eq!(
-            initialize(&db).unwrap_err().to_string(),
-            "master_schema_conflict"
-        );
-    }
-}
+mod schema_tests;
