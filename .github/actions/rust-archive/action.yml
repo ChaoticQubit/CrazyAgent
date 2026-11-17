@@ -57,7 +57,7 @@ runs:
         set -euo pipefail
         exe=""
         if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
-        cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --locked --offline
+        cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --features crazyagent/owner-trace --locked --offline
         mkdir -p target/debug/deps
         cp "target/debug/crazyagent-landlock$exe" "target/debug/deps/crazyagent-landlock$exe"
     - name: Build and archive every workspace test
@@ -72,7 +72,7 @@ runs:
           sampler=$!
           trap 'kill "$sampler" 2> /dev/null || true' EXIT
         fi
-        cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
+        cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --features crazyagent/owner-trace --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
     - name: Show the free disk, the target and the archive size
       if: always()
       shell: bash

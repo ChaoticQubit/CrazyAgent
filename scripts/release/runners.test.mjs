@@ -368,3 +368,11 @@ test("every test farm Linux tmux install first takes group and other write off t
     assert(site.indexOf("sudo install ") > owned, "before tmux goes in");
   }
 });
+
+test("both test farm cargo builds turn on the engine's owner-trace feature, so a failed row's captured stderr holds one line per owner exchange, and nothing else in the farm names it (leader 02:58; clean_mac_release.rs keeps it out of every release build)", async () => {
+  const archive = await readFile(new URL("../../.github/actions/rust-archive/action.yml", import.meta.url), "utf8");
+  const builds = archive.split("\n").filter((line) => /^ +cargo (build|nextest archive) /.test(line));
+  assert.equal(builds.length, 2, "the engine binaries and the test archive");
+  for (const build of builds) assert.match(build, / --features crazyagent\/owner-trace --locked --offline/);
+  assert.equal(archive.match(/owner-trace/g).length, 2);
+});
