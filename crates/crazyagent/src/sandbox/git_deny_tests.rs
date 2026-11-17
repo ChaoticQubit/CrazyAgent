@@ -22,6 +22,24 @@ struct Case {
 fn case() -> Case {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
+    case_in(temp, root)
+}
+
+/// Makes the case folders under a root `bytes` long inside a fresh temp folder, for a profile
+/// whose every path is as long as a deep project or home gives. Input: the root's length.
+/// Output: the case.
+fn long_case(bytes: usize) -> Case {
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let pad = bytes - base.as_os_str().len() - 1;
+    let root = base.join("p".repeat(pad));
+    assert_eq!(root.as_os_str().len(), bytes);
+    case_in(temp, root)
+}
+
+/// Makes the case folders under `root`, which lies in `temp`. Inputs: the temp folder and
+/// the root. Output: the case.
+fn case_in(temp: tempfile::TempDir, root: PathBuf) -> Case {
     let case = Case {
         project: root.join("project"),
         home: root.join("agent").join("home"),
@@ -608,4 +626,23 @@ fn a_project_agent_links_no_protected_file_under_another_name() {
     }
     fs::write(case.project.join("notes.txt"), "plain\n").unwrap();
     allowed(&sandbox, &profile, "/bin/ln notes.txt notes-link.txt");
+}
+
+/// V243-PROFILE-CAP-ROW: the widest confined profile, a worktree agent with kept project
+/// secrets, the owner's temp folder and a shared writable folder, every root under a
+/// 150-byte path, still leaves a tenth of the 64 KiB cap free. Every path is spelled into
+/// the profile many times over, so the size grows with path length, and an install over the
+/// cap refuses to start the agent (V243-FARM2-PRODUCT-SMALL).
+#[test]
+fn the_widest_profile_under_a_long_root_keeps_a_tenth_of_the_cap_free() {
+    let case = long_case(150);
+    let (sandbox, _, _) = widened(&case);
+    let text = sandbox.profile();
+    assert!(text.len() > super::PROFILE_BYTES_MAX / 2, "{}", text.len());
+    assert!(
+        text.len() <= super::PROFILE_BYTES_MAX * 9 / 10,
+        "{} of {} bytes",
+        text.len(),
+        super::PROFILE_BYTES_MAX
+    );
 }
