@@ -101,8 +101,8 @@ test("v2.5 S3c: the page watches once, and a page that cannot watch hears unknow
 test("v2.5 S3c: the IDE focus and the team alerts are read on the engine's watch, with no poll left", () => {
   const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
   const hook = (name) => app.slice(app.indexOf(`function ${name}(`), app.indexOf("\n}\n", app.indexOf(`function ${name}(`)));
-  assert.match(hook("useIdeFocus"), /const stopHearing = onChanged\(\["ide"\], \(\) => void read\(\)\);\n {4}void startWatch\(\)\.then\(\(\) => live && read\(\)\);/);
-  assert.match(hook("useTeamAlerts"), /const stopHearing = onChanged\(\["team"\], \(\) => void read\(\)\);\n {4}void startWatch\(\)\.then\(\(\) => live && read\(\)\);/);
+  assert.match(hook("useIdeFocus"), /const stopHearing = onChanged\(\["ide"\], \(\) => void read\(\)\);\n {4}void startWatch\(\)\.then\(\(\) => \{\n {6}if \(live\) void read\(\);\n {4}\}\);/);
+  assert.match(hook("useTeamAlerts"), /const stopHearing = onChanged\(\["team"\], \(\) => void read\(\)\);\n {4}void startWatch\(\)\.then\(\(\) => \{\n {6}if \(live\) void read\(\);\n {4}\}\);/);
   for (const name of ["useIdeFocus", "useTeamAlerts"]) assert.doesNotMatch(hook(name), /setTimeout|setInterval/, name);
   assert.doesNotMatch(app, /IDE_FOCUS_POLL_MS|ALERT_READ_MS/);
 });
