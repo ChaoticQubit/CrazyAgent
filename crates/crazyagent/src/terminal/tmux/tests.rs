@@ -27,14 +27,22 @@ fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert!(!quote("one\ntwo\r").contains(['\n', '\r']));
 }
 
+/// R1: the attach and the paste check read `#{bracket_paste_flag}`, which tmux has from 3.7
+/// on. An older tmux answers it empty, so every attach ran out of time; such a tmux is too
+/// old for agent terminals.
 #[test]
-fn only_tmux_three_two_and_later_is_supported() {
+fn only_tmux_three_seven_and_later_is_supported() {
     for (version, expected) in [
         ("3.8", Some(true)),
-        ("3.2", Some(true)),
-        ("3.3a", Some(true)),
-        ("next-3.6", Some(true)),
+        ("3.7", Some(true)),
+        ("3.7c", Some(true)),
+        ("next-3.8", Some(true)),
         ("10.0", Some(true)),
+        ("3.6b", Some(false)),
+        ("next-3.6", Some(false)),
+        ("3.4", Some(false)),
+        ("3.3a", Some(false)),
+        ("3.2a", Some(false)),
         ("3.1c", Some(false)),
         ("2.9", Some(false)),
         ("master", None),
