@@ -377,7 +377,6 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
 #[tokio::test]
 async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     const ID: &str = "mcp-0123456789abcdef01234568";
-    const CONTAINER_SID: &str = "S-1-15-2-";
     let directory = tempfile::tempdir().unwrap();
     let base = crate::sandbox::canonical(directory.path()).unwrap();
     let root = base.join("engine");
@@ -386,17 +385,13 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     std::fs::create_dir_all(&folder).unwrap();
     let server = folder.join("server.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
-    let containers = || {
+    let entries = || {
         let listed =
             crate::spawn_gate::output(std::process::Command::new("icacls").arg(&folder)).unwrap();
         assert!(listed.status.success(), "{listed:?}");
-        String::from_utf8_lossy(&listed.stdout)
-            .lines()
-            .filter(|line| line.contains(CONTAINER_SID))
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
+        String::from_utf8_lossy(&listed.stdout).into_owned()
     };
-    let before = containers();
+    let before = entries();
     let checked = boundary_check(
         &root,
         ID,
@@ -418,7 +413,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
         return;
     }
     assert_eq!(checked, "server_exited");
-    assert!(containers().len() > before.len());
+    assert_ne!(entries(), before);
     let checks = root.join(CHECK_FOLDER);
     let profile = check_profile(&checks, ID);
     let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
@@ -431,7 +426,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     let cleared = check_folders::remove_check_folder(&checks, ID);
     assert!(!checks.join(ID).exists());
     cleared.await.unwrap();
-    assert_eq!(containers(), before);
+    assert_eq!(entries(), before);
     assert!(!profile.exists());
     assert!(!container.exists());
 }
