@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { TARGETS } from "./assets.mjs";
+import { SECRET_NAMES } from "./sign-windows.mjs";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
 
@@ -145,10 +147,10 @@ function actionSecretLines(text) {
  * Lists every runner of a workflow outside the allowed GitHub-hosted images, reading each
  * matrix runner value when a job takes `${{ matrix.runner }}`; a `runner:` key, in block or
  * flow form, whose value is not one plain name is a problem. A job that calls a reusable workflow has no runner of its own.
- * Input: the workflow text. Output: "job: runner" entries.
+ * Inputs: the workflow text and the runners only that workflow may add. Output: "job: runner" entries.
  */
-function runnerProblems(text) {
-  const allowed = new Set(Object.values(RUNNERS));
+function runnerProblems(text, extra = []) {
+  const allowed = new Set([...Object.values(RUNNERS), ...extra]);
   const problems = [];
   for (const { name, lines } of jobsOf(text)) {
     const runsOn = lines.find((line) => /^ {4}runs-on:/.test(line))?.replace(/^ {4}runs-on:\s*/, "");
@@ -226,6 +228,9 @@ const RUNNERS = Object.freeze({
   windows: "windows-2022",
 });
 
+/** Runners only one workflow may add to RUNNERS: the release builds ARM64 Windows on GitHub's windows-11-arm (DEC-195 Q8). */
+const ONLY_IN = Object.freeze({ "release.yml": Object.freeze(["windows-11-arm"]) });
+
 /**
  * Returns the steps of `job` in `workflow` text as one string per step.
  * Inputs: the workflow text and the job name. Output: each `- ` step with its indented lines.
@@ -290,17 +295,59 @@ test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no wor
   for (const name of (await readdir(WORKFLOWS)).filter((name) => /\.ya?ml$/.test(name))) {
     const text = await workflow(name);
     assert.doesNotMatch(text, /pull_request_target|head\.repo/, name);
-    assert.deepEqual(runnerProblems(text), [], name);
+    assert.deepEqual(runnerProblems(text, ONLY_IN[name]), [], name);
   }
 });
 
-test("the update manifests cover exactly the targets the release matrix builds, and no Windows target ships until its sandbox holds", async () => {
+test("the update manifests cover exactly the targets the release matrix builds, both Windows targets included as dev builds that ship unsigned until the owner sets the signing secrets (DEC-195 Q8)", async () => {
   const release = await workflow("release.yml");
   const matrix = block(block(release, 2, "build").join("\n"), 6, "matrix").join("\n");
   const built = [...matrix.matchAll(/^ {12}target: (\S+)$/gm)].map((match) => match[1]);
   const manifest = steps(release, "publish").find((step) => step.includes("- name: Write update manifests and checksums"));
   assert.deepEqual(manifest.match(/ --targets (\S+)/)[1].split(","), built);
-  assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]);
+  assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]);
+  assert.deepEqual(built, Object.keys(TARGETS), "assets.mjs stages and collects every built target");
+});
+
+test("the Windows signing tools are prepared only with all six Azure secrets: the step sees whether each is set, never its value; none set lets a dev build go on unsigned with a notice, and a stable build or a partial set fails naming what is missing (DEC-195 Q8)", async () => {
+  const step = await releaseStep("build", "Prepare Windows signing tools");
+  assert.match(step, /^ {6}- name: Prepare Windows signing tools\n {8}if: matrix\.os == 'windows'\n {8}env:\n/);
+  assert.deepEqual(step.split("\n").filter((line) => SECRET.test(line)).map((line) => line.trim()), SECRET_NAMES.map((name) => `${name}_SET: \${{ secrets.${name} != '' }}`), "the step sees whether each secret is set, never a value");
+  const body = runBody(step);
+  const run = (channel, set) => {
+    const root = mkdtempSync(join(tmpdir(), "ca-relwf-winsign-"));
+    try {
+      const state = join(root, "state");
+      mkdirSync(state);
+      writeFileSync(join(state, "curl-fails"), "1\n");
+      writeFileSync(join(root, "step.sh"), body);
+      const flags = Object.fromEntries(SECRET_NAMES.map((name) => [`${name}_SET`, String(set.includes(name))]));
+      const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: STEP_MS,
+        env: { PATH: `${stepBin()}:/usr/bin:/bin`, HOME: root, FAKE_STATE: state, RUNNER_TEMP: root, CHANNEL: channel, ARTIFACT_SIGNING_CLIENT_VERSION: "0.0.0", ARTIFACT_SIGNING_CLIENT_SHA256: "0".repeat(64), ...flags },
+      });
+      assert.equal(result.error, undefined, `the step ends within ${STEP_MS} ms`);
+      return { status: result.status, stdout: result.stdout, curls: logged(state, "calls").filter((line) => line.startsWith("curl ")) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const missing = (set) => SECRET_NAMES.filter((name) => !set.includes(name)).join(" ");
+  const none = run("dev", []);
+  assert.deepEqual([none.status, none.curls], [0, []], "a dev build with no secret prepares nothing and goes on");
+  assert.match(none.stdout, /^::notice::Windows signing skipped: [^\n]+\n$/);
+  const stable = run("stable", []);
+  assert.deepEqual([stable.status, stable.curls], [1, []], "a stable build with no secret fails before any download");
+  assert.match(stable.stdout, new RegExp(`^::error::[^\\n]*: ${missing([])} not set[^\\n]*\\n$`));
+  const partial = run("dev", ["AZURE_CLIENT_SECRET"]);
+  assert.deepEqual([partial.status, partial.curls], [1, []], "a partial set fails before any download");
+  assert.match(partial.stdout, new RegExp(`^::error::[^\\n]*: ${missing(["AZURE_CLIENT_SECRET"])} not set[^\\n]*\\n$`));
+  const all = run("dev", SECRET_NAMES);
+  assert.equal(all.curls.length, 1, "all six set: the step goes on to fetch the signing client");
+  assert.match(all.curls[0], /\/microsoft\.artifactsigning\.client\.0\.0\.0\.nupkg$/);
+  assert.equal(all.status, 22, "the stand-in curl's failure ends it");
 });
 
 test("the Windows CI job is off until v2.2.1: an if that is always false skips it at no cost, its body kept to turn back on", async () => {
@@ -1506,7 +1553,7 @@ test("the secret and runner guards read every job of every workflow file, matrix
   for (const name of names) {
     const text = await workflow(name);
     exposed.push(...exposedJobs(text).map((job) => `${name}:${job}`));
-    assert.deepEqual(runnerProblems(text), [], name);
+    assert.deepEqual(runnerProblems(text, ONLY_IN[name]), [], name);
   }
   assert.deepEqual(exposed, ["release.yml:build"], "only the release build reads a secret or binds an environment");
   const actions = await localActions();

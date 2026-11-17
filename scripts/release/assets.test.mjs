@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cliArchiveName, collectDesktop, needsLoader, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
+import { TARGETS, cliArchiveName, collectDesktop, needsLoader, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
@@ -66,9 +66,20 @@ test("each target ships the engine, the rcli host and its own helpers, and macOS
   assert.deepEqual(sidecars("x86_64-apple-darwin"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux"]);
   assert.deepEqual(sidecars("x86_64-unknown-linux-gnu"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-tmux", "crazyagent-landlock"]);
   assert.deepEqual(sidecars("x86_64-pc-windows-msvc"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-win-boundary"]);
+  assert.deepEqual(sidecars("aarch64-pc-windows-msvc"), ["crazyagent", "crazyagent-rcli", "crazyagent-runner", "crazyagent-win-boundary"]);
   assert.throws(() => sidecars("aarch64-unknown-linux-gnu"), /release_target_rejected/);
   assert.equal(cliArchiveName(VERSION, "x86_64-unknown-linux-gnu"), `crazyagent-${VERSION}-x86_64-unknown-linux-gnu.tar.gz`);
   assert.equal(cliArchiveName(VERSION, "x86_64-pc-windows-msvc"), `crazyagent-${VERSION}-x86_64-pc-windows-msvc.zip`);
+  assert.equal(cliArchiveName(VERSION, "aarch64-pc-windows-msvc"), `crazyagent-${VERSION}-aarch64-pc-windows-msvc.zip`);
+});
+
+test("every release target's CLI finds its own update entry: update.rs target() returns each TARGETS triple (DEC-195 Q8)", async () => {
+  const source = await readFile(join(REPO, "crates/crazyagent/src/update.rs"), "utf8");
+  const start = source.indexOf("pub fn target() -> Option<&'static str> {\n");
+  assert(start >= 0, "update.rs has target()");
+  const body = source.slice(start, source.indexOf("\n}\n", start));
+  const named = [...body.matchAll(/Some\("([a-z0-9_-]+)"\)/g)].map((match) => match[1]);
+  for (const target of Object.keys(TARGETS)) assert(named.includes(target), `${target}: a CLI built for it reads its own cli-latest.json entry`);
 });
 
 test("staging names sidecars with the target triple and writes the release config overlay", async () => {
@@ -181,7 +192,7 @@ test("CLI archives hold exactly the target's executables, signed and bound to th
   const root = await scratch("release-cli-");
   try {
     const { env, publicKey } = await keyPair(root);
-    for (const target of ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]) {
+    for (const target of ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
       const exe = target.includes("windows") ? ".exe" : "";
       const source = join(root, `source-${target}`);
       const out = join(root, `out-${target}`);
@@ -242,6 +253,7 @@ test("desktop bundles are collected under release names with a signature for eve
       "x86_64-apple-darwin": [["macos/CrazyAgent.app.tar.gz", `CrazyAgent_${VERSION}_x64.app.tar.gz`, true], [`dmg/CrazyAgent_${VERSION}_x64.dmg`, `CrazyAgent_${VERSION}_x64.dmg`, false]],
       "x86_64-unknown-linux-gnu": [[`appimage/CrazyAgent_${VERSION}_amd64.AppImage`, `CrazyAgent_${VERSION}_amd64.AppImage`, true], [`deb/CrazyAgent_${VERSION}_amd64.deb`, `CrazyAgent_${VERSION}_amd64.deb`, true]],
       "x86_64-pc-windows-msvc": [[`nsis/CrazyAgent_${VERSION}_x64-setup.exe`, `CrazyAgent_${VERSION}_x64-setup.exe`, true]],
+      "aarch64-pc-windows-msvc": [[`nsis/CrazyAgent_${VERSION}_arm64-setup.exe`, `CrazyAgent_${VERSION}_arm64-setup.exe`, true]],
     };
     for (const [target, layout] of Object.entries(layouts)) {
       const bundle = join(root, `bundle-${target}`);

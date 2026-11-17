@@ -65,6 +65,8 @@ test("a full release gets both update manifests and checksums over every asset",
         "linux-x86_64-deb": await entry(`CrazyAgent_${VERSION}_amd64.deb`),
         "windows-x86_64": await entry(`CrazyAgent_${VERSION}_x64-setup.exe`),
         "windows-x86_64-nsis": await entry(`CrazyAgent_${VERSION}_x64-setup.exe`),
+        "windows-aarch64": await entry(`CrazyAgent_${VERSION}_arm64-setup.exe`),
+        "windows-aarch64-nsis": await entry(`CrazyAgent_${VERSION}_arm64-setup.exe`),
       },
     });
     const cli = JSON.parse(await readFile(join(dir, "cli-latest.json"), "utf8"));
@@ -77,7 +79,7 @@ test("a full release gets both update manifests and checksums over every asset",
     const files = (await readdir(dir)).filter((name) => name !== "SHA256SUMS").sort();
     const expected = await Promise.all(files.map(async (name) => `${sha256(await readFile(join(dir, name)))}  ${name}\n`));
     assert.equal(await readFile(join(dir, "SHA256SUMS"), "utf8"), expected.join(""));
-    assert.equal(files.length, (7 + 4) * 2 + 2);
+    assert.equal(files.length, (8 + 5) * 2 + 2);
     execFileSync("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: dir, stdio: "ignore" });
   } finally {
     await rm(root, { recursive: true, force: true });
