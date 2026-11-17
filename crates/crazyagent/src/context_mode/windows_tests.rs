@@ -449,3 +449,70 @@ fn npm_installs_into_a_fresh_staging_folder() {
     );
     assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
 }
+
+/// What a boundary job could leave behind, for a before and after comparison: the containers'
+/// grants records in the engine's grants folder, the containers' AppContainer folders under
+/// `%LOCALAPPDATA%\Packages`, and the access list of one folder the job read, without the
+/// inherited mark a rewritten list may change. Input: that folder. Output: the three.
+fn leftovers(read: &Path) -> (Vec<String>, Vec<String>, String) {
+    let grants = crate::paths::Layout::current()
+        .unwrap()
+        .root()
+        .join(crate::sandbox::windows::GRANTS_FOLDER);
+    let packages = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Packages");
+    let names = |folder: &Path, prefix: &str, suffix: &str| {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.starts_with(prefix) && name.ends_with(suffix))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let listed = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe")).arg(read),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let list = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
+    assert!(list.contains("(OI)(CI)"), "{list}");
+    (
+        names(&grants, "container-crazyagent.", ".grants"),
+        names(&packages, "crazyagent.", ""),
+        list,
+    )
+}
+
+/// V243-WIN-CONTAINER-RELEASE: the node probe releases the container it ran `node.exe` in once
+/// the probe ends, so it leaves no grants record, AppContainer profile or access entry on
+/// npx's folder behind; here `node.exe` is empty, so the probe names no version.
+#[test]
+fn the_node_probe_leaves_no_container_behind() {
+    let case = case();
+    let before = leftovers(&case.bin);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(leftovers(&case.bin), before);
+}
+
+/// V243-WIN-CONTAINER-RELEASE: an npm install releases its container before its staging
+/// folder is published or removed, so a failed install, here with an empty `node.exe`, leaves
+/// no grants record, AppContainer profile, access entry on npx's folder or boundary profile.
+#[test]
+fn a_failed_npm_install_leaves_no_container_behind() {
+    let case = case();
+    let folder = install_folder(&case.root, VERSION);
+    let before = leftovers(&case.bin);
+    assert_eq!(
+        replace(&case.root, &folder, &case.bin, VERSION),
+        Err(InstallError("context_mode_install_failed"))
+    );
+    assert_eq!(leftovers(&case.bin), before);
+    let parent = folder.parent().unwrap();
+    assert!(!parent.join(format!("{PACKAGE}@{VERSION}.sb")).exists());
+    assert!(!folder.exists());
+}
