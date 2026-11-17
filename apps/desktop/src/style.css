@@ -109,7 +109,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tone-warn { color: var(--warn); }
 .tone-danger { color: var(--danger); }
 .tone-info { color: var(--running); }
-@media (prefers-reduced-motion: no-preference) { .badge.tone-info::before { animation: badge-pulse 1.2s ease-in-out infinite; } }
+@media (prefers-reduced-motion: no-preference) { .badge[data-working]::before { animation: badge-pulse 1.2s ease-in-out infinite; } }
 @keyframes badge-pulse { 50% { opacity: 0.4; } }
 
 .provider-mark { display: inline-grid; place-items: center; flex: none; width: 26px; height: 26px; border-radius: var(--radius-control); border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2); font-size: 11px; line-height: 1; font-weight: 600; font-family: var(--mono); letter-spacing: -0.02em; }
