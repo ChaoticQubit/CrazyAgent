@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { bundle, withPage } from "./browser.mjs";
 
@@ -137,3 +138,19 @@ for (const theme of ["light", "dark"]) {
     for (const [name, ratio] of Object.entries(ratios)) assert.ok(ratio >= 4.5, `${name} ${ratio}`);
   });
 }
+
+for (const theme of ["light", "dark"]) {
+  test(`${theme}: the current page is ink at weight 500 on --surface-3, the other links --text-2 at 500, and the footer at 500`, async () => {
+    const seen = await onSidebar(`3, { name: "metrics" }, "running", "${theme}"`, 800, ({ evaluate }) => evaluate("Fixture.navLook()"));
+    assert.deepEqual(seen.current, { background: seen.tokens["surface-3"], color: seen.tokens.text, weight: "500" });
+    assert.deepEqual(seen.other, { background: "rgba(0, 0, 0, 0)", color: seen.tokens["text-2"], weight: "500" });
+    assert.deepEqual([seen.avatar, seen.name], ["500", "500"]);
+  });
+}
+
+test("the sidebar rules name no accent token, no weight 600 and no literal font size", () => {
+  const style = readFileSync(new URL("../src/style.css", import.meta.url), "utf8");
+  const rules = style.split("\n").filter((line) => /^\.(?:nav|sidebar|foot-|engine-state)/.test(line));
+  assert.ok(rules.length >= 20, `found ${rules.length} sidebar rules`);
+  assert.deepEqual(rules.filter((line) => /var\(--(?:accent|on-accent)|font-weight:\s*600|font-size:\s*[0-9]/.test(line)), []);
+});

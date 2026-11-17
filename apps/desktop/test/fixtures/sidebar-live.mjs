@@ -60,3 +60,21 @@ export function firstRowParts() {
   const dot = document.querySelector(".nav-group .nav-live-dot");
   return { dot: dot ? getComputedStyle(dot).backgroundColor : null, count: document.querySelector(".nav-group .nav-live") !== null };
 }
+
+/**
+ * The color one token paints in the mounted theme, as the browser computes it.
+ * Input: the token name without its dashes. Output: an rgb() string.
+ */
+function token(name) {
+  const probe = document.createElement("span");
+  probe.style.color = `var(--${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}
+
+/** The color of the working state, for the dot that marks a project with agents working. */
+export function running() {
+  return token("running");
+}
