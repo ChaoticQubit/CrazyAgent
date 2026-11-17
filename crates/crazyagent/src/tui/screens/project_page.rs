@@ -1440,7 +1440,14 @@ impl ProjectPage {
     /// Reads the reinstall offer the engine keeps for this project's folder, unless a read or
     /// a dismiss of it is already on its way. Takes the context. Returns nothing.
     fn read_reinstall(&mut self, ctx: &mut Ctx) {
-        let _ = ctx;
+        if self.reinstall_sent.is_some() {
+            return;
+        }
+        let query = IntakeQuery::ReinstallOffer {
+            project: self.screen.project.clone(),
+        };
+        self.reinstall_sent = Some(query.clone());
+        super::intake::ask(ctx, query);
     }
 
     fn intake_arrived(&mut self, event: &IntakeEvent, ctx: &mut Ctx) -> bool {

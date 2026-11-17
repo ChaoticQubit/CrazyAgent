@@ -77,8 +77,10 @@ pub(in crate::tui) const COMMANDS: &[Command] = &[
 /// draft alone in an empty input, else after the owner's own text and a blank line, so
 /// nothing typed is lost. Takes the input's text and the draft. Returns the new text.
 pub(in crate::tui) fn seeded(text: &str, draft: &str) -> String {
-    let _ = draft;
-    text.to_owned()
+    match text.trim().is_empty() {
+        true => draft.to_owned(),
+        false => format!("{text}\n\n{draft}"),
+    }
 }
 
 /// The menu a prompt opens while the whole prompt is one `/` word, as the desktop console.

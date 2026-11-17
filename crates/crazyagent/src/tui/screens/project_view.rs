@@ -1968,7 +1968,22 @@ pub(in crate::tui) const REINSTALL_SIGN_IN: &str =
 /// What the reinstall offer says, as the desktop: the folders a job left in iCloud, the first
 /// three named and the rest counted, and why. Takes the offer. Returns the sentence.
 pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Offer) -> String {
-    offer.folders.join(", ")
+    let names = &offer.folders;
+    let count = names.len() as u64 + offer.more;
+    let listed = match (names.as_slice(), offer.more) {
+        (_, more) if more > 0 => format!("{} and {more} more", names.join(", ")),
+        ([one], _) => one.clone(),
+        ([head @ .., last], _) => format!("{} and {last}", head.join(", ")),
+        ([], _) => String::new(),
+    };
+    let (verb, pronoun) = match count {
+        1 => ("was", "it"),
+        _ => ("were", "they"),
+    };
+    format!(
+        "{listed} {verb} left out when this project came into your projects folder, as \
+         {pronoun} can be rebuilt."
+    )
 }
 
 /// The reinstall offer's rows above the input: its sentence, the sign-in sentence while the
@@ -1976,13 +1991,27 @@ pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Of
 /// master can take a message; while typing they come after Tab. Takes the screen, the width and
 /// the look. Returns the rows, none without an offer.
 fn reinstall_rows(screen: &ProjectScreen, content: usize, look: &Look) -> Vec<Row> {
-    let _ = (
-        screen.reinstall_signed_out(),
-        content,
-        look,
-        REINSTALL_SIGN_IN,
-    );
-    Vec::new()
+    let Some(offer) = screen.reinstall.as_ref() else {
+        return Vec::new();
+    };
+    let mut text = reinstall_line(offer);
+    if screen.reinstall_signed_out() {
+        text.push(' ');
+        text.push_str(REINSTALL_SIGN_IN);
+    }
+    let keys = match screen.reinstall_ask() {
+        true => "a to put the drafted message in your input, d to dismiss this.",
+        false => "d to dismiss this.",
+    };
+    let lead = match screen.typing {
+        true => "Press Tab, then",
+        false => "Press",
+    };
+    text.push_str(&format!(" {lead} {keys}"));
+    wrap_words(&text, content)
+        .into_iter()
+        .map(|line| Row::of(line, look.fg))
+        .collect()
 }
 
 fn input_row(screen: &ProjectScreen, look: &Look) -> Row {
