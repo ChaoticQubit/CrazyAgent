@@ -1,7 +1,5 @@
 use super::*;
-#[cfg(target_os = "macos")]
 use crate::harnesses::interactive::settings::TerminalSettings;
-#[cfg(target_os = "macos")]
 use crate::harnesses::interactive::{Run, command_with};
 use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest};
 
@@ -35,7 +33,6 @@ fn pane_request(harness: &str, home: &Path, work: &Path, profile: &Path) -> Laun
 /// context when its manifest renders MCP servers. The pane gets the variables the home
 /// block sets, and the servers are only in the file the manifest names, so no secret is in
 /// its arguments or environment. A manifest without an `mcp` render keeps the refusal.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_listed_pane_takes_its_team_context_only_when_its_manifest_renders_mcp_servers() {
     let (_folder, home) = harness_home("standin-jsonl-append");
@@ -79,7 +76,6 @@ fn a_listed_pane_takes_its_team_context_only_when_its_manifest_renders_mcp_serve
 /// handed its keyless account as its piped launch is: the account's address in its
 /// variables, and the local placeholder under the names its manifest's accounts entry lists
 /// through the pane's bridge, never its variables. A hand-over for another address is refused.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_address() {
     let (_folder, home) = harness_home("standin-jsonl-append");
@@ -129,7 +125,6 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
 /// token from the key file into the name its manifest lists; the token is in no argument or
 /// pane variable, the saved key in none and in no file of the pane's home. Without a
 /// hand-over a key is refused.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
     use crate::credentials::SecretString;
@@ -223,7 +218,6 @@ fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
 /// rv-ds241 N1 (T20 M8): a pane is given its account hand-over only inside the project
 /// sandbox, as the piped launch is, so a hand-over to a pane at Full access is refused as
 /// the piped launch refuses it, before any other check of the pane.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_listed_pane_at_full_access_is_refused_its_hand_over() {
     let (_folder, home) = harness_home("standin-jsonl-append");
@@ -256,7 +250,6 @@ fn a_listed_pane_at_full_access_is_refused_its_hand_over() {
 /// that stand-in's own home, the terminal settings of a manifest and a request naming a
 /// harness, and drops what [`command_with`] gives. Inputs: the installed manifest, the
 /// settings' manifest and the request's harness.
-#[cfg(target_os = "macos")]
 fn crossed(installed: &str, settings: &str, harness: &str) {
     let written = parse(installed.as_bytes()).unwrap();
     let (_folder, home) = harness_home(&written.id);
@@ -278,7 +271,6 @@ fn crossed(installed: &str, settings: &str, harness: &str) {
 
 /// rv-sa241 N2 (T20 M8): a listed context installed for one harness is never used under
 /// another harness's settings, so one harness's MCP file never reaches another's pane.
-#[cfg(target_os = "macos")]
 #[test]
 #[should_panic(expected = "a listed context written for another harness")]
 fn a_listed_context_of_one_harness_under_another_s_settings_trips_its_assert() {
@@ -287,7 +279,6 @@ fn a_listed_context_of_one_harness_under_another_s_settings_trips_its_assert() {
 
 /// rv-sa241 N2 (T20 M8): a pane's settings name the request's own harness, so a request
 /// for another harness than its settings and installed context trips the assert.
-#[cfg(target_os = "macos")]
 #[test]
 #[should_panic(expected = "a pane request for another harness than its settings")]
 fn a_listed_pane_for_another_harness_than_its_settings_trips_its_assert() {
@@ -298,7 +289,6 @@ fn a_listed_pane_for_another_harness_than_its_settings_trips_its_assert() {
 /// passes the terminal host's variable guard, which refuses a key name even holding the
 /// local placeholder, so the names the hand-over lists reach the harness only through the
 /// bridge its sandboxed command starts with, which exports them as the harness starts.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
@@ -354,7 +344,6 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
 /// rv-ds241 t20keyed nit: a pane's bridge takes out of its variables only the names the
 /// account hand-over lists, so a home block variable that holds the same value stays one
 /// of the pane's own variables.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_pane_s_bridge_takes_only_the_names_its_hand_over_lists() {
     use crate::model_gateway::relay::LOCAL_PLACEHOLDER;
@@ -395,7 +384,6 @@ fn a_pane_s_bridge_takes_only_the_names_its_hand_over_lists() {
 /// fix9 T19b F7 for panes: a live master's pane on a listed harness takes its temp folder,
 /// agent `getconf` and cargo home from the agent home its context names as tool home, as
 /// its piped launch does, while its HOME stays the private home.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_listed_pane_takes_its_temp_folder_and_tools_from_its_tool_home() {
     struct TmpRemoved(PathBuf);

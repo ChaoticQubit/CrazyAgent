@@ -5,6 +5,7 @@ use crate::plugins::SecretValue;
 #[path = "listed_walk_tests.rs"]
 mod walk_tests;
 
+#[cfg(target_os = "macos")]
 #[path = "listed_pane_tests.rs"]
 mod pane_tests;
 
