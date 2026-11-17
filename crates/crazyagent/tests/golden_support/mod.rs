@@ -70,6 +70,7 @@ impl Golden {
     pub fn finish(&mut self) -> Option<Value> {
         assert!(!self.record.finished);
         self.record.finished = true;
+        self.record.write("passed").unwrap();
         serde_json::from_slice(&fs::read(self.record.path()).ok()?).ok()
     }
 }

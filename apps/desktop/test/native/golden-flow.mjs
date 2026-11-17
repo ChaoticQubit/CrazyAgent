@@ -83,6 +83,7 @@ export function step(run, name) {
 export function finishGolden(run) {
   assert.ok(!run.finished);
   run.finished = true;
+  writeRecord(run, "passed");
   return existsSync(recordPath(run)) ? JSON.parse(readFileSync(recordPath(run), "utf8")) : null;
 }
 
