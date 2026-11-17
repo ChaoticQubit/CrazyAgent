@@ -1443,7 +1443,8 @@ test("on macOS only the app icon's actool runs from an Xcode with actool 26 or n
   assert.match(step, /CRAZYAGENT_ACTOOL_XCODE="\$developer" "\$shim" --version --output-format=human-readable-text/, "each Xcode is asked through the shim with Tauri's own version arguments");
   assert.match(step, /sed -n 's\/\^short-bundle-version: \*\/\/p'/);
   assert.match(step, /\[ "\$major" -ge 26 \] \|\| continue/);
-  assert.match(step, /\*\[Bb\]eta\*\) continue/, "a beta Xcode never builds a release icon");
+  assert.match(step, /resolve\(\) \{ \[ -n "\$1" \] && \(cd "\$1" 2>\/dev\/null && pwd -P\); \}/);
+  assert.match(step, /developer="\$\(resolve "\$candidate"\)" \|\| continue\n\s+case "\$developer" in \*\[Bb\]eta\*\) continue ;; esac/, "a beta Xcode never builds a release icon, even behind a release-named link");
   assert.match(step, /if \[ "\$developer" = "\$default" \]; then best="\$developer"; best_version="\$version"; break; fi/, "a default Xcode that qualifies is kept");
   assert.match(step, /echo "::error::no Xcode on this runner has actool 26 or newer;.*\(DEC-181\).*"\n\s+exit 1/);
   assert.match(step, /echo "CRAZYAGENT_ACTOOL_XCODE=\$best" >> "\$GITHUB_ENV"/);
@@ -1455,12 +1456,12 @@ test("on macOS only the app icon's actool runs from an Xcode with actool 26 or n
   assert.deepEqual(release.split("\n").filter((line) => /DEVELOPER_DIR|xcode-select (-s|--switch)|sudo xcode-select/.test(line)), [], "no step switches the Xcode the tmux, rcli and desktop compiles use");
   assert.deepEqual(readdirSync(ACTOOL_XCODE26), ["actool"], "the folder ahead of /usr/bin while codesign and notarytool run holds nothing but actool");
   assert.notEqual(statSync(join(ACTOOL_XCODE26, "actool")).mode & 0o111, 0, "the actool shim is executable");
-  const empty = mkdtempSync(join(tmpdir(), "actool-xcode26-"));
+  const empty = mkdtempSync(join(tmpdir(), "ca-relwf-"));
   try {
     for (const developer of [undefined, empty]) {
       const env = { PATH: process.env.PATH };
       if (developer) env.CRAZYAGENT_ACTOOL_XCODE = developer;
-      const run = spawnSync(join(ACTOOL_XCODE26, "actool"), ["--version"], { env, encoding: "utf8" });
+      const run = spawnSync(join(ACTOOL_XCODE26, "actool"), ["--version"], { env, encoding: "utf8", timeout: SCRIPT_MS });
       assert.equal(run.status, 1, `the shim refuses ${developer ?? "an unset folder"}`);
       assert.match(run.stderr, /actool-xcode26: CRAZYAGENT_ACTOOL_XCODE names no Xcode developer folder with actool/);
     }

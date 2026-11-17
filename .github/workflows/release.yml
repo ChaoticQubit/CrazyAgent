@@ -136,13 +136,14 @@ jobs:
         run: |
           set -euo pipefail
           shim="$GITHUB_WORKSPACE/scripts/release/actool-xcode26/actool"
-          default="$(xcode-select -p 2>/dev/null || true)"
+          resolve() { [ -n "$1" ] && (cd "$1" 2>/dev/null && pwd -P); }
+          default="$(resolve "$(xcode-select -p 2>/dev/null || true)" || true)"
           best=""
           best_version=""
           best_major=0
           best_minor=0
-          for developer in "$default" /Applications/Xcode*.app/Contents/Developer; do
-            [ -n "$developer" ] || continue
+          for candidate in "$default" /Applications/Xcode*.app/Contents/Developer; do
+            developer="$(resolve "$candidate")" || continue
             case "$developer" in *[Bb]eta*) continue ;; esac
             [ -x "$developer/usr/bin/actool" ] || continue
             out="$(CRAZYAGENT_ACTOOL_XCODE="$developer" "$shim" --version --output-format=human-readable-text 2>/dev/null)" || continue
