@@ -73,6 +73,7 @@ pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
 pub mod service;
+pub mod settings_log;
 pub mod setup;
 pub mod skills;
 /// The short address a Unix socket is bound and reached at when its own path is too long

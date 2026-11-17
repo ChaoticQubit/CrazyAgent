@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
+#[cfg(test)]
 use crate::protocol::Outcome;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -73,27 +74,29 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }
 
-/// Saves the owner's finished agents setting over the stored one. Inputs: the open
-/// transaction and the settings. Output: `Applied`, or `cleanup_settings_invalid` for days
-/// outside 1 to 365.
+/// Checks the owner's finished agents setting before it is saved. Input: the settings.
+/// Output: Ok, or `cleanup_settings_invalid` for days outside 1 to 365.
+pub(crate) fn check(settings: &CleanupSettings) -> Result<(), EngineError> {
+    if !(DAYS_MIN..=DAYS_MAX).contains(&settings.days) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Stores the owner's finished agents setting for a test, checked, through the settings
+/// log's projection; the engine saves it only through `settings_log::owner`, which logs the
+/// save (v2.5 L10). Inputs: the connection and the settings. Output: `Applied`,
+/// `cleanup_settings_invalid` for days outside 1 to 365, or the store's refusal.
+#[cfg(test)]
 pub(crate) fn save(
     connection: &Connection,
     settings: &CleanupSettings,
 ) -> Result<Outcome, EngineError> {
-    if !(DAYS_MIN..=DAYS_MAX).contains(&settings.days) {
-        return Err(invalid());
-    }
-    let serde_json::Value::String(mode) = serde_json::to_value(settings.mode).map_err(error)?
-    else {
-        return Err(invalid());
-    };
-    let stored = connection
-        .execute(
-            "INSERT INTO agent_cleanup_settings(singleton,mode,days) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET mode=excluded.mode, days=excluded.days",
-            rusqlite::params![mode, settings.days],
-        )
-        .map_err(error)?;
-    assert_eq!(stored, 1);
+    check(settings)?;
+    let event = crate::settings_log::Event::Cleanup(crate::settings_log::Saved {
+        settings: *settings,
+    });
+    crate::settings_log::apply(connection, &event)?;
     Ok(Outcome::Applied)
 }
 

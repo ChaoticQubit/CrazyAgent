@@ -1299,13 +1299,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::demo::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
-    crate::sandbox_settings::initialize(connection)?;
-    crate::cleanup_settings::initialize(connection)?;
-    crate::quit_settings::initialize(connection)?;
-    crate::provider_retry::initialize(connection)?;
-    crate::master_step_limit::initialize(connection)?;
-    crate::master_time_limit::initialize(connection)?;
-    crate::master_frame_limit::initialize(connection)?;
+    crate::settings_log::initialize(connection)?;
     crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
@@ -1313,9 +1307,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;
     crate::activity::initialize(connection)?;
-    crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
-    crate::roadmap_status::initialize(connection)?;
     crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
     crate::app_plugins::store::initialize(connection)?;
@@ -1866,16 +1858,14 @@ fn execute(
         Command::OwnerConversation { mutation } => {
             crate::conversation::apply(tx, mutation, revision)
         }
-        Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
-        Command::OwnerSandbox { settings, version } => {
-            crate::sandbox_settings::save_from(tx, settings, *version)
-        }
-        Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
-        Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
-        Command::OwnerProviderRetry { choice } => crate::provider_retry::save(tx, *choice),
-        Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
-        Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
-        Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
+        Command::OwnerProfile { .. }
+        | Command::OwnerSandbox { .. }
+        | Command::OwnerAgentCleanup { .. }
+        | Command::OwnerAgentQuit { .. }
+        | Command::OwnerProviderRetry { .. }
+        | Command::OwnerMasterSteps { .. }
+        | Command::OwnerMasterTime { .. }
+        | Command::OwnerMasterFrames { .. } => crate::settings_log::owner(tx, command, revision),
         Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
@@ -2656,6 +2646,7 @@ fn owner_apply_with(
             let project = removed.project.as_str();
             redacted = crate::worktrees::log::forget_project(&tx, project, Some(seq), &fence)?;
             redacted += crate::ide::log::forget_project(&tx, project, Some(seq), &fence)?;
+            redacted += crate::settings_log::forget_project(&tx, project, Some(seq), &fence)?;
         }
     }
     let provenance = OwnerProvenance {
