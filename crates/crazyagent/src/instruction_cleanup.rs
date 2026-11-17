@@ -29,6 +29,8 @@ pub const NO_ACCOUNT: &str = "instructions_cleanup_no_account";
 pub const PAUSED: &str = "instructions_cleanup_paused";
 /// Another cleanup of the same text, one project's or the app text, is running in this engine.
 pub const BUSY: &str = "instructions_cleanup_busy";
+/// [`CLEANUPS_MAX`] cleanups already run in this engine.
+pub const FULL: &str = "instructions_cleanup_full";
 /// The saved text is blank, so there is nothing to clean up.
 pub const EMPTY: &str = "instructions_cleanup_empty";
 /// The model run failed.
@@ -62,8 +64,13 @@ pub const WALL_TIME: Duration = Duration::from_secs(5 * 60);
 pub const OUTPUT_TOKENS_MAX: u32 = 16384;
 /// How many accounts one cleanup may try, so a limit on one account fails over (DEC-091).
 pub const TRIES_MAX: u32 = 2;
+/// The most cleanups one engine runs at once. Each holds one of the owner server's few
+/// seats for long requests until it ends, so the cap leaves the other seats to the owner's
+/// other requests (DEC-199).
+pub const CLEANUPS_MAX: usize = 2;
 
 const _: () = assert!(TRIES_MAX >= 1 && TRIES_MAX <= 9);
+const _: () = assert!(CLEANUPS_MAX >= 2);
 const _: () = assert!(TEXT_BYTES_MAX <= 1 << 20);
 
 /// Which instructions file a cleanup rewrites.
@@ -433,8 +440,13 @@ mod run {
     impl Slot {
         /// Takes the slot of one text in this engine data folder. Inputs: the canonical
         /// folder, the project or none for the app text, and the run's stem from
-        /// [`run_stem`]. Output: the slot, or none while another cleanup holds it.
-        pub(super) fn take(root: &Path, text: Option<&ProjectId>, stem: &str) -> Option<Self> {
+        /// [`run_stem`]. Output: the slot, `BUSY` while a cleanup of the same text runs, or
+        /// `FULL` while [`super::CLEANUPS_MAX`] cleanups run in the folder.
+        pub(super) fn take(
+            root: &Path,
+            text: Option<&ProjectId>,
+            stem: &str,
+        ) -> Result<Self, &'static str> {
             assert!(stem.starts_with(NAME_PREFIX));
             let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
             if running.len() >= RUNNING_MAX
@@ -442,7 +454,7 @@ mod run {
                     .iter()
                     .any(|held| held.root == root && held.text.as_ref() == text)
             {
-                return None;
+                return Err(BUSY);
             }
             let held = Held {
                 root: root.to_path_buf(),
@@ -451,7 +463,7 @@ mod run {
             };
             running.push(held.clone());
             assert!(running.len() <= RUNNING_MAX);
-            Some(Self(held))
+            Ok(Self(held))
         }
 
         /// The stems of the runs whose slots are held in this engine data folder. Input:
@@ -602,7 +614,7 @@ mod run {
         let pool = super::cleanup_pool(request.project, request.pool)?;
         let root = request.root.canonicalize().map_err(|_| UNAVAILABLE)?;
         let stem = run_stem(crate::team::now_ms());
-        let _slot = Slot::take(&root, request.project, &stem).ok_or(BUSY)?;
+        let _slot = Slot::take(&root, request.project, &stem)?;
         let home = private_folder(root.join(FOLDER)).ok_or(UNAVAILABLE)?;
         let state = private_folder(home.join("state")).ok_or(UNAVAILABLE)?;
         let empty = private_folder(home.join("empty")).ok_or(UNAVAILABLE)?;

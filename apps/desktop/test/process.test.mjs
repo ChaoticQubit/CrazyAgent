@@ -891,7 +891,7 @@ test("a finding names the whole file, one line or each line it covers", () => {
 
 test("every Edit with AI refusal reads as a plain sentence that says nothing changed or what to do", () => {
   const codes = ["instructions_cleanup_master_harness", "instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
-    "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",
+    "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_full", "instructions_cleanup_empty", "instructions_cleanup_failed",
     "instructions_cleanup_timed_out", "instructions_cleanup_no_proposal", "instructions_cleanup_too_large", "instructions_cleanup_off", "instructions_cleanup_unavailable",
     "instructions_cleanup_provider_unreachable", "instructions_cleanup_remote_provider_unreachable", "instructions_cleanup_no_network"];
   for (const code of codes) {

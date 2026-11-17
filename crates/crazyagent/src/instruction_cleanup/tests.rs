@@ -465,8 +465,62 @@ fn edit_with_ai_on_one_project_runs_while_another_project_or_the_app_text_holds_
     let other = other.path().canonicalize().unwrap();
     let _held = Slot::take(&root, Some(&alpha), &run_stem(3)).unwrap();
     assert!(
-        Slot::take(&other, Some(&alpha), &run_stem(4)).is_some(),
+        Slot::take(&other, Some(&alpha), &run_stem(4)).is_ok(),
         "another engine folder has its own slots"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_third_cleanup_answers_full_while_two_run_in_the_engine() {
+    use super::run::{Slot, run_stem};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    let gamma = ProjectId::new("gamma").unwrap();
+    let picked = pool("pool-a");
+    let settings = (root.join("global.toml"), root.join("project.toml"));
+    let request = |project, pool| Request {
+        root: &root,
+        settings: (&settings.0, &settings.1),
+        codex: None,
+        claude: None,
+        project,
+        pool,
+        prompt: "prompt",
+        agent: "instructions-cleanup",
+    };
+    assert_eq!(CLEANUPS_MAX, 2);
+    let first = Slot::take(&root, Some(&alpha), &run_stem(1)).unwrap();
+    let _second = Slot::take(&root, Some(&beta), &run_stem(2)).unwrap();
+    assert_eq!(
+        run(&request(Some(&gamma), None)).unwrap_err(),
+        FULL,
+        "a third project waits for one of the two"
+    );
+    assert_eq!(
+        run(&request(None, Some(&picked))).unwrap_err(),
+        FULL,
+        "the app text counts as one cleanup"
+    );
+    assert_eq!(
+        run(&request(Some(&alpha), None)).unwrap_err(),
+        BUSY,
+        "the same project still answers busy, not full"
+    );
+    assert!(!root.join("instruction-cleanup").exists());
+    drop(first);
+    assert_eq!(
+        run(&request(Some(&gamma), None)).unwrap_err(),
+        UNAVAILABLE,
+        "a place frees once one cleanup ends; the test engine has no harness"
+    );
+    let other = tempfile::tempdir().unwrap();
+    let other = other.path().canonicalize().unwrap();
+    assert!(
+        Slot::take(&other, Some(&gamma), &run_stem(3)).is_ok(),
+        "another engine folder counts its own"
     );
 }
 
