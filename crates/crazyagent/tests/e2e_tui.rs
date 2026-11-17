@@ -2882,7 +2882,8 @@ fn start_at(prefix: &str, home: &Path) -> Engine {
 }
 
 /// Makes the project `gone-app` the way New project does, saves the owner's note on it, then
-/// removes it from the dashboard, or with its files when `everything`, as both apps do.
+/// removes it from the dashboard, or with its files when `everything`, as both apps do; before
+/// Delete everything it cancels the research that waits for a pool, which the delete refuses.
 /// Inputs: the engine, the projects home and the choice. Output: the project's folder.
 async fn noted_then_removed(engine: &Engine, home: &Path, everything: bool) -> PathBuf {
     let mut owner = Owner::attach(engine).await;
@@ -2913,6 +2914,23 @@ async fn noted_then_removed(engine: &Engine, home: &Path, everything: bool) -> P
         .unwrap()
         .expect("the new project has its setup");
     let folder = PathBuf::from(setup.folder.trim_end_matches("/.crazyagent"));
+    if everything {
+        let jobs = owner
+            .controller
+            .research_jobs(project.clone())
+            .await
+            .unwrap();
+        assert!(!jobs.is_empty(), "New project queues its research");
+        for job in jobs {
+            let generation = owner.next();
+            let cancelled = owner
+                .controller
+                .cancel_research(project.clone(), job.id, generation)
+                .await
+                .unwrap();
+            assert_eq!(result(cancelled), OwnerResult::Applied);
+        }
+    }
     let generation = owner.next();
     let removed = if everything {
         owner
@@ -2945,6 +2963,13 @@ async fn in_setup_with_note(engine: &Engine, id: &str) -> (bool, bool) {
         .is_ok_and(|notes| notes.items.iter().any(|item| item.text == NOTE));
     owner.controller.detach();
     (setting_up, noted)
+}
+
+/// Tells whether Home shows `gone-app`'s folder, still in the projects folder, as a found
+/// folder that is not set up: the way back from a removal, and the folder made again after
+/// Delete everything. Input: the screen. Output: the answer.
+fn found_gone_app(screen: &str) -> bool {
+    screen.contains("gone-app") && screen.contains("Not set up")
 }
 
 /// Sets up a folder where it is from Home's Existing folder page as the owner does, waits for
@@ -3009,7 +3034,7 @@ fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
     );
 
     let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
-    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    reach_home(&pty, found_gone_app);
     set_up_here(&pty, &folder);
     assert_eq!(
         runtime.block_on(in_setup_with_note(&engine, "gone-app")),
@@ -3136,7 +3161,7 @@ fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
     std::fs::write(folder.join("notes.md"), "made again\n").unwrap();
 
     let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
-    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    reach_home(&pty, found_gone_app);
     set_up_here(&pty, &folder);
     assert_eq!(
         runtime.block_on(in_setup_with_note(&engine, "gone-app-2")),
