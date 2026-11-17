@@ -249,10 +249,12 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&WatchReply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
-/// Serves one admitted watch request: waits for a commit and writes the reply, a refusal in
-/// the reply's shape on any error. Inputs: the stream, the engine, the server authority, the
-/// handshake packet, its admission and the request body. Output: Ok once the reply is
-/// written.
+/// Serves one admitted watch request: waits for a commit and writes the reply while holding
+/// the owner barrier taken for the last owner check, so a revocation cannot land between
+/// that check and the write, which is capped as every barrier holder's is. A refusal, in
+/// the reply's shape, tells nothing and is written without it. Inputs: the stream, the
+/// engine, the server authority, the handshake packet, its admission and the request body.
+/// Output: Ok once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -261,45 +263,47 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let reply = match handle(engine, authority, packet, admission, bytes).await {
-        Ok(reply) => reply,
-        Err(error) => WatchReply::Rejected { code: error.0 },
+    let (reply, _barrier) = match handle(engine, authority, packet, admission, bytes).await {
+        Ok((reply, barrier)) => (reply, Some(barrier)),
+        Err(error) => (WatchReply::Rejected { code: error.0 }, None),
     };
     let frame = encode_frame(&reply).map_err(|_| unknown())?;
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
 }
 
 /// Checks the owner, waits, and checks the owner again, so an owner revoked while it waited
-/// is told nothing. Inputs: as [`serve`]. Output: the reply, or the refusal.
-async fn handle(
-    engine: &Arc<Engine>,
+/// is told nothing. Inputs: as [`serve`]. Output: the reply with the barrier of the last
+/// check, or the refusal.
+async fn handle<'e>(
+    engine: &'e Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
-) -> Result<WatchReply, EngineError> {
+) -> Result<(WatchReply, tokio::sync::RwLockWriteGuard<'e, ()>), EngineError> {
     let request = parse(bytes)?;
-    admitted(engine, authority, packet, admission).await?;
+    drop(admitted(engine, authority, packet, admission).await?);
     let database = super::changes::engine_root(authority)?.join(DATABASE);
     let reply = wait(&authority.watches, &database, request).await?;
-    admitted(engine, authority, packet, admission).await?;
-    Ok(reply)
+    let barrier = admitted(engine, authority, packet, admission).await?;
+    Ok((reply, barrier))
 }
 
 /// Whether the handshake still names the admitted owner, read behind the owner barrier.
-/// Inputs: the engine, the authority, the packet and the admission. Output: Ok, or
+/// Inputs: the engine, the authority, the packet and the admission. Output: the barrier,
+/// held by the caller for as long as what it does must not overlap a revocation, or
 /// `owner_grant_stale_or_revoked`.
-async fn admitted(
-    engine: &Arc<Engine>,
+async fn admitted<'e>(
+    engine: &'e Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
-) -> Result<(), EngineError> {
-    let _barrier = engine.owner_egress.write().await;
+) -> Result<tokio::sync::RwLockWriteGuard<'e, ()>, EngineError> {
+    let barrier = engine.owner_egress.write().await;
     if &authority.authenticate(packet)? != admission {
         return Err(failure("owner_grant_stale_or_revoked"));
     }
-    Ok(())
+    Ok(barrier)
 }
 
 /// Reads a watch request body. Input: the bytes. Output: the request, or
