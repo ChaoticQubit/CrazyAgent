@@ -76,17 +76,21 @@ pub(crate) fn append(
     Ok(seq)
 }
 
-/// The projection of a removal, live and in replay (v2.5 L14b, L7): first the project's rule
-/// proposals, schedule override and version, coordination with its stopped and failed agents'
-/// counts, activity, IDE rows and usage (to `<removed>`); then its agent texts, questions,
-/// hidden folders, access, grants, stopped and failed agents and [`TABLES`] rows. Inputs: the
-/// transaction and the body. Output: Ok, `project_removed_body`, or a store failure.
+/// The projection of a removal, live and in replay (v2.5 L14b, L7, L9): first the project's
+/// rule proposals, a Delete's publish prompt answer, schedule override and version,
+/// coordination with its stopped and failed agents' counts, activity, IDE rows and usage (to
+/// `<removed>`); then its agent texts, questions, hidden folders, access, grants, stopped and
+/// failed agents and [`TABLES`] rows. Inputs: the transaction and the body. Output: Ok,
+/// `project_removed_body`, or a store failure.
 pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError> {
     let removed: ProjectRemoved =
         serde_json::from_slice(body).map_err(|_| EngineError("project_removed_body".into()))?;
     let failed = |error: rusqlite::Error| EngineError(error.to_string());
     let project = removed.project.as_str();
     crate::github::proposals::forget_project(tx, &removed.project)?;
+    if !removed.kept {
+        crate::github::forget_prompt(tx, &removed.project)?;
+    }
     crate::scheduling::forget_project(tx, project)?;
     crate::coord::forget_project(tx, &removed.project)?;
     crate::activity::forget_project(tx, &removed.project)?;

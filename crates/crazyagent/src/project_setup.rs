@@ -2970,7 +2970,6 @@ pub(crate) fn record_delete(
     };
     let removed = remove(tx, project_id, revision, false)?;
     if matches!(removed, Outcome::Applied) {
-        crate::github::forget_prompt(tx, project_id)?;
         if let Some(folder) = &folder {
             crate::github::forget_job(tx, folder);
         }

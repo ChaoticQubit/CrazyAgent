@@ -537,9 +537,31 @@ const TABLES: [&str; 6] = [
     "github_publish_prompt",
 ];
 
+/// The most project removals a rebuild reads, as L6's bound.
+const REMOVALS_MAX: usize = 65_536;
+
 /// Rebuilds the tables on the landing log from it: empties each one the store has, then
-/// replays every landing event. Input: the store. Output: the last seq read, or the refusal.
+/// replays every landing event; a logged project Delete forgets its project's publish prompt
+/// answer at its place in the log, as its projection does (L6 Q10). Input: the store.
+/// Output: the last landing seq read, or the refusal.
 pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
+    let mut deletes = deletes(db)?.into_iter().peekable();
+    clear(db)?;
+    let last = replay::replay(db, Aggregate::Landing, 0, |event| {
+        while let Some((_, project)) = deletes.next_if(|(seq, _)| *seq < event.seq) {
+            crate::github::forget_prompt(db, &project)?;
+        }
+        apply(db, &Change::parse(event)?)
+    })?;
+    for (_, project) in deletes {
+        crate::github::forget_prompt(db, &project)?;
+    }
+    Ok(last)
+}
+
+/// Empties each table on the landing log the store has. Input: the store. Output: Ok, or
+/// `changes_unavailable`.
+fn clear(db: &Connection) -> Result<(), EngineError> {
     let unavailable = |_| failure("changes_unavailable");
     for table in TABLES {
         let kept: bool = db
@@ -554,9 +576,34 @@ pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
                 .map_err(unavailable)?;
         }
     }
-    replay::replay(db, Aggregate::Landing, 0, |event| {
-        apply(db, &Change::parse(event)?)
-    })
+    Ok(())
+}
+
+/// Each logged project Delete, a removal that forgets the project's notes, as its seq and
+/// project, in log order. Input: the store. Output: the deletes, `landing_log_removals` past
+/// [`REMOVALS_MAX`] removals, or `landing_log_event` for a removal body that is not one.
+fn deletes(db: &Connection) -> Result<Vec<(u64, crate::protocol::ProjectId)>, EngineError> {
+    use crate::project_setup::removed::event as removed;
+    let mut found = Vec::new();
+    let mut read = 0;
+    replay::replay(db, Aggregate::Projects, 0, |logged| {
+        if logged.kind != removed::KIND {
+            return Ok(());
+        }
+        read += 1;
+        if read > REMOVALS_MAX {
+            return Err(failure("landing_log_removals"));
+        }
+        let removal: removed::ProjectRemoved =
+            serde_json::from_slice(&logged.body).map_err(|_| failure("landing_log_event"))?;
+        if !removal.kept {
+            found.push((logged.seq, removal.project));
+        }
+        Ok(())
+    })?;
+    assert!(found.len() <= REMOVALS_MAX);
+    assert!(found.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    Ok(found)
 }
 
 /// Seeds a test store for logged landing writes, as ide::log::seed does. Input: the store.
