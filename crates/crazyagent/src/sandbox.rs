@@ -5984,20 +5984,16 @@ mod profile_string_tests {
 
     /// V243-FARM2-PRODUCT-SMALL: the agent home's config and kept-entry denies and the
     /// regranted flag and `.git` denies match a path and everything below it as an `X$` and
-    /// an `X/` regex, never as one regex with an optional `(/.*)?$` tail, which libsandbox
-    /// fails to compile again in lower case once an escaped dot, as in `.tmp`, comes first.
+    /// an `X/` regex, never as one regex with a `(/.*)` tail, which libsandbox fails to
+    /// compile again in lower case after a fold group with no bracket class before it.
     #[test]
     fn home_denies_match_at_or_below_without_an_optional_tail() {
         let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
         let data = Path::new("/private/tmp/.tmpA1b2C3/data");
         let config = agent_config_denies(home);
-        assert!(!config.contains("(/.*)?$"), "{config}");
+        assert!(!config.contains("(/.*)"), "{config}");
         let regranted = regranted_denies(home, &[data]);
-        assert_eq!(
-            regranted.matches("(/.*)?$").count(),
-            launch_denies(home).matches("(/.*)?$").count(),
-            "{regranted}"
-        );
+        assert!(!regranted.contains("(/.*)"), "{regranted}");
         let flagged = seatbelt_pattern(home);
         assert!(
             regranted.contains(&format!(
@@ -6015,15 +6011,15 @@ mod profile_string_tests {
         }
     }
 
-    /// V243-FARM2-PRODUCT-SMALL: under a temporary folder whose name holds a dot, as every
-    /// `.tmp` folder does, no regex of a confined agent's profile, a clone's store denies or
-    /// a home's config denies ends in an optional `(/.*)?$` tail after an escaped character,
-    /// the shape libsandbox fails to compile again in lower case (the closed-tops row).
+    /// V243-FARM2-PRODUCT-SMALL: no regex of a closed-tops agent's profile, a clone's store
+    /// denies or a home's config denies holds a `(/.*)` tail. libsandbox fails its second,
+    /// lower-case compile of one after a fold group with no bracket class or wildcard before
+    /// it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is `X$` and `X/` instead. The HFS
+    /// rule alone keeps one, after its leading `(.*/)?`, which compiles.
     #[test]
-    fn no_profile_regex_puts_an_optional_tail_after_an_escape() {
+    fn no_profile_regex_has_a_slash_tail() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
-        assert!(base.to_str().unwrap().contains("/."), "{}", base.display());
         let (home, tmp, project) = (base.join("home"), base.join("tmp"), base.join("project"));
         for folder in [&home, &tmp, &project] {
             fs::create_dir_all(folder).unwrap();
@@ -6040,16 +6036,19 @@ mod profile_string_tests {
             agent_config_denies(&home),
         ]
         .concat();
+        let hfs = hfs_ignored_deny();
+        assert_eq!(text.matches(hfs.as_str()).count(), 1);
+        let text = text.replace(hfs.as_str(), "");
         let bodies: Vec<&str> = text
             .split("#\"")
             .skip(1)
             .filter_map(|rest| rest.split_once('"').map(|(body, _)| body))
             .collect();
         assert!(bodies.len() > 20, "{text}");
-        let escaped: Vec<&&str> = bodies
+        let tailed: Vec<&&str> = bodies
             .iter()
-            .filter(|body| body.ends_with("(/.*)?$") && body.contains('\\'))
+            .filter(|body| body.contains("(/.*)"))
             .collect();
-        assert!(escaped.is_empty(), "{escaped:#?}");
+        assert!(tailed.is_empty(), "{tailed:#?}");
     }
 }
