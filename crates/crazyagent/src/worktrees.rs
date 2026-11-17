@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
+/// The worktrees aggregate on the state log: its events, their projection, replay and
+/// snapshot run (v2.5 L6).
+pub(crate) mod log;
+
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// The most entries of a repository's .git outside its object store that the metadata walk
 /// reads, each one checked. A long-used repository holds thousands in its rerere cache and
