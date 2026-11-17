@@ -50,7 +50,11 @@ env:
     (binary_id(=crazyagent) & (test(~team::master::tests::) | test(~team::runtime::tests::)
     | test(~team::graph::tests::) | test(~team::cleanup::tests::) | test(~landing::)
     | test(~landing_log::) | test(~owner_texts::) | test(~storage::owner_actor_tests::)
-    | test(~worktrees::log::) | test(~state_log::) | test(~storage::project_removed_tests::)))
+    | test(~worktrees::log::) | test(~state_log::) | test(~storage::project_removed_tests::)
+    | test(~storage::migrations::) | test(~storage::projects_home_tests::)
+    | test(~projects_home::move_tests::) | test(~github::github_tests::)
+    | test(~engine::owner::transport::changes::))
+    | binary_id(=crazyagent::verification_integrity))
     | binary_id(=crazyagent::sub_agent_landing) | binary_id(=crazyagent::project_activity)
 
 defaults:
