@@ -76,16 +76,25 @@ pub(crate) fn append(
     Ok(seq)
 }
 
-/// The projection of a removal, live and in replay: deletes the removed project's agent
-/// texts and their instruction versions, questions, hidden folders and the agents that can
-/// see them, agent access, grants and access requests, its stopped and failed agents with
-/// their panes, and its rows in [`TABLES`]. Inputs: the transaction and the event body.
-/// Output: Ok, `project_removed_body` for a body that is not a removal, or a store failure.
+/// The projection of a removal, live and in replay: forgets the removed project's GitHub
+/// rule proposals, schedule override (moving the schedule's version), coordination with its
+/// stopped and failed agents' counts, activity and IDE Run setting, and moves its usage to
+/// `<removed>` (v2.5 L14b); then deletes its agent texts and their instruction versions,
+/// questions, hidden folders and the agents that can see them, agent access, grants and
+/// access requests, its stopped and failed agents with their panes, and its rows in
+/// [`TABLES`]. Inputs: the transaction and the event body. Output: Ok,
+/// `project_removed_body` for a body that is not a removal, or a store failure.
 pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError> {
     let removed: ProjectRemoved =
         serde_json::from_slice(body).map_err(|_| EngineError("project_removed_body".into()))?;
     let failed = |error: rusqlite::Error| EngineError(error.to_string());
     let project = removed.project.as_str();
+    crate::github::proposals::forget_project(tx, &removed.project)?;
+    crate::scheduling::forget_project(tx, project)?;
+    crate::coord::forget_project(tx, &removed.project)?;
+    crate::activity::forget_project(tx, &removed.project)?;
+    crate::usage::forget_project(tx, project)?;
+    crate::ide::bridge::run_command::forget_project(tx, &removed.project)?;
     crate::storage::agent_text::forget_project(tx, &removed.project)?;
     crate::questions::forget_project(tx, &removed.project)?;
     crate::sandbox::hidden_paths::save(tx, project, &[]).map_err(failed)?;

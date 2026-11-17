@@ -81,7 +81,7 @@
   "crates/crazyagent/src/memory/library/tests.rs": 2566,
   "crates/crazyagent/src/onboarding/tests.rs": 2765,
   "crates/crazyagent/src/project_overview/tests.rs": 2368,
-  "crates/crazyagent/src/project_setup.rs": 4129,
+  "crates/crazyagent/src/project_setup.rs": 4123,
   "crates/crazyagent/src/project_setup/engine_tests.rs": 4337,
   "crates/crazyagent/src/project_setup/engine_tests/delete.rs": 2005,
   "crates/crazyagent/src/project_setup/tests.rs": 1799,
