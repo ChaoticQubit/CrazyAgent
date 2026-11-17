@@ -494,3 +494,54 @@ fn a_setup_cut_short_restores_failed_interrupted_with_no_subject_to_restart() {
     };
     assert_eq!(started.kind(), JobKind::Setup);
 }
+
+#[test]
+fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
+    let quotes = |bytes: usize| "\"".repeat(bytes);
+    let project = ProjectId::new("p".repeat(128)).unwrap();
+    let source = format!("/{}", quotes(1023));
+    let overrides = vec![
+        AddOverride::Worktrees,
+        AddOverride::LinkedCheckout,
+        AddOverride::TooLarge,
+    ];
+    let mut views = Vec::new();
+    for at in 0..22 {
+        let job = IntakeJob::new(
+            RequestId::new(format!("{at:0>128}")).unwrap(),
+            JobKind::MoveProject,
+            Some(project.clone()),
+            source.clone(),
+            AddMode::Copy,
+            overrides.clone(),
+        );
+        match at {
+            0..=7 => job.wait(&quotes(1024)),
+            8 => job.end(failure("home_copy_linked_checkout")),
+            _ => job.end(Err(EngineError(format!(
+                "home_copy_failed: {}",
+                quotes(4096)
+            )))),
+        }
+        views.push(job.view());
+    }
+    let reply = serde_json::json!({"kind": "jobs", "jobs": views});
+    let frame = crate::protocol::encode_frame(&reply).expect("every held job fits one frame");
+    let read: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
+    let listed: Vec<JobView> = serde_json::from_value(read["jobs"].clone()).unwrap();
+    assert_eq!(listed.len(), 22);
+    for (at, view) in listed.iter().enumerate() {
+        assert_eq!(view.id.as_str(), format!("{at:0>128}"));
+        assert_eq!(view.source, source, "a source is never cut");
+    }
+    assert_eq!(
+        listed[8].state,
+        JobState::NeedsAnswer {
+            code: "home_copy_linked_checkout".into()
+        }
+    );
+    let JobState::Failed { code, .. } = &listed[9].state else {
+        panic!("a failed end: {:?}", listed[9].state);
+    };
+    assert!(code.starts_with("home_copy_failed: "), "{code}");
+}
