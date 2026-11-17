@@ -168,3 +168,39 @@ pub(crate) fn remove_generated_home(
         homes.file.sync_all().map_err(unsafe_custody)
     })
 }
+
+/// Moves the generated SDK home, or the whole profile slot, of an account only a restore's
+/// replaced 2.5 data holds into the same 0700 folder of that data's dated copy (V250-L5-N5B,
+/// DEC-192), while no agent, sign-in, check or renewal holds the slot, so the copy keeps it
+/// whole and nothing of it stays in the engine root. Inputs: the engine root, the dated
+/// copy's folder, the profile reference and whether the generated home moves. Output: Ok,
+/// also when nothing is there; a refusal for a link or an unsafe folder on the way, a slot in
+/// use or a failed rename keeps it in place.
+pub(crate) fn move_aside(
+    root: &Path,
+    copy: &Path,
+    profile_ref: &CredentialRef,
+    home: bool,
+) -> Result<(), EngineError> {
+    let anchor = engine_root(root)?;
+    let key = digest(profile_ref.as_str().as_bytes());
+    let folder = OsStr::new(if home { HOMES } else { ROOT });
+    while_free(&anchor, &key, |_| {
+        let Some(parent) = present(&anchor, folder)? else {
+            return Ok(());
+        };
+        let Some(moving) = present(&parent.file, OsStr::new(&key))? else {
+            return Ok(());
+        };
+        let copied = engine_root(copy)?;
+        let target = match present(&copied, folder)? {
+            Some(target) => target,
+            None => Directory::create(&copied, folder)?,
+        };
+        moving.verify(&parent.file, OsStr::new(&key))?;
+        rustix::fs::renameat(&parent.file, key.as_str(), &target.file, key.as_str())
+            .map_err(unsafe_custody)?;
+        target.file.sync_all().map_err(unsafe_custody)?;
+        parent.file.sync_all().map_err(unsafe_custody)
+    })
+}

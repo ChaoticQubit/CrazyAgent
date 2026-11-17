@@ -294,7 +294,8 @@ fn key_files(base: &Path, folder: &str) -> Vec<String> {
 /// binding held and a key of an account added after the upgrade, into the same key folders
 /// of the dated copy it keeps of the 2.5 data (DEC-192), private as they were, and deletes
 /// the staged copies in both key folders, while the key of an account the 2.4 copy holds
-/// stays where it is.
+/// stays where it is. A key no row of either copy names, left by a removal, is deleted, not
+/// kept in the copy (leader 05:05).
 #[test]
 fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_accounts_key() {
     use crate::storage::accounts::{self, ACCOUNT_KEYS, KEY_FOLDERS, PLUGIN_KEYS};
@@ -334,8 +335,10 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
     drop(db);
     for (folder, name) in [
         (PLUGIN_KEYS, "plugin-key-restore"),
+        (PLUGIN_KEYS, "plugin-key-orphan"),
         (ACCOUNT_KEYS, "restore-old-key"),
         (ACCOUNT_KEYS, "restore-new-key"),
+        (ACCOUNT_KEYS, "restore-orphan-key"),
     ] {
         let reference = crate::protocol::CredentialRef::new(name).unwrap();
         accounts::replace_key_in(root.path(), folder, &reference, b"sk-restore".to_vec()).unwrap();
@@ -347,11 +350,20 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
     }
     assert_eq!(
         key_files(root.path(), PLUGIN_KEYS),
-        [".replace-restore", "plugin-key-restore"]
+        [
+            ".replace-restore",
+            "plugin-key-orphan",
+            "plugin-key-restore"
+        ]
     );
     assert_eq!(
         key_files(root.path(), ACCOUNT_KEYS),
-        [".replace-restore", "restore-new-key", "restore-old-key"]
+        [
+            ".replace-restore",
+            "restore-new-key",
+            "restore-old-key",
+            "restore-orphan-key"
+        ]
     );
 
     let copy = restored(&root, start + HOUR).unwrap();
@@ -370,5 +382,150 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         assert_eq!(mode(&copy.join(folder)), 0o700);
         assert_eq!(mode(&moved), 0o600);
         assert_eq!(std::fs::read(&moved).unwrap(), b"sk-restore");
+    }
+}
+
+/// Saves one account row as the accounts store writes it: a local connection with the given
+/// authentication, and its details. Inputs: the database, the id and the authentication.
+fn save_account(db: &Connection, id: &str, auth: crate::config::ModelAuthentication) {
+    let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+    let account = crate::config::ModelConnection {
+        id: reference(id),
+        provider: reference("openai-compatible"),
+        harness: reference("rcli"),
+        protocol: reference("openai-chat"),
+        account_ref: reference("local-account"),
+        endpoint: crate::config::ModelEndpoint::Http {
+            url: "http://127.0.0.1:8000/v1".into(),
+        },
+        model: crate::config::ModelReference {
+            id: "m".into(),
+            author: reference("openai-compatible"),
+        },
+        auth,
+    };
+    let details = crate::accounts::AccountDetails {
+        name: "Lab".into(),
+        provider: crate::accounts::Provider::OpenaiCompatible,
+    };
+    let body = serde_json::to_vec(&serde_json::json!({"connection": account, "details": details}))
+        .unwrap();
+    db.execute(
+        "INSERT INTO accounts (id, body) VALUES (?1, ?2)",
+        rusqlite::params![id, body],
+    )
+    .unwrap();
+}
+
+/// The folder name the engine gives an account's profile slot or generated home: the
+/// SHA-256 of its reference in hex. Input: the reference. Output: the name.
+fn slot_name(reference: &str) -> String {
+    format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(reference.as_bytes())
+    )
+}
+
+/// Makes one private file holding a dummy secret, its 0700 folders included. Input: the
+/// file. Output: none.
+fn private_secret(file: &Path) {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(file.parent().unwrap())
+        .unwrap();
+    std::fs::write(file, "secret-dummy").unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// V250-L5-N5B: a restore moves the generated SDK home holding the key of an API key account
+/// only the replaced 2.5 data holds, and the whole profile slot of a native account only it
+/// holds, sign-in files included, into the same folders of its dated copy (DEC-192), private
+/// as they were, while the home of an account the 2.4 copy holds stays where it is. A home
+/// only the replaced data's trash still notes, of an account the owner removed in 2.5, is
+/// deleted, not kept in the copy.
+#[test]
+fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_copy() {
+    use crate::config::ModelAuthentication;
+    let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+    let start = SystemTime::now();
+    let (root, _) = fixture();
+    let old = root.connection();
+    crate::storage::accounts::initialize(&old).unwrap();
+    let old_key = ModelAuthentication::ApiKey {
+        credential_ref: reference("restore-old-key"),
+    };
+    save_account(&old, "restore-old", old_key);
+    drop(old);
+    let sources = sources(&root);
+    let mut db = root.connection();
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        &steps(&[probe]),
+        start,
+        check_copy,
+    )
+    .unwrap();
+    let new_key = ModelAuthentication::ApiKey {
+        credential_ref: reference("restore-new-key"),
+    };
+    save_account(&db, "restore-new", new_key);
+    let native = ModelAuthentication::NativeManaged {
+        profile_ref: reference("restore-new-profile"),
+    };
+    save_account(&db, "restore-native", native);
+    crate::storage::trash::initialize(&db).unwrap();
+    crate::storage::trash::put(&db, "generated_home", "restore-gone-key").unwrap();
+    drop(db);
+    let homes = root.path().join("configured-sdk-homes");
+    let kept_home = homes.join(slot_name("restore-old-key"));
+    let new_home = homes.join(slot_name("restore-new-key"));
+    let gone_home = homes.join(slot_name("restore-gone-key"));
+    for home in [&kept_home, &new_home, &gone_home] {
+        private_secret(&home.join(".backboard/config.json"));
+        private_secret(&home.join(".backboard/keys.json"));
+    }
+    let slot = root
+        .path()
+        .join("native-profiles")
+        .join(slot_name("restore-new-profile"));
+    let sign_ins = [
+        slot.join("home/auth.json"),
+        slot.join("home/.credentials.json"),
+        slot.join("home/Library/Keychains/login.keychain-db"),
+    ];
+    let identity = slot.join("identity.json");
+    for file in sign_ins.iter().chain([&identity]) {
+        private_secret(file);
+    }
+
+    let copy = restored(&root, start + HOUR).unwrap();
+
+    assert_eq!(version(&root.connection()).unwrap(), V24_VERSION_MAX);
+    assert!(kept_home.join(".backboard/keys.json").exists());
+    assert!(!new_home.exists());
+    assert!(!slot.exists());
+    assert!(!gone_home.exists());
+    let copied_homes = copy.join("configured-sdk-homes");
+    assert!(!copied_homes.join(slot_name("restore-gone-key")).exists());
+    let copied_slot = copy
+        .join("native-profiles")
+        .join(slot_name("restore-new-profile"));
+    assert_eq!(mode(&copied_homes), 0o700);
+    assert_eq!(mode(&copy.join("native-profiles")), 0o700);
+    assert!(!copied_homes.join(slot_name("restore-old-key")).exists());
+    let moved_home = copied_homes.join(slot_name("restore-new-key"));
+    let moved = sign_ins
+        .iter()
+        .chain([&identity])
+        .map(|file| copied_slot.join(file.strip_prefix(&slot).unwrap()))
+        .chain(
+            [".backboard/config.json", ".backboard/keys.json"].map(|file| moved_home.join(file)),
+        );
+    for file in moved {
+        assert_eq!(mode(&file), 0o600, "{}", file.display());
+        assert_eq!(std::fs::read(&file).unwrap(), b"secret-dummy");
     }
 }

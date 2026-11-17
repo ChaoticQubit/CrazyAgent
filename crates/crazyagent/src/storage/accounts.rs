@@ -338,21 +338,23 @@ pub(crate) fn remove_staged_in(root: &Path, folder: &str) -> Result<(), EngineEr
 #[cfg(unix)]
 const KEY_SWEEP_MAX: usize = 10_000;
 
-/// Moves, after a restore to a 2.4 copy (V250-L5-N5), every key in one of the engine root's
-/// owner-only key folders that `kept` does not keep into the same-named new 0700 folder of
-/// the restore's dated copy, so that copy holds the keys its data names (DEC-192), and
-/// deletes the staged copies. It reads at most [`KEY_SWEEP_MAX`] entries and leaves a name
-/// that is no plain reference alone. A key whose move fails stays where it is and does not
-/// stop the others; a failed keep test stops the sweep before any key moves. Inputs: the engine
-/// root, a folder from [`KEY_FOLDERS`], the dated copy's folder and the keep test by key
-/// name. Output: how many keys moved, or the folder's refusal, the keep test's failure or the
-/// first failed move.
+/// Settles, after a restore to a 2.4 copy (V250-L5-N5), every key in one of the engine
+/// root's owner-only key folders that `kept` does not keep: one `copied` says a row of the
+/// restore's dated copy names moves into the same-named new 0700 folder of that copy, so the
+/// copy holds the keys its data names (DEC-192), and one no row names, left by a removal, is
+/// deleted as every key removal does ([`remove_key_in`]). The staged copies are deleted. It
+/// reads at most [`KEY_SWEEP_MAX`] entries and leaves a name that is no plain reference alone.
+/// A key whose move or removal fails stays where it is and does not stop the others; a failed
+/// test stops the sweep before any key changes. Inputs: the engine root, a folder from
+/// [`KEY_FOLDERS`], the dated copy's folder and the two tests by key name. Output: how many
+/// keys were settled, or the folder's refusal, a test's failure or the first failed change.
 #[cfg(unix)]
-pub(crate) fn move_unkept_in(
+pub(crate) fn settle_unkept_in(
     root: &Path,
     folder: &str,
     copy: &Path,
     kept: impl Fn(&str) -> Result<bool, EngineError>,
+    copied: impl Fn(&str) -> Result<bool, EngineError>,
 ) -> Result<usize, EngineError> {
     let mut failed = remove_staged_in(root, folder).err();
     let Some(directory) = open_key_folder(root, folder)? else {
@@ -380,30 +382,44 @@ pub(crate) fn move_unkept_in(
     let mut unkept = Vec::new();
     for name in names {
         if !kept(name.as_str())? {
-            unkept.push(name);
+            let to_copy = copied(name.as_str())?;
+            unkept.push((name, to_copy));
         }
     }
     if unkept.is_empty() {
         return failed.map_or(Ok(0), Err);
     }
-    let into = match copy_key_folder(copy, folder) {
-        Ok(made) => made,
-        Err(cause) => return Err(failed.unwrap_or(cause)),
+    let into = if unkept.iter().any(|(_, to_copy)| *to_copy) {
+        match copy_key_folder(copy, folder) {
+            Ok(made) => Some(made),
+            Err(cause) => return Err(failed.unwrap_or(cause)),
+        }
+    } else {
+        None
     };
-    let mut moved = 0;
-    for name in &unkept {
-        match rustix::fs::renameat(&directory, name.as_str(), &into, name.as_str()) {
-            Ok(()) => moved += 1,
-            Err(_) => {
-                failed.get_or_insert(error("account_key_store_unavailable"));
+    let mut settled = 0;
+    for (name, to_copy) in &unkept {
+        let gone = match (&into, to_copy) {
+            (Some(into), true) => {
+                rustix::fs::renameat(&directory, name.as_str(), into, name.as_str())
+                    .map_err(|_| error("account_key_store_unavailable"))
+            }
+            _ => remove_key_in(root, folder, name),
+        };
+        match gone {
+            Ok(()) => settled += 1,
+            Err(cause) => {
+                failed.get_or_insert(cause);
             }
         }
     }
-    assert!(moved <= unkept.len());
-    if moved > 0 && (into.sync_all().is_err() || directory.sync_all().is_err()) {
+    assert!(settled <= unkept.len());
+    let synced =
+        into.as_ref().is_none_or(|into| into.sync_all().is_ok()) && directory.sync_all().is_ok();
+    if settled > 0 && !synced {
         failed.get_or_insert(error("account_key_store_unavailable"));
     }
-    failed.map_or(Ok(moved), Err)
+    failed.map_or(Ok(settled), Err)
 }
 
 /// Makes and opens one key folder in a restore's dated copy, which must not hold it yet, as
@@ -502,6 +518,46 @@ fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
         return Err(error("account_record_bounds"));
     }
     Ok(body)
+}
+
+/// The generated SDK homes and native sign-ins the saved accounts of a database name, for a
+/// restore's sweep of what only the replaced 2.5 data held (V250-L5-N5B), read from at most
+/// [`KEY_SWEEP_MAX`] rows; a row that does not decode names nothing. Input: the database.
+/// Output: each trash kind with its reference, none without an `accounts` table.
+#[cfg(unix)]
+pub(crate) fn profile_files(db: &Connection) -> Result<Vec<(&'static str, String)>, EngineError> {
+    if !registry_exists(db)? {
+        return Ok(Vec::new());
+    }
+    let limit = i64::try_from(KEY_SWEEP_MAX).map_err(error)?;
+    let rows = db
+        .prepare("SELECT id, body FROM accounts ORDER BY seq LIMIT ?1")
+        .map_err(error)?
+        .query_map([limit], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= KEY_SWEEP_MAX);
+    let mut files = Vec::new();
+    for (id, body) in rows {
+        let Ok(record) = decode(&id, &body) else {
+            continue;
+        };
+        files.extend(
+            account_files(&record.connection.auth)
+                .into_iter()
+                .filter(|(kind, _)| {
+                    matches!(
+                        *kind,
+                        super::trash::GENERATED_HOME | super::trash::NATIVE_SIGN_IN
+                    )
+                })
+                .map(|(kind, name)| (kind, name.to_owned())),
+        );
+    }
+    Ok(files)
 }
 
 fn decode(id: &str, body: &[u8]) -> Result<Record, EngineError> {
