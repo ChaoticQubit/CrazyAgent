@@ -754,12 +754,17 @@ fn capture_text(scenario: &Scenario) -> Result<String, String> {
 /// The failure text of a driver that panicked. Input: the panic payload.
 /// Output: the payload's message when it is text, else a fixed line.
 fn panicked(payload: &(dyn std::any::Any + Send)) -> String {
-    let text = payload
+    format!("the driver panicked: {}", payload_text(payload))
+}
+
+/// The text of a panic payload. Input: the payload. Output: its message when it is text,
+/// else a fixed line.
+fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
         .downcast_ref::<&str>()
         .map(|text| (*text).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "a payload that is not text".to_owned());
-    format!("the driver panicked: {text}")
+        .unwrap_or_else(|| "a payload that is not text".to_owned())
 }
 
 /// The git variables a snapshot engine never inherits, whatever this machine's shell holds:
@@ -788,14 +793,33 @@ fn hermetic(engine: &mut e2e_support::Engine) {
 /// Inputs: the panic text and this machine's HOME and USER. Output: the line, or none when
 /// the text holds nothing private and prints as Rust prints it.
 fn panic_text(message: &str, home: Option<&str>, user: Option<&str>) -> Option<String> {
-    let _ = (message, home, user);
-    None
+    refuse_private(message, home, user)
+        .err()
+        .map(|kind| format!("a panic: text withheld, it {kind}"))
 }
 
 /// Installs, once per test process, the panic hook that prints a panic's text only when it
-/// holds no private text, so a driver or fixture panic never puts a user path, name or token
-/// in a test log; a clean panic prints as before.
-fn guard_panics() {}
+/// and its source location hold no private text, so a driver or fixture panic, on any thread,
+/// never puts a user path, name or token in a test log; a clean panic prints as before,
+/// through the hook it replaced.
+fn guard_panics() {
+    static GUARD: std::sync::Once = std::sync::Once::new();
+    GUARD.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let at = info.location().map(ToString::to_string).unwrap_or_default();
+            let text = format!("{} at {at}", payload_text(info.payload()));
+            let home = std::env::var("HOME").ok();
+            let user = std::env::var("USER")
+                .ok()
+                .filter(|user| !KINDS.contains(&user.as_str()));
+            match panic_text(&text, home.as_deref(), user.as_deref()) {
+                Some(line) => eprintln!("{line}"),
+                None => previous(info),
+            }
+        }));
+    });
+}
 
 /// Lists golden files no scenario names, so a dropped driver cannot drop its capture silently.
 /// Input: the scenarios. Output: one line per golden with no scenario, sorted.
