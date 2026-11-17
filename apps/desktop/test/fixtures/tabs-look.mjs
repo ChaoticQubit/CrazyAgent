@@ -48,12 +48,12 @@ function token(name) {
 }
 
 /**
- * The look of one tab or segment. Input: the element. Output: its text color, weight, fill
- * and underline color.
+ * The look of one tab or segment. Input: the element. Output: its text color, weight, fill,
+ * underline color and inset edge.
  */
 function part(node) {
   const style = getComputedStyle(node);
-  return { color: style.color, weight: style.fontWeight, background: style.backgroundColor, underline: style.borderBottomColor };
+  return { color: style.color, weight: style.fontWeight, background: style.backgroundColor, underline: style.borderBottomColor, edge: style.boxShadow };
 }
 
 /**
