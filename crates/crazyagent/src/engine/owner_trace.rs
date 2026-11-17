@@ -95,8 +95,9 @@ pub(crate) fn request(request: &OwnerRequest) -> &OwnerRequest {
     request
 }
 
-/// The kind of an owner operation from its serde `kind` tags, each a variant name; a tag
-/// that is not one short alphanumeric word reads `?`. Input: the operation. Output: the kind.
+/// The kind of an owner operation from its serde `kind` tags, each a variant name, so no
+/// field of the operation is ever read into the line; a tag that is not one short
+/// alphanumeric word reads `?`. Input: the operation. Output: the kind.
 fn kind(operation: &OwnerOperation) -> String {
     let tags = serde_json::to_value(operation).unwrap_or_default();
     let tag = |value: &serde_json::Value| {
@@ -128,7 +129,8 @@ pub(crate) fn claim<T>(id: &RequestId, claim: Option<T>) -> Option<T> {
 }
 
 /// Records a Reconcile's check of the running set: `hit` when the asked id is still
-/// running, `miss` when it is not. Input: the check. Output: the same check.
+/// running, so the reply is in progress, `miss` when it is not and the Reconcile goes on.
+/// Input: the check. Output: the same check.
 pub(crate) fn held(running: bool) -> bool {
     note(|trace| trace.claim = Some(if running { "hit" } else { "miss" }));
     running
