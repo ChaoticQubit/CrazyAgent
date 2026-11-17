@@ -504,6 +504,68 @@ fn unsafe_homes_and_sources_are_refused_before_anything_changes() {
     assert!(source.is_dir());
 }
 
+/// V243-FIRMLINK-HOME-REFUSAL (rv-sec2 15:20 N1/N2): macOS names every folder under a
+/// firmlink, such as /Users and /private, a second way under /System/Volumes/Data. A folder
+/// picked in that spelling is the same folder and meets the same refusals, the data volume
+/// and the folders above it hold the owner's home, and a plan names the folder one way.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_picked_through_the_data_volume_meets_the_same_refusals() {
+    let case = case();
+    let owner = owner_home().unwrap();
+    let data = |path: &Path| format!("/System/Volumes/Data{}", text(path));
+    fs::create_dir(case.home.join("inner")).unwrap();
+    fs::create_dir(case.engine.join("inside")).unwrap();
+    let source = case.sources.join("project");
+    fs::create_dir(&source).unwrap();
+    for (picked, code) in [
+        (data(&owner), "home_source_unsafe"),
+        (data(owner.parent().unwrap()), "home_source_unsafe"),
+        ("/System/Volumes/Data".to_owned(), "home_source_unsafe"),
+        ("/System".to_owned(), "home_source_unsafe"),
+        (data(&case.engine.join("inside")), "home_source_unsafe"),
+        (data(&case.home), "home_source_in_home"),
+        (data(&case.home.join("inner")), "home_source_in_home"),
+    ] {
+        for mode in [AddMode::Move, AddMode::Copy] {
+            assert_eq!(
+                plan_add(&case.home, &case.engine, &picked, mode, &[], &[])
+                    .unwrap_err()
+                    .0,
+                code,
+                "{picked}"
+            );
+        }
+    }
+    for picked in [
+        data(&owner),
+        "/System/Volumes/Data".to_owned(),
+        data(&case.engine),
+    ] {
+        assert_eq!(
+            check_home(Path::new(&picked), &case.engine).unwrap_err().0,
+            "projects_home_unsafe",
+            "{picked}"
+        );
+        assert_eq!(
+            icloud::folder(&picked).map_err(|refusal| refusal.0).err(),
+            (picked != data(&case.engine)).then_some("icloud_folder_unsafe".to_owned()),
+            "{picked}"
+        );
+    }
+    let plan = plan_add(
+        &case.home,
+        &case.engine,
+        &data(&source),
+        AddMode::Copy,
+        &[],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(plan.source(), source.as_path());
+    assert!(source.is_dir() && owner.is_dir());
+}
+
 #[test]
 fn layout_is_created_once_and_each_git_exclude_line_is_written_exactly_once() {
     let case = case();
