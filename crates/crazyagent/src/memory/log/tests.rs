@@ -392,6 +392,19 @@ fn the_first_run_puts_memory_rows_written_before_the_log_on_it() {
     replays_to_live(&mut db);
 }
 
+/// v2.5 L8 STEPS row: a store whose memory is already on the log gets no second run, so the
+/// step run again over it, as an upgrade from a reset version runs it, moves nothing.
+#[test]
+fn the_first_run_skips_a_store_whose_memory_is_already_logged() {
+    let mut db = hosted();
+    request(&mut db, &first_writes());
+    let before = moved(&db);
+    let tx = db.transaction().unwrap();
+    assert!(!first_run(&tx, Opening::for_test(2)).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(moved(&db), before, "no second snapshot run");
+}
+
 /// v2.5 L8 L1-N1: a change body decodes only with its three fields, closed tables, cells
 /// and digests; free text in any field or one more field is refused.
 #[test]
