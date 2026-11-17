@@ -49,3 +49,4 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 tauri = { version = "=2.12.4", features = ["test"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["backup"] }
 tempfile = "=3.27.0"
+notify = "=8.2.0"

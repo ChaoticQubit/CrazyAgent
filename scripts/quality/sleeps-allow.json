@@ -3,7 +3,6 @@
   "apps/desktop/src-tauri/src/bridge/queue.rs": 7,
   "apps/desktop/src-tauri/src/ide.rs": 5,
   "apps/desktop/src-tauri/tests/long_call_bridge.rs": 1,
-  "apps/desktop/src-tauri/tests/memory_bridge.rs": 1,
   "apps/desktop/src-tauri/tests/native_auth.rs": 11,
   "apps/desktop/src-tauri/tests/pending_change.rs": 1,
   "apps/desktop/src-tauri/tests/picker.rs": 1,
