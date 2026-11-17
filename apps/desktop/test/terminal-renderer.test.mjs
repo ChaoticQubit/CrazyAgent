@@ -140,6 +140,19 @@ test("#358 r2: a new Terminal renderer choice applies to an open terminal at onc
   assert.deepEqual(seen, { gpu: true, standard: true, standardText: true, back: true, text: true, contexts: 1 });
 });
 
+test("#358 r2: a Terminal renderer choice made in another window applies to this window's open terminal at once", async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await live(evaluate, true);
+    const gpu = await drawnWith(evaluate, "webgl");
+    await evaluate('Fixture.chooseElsewhere("standard")');
+    const standard = await drawnWith(evaluate, "dom");
+    await evaluate('Fixture.chooseElsewhere("gpu")');
+    const back = await drawnWith(evaluate, "webgl");
+    return { gpu, standard, back, text: await shows(evaluate, "drawn line") };
+  });
+  assert.deepEqual(seen, { gpu: true, standard: true, back: true, text: true });
+});
+
 test("#358 r2: a hidden terminal holds no WebGL context and draws on the GPU again, with what it printed meanwhile, once shown", async () => {
   const seen = await withPage(async ({ evaluate }) => {
     await live(evaluate, true);
@@ -188,10 +201,16 @@ test("#358 r2: letting a terminal go loses its WebGL context", async () => {
   assert.deepEqual(seen, { gpu: true, before: 1, after: 0 });
 });
 
-test("#358 r1 F1: the terminal's text reads from its buffer, so a reader sees it under WebGL too", async () => {
-  const seen = await withPage(async ({ evaluate }) => {
-    await live(evaluate, true);
-    return { gpu: await drawnWith(evaluate, "webgl"), shown: await shows(evaluate, "drawn line") };
+test("#358 r1 F1: the terminal's text and row height read the same under WebGL as with DOM rows", async () => {
+  const read = (offered) => withPage(async ({ evaluate }) => {
+    await live(evaluate, offered);
+    const drawn = await drawnWith(evaluate, offered ? "webgl" : "dom");
+    const shown = await shows(evaluate, "drawn line");
+    return { drawn, shown, rowHeight: (await evaluate("Fixture.view()")).rowHeight };
   });
-  assert.deepEqual(seen, { gpu: true, shown: true });
+  const gpu = await read(true);
+  const dom = await read(false);
+  assert.deepEqual([gpu.drawn, gpu.shown, dom.drawn, dom.shown], [true, true, true, true]);
+  assert.ok(dom.rowHeight > 0, JSON.stringify(dom));
+  assert.equal(gpu.rowHeight, dom.rowHeight, JSON.stringify({ gpu, dom }));
 });

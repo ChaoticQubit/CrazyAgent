@@ -83,6 +83,14 @@ export function choose(choice) {
   state.saveTerminalRenderer(choice);
 }
 
+/** Saves a Terminal renderer choice as another window of the app does: the store changes
+ * and this window hears only the storage event. Input: the choice. */
+export function chooseElsewhere(choice) {
+  keepStorage();
+  window.localStorage.setItem("crazyagent.terminal-renderer", choice);
+  window.dispatchEvent(new StorageEvent("storage", { key: "crazyagent.terminal-renderer", newValue: choice }));
+}
+
 /** Makes the page report one platform with nothing chosen yet, as a first start on that
  * machine. Input: the platform name, as navigator.platform gives it. */
 export function startOn(platform) {
@@ -289,22 +297,24 @@ export async function until(check, limitMs = 5000) {
 }
 
 /** The panel as the owner sees it: whether its terminal is live, its status line, the text on
- * its screen, the screen's box and the height of one row in page coordinates, the open
- * right-click menu's items with their boxes, and every chunk the engine got typed. */
+ * its screen, the screen's box and the height of one row in page coordinates (the screen's
+ * height over its lines, so it holds under every Terminal renderer), the open right-click
+ * menu's items with their boxes, and every chunk the engine got typed. */
 export function view() {
   const box = (element) => {
     if (!element) return null;
     const rect = element.getBoundingClientRect();
     return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
   };
-  const rows = document.querySelector(".tg-terminal-screen .xterm-rows");
+  const lines = document.querySelector(".tg-terminal-screen .tg-terminal-host")?.readScreen?.() ?? [];
+  const screen = document.querySelector(".tg-terminal-screen .xterm-screen");
   const status = document.querySelector(".tg-terminal-note [role=status]");
   return {
     live: status !== null,
     note: status?.textContent ?? null,
-    text: document.querySelector(".tg-terminal-screen .tg-terminal-host")?.readScreen?.().join("\n") ?? "",
-    screen: box(document.querySelector(".tg-terminal-screen .xterm-screen")),
-    rowHeight: rows?.firstElementChild?.getBoundingClientRect().height ?? 0,
+    text: lines.join("\n"),
+    screen: box(screen),
+    rowHeight: screen && lines.length ? screen.getBoundingClientRect().height / lines.length : 0,
     menu: [...document.querySelectorAll(".tg-terminal-menu [role=menuitem]")].map((item) => ({ text: item.textContent.trim(), disabled: item.disabled, ...box(item) })),
     typed: [...engine.typed],
   };
