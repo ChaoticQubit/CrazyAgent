@@ -798,7 +798,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
 #[cfg(unix)]
 const WORK: &str = "/Users/owner/Work";
 #[cfg(not(unix))]
-const WORK: &str = r"C:\Users\owner\Work";
+const WORK: &str = r"C:\Users\you\Work";
 #[cfg(unix)]
 const BIG: &str = "/Volumes/Big/Projects";
 #[cfg(not(unix))]
