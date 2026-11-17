@@ -525,23 +525,27 @@ fn a_setup_cut_short_restores_failed_interrupted_with_no_subject_to_restart() {
     assert_eq!(started.kind(), JobKind::Setup);
 }
 
-#[test]
-fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
-    let quotes = |bytes: usize| "\"".repeat(bytes);
+fn quotes(bytes: usize) -> String {
+    "\"".repeat(bytes)
+}
+
+/// Held jobs at their longest: project moves with 128-byte ids, a source of 1024 quotes and
+/// every override; the first eight wait behind a long name, the ninth asks, the rest failed
+/// with a long code. Input: how many jobs. Output: the jobs in start order.
+fn longest_jobs(count: usize) -> Vec<IntakeJob> {
     let project = ProjectId::new("p".repeat(128)).unwrap();
-    let source = format!("/{}", quotes(1023));
     let overrides = vec![
         AddOverride::Worktrees,
         AddOverride::LinkedCheckout,
         AddOverride::TooLarge,
     ];
-    let mut views = Vec::new();
-    for at in 0..22 {
+    let mut jobs = Vec::new();
+    for at in 0..count {
         let job = IntakeJob::new(
             RequestId::new(format!("{at:0>128}")).unwrap(),
             JobKind::MoveProject,
             Some(project.clone()),
-            source.clone(),
+            format!("/{}", quotes(1023)),
             AddMode::Copy,
             overrides.clone(),
         );
@@ -553,8 +557,16 @@ fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
                 quotes(4096)
             )))),
         }
-        views.push(job.view());
+        jobs.push(job);
     }
+    assert_eq!(jobs.len(), count);
+    jobs
+}
+
+#[test]
+fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
+    let source = format!("/{}", quotes(1023));
+    let views: Vec<JobView> = longest_jobs(22).iter().map(IntakeJob::view).collect();
     let reply = serde_json::json!({"kind": "jobs", "jobs": views});
     let frame = crate::protocol::encode_frame(&reply).expect("every held job fits one frame");
     let read: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();

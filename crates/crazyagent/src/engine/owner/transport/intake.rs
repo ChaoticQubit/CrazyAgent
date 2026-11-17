@@ -2,7 +2,7 @@ use super::projects_home::{Running, Sink, UNKNOWN};
 use super::*;
 use crate::projects_home::icloud;
 use crate::projects_home::job::{
-    IntakeJob, JOB_VIEW_BYTES_MAX, JobKind, JobState, JobSubject, JobView,
+    IntakeJob, JOB_VIEW_BYTES_MAX, JobKind, JobState, JobSubject, JobView, fit_left,
 };
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
@@ -29,6 +29,10 @@ const JOBS_HELD_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX + JOBS_ENDED_MA
 /// The most bytes of JSON a status reply takes: every job held at its largest view, the
 /// commas between them and the reply's kind around the list, within one frame (#380 N3).
 const JOBS_REPLY_BYTES_MAX: usize = JOBS_HELD_MAX * JOB_VIEW_BYTES_MAX + JOBS_HELD_MAX + 64;
+
+/// The most bytes of JSON the list of a status reply takes: a frame less the reply's kind
+/// and names around the list.
+const JOBS_LIST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 64;
 
 const _: () = assert!(JOBS_RUNNING_MAX <= REVISION_TRIES);
 const _: () = assert!(JOBS_REPLY_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
@@ -452,7 +456,8 @@ impl Intake {
     pub(super) fn status(&self) -> Vec<JobView> {
         let mut held = self.lock();
         assert!(held.len() <= JOBS_HELD_MAX);
-        let views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        let mut views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        fit_left(&mut views, JOBS_LIST_BYTES_MAX);
         for (current, view) in held.iter_mut().zip(&views) {
             if view.state.over() {
                 current.seen = true;

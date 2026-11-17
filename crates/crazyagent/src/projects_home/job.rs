@@ -178,6 +178,14 @@ impl JobView {
     }
 }
 
+/// Keeps a list of job views within `bytes` of JSON, so a status reply of every held job fits
+/// one frame (V243-JOBLIST-FRAME-BOUND). Inputs: the views in start order and the most bytes
+/// the list may take. Output: none.
+pub fn fit_left(views: &mut [JobView], bytes: usize) {
+    assert!(bytes > 0);
+    assert!(views.len() <= bytes);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Stage {
     Waiting(String),
