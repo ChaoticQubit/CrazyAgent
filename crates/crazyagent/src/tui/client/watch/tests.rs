@@ -2,8 +2,10 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::owner_profile::OwnerProfile;
 use crate::protocol::Topic;
+use crate::tui::client::app_setup::AppSetupJob;
 use crate::tui::client::changes::ChangesQuery;
 use crate::tui::client::intake::{IntakeJob, IntakeQuery};
+use crate::tui::client::learning::LearningQuery;
 use crate::tui::client::questions::QuestionsQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
@@ -151,10 +153,17 @@ async fn the_reads_a_refresh_and_home_ask_commit_nothing() {
     live.answer().await;
     live.connection.questions(QuestionsQuery::Counts).unwrap();
     live.answer().await;
-    live.connection
-        .settings(SettingsJob::Extras { detail: false })
-        .unwrap();
+    live.connection.learning(LearningQuery::Progress).unwrap();
     live.answer().await;
+    for job in [
+        SettingsJob::Extras { detail: false },
+        SettingsJob::AllAccounts,
+        SettingsJob::Harnesses,
+        SettingsJob::AppSetup(AppSetupJob::Status),
+    ] {
+        live.connection.settings(job).unwrap();
+        live.answer().await;
+    }
     for request in [
         ShellRequest::Profile,
         ShellRequest::Projects,
