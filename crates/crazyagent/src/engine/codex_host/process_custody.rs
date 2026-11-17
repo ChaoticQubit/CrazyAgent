@@ -713,6 +713,7 @@ mod tests {
             woken,
             custody_passes: std::sync::atomic::AtomicU64::new(0),
             host_passes: std::sync::atomic::AtomicU64::new(0),
+            after_read: Mutex::new(None),
         }
     }
 
