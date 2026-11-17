@@ -384,6 +384,10 @@ async fn fix_dependency(
     });
 }
 
+/// Installs one dependency setup did not find and stores its row: installed, unsupported, or
+/// why it failed. An install whose program then reports no usable version shows the check's
+/// own line when that version is too old, naming it and the one needed (V243-TMUX-APT-OLD).
+/// Inputs: the installer, the engine root and the dependency.
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
     let finder = installer.clone();
     let found = tokio::task::spawn_blocking(move || finder.find(dep)).await;
@@ -401,18 +405,28 @@ async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dep
     progress::with(root, |state| {
         state.dependencies.insert(dep, DependencyState::Installing);
     });
-    let outcome = tokio::task::spawn_blocking(move || match crate::setup::platform_pin(dep) {
-        Some(pin) => installer.install(dep, &pin),
-        None => Err(InstallError(crate::setup::PLATFORM_UNSUPPORTED)),
+    let outcome = tokio::task::spawn_blocking(move || {
+        let installed = match crate::setup::platform_pin(dep) {
+            Some(pin) => installer.install(dep, &pin),
+            None => Err(InstallError(crate::setup::PLATFORM_UNSUPPORTED)),
+        };
+        match installed {
+            Ok(version) => DependencyState::Installed { version },
+            Err(code) if code.0 == "setup_version_unreadable" => match installer.lookup(dep) {
+                Ok(Err(missing)) if missing.reason == crate::tools::Reason::WrongVersion => {
+                    DependencyState::Missing {
+                        line: missing.line(),
+                    }
+                }
+                _ => DependencyState::refused(code.0),
+            },
+            Err(code) => DependencyState::refused(code.0),
+        }
     })
     .await;
-    let next = match outcome {
-        Ok(Ok(version)) => DependencyState::Installed { version },
-        Ok(Err(code)) => DependencyState::refused(code.0),
-        Err(_) => DependencyState::Failed {
-            reason: plain_reason("setup_install_failed").to_owned(),
-        },
-    };
+    let next = outcome.unwrap_or_else(|_| DependencyState::Failed {
+        reason: plain_reason("setup_install_failed").to_owned(),
+    });
     progress::with(root, |state| {
         state.dependencies.insert(dep, next);
     });
