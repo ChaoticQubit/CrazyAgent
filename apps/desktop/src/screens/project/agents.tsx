@@ -216,7 +216,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     <QuestionsPanel projectId={data.id} read={inbox} reload={reloadInbox} focus={focus} onOpen={(node) => { setAsking(false); setFocus(null); setShownView("team"); setTerminal(node); }} />
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
   </Drawer>;
-  if (shownView === "settings") return <div className="pj-stack">
+  if (shownView === "settings") return <div className="pj-stack pj-agents">
     <SettingsToolbar projectId={data.id} name={data.name} perWindow={perWindow} {...bar} />
     {team.result === undefined && <p className="pj-muted" role="status">Loading...</p>}
     {team.result?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
@@ -224,7 +224,7 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} reload={data.reloadTeam} data={data} group={opened.group} />}
     {drawer}
   </div>;
-  return <div className="pj-stack">
+  return <div className="pj-stack pj-agents">
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
     {data.research?.kind === "error" && <p className="pj-error" role="alert">Couldn't load agents. {failureCopy(data.research)}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
