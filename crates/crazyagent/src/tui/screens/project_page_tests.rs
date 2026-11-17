@@ -1807,11 +1807,12 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
 }
 
-/// DEC-177 step 3c: while another project's move waits for its agents, Create on New project
-/// starts the engine's New Project job, which the held move refuses; the wizard keeps the
-/// draft and says another job runs, nothing is made and the move still waits.
+/// DEC-197: while another project's move waits for its agents, Create on New project starts
+/// the engine's New Project job, which waits its turn behind the move and names it while the
+/// wizard follows it; once the move is stopped the New Project is made, and the move moved
+/// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
+async fn create_while_a_move_holds_the_job_waits_its_turn_and_is_made_once_the_move_stops() {
     let mut engine = Engine::start().await;
     let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
     let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
@@ -1856,39 +1857,46 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
     assert_eq!(
         sent.iter().filter(|sent| **sent == "job start").count(),
         1,
-        "one start, never sent again after the refusal: {sent:?}"
+        "one start: {sent:?}"
+    );
+    let moving = origin
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("the moved folder's name")
+        .to_owned();
+    let (waiting, _) = job_until(&mut shell, &mut connection, |job| {
+        job.kind == JobKind::Setup
+    })
+    .await;
+    assert_eq!(
+        waiting.state,
+        JobState::Waiting { behind: moving },
+        "{waiting:?}"
     );
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
-    assert!(shown.contains("Could not create the project."), "{shown}");
-    assert!(shown.contains("Another job is running."), "{shown}");
-    assert!(!home.join("tidepool").exists(), "nothing was made");
-    assert!(origin.is_dir(), "the move still waits: {origin:?}");
-    go_to(&mut shell, "home");
-    assert_eq!(
-        kept_draft().as_deref(),
-        Some("Tidepool"),
-        "leaving the refused wizard keeps its draft"
-    );
-    drop(shell);
-    drop(connection);
-
-    let mut connection = engine.connect();
-    let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the held move");
-    assert_eq!(shown.id, held.id, "the held move is still the engine's job");
-    assert!(super::intake_job::running(&shown), "{shown:?}");
-    shell.key(Key::Home);
-    shell.key(Key::Enter);
-    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
-        !super::intake_job::running(job)
-    })
-    .await;
+    assert!(!shown.contains("Could not create the project."), "{shown}");
     assert!(
-        matches!(ended.state, JobState::Cancelled { .. }),
-        "the held move still stops: {ended:?}"
+        !home.join("tidepool").exists(),
+        "nothing is made while it waits"
     );
-    assert!(origin.is_dir(), "nothing was moved: {origin:?}");
+
+    assert!(engine.controller.job_stop(held.id.clone()).await.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !home.join("tidepool").is_dir() {
+        assert!(
+            Instant::now() < deadline,
+            "the New Project was never made: {:?}",
+            shell.ctx.store.intake
+        );
+        super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
+        pump(&mut shell, &mut connection).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        origin.is_dir(),
+        "the stopped move moved nothing: {origin:?}"
+    );
 }
 
 /// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start

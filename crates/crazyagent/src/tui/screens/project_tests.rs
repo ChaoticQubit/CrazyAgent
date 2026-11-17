@@ -4525,7 +4525,7 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     );
     assert!(!screen.confirm_move);
 
-    screen.job_refused("move_project_busy", None);
+    screen.job_refused("move_project_busy");
     assert!(
         screen
             .problem
@@ -4534,42 +4534,23 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.job_refused("move_project_already_home", None);
+    screen.job_refused("move_project_already_home");
     assert_eq!(
         screen.problem.as_deref(),
         Some("This project is already in your projects folder.")
     );
-    screen.job_refused("job_busy", None);
+    screen.job_refused("job_busy");
     assert_eq!(
         screen.problem.as_deref(),
-        Some("Another job is running. Wait for it to finish on Home.")
+        Some("Several folders are already waiting. Wait for one to finish on Home.")
     );
-    let adding = crate::projects_home::job::JobView {
-        id: crate::protocol::RequestId::new("add-1").unwrap(),
-        kind: crate::projects_home::job::JobKind::Add,
-        project_id: None,
-        source: "/Users/mira/Code/shop".into(),
-        mode: crate::projects_home::AddMode::Copy,
-        overrides: Vec::new(),
-        stopping: false,
-        state: crate::projects_home::job::JobState::Copying {
-            copied: 3,
-            checked: 0,
-        },
-    };
-    screen.job_refused("job_busy", Some(&adding));
-    assert_eq!(
-        screen.problem.as_deref(),
-        Some("Adding shop is running. Wait for it to finish on Home."),
-        "a busy refusal names the job that runs"
-    );
-    screen.job_refused("home_add_in_progress", None);
+    screen.job_refused("home_add_in_progress");
     assert_eq!(
         screen.problem.as_deref(),
         Some("A folder is being added to your projects folder. Try again when it finishes."),
         "a move while an add runs says so in plain words"
     );
-    screen.job_refused("home_move_worktrees", None);
+    screen.job_refused("home_move_worktrees");
     assert!(
         screen
             .problem

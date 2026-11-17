@@ -2983,52 +2983,56 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         });
         shell.arrive(intake(
             IntakeQuery::JobStatus,
-            Ok(IntakeView::Job(read_job)),
+            Ok(IntakeView::Jobs(read_job.into_iter().collect())),
         ));
         if home {
             assert_eq!(shell.place(), Some(Place::Home), "{read:?}");
             continue;
         }
         assert_eq!(shell.place(), Some(Place::AddFolder), "{before:?} {read:?}");
-        let rows = render(&mut shell, 80, 40);
-        let refusal = "Another job is running. Wait for it to finish on Home.";
+        let rows = render(&mut shell, 120, 40);
+        let refusal = "Several folders are already waiting. Wait for one to finish on Home.";
         assert!(shows(&rows, refusal), "{rows:#?}");
         assert!(job_asks(&mut shell).is_empty(), "{read:?}");
     }
 }
 
-/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job the read after
-/// it finds running, here another project's move, and the page stays for another try.
+/// DEC-197: a start refused `job_same_folder` is never taken for its own lost reply, though
+/// the read after it finds a job for that folder running: the page says the folder is
+/// already being moved or added, and stays for another try.
 #[test]
-fn a_busy_start_names_the_job_the_read_after_it_finds_running() {
+fn a_start_refused_for_the_same_folder_says_so_though_a_job_for_it_runs() {
     let user = tempfile::tempdir().unwrap();
-    let (mut shell, _typed) = measured(user.path(), AddMode::Copy, 0, None);
+    let (mut shell, typed) = measured(user.path(), AddMode::Copy, 0, None);
     let asks: Vec<_> = intake_jobs(&mut shell)
         .iter()
         .map(IntakeJob::query)
         .filter(|query| matches!(query, IntakeQuery::JobStart { .. }))
         .collect();
     let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
-    shell.arrive(intake(asked, Err("job_busy".into())));
-    assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
-    let running = reading_job(
-        "/Users/mira/Code/reading-list",
-        JobState::Stopping { agents_left: 1 },
+    shell.arrive(intake(asked, Err("job_same_folder".into())));
+    let holding = job_for(
+        &typed,
+        AddMode::Move,
+        JobState::Copying {
+            copied: 1,
+            checked: 0,
+        },
     );
     shell.arrive(intake(
         IntakeQuery::JobStatus,
-        Ok(IntakeView::Job(Some(running))),
+        Ok(IntakeView::Jobs(vec![holding])),
     ));
+    job_asks(&mut shell);
     assert_eq!(shell.place(), Some(Place::AddFolder));
-    let rows = render(&mut shell, 80, 40);
+    let rows = render(&mut shell, 120, 40);
     assert!(
         shows(
             &rows,
-            "Moving reading-list is running. Wait for it to finish on Home."
+            "This folder is already being moved or added. See it on Home."
         ),
         "{rows:#?}"
     );
-    assert!(job_asks(&mut shell).is_empty());
 }
 
 fn shop_job(state: JobState) -> JobView {
@@ -3063,9 +3067,47 @@ fn past_home_reads(shell: &mut Shell) -> Vec<IntakeQuery> {
         .collect()
 }
 
-fn job_read(shell: &mut Shell, job: Option<JobView>) {
-    shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Job(job))));
+fn job_read(shell: &mut Shell, jobs: Vec<JobView>) {
+    shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Jobs(jobs))));
     job_asks(shell);
+}
+
+/// DEC-197: Home lists every intake job as its own card, first and in start order; a
+/// waiting one names the job it waits behind, Enter on the second card stops the second job,
+/// and when that card goes the first job's card is the one picked.
+#[test]
+fn home_lists_every_intake_job_and_enter_on_the_second_card_stops_the_second_job() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let running = shop_job(JobState::Copying {
+        copied: 4,
+        checked: 0,
+    });
+    let waiting = JobView {
+        id: RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..shop_job(JobState::Waiting {
+            behind: "shop".into(),
+        })
+    };
+    job_read(&mut shell, vec![running.clone(), waiting.clone()]);
+    let rows = render(&mut shell, 120, 30);
+    assert!(shows(&rows, "Moving shop: 4 files copied"), "{rows:#?}");
+    assert!(shows(&rows, "Waiting for shop to finish..."), "{rows:#?}");
+    let badge = format!("{} Waiting", shell.ctx.glyphs.status(Status::Active));
+    assert!(shows(&rows, &badge), "{rows:#?}");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let stop = |job: &JobView| IntakeQuery::JobStop { id: job.id.clone() };
+    assert_eq!(job_asks(&mut shell), [stop(&waiting)]);
+
+    job_read(&mut shell, vec![running.clone()]);
+    let rows = render(&mut shell, 120, 30);
+    assert!(!shows(&rows, "garden"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(job_asks(&mut shell), [stop(&running)]);
 }
 
 /// DEC-159 S7: Home lists the engine's intake job first as its own card, even before any
@@ -3128,7 +3170,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
         (
             Tone::Error,
             "Adding the folder did not start again.",
-            "Another job is running. Wait for it to finish on Home."
+            "Several folders are already waiting. Wait for one to finish on Home."
         )
     );
 
@@ -3267,7 +3309,7 @@ fn home_starts_a_failed_project_move_again_by_its_project_and_says_a_refusal_in_
         (
             Tone::Error,
             "Moving the project did not start again.",
-            "Another job is running. Wait for it to finish on Home."
+            "Several folders are already waiting. Wait for one to finish on Home."
         )
     );
 }
