@@ -1270,7 +1270,7 @@ fn open_actor_database(
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
         let started = std::time::Instant::now();
-        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+        if let Some(held @ 1..) = crate::project_setup::removed::hold_left(&connection)? {
             eprintln!(
                 "projects_removed_backfill held={held} ms={}",
                 started.elapsed().as_millis()
@@ -2071,39 +2071,6 @@ fn created_ms() -> i64 {
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
         .unwrap_or(0)
-}
-
-fn snapshot(tx: &Transaction<'_>) -> Result<Outcome, EngineError> {
-    let projects = read_rows(tx, "SELECT body FROM projects ORDER BY id LIMIT 129")?;
-    let tasks = read_rows(tx, "SELECT body FROM tasks ORDER BY id LIMIT 129")?;
-    if projects.len() > 128 || tasks.len() > 128 {
-        return Err(error("state_capacity"));
-    }
-    assert!(projects.len() <= 128);
-    assert!(tasks.len() <= 128);
-    Ok(Outcome::Snapshot { projects, tasks })
-}
-
-fn read_rows<T: serde::de::DeserializeOwned>(
-    tx: &Transaction<'_>,
-    sql: &str,
-) -> Result<Vec<T>, EngineError> {
-    let mut statement = tx.prepare(sql).map_err(error)?;
-    let rows = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(error)?;
-    rows.map(|row| serde_json::from_str(&row.map_err(error)?).map_err(error))
-        .collect()
-}
-
-fn enforce_snapshot_bound(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    let snapshot = snapshot(tx)?;
-    let bytes = serde_json::to_vec(&snapshot).map_err(error)?;
-    if bytes.len() > FRAME_BYTES_MAX - 1024 {
-        return Err(error("state_capacity"));
-    }
-    assert!(bytes.len() <= FRAME_BYTES_MAX - 1024);
-    Ok(())
 }
 
 pub(crate) fn task_context(
@@ -2945,6 +2912,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                unavailable: crate::sandbox::hidden_paths::UNAVAILABLE,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())
@@ -3917,3 +3885,8 @@ fallback_allowed = false
         }
     }
 }
+
+/// The owner's snapshot of the stored projects and tasks, and the check that it fits in one
+/// frame.
+mod state_snapshot;
+use state_snapshot::{enforce_snapshot_bound, snapshot};

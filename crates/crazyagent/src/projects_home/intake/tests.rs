@@ -112,6 +112,84 @@ fn a_move_keeps_a_source_file_rewritten_with_the_same_size_and_modify_time() {
     assert_eq!(fs::read_to_string(landed.join("a.txt")).unwrap(), "a\n");
 }
 
+/// V243-INODE-STAMPS: a source file rewritten in place after the check, with its old size
+/// and a modify time older than [`STAMP_SETTLE`] put back, keeps the device, inode, size and
+/// modify time the check saw, and only its change time tells it apart: the move keeps it.
+/// Every link of an old hard-linked file still goes, its bytes equal to the landed copy,
+/// though deleting the first link moves the change time of the others.
+#[test]
+fn a_move_keeps_an_old_source_file_rewritten_in_place_with_its_size_and_modify_time() {
+    use std::os::unix::fs::MetadataExt;
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let source = base.join("source");
+    fs::create_dir_all(source.join("sub")).unwrap();
+    fs::write(source.join("a.txt"), "a\n").unwrap();
+    fs::write(source.join("sub/linked"), "binary\n").unwrap();
+    fs::hard_link(source.join("sub/linked"), source.join("linked")).unwrap();
+    let long_ago = SystemTime::now() - Duration::from_secs(3600);
+    for name in ["a.txt", "sub/linked"] {
+        set_modified(&source.join(name), long_ago);
+    }
+    let landed = base.join("landed");
+    let verified = copy_into(
+        &source,
+        &landed,
+        Copying::Exact,
+        COPY_BOUNDS,
+        &Tally::default(),
+    )
+    .unwrap();
+
+    let file = source.join("a.txt");
+    let checked = fs::symlink_metadata(&file).unwrap();
+    let mut rewritten = checked.clone();
+    for _ in 0..1000 {
+        fs::write(&file, "A\n").unwrap();
+        set_modified(&file, long_ago);
+        rewritten = fs::symlink_metadata(&file).unwrap();
+        if (rewritten.ctime(), rewritten.ctime_nsec()) != (checked.ctime(), checked.ctime_nsec()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        (
+            rewritten.dev(),
+            rewritten.ino(),
+            rewritten.len(),
+            rewritten.modified().unwrap()
+        ),
+        (
+            checked.dev(),
+            checked.ino(),
+            checked.len(),
+            checked.modified().unwrap()
+        ),
+        "the rewrite kept the device, inode, size and modify time"
+    );
+    assert_ne!(
+        (rewritten.ctime(), rewritten.ctime_nsec()),
+        (checked.ctime(), checked.ctime_nsec()),
+        "the rewrite moved the change time"
+    );
+
+    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS);
+    assert_eq!(
+        fs::read_to_string(&file).ok().as_deref(),
+        Some("A\n"),
+        "a file rewritten in place under its old size and modify time is kept"
+    );
+    for gone in ["sub/linked", "linked"] {
+        assert!(
+            fs::symlink_metadata(source.join(gone)).is_err(),
+            "{gone}: every link of an old hard-linked file goes by its bytes"
+        );
+    }
+    assert_eq!(left.unwrap_err().0, "home_move_source_left");
+    assert_eq!(fs::read_to_string(landed.join("a.txt")).unwrap(), "a\n");
+}
+
 #[test]
 fn a_move_removes_every_hard_link_of_a_file_it_checked() {
     let root = tempfile::tempdir().unwrap();

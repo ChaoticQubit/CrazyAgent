@@ -5518,7 +5518,7 @@ mod windows_path_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
     use crate::sandbox::elf::tests::executable;

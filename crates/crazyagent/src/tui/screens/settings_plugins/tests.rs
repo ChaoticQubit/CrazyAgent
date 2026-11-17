@@ -1,4 +1,4 @@
-use super::import_page::outcome_line;
+use super::command_line::{command_spec, words};
 use super::skill_detail::{file_size, skill_body};
 use super::*;
 use crate::plugins::{Scope, SecretView};
@@ -48,6 +48,18 @@ fn server(name: &str, spec: ServerSpec, status: ServerStatus) -> ServerView {
         version: 2,
     }
 }
+
+/// A uvx path the server check accepts on this system: a drive path on Windows.
+#[cfg(unix)]
+const UVX: &str = "/opt/homebrew/bin/uvx";
+#[cfg(not(unix))]
+const UVX: &str = r"C:\Users\owner\.local\bin\uvx.exe";
+
+/// An npx path the server check accepts on this system: a drive path on Windows.
+#[cfg(unix)]
+const NPX: &str = "/opt/homebrew/bin/npx";
+#[cfg(not(unix))]
+const NPX: &str = r"C:\Program Files\nodejs\npx.cmd";
 
 fn stdio(command: &str, args: &[&str]) -> ServerSpec {
     ServerSpec::Stdio {
@@ -433,11 +445,8 @@ fn the_server_form_checks_locally_and_hides_secret_values() {
 #[test]
 fn local_checks_and_short_lines() {
     assert_eq!(
-        command_spec("/opt/homebrew/bin/uvx mcp-server-postgres --read-only"),
-        Ok(stdio(
-            "/opt/homebrew/bin/uvx",
-            &["mcp-server-postgres", "--read-only"]
-        ))
+        command_spec(&format!("{UVX} mcp-server-postgres --read-only")),
+        Ok(stdio(UVX, &["mcp-server-postgres", "--read-only"]))
     );
     assert_eq!(command_spec("uvx mcp"), Err(COMMAND_HINT));
     assert_eq!(
@@ -751,125 +760,6 @@ fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
 }
 
 #[test]
-fn a_command_line_reads_back_as_the_same_command() {
-    let spec = stdio(
-        "/opt/homebrew/bin/uvx",
-        &["mcp-server-postgres", "--name", "it's here", ""],
-    );
-    assert_eq!(command_spec(&spec.runs()), Ok(spec));
-    assert_eq!(
-        words(r"a 'b c'd e\ f"),
-        Ok(vec!["a".to_owned(), "b cd".to_owned(), "e f".to_owned()])
-    );
-    assert_eq!(words("a 'b"), Err("A quote is not closed."));
-    assert_eq!(words("a \\"), Err("A backslash ends the line."));
-    assert_eq!(words("  "), Ok(Vec::new()));
-}
-
-#[test]
-fn an_unchanged_server_line_writes_nothing_and_an_added_word_keeps_the_rest_exact() {
-    let specs = [
-        stdio("/opt/My Tools/uvx", &["mcp-server-x"]),
-        stdio(
-            "/usr/bin/grep",
-            &[r"--pattern=\d+", "it's", "a b", "", r"C:\path", "'", r"\"],
-        ),
-        stdio(
-            "/opt/homebrew/bin/npx",
-            &["@modelcontextprotocol/server-github"],
-        ),
-    ];
-    for spec in specs {
-        let line = spec.runs();
-        assert_eq!(command_spec(&line), Ok(spec.clone()), "{line}");
-        let mut ctx = plugin_ctx(80, 24);
-        let mut screen = EditServer::new(server("odd", spec.clone(), ServerStatus::Approved));
-        screen.key(&Key::Enter, &mut ctx);
-        assert_eq!(ctx.queued(), 0, "no write for an unchanged {line}");
-        assert_eq!(ctx.message().unwrap().lead, "Nothing changed.");
-        assert_eq!(screen.target.error, None, "{line}");
-        for character in " --read-only".chars() {
-            screen.key(&Key::Char(character), &mut ctx);
-        }
-        screen.key(&Key::Enter, &mut ctx);
-        let ServerSpec::Stdio { command, mut args } = spec else {
-            panic!("stdio spec expected");
-        };
-        args.push("--read-only".into());
-        let wanted = ServerSpec::Stdio { command, args };
-        match ctx.next_request() {
-            Some(Request::Settings(job)) => match *job {
-                SettingsJob::Plugin(PluginChange::Update { spec, .. }) => {
-                    assert_eq!(spec, wanted, "{line}");
-                }
-                other => panic!("update expected, got {other:?}"),
-            },
-            other => panic!("settings request expected for {line}, got {other:?}"),
-        }
-    }
-}
-
-#[test]
-fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
-    let mut ctx = plugin_ctx(80, 24);
-    let mut screen = EditServer::new(github_with_token());
-    assert!(screen.typing(), "the page opens on the command");
-    screen.key(&Key::Enter, &mut ctx);
-    assert_eq!(ctx.queued(), 0);
-    assert_eq!(ctx.message().unwrap().lead, "Nothing changed.");
-    screen.key(&Key::Char(' '), &mut ctx);
-    for character in "--read-only".chars() {
-        screen.key(&Key::Char(character), &mut ctx);
-    }
-    screen.key(&Key::Enter, &mut ctx);
-    let wanted = stdio(
-        "/opt/homebrew/bin/npx",
-        &["@modelcontextprotocol/server-github", "--read-only"],
-    );
-    match ctx.next_request() {
-        Some(Request::Settings(job)) => match *job {
-            SettingsJob::Plugin(PluginChange::Update { id, spec, version }) => {
-                assert_eq!(id, "server-github");
-                assert_eq!(spec, wanted);
-                assert_eq!(version, 2, "the edit names the version the list showed");
-            }
-            other => panic!("update expected, got {other:?}"),
-        },
-        other => panic!("settings request expected, got {other:?}"),
-    }
-    assert!(screen.busy(&ctx));
-    let mut updated = github_with_token();
-    updated.runs = wanted.runs();
-    updated.spec = wanted;
-    updated.status = ServerStatus::WaitingForApproval;
-    screen.arrive(&changed(Some(updated)), &mut ctx);
-    assert_eq!(
-        ctx.message().unwrap().lead,
-        "Changed github. Approve it before agents can use it."
-    );
-    let (lines, _) = screen.body(76, &ctx);
-    let first: String = lines[0]
-        .spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect();
-    assert!(first.contains("Needs approval"), "{first}");
-}
-
-#[test]
-fn a_command_without_a_full_path_is_refused_on_the_edit_page() {
-    let mut ctx = plugin_ctx(80, 24);
-    let mut screen = EditServer::new(github_with_token());
-    screen.key(&Key::Ctrl('u'), &mut ctx);
-    for character in "npx server".chars() {
-        screen.key(&Key::Char(character), &mut ctx);
-    }
-    screen.key(&Key::Enter, &mut ctx);
-    assert_eq!(ctx.queued(), 0);
-    assert_eq!(screen.target.error.as_deref(), Some(COMMAND_HINT));
-}
-
-#[test]
 fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
     let tidepool = crate::protocol::ProjectId::new("tidepool").unwrap();
     let back = |flow: Flow| match flow {
@@ -923,7 +813,7 @@ fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
     }
     form.key(&Key::Tab, &mut ctx);
     form.key(&Key::Tab, &mut ctx);
-    for character in "/opt/homebrew/bin/uvx mcp-server-postgres".chars() {
+    for character in format!("{UVX} mcp-server-postgres").chars() {
         form.key(&Key::Char(character), &mut ctx);
     }
     form.key(&Key::Enter, &mut ctx);
@@ -1548,7 +1438,7 @@ fn the_import_page_scrolls_and_says_why_the_scan_failed() {
     };
     assert_eq!(back.crumbs(), ["Settings", "Plugins and skills"]);
     assert_eq!(
-        outcome_line("notes", &Err("skill_link_outside".into())),
+        super::import_page::outcome_line("notes", &Err("skill_link_outside".into())),
         format!(
             "Could not import notes: {}",
             plugin_plain("skill_link_outside")
@@ -1945,3 +1835,8 @@ fn space_on_a_plugin_row_sets_every_hook_and_on_an_event_row_sets_that_hook() {
         other => panic!("change expected, got {other:?}"),
     }
 }
+
+/// The server command line rows: a typed command reads back as the same command, the
+/// Windows hint example reads as written, an unchanged line writes nothing, a changed
+/// command asks for approval, and one without a full path is refused. Output: none.
+mod command_line;

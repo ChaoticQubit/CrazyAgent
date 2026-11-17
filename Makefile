@@ -60,12 +60,12 @@ test-sleeps-script:
 	node --test scripts/quality/sleeps.test.mjs
 
 test-node:
-	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TESTS)
+	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TEST_ARGS) $(NODE_TESTS)
 
 test-bun:
 	@test -n "$(BUN)" || { echo 'test-bun: unavailable: bun is not on PATH; set BUN=/path/to/bun' >&2; exit 2; }
 	@test -d "$(CURDIR)/.local-state/tools/rcli-source/node_modules" || { echo 'test-bun: unavailable: .local-state/tools/rcli-source is not the pinned Backboard-R-CLI checkout with installed node_modules' >&2; exit 2; }
-	"$(BUN)" test $(BUN_TESTS)
+	"$(BUN)" test $(BUN_TEST_ARGS) $(BUN_TESTS)
 
 build: desktop-dist
 	cargo build --workspace --locked --offline

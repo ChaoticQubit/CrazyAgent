@@ -12,6 +12,19 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
     (folder, real)
 }
 
+/// A scratch folder no other user can change, its real path, for rows that need a folder
+/// kept: the probe drops every folder others can change (`probe.rs:659`), and [`scratch`]
+/// sits in the shared `/tmp` on Linux. Output: the folder and its real path.
+fn private_scratch() -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::Builder::new()
+        .prefix("tools-probe-")
+        .tempdir_in(crate::harnesses::finding::private_root())
+        .unwrap();
+    let real = folder.path().canonicalize().unwrap();
+    assert_eq!(crate::service::changeable_by_others(&real), None);
+    (folder, real)
+}
+
 /// Writes an executable file with the given text, its folders made first.
 fn program(file: &Path, text: &str) -> PathBuf {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -102,7 +115,7 @@ fn a_login_shell_run_gives_the_path_its_startup_files_set_and_a_hang_gives_none(
 
 #[test]
 fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_folders() {
-    let (_folder, home) = scratch();
+    let (_folder, home) = private_scratch();
     let tools = home.join("tools");
     let project = home.join("projects/app");
     let shared = home.join("shared");
@@ -168,7 +181,7 @@ fn the_npm_prefix_bin_comes_from_the_found_npm_asked_with_a_cleared_environment(
 
 #[test]
 fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders() {
-    let (_folder, home) = scratch();
+    let (_folder, home) = private_scratch();
     let tools = home.join("tools");
     let other = home.join("other");
     let global = home.join("global/bin");

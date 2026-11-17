@@ -5,12 +5,18 @@ const QUIT: &str = "Folder access\r\n/some/folder\r\n\r\nConfig, hooks, and exec
 const BACK: &str = "Folder access\r\n/some/folder\r\n\r\n\u{203a} 1. Open restricted\r\n  2. Back to Agent Command Center\r\n\r\nenter continue \u{b7} esc back\r\n";
 const EXISTING: &str = "Folder access\r\n/some/folder\r\n\r\nThis existing task may retain settings and history.\r\n\r\n\u{203a} 1. Open existing task\r\n  2. Back to Agent Command Center\r\n\r\nenter continue \u{b7} esc back\r\n";
 
+/// A scratch folder for one row: under /tmp on Unix and the user's temp folder on Windows.
+/// Output: the folder's guard and its plain canonical path, a drive path on Windows.
 fn scratch() -> (tempfile::TempDir, PathBuf) {
+    #[cfg(unix)]
+    let parent = std::fs::canonicalize("/tmp").unwrap();
+    #[cfg(not(unix))]
+    let parent = std::env::temp_dir();
     let root = tempfile::Builder::new()
         .prefix("ca-codex-folder-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .tempdir_in(parent)
         .unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = crate::sandbox::canonical(root.path()).unwrap();
     (root, base)
 }
 
@@ -22,7 +28,10 @@ fn folder(path: &Path) -> &Path {
 fn line(folders: &[&Path], level: &str) -> String {
     let parts: Vec<String> = folders
         .iter()
-        .map(|folder| format!("\"{}\"={{trust_level=\"{level}\"}}", folder.display()))
+        .map(|folder| {
+            let name = serde_json::to_string(folder.to_str().unwrap()).unwrap();
+            format!("{name}={{trust_level=\"{level}\"}}")
+        })
         .collect();
     format!("projects={{{}}}", parts.join(","))
 }
@@ -63,7 +72,10 @@ fn with_no_git_the_walk_reaches_the_root() {
     folder(&cwd);
     let folders = project_folders(&cwd);
     assert_eq!(folders.first(), Some(&cwd.as_path()));
-    assert_eq!(folders.last(), Some(&Path::new("/")));
+    assert!(
+        folders.last().is_some_and(|last| last.parent().is_none()),
+        "{folders:?}"
+    );
     assert!(folders.contains(&base.as_path()));
 }
 
@@ -140,9 +152,12 @@ fn only_an_untrusted_setting_puts_a_launch_behind_the_screen() {
     folder(&repo.join(".git"));
     assert!(!behind_a_screen(&args(terminal_entry(&repo).unwrap())));
     assert!(behind_a_screen(&args(untrusted(&repo).unwrap())));
-    let forged = base.join("x={trust_level=\"untrusted\"}}");
-    folder(&forged.join(".git"));
-    assert!(!behind_a_screen(&args(terminal_entry(&forged).unwrap())));
+    #[cfg(unix)]
+    {
+        let forged = base.join("x={trust_level=\"untrusted\"}}");
+        folder(&forged.join(".git"));
+        assert!(!behind_a_screen(&args(terminal_entry(&forged).unwrap())));
+    }
     assert!(!behind_a_screen(&[untrusted(&repo).unwrap()]));
     assert!(!behind_a_screen(&args("model=\"x\"".to_owned())));
 }

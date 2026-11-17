@@ -162,6 +162,14 @@ pub const CODEX_HOOKS_UNTRUSTED: &str = "Codex does not trust CrazyAgent's hooks
 /// What a Codex agent's Messages timeline shows when the engine cannot ask its app-server
 /// about the pinned hooks in time: another Codex release, another system, or no answer.
 pub const CODEX_HOOKS_UNCHECKED: &str = "CrazyAgent could not confirm that Codex trusts its hooks for this agent, so Block and Wait may not hold its edits and your hooks may not run for it.";
+/// What a Codex agent's Messages timeline shows when its launch left no list of the hooks it
+/// pinned, as for an agent an earlier CrazyAgent started: the engine asks Codex about no
+/// hook it could not read and takes none as trusted (SECRET-PARSE-COPIES R2).
+pub const CODEX_HOOKS_UNLISTED: &str = "This Codex agent has no list of the hooks it started with, as an agent started before this update has none, so CrazyAgent cannot confirm that Codex trusts them: Block and Wait may not hold its edits and your hooks may not run for it until the agent restarts.";
+/// What a Codex agent's Messages timeline shows when its launch's list of pinned hooks is
+/// there but cannot be read: a link in its place, too large, or not a list of keys. The
+/// engine asks Codex about none of them and takes none as trusted (#166 N0).
+pub const CODEX_HOOKS_LIST_UNREADABLE: &str = "CrazyAgent cannot read the list of hooks this Codex agent started with, since it was replaced or damaged, so it cannot confirm that Codex trusts them: Block and Wait may not hold its edits and your hooks may not run for it until the agent restarts.";
 /// The short form of BARE_NO_HOOKS and RCLI_NO_HOOKS a terminal Hooks heading has room
 /// for: which agents run none of the owner's hooks.
 pub const HOOKS_NONE_SHORT: &str = "Claude Code on a key or URL and RCLI run none";

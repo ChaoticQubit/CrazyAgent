@@ -1046,29 +1046,24 @@ fn engine_worktree_git_runs_no_repository_signature_program_in_any_armor() {
     }
 }
 
-/// Runs [`restarted_at`] for a lease of `/repository`, a folder that does not exist, so
-/// its volume never reads as renumbered. Inputs: the state and the answers. Output: the
-/// state stored after the start and how many checks ran.
+/// Runs [`restarted_with`] for a pinned lease stored at `state`. Inputs: the state and
+/// the answers. Output: the state stored after the start and how many checks ran.
 fn restarted(state: LeaseState, answers: &[Result<(), &str>]) -> (LeaseState, usize) {
-    restarted_at("/repository", state, answers)
+    restarted_with(|record| record.lease.state = state, answers)
 }
 
-/// Stores one lease of `repository` at `state` with both worktree identities pinned in a
-/// fresh lease table, then runs one engine start's reconcile with a lease check that
-/// gives `answers` in turn, the last one again once they run out. Inputs: the
-/// repository, the state and the answers. Output: the state stored and the check count.
-fn restarted_at(
-    repository: &str,
-    state: LeaseState,
+/// Stores one lease, with both worktree identities pinned and then changed by `change`,
+/// in a fresh lease table, then runs one engine start's reconcile with a lease check that
+/// gives `answers` in turn, the last one again once they run out. Inputs: the change and
+/// the answers. Output: the state stored after the start and how many checks ran.
+fn restarted_with(
+    change: impl FnOnce(&mut LeaseRecord),
     answers: &[Result<(), &str>],
 ) -> (LeaseState, usize) {
     assert!(!answers.is_empty());
     let connection = Connection::open_in_memory().unwrap();
     initialize(&connection).unwrap();
     let mut record = reserved_record();
-    record.lease.repository = repository.into();
-    record.admission.repository = repository.into();
-    record.lease.state = state;
     record.directory = Some(Identity {
         device: 1,
         inode: 4,
@@ -1077,6 +1072,7 @@ fn restarted_at(
         device: 1,
         inode: 5,
     });
+    change(&mut record);
     let inserted = connection
         .execute(
             "INSERT INTO worktree_leases VALUES (?1, ?2, ?3, ?4)",
@@ -1133,8 +1129,8 @@ fn a_lease_check_that_failed_on_a_read_at_start_is_tried_once_more() {
 }
 
 /// ENGINE-START-LEASE-DEMOTE guard: a lease that verifies at start waits for recovery; one
-/// that broke a rule is Uncertain after one check; a Reserved lease and an Uncertain one
-/// on an unrenumbered volume are Uncertain without a check.
+/// that broke a rule is Uncertain after one check; a Reserved lease is Uncertain without
+/// a check.
 #[test]
 fn a_lease_at_start_is_uncertain_on_a_rule_and_waits_for_recovery_when_it_verifies() {
     assert_eq!(
@@ -1152,26 +1148,38 @@ fn a_lease_at_start_is_uncertain_on_a_rule_and_waits_for_recovery_when_it_verifi
             "{rule}"
         );
     }
-    let volume = tempfile::tempdir().unwrap();
-    let moved = std::fs::canonicalize(volume.path()).unwrap();
-    assert_ne!(
-        identity(&moved, true).unwrap().device,
-        reserved_record().admission.root.device
-    );
     assert_eq!(
-        restarted_at(
-            moved.to_str().unwrap(),
-            LeaseState::Uncertain,
-            &[Err("git_deadline")]
-        ),
-        (LeaseState::Uncertain, 1),
-        "an Uncertain lease checked after a renumber stays Uncertain when its check times out"
+        restarted(LeaseState::Reserved, &[Ok(())]),
+        (LeaseState::Uncertain, 0)
     );
-    for state in [LeaseState::Reserved, LeaseState::Uncertain] {
+}
+
+/// LEASE-LEGACY-UNCERTAIN: every Uncertain lease with both worktree identities pinned is
+/// checked again at each engine start, renumbered volume or not, and waits for recovery
+/// once its check passes; a check that times out leaves it Uncertain, and a lease whose
+/// checkout never pinned its folder is not checked at all.
+#[test]
+fn a_pinned_uncertain_lease_is_checked_again_at_each_start() {
+    assert_eq!(
+        restarted(LeaseState::Uncertain, &[Ok(())]),
+        (LeaseState::RecoveryRequired, 1)
+    );
+    for failure in ["git_deadline", "worktree_content_differs_from_index"] {
         assert_eq!(
-            restarted(state.clone(), &[Err("git_deadline")]),
-            (LeaseState::Uncertain, 0),
-            "{state:?}"
+            restarted(LeaseState::Uncertain, &[Err(failure)]),
+            (LeaseState::Uncertain, 1),
+            "{failure}"
         );
     }
+    assert_eq!(
+        restarted_with(
+            |record| {
+                record.lease.state = LeaseState::Uncertain;
+                record.directory = None;
+                record.metadata = None;
+            },
+            &[Ok(())]
+        ),
+        (LeaseState::Uncertain, 0)
+    );
 }

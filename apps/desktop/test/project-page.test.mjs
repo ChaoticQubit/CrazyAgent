@@ -11,7 +11,7 @@ const api = await import("../src/api-projects.ts");
 const job = (status, extra = {}) => ({
   id: 1, project_id: "p", kind: "market_research", kind_label: "Market research", status, status_label: "", report_path: "context/research/market_research.md",
   harness: "codex", tools: true, attempts: 0, claimer: null, error: null, cancel_requested: false, output_bytes: 0,
-  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, ...extra,
+  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, retryable: status === "failed" || status === "cancelled", ...extra,
 });
 
 test("elapsed time reads in seconds, minutes and hours", () => {
