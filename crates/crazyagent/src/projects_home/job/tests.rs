@@ -576,7 +576,7 @@ fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
         assert_eq!(view.id.as_str(), format!("{at:0>128}"));
         assert_eq!(view.source, source, "a source is never cut");
         let bytes = serde_json::to_vec(view).unwrap().len();
-        assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+        assert!(bytes <= JOB_VIEW_NAMELESS_BYTES_MAX, "{bytes} bytes");
     }
     assert_eq!(
         listed[8].state,
@@ -616,7 +616,7 @@ fn a_delete_name_past_the_bound_shows_as_a_label_within_it() {
     assert!(view.source.starts_with("Old notes "), "{}", view.source);
     assert!(view.source.len() <= PATH_BYTES_MAX);
     let bytes = serde_json::to_vec(&view).unwrap().len();
-    assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+    assert!(bytes <= JOB_VIEW_NAMELESS_BYTES_MAX, "{bytes} bytes");
 }
 
 /// Rebuildable folders a download left, each named by 256 bytes JSON writes at six bytes each,
@@ -669,6 +669,10 @@ fn a_status_list_of_every_held_job_naming_its_left_folders_fits_one_frame() {
             (5, Some(5)),
             "a folder no longer named is counted"
         );
+        if view.left.is_empty() {
+            let bytes = serde_json::to_vec(view).unwrap().len();
+            assert!(bytes <= JOB_VIEW_NAMELESS_BYTES_MAX, "{bytes} bytes");
+        }
     }
     if let Some(first) = views.iter().position(|view| !view.left.is_empty()) {
         assert!(
