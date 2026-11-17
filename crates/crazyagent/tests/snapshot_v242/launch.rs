@@ -283,6 +283,7 @@ pub(super) fn without_target(text: &str, target: &str) -> String {
 pub(super) struct Team {
     pub(super) engine: Engine,
     pub(super) project: ProjectId,
+    access: AgentAccess,
     target: String,
     projects: PathBuf,
     tmux: PathBuf,
@@ -515,6 +516,7 @@ impl Team {
         Ok(Self {
             engine,
             project,
+            access,
             target,
             projects: projects_home,
             tmux,
@@ -600,7 +602,7 @@ impl Team {
 
     /// Captures one launch: the arguments and variable names the stand-in was started
     /// with, the files in the agent's own home and the Seatbelt profile the engine
-    /// installed for it (none when it installed none), with the cargo target folder read as
+    /// installed for it (none only at full access, see [`profile_may_be_missing`]), with the cargo target folder read as
     /// [`TARGET_TOKEN`], the rules naming this Mac's own tool installs taken out and stable
     /// facts in their place, facts about its loopback remotes, and the engine root,
     /// projects home and agent home the masked paths in it stand for.
@@ -629,6 +631,7 @@ impl Team {
             let network = loopback_facts(&text, self.recorder.port);
             (Some(text), facts, network)
         } else {
+            profile_may_be_missing(self.access)?;
             (None, Value::Null, Value::Null)
         };
         let canonical = |folder: &Path| {
@@ -753,8 +756,12 @@ pub(super) fn sdkroot_fact(
 /// level the engine starts without one, so a wrong profile path or a sandboxed launch that
 /// installed none is never written as a golden. Input: the level. Output: nothing, or why.
 pub(super) fn profile_may_be_missing(access: AgentAccess) -> Result<(), String> {
-    let _ = access;
-    Ok(())
+    match access {
+        AgentAccess::Full => Ok(()),
+        AgentAccess::Sandboxed | AgentAccess::OwnBranch => Err(format!(
+            "the {access:?} launch installed no Seatbelt profile; only a full-access launch is captured without one"
+        )),
+    }
 }
 
 /// Spells a folder as the engine's Seatbelt regex rules do, every regex character escaped,
