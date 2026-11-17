@@ -2526,13 +2526,11 @@ impl ProjectSandbox {
             .collect();
         let prefix = format!("^{}/(.*/)?", seatbelt_pattern(root));
         let mut text = String::new();
-        for suffix in ["$", "/"] {
-            for body in regex_bodies(&prefix, &names, suffix) {
-                text.push_str(&format!(
-                    "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
-                    root.display()
-                ));
-            }
+        for body in regex_bodies(&prefix, &names, "(/|$)") {
+            text.push_str(&format!(
+                "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
+                root.display()
+            ));
         }
         text.push_str("(deny file-clone (vnode-type DIRECTORY))\n");
         for folder in self
@@ -3462,10 +3460,7 @@ impl ProjectSandbox {
         }
         text.push_str(")\n");
         assert_eq!(below.len() + entries.len(), 19);
-        assert_eq!(
-            text.matches("(regex #\"^/").count(),
-            2 * below.len() + entries.len()
-        );
+        assert_eq!(text.matches("(regex #\"^/").count(), 19);
         text
     }
 
@@ -3547,7 +3542,7 @@ impl ProjectSandbox {
                 "{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}"
             ))
         );
-        assert_eq!(text.matches("(regex #\"^/").count(), 2);
+        assert_eq!(text.matches("(regex #\"^/").count(), 1);
         text
     }
 
@@ -3614,8 +3609,8 @@ impl ProjectSandbox {
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
         assert!(
             text.matches("(regex #\"^/").count()
-                == 2 * working.len()
-                    + 2 * other.len()
+                == working.len()
+                    + other.len()
                     + usize::from(self.adds_worktrees)
                     + usize::from(self.clone.is_some())
                     + usize::from(self.setup.is_some())
@@ -4116,7 +4111,7 @@ impl Checkout {
         let text = format!(
             "(deny file-write*\n  {held})\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
         );
-        assert!(text.matches("(regex #\"^/").count() == 6);
+        assert!(text.matches("(regex #\"^/").count() == 5);
         assert!(text.contains("(vnode-type SYMLINK)"));
         assert!(text.contains("(deny file-write-mode file-write-flags file-write-acl"));
         assert!(text.contains("(deny file-write-unlink file-write-data file-link"));
@@ -4231,7 +4226,7 @@ fn clone_store_denies(clone: &Path) -> String {
     let text = format!(
         "(deny file-write*\n  (regex #\"^{git}$\")\n  {below}\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
     );
-    assert_eq!(text.matches("(regex #\"^/").count(), 11);
+    assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
     text
 }
@@ -4865,10 +4860,7 @@ fn launch_denies(home: &Path) -> String {
         spelled("  "),
         spelled("      "),
     ));
-    assert_eq!(
-        text.matches("(regex #\"^/").count(),
-        20 + folders.len() + 2 * walked.len()
-    );
+    assert_eq!(text.matches("(regex #\"^/").count(), 20 + 2 * walked.len());
     text
 }
 
@@ -4976,7 +4968,7 @@ fn agent_config_denies(home: &Path) -> String {
     );
     assert_eq!(
         text.matches("(regex #\"^/").count(),
-        2 * AGENT_CONFIG.len() + CONFIG_PARENTS.len() + 2 * kept.len()
+        AGENT_CONFIG.len() + CONFIG_PARENTS.len() + kept.len()
     );
     assert!(!text.contains("(/.*)"));
     text
@@ -5043,14 +5035,15 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filters for a path and everything below it: `^X$` and `^X/` in place of one
+/// The Seatbelt filter for a path and everything below it: one `^X(/|$)` in place of
 /// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
 /// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
-/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). Profiles hold no `(/.*)` but the HFS rule.
-/// Input: the pattern after `^`, an absolute path first. Output: both filters on one line.
+/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). One regex keeps the profile under its cap
+/// for long roots, where an `X$` and `X/` pair did not (V243-PROFILE-CAP-ROW, DEC-195 Q6).
+/// Input: the pattern after `^`, an absolute path first. Output: the filter.
 pub(crate) fn at_or_below(pattern: &str) -> String {
     assert!(pattern.starts_with('/'));
-    format!("(regex #\"^{pattern}$\") (regex #\"^{pattern}/\")")
+    format!("(regex #\"^{pattern}(/|$)\")")
 }
 
 /// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
