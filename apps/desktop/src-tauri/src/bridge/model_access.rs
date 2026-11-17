@@ -6,6 +6,7 @@ use crazyagent::protocol::{CredentialRef, RequestId};
 
 pub(super) struct Selection {
     generation: u64,
+    query: OwnerRead,
     state: OwnerReadReply,
     attempt: Option<RequestId>,
 }
@@ -172,13 +173,12 @@ impl NativeBridge {
             self.model_access_next = None;
             None
         };
-        let state = self
-            .read_model_access(OwnerRead::ModelAccessPage {
-                collection,
-                cursor,
-                limit: PAGE_SIZE,
-            })
-            .await?;
+        let query = OwnerRead::ModelAccessPage {
+            collection,
+            cursor,
+            limit: PAGE_SIZE,
+        };
+        let state = self.read_model_access(query.clone()).await?;
         let OwnerData::ModelAccessPage {
             collection: actual,
             source_hash,
@@ -211,6 +211,7 @@ impl NativeBridge {
         self.model_access_next = next.clone();
         self.model_access = Some(Selection {
             generation: self.generation,
+            query,
             state,
             attempt: None,
         });
@@ -227,12 +228,11 @@ impl NativeBridge {
         self.selected = None;
         self.model_access = None;
         let id = CredentialRef::new(id).map_err(|_| failure("invalid_model_access"))?;
-        let state = self
-            .read_model_access(OwnerRead::ModelAccessRecord {
-                collection,
-                id: id.clone(),
-            })
-            .await?;
+        let query = OwnerRead::ModelAccessRecord {
+            collection,
+            id: id.clone(),
+        };
+        let state = self.read_model_access(query.clone()).await?;
         let OwnerData::ModelAccessRecord {
             source_hash,
             writable,
@@ -260,6 +260,7 @@ impl NativeBridge {
         };
         self.model_access = Some(Selection {
             generation: self.generation,
+            query,
             state,
             attempt,
         });
@@ -374,8 +375,9 @@ impl NativeBridge {
             expected_source_hash: source_hash.clone(),
             edit,
         };
+        let basis = (selected.query.clone(), selected.state.clone());
         self.controller()?
-            .begin_mutation(mutation, generation)
+            .begin_mutation_on(mutation, generation, basis)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.model_access = None;
         self.model_access_next = None;
