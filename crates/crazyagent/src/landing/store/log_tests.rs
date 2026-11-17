@@ -1,7 +1,8 @@
 use super::*;
 use crate::landing_log::{
-    AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, OWNER_EDIT_KEPT, OWNER_EDITS_DROPPED,
-    OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED, WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
+    AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, CHANGE_SET_NUMBERED, OWNER_EDIT_KEPT,
+    OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED,
+    WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
 };
 use crate::state_log::replay::rows;
 use serde_json::json;
@@ -201,4 +202,46 @@ fn a_landing_write_inside_a_caller_transaction_is_refused_and_leaves_nothing() {
     );
     assert!(events(&db).is_empty());
     assert_eq!(revision(&db), before);
+}
+
+/// V250-L9: the numbering pass logs one `ChangeSetNumbered` event per set it numbers, all at
+/// one revision, in the order the sets were made; a pass with nothing to number moves no
+/// revision; the numbers rebuilt from the log equal the live rows.
+#[test]
+fn a_numbering_pass_logs_one_event_per_set_at_one_revision_and_rebuilds() {
+    let (_root, db) = store();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         INSERT INTO projects(id, body) VALUES ('project-1', '{}');",
+    )
+    .unwrap();
+    for (digit, made) in [('b', 2), ('a', 1)] {
+        db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,\
+             worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,\
+             removed,conflicts,created_ms,updated_ms) VALUES (?1,'project-1','sub','agent-1',\
+             'Agent 1','/r','/w','/g','b','h','discarded','succeeded','t','Fix',1,1,0,'[]',?2,?2)",
+            params![digit.to_string().repeat(32), made],
+        )
+        .unwrap();
+    }
+    let before = revision(&db);
+    assert_eq!(number_unnumbered(&db).unwrap(), 2);
+    assert_eq!(revision(&db), before + 1, "one revision for the pass");
+    let logged = events(&db);
+    assert_eq!(logged.len(), 2);
+    assert!(logged.iter().all(|(kind, _)| kind == CHANGE_SET_NUMBERED));
+    let first = json!({"change_set": "a".repeat(32), "project": "project-1", "number": 1});
+    let second = json!({"change_set": "b".repeat(32), "project": "project-1", "number": 2});
+    assert_eq!((&logged[0].1, &logged[1].1), (&first, &second));
+    assert_eq!(number_unnumbered(&db).unwrap(), 0);
+    assert_eq!(
+        revision(&db),
+        before + 1,
+        "nothing to number moves no revision"
+    );
+    let live = rows(&db, "landing_change_set_numbers").unwrap();
+    assert_eq!(live.len(), 2);
+    rebuild(&db).unwrap();
+    assert_eq!(rows(&db, "landing_change_set_numbers").unwrap(), live);
 }
