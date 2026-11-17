@@ -803,6 +803,12 @@ const WORK: &str = r"C:\Users\owner\Work";
 const BIG: &str = "/Volumes/Big/Projects";
 #[cfg(not(unix))]
 const BIG: &str = r"D:\Projects";
+#[cfg(target_os = "windows")]
+const HOME_HINT: &str = r"Use a full folder path, such as C:\Users\you\Projects.";
+#[cfg(target_os = "linux")]
+const HOME_HINT: &str = "Use a full folder path, such as /home/you/Projects.";
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+const HOME_HINT: &str = "Use a full folder path, such as /Users/you/Projects.";
 
 #[test]
 fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
@@ -812,10 +818,7 @@ fn changing_the_home_moves_nothing_unless_move_all_is_chosen() {
     shell.key(Key::Ctrl('u'));
     typed(&mut shell, "Work");
     shell.key(Key::Enter);
-    assert_eq!(
-        lead(&shell),
-        "Use a full folder path, such as /Users/you/Projects."
-    );
+    assert_eq!(lead(&shell), HOME_HINT);
     assert!(jobs(&mut shell).is_empty());
     shell.key(Key::Ctrl('u'));
     typed(&mut shell, WORK);
