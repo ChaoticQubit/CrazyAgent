@@ -200,8 +200,9 @@ async fn config_id(owner: &mut Owner) -> Result<ConfigId, String> {
 
 /// The whole verification path on a project at 2.4.2: a baseline proposed and approved, a
 /// task pinned, a candidate registered, then Verify from the host and from the owner, both
-/// refused as unavailable until the runtime is qualified, the candidate's state, and Accept
-/// refused. Input: the scratch folder. Output: each step's outcome by name.
+/// refused as unavailable until the runtime is qualified, the candidate's state, Accept
+/// refused, and whether the outcomes name the draft's identity and the registered digests,
+/// which the runner masks. Input: the scratch folder. Output: each step's outcome by name.
 fn verify_refused_until_qualified(scratch: &Path) -> Result<Value, String> {
     let engine = engine(scratch)?;
     let socket = engine.socket();
@@ -219,6 +220,7 @@ async fn verify_steps(owner: &mut Owner, scratch: &Path, socket: &Path) -> Resul
     let config_id = config_id(owner).await?;
     let draft = draft()?;
     let baseline_id: BaselineId = draft.identity().map_err(|error| error.0)?;
+    let identity = baseline_id.as_str().to_owned();
     let candidate = typed("candidate", RequestId::new)?;
     let task_id = typed("task", TaskId::new)?;
     let mut wire = Wire::new(socket)?;
@@ -284,6 +286,16 @@ async fn verify_steps(owner: &mut Owner, scratch: &Path, socket: &Path) -> Resul
         attempt_id: typed("attempt", RequestId::new)?,
     });
     steps.insert("8-accept".into(), wire.call(accept).await?);
+    let text = Value::Object(steps.clone()).to_string();
+    let registered = snapshot();
+    steps.insert(
+        "9-facts".into(),
+        json!({
+            "names_draft_identity": text.contains(&identity),
+            "names_registered_head": text.contains(&registered.head_digest),
+            "names_registered_target": text.contains(&registered.target_digest),
+        }),
+    );
     Ok(Value::Object(steps))
 }
 
@@ -407,8 +419,9 @@ fn qualification(scratch: &Path, arguments: &[&str]) -> Result<Value, String> {
     }))
 }
 
-/// The report the engine writes without native or provider runs. Input: the scratch
-/// folder. Output: the command's result.
+/// The report the engine writes without native or provider runs, and whether it names the
+/// source revision given, which the runner masks. Input: the scratch folder.
+/// Output: the command's result.
 fn qualification_report(scratch: &Path) -> Result<Value, String> {
     let arguments = [
         "report",
@@ -417,7 +430,12 @@ fn qualification_report(scratch: &Path) -> Result<Value, String> {
         "--profile-id",
         PROFILE,
     ];
-    qualification(scratch, &arguments)
+    let mut ran = qualification(scratch, &arguments)?;
+    let names_source = ran["stdout"]
+        .as_str()
+        .is_some_and(|text| text.contains(SOURCE));
+    ran["names_source"] = json!(names_source);
+    Ok(ran)
 }
 
 /// Writes the engine's own report and an empty evidence folder for the admit scenarios.
@@ -433,7 +451,8 @@ fn report_files(scratch: &Path) -> Result<(String, String), String> {
 }
 
 /// Admits the engine's own report for one required capability with the given source and
-/// profile. Inputs: the scratch folder, the source revision and the profile.
+/// profile, and records whether each is the report's, since the runner masks the source.
+/// Inputs: the scratch folder, the source revision and the profile.
 /// Output: the command's result.
 fn admit(scratch: &Path, source: &str, profile: &str) -> Result<Value, String> {
     let (report, evidence) = report_files(scratch)?;
@@ -450,7 +469,10 @@ fn admit(scratch: &Path, source: &str, profile: &str) -> Result<Value, String> {
         "--require",
         "confinement",
     ];
-    qualification(scratch, &arguments)
+    let mut ran = qualification(scratch, &arguments)?;
+    ran["source_is_reports"] = json!(source == SOURCE);
+    ran["profile_is_reports"] = json!(profile == PROFILE);
+    Ok(ran)
 }
 
 /// Admission of the engine's own report, where no capability is proven.
