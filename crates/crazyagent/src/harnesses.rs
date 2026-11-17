@@ -270,10 +270,14 @@ impl Search {
         };
         let mut folders = self.set_aside_holding(spec);
         for folder in self.places(spec) {
-            let leads = spec.binaries.iter().any(|binary| {
-                let file = folder.join(binary);
-                executable_file(&file) && self.links_into_temp(&file)
-            });
+            let leads = spec
+                .binaries
+                .iter()
+                .flat_map(|binary| crate::paths::executable_names(binary))
+                .any(|name| {
+                    let file = folder.join(name);
+                    executable_file(&file) && self.links_into_temp(&file)
+                });
             if leads && !folders.contains(&folder) {
                 folders.push(folder);
             }
@@ -298,7 +302,8 @@ impl Search {
             .filter(|folder| {
                 spec.binaries
                     .iter()
-                    .any(|binary| executable_file(&folder.join(binary)))
+                    .flat_map(|binary| crate::paths::executable_names(binary))
+                    .any(|name| executable_file(&folder.join(name)))
             })
             .cloned()
             .collect()
@@ -451,18 +456,20 @@ impl Search {
         for binary in spec.binaries {
             assert!(!binary.contains('/'));
             for directory in &directories {
-                let candidate = directory.join(binary);
-                if found.contains(&candidate)
-                    || !executable_file(&candidate)
-                    || self.links_into_temp(&candidate)
-                    || (!shims && is_shim(self.home(), &candidate))
-                {
-                    continue;
-                }
-                assert!(candidate.is_absolute());
-                found.push(candidate);
-                if found.len() == limit {
-                    return found;
+                for name in crate::paths::executable_names(binary) {
+                    let candidate = directory.join(name);
+                    if found.contains(&candidate)
+                        || !executable_file(&candidate)
+                        || self.links_into_temp(&candidate)
+                        || (!shims && is_shim(self.home(), &candidate))
+                    {
+                        continue;
+                    }
+                    assert!(candidate.is_absolute());
+                    found.push(candidate);
+                    if found.len() == limit {
+                        return found;
+                    }
                 }
             }
         }
@@ -625,8 +632,17 @@ fn usable_path(path: &Path) -> bool {
         && path.as_os_str() != OsStr::new("/")
 }
 
+#[cfg(unix)]
 fn executable_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
+}
+
+/// Whether a file a search finds is one a Windows launch runs: a program, or an npm
+/// cmd-shim whose script is there ([`crate::paths::executable_file`]); any other batch file
+/// is no hit. Input: the file. Output: the answer.
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    crate::paths::executable_file(path).is_some()
 }
 
 /// Reports whether file metadata grants any execute permission.
@@ -634,13 +650,6 @@ fn executable_file(path: &Path) -> bool {
 #[cfg(unix)]
 fn runnable(metadata: &std::fs::Metadata) -> bool {
     metadata.permissions().mode() & 0o111 != 0
-}
-
-/// Reports that a file may be run where the platform has no execute bit; the launch
-/// decides by extension. Takes the metadata, unused. Returns true.
-#[cfg(not(unix))]
-fn runnable(_metadata: &std::fs::Metadata) -> bool {
-    true
 }
 
 /// Builds the catalog rows for every known harness, in owner priority order.

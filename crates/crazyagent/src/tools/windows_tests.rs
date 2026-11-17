@@ -124,3 +124,59 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
         assert_eq!(refused.file, file.canonicalize().unwrap());
     }
 }
+
+/// Writes the `.cmd` npm makes for Codex and the script it names into a folder. Input: the
+/// folder. Output: the shim and the script's real file.
+fn codex_shim(folder: &Path) -> (PathBuf, PathBuf) {
+    let package = folder
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("bin");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+    let shim = folder.join("codex.cmd");
+    std::fs::write(&shim, batch::tests::CODEX).unwrap();
+    (shim, package.join("codex.js").canonicalize().unwrap())
+}
+
+/// V243-WIN-HARNESS-SEARCH: the harness search tries `<name>.exe` then `<name>.cmd` in each
+/// folder in order, so a shim in an earlier folder comes before a program in a later one;
+/// npm's extensionless sh file and a `.cmd` that is no npm cmd-shim are never found, and the
+/// pin of a shim is the script it names.
+#[test]
+fn a_windows_search_tries_exe_then_cmd_per_folder_and_pins_a_shim_s_script() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let [first, second, other] = ["first", "second", "other"].map(|name| {
+        let folder = root.join(name);
+        std::fs::create_dir(&folder).unwrap();
+        folder
+    });
+    let (first_shim, first_script) = codex_shim(&first);
+    std::fs::write(first.join("codex"), "#!/bin/sh\n").unwrap();
+    let (second_shim, _) = codex_shim(&second);
+    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(&shipped, second.join("codex.exe")).unwrap();
+    let unknown = other.join("codex.cmd");
+    std::fs::write(&unknown, "@ECHO off\r\ncalc.exe\r\n").unwrap();
+
+    let search =
+        crate::harnesses::Search::new(vec![other, first.clone(), second.clone()], None, vec![]);
+    assert_eq!(
+        search.candidates("codex"),
+        vec![first_shim.clone(), second.join("codex.exe"), second_shim]
+    );
+    assert_eq!(
+        crate::paths::executable_file(&first_shim),
+        Some(first_script)
+    );
+    assert_eq!(crate::paths::executable_file(&unknown), None);
+    assert_eq!(
+        crate::paths::executable_names("codex"),
+        ["codex.exe", "codex.cmd"]
+    );
+    assert_eq!(crate::paths::executable_names("codex.cmd"), ["codex.cmd"]);
+}

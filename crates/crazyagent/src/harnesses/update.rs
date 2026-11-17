@@ -877,8 +877,8 @@ fn vetted(fixed: &Fixed, places: &crate::tools::Places) -> Result<PathBuf, &'sta
 /// Whether an interpreter an update command's script names runs that script and nothing it
 /// looks up by name, read by its real file: a shell given only `-e`, `-u`, `-p` and `-x`
 /// flags, as stock Homebrew's `#!/bin/bash -pu` (privileged mode reads no startup or
-/// environment files, so it only narrows), or Node given only flags that change no code it
-/// runs. Any other program, such as a launcher
+/// environment files, so it only narrows), or Node (`node.exe` on Windows) given only flags
+/// that change no code it runs. Any other program, such as a launcher
 /// that runs a later word (`lockf`, `xargs`, `perl -S`), a shell given `-c` or another word,
 /// and Node given `-e`, is refused, so no shipped update command needs more (rv-sec3 B18 F2).
 /// Inputs: the interpreter's real file and the first line's words before the script.
@@ -891,9 +891,13 @@ fn runs_its_script(interpreter: &Path, arguments: &[String]) -> bool {
                 !flags.is_empty() && flags.chars().all(|flag| SHELL_FLAGS.contains(flag))
             })
         }),
-        Some("node" | "nodejs") => arguments
-            .iter()
-            .all(|word| NODE_FLAGS.contains(&word.as_str())),
+        Some(name)
+            if name == "node" || name == "nodejs" || (cfg!(windows) && name == "node.exe") =>
+        {
+            arguments
+                .iter()
+                .all(|word| NODE_FLAGS.contains(&word.as_str()))
+        }
         _ => false,
     }
 }

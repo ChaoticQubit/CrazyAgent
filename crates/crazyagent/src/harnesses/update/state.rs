@@ -229,10 +229,34 @@ fn version_command(executable: &Path) -> Option<Fixed> {
     })
 }
 
-/// Runs a version command, bounded like every other run. Inputs: the command and the home
-/// folder. Output: the version it printed, or none.
-fn version_ran(fixed: &Fixed, home: &Path) -> Option<String> {
+/// Runs a version command, bounded like every other run. Inputs: the command, the home
+/// folder and the resolver's places, unused here. Output: the version it printed, or none.
+#[cfg(unix)]
+fn version_ran(fixed: &Fixed, home: &Path, _places: &crate::tools::Places) -> Option<String> {
     let raw = version_raw(fixed, home, VERSION_TIME).ok()?;
+    installed_version(&String::from_utf8_lossy(&raw.stdout))
+        .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
+}
+
+/// Runs a version command on Windows, which runs no script by its first line: the checked
+/// real file is resolved once more ([`crate::tools::resolve_entry`]), refused unless that
+/// gives the same file and every file it runs passes [`owner_only`] (the script and each
+/// interpreter, [`crate::tools::Resolved::grants`]), and that same value's words start with
+/// the version arguments, bounded like every other run. Inputs: the command, the home
+/// folder and the resolver's places. Output: the version it printed, or none.
+#[cfg(windows)]
+fn version_ran(fixed: &Fixed, home: &Path, places: &crate::tools::Places) -> Option<String> {
+    assert!(fixed.prefix.is_none());
+    let tool = crate::tools::resolve_entry(&fixed.program, places).ok()?;
+    if tool.program != fixed.program {
+        return None;
+    }
+    for file in tool.grants() {
+        owner_only(&file)?;
+    }
+    let mut words = tool.argv();
+    words.extend(fixed.args.iter().map(std::ffi::OsString::from));
+    let raw = version_raw(&words, &fixed.search, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))
         .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
 }
@@ -406,8 +430,8 @@ fn owner_only(program: &Path) -> Option<()> {
 /// missing, is never started for a version. It runs the real file the resolver checked,
 /// once that file passes again by its own path, with the entry's folder kept as the search
 /// an interpreter asked for by name is found in, so no link of the entry's chain is
-/// followed after the check. On Windows that real file must also pass [`owner_only`],
-/// since no link on its way is read.
+/// followed after the check. On Windows the run resolves that real file once more and
+/// checks every file it runs with [`owner_only`], since no link on its way is read.
 /// Inputs: the harness executable, the home folder and the resolver's places. Output: the
 /// version, or none.
 pub(super) fn version_if_runs(
@@ -425,14 +449,12 @@ pub(super) fn version_if_runs(
     if super::vetted(&fixed, places).ok()? != fixed.program {
         return None;
     }
-    #[cfg(windows)]
-    owner_only(&fixed.program)?;
     assert!(fixed.program.is_absolute());
     #[cfg(test)]
     if let Some(step) = between_vetted_and_run(executable) {
         step();
     }
-    version_ran(&fixed, home)
+    version_ran(&fixed, home, places)
 }
 
 /// A step a row runs once between the check of a version command and its run.

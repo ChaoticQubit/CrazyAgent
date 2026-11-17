@@ -1,5 +1,7 @@
 #[cfg(any(windows, test))]
 mod batch;
+#[cfg(windows)]
+pub(crate) use batch::{batch_file, cmd_shim_real};
 pub mod permission_fix;
 pub mod probe;
 #[cfg(all(test, unix))]

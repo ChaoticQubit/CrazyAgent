@@ -69,13 +69,7 @@ pub(super) fn entry(
     depth: usize,
     refused: impl Fn(&Path, Refusal) -> Missing,
 ) -> Option<Result<Resolved, Missing>> {
-    let batch = program
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        });
-    if !batch {
+    if !batch_file(program) {
         return None;
     }
     let refuse = || Some(Err(refused(program, Refusal::Batch)));
@@ -98,21 +92,48 @@ pub(super) fn entry(
             },
         }));
     }
-    let Some(text) = shim_file_text(program) else {
+    let Some(target) = shim_target(program) else {
         return refuse();
     };
-    let Some(parts) = cmd_shim_target(&text) else {
-        return refuse();
-    };
-    assert!(!parts.is_empty());
-    let target = parts
-        .iter()
-        .fold(folder.to_path_buf(), |at, part| at.join(part));
     Some(entry_at(&target, places, depth + 1).map(|target| Resolved {
         entry: entry.to_path_buf(),
         program: target.program,
         kind: target.kind,
     }))
+}
+
+/// Whether Windows would start a file through cmd.exe: a `.cmd` or `.bat` file, in any case.
+/// Input: the file. Output: the answer.
+#[cfg(windows)]
+pub(crate) fn batch_file(file: &Path) -> bool {
+    file.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+}
+
+/// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.
+/// Input: the shim's real file. Output: the target, none for any other file.
+#[cfg(windows)]
+fn shim_target(cmd: &Path) -> Option<PathBuf> {
+    let folder = cmd.parent()?;
+    let text = shim_file_text(cmd)?;
+    let parts = cmd_shim_target(&text)?;
+    assert!(!parts.is_empty());
+    Some(
+        parts
+            .iter()
+            .fold(folder.to_path_buf(), |at, part| at.join(part)),
+    )
+}
+
+/// The real file an npm cmd-shim starts, which is the pin of a harness found as one, as the
+/// real file of npm's link is on Unix. npx and any other batch file give none. Input: the
+/// shim's real file. Output: the target's real file.
+#[cfg(windows)]
+pub(crate) fn cmd_shim_real(cmd: &Path) -> Option<PathBuf> {
+    shim_target(cmd)?.canonicalize().ok()
 }
 
 /// npm's own `npx.cmd` by where it sits: named `npx.cmd`, with `node.exe` beside it and the
