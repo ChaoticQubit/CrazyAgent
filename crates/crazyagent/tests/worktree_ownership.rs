@@ -145,6 +145,15 @@ fn allocate(repo: &Path, owner: &str, native: Option<&str>) -> Command {
     }
 }
 
+/// The engine's current revision, from a read's reply; lease writes move it more than once
+/// (v2.5 L6), so requests after one read it. Input: the engine. Output: the revision.
+async fn revision(engine: &Engine) -> u64 {
+    let read = Command::WorktreeLeases {
+        task_id: TaskId::new("task").unwrap(),
+    };
+    apply(engine, "revision", 0, read).await.revision.value()
+}
+
 async fn leases(engine: &Engine) -> Vec<crazyagent::worktrees::WorktreeLease> {
     let reply = apply(
         engine,
@@ -187,7 +196,7 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     );
     let operation = request(
         "allocate",
-        3,
+        revision(&engine).await,
         allocate(&repo, "owner", Some("native-child")),
     );
     let first = send(&engine, operation.clone()).await;
@@ -201,7 +210,13 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     assert_eq!(lease.native_descendant.as_deref(), Some("native-child"));
     std::fs::write(Path::new(&lease.path).join("tracked"), b"worker dirty").unwrap();
     std::fs::write(Path::new(&lease.path).join("scratch"), b"worker scratch").unwrap();
-    let second = apply(&engine, "second", 4, allocate(&repo, "second-owner", None)).await;
+    let second = apply(
+        &engine,
+        "second",
+        revision(&engine).await,
+        allocate(&repo, "second-owner", None),
+    )
+    .await;
     assert!(matches!(second.outcome, Outcome::Rejected { .. }));
     engine.close().await.unwrap();
     let engine = Engine::open(&root.join("db"), config).await.unwrap();
@@ -214,7 +229,7 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
     let release = apply(
         &engine,
         "release",
-        4,
+        revision(&engine).await,
         Command::ReleaseWorktree {
             task_id: lease.task_id.clone(),
             repository: lease.repository.clone(),
@@ -272,14 +287,15 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
     let repo = repository(&root, "repo");
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
+    let at = revision(&engine).await;
     let (first, second) = tokio::join!(
         send(
             &engine,
-            request("one", 3, allocate(&repo, "owner-one", None))
+            request("one", at, allocate(&repo, "owner-one", None))
         ),
         send(
             &engine,
-            request("two", 3, allocate(&repo, "owner-two", Some("native-two")))
+            request("two", at, allocate(&repo, "owner-two", Some("native-two")))
         )
     );
     let results = [first, second];
@@ -296,9 +312,14 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
         .unwrap();
     assert_eq!(loser.outcome, rejected("stale_revision"));
     assert_eq!(
-        apply(&engine, "third", 4, allocate(&repo, "owner-three", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "third",
+            revision(&engine).await,
+            allocate(&repo, "owner-three", None)
+        )
+        .await
+        .outcome,
         rejected("writer_already_owned")
     );
     assert_eq!(leases(&engine).await.len(), 1);
@@ -306,7 +327,7 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
         apply(
             &engine,
             "pin-two",
-            4,
+            revision(&engine).await,
             Command::PinTask {
                 context: ExecutionContext {
                     project_id: ProjectId::new("project").unwrap(),
@@ -328,7 +349,9 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
         *task_id = TaskId::new("second-task").unwrap();
     }
     assert_eq!(
-        apply(&engine, "allocate-two", 5, command).await.outcome,
+        apply(&engine, "allocate-two", revision(&engine).await, command)
+            .await
+            .outcome,
         Outcome::Applied
     );
     let listing = git(&repo, &["worktree", "list", "--porcelain"]);
@@ -404,9 +427,14 @@ async fn hostile_config_filters_and_attributes_never_execute() {
         let result = if admission.outcome == Outcome::Applied {
             (
                 "allocation",
-                apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-                    .await
-                    .outcome,
+                apply(
+                    &engine,
+                    "allocate",
+                    revision(&engine).await,
+                    allocate(&repo, "owner", None),
+                )
+                .await
+                .outcome,
             )
         } else {
             ("admission", admission.outcome)
@@ -448,9 +476,14 @@ async fn hooks_are_disabled_and_config_changes_after_admission_are_rejected() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     assert!(!marker.exists());
@@ -467,7 +500,13 @@ async fn hooks_are_disabled_and_config_changes_after_admission_are_rejected() {
             &format!("touch {}", marker.display()),
         ],
     );
-    let allocation = apply(&engine, "allocate", 3, allocate(&repo, "owner", None)).await;
+    let allocation = apply(
+        &engine,
+        "allocate",
+        revision(&engine).await,
+        allocate(&repo, "owner", None),
+    )
+    .await;
     assert!(matches!(allocation.outcome, Outcome::Rejected { .. }));
     assert!(!marker.exists());
     engine.close().await.unwrap();
@@ -496,16 +535,21 @@ async fn outside_paths_symlinks_and_metadata_swaps_fail_closed() {
     let allocation = apply(
         &engine,
         "alias",
-        3,
+        revision(&engine).await,
         allocate(&root.join("alias"), "owner", None),
     )
     .await;
     assert_eq!(allocation.outcome, rejected("repository_not_admitted"));
     assert!(leases(&engine).await.is_empty());
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -526,9 +570,14 @@ async fn outside_paths_symlinks_and_metadata_swaps_fail_closed() {
         b"committed\n"
     );
     assert!(matches!(
-        apply(&engine, "second", 4, allocate(&repo, "second", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "second",
+            revision(&engine).await,
+            allocate(&repo, "second", None)
+        )
+        .await
+        .outcome,
         Outcome::Rejected { .. }
     ));
     engine.close().await.unwrap();
@@ -545,6 +594,7 @@ async fn multiple_repositories_require_individual_admission() {
     let engine = Engine::open(&root.join("db"), config.clone())
         .await
         .unwrap();
+    engine.start_owner_runtime().await.unwrap();
     assert_eq!(
         apply(
             &engine,
@@ -570,7 +620,7 @@ async fn multiple_repositories_require_individual_admission() {
             apply(
                 &engine,
                 &format!("admit-{index}"),
-                1 + index as u64,
+                revision(&engine).await,
                 Command::AdmitRepository {
                     project_id: ProjectId::new("project").unwrap(),
                     repository: repository.to_str().unwrap().into(),
@@ -585,7 +635,7 @@ async fn multiple_repositories_require_individual_admission() {
         apply(
             &engine,
             "pin",
-            3,
+            revision(&engine).await,
             Command::PinTask {
                 context: ExecutionContext {
                     project_id: ProjectId::new("project").unwrap(),
@@ -606,7 +656,7 @@ async fn multiple_repositories_require_individual_admission() {
         apply(
             &engine,
             "allocate-one",
-            4,
+            revision(&engine).await,
             allocate(&repo, "owner-one", None)
         )
         .await
@@ -617,7 +667,7 @@ async fn multiple_repositories_require_individual_admission() {
         apply(
             &engine,
             "allocate-two",
-            5,
+            revision(&engine).await,
             allocate(&other, "owner-two", None)
         )
         .await
@@ -638,9 +688,14 @@ async fn lease_status_detects_replacement_without_restart() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -676,9 +731,14 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -731,7 +791,7 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
     let readmission = apply(
         &engine,
         "readmit",
-        4,
+        revision(&engine).await,
         Command::AdmitRepository {
             project_id: ProjectId::new("project").unwrap(),
             repository: repo.to_str().unwrap().into(),
