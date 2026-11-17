@@ -2304,6 +2304,24 @@ fn the_master_diagnoses_and_plans_before_it_hands_out_work() {
     }
 }
 
+/// A master without team tools hands out work in task blocks, so the block text asks for
+/// the same finding, part of the plan and acceptance check as the tools' task fields, and
+/// for a costly probe asked of the owner once, else an UNCONFIRMED cause (#388 F1).
+#[test]
+fn a_task_block_carries_the_finding_and_the_acceptance_check() {
+    let text = block_text();
+    for part in [
+        "what you found",
+        "this agent's part of your plan",
+        "its acceptance check",
+        "ask the owner once for a small probe",
+        "UNCONFIRMED",
+        "reproducing it the agent's first step",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
 #[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();

@@ -1362,6 +1362,18 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
     );
 }
 
+/// The phrases every hand-off task description holds: the finding, the agent's part, its
+/// acceptance check, and a probe that costs the owner asked for once, else an UNCONFIRMED
+/// cause the agent reproduces first (V243-MASTER-ANALYZE-FIRST, #388 F1, leader 16:33).
+const HAND_OFF_PARTS: [&str; 6] = [
+    "what you found",
+    "this agent's part of your plan",
+    "its acceptance check",
+    "ask the owner once for a small probe",
+    "UNCONFIRMED",
+    "reproducing it the agent's first step",
+];
+
 /// The spawn tool asks for what the master found and the agent's acceptance check with each
 /// task, so a hand-off carries the diagnosis and its part of the plan, not only an order
 /// (V243-MASTER-ANALYZE-FIRST).
@@ -1371,11 +1383,7 @@ fn a_spawn_task_carries_the_finding_and_the_acceptance_check() {
         .as_str()
         .unwrap()
         .to_owned();
-    for part in [
-        "what you found",
-        "this agent's part of your plan",
-        "its acceptance check",
-    ] {
+    for part in HAND_OFF_PARTS {
         assert!(task.contains(part), "{part}: {task}");
     }
 }
@@ -1407,11 +1415,7 @@ fn listed_task(name: &str) -> String {
 #[test]
 fn a_delegate_task_carries_the_finding_and_the_acceptance_check() {
     let task = listed_task(TOOL_NAME);
-    for part in [
-        "what you found",
-        "this agent's part of your plan",
-        "its acceptance check",
-    ] {
+    for part in HAND_OFF_PARTS {
         assert!(task.contains(part), "{part}: {task}");
     }
 }
@@ -1421,11 +1425,7 @@ fn a_delegate_task_carries_the_finding_and_the_acceptance_check() {
 #[test]
 fn a_wake_task_carries_the_finding_and_the_acceptance_check() {
     let task = listed_task(WAKE_TOOL);
-    for part in [
-        "what you found",
-        "this agent's part of your plan",
-        "its acceptance check",
-    ] {
+    for part in HAND_OFF_PARTS {
         assert!(task.contains(part), "{part}: {task}");
     }
 }
