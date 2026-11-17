@@ -22,6 +22,21 @@ pub(crate) const PAGE_ITEMS_MAX: u8 = 32;
 /// turns, so this is also the most of a reply they show.
 pub(crate) const REPLY_BYTES_MAX: usize = 12 * 1024;
 
+/// The kind of the event an owner Delete of a master session appends to the Sessions
+/// aggregate of the state log. Its writer, the team projection and the redaction of the
+/// session's earlier events all name it through this, so none can drift (v2.5 L12).
+pub(crate) const SESSION_DELETED: &str = "SessionDeleted";
+
+/// The body of a [`SESSION_DELETED`] event: only the project's and the session's ids, at
+/// the top level and written by serde_json, so no secret enters the log and the redaction
+/// of the session's earlier events finds them by their top-level `session` (L1-N1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionDeleted {
+    pub(crate) project: ProjectId,
+    pub(crate) session: SessionId,
+}
+
 /// Measures a reply as its stored turn holds it: the bytes of its JSON string, quotes and
 /// escapes included. Input: the text. Output: the byte count.
 pub(crate) fn reply_bytes(text: &str) -> usize {

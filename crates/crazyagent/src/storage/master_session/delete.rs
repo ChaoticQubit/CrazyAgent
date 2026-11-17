@@ -1,9 +1,14 @@
 use super::*;
+use crate::master_session::{SESSION_DELETED, SessionDeleted};
+use crate::state_log::fence::Fence;
+use crate::state_log::replay::{Logged, redact_matching};
+use crate::state_log::{Aggregate, Appender, Draft};
 
 /// Deletes a project's master session that is not live, for the owner's Delete: first the
 /// harness transcript it kept is removed from its master's private home, then a parked
 /// session closes so it can no longer be resumed, and its stored turns, their owner
-/// messages, its marks and its kept conversation go, so it leaves the Sessions list.
+/// messages and its marks go, so it leaves the Sessions list; its kept conversation goes
+/// with the event [`log_deleted`] logs once the request applies.
 /// Takes the transaction, the project, the session and the revision read at.
 /// Returns Applied, or a plain rejection before any write.
 pub(super) fn delete_session(
@@ -38,7 +43,6 @@ pub(super) fn delete_session(
         "DELETE FROM master_preparations WHERE session=?1",
         "DELETE FROM conversation_entries WHERE kind='message' AND event_cursor IN (SELECT input FROM master_turns WHERE session=?1)",
         "DELETE FROM master_turns WHERE session=?1",
-        "DELETE FROM team_master_conversations WHERE session=?1",
         "DELETE FROM session_owner_turns WHERE session=?1",
         "DELETE FROM session_messages WHERE session=?1",
         "DELETE FROM session_marks WHERE session=?1",
@@ -47,6 +51,68 @@ pub(super) fn delete_session(
     }
     assert!(!crate::master_sessions::has_owner_turn(tx, id)?);
     Ok(Outcome::Applied)
+}
+
+/// Logs an applied owner Delete of a master session at the request's revision: one
+/// [`SESSION_DELETED`] event holding only the two ids, which the team projection applies in
+/// the same transaction, then every earlier Sessions and Team event naming the session is
+/// redacted (L1-N1). Any refusal rolls the whole request back, the redactions with it.
+/// Inputs: the request's transaction, its revision, the owner's admission, the project and
+/// the session. Output: how many earlier events were redacted, or the first refusal.
+pub(super) fn log_deleted(
+    tx: &Transaction<'_>,
+    revision: u64,
+    admission: &Admission,
+    project: &ProjectId,
+    session: &SessionId,
+) -> Result<usize, EngineError> {
+    let fence = Fence::Owner(admission.clone());
+    let mut log = Appender::owner(tx, revision, fence.clone())?;
+    let body = serde_json::to_vec(&SessionDeleted {
+        project: project.clone(),
+        session: session.clone(),
+    })
+    .map_err(error)?;
+    let at_ms = now_ms()?;
+    let seq = log.append(&Draft {
+        aggregate: Aggregate::Sessions,
+        kind: SESSION_DELETED,
+        schema: 1,
+        at_ms,
+        body: &body,
+    })?;
+    let event = Logged {
+        seq,
+        revision,
+        aggregate: Aggregate::Sessions,
+        kind: SESSION_DELETED.into(),
+        schema: 1,
+        at_ms,
+        body,
+    };
+    log.project(|tx| crate::team::master::project_session_deleted(tx, &event))?;
+    redact_matching(
+        tx,
+        &[Aggregate::Sessions, Aggregate::Team],
+        None,
+        "session",
+        session.as_str(),
+        seq,
+        &fence,
+    )
+}
+
+/// Moves the WAL into the database file and empties it after a Delete redacted earlier
+/// events, so no old body stays in the WAL, as `redact` asks of its caller. A busy
+/// checkpoint is logged, not returned: the delete is already committed. Input: the
+/// connection. Output: none.
+pub(super) fn checkpoint(db: &Connection) {
+    let busy = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    if !matches!(busy, Ok(0)) {
+        eprintln!("state_log_redact_checkpoint_busy");
+    }
 }
 
 /// How many folder levels a deleted session's transcript folder may hold before its removal

@@ -2525,7 +2525,9 @@ mod merge;
 mod sub_merge;
 mod work;
 
-pub(crate) use conversations::{REFUSED_CONVERSATION, keep_conversation, refuse_conversation};
+pub(crate) use conversations::{
+    REFUSED_CONVERSATION, keep_conversation, project_session_deleted, refuse_conversation,
+};
 pub use conversations::{SessionConversation, session_conversation};
 pub use work::wait_sentence;
 pub(crate) use work::{WAKE_DELIVERED, WAKE_TASK};

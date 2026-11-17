@@ -1,4 +1,6 @@
 use super::*;
+use crate::master_session::{SESSION_DELETED, SessionDeleted};
+use crate::state_log::replay::Logged;
 
 /// The harness conversation a master session continues: the team agent whose home keeps
 /// the record, its harness and account, and the id and record the harness resumes by.
@@ -93,4 +95,25 @@ pub fn session_conversation(
         )
         .optional()
         .map_err(state)
+}
+
+/// The team projection of a [`SESSION_DELETED`] event: the deleted session's kept
+/// conversation row goes, applied in the delete's own transaction and again by a replay of
+/// the log; another kind changes nothing. Inputs: the store and the event. Output: any
+/// SQLite failure, or a body that is not a session delete.
+pub(crate) fn project_session_deleted(
+    connection: &Connection,
+    event: &Logged,
+) -> Result<(), EngineError> {
+    if event.kind != SESSION_DELETED {
+        return Ok(());
+    }
+    let deleted: SessionDeleted = serde_json::from_slice(&event.body).map_err(state)?;
+    connection
+        .execute(
+            "DELETE FROM team_master_conversations WHERE session=?1",
+            [deleted.session.as_str()],
+        )
+        .map_err(state)?;
+    Ok(())
 }

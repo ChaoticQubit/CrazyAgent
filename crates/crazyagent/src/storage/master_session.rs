@@ -5178,6 +5178,7 @@ pub(super) fn apply(
             current_revision: Cursor::new(revision),
         });
     }
+    let mut redacted = 0;
     let prepared = (|| -> Result<(OwnerResult, OwnerProvenance), EngineError> {
         let mut provenance = OwnerProvenance {
             origin: "native_owner".into(),
@@ -5221,6 +5222,19 @@ pub(super) fn apply(
                     &ClientId::new(format!("owner:{}", admission.owner_id)).map_err(error)?,
                     provenance.revision_after.value(),
                 )?;
+                if let MasterOwnerAction::DeleteSession {
+                    project_id,
+                    session_id,
+                } = action
+                {
+                    redacted = delete::log_deleted(
+                        &tx,
+                        provenance.revision_after.value(),
+                        admission,
+                        project_id,
+                        session_id,
+                    )?;
+                }
                 if let Some(project) = touched(action) {
                     crate::master_sessions::touch(&tx, project, now_ms()?)?;
                 }
@@ -5284,6 +5298,9 @@ pub(super) fn apply(
     };
     let current_revision = provenance.revision_after.clone();
     tx.commit().map_err(error)?;
+    if redacted > 0 {
+        delete::checkpoint(db);
+    }
     assert_eq!(
         current_revision.value() > revision,
         result == OwnerResult::Applied
