@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::HostStamp;
 use crate::project_setup::removed::event as removed;
+use crate::protocol::{ProjectId, TaskId};
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
@@ -9,6 +10,8 @@ use crate::storage::opening::Opening;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use super::{Admission, LeaseRecord};
 
 #[cfg(test)]
 mod tests;
@@ -33,36 +36,141 @@ const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 /// The most project removals one worktrees replay applies.
 const REMOVALS_MAX: usize = 65_536;
 
-/// A repository admitted to a project: its `repository_admissions` row, as stored.
+/// A repository admitted to a project: the project and the admission stored in its
+/// `repository_admissions` row, whose repository is the row's key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Admitted {
-    pub project: String,
-    pub repository: String,
-    pub body: String,
+    pub(crate) project: ProjectId,
+    pub(crate) body: AdmissionBody,
 }
 
-/// A worktree reserved for a task: its new `worktree_leases` row, as stored.
+/// A worktree reserved for a task: the task and the lease record stored in its new
+/// `worktree_leases` row, whose repository and path are the row's other columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reserved {
-    pub task: String,
-    pub repository: String,
-    pub path: String,
-    pub body: String,
+    pub(crate) task: TaskId,
+    pub(crate) body: LeaseBody,
 }
 
-/// A lease's body saved: the key of its `worktree_leases` row and the new body.
+/// A lease's body saved: the task and the new lease record of its `worktree_leases` row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Saved {
-    pub task: String,
-    pub repository: String,
-    pub body: String,
+    pub(crate) task: TaskId,
+    pub(crate) body: LeaseBody,
 }
 
-/// One worktrees event. Each carries the stored column text of the row it writes, which
-/// holds ids, paths, a branch, a commit and file identities, never a secret.
+/// An admission as an event carries it: decoded only when its repository is a checked path
+/// (v2.5 L1-N1), so free text cannot ride in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Admission", into = "Admission")]
+pub(crate) struct AdmissionBody(Admission);
+
+impl AdmissionBody {
+    /// Checks an admission for the log. Input: the admission. Output: the body, or
+    /// `worktrees_log_body_invalid`.
+    pub(crate) fn new(admission: Admission) -> Result<Self, EngineError> {
+        if !absolute(&admission.repository) {
+            return Err(error("worktrees_log_body_invalid"));
+        }
+        let body = Self(admission);
+        assert!(body.0.repository.starts_with('/'));
+        assert!(body.0.repository.len() > 1, "a path below the root");
+        Ok(body)
+    }
+}
+
+impl TryFrom<Admission> for AdmissionBody {
+    type Error = EngineError;
+    fn try_from(admission: Admission) -> Result<Self, Self::Error> {
+        Self::new(admission)
+    }
+}
+
+impl From<AdmissionBody> for Admission {
+    fn from(body: AdmissionBody) -> Self {
+        body.0
+    }
+}
+
+/// A lease record as an event carries it: decoded only when every text in it is closed,
+/// ids as ids, its repository and path checked paths, its branch the engine's and its head
+/// a commit id (v2.5 L1-N1), so free text cannot ride in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "LeaseRecord", into = "LeaseRecord")]
+pub(crate) struct LeaseBody(LeaseRecord);
+
+impl LeaseBody {
+    /// Checks a lease record for the log. Input: the record. Output: the body, or
+    /// `worktrees_log_body_invalid`.
+    pub(crate) fn new(record: LeaseRecord) -> Result<Self, EngineError> {
+        let lease = &record.lease;
+        let branch = lease.branch.strip_prefix("crazyagent/").unwrap_or_default();
+        let closed = absolute(&lease.repository)
+            && absolute(&lease.path)
+            && lease.repository == record.admission.repository
+            && branch.len() == 64
+            && branch
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && super::validate_oid(&record.head).is_ok()
+            && lease
+                .native_descendant
+                .as_deref()
+                .is_none_or(|native| crate::protocol::SessionId::new(native).is_ok());
+        if !closed {
+            return Err(error("worktrees_log_body_invalid"));
+        }
+        let body = Self(record);
+        assert!(body.0.lease.path.starts_with('/'));
+        assert_eq!(body.0.lease.repository, body.0.admission.repository);
+        Ok(body)
+    }
+}
+
+impl TryFrom<LeaseRecord> for LeaseBody {
+    type Error = EngineError;
+    fn try_from(record: LeaseRecord) -> Result<Self, Self::Error> {
+        Self::new(record)
+    }
+}
+
+impl From<LeaseBody> for LeaseRecord {
+    fn from(body: LeaseBody) -> Self {
+        body.0
+    }
+}
+
+/// Whether a text is an absolute path whose parts git could name: a leading `/`, then
+/// parts checked by `landing::owner_edit::check_path` (no empty, `.` or `..` part, no NUL,
+/// at most its byte bound). Input: the text. Output: the answer.
+fn absolute(path: &str) -> bool {
+    path.strip_prefix('/')
+        .is_some_and(|rest| crate::landing::owner_edit::check_path(rest).is_ok())
+}
+
+/// An admission event for rows outside the worktrees module, the repository's identities
+/// made up. Inputs: the project and the repository, an absolute path. Output: the event.
+#[cfg(test)]
+pub(crate) fn admitted_for_test(project: &ProjectId, repository: &str) -> Event {
+    let identity = |inode| super::Identity { device: 1, inode };
+    let admission = Admission {
+        repository: repository.into(),
+        root: identity(2),
+        metadata: identity(3),
+    };
+    let body = AdmissionBody::new(admission).expect("a checked absolute path");
+    assert_eq!(body.0.repository, repository);
+    Event::Admitted(Admitted {
+        project: project.clone(),
+        body,
+    })
+}
+
+/// One worktrees event. Each carries ids and the typed record its row stores, whose texts
+/// are checked paths, the engine's branch, a commit id and ids, never a secret or free text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Admitted(Admitted),
@@ -92,9 +200,10 @@ impl Event {
 }
 
 /// Writes one worktrees event: the projection applies it in the appender's transaction,
-/// then the log appends it, so an event is logged only when its statement applied. A
-/// refusal leaves the transaction for the caller to roll back. Inputs: the appender, the
-/// writer's clock and the event. Output: the event's `seq`, or the first refusal.
+/// then the log appends it, so an event is logged only when its statement applied. Each
+/// kind has its own draft naming its kind constant. A refusal leaves the transaction for
+/// the caller to roll back. Inputs: the appender, the writer's clock and the event.
+/// Output: the event's `seq`, or the first refusal.
 pub fn record(
     appender: &mut Appender<'_, '_>,
     at_ms: u64,
@@ -102,13 +211,30 @@ pub fn record(
 ) -> Result<u64, EngineError> {
     let body = event.body()?;
     appender.project(|tx| apply(tx, event))?;
-    let seq = appender.append(&Draft {
-        aggregate: Aggregate::Worktrees,
-        kind: event.kind(),
-        schema: SCHEMA,
-        at_ms,
-        body: &body,
-    })?;
+    let aggregate = Aggregate::Worktrees;
+    let seq = match event {
+        Event::Admitted(_) => appender.append(&Draft {
+            aggregate,
+            kind: KIND_ADMITTED,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::Reserved(_) => appender.append(&Draft {
+            aggregate,
+            kind: KIND_RESERVED,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::Saved(_) => appender.append(&Draft {
+            aggregate,
+            kind: KIND_SAVED,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+    }?;
     assert!(seq > 0, "a logged event has a seq");
     assert!(
         body.len() <= BODY_BYTES_MAX,
@@ -117,7 +243,8 @@ pub fn record(
     Ok(seq)
 }
 
-/// Applies one worktrees event to its table, for the live writers and replay alike. A save
+/// Applies one worktrees event to its table, for the live writers and replay alike: the
+/// row's body column is the record's serialization, as the live writer stores it. A save
 /// needs its lease; an admission or a lease must be new. Inputs: the connection and the
 /// event. Output: Ok, or `worktrees_log_admission_exists`, `worktrees_log_lease_exists` or
 /// `worktrees_log_lease_missing`.
@@ -126,21 +253,34 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
         Event::Admitted(row) => (
             db.execute(
                 "INSERT OR IGNORE INTO repository_admissions VALUES (?1,?2,?3)",
-                params![row.project, row.repository, row.body],
+                params![
+                    row.project.as_str(),
+                    row.body.0.repository,
+                    serde_json::to_string(&row.body.0).map_err(error)?
+                ],
             ),
             "worktrees_log_admission_exists",
         ),
         Event::Reserved(row) => (
             db.execute(
                 "INSERT OR IGNORE INTO worktree_leases VALUES (?1,?2,?3,?4)",
-                params![row.task, row.repository, row.path, row.body],
+                params![
+                    row.task.as_str(),
+                    row.body.0.lease.repository,
+                    row.body.0.lease.path,
+                    serde_json::to_string(&row.body.0).map_err(error)?
+                ],
             ),
             "worktrees_log_lease_exists",
         ),
         Event::Saved(row) => (
             db.execute(
                 "UPDATE worktree_leases SET body=?3 WHERE task=?1 AND repository=?2",
-                params![row.task, row.repository, row.body],
+                params![
+                    row.task.as_str(),
+                    row.body.0.lease.repository,
+                    serde_json::to_string(&row.body.0).map_err(error)?
+                ],
             ),
             "worktrees_log_lease_missing",
         ),

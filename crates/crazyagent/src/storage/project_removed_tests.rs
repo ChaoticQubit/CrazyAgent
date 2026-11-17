@@ -475,18 +475,15 @@ fn a_removal_without_its_engine_host_here_is_refused_and_changes_nothing() {
 /// place in the log. The other project's admission replays as it stands.
 #[test]
 fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_back() {
-    use crate::worktrees::log::{self, Admitted, Event};
+    use crate::worktrees::log;
     let mut s = store();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
     let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
-        let admitted = Admitted {
-            project: project.into(),
-            repository: format!("/repo/{project}"),
-            body: "{}".into(),
-        };
-        log::record(&mut appender, 1, &Event::Admitted(admitted)).unwrap();
+        let project_id = ProjectId::new(project).unwrap();
+        let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));
+        log::record(&mut appender, 1, &admitted).unwrap();
     }
     tx.commit().unwrap();
     let tx = s.db.transaction().unwrap();

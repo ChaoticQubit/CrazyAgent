@@ -39,28 +39,66 @@ fn code<T>(result: Result<T, EngineError>) -> Option<String> {
     result.err().map(|error| error.0)
 }
 
+/// An admission of a repository, its identities made up. Input: the repository. Output:
+/// the admission.
+fn admission(repository: &str) -> Admission {
+    Admission {
+        repository: repository.into(),
+        root: Identity {
+            device: 1,
+            inode: 2,
+        },
+        metadata: Identity {
+            device: 1,
+            inode: 3,
+        },
+    }
+}
+
+/// A lease record of project p1 with no checked-out directory, under the engine's branch.
+/// Inputs: the task, the repository and the state. Output: the record.
+fn record_of(task: &str, repository: &str, state: LeaseState) -> LeaseRecord {
+    LeaseRecord {
+        lease: WorktreeLease {
+            project_id: ProjectId::new("p1").unwrap(),
+            task_id: TaskId::new(task).unwrap(),
+            repository: repository.into(),
+            path: format!("{repository}/.wt/{task}"),
+            branch: format!("crazyagent/{}", "a".repeat(64)),
+            owner_session: SessionId::new("s1").unwrap(),
+            native_descendant: None,
+            state,
+        },
+        admission: admission(repository),
+        head: "0".repeat(40),
+        directory: None,
+        metadata: None,
+    }
+}
+
+/// The body column a record is stored as. Input: the record. Output: the column value.
+fn stored(record: &LeaseRecord) -> Value {
+    Value::Text(serde_json::to_string(record).unwrap())
+}
+
 fn admitted(project: &str, repository: &str) -> Event {
     Event::Admitted(Admitted {
-        project: project.into(),
-        repository: repository.into(),
-        body: format!("{{\"repository\":\"{repository}\"}}"),
+        project: ProjectId::new(project).unwrap(),
+        body: AdmissionBody::new(admission(repository)).unwrap(),
     })
 }
 
-fn reserved(task: &str, repository: &str, body: &str) -> Event {
+fn reserved(task: &str, repository: &str, state: LeaseState) -> Event {
     Event::Reserved(Reserved {
-        task: task.into(),
-        repository: repository.into(),
-        path: format!("{repository}/.wt/{task}"),
-        body: body.into(),
+        task: TaskId::new(task).unwrap(),
+        body: LeaseBody::new(record_of(task, repository, state)).unwrap(),
     })
 }
 
-fn saved(task: &str, repository: &str, body: &str) -> Event {
+fn saved(task: &str, repository: &str, state: LeaseState) -> Event {
     Event::Saved(Saved {
-        task: task.into(),
-        repository: repository.into(),
-        body: body.into(),
+        task: TaskId::new(task).unwrap(),
+        body: LeaseBody::new(record_of(task, repository, state)).unwrap(),
     })
 }
 
@@ -88,14 +126,14 @@ fn replay_rebuilds_both_worktree_tables_as_the_writes_left_them() {
         &[
             admitted("p1", "/r1"),
             admitted("p2", "/r2"),
-            reserved("t1", "/r1", "{\"v\":1}"),
+            reserved("t1", "/r1", LeaseState::Reserved),
         ],
     );
     let seqs = write(
         &mut db,
         &[
-            saved("t1", "/r1", "{\"v\":2}"),
-            reserved("t2", "/r2", "{\"v\":1}"),
+            saved("t1", "/r1", LeaseState::Ready),
+            reserved("t2", "/r2", LeaseState::Reserved),
         ],
     );
     let live = tables(&db);
@@ -103,7 +141,7 @@ fn replay_rebuilds_both_worktree_tables_as_the_writes_left_them() {
     assert!(
         live.1
             .iter()
-            .any(|row| row[3] == Value::Text("{\"v\":2}".into()))
+            .any(|row| row[3] == stored(&record_of("t1", "/r1", LeaseState::Ready)))
     );
 
     let tx = db.transaction().unwrap();
@@ -122,7 +160,7 @@ fn replay_rebuilds_both_worktree_tables_as_the_writes_left_them() {
         skipped
             .1
             .iter()
-            .any(|row| row[3] == Value::Text("{\"v\":1}".into()))
+            .any(|row| row[3] == stored(&record_of("t1", "/r1", LeaseState::Reserved)))
     );
 }
 
@@ -152,7 +190,7 @@ fn a_snapshot_run_and_the_events_after_it_replay_to_the_same_rows() {
     let tx = db.transaction().unwrap();
     let mut appender = Appender::own(&tx, engine()).unwrap();
     let done = snapshot(&mut appender, 9).unwrap();
-    record(&mut appender, 9, &saved("t3", "/r1", "{\"v\":2}")).unwrap();
+    record(&mut appender, 9, &saved("t3", "/r1", LeaseState::Ready)).unwrap();
     record(&mut appender, 9, &admitted("p2", "/r2")).unwrap();
     drop(appender);
     tx.commit().unwrap();
@@ -182,7 +220,7 @@ fn an_event_that_does_not_fit_the_tables_is_refused() {
     let mut db = store();
     let tx = db.transaction().unwrap();
     assert_eq!(
-        code(apply(&tx, &saved("t9", "/r9", "{}"))),
+        code(apply(&tx, &saved("t9", "/r9", LeaseState::Ready))),
         Some("worktrees_log_lease_missing".into())
     );
     apply(&tx, &admitted("p1", "/r1")).unwrap();
@@ -190,17 +228,18 @@ fn an_event_that_does_not_fit_the_tables_is_refused() {
         code(apply(&tx, &admitted("p1", "/r1"))),
         Some("worktrees_log_admission_exists".into())
     );
-    apply(&tx, &reserved("t1", "/r1", "{}")).unwrap();
+    apply(&tx, &reserved("t1", "/r1", LeaseState::Reserved)).unwrap();
     assert_eq!(
-        code(apply(&tx, &reserved("t1", "/r1", "{}"))),
+        code(apply(&tx, &reserved("t1", "/r1", LeaseState::Reserved))),
         Some("worktrees_log_lease_exists".into())
     );
     let before = tables(&tx);
     assert_eq!((before.0.len(), before.1.len()), (1, 1));
 }
 
-/// v2.5 L6: replay reads only the three worktrees kinds at schema 1 with exactly their
-/// fields; anything else is refused.
+/// v2.5 L6 and L1-N1: replay reads only the three worktrees kinds at schema 1 with exactly
+/// their fields, ids as ids and a typed record whose texts are checked paths, the engine's
+/// branch and a commit id; anything else, free text in any of them included, is refused.
 #[test]
 fn replay_refuses_a_worktrees_event_it_does_not_know() {
     let logged = |kind: &str, schema: u16, body: &str| Logged {
@@ -212,23 +251,54 @@ fn replay_refuses_a_worktrees_event_it_does_not_know() {
         at_ms: 1,
         body: body.as_bytes().to_vec(),
     };
-    let good = "{\"task\":\"t1\",\"repository\":\"/r1\",\"body\":\"{}\"}";
+    let Event::Saved(event) = saved("t1", "/r1", LeaseState::Ready) else {
+        unreachable!("saved builds a save")
+    };
+    let good = serde_json::to_string(&event).unwrap();
     assert!(matches!(
-        decode(&logged(KIND_SAVED, 1, good)),
+        decode(&logged(KIND_SAVED, 1, &good)),
         Ok(Event::Saved(_))
     ));
+    let secret = "the owner's secret prompt with sk-ant-api03-key";
+    let swapped = |from: &str, to: &str| {
+        assert_eq!(good.matches(from).count(), 1, "{from}");
+        good.replacen(from, to, 1)
+    };
+    let branch = format!("crazyagent/{}", "a".repeat(64));
     for (kind, schema, body) in [
-        ("LeaseDropped", 1, good),
-        (KIND_SAVED, 2, good),
+        ("LeaseDropped", 1, good.clone()),
+        (KIND_SAVED, 2, good.clone()),
         (
             KIND_SAVED,
             1,
-            "{\"task\":\"t1\",\"repository\":\"/r1\",\"body\":\"{}\",\"x\":1}",
+            format!("{},\"x\":1}}", &good[..good.len() - 1]),
         ),
-        (KIND_ADMITTED, 1, good),
+        (KIND_ADMITTED, 1, good.clone()),
+        (
+            KIND_SAVED,
+            1,
+            swapped("\"task\":\"t1\"", &format!("\"task\":\"{secret}\"")),
+        ),
+        (
+            KIND_SAVED,
+            1,
+            format!("{{\"task\":\"t1\",\"body\":\"{secret}\"}}"),
+        ),
+        (
+            KIND_SAVED,
+            1,
+            swapped("\"path\":\"/r1/.wt/t1\"", "\"path\":\"r1/.wt/t1\""),
+        ),
+        (
+            KIND_SAVED,
+            1,
+            swapped("\"path\":\"/r1/.wt/t1\"", "\"path\":\"/r1/../t1\""),
+        ),
+        (KIND_SAVED, 1, swapped(&branch, secret)),
+        (KIND_SAVED, 1, swapped(&"0".repeat(40), secret)),
     ] {
         assert_eq!(
-            code(decode(&logged(kind, schema, body))),
+            code(decode(&logged(kind, schema, &body))),
             Some("worktrees_log_event_invalid".into()),
             "{kind} {schema} {body}"
         );

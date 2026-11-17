@@ -135,15 +135,15 @@ impl Identity {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Admission {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Admission {
     repository: String,
     root: Identity,
     metadata: Identity,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct LeaseRecord {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct LeaseRecord {
     lease: WorktreeLease,
     admission: Admission,
     head: String,
@@ -1237,10 +1237,10 @@ pub(crate) fn admit(
     if admitted {
         return Ok(rejected("repository_already_admitted"));
     }
+    assert_eq!(admission.repository, repository);
     let event = log::Event::Admitted(log::Admitted {
-        project: project.as_str().into(),
-        repository: repository.into(),
-        body: serde_json::to_string(&admission).map_err(error)?,
+        project: project.clone(),
+        body: log::AdmissionBody::new(admission)?,
     });
     log::record_own(connection, &event)?;
     assert!(!connection.is_autocommit());
@@ -1360,10 +1360,8 @@ fn persist_reservation(
         return Ok(rejected("lease_capacity"));
     }
     let event = log::Event::Reserved(log::Reserved {
-        task: record.lease.task_id.as_str().into(),
-        repository: record.lease.repository.clone(),
-        path: record.lease.path.clone(),
-        body: serde_json::to_string(&record).map_err(error)?,
+        task: record.lease.task_id.clone(),
+        body: log::LeaseBody::new(record.clone())?,
     });
     log::record_own(connection, &event)?;
     leases(connection, &record.lease.task_id)?;
@@ -1815,9 +1813,8 @@ fn saved(record: &LeaseRecord) -> Result<log::Event, EngineError> {
     assert_record_consistent(record);
     assert!(!record.lease.path.is_empty(), "a lease has its path");
     Ok(log::Event::Saved(log::Saved {
-        task: record.lease.task_id.as_str().into(),
-        repository: record.lease.repository.clone(),
-        body: serde_json::to_string(record).map_err(error)?,
+        task: record.lease.task_id.clone(),
+        body: log::LeaseBody::new(record.clone())?,
     }))
 }
 
