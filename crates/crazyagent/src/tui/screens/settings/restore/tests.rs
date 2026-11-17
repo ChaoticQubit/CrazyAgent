@@ -91,7 +91,10 @@ fn the_page_offers_the_restore_only_while_the_backup_lasts_and_no_restore_runs_o
     };
     let again = offer(Some(UNTIL_MS), Some(&busy), NOW_MS, 0);
     assert!(again.offer, "a failed restore may be tried again");
-    assert_eq!(again.failure.as_deref(), Some(plain("storage_restore_busy")));
+    assert_eq!(
+        again.failure.as_deref(),
+        Some(plain("storage_restore_busy"))
+    );
     let late = offer(None, Some(&busy), NOW_MS, 0);
     assert!(!late.offer);
     assert_eq!(late.line, RESTORE_NONE);
@@ -127,7 +130,10 @@ fn the_confirm_names_the_three_things_a_restore_does_and_sends_it_once() {
     assert!(jobs(&mut ctx).is_empty(), "a restore is sent once");
     let mut gone = RestorePage::with(offer(None, None, NOW_MS, 0));
     gone.key(&Key::Enter, &mut ctx);
-    assert!(gone.modal(&ctx).is_none(), "no confirm once the backup is gone");
+    assert!(
+        gone.modal(&ctx).is_none(),
+        "no confirm once the backup is gone"
+    );
 }
 
 #[test]
@@ -135,16 +141,25 @@ fn a_refused_restore_says_why_in_its_own_sentence_and_an_admitted_one_shows_it_r
     let mut ctx = ctx(100, 30);
     let mut page = offered();
     page.arrive(&event(Ok(())), &mut ctx);
-    assert!(ctx.message().is_none(), "an answer to nothing sent is not shown");
+    assert!(
+        ctx.message().is_none(),
+        "an answer to nothing sent is not shown"
+    );
     confirm(&mut page, &mut ctx);
     assert_eq!(jobs(&mut ctx).len(), 1);
 
-    page.arrive(&event(Err("storage_restore_agents_running".into())), &mut ctx);
+    page.arrive(
+        &event(Err("storage_restore_agents_running".into())),
+        &mut ctx,
+    );
 
     let said = ctx.message().expect("the refusal is shown").clone();
     assert_eq!(said.tone, Tone::Warning);
     assert_eq!(said.lead, plain("storage_restore_agents_running"));
-    assert!(page.shown.offer, "a refusal changed nothing, so it can be tried again");
+    assert!(
+        page.shown.offer,
+        "a refusal changed nothing, so it can be tried again"
+    );
     confirm(&mut page, &mut ctx);
     assert_eq!(jobs(&mut ctx).len(), 1);
 
@@ -157,7 +172,10 @@ fn a_refused_restore_says_why_in_its_own_sentence_and_an_admitted_one_shows_it_r
     for code in CODES {
         assert!(!plain(code).is_empty(), "{code}");
         assert!(!plain(code).contains('('), "{code}");
-        assert!(code == "storage_restore_failed" || plain(code) != fallback, "{code}");
+        assert!(
+            code == "storage_restore_failed" || plain(code) != fallback,
+            "{code}"
+        );
     }
     assert_eq!(plain("stale_revision"), fallback);
 }
@@ -181,9 +199,18 @@ fn the_restore_tab_shows_only_for_an_engine_with_a_2_4_backup_or_a_restore_recor
     assert_eq!(shown.last(), Some(&SettingsSection::Restore));
     assert!(strip(&ctx, SettingsSection::Restore).contains("Restore 2.4"));
     let next = |section: SettingsSection, forward| section.step(forward, &shown);
-    assert_eq!(next(SettingsSection::Profile, true), SettingsSection::Restore);
-    assert_eq!(next(SettingsSection::Restore, true), SettingsSection::Accounts);
-    assert_eq!(next(SettingsSection::Accounts, false), SettingsSection::Restore);
+    assert_eq!(
+        next(SettingsSection::Profile, true),
+        SettingsSection::Restore
+    );
+    assert_eq!(
+        next(SettingsSection::Restore, true),
+        SettingsSection::Accounts
+    );
+    assert_eq!(
+        next(SettingsSection::Accounts, false),
+        SettingsSection::Restore
+    );
 
     let root = tempfile::Builder::new()
         .prefix("ca-tui-restore-")
@@ -206,7 +233,10 @@ fn the_restore_tab_shows_only_for_an_engine_with_a_2_4_backup_or_a_restore_recor
 fn an_unanswered_restore_counts_as_sent_and_drops_the_connection_and_a_refusal_keeps_its_code() {
     let mut lost = false;
     assert_eq!(restored(Ok(None), &mut lost), Ok(()));
-    assert!(lost, "the engine stops to restore, so the connection is dropped");
+    assert!(
+        lost,
+        "the engine stops to restore, so the connection is dropped"
+    );
     let mut lost = false;
     let refused = OwnerResponse::Rejected {
         code: "storage_restore_agents_running".into(),
