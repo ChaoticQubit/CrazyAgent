@@ -1002,7 +1002,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
             "{kinds:?} {field:?} {value:?}"
         );
     }
-    let outside = Fence::Engine(fence::HostStamp {
+    let outside = Fence::Engine(crate::engine::owner::HostStamp {
         db_instance: "a".repeat(64),
         engine_epoch: "9".repeat(64),
     });
@@ -1012,7 +1012,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
         )),
         Some("state_log_fence_out_of_process".into())
     );
-    let revoked = Fence::Owner(fence::Admission {
+    let revoked = Fence::Owner(crate::engine::owner::Admission {
         owner_epoch: 2,
         ..fence::test_owner()
     });

@@ -185,7 +185,7 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
 /// exactly; `value` holds no character JSON escapes, so it is logged as its own bytes.
 /// Inputs: the delete's transaction, the aggregates, the kinds (none for all), the field, the
 /// value, the kept seq and the fence. Output: how many events were redacted, a fence or
-/// [`redact`] refusal, or `state_log_redact_match`.
+/// [`redact`] refusal, `state_log_redact_match` or `state_log_replay_row`.
 pub fn redact_matching(
     tx: &Transaction<'_>,
     aggregates: &[Aggregate],
