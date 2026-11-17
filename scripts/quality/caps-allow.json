@@ -165,7 +165,7 @@
   "crates/crazyagent/tests/sub_agent_landing.rs": 1692,
   "crates/crazyagent/tests/terminal_tmux.rs": 2437,
   "crates/crazyagent/tests/worktree_ownership.rs": 1525,
-  "scripts/release/workflows.test.mjs": 1708,
+  "scripts/release/workflows.test.mjs": 1618,
   "scripts/smoke/owner-flow.mjs": 966,
   "scripts/trial/report.mjs": 1115,
   "scripts/trial/report.test.mjs": 995,
