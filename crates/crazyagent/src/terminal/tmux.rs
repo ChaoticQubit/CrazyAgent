@@ -116,6 +116,10 @@ const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
 const VERSION_MIN: (u32, u32) = (3, 7);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
+/// The most bytes one `send-keys -H` command types. tmux parses a command's arguments in time
+/// that grows faster than their count and answers nothing else meanwhile: 4096 hex keys held
+/// the server about 74 ms, 256 under 1 ms (fix11 NOTE-1032).
+const SEND_KEYS_BYTES_MAX: usize = 256;
 const REPLY_TIME: Duration = Duration::from_secs(10);
 /// Ends every format the engine has tmux expand. tmux stops expanding a format that has run
 /// for 100 ms of wall time, which a server stalled on a loaded machine reaches, and answers
@@ -836,20 +840,17 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys. Takes the control client, the target and
-    /// the bytes. Returns once tmux took them, or `terminal_input_bounds`.
+    /// Types bytes into one tmux target as hex keys, one command after another, in order.
+    /// Takes the control client, the target and the bytes. Returns once tmux took them all,
+    /// or `terminal_input_bounds`.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
         }
-        if bytes.is_empty() {
-            return Ok(());
+        for line in send_keys_lines(target, bytes) {
+            control.run(&line)?;
         }
-        let mut line = format!("send-keys -t {target} -H");
-        for byte in bytes {
-            let _ = write!(line, " {byte:02x}");
-        }
-        control.run(&line).map(drop)
+        Ok(())
     }
 
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
@@ -2463,6 +2464,28 @@ impl Host for Tmux {
     fn renew(&self, until: SystemTime) -> Result<(), HostError> {
         renew_socket(&self.socket, until)
     }
+}
+
+const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
+const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
+/// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
+/// bytes, so none cuts a character or an escape sequence, and none for no bytes.
+fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
+    let lines: Vec<String> = super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
+        .into_iter()
+        .map(|run| {
+            let mut line = format!("send-keys -t {target} -H");
+            for byte in run {
+                let _ = write!(line, " {byte:02x}");
+            }
+            line
+        })
+        .collect();
+    assert!(lines.len() >= bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+    assert!(lines.len() <= super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
+    lines
 }
 
 mod servers;
