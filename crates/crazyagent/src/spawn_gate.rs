@@ -361,11 +361,20 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     Ok(std::net::TcpListener::from(socket))
 }
 
-/// The [`bind_tcp_std_exclusive`] of a system whose `std` bind sets no `SO_REUSEADDR`.
-/// Input: the address. Output: the listener.
+/// The [`bind_tcp_std_exclusive`] of Windows, whose `std` bind sets no `SO_REUSEADDR` yet
+/// sits beside a listener on another address of the port: it binds, then reads the system's
+/// listener table and fails with `AddrInUse` when such a listener holds the port. A listener
+/// bound after that read is not seen. Input: the address. Output: the listener.
 #[cfg(not(unix))]
 pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
-    bind_tcp_std(address)
+    let listener = bind_tcp_std(address)?;
+    if crazyagent_win_sandbox::listener_beside(listener.local_addr()?)? {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "a listener on another address holds the port",
+        ));
+    }
+    Ok(listener)
 }
 
 /// Holds a free loopback TCP port that refuses every connect, as a model provider that is

@@ -11,4 +11,6 @@ pub mod request;
 mod win;
 
 #[cfg(windows)]
-pub use win::{BoundaryError, ProcessTree, final_name, owner_only, release, run};
+pub use win::{
+    BoundaryError, ProcessTree, file_id, final_name, listener_beside, owner_only, release, run,
+};

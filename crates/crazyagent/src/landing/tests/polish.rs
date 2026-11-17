@@ -650,3 +650,142 @@ fn a_confined_step_on_a_mac_checks_the_version_of_the_git_it_runs() {
     assert!(!agent.reading().unwrap().old_git());
     shape_git(None);
 }
+
+/// #274 (W-GIT-FLOOR r2): on git 2.39 a lead's worker set whose head its lead's branch has is
+/// judged landed there, but the work cannot be checked by merging again, so the set waits for
+/// the owner: reading it against the lead's tip answers Ok and keeps it pending, where it
+/// refused with `changes_git_old` on every poll. On 2.40 the same read closes it as Accepted.
+#[test]
+fn on_git_2_39_a_worker_set_its_lead_s_branch_holds_waits_for_the_owner() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 1);
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    git_in(&case.home, &lead, &["merge", "-q", "--ff-only", &head]);
+    assert_eq!(
+        git_in(&case.home, &lead, &["rev-parse", "HEAD"]).trim(),
+        head
+    );
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let read = owner::observe_for_diff(&case.db, &id).map(drop);
+    assert!(read.is_ok(), "{:?}", read.err().map(|error| error.0));
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    shape_git(Some("git version 2.40.0"));
+    owner::observe_for_diff(&case.db, &id).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+    shape_git(None);
+}
+
+/// #274 (W-GIT-FLOOR r2): on git 2.39 a lead in its own clone that holds a worker's head
+/// settles at its turn end without checking the work by merging again: the settle answers
+/// Ok and the worker's set waits for the owner, where it failed with `changes_git_old` at
+/// every turn end. On 2.40 the same settle closes the set as Accepted.
+#[test]
+fn on_git_2_39_a_clone_lead_s_settle_leaves_a_worker_set_it_holds_for_the_owner() {
+    let mut case = Case::new();
+    let (lead, lead_tip) = lead_35(&case, 1, true);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(&case, &case.workspace, &lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    git_in(&case.home, &lead, &["merge", "-q", "--ff-only", &head]);
+    assert_eq!(
+        git_in(&case.home, &lead, &["rev-parse", "HEAD"]).trim(),
+        head
+    );
+    let project = case.workspace.project.clone();
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let settled = crate::landing::settle_sub_agents(&case.db, &project, 35);
+    assert!(settled.is_ok(), "{:?}", settled.err().map(|error| error.0));
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    shape_git(Some("git version 2.40.0"));
+    crate::landing::settle_sub_agents(&case.db, &project, 35).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+    shape_git(None);
+}
+
+/// V243-GIT-FLOOR-SIBLING-DOORS (#298 N2): on git 2.39 a master set the owner landed outside
+/// closes, and the master close leaves the conflicted set its fix covers open: whether the
+/// land holds that set's work cannot be checked by merging again, so the check answers no,
+/// where it refused with `changes_git_old` and the master close logged it. On 2.40 the same
+/// check answers yes.
+#[test]
+fn on_git_2_39_a_master_land_read_from_outside_leaves_the_set_it_covers_for_the_owner() {
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let landed = case.view(&fix).head;
+    case.owner(&["merge", "-q", "--ff-only", &landed]);
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let read = owner::observe_for_diff(&case.db, &fix).map(drop);
+    assert!(read.is_ok(), "{:?}", read.err().map(|error| error.0));
+    assert_eq!(case.view(&fix).state, ChangeState::Accepted);
+    assert_eq!(case.view(&sub).state, ChangeState::Conflict);
+    let set = store::load(&case.db, &sub).unwrap();
+    assert_eq!(set.landed, None);
+    let held = || {
+        let owner = git::Repo::open(&case.repo, &case.repo.join(".git"), None).unwrap();
+        merges::holds_set_work(&owner, &landed, &set.base, &set.head).map_err(|error| error.0)
+    };
+    assert_eq!(held(), Ok(false));
+    shape_git(Some("git version 2.40.0"));
+    assert_eq!(held(), Ok(true));
+    shape_git(None);
+}
+
+/// V243-GIT-FLOOR-SIBLING-DOORS (#298 N2, leader 04:05 A): an undo of a master's merge that
+/// an engine stop cut short after the branch moved is finished on git 2.39, which cannot tell
+/// by merging again whether the revert took a closed set's work, so a set the merge closed
+/// counts as reverted, as when its work cannot be read, and is marked undone with it.
+#[test]
+fn on_git_2_39_a_cut_short_undo_of_a_master_merge_marks_the_set_it_closed_undone() {
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    assert!(matches!(
+        land_master_set(&case.db, &case.home, &fix).unwrap(),
+        Some(AcceptOutcome::Landed { .. })
+    ));
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    let stopped = owner::undo(&case.db, &case.home, &fix, &|at| {
+        at == owner::Step::BranchMoved
+    });
+    assert_eq!(refused(stopped), "changes_git_failed");
+    let revert = case.tip();
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let settled = owner::settled(&case.db, &fix).map(drop);
+    assert!(settled.is_ok(), "{:?}", settled.err().map(|error| error.0));
+    assert_eq!(
+        store::load(&case.db, &fix).unwrap().undone.as_deref(),
+        Some(revert.as_str())
+    );
+    assert_eq!(
+        store::load(&case.db, &sub).unwrap().undone.as_deref(),
+        Some(revert.as_str()),
+        "the set the merge closed is marked undone with it"
+    );
+    shape_git(None);
+}
+
+/// V243-GIT-FLOOR-THIRD-DOOR (#312 F1): on git 2.39 the master's own fix of a conflicted set
+/// is not landed by the master and waits for the owner, a clean no where the conflict-fix
+/// check refused with `changes_git_old` and the master runtime logged it. On 2.40 it lands.
+#[test]
+fn on_git_2_39_a_master_fix_of_a_conflict_waits_for_the_owner_and_lands_on_2_40() {
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let waited = land_master_set(&case.db, &case.home, &fix).map_err(|error| error.0);
+    assert_eq!(waited, Ok(None), "the master's set waits, no refusal");
+    master_set_waits(&case, &fix, &sub, ChangeState::Conflict, "git 2.39");
+    shape_git(Some("git version 2.40.0"));
+    assert!(matches!(
+        land_master_set(&case.db, &case.home, &fix).map_err(|error| error.0),
+        Ok(Some(AcceptOutcome::Landed { .. }))
+    ));
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    shape_git(None);
+}
