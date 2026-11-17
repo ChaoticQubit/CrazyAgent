@@ -6,10 +6,9 @@
     "src/screens/demo/demo.css": 1,
     "src/screens/metrics/metrics.css": 3,
     "src/screens/process.css": 1,
-    "src/screens/project/projects.css": 27,
+    "src/screens/project/projects.css": 22,
     "src/screens/project/questions.css": 1,
     "src/screens/project/team-activity.css": 2,
-    "src/screens/settings/settings.css": 7,
     "src/screens/skill-tag.css": 4,
     "src/style.css": 12
   },
@@ -18,10 +17,9 @@
     "src/screens/intake/intake.css": 2,
     "src/screens/metrics/metrics.css": 4,
     "src/screens/process.css": 4,
-    "src/screens/project/projects.css": 11,
+    "src/screens/project/projects.css": 10,
     "src/screens/project/questions.css": 1,
     "src/screens/project/team-activity.css": 1,
-    "src/screens/settings/settings.css": 11,
     "src/screens/terminals/terminals.css": 2,
     "src/style.css": 6
   },
@@ -31,9 +29,8 @@
     "src/screens/metrics/metrics.css": 18,
     "src/screens/process.css": 4,
     "src/screens/project/overview-tabs.css": 1,
-    "src/screens/project/projects.css": 35,
+    "src/screens/project/projects.css": 28,
     "src/screens/project/team-activity.css": 5,
-    "src/screens/settings/settings.css": 26,
     "src/screens/terminals/terminals.css": 5,
     "src/style.css": 19
   }
