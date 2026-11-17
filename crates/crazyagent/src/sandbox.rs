@@ -6082,3 +6082,35 @@ mod profile_string_tests {
         assert!(below >= 20, "{below}");
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod firmlink_tests {
+    use super::*;
+
+    /// V243-FIRMLINK-SANDBOX-ROOT (sweep #3): a root named through /System/Volumes/Data is
+    /// refused, since Seatbelt matches only the short name and every rule written in the long
+    /// one would never match; an extra read path typed that way is checked under its short
+    /// name, so one holding the engine's data is refused.
+    #[test]
+    fn a_root_named_through_the_data_volume_is_refused_and_a_read_path_is_checked_short() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp", "engine"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        assert!(long(&root.join("project")).is_dir());
+        let network = || SandboxNetwork::Only(Vec::new());
+        let (home, tmp) = (root.join("home"), root.join("tmp"));
+        let refused = ProjectSandbox::new(&long(&root.join("project")), &home, &tmp, network());
+        assert!(
+            matches!(&refused, Err(SandboxError::Invalid(reason)) if reason.contains("canonical")),
+            "{refused:?}"
+        );
+        assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
+        assert_eq!(
+            extra_paths::checked(long(&root).to_str().unwrap(), &root.join("engine")),
+            Err("read_path_engine_data")
+        );
+    }
+}
