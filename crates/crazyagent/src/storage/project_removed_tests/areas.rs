@@ -114,7 +114,10 @@ fn seed_areas(db: &Connection, project: &str, first: i64) {
         [project],
     )
     .unwrap();
-    run_command::set_mode(db, &id, RunMode::Off).unwrap();
+    let host = crate::ide::log::active_host(db)
+        .unwrap()
+        .expect("the store's host runs");
+    run_command::set_mode(db, &host, &id, RunMode::Off).unwrap();
     db.execute(
         "INSERT INTO account_strategies(scope,id,strategy) VALUES ('project',?1,?2)",
         params![project, Strategy::Balanced.code()],
@@ -227,8 +230,11 @@ fn removed_store() -> Removed {
 fn a_replayed_removal_leaves_the_project_no_row_in_activity_coord_github_ide_schedule_or_usage() {
     let r = removed_store();
     let live = &r.store.db;
-    let events = logged(live);
-    assert_eq!(events.len(), 1, "one removal, one event");
+    let events: Vec<_> = logged(live)
+        .into_iter()
+        .filter(|(_, aggregate, ..)| aggregate.as_str() == "projects")
+        .collect();
+    assert_eq!(events.len(), 1, "one removal, one projects event");
     let seq = events[0].0 as u64;
     assert!(
         held_areas(live, REMOVED, 10)

@@ -646,18 +646,21 @@ fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Result<(), Engin
     Ok(())
 }
 
-/// Tombstones, for a project removal, every logged instruction and roadmap settings event of
-/// the removed project, so its id leaves the log's settings events; snapshot runs keep their
-/// rows until compaction (L1b) rewrites them. The caller checkpoints the WAL after its
-/// commit. Inputs: the removal's transaction, the project, the removal's own `seq` and its
-/// fence. Output: how many events were tombstoned, or the redaction's refusal.
+/// Tombstones, for a project removal or a demo clear, every logged instruction and roadmap
+/// settings event of the project, so its id leaves the log's settings events; snapshot runs
+/// keep their rows until compaction (L1b) rewrites them. The caller checkpoints the WAL
+/// after its commit. Inputs: the transaction, the project, the removal's own `seq` (none for
+/// a clear, which logs no removal) and the fence. Output: how many events were tombstoned,
+/// or the redaction's refusal.
 pub(crate) fn forget_project(
     tx: &Transaction<'_>,
     project: &str,
-    keep: u64,
+    keep: Option<u64>,
     fence: &Fence,
 ) -> Result<usize, EngineError> {
-    assert!(keep > 0, "the removal is logged before its redaction");
+    if let Some(seq) = keep {
+        assert!(seq > 0, "the removal is logged before its redaction");
+    }
     let kinds = [KIND_INSTRUCTION, KIND_ROADMAP];
     let redacted = replay::redact_matching(
         tx,
@@ -665,7 +668,7 @@ pub(crate) fn forget_project(
         Some(&kinds),
         "project",
         project,
-        keep,
+        keep.unwrap_or(0),
         fence,
     )?;
     assert!(!tx.is_autocommit(), "the redaction is part of the removal");

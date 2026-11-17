@@ -85,7 +85,7 @@ test("the window names only the project and the question; the app writes the not
   assert.match(settings, /systemNotificationsLine\(/);
 });
 
-test("one question-counts read every 10 s feeds the sidebar flags, the badge and the notification watch", () => {
+test("one question-counts read per team change feeds the sidebar flags, the badge and the notification watch", () => {
   const source = readFileSync(new URL("../src/notify.ts", import.meta.url), "utf8");
   const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
   const reads = (text) => text.match(/loadQuestionCounts\(\)/g)?.length ?? 0;
@@ -94,7 +94,7 @@ test("one question-counts read every 10 s feeds the sidebar flags, the badge and
   assert.equal(app.match(/questionWatch\(\(line\) => toast\.current\(line\)\)/g)?.length, 1, "one watch, made by the alerts read");
   assert.match(app, /if \(questions\.kind === "ok"\) await watch\.look\(questions\.value\);/);
   assert.match(app, /watch\.stop\(\);/);
-  assert.match(app, /if \(live && \(result\.kind !== "not_ready" \|\| questions\.kind !== "not_ready"\)\) timer = window\.setTimeout\(read, ALERT_READ_MS\);/, "a build without team events still watches questions");
+  assert.match(app, /if \(result\.kind === "not_ready" && questions\.kind === "not_ready"\) stopHearing\(\);/, "a build without team events still watches until neither read exists");
   assert.doesNotMatch(source, /setTimeout|setInterval|QUESTION_READ_MS/, "the watch has no timer of its own");
   assert.doesNotMatch(app, /useQuestionNotifications/);
 });
