@@ -1,4 +1,5 @@
 mod routes;
+mod watch;
 
 use crazyagent::agent_git::Layout;
 use crazyagent::coord::settings::SkillRole;
@@ -185,8 +186,14 @@ async fn configure_profile(state: &Shared, args: Value) -> Routed {
 }
 
 /// Serves one connection: routes its invoke on the shared bridge and writes the answer.
-/// Input: the stream, the shared bridge and the token. Output: nothing; failures close it.
-async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
+/// Input: the stream, the shared bridge, the engine watch and the token. Output: nothing;
+/// failures close it.
+async fn serve(
+    mut stream: TcpStream,
+    state: Shared,
+    watched: Arc<watch::Watched>,
+    token: Arc<String>,
+) {
     let (status, answer) = match request(&mut stream, &token).await {
         Err(reason) => ("400 Bad Request", json!({ "refused": reason })),
         Ok(body) => match serde_json::from_slice::<Value>(&body) {
@@ -197,6 +204,10 @@ async fn serve(mut stream: TcpStream, state: Shared, token: Arc<String>) {
                         ide_open(&state, args).await
                     } else if command == CONFIGURE_PROFILE {
                         configure_profile(&state, args).await
+                    } else if command == watch::WATCH {
+                        watch::watch(&state, &watched, args)
+                    } else if command == watch::WATCH_NEXT {
+                        watch::next(&watched).await
                     } else {
                         routes::route(&state, &command, args).await
                     };
@@ -604,6 +615,7 @@ async fn main() -> std::process::ExitCode {
         socket,
     )))));
     let token = Arc::new(token);
+    let watched = Arc::new(watch::Watched::default());
     std::thread::spawn(|| {
         let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
         std::process::exit(0);
@@ -619,6 +631,11 @@ async fn main() -> std::process::ExitCode {
         if !peer.ip().is_loopback() {
             continue;
         }
-        tokio::spawn(serve(stream, Arc::clone(&state), Arc::clone(&token)));
+        tokio::spawn(serve(
+            stream,
+            Arc::clone(&state),
+            Arc::clone(&watched),
+            Arc::clone(&token),
+        ));
     }
 }

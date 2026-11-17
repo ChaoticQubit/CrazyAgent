@@ -17,6 +17,8 @@ const OTHER: &str = "other";
 /// rule proposals, the IDE Run setting, the schedule and usage, on this module's store,
 /// rebuilt from the log equal to the live store, and the engine's open writes off the log.
 mod areas;
+/// The removal's redaction of the project's ide events and its ide rows (v2.5 L7, #309 N1).
+mod ide_events;
 
 /// Each area the removal's projection clears, with the rows [`seed`] gives one project
 /// there: three agents (stopped, failed, working), each with a pane, own instructions and
@@ -507,6 +509,49 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
     assert_eq!(kind, event::KIND, "the removal keeps its own event");
     assert_ne!(body.as_slice(), crate::state_log::TOMBSTONE);
 
+    let live = rows(&s.db, "repository_admissions").unwrap();
+    assert_eq!(live.len(), 1, "only the other project's admission stands");
+    let tx = s.db.transaction().unwrap();
+    log::rebuild(&tx).unwrap();
+    assert_eq!(rows(&tx, "repository_admissions").unwrap(), live);
+}
+
+/// rv-sec2 #345 N4: Create demo's clear of an id tombstones the id's `RepositoryAdmitted`
+/// events with its admissions, keeping the other project's, so the worktrees replay brings
+/// back no admission of the cleared id; the other project's admission replays as it stands.
+#[test]
+fn a_cleared_ids_admissions_are_tombstoned_and_their_replay_brings_none_back() {
+    use crate::worktrees::log;
+    let mut s = store();
+    let engine = || fence::Fence::Engine(s.started.host.clone());
+    let tx = s.db.transaction().unwrap();
+    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    for project in [REMOVED, OTHER] {
+        let project_id = ProjectId::new(project).unwrap();
+        let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));
+        log::record(&mut appender, 1, &admitted).unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(rows(&s.db, "repository_admissions").unwrap().len(), 2);
+
+    let owner = fence::Fence::Owner(s.started.owners[0].admission.clone());
+    let cleared = ProjectId::new(REMOVED).unwrap();
+    let tx = s.db.transaction().unwrap();
+    crate::project_setup::removed::clear(&tx, &cleared, &owner).unwrap();
+    tx.commit().unwrap();
+
+    let admitted: Vec<Vec<u8>> = logged(&s.db)
+        .into_iter()
+        .filter(|(_, _, kind, _, _)| kind == log::KIND_ADMITTED)
+        .map(|(_, _, _, _, body)| body)
+        .collect();
+    assert_eq!(admitted.len(), 2);
+    assert_eq!(
+        admitted[0].as_slice(),
+        crate::state_log::TOMBSTONE,
+        "the cleared id's admission is redacted"
+    );
+    assert!(String::from_utf8_lossy(&admitted[1]).contains("/repo/other"));
     let live = rows(&s.db, "repository_admissions").unwrap();
     assert_eq!(live.len(), 1, "only the other project's admission stands");
     let tx = s.db.transaction().unwrap();

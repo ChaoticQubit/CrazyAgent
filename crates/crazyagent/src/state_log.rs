@@ -413,18 +413,19 @@ const ENGINE_CLIENT: &str = "owner:engine";
 /// request trims to the setting.
 const EVENTS_KEPT_MAX: i64 = 256;
 
-/// Writes the `events` row of a revision an engine-own write moved, in its transaction, so
-/// a client catching up from `events` moves to it and its next save is not
-/// `stale_revision` (v2.5 L6, fix11 L7 Q6). Every store with a `state` table has `events`:
-/// both come from the same schema batch. Inputs: the transaction and the revision. Output:
-/// Ok or the store's refusal.
+/// Writes the `events` row of a revision an engine-own write moved, in its transaction, so a
+/// client catching up from `events` moves to it and its next save is not `stale_revision`
+/// (v2.5 L6, fix11 L7 Q6). The row's topic is `unknown`: any writer may append here (S3a).
+/// Every store with a `state` table has `events`, from the same schema batch. Inputs: the
+/// transaction and the revision. Output: Ok or the store's refusal.
 fn publish(tx: &Transaction<'_>, revision: u64) -> Result<(), EngineError> {
-    use crate::protocol::{ClientId, Cursor, Event, RequestId};
+    use crate::protocol::{ClientId, Cursor, Event, RequestId, Topic};
     assert!(revision > 0, "an own write moved the revision");
     let event = Event {
         cursor: Cursor::new(revision),
         request_id: RequestId::new(format!("engine-{revision}")).map_err(error)?,
         client_id: ClientId::new(ENGINE_CLIENT).map_err(error)?,
+        topic: Topic::Unknown,
     };
     let cursor = i64::try_from(revision).map_err(error)?;
     let body = serde_json::to_string(&event).map_err(error)?;

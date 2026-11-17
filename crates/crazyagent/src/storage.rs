@@ -2608,12 +2608,8 @@ fn owner_apply_with(
             projects_home::record(&tx, path, &request.request_id, &command, effect)?
         }
         (Some(Effect::NewProject(staged)), Command::ProjectSetup { action }) => {
-            let demo = matches!(
-                &request.operation,
-                OwnerOperation::Apply {
-                    mutation: OwnerMutation::CreateDemo { .. }
-                }
-            );
+            let fence = crate::state_log::fence::Fence::Owner(a.clone());
+            let demo = matches!(mutation, OwnerMutation::CreateDemo { .. }).then_some(&fence);
             let outcome = crate::project_setup::record_new(&tx, config, action, staged, demo)?;
             if let (
                 Outcome::Applied,
@@ -2691,7 +2687,8 @@ fn owner_apply_with(
             let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
             let fence = crate::state_log::fence::Fence::Owner(a.clone());
             let project = removed.project.as_str();
-            redacted = crate::worktrees::log::forget_project(&tx, project, seq, &fence)?;
+            redacted = crate::worktrees::log::forget_project(&tx, project, Some(seq), &fence)?;
+            redacted += crate::ide::log::forget_project(&tx, project, Some(seq), &fence)?;
         }
     }
     let provenance = OwnerProvenance {

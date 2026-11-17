@@ -377,7 +377,8 @@ fn the_suffix_keeps_the_id_within_64_bytes() {
 
 #[test]
 fn clear_takes_every_row_of_the_id() {
-    let (_directory, db) = database();
+    let (_directory, mut db) = database();
+    crate::state_log::fence::seed(&db);
     let demo = id(crate::demo::PROJECT_ID);
     record(&db, &demo, Some("/h/crazyagent-demo"), true).unwrap();
     db.execute_batch(&format!(
@@ -389,7 +390,10 @@ fn clear_takes_every_row_of_the_id() {
     ))
     .unwrap();
     assert!(held(&db, &demo).unwrap());
-    clear(&db, &demo).unwrap();
+    let owner = Fence::Owner(crate::state_log::fence::test_owner());
+    let tx = db.transaction().unwrap();
+    clear(&tx, &demo, &owner).unwrap();
+    tx.commit().unwrap();
     assert!(!held(&db, &demo).unwrap());
     assert_eq!(returning(&db, "/h/crazyagent-demo").unwrap(), None);
     for table in ["connector_write_allowed", "memory_library"] {

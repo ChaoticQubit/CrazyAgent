@@ -1,5 +1,5 @@
 use crate::engine::EngineError;
-use crate::engine::owner::{OwnerRuntimeHandle, failure};
+use crate::engine::owner::{HostStamp, OwnerRuntimeHandle, failure};
 use crate::protocol::ProjectId;
 use crate::terminal::{AgentId, Host};
 use rusqlite::{OptionalExtension, params};
@@ -16,6 +16,7 @@ pub(super) async fn answer(
     path: String,
 ) -> Result<serde_json::Value, EngineError> {
     let root = runtime.ide()?.root;
+    let engine = runtime.identity();
     let host = runtime.terminal_off_worker().await.ok();
     let project = project.clone();
     let (path, told) = tokio::task::spawn_blocking(move || -> Result<_, EngineError> {
@@ -24,7 +25,15 @@ pub(super) async fn answer(
             .ok()
             .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
             .ok_or_else(|| failure("ide_clock_unavailable"))?;
-        let told = edit(&root, host.as_deref(), &project, &agent, &path, now)?;
+        let told = edit(
+            &root,
+            &engine,
+            host.as_deref(),
+            &project,
+            &agent,
+            &path,
+            now,
+        )?;
         Ok((path, told))
     })
     .await
@@ -37,13 +46,15 @@ pub(super) async fn answer(
 /// the workspace and types one message naming the file on one line into a sub-agent's
 /// terminal, kept in its Messages timeline as an engine notice, so a path with a line break
 /// cannot add a line to that notice. A master hears nothing; the owner talks to it
-/// directly. Inputs: the engine root, the terminal host when there is one, the project, the
-/// agent, the path inside its worktree and the time in ms. Output: whether the agent was
+/// directly. Inputs: the engine root, the engine host whose fence the unlock and the
+/// workspace write hold, the terminal host when there is one, the project, the agent, the
+/// path inside its worktree and the time in ms. Output: whether the agent was
 /// told, or `ide_agent_unknown`, `ide_agent_not_running`, `ide_agent_files_read_only` while
 /// the project's agent folders are Read only below Full access (DEC-124), since the IDE could
 /// not save the file, or the store's refusal.
 pub(crate) fn edit(
     root: &Path,
+    engine: &HostStamp,
     host: Option<&dyn Host>,
     project: &ProjectId,
     agent: &AgentId,
@@ -83,8 +94,8 @@ pub(crate) fn edit(
         return Err(failure("ide_agent_files_read_only"));
     }
     crate::landing::owner_edit::record(&db, &worktree, path, now)?;
-    super::super::readonly::unlock(&db, id, path)?;
-    super::super::workspace::write(root, project)?;
+    super::super::readonly::unlock(&db, engine, project, id, path)?;
+    super::super::workspace::write(root, engine, project)?;
     let Some(host) = host.filter(|_| role == "sub") else {
         return Ok(false);
     };

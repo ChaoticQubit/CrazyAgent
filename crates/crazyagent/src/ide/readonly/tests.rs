@@ -45,10 +45,32 @@ fn readonly_globs_cover_running_agents_only() {
             readonly_exclude: vec![],
         }
     );
-    unlock(&case.db, working.id, "src/lib.rs").unwrap();
-    unlock(&case.db, working.id, "docs/a[1]*{x}?.md").unwrap();
+    unlock(
+        &case.db,
+        &case.host,
+        &case.project,
+        working.id,
+        "src/lib.rs",
+    )
+    .unwrap();
+    unlock(
+        &case.db,
+        &case.host,
+        &case.project,
+        working.id,
+        "docs/a[1]*{x}?.md",
+    )
+    .unwrap();
     assert_eq!(
-        unlock(&case.db, stopped.id, "src/lib.rs").unwrap_err().0,
+        unlock(
+            &case.db,
+            &case.host,
+            &case.project,
+            stopped.id,
+            "src/lib.rs"
+        )
+        .unwrap_err()
+        .0,
         "ide_agent_not_running"
     );
     let unlocked = settings(&case.db, &case.project).unwrap();
@@ -62,7 +84,14 @@ fn readonly_globs_cover_running_agents_only() {
     );
     next_turn(&case, &working);
     assert_eq!(settings(&case.db, &case.project).unwrap(), locked);
-    unlock(&case.db, working.id, "src/lib.rs").unwrap();
+    unlock(
+        &case.db,
+        &case.host,
+        &case.project,
+        working.id,
+        "src/lib.rs",
+    )
+    .unwrap();
     assert_eq!(
         settings(&case.db, &case.project).unwrap().readonly_exclude,
         vec![file(&working, "src/lib.rs")]
@@ -91,15 +120,24 @@ fn unlocked_files_stop_at_their_bound_per_agent() {
     let mut case = Case::new();
     let agent = case.agent("sub", "working");
     for index in 0..UNLOCKED_PER_AGENT_MAX {
-        unlock(&case.db, agent.id, &format!("file-{index}")).unwrap();
+        unlock(
+            &case.db,
+            &case.host,
+            &case.project,
+            agent.id,
+            &format!("file-{index}"),
+        )
+        .unwrap();
     }
     assert_eq!(
-        unlock(&case.db, agent.id, "one-more").unwrap_err().0,
+        unlock(&case.db, &case.host, &case.project, agent.id, "one-more")
+            .unwrap_err()
+            .0,
         "ide_unlocked_full"
     );
-    unlock(&case.db, agent.id, "file-0").unwrap();
+    unlock(&case.db, &case.host, &case.project, agent.id, "file-0").unwrap();
     next_turn(&case, &agent);
-    unlock(&case.db, agent.id, "one-more").unwrap();
+    unlock(&case.db, &case.host, &case.project, agent.id, "one-more").unwrap();
     let kept: i64 = case
         .db
         .query_row(
