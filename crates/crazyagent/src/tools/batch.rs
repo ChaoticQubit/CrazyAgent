@@ -58,9 +58,10 @@ fn plain_part(part: &str) -> bool {
 /// npm's own `npx.cmd` as the `node.exe` and `npx-cli.js` beside it, read by where they sit
 /// and never by its text (leader 04:09); any other `.cmd` or `.bat` refused. A shim's
 /// target and npx's files pass every check an entry passes ([`entry_at`]), one level
-/// deeper, so a batch file leading to another stays bounded. Inputs: the entry, its checked
-/// real file, the places, the depth and how a refusal reads. Output: none when the real
-/// file is no batch file, else the tool or why it cannot run.
+/// deeper, so a batch file leading to another stays bounded; `npx-cli.js` looks its `node`
+/// up beside npx.cmd only, so npx runs off the engine's PATH too (#341). Inputs: the entry,
+/// its checked real file, the places, the depth and how a refusal reads. Output: none when
+/// the real file is no batch file, else the tool or why it cannot run.
 #[cfg(windows)]
 pub(super) fn entry(
     entry: &Path,
@@ -82,7 +83,11 @@ pub(super) fn entry(
             Ok(_) => return refuse(),
             Err(missing) => return Some(Err(missing)),
         };
-        return Some(entry_at(&cli, places, depth + 1).map(|script| Resolved {
+        let beside = Places {
+            folders: vec![folder.to_path_buf()],
+            ..places.clone()
+        };
+        return Some(entry_at(&cli, &beside, depth + 1).map(|script| Resolved {
             entry: entry.to_path_buf(),
             program: script.program,
             kind: Kind::Script {
@@ -118,6 +123,25 @@ fn batch_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let name = name.trim_end_matches(['.', ' ']);
     name.contains(':') || name.ends_with(".cmd") || name.ends_with(".bat")
+}
+
+/// Whether Windows starts a file directly as a program, never through cmd.exe
+/// ([`program_name`]). Input: the file. Output: the answer, false for a path with no file
+/// name.
+#[cfg(windows)]
+pub(crate) fn program_file(file: &Path) -> bool {
+    file.file_name()
+        .is_some_and(|name| program_name(&name.to_string_lossy()))
+}
+
+/// Whether a file name is one Windows starts directly as a program: `.exe` or `.com` in any
+/// case once the trailing dots and spaces Windows drops are gone, with no `:` stream part. A
+/// name with no extension or another one is not, since a launcher may complete it from
+/// `PATHEXT` with a `.cmd` beside it (#341 sec F1). Input: the name. Output: the answer.
+fn program_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.trim_end_matches(['.', ' ']);
+    !name.contains(':') && (name.ends_with(".exe") || name.ends_with(".com"))
 }
 
 /// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.
@@ -163,6 +187,17 @@ fn npx_layout(cmd: &Path, folder: &Path) -> Option<(PathBuf, PathBuf)> {
         .join("bin")
         .join("npx-cli.js");
     (named && node.is_file() && cli.is_file()).then_some((node, cli))
+}
+
+/// npm's own `npx.cmd` as the real `node.exe` and `npx-cli.js` its layout names
+/// ([`npx_layout`]), so a caller can tell the resolver mapped a batch file by that layout and
+/// by no shim text. Input: the batch file as written. Output: both real files, none for any
+/// other file.
+#[cfg(windows)]
+pub(crate) fn npx_real(cmd: &Path) -> Option<(PathBuf, PathBuf)> {
+    let cmd = cmd.canonicalize().ok()?;
+    let (node, cli) = npx_layout(&cmd, cmd.parent()?)?;
+    Some((node.canonicalize().ok()?, cli.canonicalize().ok()?))
 }
 
 /// The text of a batch file, read up to one byte past the bound a cmd-shim can reach.
@@ -221,6 +256,38 @@ pub(super) mod tests {
         }
         for name in ["tool.exe", "cmd", "run.cmdx", "run.cmd.exe", "bat", ""] {
             assert!(!batch_name(name), "{name}");
+        }
+    }
+
+    /// #341 sec F1: only `.exe` or `.com` in any case, trailing dots and spaces dropped, is a
+    /// program Windows starts directly; a name with no extension, a dotted one such as
+    /// `tool.v2`, a batch file, a script or any stream part is not.
+    #[test]
+    fn a_program_name_is_read_as_windows_reads_it() {
+        for name in [
+            "node.exe",
+            "NODE.EXE",
+            "tool.Com",
+            "tool.exe.",
+            "tool.exe ",
+            "run.cmd.exe",
+        ] {
+            assert!(program_name(name), "{name}");
+        }
+        for name in [
+            "tool",
+            "tool.v2",
+            "npx",
+            "npx.cmd",
+            "run.bat",
+            "cli.js",
+            "tool.exe:stream",
+            "tool.exe::$DATA",
+            "tool.exex",
+            "exe",
+            "",
+        ] {
+            assert!(!program_name(name), "{name}");
         }
     }
 

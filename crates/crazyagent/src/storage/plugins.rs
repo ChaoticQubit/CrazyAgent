@@ -1687,12 +1687,25 @@ pub(crate) fn launch_set(
 fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, EngineError> {
     let mut servers = Vec::with_capacity(plugins.servers.len());
     let mut context_mode_off = None;
+    let mut batch_files = Vec::new();
     let mut left_out = Vec::new();
     for server in plugins.servers {
         let spec = match crate::context_mode::for_launch(root, server.spec) {
             Ok(spec) => spec,
             Err(off) => {
                 context_mode_off = Some(off);
+                left_out.push(server.name);
+                continue;
+            }
+        };
+        let spec = match crate::plugins::without_cmd_exe(root, spec) {
+            Ok(spec) => spec,
+            Err(code) => {
+                eprintln!(
+                    "plugin_server_batch_left_out name={} code={code}",
+                    server.name
+                );
+                batch_files.push(server.name.clone());
                 left_out.push(server.name);
                 continue;
             }
@@ -1711,11 +1724,16 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
         });
     }
     assert!(servers.len() + left_out.len() <= 2 * SERVERS_PER_SCOPE_MAX);
-    assert_eq!(context_mode_off.is_some(), !left_out.is_empty());
+    assert_eq!(
+        context_mode_off.is_some() || !batch_files.is_empty(),
+        !left_out.is_empty()
+    );
+    assert!(batch_files.iter().all(|name| left_out.contains(name)));
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
         context_mode_off,
+        batch_files,
         left_out,
     })
 }
@@ -2187,19 +2205,8 @@ fn tool_views(
 }
 
 #[cfg(all(test, windows))]
-mod windows_tests {
-    #[test]
-    fn a_skill_folder_name_with_a_colon_is_refused_on_windows() {
-        let root = tempfile::tempdir().unwrap();
-        for id in ["name:x", "owner:abc"] {
-            let outcome = super::remove_skill_project_folder(root.path(), id);
-            assert!(
-                matches!(&outcome, Err(refused) if refused.0 == "plugin_skill_folder_invalid"),
-                "{id}: Windows reads a colon as a stream or device, never as this folder: {outcome:?}"
-            );
-        }
-    }
-}
+#[path = "plugins_windows_tests.rs"]
+mod windows_tests;
 
 #[cfg(all(test, unix))]
 #[path = "plugins_tests.rs"]

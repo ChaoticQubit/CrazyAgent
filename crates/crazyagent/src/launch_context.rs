@@ -111,8 +111,13 @@ const CONTEXT_MODE_TOOLS: [&str; 5] = [
     "ctx_search",
 ];
 /// The most bytes of the section that tells a tools-on launch when to use context-mode,
-/// graphify and its skills.
-pub const TOOL_USE_BYTES_MAX: usize = 2 * 1024;
+/// graphify and its skills, and which MCP servers it left out.
+pub const TOOL_USE_BYTES_MAX: usize = 3 * 1024;
+/// The most server names the tools-section line about servers left out as Windows batch
+/// files shows before it says how many more there are.
+const BATCH_NAMES_SHOWN_MAX: usize = 4;
+/// The most bytes of that line: its words, the names shown and the count of the rest.
+const BATCH_LINE_BYTES_MAX: usize = 640;
 /// The most bytes of the Task-start reminder the first turn of a task carries (T3-15).
 pub const TASK_START_BYTES_MAX: usize = 1024;
 const TEAMMATE_COMMAND: &str = "teammate";
@@ -1156,6 +1161,7 @@ impl AgentContext {
                     false,
                     servers,
                     self.plugins.context_mode_off,
+                    &self.plugins.batch_files,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1234,6 +1240,7 @@ impl AgentContext {
                     true,
                     servers,
                     self.plugins.context_mode_off,
+                    &self.plugins.batch_files,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1703,18 +1710,43 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
     }
 }
 
+/// The tools-section line naming the MCP servers a launch left out because each one's
+/// command is not a Windows program ([`crate::plugins::without_cmd_exe`]) and what to tell the
+/// owner: at most [`BATCH_NAMES_SHOWN_MAX`] names, each clipped to a server name's bound, then
+/// how many more. Input: the names. Output: one line ending in a newline, none without names.
+fn batch_files_line(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = names
+        .iter()
+        .take(BATCH_NAMES_SHOWN_MAX)
+        .map(|name| format!("`{}`", clip(name, crate::plugins::SERVER_NAME_BYTES_MAX)))
+        .collect();
+    let list = match names.len() - shown.len() {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    };
+    let line = format!(
+        "- MCP servers off for this launch: {list}. Each one's command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent did not start it. Tell the owner in your report to set its command to the tool's .exe, or to node.exe with the tool's script as the first argument.\n"
+    );
+    assert!(line.len() <= BATCH_LINE_BYTES_MAX);
+    Some(line)
+}
+
 /// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
 /// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
 /// all output that is not short and fixed, a graphify query before any source read and a
 /// check of the approved skills by the names the skills index uses. A launch that left the
-/// context-mode server out is told why. Inputs: whether the harness is Claude Code, the
-/// launch's servers, why context-mode was left out if it was, the tools switched off and the
-/// first approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX`
-/// bytes.
+/// context-mode server or servers whose command is no Windows program out is told why. Inputs:
+/// whether the harness is Claude Code, the launch's servers, why context-mode was left out
+/// if it was, the servers left out as no Windows program, the tools switched off and the first
+/// approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
     context_mode_off: Option<crate::plugins::ContextModeOff>,
+    batch_files: &[String],
     off_tools: &[(String, Vec<String>)],
     skill: Option<&str>,
 ) -> String {
@@ -1743,6 +1775,9 @@ fn tool_use_section(
     }
     if let Some(off) = context_mode_off.filter(|_| !context_mode) {
         section.push_str(context_mode_off_line(off));
+    }
+    if let Some(line) = batch_files_line(batch_files) {
+        section.push_str(&line);
     }
     section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {
