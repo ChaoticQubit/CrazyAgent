@@ -1,5 +1,9 @@
 use crate::engine::owner::{OwnerClient, OwnerClientKind};
 use crate::paths::{Layout, Platform, RootEnvironment};
+use markup::{
+    bounded_text, plist_string, systemd_environment_quoted, systemd_quoted, systemd_specifiers,
+    systemd_unquoted, windows_quoted, xml,
+};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -1327,107 +1331,6 @@ fn copy_private(source: &Path, copy: &Path) -> std::io::Result<()> {
     file.sync_all()
 }
 
-fn xml(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-fn systemd_specifiers(text: &str) -> String {
-    text.replace('%', "%%")
-}
-
-/// The largest definition or Info.plist read when telling installed versions apart.
-const PLIST_BYTES_MAX: u64 = 64 << 10;
-
-/// Reads a small file as UTF-8 text. Input: the path. Output: the text, or none when it is
-/// missing, not UTF-8 or larger than [`PLIST_BYTES_MAX`].
-fn bounded_text(path: &Path) -> Option<String> {
-    use std::io::Read;
-    let mut text = String::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(PLIST_BYTES_MAX + 1)
-        .read_to_string(&mut text)
-        .ok()?;
-    (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
-}
-
-/// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
-/// the line. Output: the text, or none for a line that holds no such element.
-fn plist_string(line: &str) -> Option<String> {
-    let inner = line
-        .trim()
-        .strip_prefix("<string>")?
-        .strip_suffix("</string>")?;
-    Some(
-        inner
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&amp;", "&"),
-    )
-}
-
-/// Reads back the first word of an ExecStart= line as [`systemd_quoted`] wrote it.
-/// Input: the line after `ExecStart=`. Output: the word, or none when it is not quoted so.
-fn systemd_unquoted(text: &str) -> Option<String> {
-    let mut characters = text.strip_prefix('"')?.chars();
-    let mut word = String::new();
-    while let Some(character) = characters.next() {
-        match character {
-            '"' => return Some(word),
-            '\\' => word.push(characters.next()?),
-            '%' | '$' => {
-                if characters.next()? != character {
-                    return None;
-                }
-                word.push(character);
-            }
-            other => word.push(other),
-        }
-    }
-    None
-}
-
-/// Quotes one word of an ExecStart= line, where systemd also expands `$` variables, so a
-/// `$` is doubled on top of [`systemd_environment_quoted`]. Input: the word. Output: the
-/// quoted text.
-fn systemd_quoted(text: &str) -> String {
-    systemd_environment_quoted(&text.replace('$', "$$"))
-}
-
-/// Quotes a value for systemd: backslash and double quote are escaped and `%` (a specifier)
-/// is doubled. Environment= expands no variables, so `$` is written as is. Input: the value.
-/// Output: the quoted text.
-fn systemd_environment_quoted(text: &str) -> String {
-    let mut quoted = String::from("\"");
-    for character in text.chars() {
-        match character {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            '%' => quoted.push_str("%%"),
-            other => quoted.push(other),
-        }
-    }
-    quoted.push('"');
-    quoted
-}
-
-fn windows_quoted(text: &str) -> String {
-    format!("\"{text}\"")
-}
-
 #[cfg(unix)]
 fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
@@ -2080,6 +1983,11 @@ Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $v -Type 
 
 #[cfg(unix)]
 mod acl;
+
+/// The escapes and quotes each manager's definition format needs, and the bounded reads
+/// that take a written definition or Info.plist apart again. Inputs: text or a path.
+/// Outputs: the escaped, quoted or read-back text.
+mod markup;
 
 #[cfg(test)]
 mod tests;
