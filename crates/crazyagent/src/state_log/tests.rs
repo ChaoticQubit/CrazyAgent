@@ -549,7 +549,15 @@ fn closed_body(
     assert!(decodes(&serde_json::to_vec(&sample).unwrap()), "{sample}");
     for key in &free {
         let too_long = "a".repeat(crate::landing::owner_edit::PATH_BYTES_MAX + 1);
-        for path in ["", "/etc/hosts", "a//b", "./a", "a/../b", "a\0b", &too_long] {
+        for path in [
+            "",
+            "/etc/hosts",
+            "a//b",
+            "./a",
+            "a/../b",
+            "a\0b",
+            too_long.as_str(),
+        ] {
             let mut changed = sample.clone();
             changed[*key] = json!(path);
             assert!(

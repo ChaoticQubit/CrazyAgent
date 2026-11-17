@@ -1,4 +1,4 @@
-use super::log::{self, Change, FileUnlocked};
+use super::log::{self, Change, FileUnlocked, WorktreePath};
 use super::workspace::WorkspaceSettings;
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
@@ -79,7 +79,7 @@ pub fn unlock(
     agent: i64,
     path: &str,
 ) -> Result<(), EngineError> {
-    crate::landing::owner_edit::check_path(path)?;
+    let path = WorktreePath::try_from(path.to_owned()).map_err(EngineError)?;
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     let tx = log::begin(db)?;
     let turns: i64 = tx
@@ -96,7 +96,7 @@ pub fn unlock(
     let kept: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM ide_unlocked WHERE agent=?1 AND turns=?2 AND path<>?3",
-            params![agent, turns, path],
+            params![agent, turns, path.as_str()],
             |row| row.get(0),
         )
         .map_err(unavailable)?;
@@ -105,9 +105,9 @@ pub fn unlock(
         return Err(failure("ide_unlocked_full"));
     }
     let change = Change::FileUnlocked(FileUnlocked {
-        project: project.as_str().to_owned(),
+        project: project.clone(),
         agent,
-        path: path.to_owned(),
+        path,
         turns,
     });
     log::record(&tx, host, Clock::System.now_ms(), &change)?;
@@ -120,7 +120,7 @@ pub fn unlock(
 /// Inputs: the database and the event body. Output: Ok, or `ide_workspace_unavailable`.
 pub(crate) fn apply_unlocked(db: &Connection, unlocked: &FileUnlocked) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(unavailable)?;
-    let (agent, path, turns) = (unlocked.agent, &unlocked.path, unlocked.turns);
+    let (agent, path, turns) = (unlocked.agent, unlocked.path.as_str(), unlocked.turns);
     db.execute(
         "DELETE FROM ide_unlocked WHERE agent=?1 AND turns<>?2",
         params![agent, turns],

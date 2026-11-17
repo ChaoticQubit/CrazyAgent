@@ -1,6 +1,8 @@
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
-use crate::protocol::ProjectId;
+use crate::ide::bridge::Decision;
+use crate::ide::bridge::run_command::RunMode;
+use crate::protocol::{ProjectId, RequestId};
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
@@ -45,19 +47,19 @@ const _: () = assert!(CHUNK_ENVELOPE_BYTES < BODY_BYTES_MAX);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdeAsked {
-    pub project: String,
-    pub entry: String,
+    pub project: ProjectId,
+    pub entry: RequestId,
     pub version: i64,
-    pub decision: String,
+    pub decision: Decision,
     pub asked_ms: i64,
 }
 
-/// The body of [`RUN_MODE_SET`]: the project and its Run setting's stored name.
+/// The body of [`RUN_MODE_SET`]: the project and its Run setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunModeSet {
-    pub project: String,
-    pub mode: String,
+    pub project: ProjectId,
+    pub mode: RunMode,
 }
 
 /// The body of [`FILE_UNLOCKED`]: the project, the team agent, the path inside its worktree
@@ -65,10 +67,43 @@ pub struct RunModeSet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileUnlocked {
-    pub project: String,
+    pub project: ProjectId,
     pub agent: i64,
-    pub path: String,
+    pub path: WorktreePath,
     pub turns: i64,
+}
+
+/// A file path inside a worktree as git names it: the one free-form key an ide body holds
+/// (L1-N1, leader 07:16 A). It decodes only through `landing::owner_edit::check_path`, so it
+/// is never empty, absolute, NUL-bearing, `.` or `..` in a part, or over its byte bound.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct WorktreePath(String);
+
+impl WorktreePath {
+    /// The path as text. Input: none. Output: the path.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WorktreePath {
+    type Error = String;
+
+    /// Takes a path `check_path` accepts. Input: the path. Output: the path, or
+    /// `changes_path_invalid`.
+    fn try_from(path: String) -> Result<Self, String> {
+        crate::landing::owner_edit::check_path(&path).map_err(|refused| refused.0)?;
+        assert!(!path.is_empty() && !path.starts_with('/'));
+        Ok(Self(path))
+    }
+}
+
+impl From<WorktreePath> for String {
+    /// The path as owned text. Input: the path. Output: its text.
+    fn from(path: WorktreePath) -> Self {
+        path.0
+    }
 }
 
 /// The body of [`WORKSPACE_WRITTEN`]: the project and its show-all switch. The rendered
@@ -76,7 +111,7 @@ pub struct FileUnlocked {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceWritten {
-    pub project: String,
+    pub project: ProjectId,
     pub show_all: bool,
 }
 
@@ -84,7 +119,7 @@ pub struct WorkspaceWritten {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceForgotten {
-    pub project: String,
+    pub project: ProjectId,
 }
 
 /// One ide change as the log carries it, one variant per kind.
@@ -116,11 +151,11 @@ impl Change {
     /// Input: none. Output: the project id.
     pub fn project(&self) -> &str {
         match self {
-            Self::Asked(asked) => &asked.project,
-            Self::RunModeSet(set) => &set.project,
-            Self::FileUnlocked(unlocked) => &unlocked.project,
-            Self::WorkspaceWritten(written) => &written.project,
-            Self::WorkspaceForgotten(forgotten) => &forgotten.project,
+            Self::Asked(asked) => asked.project.as_str(),
+            Self::RunModeSet(set) => set.project.as_str(),
+            Self::FileUnlocked(unlocked) => unlocked.project.as_str(),
+            Self::WorkspaceWritten(written) => written.project.as_str(),
+            Self::WorkspaceForgotten(forgotten) => forgotten.project.as_str(),
         }
     }
 

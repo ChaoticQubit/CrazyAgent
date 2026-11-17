@@ -268,10 +268,10 @@ pub fn ask(
     let version = i64::try_from(version).map_err(|_| failure(INVALID))?;
     let at_ms = u64::try_from(now_ms).map_err(|_| failure(INVALID))?;
     let change = Change::Asked(IdeAsked {
-        project: project.as_str().to_owned(),
-        entry: entry_id.as_str().to_owned(),
+        project: project.clone(),
+        entry: entry_id.clone(),
         version,
-        decision: decision_name(decision).to_owned(),
+        decision,
         asked_ms: now_ms,
     });
     let write = log::begin(connection)?;
@@ -297,10 +297,10 @@ pub(crate) fn apply_asked(connection: &Connection, asked: &IdeAsked) -> Result<(
              ON CONFLICT(project,entry) DO UPDATE SET version=excluded.version,
                 decision=excluded.decision, asked_ms=excluded.asked_ms",
             params![
-                asked.project,
-                asked.entry,
+                asked.project.as_str(),
+                asked.entry.as_str(),
                 asked.version,
-                asked.decision,
+                decision_name(asked.decision),
                 asked.asked_ms
             ],
         )
@@ -310,7 +310,7 @@ pub(crate) fn apply_asked(connection: &Connection, asked: &IdeAsked) -> Result<(
         .execute(
             "DELETE FROM ide_asks WHERE project=?1 AND entry NOT IN
              (SELECT entry FROM ide_asks WHERE project=?1 ORDER BY asked_ms DESC, entry LIMIT ?2)",
-            params![asked.project, ASKS_PER_PROJECT_MAX],
+            params![asked.project.as_str(), ASKS_PER_PROJECT_MAX],
         )
         .map_err(unavailable)?;
     Ok(())

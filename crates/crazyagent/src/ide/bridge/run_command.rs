@@ -175,8 +175,8 @@ pub fn set_mode(
 ) -> Result<(), EngineError> {
     assert!(RunMode::named(mode.name()) == Some(mode));
     let change = Change::RunModeSet(RunModeSet {
-        project: project.as_str().to_owned(),
-        mode: mode.name().to_owned(),
+        project: project.clone(),
+        mode,
     });
     let tx = log::begin(db)?;
     log::record(&tx, host, Clock::System.now_ms(), &change)?;
@@ -184,17 +184,17 @@ pub fn set_mode(
 }
 
 /// Applies one `RunModeSet` with the same statement live and in replay: the project's one
-/// row holds the mode. Inputs: the database and the event body. Output: Ok, or
-/// `ide_unavailable` for a mode no option has.
+/// row holds the mode, which the body decoded, so an option has it. Inputs: the database
+/// and the event body. Output: Ok, or `ide_unavailable`.
 pub(crate) fn apply_run_mode(db: &Connection, set: &RunModeSet) -> Result<(), EngineError> {
-    let mode = RunMode::named(&set.mode).ok_or_else(|| failure("ide_unavailable"))?;
-    assert_eq!(mode.name(), set.mode);
+    let mode = set.mode;
+    assert!(RunMode::named(mode.name()) == Some(mode));
     db.execute_batch(SCHEMA).map_err(unavailable)?;
     let changed = db
         .execute(
             "INSERT INTO ide_run_settings(project, mode) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
-            params![set.project, mode.name()],
+            params![set.project.as_str(), mode.name()],
         )
         .map_err(unavailable)?;
     assert!(changed == 1, "one project has one Run setting row");

@@ -143,7 +143,7 @@ fn forget(db: &Connection, host: &HostStamp, project: &str) -> Result<(), Engine
         .map_err(unavailable)?;
     if followed {
         let change = Change::WorkspaceForgotten(WorkspaceForgotten {
-            project: project.to_owned(),
+            project: ProjectId::new(project).map_err(unavailable)?,
         });
         log::record(&tx, host, Clock::System.now_ms(), &change)?;
     }
@@ -163,7 +163,7 @@ pub(crate) fn apply_written(
         .execute(
             "INSERT INTO ide_workspaces(project, show_all, body) VALUES (?1,?2,'')
              ON CONFLICT(project) DO UPDATE SET show_all=excluded.show_all",
-            params![written.project, written.show_all],
+            params![written.project.as_str(), written.show_all],
         )
         .map_err(unavailable)?;
     assert_eq!(changed, 1, "one row per followed project");
@@ -181,7 +181,7 @@ pub(crate) fn apply_forgotten(
     let removed = db
         .execute(
             "DELETE FROM ide_workspaces WHERE project=?1",
-            [&forgotten.project],
+            [forgotten.project.as_str()],
         )
         .map_err(unavailable)?;
     assert!(removed <= 1, "one row per followed project");
@@ -452,7 +452,7 @@ fn refresh(
             .map_err(unavailable)?;
         if stored != Some(show_all) {
             let change = Change::WorkspaceWritten(WorkspaceWritten {
-                project: project.as_str().to_owned(),
+                project: project.clone(),
                 show_all,
             });
             log::record(&tx, host, Clock::System.now_ms(), &change)?;

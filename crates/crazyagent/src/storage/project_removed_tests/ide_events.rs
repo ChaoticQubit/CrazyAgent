@@ -17,23 +17,23 @@ const IDE_TABLES: [&str; 4] = [
 /// for the project's working agent `first + 2`, the one agent a removal keeps. Inputs: the
 /// store, the project and its first agent id. Output: none.
 fn ide_changes(s: &Store, project: &str, first: i64) {
-    let named = || project.to_owned();
+    let named = || ProjectId::new(project).unwrap();
     let changes = [
         Change::Asked(IdeAsked {
             project: named(),
-            entry: "fact".into(),
+            entry: RequestId::new("fact").unwrap(),
             version: 1,
-            decision: "approve".into(),
+            decision: crate::ide::bridge::Decision::Approve,
             asked_ms: 1,
         }),
         Change::RunModeSet(RunModeSet {
             project: named(),
-            mode: "off".into(),
+            mode: crate::ide::bridge::run_command::RunMode::Off,
         }),
         Change::FileUnlocked(FileUnlocked {
             project: named(),
             agent: first + 2,
-            path: "src/lib.rs".into(),
+            path: log::WorktreePath::try_from("src/lib.rs".to_owned()).unwrap(),
             turns: 0,
         }),
         Change::WorkspaceForgotten(WorkspaceForgotten { project: named() }),
