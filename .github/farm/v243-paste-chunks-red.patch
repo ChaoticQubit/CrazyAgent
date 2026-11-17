@@ -1,0 +1,279 @@
+diff --git a/crates/crazyagent/src/terminal.rs b/crates/crazyagent/src/terminal.rs
+index 1fe526d00..8935daf5d 100644
+--- a/crates/crazyagent/src/terminal.rs
++++ b/crates/crazyagent/src/terminal.rs
+@@ -87,147 +87,6 @@ impl From<HostError> for EngineError {
+     }
+ }
+ 
+-/// The most bytes a UTF-8 character holds after its first byte.
+-const CHARACTER_TAIL_BYTES_MAX: usize = 3;
+-/// The most bytes `input_runs` moves a run's end back to keep an escape sequence, such as a
+-/// key, a mouse report or a closing paste marker, or a UTF-8 character whole. A sequence that
+-/// starts further back is cut at the run size.
+-pub(crate) const RUN_CUT_BACK_BYTES_MAX: usize = 64;
+-const ESC: u8 = 0x1b;
+-const BEL: u8 = 0x07;
+-const _: () = assert!(RUN_CUT_BACK_BYTES_MAX >= PASTE_CLOSE.len());
+-const _: () = assert!(RUN_CUT_BACK_BYTES_MAX > CHARACTER_TAIL_BYTES_MAX);
+-
+-/// The most runs `input_runs` cuts `length` bytes into at `run_bytes_max` bytes a run: every
+-/// run but the last keeps at least `run_bytes_max - RUN_CUT_BACK_BYTES_MAX` bytes. Inputs:
+-/// the length and the run size, over the back-off. Output: the bound.
+-pub(crate) const fn input_runs_max(length: usize, run_bytes_max: usize) -> usize {
+-    assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
+-    length.div_ceil(run_bytes_max - RUN_CUT_BACK_BYTES_MAX)
+-}
+-
+-/// Splits typed bytes into runs of at most `run_bytes_max` bytes, in order. A run ends between
+-/// tokens, never inside a UTF-8 character or an escape sequence (a key, a mouse report, a
+-/// reply or a closing paste marker), so a program that reads per read never sees half of one
+-/// and takes a lone ESC for the Escape key (RV-DS241-69, #359). Inputs: the bytes and the run
+-/// size, over the back-off. Output: the runs, none for no bytes.
+-pub(crate) fn input_runs(bytes: &[u8], run_bytes_max: usize) -> Vec<&[u8]> {
+-    assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
+-    let mut runs = Vec::new();
+-    let mut start = 0;
+-    while start < bytes.len() {
+-        let limit = start + run_bytes_max;
+-        let end = if limit >= bytes.len() {
+-            bytes.len()
+-        } else {
+-            run_end(&bytes[..=limit], start)
+-        };
+-        assert!(end > start);
+-        assert!(end <= limit);
+-        runs.push(&bytes[start..end]);
+-        start = end;
+-    }
+-    assert!(runs.iter().all(|run| run.len() <= run_bytes_max));
+-    assert!(runs.len() <= input_runs_max(bytes.len(), run_bytes_max));
+-    assert_eq!(runs.concat(), bytes);
+-    runs
+-}
+-
+-/// Where a run that starts at `start` ends, given the bytes up to one past its size: at the
+-/// last token end at most `RUN_CUT_BACK_BYTES_MAX` bytes back, else at the size moved back to
+-/// a UTF-8 character's first byte. Inputs: that window and the start, where tokens are read
+-/// from. Output: the end, past the start and at most the size.
+-fn run_end(window: &[u8], start: usize) -> usize {
+-    let limit = window.len() - 1;
+-    assert!(limit > start + RUN_CUT_BACK_BYTES_MAX);
+-    let mut boundary = start;
+-    while boundary < limit {
+-        let next = token_end(window, boundary);
+-        if next > limit {
+-            break;
+-        }
+-        boundary = next;
+-    }
+-    let end = if boundary + RUN_CUT_BACK_BYTES_MAX >= limit {
+-        boundary
+-    } else {
+-        (limit - CHARACTER_TAIL_BYTES_MAX..=limit)
+-            .rev()
+-            .find(|&at| window[at] & 0xc0 != 0x80)
+-            .unwrap_or(limit)
+-    };
+-    assert!(end > start);
+-    assert!(end <= limit);
+-    end
+-}
+-
+-/// Where the typed token that starts at `at` ends: one UTF-8 character, or one escape
+-/// sequence (CSI, an X10 mouse report, SS3, OSC or DCS up to BEL or ESC \, or ESC and one
+-/// character). A sequence the bytes stop inside runs to their end. Inputs: the bytes and a
+-/// position in them. Output: the end, past `at`.
+-fn token_end(bytes: &[u8], at: usize) -> usize {
+-    assert!(at < bytes.len());
+-    let end = match (bytes[at], bytes.get(at + 1)) {
+-        (ESC, Some(b'[')) => csi_end(bytes, at + 2),
+-        (ESC, Some(b'O')) => (at + 3).min(bytes.len()),
+-        (ESC, Some(b']' | b'P')) => string_end(bytes, at + 2),
+-        (ESC, Some(&ESC) | None) => at + 1,
+-        (ESC, Some(_)) => character_end(bytes, at + 1),
+-        _ => character_end(bytes, at),
+-    };
+-    assert!(end > at);
+-    assert!(end <= bytes.len());
+-    end
+-}
+-
+-/// The end of a CSI whose parameters start at `from`: past its final byte, three bytes on
+-/// for an X10 mouse report (`ESC [ M` and three bytes), or before a byte no CSI holds.
+-/// Inputs: the bytes and the position after `ESC [`. Output: the end.
+-fn csi_end(bytes: &[u8], from: usize) -> usize {
+-    let Some(tail) = bytes[from..]
+-        .iter()
+-        .position(|byte| !(0x20..=0x3f).contains(byte))
+-    else {
+-        return bytes.len();
+-    };
+-    let last = from + tail;
+-    match bytes[last] {
+-        b'M' if tail == 0 => (last + 4).min(bytes.len()),
+-        0x40..=0x7e => last + 1,
+-        _ => last,
+-    }
+-}
+-
+-/// The end of an OSC or DCS string whose body starts at `from`: past its BEL or its ESC \,
+-/// or before any other ESC, which ends the string and starts the next sequence. Inputs: the
+-/// bytes and the position after `ESC ]` or `ESC P`. Output: the end.
+-fn string_end(bytes: &[u8], from: usize) -> usize {
+-    let Some(stop) = bytes[from..]
+-        .iter()
+-        .position(|&byte| byte == BEL || byte == ESC)
+-    else {
+-        return bytes.len();
+-    };
+-    let at = from + stop;
+-    match (bytes[at], bytes.get(at + 1)) {
+-        (BEL, _) | (_, None) => at + 1,
+-        (_, Some(b'\\')) => at + 2,
+-        _ => at,
+-    }
+-}
+-
+-/// The end of the UTF-8 character that starts at `at`: past its continuation bytes, at most
+-/// `CHARACTER_TAIL_BYTES_MAX` of them; a byte that is not UTF-8 ends alone. Inputs: the bytes
+-/// and a position in them. Output: the end.
+-fn character_end(bytes: &[u8], at: usize) -> usize {
+-    let tail = bytes[at + 1..]
+-        .iter()
+-        .take(CHARACTER_TAIL_BYTES_MAX)
+-        .take_while(|&&byte| byte & 0xc0 == 0x80)
+-        .count();
+-    at + 1 + tail
+-}
+-
+ fn failure(code: &str) -> HostError {
+     HostError(code.into())
+ }
+diff --git a/crates/crazyagent/src/terminal/tmux.rs b/crates/crazyagent/src/terminal/tmux.rs
+index 54306a424..c15d6ad70 100644
+--- a/crates/crazyagent/src/terminal/tmux.rs
++++ b/crates/crazyagent/src/terminal/tmux.rs
+@@ -2466,15 +2466,15 @@ impl Host for Tmux {
+     }
+ }
+ 
+-const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
++const _: () = assert!(SEND_KEYS_BYTES_MAX > 0);
+ const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+ 
+ /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
+-/// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
+-/// bytes, so none cuts a character or an escape sequence, and none for no bytes.
++/// and the bytes. Returns one command per run of at most `SEND_KEYS_BYTES_MAX` bytes, none
++/// for no bytes.
+ fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
+-    let lines: Vec<String> = super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
+-        .into_iter()
++    let lines: Vec<String> = bytes
++        .chunks(SEND_KEYS_BYTES_MAX)
+         .map(|run| {
+             let mut line = format!("send-keys -t {target} -H");
+             for byte in run {
+@@ -2483,8 +2483,7 @@ fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
+             line
+         })
+         .collect();
+-    assert!(lines.len() >= bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+-    assert!(lines.len() <= super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
++    assert_eq!(lines.len(), bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+     lines
+ }
+ 
+diff --git a/crates/crazyagent/src/tui/client/terminal.rs b/crates/crazyagent/src/tui/client/terminal.rs
+index 05d307199..1ef569688 100644
+--- a/crates/crazyagent/src/tui/client/terminal.rs
++++ b/crates/crazyagent/src/tui/client/terminal.rs
+@@ -1,9 +1,7 @@
+ use super::bounded_problem;
+ use crate::engine::Client;
+ use crate::engine::owner::{OwnerClientKind, TerminalOutput, TerminalSession};
+-use crate::terminal::{
+-    AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, input_runs, input_runs_max,
+-};
++use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
+ use crate::tui::seam::Request;
+ use crate::tui::terminal_pane::{PASTE_CLOSE, PASTE_OPEN};
+ use std::collections::VecDeque;
+@@ -25,7 +23,7 @@ const DRAIN_TIME: Duration = Duration::from_secs(5);
+ /// `PASTE_CHARS_MAX` characters of up to four bytes each inside its bracketed paste markers.
+ const TYPED_BYTES_MAX: usize =
+     4 * crate::tui::run::PASTE_CHARS_MAX + PASTE_OPEN.len() + PASTE_CLOSE.len();
+-const _: () = assert!(input_runs_max(TYPED_BYTES_MAX, INPUT_BYTES_MAX) <= COMMANDS_QUEUED);
++const _: () = assert!(TYPED_BYTES_MAX.div_ceil(INPUT_BYTES_MAX) <= COMMANDS_QUEUED);
+ 
+ struct Session {
+     agent: AgentId,
+@@ -219,7 +217,7 @@ impl Terminals {
+         else {
+             return;
+         };
+-        let parts = input_runs(bytes, INPUT_BYTES_MAX);
++        let parts = inputs(bytes);
+         let reason = match session.commands.try_reserve_many(parts.len()) {
+             Ok(permits) => {
+                 for (permit, part) in permits.zip(parts) {
+@@ -306,6 +304,32 @@ fn stream(
+     });
+ }
+ 
++/// Splits one key event's bytes into host inputs of at most `INPUT_BYTES_MAX` bytes, never
++/// inside the closing bracketed paste marker, so a program that reads paste markers per read
++/// sees it whole. Input: the bytes, at least one. Output: the inputs in order.
++fn inputs(bytes: &[u8]) -> Vec<&[u8]> {
++    assert!(!bytes.is_empty());
++    let marker = if bytes.ends_with(PASTE_CLOSE) {
++        bytes.len() - PASTE_CLOSE.len()
++    } else {
++        bytes.len()
++    };
++    let mut parts = Vec::new();
++    let mut start = 0;
++    while start < bytes.len() {
++        let mut end = (start + INPUT_BYTES_MAX).min(bytes.len());
++        if marker < end && end < bytes.len() {
++            end = marker;
++        }
++        assert!(end > start);
++        parts.push(&bytes[start..end]);
++        start = end;
++    }
++    assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
++    assert_eq!(parts.concat(), bytes);
++    parts
++}
++
+ /// Opens an owner connection and attaches to the agent's terminal, or to one
+ /// pane of its window such as a native teammate's, sized first when a size is given.
+ /// Inputs: engine socket, timeout, agent, the pane and the size, if any. Output: the
+diff --git a/crates/crazyagent/src/tui/client/terminal/tests.rs b/crates/crazyagent/src/tui/client/terminal/tests.rs
+index e878ebf63..65fe3f133 100644
+--- a/crates/crazyagent/src/tui/client/terminal/tests.rs
++++ b/crates/crazyagent/src/tui/client/terminal/tests.rs
+@@ -120,7 +120,7 @@ fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
+     for over in 0..=PASTE_CLOSE.len() {
+         let body = INPUT_BYTES_MAX + over - PASTE_OPEN.len() - PASTE_CLOSE.len();
+         let bytes = [PASTE_OPEN, &vec![b'x'; body][..], PASTE_CLOSE].concat();
+-        let parts = input_runs(&bytes, INPUT_BYTES_MAX);
++        let parts = inputs(&bytes);
+         assert!(parts.iter().all(|part| part.len() <= INPUT_BYTES_MAX));
+         assert!(
+             parts.last().is_some_and(|part| part.ends_with(PASTE_CLOSE)),
+@@ -130,11 +130,7 @@ fn a_long_paste_is_split_into_host_inputs_without_cutting_its_end_marker() {
+         assert_eq!(parts.concat(), bytes);
+     }
+     let typed = vec![b'x'; 3 * INPUT_BYTES_MAX + 1];
+-    assert_eq!(
+-        input_runs(&typed, INPUT_BYTES_MAX).len(),
+-        4,
+-        "plain bytes are cut at the limit"
+-    );
++    assert_eq!(inputs(&typed).len(), 4, "plain bytes are cut at the limit");
+ }
+ 
+ #[test]

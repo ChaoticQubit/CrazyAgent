@@ -55,6 +55,7 @@ defaults:
 jobs:
   build-linux:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -86,6 +87,7 @@ jobs:
 
   build-macos:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     strategy:
@@ -114,6 +116,7 @@ jobs:
 
   build-windows:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -145,7 +148,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +195,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +257,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -301,6 +304,7 @@ jobs:
 
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -464,6 +468,7 @@ jobs:
 
   typecheck:
     name: Desktop typecheck and Bun suites
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -527,7 +532,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,77 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  paste-chunks:
+    name: V243 paste chunks ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-15
+          - os: linux
+            runner: ubuntu-22.04
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - name: Free disk on the Linux runner
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install Linux build packages
+        if: matrix.os == 'linux'
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install tmux on macOS
+        if: matrix.os == 'macos'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Select Xcode 26.3, whose git the engine runs
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Set debug info and build jobs for the runner
+        run: |
+          set -euo pipefail
+          debug=0
+          if [ "$RUNNER_OS" = Linux ]; then debug=line-tables-only; fi
+          {
+            echo "CARGO_PROFILE_DEV_DEBUG=$debug"
+            echo "CARGO_PROFILE_TEST_DEBUG=$debug"
+          } >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = macOS ]; then echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"; fi
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          prefix-key: farm
+          shared-key: ${{ matrix.os }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          save-if: false
+      - name: The split rows at the tip 3 rounds, then under the r1 split (red patch, r2 rows fail)
+        run: bash .github/farm/v243-paste-chunks.sh "${{ matrix.os }}"
