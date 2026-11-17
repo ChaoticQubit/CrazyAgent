@@ -627,7 +627,7 @@ fn overlapping_pull(_: &str, _: &icloud::Download, _: CopyBounds) -> Result<u64,
     let now = PULLS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
     PULLS_IN_FLIGHT_MOST.fetch_max(now, Ordering::SeqCst);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while PULLS_IN_FLIGHT.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+    while PULLS_IN_FLIGHT_MOST.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(5));
     }
     PULLS_IN_FLIGHT_MOST.fetch_max(PULLS_IN_FLIGHT.load(Ordering::SeqCst), Ordering::SeqCst);
