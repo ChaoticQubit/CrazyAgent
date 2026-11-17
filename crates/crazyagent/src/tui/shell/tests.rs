@@ -1073,7 +1073,15 @@ fn files(query: &str, paths: &[&str]) -> Arrival {
 
 #[test]
 fn go_to_lists_the_live_role_sub_agents_of_the_team_graph_leads_included() {
-    assert_eq!(go_to_agents(&tidepool_team()), ["Ada", "Grace", "Hopper"]);
+    let listed = go_to_agents(&tidepool_team());
+    let listed: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|(node, label)| (node.as_str(), label.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        [("team-1", "Ada"), ("team-2", "Grace"), ("team-4", "Hopper")]
+    );
 }
 
 #[test]
@@ -1174,8 +1182,20 @@ fn go_to_asks_the_ide_for_a_picked_file_and_stays_on_the_page() {
     );
 }
 
-#[test]
-fn go_to_opens_agents_for_a_picked_agent_and_says_how_to_read_its_messages() {
+fn messages_read(shell: &mut Shell) -> Vec<i64> {
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Setup(crate::project_setup::SetupQuery::TeamMessages {
+                project,
+                agent,
+                ..
+            }) if project == tidepool() => Some(agent),
+            _ => None,
+        })
+        .collect()
+}
+
+fn grace_picked() -> Shell {
     let mut shell = tidepool_page();
     shell.key(Key::Ctrl('k'));
     shell.arrive(Arrival::TeamGraph {
@@ -1186,23 +1206,82 @@ fn go_to_opens_agents_for_a_picked_agent_and_says_how_to_read_its_messages() {
     assert_eq!(go_to_rows(&shell)[0], ("Grace".to_owned(), "Agent"));
     shell.key(Key::Enter);
     assert!(shell.overlay.is_none());
+    shell
+}
+
+#[test]
+fn go_to_opens_the_team_on_a_picked_agent_with_its_messages_open() {
+    let mut shell = grace_picked();
     assert_eq!(
         shell.place(),
-        Some(Place::Project {
+        Some(Place::Team {
             id: tidepool(),
             name: "Tidepool".into(),
-            tab: ProjectTab::Agents,
         })
     );
+    assert_eq!(
+        shell.ctx.messages_for, None,
+        "the Team screen took the agent Go to picked"
+    );
+    assert_eq!(messages_read(&mut shell), Vec::<i64>::new());
+    shell.arrive(Arrival::TeamGraph {
+        project: tidepool(),
+        result: Ok(Box::new(tidepool_team())),
+    });
+    assert_eq!(
+        messages_read(&mut shell),
+        [2],
+        "Grace's Messages list opens"
+    );
+    shell.key(Key::Esc);
+    drain(&mut shell);
+    shell.key(Key::Char('m'));
+    assert_eq!(
+        messages_read(&mut shell),
+        [2],
+        "the tree cursor sits on Grace's card"
+    );
+}
+
+#[test]
+fn a_picked_agent_gone_from_the_team_is_said_and_opens_no_messages() {
+    let mut shell = grace_picked();
+    let mut gone = tidepool_team();
+    gone.nodes.retain(|node| node.id != "team-2");
+    shell.arrive(Arrival::TeamGraph {
+        project: tidepool(),
+        result: Ok(Box::new(gone)),
+    });
+    assert_eq!(messages_read(&mut shell), Vec::<i64>::new());
     let said = shell
         .ctx
         .message()
-        .expect("Go to says how to read its messages");
-    assert_eq!(said.lead, "Opened Agents.");
+        .expect("the Team screen says the agent left");
+    assert_eq!(said.lead, "That agent is no longer on the team.");
+    shell.arrive(Arrival::TeamGraph {
+        project: tidepool(),
+        result: Ok(Box::new(tidepool_team())),
+    });
     assert_eq!(
-        said.rest,
-        "Pick Grace in the agents list, then press M for its messages."
+        messages_read(&mut shell),
+        Vec::<i64>::new(),
+        "the pick is used once"
     );
+}
+
+#[test]
+fn a_team_screen_leaves_an_agent_picked_for_another_project() {
+    let other = ProjectId::new("project-harbor").unwrap();
+    let mut ctx = ctx();
+    ctx.messages_for = Some((other.clone(), "team-2".into()));
+    let shell = at(
+        Place::Team {
+            id: tidepool(),
+            name: "Tidepool".into(),
+        },
+        ctx,
+    );
+    assert_eq!(shell.ctx.messages_for, Some((other, "team-2".into())));
 }
 
 #[test]
