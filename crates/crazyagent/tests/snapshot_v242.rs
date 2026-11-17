@@ -5,6 +5,8 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod e2e_support;
+
 #[path = "snapshot_v242/harness.rs"]
 mod harness;
 #[path = "snapshot_v242/provider.rs"]
