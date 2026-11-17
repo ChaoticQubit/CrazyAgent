@@ -9,16 +9,14 @@ const LEAD_WAIT: Duration = Duration::from_secs(2);
 /// pid. Returns its group; panics with the last answer when it leads none within `LEAD_WAIT`.
 pub fn pane_group(pane: u32) -> rustix::process::Pid {
     let leader = rustix::process::Pid::from_raw(i32::try_from(pane).unwrap()).unwrap();
-    let deadline = Instant::now() + LEAD_WAIT;
-    loop {
-        let group = rustix::process::getpgid(Some(leader));
-        if group == Ok(leader) {
-            return leader;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "tmux makes a pane's first process lead its own group within {LEAD_WAIT:?}: {group:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let mut group = rustix::process::getpgid(Some(leader));
+    let led = crate::poll_support::poll_until(Instant::now() + LEAD_WAIT, || {
+        group = rustix::process::getpgid(Some(leader));
+        group == Ok(leader)
+    });
+    assert!(
+        led,
+        "tmux makes a pane's first process lead its own group within {LEAD_WAIT:?}: {group:?}"
+    );
+    leader
 }

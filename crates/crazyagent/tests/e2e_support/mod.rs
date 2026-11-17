@@ -16,6 +16,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 pub mod harness_standin;
+#[path = "../poll_support/mod.rs"]
+pub mod poll_support;
 
 pub const ENGINE: &str = env!("CARGO_BIN_EXE_crazyagent");
 pub const GIT: &str = "UNAVAILABLE: git is not on PATH; install git";

@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
 mod pgid_support;
+mod poll_support;
 
 use crazyagent::coord::adoption::Flag;
 use crazyagent::coord::delivery::codex::{self, Bridged, CONTROL_SOCKET};

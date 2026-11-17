@@ -35,7 +35,10 @@ function looks(theme, menu = false) {
     if (!menu) return evaluate("Fixture.look()");
     await evaluate(`document.getElementById(${JSON.stringify(id)}).focus()`);
     await send("Input.insertText", { text: "ask @" });
-    await evaluate("new Promise((done) => setTimeout(done, 0))");
+    const deadline = Date.now() + 5000;
+    while (!(await evaluate(`document.querySelector('.cs-menu [aria-selected="true"]') !== null`))) {
+      assert.ok(Date.now() < deadline, "the @ menu never opened with a picked option");
+    }
     return { ...(await evaluate("Fixture.look()")), menu: await evaluate("Fixture.picked()") };
   });
 }
