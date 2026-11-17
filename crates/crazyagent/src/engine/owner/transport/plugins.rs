@@ -1012,9 +1012,9 @@ fn checking() -> std::sync::MutexGuard<'static, Checking> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// One check of one server, counted from before the engine reads the server until the check
-/// ended, so a removal in between leaves its check folder to the check's end
-/// ([`removed_server_checks`]).
+/// One check of one server, counted from before the engine reads the server until its run
+/// in the boundary ended, before its result is recorded, so a removal in between leaves its
+/// check folder to that end ([`removed_server_checks`]).
 struct CheckOf {
     id: String,
     checks: PathBuf,
@@ -1590,7 +1590,6 @@ async fn start_check(
     let engine = engine.clone();
     tokio::spawn(async move {
         let _slot = slot;
-        let _counted = counted;
         let folder = id.clone();
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1606,6 +1605,7 @@ async fn start_check(
             outcome
         })
         .await;
+        drop(counted);
         let outcome = match outcome {
             Ok(Ok(tools)) => Ok(tools),
             Ok(Err(problem)) => Err(problem),
