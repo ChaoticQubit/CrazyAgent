@@ -240,6 +240,7 @@ test("each sign-in sentence is true on every path that records its code, and an 
 
 const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
 const TUI_OWN = new Set(["native_auth_recovery_required"]);
+const DESKTOP_COMPUTER = "this Mac";
 
 test("the TUI gives every sign-in failure the engine records the app's sentence", () => {
   const source = readFileSync(join(ENGINE, TUI_SIGN_IN), "utf8");
@@ -252,7 +253,7 @@ test("the TUI gives every sign-in failure the engine records the app's sentence"
   for (const code of new Set([...recordedSignInCodes(), ...sentences.keys()])) {
     assert.ok(sentences.has(code), `${code} has no TUI sentence`);
     for (const [provider, harness, name] of [["chatgpt", "Codex", "ChatGPT"], ["claude", "Claude Code", "Claude"]]) {
-      const line = sentences.get(code).replaceAll("{harness}", harness).replaceAll("{name}", name);
+      const line = sentences.get(code).replaceAll("{harness}", harness).replaceAll("{name}", name).replaceAll("{computer}", DESKTOP_COMPUTER);
       if (TUI_OWN.has(code)) assert.doesNotMatch(line, / \([a-z0-9_]+\)$|_|[{}]/, `${code}: ${line}`);
       else assert.equal(line, signInFailure(code, provider).text, `${code} for ${provider}`);
     }
