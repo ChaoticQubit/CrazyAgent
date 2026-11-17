@@ -138,6 +138,8 @@ struct Shared {
     open: Mutex<Vec<Open>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     stop: AtomicBool,
+    #[cfg(test)]
+    accept_passes: AtomicUsize,
 }
 
 /// One harness connection the relay is serving: its accept number, a handle to shut it
@@ -312,6 +314,8 @@ impl Relay {
             open: Mutex::new(Vec::new()),
             workers: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
+            #[cfg(test)]
+            accept_passes: AtomicUsize::new(0),
         });
         let accepting = Arc::clone(&shared);
         let accept = std::thread::Builder::new()
@@ -383,6 +387,8 @@ impl Drop for Slot<'_> {
 fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
     let mut numbered: u64 = 0;
     while !shared.stop.load(Ordering::Acquire) {
+        #[cfg(test)]
+        shared.accept_passes.fetch_add(1, Ordering::SeqCst);
         let (stream, peer) = match crate::spawn_gate::accept_tcp_std(listener) {
             Ok(accepted) => accepted,
             Err(_) => {
