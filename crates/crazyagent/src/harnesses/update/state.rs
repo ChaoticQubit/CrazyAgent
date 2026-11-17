@@ -1037,7 +1037,7 @@ mod windows_tests {
     /// V243-WIN-HARNESS-SEARCH: a script's version is read through the `node.exe` the places
     /// hold only while no other account can change it. A curl copy standing in as node.exe
     /// tells the version of a script whose first line asks for node; once the node folder
-    /// grants Users Modify, the script still resolves but the read asks nothing.
+    /// grants Users Modify after the read's check and before its run, the read asks nothing.
     #[test]
     fn a_script_s_node_another_account_can_change_tells_no_version() {
         let home = home_folder().unwrap();
@@ -1056,14 +1056,24 @@ mod windows_tests {
         let places = crate::tools::Places::new(vec![node.clone()], None);
         assert!(version_if_runs(&script, &home, &places).is_some());
 
-        let granted = crate::spawn_gate::output(
-            std::process::Command::new("icacls")
-                .arg(&node)
-                .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
-        )
-        .unwrap();
-        assert!(granted.status.success(), "{granted:?}");
-        assert!(crate::tools::resolve_entry(&script, &places).is_ok());
+        let step: Step = Box::new(move || {
+            let granted = crate::spawn_gate::output(
+                std::process::Command::new("icacls")
+                    .arg(&node)
+                    .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
+            )
+            .unwrap();
+            assert!(granted.status.success(), "{granted:?}");
+        });
+        BETWEEN_VETTED_AND_RUN
+            .lock()
+            .unwrap()
+            .push((script.clone(), step));
         assert_eq!(version_if_runs(&script, &home, &places), None);
+        let steps = BETWEEN_VETTED_AND_RUN.lock().unwrap();
+        assert!(
+            steps.iter().all(|(entry, _)| *entry != script),
+            "the read passed its check before the grant"
+        );
     }
 }
