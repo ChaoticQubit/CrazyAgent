@@ -291,7 +291,7 @@ fn a_run_checks_the_pool_rule_and_its_one_slot_before_it_touches_the_disk() {
     );
     assert!(!root.join("instruction-cleanup").exists());
     {
-        let _held = super::run::Slot::take(&root).unwrap();
+        let _held = super::run::Slot::take(&root, None, &super::run::run_stem(1)).unwrap();
         assert_eq!(run(&request(None, Some(&picked))).unwrap_err(), BUSY);
         assert!(!root.join("instruction-cleanup").exists());
     }
@@ -352,20 +352,21 @@ fn a_run_refuses_a_linked_or_filled_work_folder() {
 #[cfg(unix)]
 #[test]
 fn old_run_folders_are_pruned_and_run_names_never_repeat() {
-    use super::run::{KEPT_RUNS_MAX, prune, run_name};
+    use super::run::{KEPT_RUNS_MAX, prune, run_name, run_stem};
     let temp = tempfile::tempdir().unwrap();
     let agents = temp.path().join("agents");
     std::fs::create_dir(&agents).unwrap();
     let first = 1_800_000_000_000_i64;
     let made = KEPT_RUNS_MAX as i64 + 5;
-    for start in 0..made {
-        std::fs::create_dir(agents.join(run_name(first + start, 1))).unwrap();
+    let stems: Vec<String> = (0..made).map(|start| run_stem(first + start)).collect();
+    for stem in &stems {
+        std::fs::create_dir(agents.join(run_name(stem, 1))).unwrap();
     }
     std::fs::create_dir(agents.join("onboard-m-other")).unwrap();
     std::fs::write(agents.join("instructions-cleanup-note"), "a file").unwrap();
     std::os::unix::fs::symlink(temp.path(), agents.join("instructions-cleanup-link")).unwrap();
 
-    prune(&agents);
+    prune(&agents, &[]);
     let runs = std::fs::read_dir(&agents)
         .unwrap()
         .filter_map(Result::ok)
@@ -373,11 +374,11 @@ fn old_run_folders_are_pruned_and_run_names_never_repeat() {
         .count();
     assert_eq!(runs, KEPT_RUNS_MAX - 1, "a new run then makes it the bound");
     assert!(
-        agents.join(run_name(first + made - 1, 1)).is_dir(),
+        agents.join(run_name(&stems[stems.len() - 1], 1)).is_dir(),
         "the newest run stays"
     );
     assert!(
-        !agents.join(run_name(first, 1)).exists(),
+        !agents.join(run_name(&stems[0], 1)).exists(),
         "the oldest run goes"
     );
     assert!(
@@ -393,23 +394,130 @@ fn old_run_folders_are_pruned_and_run_names_never_repeat() {
             && temp.path().is_dir(),
         "a link is neither followed nor removed"
     );
-    prune(&agents);
+    prune(&agents, &[]);
     assert!(
-        agents.join(run_name(first + made - 1, 1)).is_dir(),
+        agents.join(run_name(&stems[stems.len() - 1], 1)).is_dir(),
         "pruning twice removes no more"
     );
-    prune(&temp.path().join("missing"));
+    prune(&temp.path().join("missing"), &[]);
 
-    assert_ne!(run_name(5, 1), run_name(5, 2));
-    assert_ne!(run_name(5, 1), run_name(6, 1));
+    let stem = run_stem(5);
+    assert_ne!(run_name(&stem, 1), run_name(&stem, 2));
+    assert_ne!(run_name(&stem, 1), run_name(&run_stem(6), 1));
     assert!(
-        run_name(9, 1) < run_name(10, 1),
+        run_name(&run_stem(9), 1) < run_name(&run_stem(10), 1),
         "name order is start order"
     );
     assert!(
-        run_name(i64::MAX, TRIES_MAX).len() <= 96,
+        run_name(&run_stem(i64::MAX), TRIES_MAX).len() <= 96,
         "the runner's name bound"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn edit_with_ai_on_one_project_runs_while_another_project_or_the_app_text_holds_its_slot() {
+    use super::run::{Slot, run_stem};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    let picked = pool("pool-a");
+    let settings = (root.join("global.toml"), root.join("project.toml"));
+    let request = |project, pool| Request {
+        root: &root,
+        settings: (&settings.0, &settings.1),
+        codex: None,
+        claude: None,
+        project,
+        pool,
+        prompt: "prompt",
+        agent: "instructions-cleanup",
+    };
+    {
+        let _alpha = Slot::take(&root, Some(&alpha), &run_stem(1)).unwrap();
+        assert_eq!(
+            run(&request(Some(&beta), None)).unwrap_err(),
+            UNAVAILABLE,
+            "another project's cleanup passes the slot; the test engine has no harness"
+        );
+        assert_eq!(
+            run(&request(None, Some(&picked))).unwrap_err(),
+            UNAVAILABLE,
+            "the app text's cleanup passes the slot"
+        );
+        assert_eq!(
+            run(&request(Some(&alpha), None)).unwrap_err(),
+            BUSY,
+            "the same project waits for its own cleanup"
+        );
+    }
+    {
+        let _app = Slot::take(&root, None, &run_stem(2)).unwrap();
+        assert_eq!(
+            run(&request(None, Some(&picked))).unwrap_err(),
+            BUSY,
+            "the app text waits for its own cleanup"
+        );
+        assert_eq!(run(&request(Some(&alpha), None)).unwrap_err(), UNAVAILABLE);
+    }
+    let other = tempfile::tempdir().unwrap();
+    let other = other.path().canonicalize().unwrap();
+    let _held = Slot::take(&root, Some(&alpha), &run_stem(3)).unwrap();
+    assert!(
+        Slot::take(&other, Some(&alpha), &run_stem(4)).is_some(),
+        "another engine folder has its own slots"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn two_cleanups_started_in_the_same_millisecond_get_different_run_names() {
+    use super::run::{run_name, run_stem};
+    let first = run_stem(1_800_000_000_000);
+    let second = run_stem(1_800_000_000_000);
+    assert_ne!(first, second, "the runner refuses a name it has used");
+    assert_ne!(run_name(&first, 1), run_name(&second, 1));
+    assert!(
+        first < second,
+        "name order is start order within a millisecond"
+    );
+    assert!(second < run_stem(1_800_000_000_001));
+}
+
+#[cfg(unix)]
+#[test]
+fn pruning_never_removes_the_folder_of_a_run_still_running() {
+    use super::run::{KEPT_RUNS_MAX, prune, run_name, run_stem};
+    let temp = tempfile::tempdir().unwrap();
+    let agents = temp.path().join("agents");
+    std::fs::create_dir(&agents).unwrap();
+    let first = 1_800_000_000_000_i64;
+    let running = run_stem(first);
+    std::fs::create_dir_all(agents.join(run_name(&running, 1)).join("home")).unwrap();
+    let finished: Vec<String> = (1..=KEPT_RUNS_MAX as i64 + 2)
+        .map(|start| run_stem(first + start))
+        .collect();
+    for stem in &finished {
+        std::fs::create_dir(agents.join(run_name(stem, 1))).unwrap();
+        std::fs::create_dir(agents.join(run_name(stem, 2))).unwrap();
+    }
+    prune(&agents, std::slice::from_ref(&running));
+    assert!(
+        agents.join(run_name(&running, 1)).join("home").is_dir(),
+        "the oldest folder belongs to a run still running and stays"
+    );
+    let kept = std::fs::read_dir(&agents).unwrap().count();
+    assert_eq!(
+        kept, KEPT_RUNS_MAX,
+        "the running run plus the newest finished ones"
+    );
+    assert!(
+        agents
+            .join(run_name(&finished[finished.len() - 1], 2))
+            .is_dir()
+    );
+    assert!(!agents.join(run_name(&finished[0], 1)).exists());
 }
 
 /// Each reason the pool's model provider can't be reached ends the run with its own code,
