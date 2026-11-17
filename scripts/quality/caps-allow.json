@@ -124,7 +124,7 @@
   "crates/crazyagent/src/tui/model_access.rs": 1934,
   "crates/crazyagent/src/tui/native_auth/tests.rs": 1966,
   "crates/crazyagent/src/tui/screens/app_setup.rs": 2994,
-  "crates/crazyagent/src/tui/screens/app_setup/tests.rs": 2690,
+  "crates/crazyagent/src/tui/screens/app_setup/tests.rs": 2622,
   "crates/crazyagent/src/tui/screens/changes/tests.rs": 1755,
   "crates/crazyagent/src/tui/screens/intake_tests.rs": 3755,
   "crates/crazyagent/src/tui/screens/new_project.rs": 2021,
