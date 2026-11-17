@@ -2,13 +2,11 @@ import { useEffect, useId, useRef, useState } from "react";
 import { keyLabel, shortcutKey } from "./keys";
 import { Dialog } from "./overlay";
 import { formatRoute, navigate, type Route } from "./router";
+import { IDE_TAB, TABS } from "../screens/project/index";
 
 export const GO_TO_ROWS_MAX = 8;
 export const GO_TO_QUERY_MAX = 100;
 
-const PROJECT_TAB_LABELS = [
-  ["overview", "Overview"], ["conversation", "Conversation"], ["agents", "Agents"], ["changes", "Changes"], ["questions", "Questions"], ["context", "Context"], ["settings", "Settings"],
-] as const;
 const SETTINGS_LABELS = [
   ["accounts", "Accounts"], ["pools", "Pools"], ["harnesses", "Harnesses"], ["plugins", "Plugins and skills"], ["memory", "Memory"],
 ] as const;
@@ -30,13 +28,13 @@ export const SHORTCUTS: readonly (readonly [string, string])[] = [
   ["Arrow keys", "Move a focused box in the team graph"],
 ];
 
-/** Lists every Go to destination, like the TUI: each project and its tabs, Home, Profile
- * (a dialog from the user menu since DEC-151), every Settings section, then the actions.
- * Input: the projects. Output: targets in display order. */
+/** Lists every Go to destination, like the TUI: each project with every project page tab
+ * plus the IDE, Home, Profile (a dialog from the user menu since DEC-151), every Settings
+ * section, then the actions. Input: the projects. Output: targets in display order. */
 export function goToTargets(projects: readonly { id: string; name: string }[]): Target[] {
   const out: Target[] = [];
   for (const project of projects) {
-    for (const [tab, label] of PROJECT_TAB_LABELS) {
+    for (const { id: tab, label } of [...TABS, IDE_TAB]) {
       out.push({
         label: tab === "overview" ? project.name : `${project.name} / ${label}`,
         kind: tab === "overview" ? "Project" : "Project tab",

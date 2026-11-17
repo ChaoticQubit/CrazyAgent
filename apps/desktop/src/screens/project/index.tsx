@@ -47,7 +47,7 @@ export const TABS = [
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
-const IDE_TAB = { id: "ide", label: "IDE", icon: "file-code" } as const satisfies { id: string; label: string; icon: IconName };
+export const IDE_TAB = { id: "ide", label: "IDE", icon: "file-code" } as const satisfies { id: string; label: string; icon: IconName };
 
 export type TabId = typeof TABS[number]["id"] | typeof IDE_TAB.id;
 
