@@ -95,24 +95,68 @@ fn install(case: &Case, profile: &BoundaryProfile) {
     fs::write(&case.profile, profile.encode().unwrap()).unwrap();
 }
 
+/// The access list of `path` as the SDDL line `icacls /save` writes, from `D:` on. icacls is
+/// native, while a PowerShell Get-Acl start costs about 3 s on windows-11-arm; it saves no
+/// owner or group. Input: the path. Output: the line, or what failed.
 fn read_sddl(path: &Path) -> String {
+    let saved = tempfile::tempdir().unwrap();
+    let file = saved.path().join("acl.txt");
+    let read = Command::new(system("icacls.exe"))
+        .arg(path)
+        .arg("/save")
+        .arg(&file)
+        .arg("/q")
+        .output();
+    let output = match read {
+        Ok(output) => output,
+        Err(error) => return format!("icacls failed: {error}"),
+    };
+    if !output.status.success() {
+        return format!("icacls failed: {}", ran(&output));
+    }
+    let bytes = fs::read(&file).unwrap();
+    let text = if bytes.starts_with(&[0xFF, 0xFE]) || bytes.get(1) == Some(&0) {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    text.lines()
+        .map(|line| line.trim_matches(|unit: char| unit == '\u{feff}' || unit.is_whitespace()))
+        .find(|line| line.starts_with("D:"))
+        .map_or_else(
+            || format!("icacls saved no access list: {text:?}"),
+            str::to_owned,
+        )
+}
+
+/// The owner of each path as Get-Acl names it, all read in one PowerShell start: the one
+/// PowerShell read left in these rows, since icacls saves no owner. Input: the paths. Output:
+/// one owner per path in order, or fewer lines when the read failed.
+fn owners(paths: &[&Path]) -> Vec<String> {
+    let joined = paths
+        .iter()
+        .map(|path| plain(path))
+        .collect::<Vec<_>>()
+        .join("|");
     let read = Command::new(system(r"WindowsPowerShell\v1.0\powershell.exe"))
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "(Get-Acl -LiteralPath $env:CRAZYAGENT_TEST_ACL_PATH).Sddl",
+            "$env:CRAZYAGENT_TEST_OWNER_PATHS -split '\\|' | ForEach-Object { (Get-Acl -LiteralPath $_).Owner }",
         ])
-        .env("CRAZYAGENT_TEST_ACL_PATH", path)
-        .output();
-    match read {
-        Ok(output) => format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
-        Err(error) => format!("powershell failed: {error}"),
-    }
+        .env("CRAZYAGENT_TEST_OWNER_PATHS", joined)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&read.stdout)
+        .lines()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 fn sddl(paths: &[&Path]) -> String {
@@ -123,9 +167,10 @@ fn sddl(paths: &[&Path]) -> String {
         .join("\n")
 }
 
-/// A path's security descriptor in SDDL with only the access list's auto-inherited flag (AI)
-/// left out, so two lists compare equal when their owner, group, protection and every entry
-/// with its flags and order match (DEC-130 option b). Input: the path. Output: the text.
+/// A path's access list in SDDL as icacls saves it, with no owner or group and only the
+/// auto-inherited flag (AI) left out, so two lists compare equal when their protection and
+/// every entry with its flags and order match (DEC-130 option b). Input: the path. Output:
+/// the text.
 fn entries(path: &Path) -> String {
     let text = read_sddl(path);
     let Some(start) = text.find("D:") else {
@@ -901,6 +946,7 @@ fn an_agent_cannot_change_an_access_list_or_take_ownership() {
         ("takeown.exe", &["/F", &config_text]),
         ("icacls.exe", &[&context_text, "/grant", &all]),
     ];
+    let mut taken = None;
     for (program, args) in attempts {
         let output = exe(&case, program, args);
         checks.expect(
@@ -908,7 +954,22 @@ fn an_agent_cannot_change_an_access_list_or_take_ownership() {
             &format!("{program} {args:?} changes no access list"),
             &output,
         );
+        if program == "takeown.exe" {
+            taken = Some(output);
+        }
     }
+    let taken = taken.unwrap();
+    checks.expect(
+        !taken.status.success() && !String::from_utf8_lossy(&taken.stdout).contains("now owned"),
+        "takeown cannot take ownership of .git\\config",
+        &taken,
+    );
+    let owned = owners(&[&config, &case.project]);
+    checks.expect(
+        owned.len() == 2 && !owned[0].is_empty() && owned[0] == owned[1],
+        &format!(".git\\config keeps the owner the project folder has: {owned:?}"),
+        &taken,
+    );
     let hook = hooks.join("post-checkout");
     let planted = run(&case, &["/C", "echo", "hook>", &plain(&hook)]);
     checks.expect(!hook.exists(), "no hook is created afterwards", &planted);
