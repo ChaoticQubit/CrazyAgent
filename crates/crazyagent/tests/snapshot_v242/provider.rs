@@ -252,8 +252,9 @@ fn endpoint_base_url(_scratch: &Path) -> Result<Value, String> {
 /// A key that is no real provider's and starts with no token prefix the golden writer refuses.
 const DUMMY_KEY: &str = "snapshot-dummy-provider-key-0001";
 
-/// The most requests one loopback recorder answers.
-const HEARD_MAX: usize = 8;
+/// The most requests one loopback recorder answers; an engine team checks its account more
+/// than once before a launch.
+const HEARD_MAX: usize = 64;
 
 /// The longest request head a loopback recorder reads.
 const HEAD_BYTES_MAX: usize = 16 * 1024;

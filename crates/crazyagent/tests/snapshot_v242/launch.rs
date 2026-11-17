@@ -179,6 +179,10 @@ const READ_BYTES_MAX: u64 = 1024 * 1024;
 /// macOS SDK (toolchains.rs `agent_env`).
 const SDKROOT: &str = "SDKROOT";
 
+/// The cargo caches an agent home links to the owner's own when the owner has them
+/// (toolchains.rs `CARGO_SHARED`, made by `prepare_cargo_home`).
+const CARGO_SHARED: [&str; 2] = ["registry", "git"];
+
 /// The rule kinds that name one path on a line of their own in a Seatbelt profile.
 const PATH_RULES: [&str; 3] = ["subpath", "literal", "path-ancestors"];
 
@@ -601,6 +605,8 @@ impl Team {
         let sdkroot = sdkroot_fact(&mut env_names, true)?;
         let state = self.state();
         let home = crazyagent::team::runtime::agent_home(&state, id);
+        let mut home_files = home_files(&home)?;
+        let cargo_links = cargo_links_fact(&mut home_files)?;
         let installed = crazyagent::team::runtime::agent_profile(&state, id);
         let (profile, machine_reads, network) = if installed.exists() {
             let text = without_target(&bounded(&installed)?, &self.target);
@@ -624,7 +630,8 @@ impl Team {
             "argv": argv,
             "env_names": env_names,
             "sdkroot": sdkroot,
-            "home_files": home_files(&home)?,
+            "home_files": home_files,
+            "cargo_shared_links": cargo_links,
             "profile": profile.as_deref().map(|text| text.lines().collect::<Vec<&str>>()),
             "machine_reads": machine_reads,
             "network": network,
@@ -683,6 +690,25 @@ fn machine_folders() -> Result<Vec<String>, String> {
                 .ok_or_else(|| "a machine folder is not UTF-8".to_owned())
         })
         .collect()
+}
+
+/// Takes the cargo cache links out of an agent home listing and states whether each was
+/// there exactly when the owner has that cache, so the listing reads the same on a Mac
+/// without cargo. Input: the listing. Output: `as_the_owner_has_them`, or the first name
+/// that differs.
+fn cargo_links_fact(home_files: &mut Vec<String>) -> Result<String, String> {
+    let homes = ToolHomes::owner().map_err(|error| format!("{error:?}"))?;
+    let mut fact = "as_the_owner_has_them".to_owned();
+    for name in CARGO_SHARED {
+        let listed = format!(".cargo/{name}");
+        let given = home_files.contains(&listed);
+        let owned = homes.cargo().join(name).is_dir();
+        home_files.retain(|file| *file != listed);
+        if given != owned && fact == "as_the_owner_has_them" {
+            fact = format!("{listed} differs");
+        }
+    }
+    Ok(fact)
 }
 
 /// Takes `SDKROOT` out of a launch's variable names and states whether it was there
