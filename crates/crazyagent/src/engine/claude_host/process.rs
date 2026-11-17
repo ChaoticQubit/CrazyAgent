@@ -306,7 +306,7 @@ impl Process {
                 let held = Fault::Exit(code).held();
                 if !held && self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some())
                 {
-                    exit_wait = self.wait(exit_wait);
+                    exit_wait = self.wait(exit_wait, false);
                     continue;
                 }
                 if held {
@@ -326,7 +326,7 @@ impl Process {
             }
             if self.stdout.is_none() {
                 if self.protocol.state() == State::Idle && self.completed_turns > 0 {
-                    exit_wait = self.wait(exit_wait);
+                    exit_wait = self.wait(exit_wait, false);
                     continue;
                 }
                 self.fail(Fault::Host("claude_host_disconnected"));
@@ -336,16 +336,16 @@ impl Process {
             if self.fault.is_some() {
                 return;
             }
-            exit_wait = self.wait(exit_wait);
+            exit_wait = self.wait(exit_wait, true);
         }
     }
 
-    /// Waits until a pipe the loop still reads is ready, stdin can take the pending input, the
-    /// host is roused, or the bound passes: the deadline or [`WAIT_MAX`]. With no pipe left and
-    /// the harness not reaped, nothing reports its exit, so the bound is `exit_wait`, doubled
-    /// for the next pass; a failed poll sleeps [`POLL_TIME`]. Input: the exit wait. Output: the
-    /// exit wait for the next pass.
-    fn wait(&self, exit_wait: Duration) -> Duration {
+    /// Waits until a pipe the loop still reads is ready, the host is roused, stdin can take the
+    /// pending input when the next pass writes it (`writing`), or the bound passes: the
+    /// deadline or [`WAIT_MAX`]. With no pipe left and the harness not reaped, nothing reports
+    /// its exit, so the bound is `exit_wait`, doubled for the next pass; a failed poll sleeps
+    /// [`POLL_TIME`]. Inputs: the exit wait and `writing`. Output: the next exit wait.
+    fn wait(&self, exit_wait: Duration, writing: bool) -> Duration {
         assert!(exit_wait >= EXIT_WAIT_MIN && exit_wait <= WAIT_MAX);
         let mut fds = Vec::with_capacity(4);
         if let Some(stdout) = &self.stdout {
@@ -355,7 +355,8 @@ impl Process {
             fds.push(PollFd::new(stderr, PollFlags::IN));
         }
         let exiting = fds.is_empty() && self.status.is_none();
-        if let (Some(stdin), Some(_)) = (&self.stdin, &self.pending) {
+        if let (true, Some(stdin), Some(_)) = (writing, &self.stdin, &self.pending) {
+            assert!(self.status.is_none());
             fds.push(PollFd::new(stdin, PollFlags::OUT));
         }
         fds.push(PollFd::new(&self.woken, PollFlags::IN));
