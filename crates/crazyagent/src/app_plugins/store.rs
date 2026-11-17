@@ -10,6 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::ops::RangeInclusive;
 use std::path::Path;
 
+#[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS app_plugin_trust (
     name TEXT PRIMARY KEY CHECK(length(name) BETWEEN 1 AND 64),
     sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS app_plugin_secrets (
 /// Creates the store's three tables when missing: trust records, on and off switches and
 /// secret bindings. The engine runs it at every open and migration step 12 runs it inside
 /// the upgrade. Input: the engine connection. Output: Ok, or `app_plugins_unavailable`.
+#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)
 }
