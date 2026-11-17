@@ -379,6 +379,32 @@ fn shown(shell: &mut Shell) -> String {
     render(shell, 80, 24).join("\n")
 }
 
+/// The words of the Lid closed line under State, with each line wrapped under its value
+/// column joined on by one space. Input: the shown text. Output: the words, empty when
+/// the screen shows no such line.
+fn lid_now_shown(text: &str) -> String {
+    let column = " ".repeat(usize::from(super::GUTTER) + super::LABEL_WIDTH);
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !line.starts_with("  Lid closed "));
+    let Some(first) = lines
+        .next()
+        .and_then(|line| line.strip_prefix("  Lid closed"))
+    else {
+        return String::new();
+    };
+    let mut words = vec![first.trim()];
+    for line in lines {
+        match line.strip_prefix(column.as_str()) {
+            Some(more) if !more.starts_with(' ') && !more.trim().is_empty() => {
+                words.push(more.trim());
+            }
+            _ => break,
+        }
+    }
+    words.join(" ")
+}
+
 /// Presses one key and returns the single change it sent, answered as applied so the
 /// next key is taken. Inputs: the shell and the key. Output: the change.
 fn pressed(shell: &mut Shell, key: char) -> KeepAwakeQuery {
@@ -754,7 +780,11 @@ fn a_none_pin_makes_the_screen_offer_remove_lid_helper_on_d() {
     };
     let mut shell = screen(on_mac(pin));
     let text = shown(&mut shell);
-    assert!(text.contains(PIN_NONE), "the screen says why: {text}");
+    assert_eq!(
+        lid_now_shown(&text),
+        PIN_NONE,
+        "the screen says why: {text}"
+    );
     assert!(text.contains("d  Remove lid helper"), "{text}");
     assert!(!text.contains(TURN_ON), "{text}");
     assert_eq!(
@@ -801,11 +831,32 @@ fn a_failed_unregister_keeps_offering_remove_lid_helper_on_the_screen() {
         reason: reason.into(),
     }));
     let text = shown(&mut shell);
-    assert!(text.contains(reason), "{text}");
+    assert_eq!(lid_now_shown(&text), reason, "{text}");
     assert!(text.contains("d  Remove lid helper"), "{text}");
     assert_eq!(
         action(pressed(&mut shell, 'd')),
         KeepAwakeAction::RemoveLidHelper
+    );
+}
+
+/// A reason four lines long at 80 columns is read whole under the Lid closed label, and
+/// every row below it is still on the screen.
+#[test]
+fn a_long_lid_reason_is_read_whole_under_its_label_at_80_columns() {
+    let reason = format!(
+        "The lid helper stopped:{}",
+        " it cannot reach the power service".repeat(5)
+    );
+    assert!((169..=200).contains(&reason.chars().count()));
+    let text = shown(&mut screen(on_mac(LidSupport::NotAvailable {
+        reason: reason.clone(),
+    })));
+    assert_eq!(lid_now_shown(&text), reason, "{text}");
+    assert!(text.contains("m  Mode"), "{text}");
+    assert!(text.contains("s  All Keep awake settings"), "{text}");
+    assert!(
+        text.lines().all(|line| line.chars().count() <= 80),
+        "{text}"
     );
 }
 

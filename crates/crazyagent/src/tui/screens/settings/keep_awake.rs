@@ -600,7 +600,11 @@ impl KeepAwakeSettingsPage {
         let reason = unavailable(setting, view);
         let mut lines = Vec::new();
         if let Some(reason) = &reason {
-            lines.push(Line::styled(format!("  {reason}"), ctx.theme.warning));
+            let parts = wrap(reason, room);
+            assert!(parts.len() <= reason.chars().count());
+            for part in parts {
+                lines.push(Line::styled(format!("  {part}"), ctx.theme.warning));
+            }
         }
         if setting == Setting::Freeze && reason.is_none() {
             let names: Vec<&str> = view

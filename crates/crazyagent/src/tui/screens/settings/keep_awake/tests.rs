@@ -382,11 +382,28 @@ fn a_refused_save_keeps_the_picks_and_says_why() {
     assert_eq!(picks.mode, Some(Mode::Manual), "Enter saves again");
 }
 
+/// A Mac honours every setting, so no setting line gives a reason; its Lid helper line still
+/// says the helper is not set up yet, since that tells where the helper stands, not why a
+/// setting cannot hold (90f118552).
 #[test]
 fn a_setting_this_computer_cannot_honour_says_why() {
     let text = shown(&mut page(resting()));
+    let helper: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("Lid helper"))
+        .collect();
+    assert_eq!(helper.len(), 1, "{text}");
+    assert!(
+        helper[0].contains("Lid helper  Not set up on this computer yet"),
+        "{text}"
+    );
+    let settings: String = text
+        .lines()
+        .filter(|line| !line.contains("Lid helper"))
+        .collect::<Vec<_>>()
+        .join("\n");
     for reason in ["Not available on Windows", "Only on macOS", "Not set up"] {
-        assert!(!text.contains(reason), "{reason}: {text}");
+        assert!(!settings.contains(reason), "{reason}: {text}");
     }
     let mut windows = resting();
     windows.platform = Platform::Windows;
@@ -408,6 +425,28 @@ fn a_setting_this_computer_cannot_honour_says_why() {
     let text = shown(&mut page(linux));
     assert!(!text.contains("Not available on Windows"), "{text}");
     assert_eq!(text.matches("Only on macOS").count(), 1, "{text}");
+}
+
+/// A reason wider than the page under a setting it cannot honour is wrapped, so every word
+/// of it is shown in order with nothing but line breaks and indents between them.
+#[test]
+fn a_long_reason_a_setting_cannot_be_honoured_is_read_whole() {
+    let reason = format!(
+        "The lid helper stopped:{}",
+        " it cannot reach the power service".repeat(5)
+    );
+    assert!((117..=200).contains(&reason.chars().count()));
+    let mut view = resting();
+    view.lid_support = LidSupport::NotAvailable {
+        reason: reason.clone(),
+    };
+    let text = shown(&mut page(view));
+    let squeezed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(squeezed.contains(&reason), "{text}");
+    assert!(
+        text.lines().all(|line| line.chars().count() <= 120),
+        "{text}"
+    );
 }
 
 const LOW_POWER_ROW: usize = 9;

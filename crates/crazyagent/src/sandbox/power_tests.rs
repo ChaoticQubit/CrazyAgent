@@ -65,18 +65,25 @@ fn confined(case: &Case, program: &str, arguments: &[&str]) -> Output {
 /// the mark of this test's own children. Input: the timeout argument. Output: how many
 /// `pgrep` finds.
 fn timed_holders(seconds: &str) -> usize {
-    let line = format!("^{CAFFEINATE} -i -t {seconds}$");
-    let output =
-        crate::spawn_gate::output(Command::new("/usr/bin/pgrep").args(["-f", &line])).unwrap();
-    String::from_utf8(output.stdout).unwrap().lines().count()
+    running(&format!("^{CAFFEINATE} -i -t {seconds}$"))
 }
 
 /// Counts the caffeinate children that hold for one engine pid. Input: the pid. Output:
 /// how many `pgrep` finds by their exact command line.
 fn engine_holders(engine: u32) -> usize {
-    let line = format!("^{CAFFEINATE} (-d )?-i -w {engine}$");
+    running(&format!("^{CAFFEINATE} (-d )?-i -w {engine}$"))
+}
+
+/// Counts the running processes whose whole command line matches a pattern, read from
+/// `pgrep`'s collected output, since `spawn_gate::output` defaults no stdio. Input: the
+/// extended regular expression. Output: how many `pgrep` finds.
+fn running(line: &str) -> usize {
     let output =
-        crate::spawn_gate::output(Command::new("/usr/bin/pgrep").args(["-f", &line])).unwrap();
+        crate::spawn_gate::collected(Command::new("/usr/bin/pgrep").args(["-f", line])).unwrap();
+    assert!(
+        output.status.code().is_some_and(|code| code <= 1),
+        "{output:?}"
+    );
     String::from_utf8(output.stdout).unwrap().lines().count()
 }
 

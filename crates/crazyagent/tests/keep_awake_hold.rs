@@ -61,7 +61,7 @@ mod macos {
     /// Lists the assertions the system holds on behalf of one engine pid. Input: the pid.
     /// Output: the caffeinate pid and kind of each, sorted by kind.
     fn assertions(engine: u32) -> Vec<(u32, String)> {
-        let output = crazyagent::spawn_gate::output(
+        let output = crazyagent::spawn_gate::collected(
             Command::new("/usr/bin/pmset").args(["-g", "assertions"]),
         )
         .unwrap();
@@ -519,7 +519,7 @@ mod windows {
     /// this row runs on the Windows probe machine as an administrator.
     fn listed() -> bool {
         let output =
-            crazyagent::spawn_gate::output(Command::new("powercfg").arg("/requests")).unwrap();
+            crazyagent::spawn_gate::collected(Command::new("powercfg").arg("/requests")).unwrap();
         assert!(output.status.success());
         String::from_utf8_lossy(&output.stdout).contains(REASON)
     }
@@ -528,7 +528,7 @@ mod windows {
     /// before SYSTEM). Needs an elevated prompt, as `listed` does.
     fn kinds_listing_us() -> Vec<String> {
         let output =
-            crazyagent::spawn_gate::output(Command::new("powercfg").arg("/requests")).unwrap();
+            crazyagent::spawn_gate::collected(Command::new("powercfg").arg("/requests")).unwrap();
         assert!(output.status.success());
         let text = String::from_utf8_lossy(&output.stdout);
         let mut kind = String::new();
