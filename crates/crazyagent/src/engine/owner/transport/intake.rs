@@ -48,7 +48,28 @@ pub(super) struct Asked {
 pub(super) struct Intake {
     held: Mutex<Vec<Held>>,
     direct: std::sync::atomic::AtomicUsize,
+    claims: std::sync::atomic::AtomicUsize,
     pub(super) downloads: tokio::sync::Mutex<()>,
+}
+
+/// A job's claim on its request id, counted among the intake's claims until it is dropped,
+/// so a start sees the claim a stopped waiting job's task still holds (#380 F3). The claim
+/// is freed before the count drops, so the count never trails the claims held.
+struct JobClaim {
+    claim: Option<Running>,
+    authority: Arc<Authority>,
+}
+
+impl Drop for JobClaim {
+    fn drop(&mut self) {
+        drop(self.claim.take());
+        let before = self
+            .authority
+            .intake
+            .claims
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(before > 0, "a job claim is counted once");
+    }
 }
 
 /// A direct client folder add or project move under way, which keeps any job from starting
@@ -322,7 +343,11 @@ impl Intake {
             return Err(failure("job_busy"));
         }
         let live = held.iter().filter(|current| current.live()).count();
-        if live >= JOBS_RUNNING_MAX + JOBS_WAITING_MAX {
+        let claims = authority
+            .intake
+            .claims
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if live.max(claims) >= JOBS_RUNNING_MAX + JOBS_WAITING_MAX {
             return Err(failure("job_busy"));
         }
         let kept = held
@@ -337,6 +362,15 @@ impl Intake {
         let taken = Running::claim(authority, &a.owner_id, &asked.request_id);
         let Some(claim) = trace::claim(&asked.request_id, taken) else {
             return Err(failure("job_busy"));
+        };
+        let before = authority
+            .intake
+            .claims
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(before < JOBS_RUNNING_MAX + JOBS_WAITING_MAX);
+        let claim = JobClaim {
+            claim: Some(claim),
+            authority: Arc::clone(authority),
         };
         let job = Arc::new(IntakeJob::new(
             asked.request_id.clone(),
@@ -670,7 +704,7 @@ async fn run(
     a: Admission,
     job: Arc<IntakeJob>,
     subject: JobSubject,
-    claim: Running,
+    claim: JobClaim,
     replaced: Vec<RequestId>,
     turn: oneshot::Receiver<()>,
 ) {
