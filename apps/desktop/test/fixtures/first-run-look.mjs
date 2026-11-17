@@ -50,12 +50,24 @@ function step(node) {
 }
 
 /**
+ * Where one step's words start on the page. Input: the step element. Output: the top of its
+ * text in px.
+ */
+function wordsTop(node) {
+  const range = document.createRange();
+  range.selectNodeContents(node);
+  return range.getBoundingClientRect().top;
+}
+
+/**
  * Reads the step list and the filled buttons of the mounted step. Output: the tokens, the
- * current and one other step's look, and each filled button's words, fill and word color.
+ * current and one other step's look and where their words start, and each filled button's
+ * words, fill and word color.
  */
 export function look() {
   const steps = document.querySelector(".in-steps");
   return {
+    words: { current: wordsTop(steps.querySelector('[aria-current="step"]')), other: wordsTop(steps.querySelector("li:not([aria-current])")) },
     tokens: Object.fromEntries(["surface", "border", "text", "text-3", "primary", "on-primary"].map((name) => [name, token(name)])),
     current: step(steps.querySelector('[aria-current="step"]')),
     other: step(steps.querySelector("li:not([aria-current])")),

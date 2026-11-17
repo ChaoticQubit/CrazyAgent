@@ -29,6 +29,11 @@ for (const theme of ["light", "dark"]) {
     assert.deepEqual(other, { fill: CLEAR, corner: "0px", color: t["text-3"], weight: "400", size: "12px", line: "16px" });
   });
 
+  test(`${theme}: the current step's words sit on the same line as the other steps' words, not pushed down by its hairline`, async () => {
+    const seen = await looks(theme, "profile");
+    assert.equal(seen.words.current, seen.words.other);
+  });
+
   for (const [step, words] of [["profile", "Save and continue"], ["accounts", "Add account"]]) {
     test(`${theme}: on the ${step} step, ${words} is the one filled button, in ink`, async () => {
       const seen = await looks(theme, step);
