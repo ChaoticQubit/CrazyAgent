@@ -270,7 +270,7 @@ mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
 ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
 ln "$admin/index" "$away/index" 2>>"$err" && echo linked
 exit 0"#;
-    let output = crazyagent::spawn_gate::output(
+    let output = crazyagent::spawn_gate::collected(
         helper_command()
             .args(["--read", "/", "--write"])
             .arg(&case.tmp)
