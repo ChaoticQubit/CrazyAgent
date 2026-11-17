@@ -49,6 +49,7 @@ describe("An engine older than the app is replaced at launch on its own (DEC-134
     assert.equal(versionOf(SIDECAR), staged.newer);
     const definition = readFileSync(join(home, "Library", "LaunchAgents", `${staged.label}.plist`), "utf8");
     assert.ok(definition.includes(join(staged.bundle, "Contents", "MacOS", "crazyagent")), "the service runs the bundle's engine");
+    assert.ok(definition.includes(`<key>HOME</key>\n\t\t<string>${home}</string>`), "the service gives its engine the scratch HOME, never the owner's");
     const after = terminalServers(DATA);
     for (const pid of staged.terminals) assert.ok(after.includes(pid), `terminal server ${pid} outlived the swap: ${after}`);
     const log = readFileSync(join(DATA, "logs", "engine.log"), "utf8");

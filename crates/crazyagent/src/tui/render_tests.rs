@@ -352,6 +352,35 @@ fn the_engine_down_screen_asks_to_start_the_engine_and_names_no_command() {
     }
 }
 
+/// L5 F1: the engine-down screen names a restore that holds the engine in the restore's own
+/// sentence, wrapped to the screen, as the desktop's engine-down view shows its problem.
+#[test]
+fn the_engine_down_screen_says_a_restore_holds_the_engine() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.starts_engine = true;
+        shell.ctx.link = Link::Down(crate::restore::ENGINE_RESTORED.into());
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(text.contains("  Your 2.4 data is back."), "{text}");
+        assert!(text.contains("Install CrazyAgent 2.4.2"), "{text}");
+        assert!(
+            text.contains("Press r to go back to 2.5 instead."),
+            "{text}"
+        );
+        shell.ctx.link = Link::Down(crate::restore::ENGINE_RESTORING.into());
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(
+            text.contains("  CrazyAgent is bringing back your 2.4 data"),
+            "{text}"
+        );
+        assert!(!text.contains("Your 2.4 data is back."), "{text}");
+        assert!(
+            text.contains("Press r to start it and try again."),
+            "{text}"
+        );
+    }
+}
+
 /// DS-118: on a TUI with the default engine the engine-down screen says `r` starts it, and
 /// `r` asks for the start with its reconnect, as the desktop's Try again starts it; with no
 /// engine of its own `r` only reconnects.

@@ -224,6 +224,13 @@ pub fn run(
     )?;
     ctx.editor_running = editor_running;
     ctx.starts_engine = engine.is_some();
+    ctx.engine_root = engine
+        .as_ref()
+        .map(|(layout, _)| layout.root().to_path_buf());
+    ctx.restore_shown = ctx
+        .engine_root
+        .as_deref()
+        .is_some_and(super::screens::settings::restore::offered_at);
     let mut terminals = Terminals::new(socket.clone(), timeout);
     let client = Client::new(socket, timeout).map_err(|error| TuiError(error.to_string()))?;
     let mut connection = Connection::connect_starting(client, engine).map_err(TuiError)?;

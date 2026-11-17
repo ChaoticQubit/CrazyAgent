@@ -18,6 +18,7 @@ mod text;
 mod theme;
 mod widgets;
 pub use master_session::default_master_open;
+pub use screens::settings::restore::plain as restore_words;
 mod model_access;
 mod native_auth;
 pub mod views;

@@ -2843,8 +2843,10 @@ fn set_agent_policy(
 /// instructions, team settings and project wake rule move on once more, so a project added
 /// again under the same id refuses a save from a screen read before the removal (V2V-1,
 /// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
-/// and their wake rule versions need no move. Takes the transaction, the project, the
-/// revision and whether its notes are kept. Returns `invalid_project` for an unknown project.
+/// and their wake rule versions need no move. The rows [`removed::event::apply`] clears go
+/// with the `ProjectRemoved` event the owner request appends next, in this transaction (v2.5
+/// L14a). Takes the transaction, the project, the revision and whether its notes are kept.
+/// Returns `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2863,7 +2865,10 @@ fn remove(
     }
     let folder = load_setup(tx, project_id)?.map(|stored| stored.project_folder());
     crate::storage::close_master_for_removal(tx, project_id, revision)?;
-    for table in REMOVED_WITH_PROJECT {
+    for table in REMOVED_WITH_PROJECT
+        .iter()
+        .filter(|table| !removed::event::TABLES.contains(*table))
+    {
         tx.execute(
             &format!("DELETE FROM {table} WHERE project=?1"),
             [project_id.as_str()],
@@ -2871,13 +2876,6 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
-    crate::storage::agent_text::forget_project(tx, project_id)?;
-    crate::questions::forget_project(tx, project_id)?;
-    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
-    crate::sandbox::hidden_paths::forget_seers(tx, project_id.as_str()).map_err(error)?;
-    crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
-    crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
-    crate::github::proposals::forget_project(tx, project_id)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),
@@ -2889,28 +2887,7 @@ fn remove(
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }
-    crate::scheduling::forget_project(tx, project_id.as_str())?;
-    crate::coord::forget_project(tx, project_id)?;
-    crate::activity::forget_project(tx, project_id)?;
-    crate::usage::forget_project(tx, project_id.as_str())?;
-    crate::ide::bridge::run_command::forget_project(tx, project_id)?;
     finish_removed_agent_notices(tx, project_id)?;
-    tx.execute(
-        "DELETE FROM team_panes WHERE agent IN
-         (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
-        [project_id.as_str()],
-    )
-    .map_err(error)?;
-    tx.execute(
-        "DELETE FROM team_agents WHERE project=?1 AND status IN ('stopped','failed')",
-        [project_id.as_str()],
-    )
-    .map_err(error)?;
-    tx.execute(
-        "DELETE FROM onboarding WHERE project=?1",
-        [project_id.as_str()],
-    )
-    .map_err(error)?;
     crate::projects_home::delete_mark::forget(tx, project_id)?;
     let removed = tx
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])

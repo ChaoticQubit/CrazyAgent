@@ -65,7 +65,9 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
-/// applied setup run, one-dependency install or permission fix starts in the background, and every removal, applied or
+/// applied setup run, one-dependency install or permission fix starts in the background, an
+/// applied restore of the pinned 2.4 backup records itself pending and asks the engine to stop
+/// so it can run once every connection is closed, and every removal, applied or
 /// not, sweeps the folders and secrets it moved aside or left, an applied agent policy
 /// reaches the project's open IDE, and a Reconcile answered Committed with an applied result
 /// reaches every open IDE, since a Save's lost reply leaves that the only call after its
@@ -117,6 +119,15 @@ pub(super) async fn after_owner(
             OwnerResponse::Applied { operation },
         ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
             start_install(engine_root(authority)?, *name)?;
+        }
+        #[cfg(unix)]
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::RestorePinned,
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            crate::restore::request(&engine_root(authority)?)?;
         }
         (
             OwnerOperation::Apply {
