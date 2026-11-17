@@ -370,16 +370,18 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
 }
 
 /// The access list icacls prints for `folder`, read through the spawn gate with stdout and
-/// stderr collected, so the rows compare listings instead of two empty strings while icacls
-/// writes to the test's console. Input: the folder. Output: the listing; a failed or empty
-/// listing panics with both streams.
+/// stderr collected, with icacls' inherited mark `(I)` dropped: writing a list re-marks an
+/// explicit entry that matches the parent's as inherited, with or without the boundary (farm
+/// 44113725856), so a taken-back grant leaves the same entries, not the same marks. Input: the
+/// folder. Output: the listing; a failed listing, or one not naming the folder, panics.
 #[cfg(target_os = "windows")]
 fn access_list(folder: &Path) -> String {
     let mut icacls = std::process::Command::new("icacls");
     let listed = crate::spawn_gate::collected(icacls.arg(folder)).unwrap();
     assert!(listed.status.success(), "{listed:?}");
-    let text = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let text = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
     assert!(text.contains(folder.to_str().unwrap()), "{listed:?}");
+    assert!(text.contains("(OI)(CI)"), "{listed:?}");
     text
 }
 
