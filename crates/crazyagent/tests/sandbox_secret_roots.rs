@@ -183,6 +183,43 @@ fn the_native_profiles_folder_is_an_engine_secret_no_root_may_cover() {
     assert!(guarded(&case).secret_paths().contains(&profiles));
 }
 
+/// V243-BACKUPS-SECRET: the folder of engine backups, which holds full copies of engine.db,
+/// the settings texts kept with them and, after a 2.5 restore, the keys, SDK homes and
+/// sign-in slots moved into its dated copy, is an engine secret like the saved account keys:
+/// no read root, worktree or project may be it or sit inside one backup in it, in either
+/// order, and the guarded sandbox names it among its secret paths.
+#[test]
+fn the_backups_folder_is_an_engine_secret_no_root_may_cover() {
+    let case = case();
+    let backups = case.runtime.join("backups");
+    let backup = backups.join("upgrade");
+    let replaced = backups.join("replaced-20261117T000000Z");
+    fs::create_dir_all(&backup).unwrap();
+    fs::write(backup.join("engine.db"), "").unwrap();
+    fs::create_dir_all(replaced.join("account-keys")).unwrap();
+    for root in [&backups, &backup, &replaced] {
+        walled(guarded(&case).allow_read(root));
+        walled(guarded(&case).allow_worktree(root));
+        walled(
+            sandbox(&case)
+                .allow_read(root)
+                .unwrap()
+                .guard_engine(&case.runtime),
+        );
+        walled(
+            ProjectSandbox::new(
+                root,
+                &case.home,
+                &case.tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .unwrap()
+            .guard_engine(&case.runtime),
+        );
+    }
+    assert!(guarded(&case).secret_paths().contains(&backups));
+}
+
 /// CONFIGURED-HOMES-GUARD: the folder of configured SDK homes, where each keyed account's
 /// home keeps its key, is an engine secret. No read root or worktree may be it, one home in
 /// it or the engine root around it, in either order; the plain guard refuses an agent home
