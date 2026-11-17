@@ -225,11 +225,8 @@ fn reference(name: &str) -> Result<crate::protocol::CredentialRef, EngineError> 
     crate::protocol::CredentialRef::new(name).map_err(|_| error("account_key_reference_invalid"))
 }
 
-/// Deletes one file of a kind under the engine root through its own removal, for the start
-/// sweep and a restore's sweep of what only the replaced data named. Inputs: the engine root,
-/// the kind and the name. Output: Ok once it is gone, or the removal's refusal.
 #[cfg(unix)]
-pub(super) fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
+fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
     match kind {
         ACCOUNT_KEY => super::accounts::remove_key_file(root, name),
         MCP_SECRET => super::plugins::remove_secret(root, name),

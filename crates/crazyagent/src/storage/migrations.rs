@@ -627,15 +627,15 @@ fn restore_pinned_at(
     Ok(kept)
 }
 
-/// Moves the owner's key files the restored 2.4 rows no longer name into the same key
-/// folders of the dated copy of the replaced 2.5 data (V250-L5-N5, DEC-192), and deletes each
-/// generated SDK home and native sign-in that copy names (V250-L5-N5B): each plugin key no
-/// restored app plugin binding holds, so every one for a 2.4 copy, and each account key, home
-/// and sign-in neither a restored account nor the live settings name, as the start sweep
-/// judges ([`super::trash::referenced`]); no settings, or settings that cannot be read, keep
-/// every account's files. A failure is logged by what it swept and its code and never fails
-/// the checked restore. Inputs: the restored connection, still held alone, the engine root,
-/// the settings sources and the dated copy's folder.
+/// Moves the owner's secrets the restored 2.4 rows no longer name into the same folders of
+/// the dated copy of the replaced 2.5 data (DEC-192), where they stay with the data that
+/// names them: each plugin key no restored app plugin binding holds, so every one for a 2.4
+/// copy, and each account key (V250-L5-N5), generated SDK home and native profile slot the
+/// copy names (V250-L5-N5B), that neither a restored account nor the live settings name, as
+/// the start sweep judges ([`super::trash::referenced`]); no settings, or settings that cannot
+/// be read, keep every account's files in place. A failure is logged by what it swept and its
+/// code and never fails the checked restore. Inputs: the restored connection, still held
+/// alone, the engine root, the settings sources and the dated copy's folder.
 fn sweep_unbound_keys(
     db: &Connection,
     root: &Path,
@@ -655,7 +655,7 @@ fn sweep_unbound_keys(
                 named(super::trash::ACCOUNT_KEY, name)
             });
             swept.push((ACCOUNT_KEYS, keys));
-            swept.push((PROFILES, remove_replaced_profiles(root, copy, &named)));
+            swept.push((PROFILES, move_replaced_profiles(root, copy, &named)));
         }
         Some(Err(cause)) => swept.push((ACCOUNT_KEYS, Err(cause))),
         None => {}
@@ -671,30 +671,40 @@ fn sweep_unbound_keys(
 /// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.
 const PROFILES: &str = "account-profiles";
 
-/// Deletes each generated SDK home and native sign-in the replaced 2.5 copy names, by its
-/// saved accounts and by its trash notes, that `named` does not keep, through the start
-/// sweep's own removals ([`super::trash::delete`]); a failed removal does not stop the
-/// others. Inputs: the engine root, the copy's folder and the keep test by kind and name.
-/// Output: how many went, or the copy's or keep test's failure, or the first failed removal.
-fn remove_replaced_profiles(
+/// Moves each generated SDK home and native profile slot the replaced 2.5 copy names, by its
+/// saved accounts and by its trash notes, that `named` does not keep, into the same folder of
+/// that dated copy ([`crate::engine::bootstrap::move_profile_into_copy`]); every keep test
+/// runs before the first move, and a failed move keeps that one in place and does not stop
+/// the others. Inputs: the engine root, the copy's folder and the keep test by kind and name.
+/// Output: how many moved, or the copy's or keep test's failure, or the first failed move.
+fn move_replaced_profiles(
     root: &Path,
-    replaced: &Path,
+    copy: &Path,
     named: impl Fn(&str, &str) -> Result<bool, EngineError>,
 ) -> Result<usize, EngineError> {
-    let mut failed = None;
-    let mut removed = 0;
-    for (kind, name) in replaced_profiles(replaced)? {
-        if named(kind, name.as_str())? {
-            continue;
+    let mut unkept = Vec::new();
+    for (kind, name) in replaced_profiles(copy)? {
+        if !named(kind, name.as_str())? {
+            unkept.push((kind, name));
         }
-        match super::trash::delete(root, kind, &name) {
-            Ok(()) => removed += 1,
+    }
+    let mut failed = None;
+    let mut moved = 0;
+    for (kind, name) in &unkept {
+        let reference = crate::protocol::CredentialRef::new(name.as_str())
+            .map_err(|_| error("account_key_reference_invalid"));
+        let home = *kind == super::trash::GENERATED_HOME;
+        match reference.and_then(|reference| {
+            crate::engine::bootstrap::move_profile_into_copy(root, copy, &reference, home)
+        }) {
+            Ok(()) => moved += 1,
             Err(cause) => {
                 failed.get_or_insert(cause);
             }
         }
     }
-    failed.map_or(Ok(removed), Err)
+    assert!(moved <= unkept.len());
+    failed.map_or(Ok(moved), Err)
 }
 
 /// The generated SDK homes and native sign-ins the replaced 2.5 copy names: those of its

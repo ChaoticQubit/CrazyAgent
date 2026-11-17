@@ -39,7 +39,8 @@ pub(crate) use native_profiles::{
 };
 #[cfg(unix)]
 pub(crate) use native_profiles::{
-    CLAUDE_RECORD, CODEX_RECORD, listed_slot_key, remove_generated_home, remove_sign_in,
+    CLAUDE_RECORD, CODEX_RECORD, listed_slot_key, move_profile_into_copy, remove_generated_home,
+    remove_sign_in,
 };
 
 /// The folder in the engine root that holds every native sign-in profile, one per account,
