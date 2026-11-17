@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 mod e2e_support;
 
 use crazyagent::harnesses::drivers::jsonl_rpc::{Config, JsonlRpc};
