@@ -2357,4 +2357,4 @@ mod tests;
 /// typed line splits into words the way a saved runs line reads back. Inputs and outputs:
 /// per function.
 mod command_line;
-pub use command_line::{command_spec, target_spec, words};
+pub use command_line::target_spec;

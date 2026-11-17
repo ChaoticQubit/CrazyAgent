@@ -1,4 +1,4 @@
-use super::import_page::outcome_line;
+use super::command_line::{command_spec, words};
 use super::skill_detail::{file_size, skill_body};
 use super::*;
 use crate::plugins::{Scope, SecretView};
@@ -1438,7 +1438,7 @@ fn the_import_page_scrolls_and_says_why_the_scan_failed() {
     };
     assert_eq!(back.crumbs(), ["Settings", "Plugins and skills"]);
     assert_eq!(
-        outcome_line("notes", &Err("skill_link_outside".into())),
+        super::import_page::outcome_line("notes", &Err("skill_link_outside".into())),
         format!(
             "Could not import notes: {}",
             plugin_plain("skill_link_outside")
