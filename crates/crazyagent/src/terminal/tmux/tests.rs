@@ -2163,13 +2163,15 @@ fn probing_a_live_server_out_of_descriptors() {
     std::fs::write(home.join("answer"), format!("{answer:?}")).unwrap();
 }
 
-/// A tmux program answering as the stand-in server a lead swapped in for its own would: its
-/// session lists `agent` and every pane it reports has `pid` as its first process. Takes the
-/// folder it goes in, the agent and the pid. Returns the program.
+/// A tmux program answering as the stand-in server a lead swapped in for its own would: it
+/// reports the lowest version the host takes ([`VERSION_MIN`]), its session lists `agent` and
+/// every pane it reports has `pid` as its first process. Takes the folder it goes in, the
+/// agent and the pid. Returns the program.
 #[cfg(target_os = "macos")]
 fn forging_tmux(folder: &Path, agent: &AgentId, pid: impl std::fmt::Display) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let program = folder.join("forging-tmux");
+    let (major, minor) = VERSION_MIN;
     let script = format!(
         r#"#!/bin/sh
 printf '%%begin 1 0 1\n%%end 1 0 1\n'
@@ -2177,7 +2179,7 @@ number=1
 while IFS= read -r line; do
   printf '%%begin 1 %s 1\n' "$number"
   case "$line" in
-    *'#{{version}}'*) printf '3.5 end\n' ;;
+    *'#{{version}}'*) printf '{major}.{minor} end\n' ;;
     *list-windows*) printf '{agent} end\n' ;;
     *list-panes*) printf '%%1 {pid} 0 end\n' ;;
     *new-window*) printf '%%2 {pid} end\n' ;;
