@@ -50,6 +50,10 @@ test("a context-mode check of an npx the engine's tool resolver does not find re
   assert.equal(api.plainError("server_npx_not_found"), "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.");
 });
 
+test("a check of a Windows batch command other than npm's npx.cmd says to point it at the tool's .exe or node.exe", () => {
+  assert.equal(api.plainError("server_batch_file"), "This command is a Windows batch file, which runs through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.");
+});
+
 test("the skills list shows each skill from the engine with its folder, switch and remove action", () => {
   const markup = renderToStaticMarkup(createElement(SkillsView, skillsProps({ kind: "ok", value: [skill(), skill({ id: "skill-2", name: "pdf", enabled: false })] })));
   assert.match(markup, /frontend-design/);

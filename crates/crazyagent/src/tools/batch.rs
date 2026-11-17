@@ -165,6 +165,17 @@ fn npx_layout(cmd: &Path, folder: &Path) -> Option<(PathBuf, PathBuf)> {
     (named && node.is_file() && cli.is_file()).then_some((node, cli))
 }
 
+/// npm's own `npx.cmd` as the real `node.exe` and `npx-cli.js` its layout names
+/// ([`npx_layout`]), so a caller can tell the resolver mapped a batch file by that layout and
+/// by no shim text. Input: the batch file as written. Output: both real files, none for any
+/// other file.
+#[cfg(windows)]
+pub(crate) fn npx_real(cmd: &Path) -> Option<(PathBuf, PathBuf)> {
+    let cmd = cmd.canonicalize().ok()?;
+    let (node, cli) = npx_layout(&cmd, cmd.parent()?)?;
+    Some((node.canonicalize().ok()?, cli.canonicalize().ok()?))
+}
+
 /// The text of a batch file, read up to one byte past the bound a cmd-shim can reach.
 /// Input: the file. Output: the text, none when it cannot be read, is not UTF-8 or is too
 /// long.
