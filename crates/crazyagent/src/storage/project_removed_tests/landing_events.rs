@@ -1,5 +1,7 @@
 use super::*;
-use crate::landing_log::{self, AgentBranch, Approved, Base, Change, OwnerEdit, Project, Snoozed};
+use crate::landing_log::{
+    self, AgentBranch, Approved, Base, Change, OwnerEdit, Project, Snoozed, Worktree,
+};
 use crate::state_log::TOMBSTONE;
 
 /// The project-keyed landing tables the row compares live against a landing rebuild.
@@ -144,6 +146,7 @@ fn a_deleted_projects_worktree_landing_events_are_tombstoned_and_a_rebuild_bring
     let applied =
         owner_apply_with(&mut s.db, &s.config, &s.path, admission, &request, delete).unwrap();
     assert_eq!(applied.result, OwnerResult::Applied);
+    late_forgets(&s.db, GONE);
 
     let after = logged(&s.db);
     for (seq, worktree, body) in &before {
@@ -166,6 +169,28 @@ fn a_deleted_projects_worktree_landing_events_are_tombstoned_and_a_rebuild_bring
         );
     }
     worktree_rebuild_equals_live(&s);
+}
+
+/// Forgets a worktree's agent branch, base and owner edits through the landing log, as a
+/// cleanup that retires it after the Delete does; with no row left to forget each logs
+/// nothing, so no event names the path again. Inputs: the store and the worktree. Output:
+/// none.
+fn late_forgets(db: &Connection, worktree: &str) {
+    let gone = || Worktree {
+        worktree: worktree.into(),
+    };
+    let changes = [
+        Change::AgentBranchForgotten(gone()),
+        Change::BaseForgotten(gone()),
+        Change::OwnerEditsDropped(gone()),
+        Change::WorktreeOwnerEditsForgotten(gone()),
+    ];
+    let count = || logged(db).len();
+    let before = count();
+    for change in &changes {
+        landing_log::write(db, change).unwrap();
+    }
+    assert_eq!(count(), before, "a forget with no row logs nothing");
 }
 
 /// Logs an agent branch, a base and an owner edit for a worktree through the landing log.
