@@ -169,7 +169,8 @@ fn token_end(bytes: &[u8], at: usize) -> usize {
     assert!(at < bytes.len());
     let end = match (bytes[at], bytes.get(at + 1)) {
         (ESC, Some(b'[')) => csi_end(bytes, at + 2),
-        (ESC, Some(b'O')) => characters_end(bytes, at + 2, 1),
+        (ESC, Some(b'O')) if at + 2 < bytes.len() => character_end(bytes, at + 2),
+        (ESC, Some(b'O')) => at + 2,
         (ESC, Some(b']' | b'P')) => string_end(bytes, at + 2),
         (ESC, Some(&ESC) | None) => at + 1,
         (ESC, Some(_)) => character_end(bytes, at + 1),
@@ -180,9 +181,10 @@ fn token_end(bytes: &[u8], at: usize) -> usize {
     end
 }
 
-/// The end of a CSI whose parameters start at `from`: past its final byte, three characters
-/// on for an X10 mouse report (`ESC [ M` and three characters), or before a byte no CSI holds.
-/// Inputs: the bytes and the position after `ESC [`. Output: the end.
+/// The end of a CSI whose parameters start at `from`: past its final byte, three bytes on
+/// for an X10 mouse report (`ESC [ M` and three raw bytes, as xterm.js sends them, never
+/// UTF-8), or before a byte no CSI holds. Inputs: the bytes and the position after `ESC [`.
+/// Output: the end.
 fn csi_end(bytes: &[u8], from: usize) -> usize {
     let Some(tail) = bytes[from..]
         .iter()
@@ -192,7 +194,7 @@ fn csi_end(bytes: &[u8], from: usize) -> usize {
     };
     let last = from + tail;
     match bytes[last] {
-        b'M' if tail == 0 => characters_end(bytes, last + 1, 3),
+        b'M' if tail == 0 => (last + 4).min(bytes.len()),
         0x40..=0x7e => last + 1,
         _ => last,
     }
@@ -219,25 +221,6 @@ fn string_end(bytes: &[u8], from: usize) -> usize {
 /// The end of the UTF-8 character that starts at `at`: past its continuation bytes, at most
 /// `CHARACTER_TAIL_BYTES_MAX` of them; a byte that is not UTF-8 ends alone. Inputs: the bytes
 /// and a position in them. Output: the end.
-/// The end of `count` UTF-8 characters from `at`, or of the bytes when they stop first: the
-/// one after SS3 and the three of an X10 mouse report, whose coordinates past column 95
-/// arrive as 2-byte characters (V243-PASTE-SS3-X10-UTF8). Inputs: the bytes, the start and
-/// the count. Output: the end.
-fn characters_end(bytes: &[u8], at: usize, count: usize) -> usize {
-    assert!(at <= bytes.len());
-    assert!((1..=3).contains(&count));
-    let mut end = at;
-    for _ in 0..count {
-        if end == bytes.len() {
-            break;
-        }
-        end = character_end(bytes, end);
-    }
-    assert!(end <= bytes.len());
-    assert!(end - at <= count * (1 + CHARACTER_TAIL_BYTES_MAX));
-    end
-}
-
 fn character_end(bytes: &[u8], at: usize) -> usize {
     let tail = bytes[at + 1..]
         .iter()
