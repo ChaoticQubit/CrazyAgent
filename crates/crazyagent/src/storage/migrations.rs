@@ -2,11 +2,11 @@ use super::error;
 use super::settings::SettingsSources;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 mod tests;
@@ -16,6 +16,25 @@ pub(crate) const BACKUPS: &str = "backups";
 
 /// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
 pub(crate) const BACKUPS_KEPT: usize = 5;
+
+/// The newest engine.db version a 2.4 engine writes: 2.4.2 ships the steps up to 11. An
+/// upgrade from at most this version to a newer one is a 2.5 upgrade of 2.4 data.
+const V24_VERSION_MAX: i64 = 11;
+const _: () = assert!(STEPS.len() as i64 + 1 >= V24_VERSION_MAX);
+
+/// How many days the first backup a 2.5 upgrade took from a 2.4 database stays outside the
+/// BACKUPS_KEPT rotation, so the owner can still go back to 2.4 in that time.
+const PINNED_DAYS: u32 = 30;
+
+/// The file a backup folder holds once its copy passed the check made before any step ran.
+const CHECKED: &str = "checked";
+
+/// The most tables the copy check counts. engine.db holds a few hundred.
+const TABLES_MAX: usize = 4_096;
+
+/// Checks a fresh backup copy against the live database before any step runs. Inputs: the
+/// live connection and the copy's path. Output: Ok, or the refusal that stops the upgrade.
+type CopyCheck = fn(&Connection, &Path) -> Result<(), EngineError>;
 
 /// The database file name inside a backup folder.
 const DATABASE: &str = "engine.db";
@@ -353,6 +372,20 @@ pub(crate) fn upgrade(
     settings: Option<&SettingsSources>,
     steps: &[Step],
 ) -> Result<(), EngineError> {
+    upgrade_at(db, path, settings, steps, SystemTime::now(), check_copy)
+}
+
+/// [`upgrade`] at a given time with a given copy check, which tests replace to reach a
+/// mismatch on purpose. Inputs: as `upgrade`, plus the time that stamps the backup and ages
+/// the pinned one, and the check the copy must pass before any step. Output: as `upgrade`.
+fn upgrade_at(
+    db: &mut Connection,
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    steps: &[Step],
+    now: SystemTime,
+    check: CopyCheck,
+) -> Result<(), EngineError> {
     assert!(db.is_autocommit());
     let latest = latest(steps);
     let found = version(db)?;
@@ -364,7 +397,8 @@ pub(crate) fn upgrade(
         }
     };
     let before = schema(db)?;
-    let backup = recorded(path, backup(db, path, settings, from, latest))?;
+    let made = backup(db, path, settings, (from, latest), now, check);
+    let backup = recorded(path, made)?;
     let failure = match run(db, steps, from, latest) {
         Ok(()) => {
             assert!(db.is_autocommit());
@@ -510,32 +544,118 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 }
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
-/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), then keeps
-/// only the newest BACKUPS_KEPT backups. Inputs: the connection, its path, the settings
-/// sources and both versions. Output: the new backup folder.
+/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), checks the copy,
+/// marks it checked, then prunes to the pinned backup and the newest BACKUPS_KEPT others.
+/// Inputs: the connection, its path, the settings sources, both versions, the time and the
+/// copy check. Output: the new backup folder; a copy that fails its check is removed.
 fn backup(
     db: &Connection,
     path: &Path,
     settings: Option<&SettingsSources>,
-    from: i64,
-    to: i64,
+    (from, to): (i64, i64),
+    now: SystemTime,
+    check: CopyCheck,
 ) -> Result<PathBuf, EngineError> {
     assert!(from < to);
     let root = path
         .parent()
         .ok_or_else(|| backup_failed("the database has no folder"))?;
     let folder = backups_folder(root)?;
-    let target = folder.join(format!("{from}-to-{to}-{}", stamp(SystemTime::now())?));
+    let target = folder.join(format!("{from}-to-{to}-{}", stamp(now)?));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&target)
         .map_err(backup_failed)?;
-    if let Err(cause) = fill(db, &target, settings) {
+    let made = fill(db, &target, settings)
+        .and_then(|()| check(db, &target.join(DATABASE)))
+        .and_then(|()| mark_checked(&folder, &target));
+    if let Err(cause) = made {
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);
     }
-    prune(&folder)?;
+    prune(&folder, now)?;
     Ok(target)
+}
+
+/// Checks a backup copy before any step runs: SQLite's integrity check must pass, the copy
+/// must hold engine.db's schema, and every table must hold as many rows as in engine.db.
+/// The copy is opened without create, by the same path `fill` wrote it to, which may pass a
+/// linked engine root. Inputs: the live connection and the copy's path.
+/// Output: Ok, or `storage_backup_failed` naming the gap.
+fn check_copy(db: &Connection, copy: &Path) -> Result<(), EngineError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let opened = Connection::open_with_flags(copy, flags).map_err(backup_failed)?;
+    let integrity: String = opened
+        .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
+        .map_err(backup_failed)?;
+    if integrity != "ok" {
+        return Err(backup_failed(format!(
+            "the backup copy failed its integrity check: {integrity}"
+        )));
+    }
+    let schemas = schema(&opened).and_then(|copied| Ok((copied, schema(db)?)));
+    let (copied, live) = schemas.map_err(|cause| backup_failed(cause.0))?;
+    if copied != live {
+        return Err(backup_failed("the backup copy holds another schema"));
+    }
+    for table in tables(db)? {
+        let live = count(db, &table)?;
+        let copied = count(&opened, &table)?;
+        if copied != live {
+            return Err(backup_failed(format!(
+                "the backup copy holds {copied} rows in {table} where engine.db holds {live}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The tables of a database, by name. Input: the connection. Output: at most TABLES_MAX
+/// names, or `storage_backup_failed` when it holds more.
+fn tables(db: &Connection) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+        .map_err(backup_failed)?;
+    let names = statement
+        .query_map([], |row| row.get(0))
+        .map_err(backup_failed)?
+        .take(TABLES_MAX + 1)
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(backup_failed)?;
+    if names.len() > TABLES_MAX {
+        return Err(backup_failed(format!(
+            "engine.db holds more than {TABLES_MAX} tables"
+        )));
+    }
+    Ok(names)
+}
+
+/// The rows one table holds. Inputs: the connection and a table name from its schema.
+/// Output: the count.
+fn count(db: &Connection, table: &str) -> Result<i64, EngineError> {
+    let quoted = table.replace('"', "\"\"");
+    let rows: i64 = db
+        .query_row(&format!("SELECT COUNT(*) FROM \"{quoted}\""), [], |row| {
+            row.get(0)
+        })
+        .map_err(backup_failed)?;
+    assert!(rows >= 0);
+    Ok(rows)
+}
+
+/// Records that a backup copy passed its check and makes the record durable: the `checked`
+/// file, then the backup folder and the backups folder synced, so a crash after this point
+/// still finds the backup checked. Inputs: the backups folder and the new backup.
+/// Output: Ok once synced.
+fn mark_checked(folder: &Path, target: &Path) -> Result<(), EngineError> {
+    assert!(target.starts_with(folder));
+    private_file(&target.join(CHECKED), b"")?;
+    for synced in [target, folder] {
+        std::fs::File::open(synced)
+            .and_then(|handle| handle.sync_all())
+            .map_err(backup_failed)?;
+    }
+    Ok(())
 }
 
 /// Creates `<root>/backups` when missing, or makes a folder of this user there private
@@ -702,10 +822,30 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
     file.sync_all().map_err(backup_failed)
 }
 
-/// Removes all but the newest BACKUPS_KEPT backup folders. Only real folders named
-/// `<from>-to-<to>-<UTC time>` count; anything else in the folder is left alone.
-/// Input: the backups folder. Output: Ok once the older backups are gone.
-fn prune(folder: &Path) -> Result<(), EngineError> {
+/// Removes the older backup folders: the pinned one stays, and of the others only the newest
+/// BACKUPS_KEPT do. Only real folders named `<from>-to-<to>-<UTC time>` count; anything else
+/// in the folder is left alone. Inputs: the backups folder and the time now.
+/// Output: Ok once the older backups are gone.
+fn prune(folder: &Path, now: SystemTime) -> Result<(), EngineError> {
+    let found = backups_in(folder)?;
+    let pinned = pinned(folder, &found, now);
+    let rotating: Vec<&str> = found
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| Some(*index) != pinned)
+        .map(|(_, (_, name))| name.as_str())
+        .collect();
+    let excess = rotating.len().saturating_sub(BACKUPS_KEPT);
+    for name in &rotating[..excess] {
+        std::fs::remove_dir_all(folder.join(name)).map_err(backup_failed)?;
+    }
+    assert!(rotating.len() - excess <= BACKUPS_KEPT);
+    Ok(())
+}
+
+/// The real backup folders, oldest first. Input: the backups folder. Output: each folder's
+/// UTC time and name; links, files and other names are left out.
+fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, EngineError> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(folder).map_err(backup_failed)? {
         let entry = entry.map_err(backup_failed)?;
@@ -720,26 +860,100 @@ fn prune(folder: &Path) -> Result<(), EngineError> {
         }
     }
     found.sort();
-    let excess = found.len().saturating_sub(BACKUPS_KEPT);
-    for (_, name) in &found[..excess] {
-        std::fs::remove_dir_all(folder.join(name)).map_err(backup_failed)?;
-    }
-    Ok(())
+    Ok(found)
+}
+
+/// The backup the rotation leaves alone: the oldest checked one a 2.5 upgrade took from a 2.4
+/// database, while its stamp is under PINNED_DAYS old. A stamp ahead of the clock counts as
+/// young. Inputs: the backups folder, its backups oldest first and the time now.
+/// Output: that backup's index, or None.
+fn pinned(folder: &Path, found: &[(String, String)], now: SystemTime) -> Option<usize> {
+    let kept_for = Duration::from_secs(86_400) * PINNED_DAYS;
+    found.iter().position(|(time, name)| {
+        let from_v24 = backup_versions(name)
+            .is_some_and(|(from, to)| from <= V24_VERSION_MAX && to > V24_VERSION_MAX);
+        let young = stamp_time(time)
+            .is_some_and(|taken| now.duration_since(taken).map_or(true, |age| age < kept_for));
+        let checked = std::fs::symlink_metadata(folder.join(name).join(CHECKED))
+            .is_ok_and(|metadata| metadata.is_file());
+        from_v24 && young && checked
+    })
+}
+
+/// The versions in a backup folder name `<from>-to-<to>-<time>`. Input: a folder name.
+/// Output: from and to, or None for any other name.
+fn backup_versions(name: &str) -> Option<(i64, i64)> {
+    backup_time(name)?;
+    let (from, rest) = name.split_once("-to-")?;
+    let (to, _) = rest.split_once('-')?;
+    Some((from.parse().ok()?, to.parse().ok()?))
 }
 
 /// The UTC time part of a backup folder name `<from>-to-<to>-<time>`.
 /// Input: a folder name. Output: the time, or None for any other name.
 fn backup_time(name: &str) -> Option<&str> {
-    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     let (from, rest) = name.split_once("-to-")?;
     let (to, time) = rest.split_once('-')?;
-    let shaped = time.len() == 19
+    (digits(from) && digits(to) && stamp_shaped(time)).then_some(time)
+}
+
+/// Whether text is one or more ASCII digits. Input: the text. Output: the answer.
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether text has the shape of a backup stamp such as `20261025T160700123Z`.
+/// Input: the text. Output: the answer; the date itself is not checked here.
+fn stamp_shaped(time: &str) -> bool {
+    time.len() == 19
         && time.is_ascii()
         && digits(&time[..8])
         && &time[8..9] == "T"
         && digits(&time[9..18])
-        && &time[18..] == "Z";
-    (digits(from) && digits(to) && shaped).then_some(time)
+        && &time[18..] == "Z"
+}
+
+/// Reads a backup stamp back as a time, the inverse of [`stamp`]. Input: the stamp.
+/// Output: the time, or None for a stamp of another shape or a date that does not exist.
+fn stamp_time(time: &str) -> Option<SystemTime> {
+    if !stamp_shaped(time) {
+        return None;
+    }
+    let field = |range: std::ops::Range<usize>| time[range].parse::<u32>().ok();
+    let (year, month, day) = (i64::from(field(0..4)?), field(4..6)?, field(6..8)?);
+    let (hour, minute, second, milli) = (
+        field(9..11)?,
+        field(11..13)?,
+        field(13..15)?,
+        field(15..18)?,
+    );
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 {
+        return None;
+    }
+    if second > 59 {
+        return None;
+    }
+    let count = days(year, month, day);
+    if count < 0 || civil(count) != (year, month, day) {
+        return None;
+    }
+    let seconds =
+        u64::try_from(count).ok()? * 86_400 + u64::from(hour * 3_600 + minute * 60 + second);
+    Some(UNIX_EPOCH + Duration::from_secs(seconds) + Duration::from_millis(u64::from(milli)))
+}
+
+/// The day count since 1970-01-01 of a proleptic Gregorian date, the inverse of [`civil`].
+/// Inputs: year, month 1-12 and day 1-31. Output: the days, negative before 1970.
+fn days(year: i64, month: u32, day: u32) -> i64 {
+    assert!((1..=12).contains(&month));
+    assert!((1..=31).contains(&day));
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let shifted = i64::from(if month > 2 { month - 3 } else { month + 9 });
+    let doy = (153 * shifted + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Formats a time as a UTC stamp such as `20261025T160700123Z`, which sorts in time
