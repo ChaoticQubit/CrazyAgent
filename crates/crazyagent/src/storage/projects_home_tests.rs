@@ -803,6 +803,90 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
 }
 
+/// DEC-197: adds onto names apart run side by side, so several running rows can be left.
+/// Settling one leaves the others running and the home held; an engine start ends every
+/// running row, removes each staging, deletes nothing of either folder, and keeps the newest
+/// end for the owner.
+#[test]
+fn an_engine_start_ends_every_add_running_side_by_side_and_keeps_the_newest_end() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let names = ["shop", "garden"];
+    for name in names {
+        std::fs::create_dir_all(base.join(name).join("lib")).unwrap();
+        std::fs::write(base.join(name).join("lib/a.txt"), format!("{name}\n")).unwrap();
+    }
+    let staging = [
+        home.join(".crazyagent-adding-00ff00ff00ff00ff"),
+        home.join(".crazyagent-adding-11ee11ee11ee11ee"),
+    ];
+    for folder in &staging {
+        std::fs::create_dir_all(folder.join("lib")).unwrap();
+    }
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str, name: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, 'move')",
+                params![
+                    request,
+                    base.join(name).to_str().unwrap(),
+                    home.join(name).to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    };
+    let running = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    insert(&connection, "add-shop", "shop");
+    insert(&connection, "add-garden", "garden");
+    let shop = RequestId::new("add-shop").unwrap();
+    assert_eq!(
+        projects_home::add_settle(&mut connection, Some((&shop, false))).unwrap(),
+        1
+    );
+    assert_eq!(running(&connection), 1, "garden still runs");
+    let elsewhere = crate::projects_home::HomeAction::SetHome {
+        path: base.join("elsewhere").to_str().unwrap().into(),
+    };
+    let held = {
+        let tx = connection.transaction().unwrap();
+        projects_home::execute(&tx, &base.join("engine.db"), &elsewhere).unwrap()
+    };
+    assert!(
+        format!("{held:?}").contains("home_add_in_progress"),
+        "{held:?}"
+    );
+
+    insert(&connection, "add-shop-2", "shop");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 2);
+    assert_eq!(running(&connection), 0, "every running add ended");
+    for folder in &staging {
+        assert!(!folder.exists(), "{folder:?}");
+    }
+    for name in names {
+        assert_eq!(
+            std::fs::read_to_string(base.join(name).join("lib/a.txt")).unwrap(),
+            format!("{name}\n"),
+            "a start deletes nothing of {name}"
+        );
+    }
+    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    assert_eq!(ended.request.as_str(), "add-shop-2");
+    assert_eq!(ended.ended, "home_add_interrupted");
+}
+
 /// RV-DS241-198: an add whose folder landed in the projects home but whose record never
 /// came, as when its grant was found stale after the disk changed, is not forgotten by its
 /// exchange's settle: its running row ends with what its disk shows, as after an engine stop,
