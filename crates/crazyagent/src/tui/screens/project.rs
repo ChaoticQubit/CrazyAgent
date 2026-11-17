@@ -3245,6 +3245,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "research_unavailable_here" => {
+            "Research does not run on this computer in this version, so it cannot run again."
+        }
         "planning_busy" => {
             "A roadmap is already being planned for this project. Wait for it to finish."
         }
