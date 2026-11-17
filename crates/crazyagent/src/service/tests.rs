@@ -875,6 +875,33 @@ fn changeable_by_others_reads_windows_owners_and_access_lists() {
     assert_eq!(changeable_by_others(&program), None);
 }
 
+/// #331 sec F1: on Windows the service PATH keeps a folder that exists and drops one that
+/// does not, under a clean folder or on a drive letter no volume holds, since a drive or
+/// folder added there later would put whatever it holds on the engine's harness lookup.
+#[cfg(windows)]
+#[test]
+fn service_path_on_windows_drops_a_folder_that_does_not_exist() {
+    let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    let kept = directory.path().join("bin");
+    std::fs::create_dir(&kept).unwrap();
+    let missing = directory.path().join("gone").join("bin");
+    let absent = ('D'..='Z')
+        .map(|letter| PathBuf::from(format!("{letter}:\\")))
+        .find(|root| !root.exists())
+        .map(|root| root.join("crazyagent-gone").join("bin"));
+    let current = std::env::join_paths(
+        [kept.clone(), missing.clone()]
+            .into_iter()
+            .chain(absent.clone()),
+    )
+    .unwrap();
+    let folders: Vec<PathBuf> =
+        std::env::split_paths(&service_path(Some(&current), None, None)).collect();
+    assert_eq!(folders.first(), Some(&kept));
+    assert!(!folders.contains(&missing));
+    assert!(absent.is_none_or(|absent| !folders.contains(&absent)));
+}
+
 #[cfg(unix)]
 #[test]
 fn install_refuses_an_engine_other_users_can_change_before_writing_anything() {
