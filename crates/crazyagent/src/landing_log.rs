@@ -1246,12 +1246,11 @@ pub(crate) fn project_worktrees(
     Ok(worktrees)
 }
 
-/// Forgets the agent worktrees of a deleted project (rv-sec3 #415 F1): tombstones every
-/// landing event of [`WORKTREE_KINDS`] whose `worktree` is one of them, in one pass over
-/// the log, and deletes their agent branch, base and owner edit rows in the same
-/// transaction, so a landing rebuild equals the live tables; snapshot runs keep theirs until
-/// compaction (L1b). Inputs: the transaction, the worktrees and the owner fence. Output: how
-/// many events were tombstoned, or the refusal.
+/// Forgets a deleted project's agent worktrees (rv-sec3 #415 F1): tombstones each event of
+/// [`WORKTREE_KINDS`] naming one, in one pass over the log, and deletes their rows in the
+/// same transaction, so a landing rebuild equals the live tables; snapshot runs keep theirs
+/// until compaction (L1b). Inputs: the transaction, the worktrees and the owner fence.
+/// Output: how many events were tombstoned, or the refusal.
 pub(crate) fn forget_worktrees(
     tx: &Transaction<'_>,
     worktrees: &[String],
