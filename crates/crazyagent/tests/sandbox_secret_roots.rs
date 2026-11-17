@@ -207,8 +207,8 @@ fn the_plugin_keys_folder_is_an_engine_secret_no_root_may_cover() {
 }
 
 /// V243-BACKUPS-SECRET: the folder of engine backups, which holds full copies of engine.db,
-/// the settings texts kept with them and, after a 2.5 restore, the keys, SDK homes and
-/// sign-in slots moved into its dated copy, is an engine secret like the saved account keys:
+/// the settings texts kept with them and, after a 2.5 restore, the plugin and account keys
+/// moved into its dated copy, is an engine secret like the saved account keys:
 /// no read root, worktree or project may be it or sit inside one backup in it, in either
 /// order, and the guarded sandbox names it among its secret paths.
 #[test]
