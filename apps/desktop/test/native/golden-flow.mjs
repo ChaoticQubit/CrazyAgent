@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -7,21 +8,24 @@ import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, closedPort, owner, required, serveApp, start as launch, stop, value } from "./e2e-harness.mjs";
+import { INTERNALS, POLL_MS, closedPort, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const WAIT_MS = 90000;
+const ONBOARD_MS = 120000;
+const GIT = "/usr/bin/git";
 const WAIT_MAX_MS = 300000;
 const STEPS_MAX = 64;
 export const POOL = "local-pool";
 
 /** Starts one golden flow as a first run leaves the app: a real engine on a private root with a
- * scratch HOME and one local pool, the bridge, the owner's profile saved, a projects folder
- * picked and the built app served, and counts that as the flow's first step. It fills the
- * caller's empty run as it goes, so `stopGolden` ends whatever a failed start left running.
- * Inputs: that run and the flow's name (lowercase words joined by "-"). Output: none. */
-export async function startGolden(run, flow) {
+ * scratch HOME and one pool, the bridge, a saved profile and projects folder and the built app,
+ * as the flow's first step. It fills the caller's empty run, so `stopGolden` ends what a failed
+ * start left. Inputs: that run, the flow's name (lowercase words joined by "-") and, for a team
+ * flow, the Codex stand-in's absolute path, pinned with a silent provider. Output: none. */
+export async function startGolden(run, flow, { codex = null } = {}) {
   assert.match(flow, /^[a-z]+(-[a-z]+)*$/);
+  assert.ok(codex === null || (isAbsolute(codex) && existsSync(codex)), `the Codex stand-in: ${codex}`);
   assert.ok(flow.length <= 64);
   assert.deepEqual(Object.keys(run), [], "a golden run starts empty");
   Object.assign(run, { flow, steps: [], started: Date.now(), finished: false });
@@ -33,11 +37,13 @@ export async function startGolden(run, flow) {
   run.root = realpathSync(mkdtempSync(join(tmpdir(), "ca-golden-")));
   run.evidence = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? process.env.E2E_EVIDENCE : join(run.root, "evidence");
   const runtime = join(run.root, "engine");
+  run.runtime = runtime;
   const home = join(run.root, "home");
   run.projects = join(run.root, "projects");
   for (const folder of [runtime, run.evidence, home, join(home, ".codex"), run.projects]) mkdirSync(folder, { recursive: true, mode: 0o700 });
   rmSync(recordPath(run), { force: true });
-  const provider = await closedPort();
+  run.provider = codex === null ? null : await silentProvider();
+  const provider = run.provider === null ? await closedPort() : run.provider.port;
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
 allowed_destinations = []
@@ -51,7 +57,8 @@ pools = [{ id = "${POOL}", members = ["local-connection"], projects = [], roles 
 `, { mode: 0o600 });
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   run.log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
-  const args = ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings"];
+  const pinned = codex === null ? [] : ["--codex-executable", codex];
+  const args = ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", ...pinned];
   ({ child: run.engine } = await launch(run.engineBinary, args, { ...env }, run.evidence, "engine", /^ready$/m));
   const started = await launch(run.bridgeBinary, [join(runtime, "engine.sock")], { ...env }, run.evidence, "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
   run.bridgeProcess = started.child;
@@ -87,9 +94,10 @@ export function finishGolden(run) {
   return existsSync(recordPath(run)) ? JSON.parse(readFileSync(recordPath(run), "utf8")) : null;
 }
 
-/** Stops the app, the bridge and the engine; an unfinished flow's record says failed at the
- * steps it reached. Keeps the root only when E2E_EVIDENCE names the evidence folder. Input: the
- * run, as full as its start got. Output: none. */
+/** Stops the app, the bridge, the engine, its provider and its agent terminals; an unfinished
+ * flow's record says failed at the steps it reached, and a tmux server left behind fails it.
+ * Keeps the root only when E2E_EVIDENCE names the evidence folder. Input: the run, as full as
+ * its start got. Output: none. */
 export async function stopGolden(run) {
   if (run.log) run.log.closing = true;
   if (run.evidence && !run.finished && run.steps.length > 0) writeRecord(run, "failed");
@@ -97,7 +105,46 @@ export async function stopGolden(run) {
   run.site?.server.close();
   await stop(run.bridgeProcess);
   await stop(run.engine);
+  run.provider?.server.close();
+  if (run.runtime) await endTerminals(run.runtime);
+  const left = run.runtime ? terminalServers(run.runtime) : [];
   if (run.root && !process.env.E2E_EVIDENCE) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  assert.deepEqual(left, [], "no tmux server outlives the golden engine");
+}
+
+/** Makes an owner repository: a git repository on main with a README in one commit.
+ * Input: an empty folder, made first if missing.
+ * Output: none. */
+export function ownerRepo(folder) {
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  writeFileSync(join(folder, "README.md"), "# Fruit stand\n\nSells fruit.\n");
+  const identity = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
+  for (const args of [["init", "-q", "-b", "main"], ["add", "."], [...identity, "commit", "-q", "-m", "Start the fruit stand"]]) {
+    const result = spawnSync(GIT, ["-c", "commit.gpgsign=false", ...args], { cwd: folder, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: folder, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
+    assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+  }
+}
+
+/** Makes an owner repository a project as onboarding does, then gives it the golden pool and
+ * one Codex sub-agent with team tools, as the app's team rows do. Inputs: the run, the
+ * repository and the first of the three write generations it uses. Output: the project id. */
+export async function onboard(run, repo, generation) {
+  const receipt = await value(run.bridge, "desktop_start_onboarding", { path: repo, pool: POOL, generation });
+  assert.equal(receipt.outcome, "applied", `the folder becomes a project: ${JSON.stringify(receipt)}`);
+  const project = receipt.project_id;
+  const busy = (step) => ["waiting", "running"].includes(step.kind);
+  await waitUntil("onboarding to settle", () => value(run.bridge, "desktop_onboarding", { id: project }), (view) => !busy(view.graph) && !busy(view.mapping), ONBOARD_MS);
+  assert.equal((await value(run.bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
+  const pools = await value(run.bridge, "desktop_model_access_page", { collection: "pools", next: false });
+  assert.equal(pools.writable, true, "the golden engine's settings are writable");
+  const assigned = await value(run.bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: POOL }, generation: generation + 1 });
+  assert.equal(assigned.outcome, "applied", `the project gets the golden pool: ${JSON.stringify(assigned)}`);
+  const stored = await value(run.bridge, "desktop_project_setup", { id: project });
+  const team = { ...stored.team, sub_harnesses: [{ harness: "codex", agents: 1, tools: true }] };
+  const setup = { about: stored.about, tech_stack: stored.tech_stack, platforms: stored.platforms, research: stored.research, pool: stored.pool, team, documents: [] };
+  const saved = await value(run.bridge, "desktop_update_project_setup", { id: project, setup, name: null, revision: stored.revision, generation: generation + 2 });
+  assert.equal(saved.outcome, "applied", `the project gets a Codex sub-agent: ${JSON.stringify(saved)}`);
+  return project;
 }
 
 /** Runs steps on a fresh page of the served app with the owner's helpers, checking the page
