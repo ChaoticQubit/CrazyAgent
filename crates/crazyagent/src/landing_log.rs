@@ -469,7 +469,7 @@ fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64
 /// its event. Inputs: the connection and the change. Output: Ok, or the refusal
 /// (`landing_log_unavailable` inside a transaction), which writes nothing.
 pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError> {
-    within(db, |tx| record(tx, change))
+    within(db, |tx| record(tx, change).map(drop))
 }
 
 /// Runs one landing write group in a transaction of its own, as [`write`] does: the group
