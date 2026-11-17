@@ -306,11 +306,14 @@ impl Masks {
                 _ => value.clone(),
             }),
             Value::String(text) => Ok(Value::from(self.text(text))),
-            Value::Array(items) => items
-                .iter()
-                .map(|item| self.value(key, item))
-                .collect::<Result<Vec<_>, _>>()
-                .map(Value::Array),
+            Value::Array(items) => {
+                let mut masked = items
+                    .iter()
+                    .map(|item| self.value(key, item))
+                    .collect::<Result<Vec<_>, _>>()?;
+                random_names::sort_socket_places(&mut masked);
+                Ok(Value::Array(masked))
+            }
             Value::Object(map) => {
                 let mut keys: Vec<&String> = map.keys().collect();
                 keys.sort();
@@ -338,11 +341,11 @@ impl Masks {
         let paths = &mut self.paths;
         let pathed = replace_folders(&lf, &self.temp_spellings, |which, after| {
             let tail = after.strip_prefix('/').unwrap_or("");
-            let entry_len = tail.find(|c: char| !path_char(c)).unwrap_or(tail.len());
+            let (name, entry_len) = caseless::escaped_name(tail);
             if entry_len == 0 {
                 return (0, "<temp>".to_owned());
             }
-            let entry = format!("{}/{}", groups[which], &tail[..entry_len]);
+            let entry = format!("{}/{name}", groups[which]);
             (
                 1 + entry_len,
                 format!("<path-{}>", number(paths, &entry.to_ascii_lowercase())),
@@ -809,8 +812,8 @@ fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<
     }
     for (start, _) in text.match_indices("<owner-home>/") {
         let below = &text[start + "<owner-home>/".len()..];
-        let first = below.split(|c: char| !path_char(c)).next().unwrap_or("");
-        if !OWNER_HOME_NAMES.contains(&first) {
+        let (first, _) = caseless::escaped_name(below);
+        if !OWNER_HOME_NAMES.contains(&first.as_str()) {
             return Err(
                 "names a folder below the owner home outside the engine's rules".to_owned(),
             );

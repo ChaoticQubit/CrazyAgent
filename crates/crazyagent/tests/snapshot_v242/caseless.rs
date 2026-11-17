@@ -159,6 +159,33 @@ pub(super) fn component(text: &str) -> Option<(String, usize)> {
     (whole && unspell(&text[..taken]).folded).then_some((name, taken))
 }
 
+/// Reads the folder name at the start of text, as a plain path or as 2.4.2's `regex_escape`
+/// spells one for a Seatbelt regex: path characters, and `\.` or `\+` (the only path
+/// characters it escapes; two backslashes in JSON text) as the character escaped. Input: the
+/// text after a `/`. Output: the plain name and the bytes it takes, empty when none starts.
+pub(super) fn escaped_name(text: &str) -> (String, usize) {
+    let bytes = text.as_bytes();
+    let mut name = String::new();
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        let slashes = bytes[at..].iter().take_while(|b| **b == b'\\').count();
+        let escaped = bytes
+            .get(at + slashes)
+            .filter(|next| (1..=2).contains(&slashes) && matches!(next, b'.' | b'+'));
+        if let Some(&next) = escaped {
+            name.push(char::from(next));
+            at += slashes + 1;
+        } else if super::path_char(char::from(byte)) {
+            name.push(char::from(byte));
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(text.is_char_boundary(at) && name.len() <= at);
+    (name, at)
+}
+
 /// Finds a caseless spelling that still names a user folder or a path below a temp folder
 /// once read back, the per-user temp parents below /var/folders included, which the plain
 /// checks cannot see. Input: the text. Output: the kind of path it holds, never the path,
@@ -301,6 +328,44 @@ fn a_caseless_hex_id_component_reads_as_the_plain_id_s_number() {
     );
     assert_eq!(component("/[aA]1((s|S|ſ)|ß)?"), None);
     assert_eq!(component("/plain1234567890abcdef/x"), None);
+}
+
+#[test]
+fn a_temp_entry_in_a_regex_escaped_path_reads_as_its_plain_placeholder() {
+    let real = std::env::temp_dir().canonicalize().unwrap();
+    let real = real.to_string_lossy();
+    assert!(!real.contains(['.', '+']), "{real}");
+    let text = normalise(&json!({
+        "a_plain": format!("{real}/.tmpAb12st/projects"),
+        "b_rule": format!("(regex #\"^{real}/\\.tmpAb12st/projects/(.*/)?(\\.npmrc)(/.*)?$\")"),
+    }))
+    .unwrap();
+    assert!(text.contains("\"<path-1>/projects\""), "{text}");
+    assert!(text.contains("^<path-1>/projects/(.*/)?"), "{text}");
+    assert!(!text.contains("tmpAb12st"), "{text}");
+    assert_eq!(escaped_name("a\\+b\\.c/x"), ("a+b.c".to_owned(), 7));
+    assert_eq!(escaped_name("a\\\\.b\""), ("a.b".to_owned(), 5));
+    assert_eq!(escaped_name("ab\\(c"), ("ab".to_owned(), 2));
+    assert_eq!(escaped_name("\\\\\\.x"), (String::new(), 0));
+}
+
+#[test]
+fn an_escaped_tool_root_below_the_owner_home_passes_and_an_unknown_name_is_refused() {
+    let names = (Some("/Users/owner"), Some("owner"));
+    let golden = |root: &str| {
+        normalise(&json!([format!(
+            "(regex #\"^<owner-home>/{}/(.*/)?(\\.npmrc)(/.*)?$\")",
+            root.replace('.', "\\.")
+        )]))
+        .unwrap()
+    };
+    for known in [".cargo", ".rustup", ".local"] {
+        let text = golden(known);
+        assert!(text.contains("<owner-home>/\\\\."), "{text}");
+        assert_eq!(super::refuse_private(&text, names.0, names.1), Ok(()));
+    }
+    assert!(super::refuse_private(&golden(".unlisted"), names.0, names.1).is_err());
+    assert!(super::refuse_private("\"<owner-home>/\\(x\"", names.0, names.1).is_err());
 }
 
 #[test]
