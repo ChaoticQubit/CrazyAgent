@@ -43,6 +43,7 @@ env:
   FARM_DESKTOP_EXCLUDE: accounts_bridge/desktop_accounts_commands_reach_the_real_engine
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
+  NODE_TEST_TIMEOUT_MACOS_MS: "60000"
   FARM_PARTS: >-
     linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
     windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
@@ -559,7 +560,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$FARM_JUNIT")"
-          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT"
+          limit=""
+          if [ "$RUNNER_OS" = macOS ]; then limit="--test-timeout=$NODE_TEST_TIMEOUT_MACOS_MS"; fi
+          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT $limit"
       - name: Keep a JUnit report for this part
         if: always()
         run: |

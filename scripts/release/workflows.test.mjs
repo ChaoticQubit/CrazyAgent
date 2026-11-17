@@ -985,6 +985,21 @@ test("every test farm node part installs what its rows run, tmux, the locked cra
   assert(step + 10 <= job, `the node run stops at ${step} min, leaving the JUnit steps time before the ${job}-min job limit`);
 });
 
+test("the hosted macOS node part scales the Makefile's 15 s per-test limit by one workflow value passed after it, and every other part keeps 15 s (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const value = block(farm, 0, "env").find((line) => line.startsWith("  NODE_TEST_TIMEOUT_MACOS_MS: "));
+  assert(value, "the workflow env names the macOS node test limit");
+  const ms = Number(JSON.parse(value.split(": ")[1]));
+  assert(Number.isInteger(ms) && ms > 15000 && ms <= 120000, `${ms} ms scales the 15 s limit and stays bounded`);
+  const run = steps(farm, "node").find((step) => step.startsWith("      - name: Run this share of the node suites\n"));
+  assert(run.includes('if [ "$RUNNER_OS" = macOS ]; then limit="--test-timeout=$NODE_TEST_TIMEOUT_MACOS_MS"; fi'));
+  assert.match(run, /make test-node BUN="\$BUN" NODE_TEST_ARGS="[^"\n]* \$limit"$/m, "the macOS limit comes last, so it wins over the Makefile's");
+  assert.equal(farm.match(/NODE_TEST_TIMEOUT_MACOS_MS/g).length, 2, "one value, read only by the node run step");
+  assert.equal(farm.match(/--test-timeout/g).length, 1, "no other part or row sets its own limit");
+  const makefile = await readFile(new URL("../../Makefile", import.meta.url), "utf8");
+  assert.match(makefile, /^\t.*node --test --test-timeout=15000 \$\(NODE_TEST_ARGS\) \$\(NODE_TESTS\)$/m, "the Makefile's limit comes before NODE_TEST_ARGS");
+});
+
 test("CI runs the price snapshot script's check on Linux, so a bad refresh fails a pull request", async () => {
   const linux = steps(await workflow("ci.yml"), "linux");
   assert(
