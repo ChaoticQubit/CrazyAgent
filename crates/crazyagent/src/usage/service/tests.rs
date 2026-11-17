@@ -662,9 +662,8 @@ fn a_claude_free_resets_source_picked_after_dont_read_reads_on_the_next_step() {
     pick(&usage, ResetsSource::Off);
     usage.step(NOW + 20_000).unwrap();
     assert_eq!(
-        usage.detail_ms,
-        Some(NOW + 5_000),
-        "Don't read stamps no read"
+        usage.detail_ms, None,
+        "a move to Don't read changes the detail call, so it clears the rest and stamps no read"
     );
     pick(&usage, ResetsSource::AsClaudeCode);
     usage.step(NOW + 25_000).unwrap();
