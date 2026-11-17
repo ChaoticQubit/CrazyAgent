@@ -287,7 +287,7 @@ fn team_actions(project: &ProjectId) -> Vec<(&'static str, TeamAction)> {
             "sub_agent_depth",
             TeamAction::SubAgentDepth {
                 project_id: id(),
-                depth: DEPTH_CHOICES[1],
+                depth: DEPTH_CHOICES[2],
             },
         ),
         (
@@ -350,14 +350,14 @@ fn team_actions(project: &ProjectId) -> Vec<(&'static str, TeamAction)> {
             "reask_empty_reply",
             TeamAction::ReaskEmptyReply {
                 project_id: id(),
-                on: true,
+                on: false,
             },
         ),
         (
             "done_quiet",
             TeamAction::DoneQuiet {
                 project_id: id(),
-                secs: Some(IDLE_CHOICES_SECS[1]),
+                secs: Some(IDLE_CHOICES_SECS[2]),
             },
         ),
         (
@@ -371,7 +371,7 @@ fn team_actions(project: &ProjectId) -> Vec<(&'static str, TeamAction)> {
             "master_live_terminal",
             TeamAction::MasterLiveTerminal {
                 project_id: id(),
-                on: true,
+                on: false,
             },
         ),
         (
@@ -414,11 +414,11 @@ fn team_actions(project: &ProjectId) -> Vec<(&'static str, TeamAction)> {
             TeamAction::MessageSettings {
                 project_id: id(),
                 settings: MessageSettings {
-                    keep_master_messages: true,
-                    kept_per_project: KEPT_CHOICES[1],
+                    keep_master_messages: false,
+                    kept_per_project: KEPT_CHOICES[2],
                     progress_shown: false,
                     results: ResultsShown::Full,
-                    owner_items_shown: true,
+                    owner_items_shown: false,
                     page_size: PAGE_CHOICES[0],
                 },
             },
@@ -472,8 +472,11 @@ fn team_actions(project: &ProjectId) -> Vec<(&'static str, TeamAction)> {
 /// write, so version 0, except the four team settings that share one item and so take 0 to 3
 /// in order (team.rs `settings_write`): keep warm, time limits, the finished agents view and
 /// the harness switch mode; then the sandbox settings, the agent policy, the extra read folder
-/// and the app-wide and project instructions text. Inputs: the attached owner, the fixture
-/// folders and the project. Output: nothing, or the request the engine did not store.
+/// and the app-wide and project instructions text. Keep warm alone is sent at its default,
+/// off: on puts the project among the team runtime's active projects, whose tick may start
+/// warm agents before the engine stops, so the dump would depend on timing. Inputs: the
+/// attached owner, the fixture folders and the project. Output: nothing, or the request the
+/// engine did not store.
 async fn versioned_settings(
     owner: &mut Owner,
     folders: &Folders,
