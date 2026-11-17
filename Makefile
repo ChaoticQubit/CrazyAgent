@@ -1,4 +1,4 @@
-.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script
+.PHONY: help fmt fmt-check lint test test-rust-selected engine-bins test-node test-bun build check desktop-dist test-price-script caps-check test-caps-script
 
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
@@ -46,6 +46,12 @@ test-rust-selected: desktop-dist engine-bins
 
 test-price-script:
 	python3 -B -I scripts/usage/test_refresh_prices.py
+
+caps-check:
+	node scripts/quality/caps.mjs
+
+test-caps-script:
+	node --test scripts/quality/caps.test.mjs
 
 test-node:
 	CRAZYAGENT_BUN="$(BUN)" CRAZYAGENT_RCLI_SDK="$(RCLI_SDK)" node --test --test-timeout=15000 $(NODE_TESTS)
