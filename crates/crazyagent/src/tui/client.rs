@@ -1335,7 +1335,7 @@ impl NativeOwner {
     /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
     /// reply deadline, so it stops blocking every later change: a change never sent is
     /// dropped, a recorded one is confirmed, and one the engine never recorded is sent once
-    /// more with its original identity and revision.
+    /// more as it was, or under a new id after a stale refusal, as `send_pending` says.
     /// Takes the owner; creation, master, conversation and model access settle their own.
     /// Returns the outcome to tell the owner, or none while nothing was settled.
     async fn settle_stray(&mut self) -> Option<Result<(), String>> {
@@ -1536,7 +1536,7 @@ impl NativeOwner {
                 ));
                 self.master_pending = Some(submission.clone());
                 controller
-                    .send_pending()
+                    .deliver(false, &mut self.master_operation)
                     .await
                     .map_err(|error| bounded_problem(&error.0))
             }
@@ -1546,12 +1546,11 @@ impl NativeOwner {
                 {
                     return Err("master_original_pending_context_required".into());
                 }
-                match delivery {
-                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
-                    MutationDelivery::Retry => controller.retry_pending().await,
-                    MutationDelivery::Submit => unreachable!(),
-                }
-                .map_err(|error| bounded_problem(&error.0))
+                let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+                controller
+                    .deliver(reconcile, &mut self.master_operation)
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
             }
         }
     }
@@ -1880,7 +1879,7 @@ impl NativeOwner {
                 ));
                 self.model_pending = Some(submission.clone());
                 controller
-                    .send_pending()
+                    .deliver(false, &mut self.model_operation)
                     .await
                     .map_err(|error| bounded_problem(&error.0))
             }
@@ -1889,12 +1888,11 @@ impl NativeOwner {
                 {
                     return Err("metadata_original_pending_context_required".into());
                 }
-                match delivery {
-                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
-                    MutationDelivery::Retry => controller.retry_pending().await,
-                    MutationDelivery::Submit => unreachable!(),
-                }
-                .map_err(|error| bounded_problem(&error.0))
+                let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+                controller
+                    .deliver(reconcile, &mut self.model_operation)
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
             }
         }
     }
@@ -2068,7 +2066,7 @@ impl NativeOwner {
                 ));
                 self.conversation_pending = Some(submission.clone());
                 controller
-                    .send_pending()
+                    .deliver(false, &mut self.conversation_operation)
                     .await
                     .map_err(|e| bounded_problem(&e.0))
             }
@@ -2078,12 +2076,11 @@ impl NativeOwner {
                 {
                     return Err("conversation_pending_context".into());
                 }
-                match delivery {
-                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
-                    MutationDelivery::Retry => controller.retry_pending().await,
-                    MutationDelivery::Submit => unreachable!(),
-                }
-                .map_err(|e| bounded_problem(&e.0))
+                let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+                controller
+                    .deliver(reconcile, &mut self.conversation_operation)
+                    .await
+                    .map_err(|e| bounded_problem(&e.0))
             }
         }
     }
@@ -2228,12 +2225,11 @@ impl NativeOwner {
             .controller
             .as_mut()
             .ok_or("trusted_connection_unavailable")?;
-        let response = match delivery {
-            MutationDelivery::Submit => controller.send_pending().await,
-            MutationDelivery::Reconcile => controller.reconcile_pending().await,
-            MutationDelivery::Retry => controller.retry_pending().await,
-        }
-        .map_err(|e| bounded_problem(&e.0));
+        let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+        let response = controller
+            .deliver(reconcile, &mut self.creation_operation)
+            .await
+            .map_err(|e| bounded_problem(&e.0));
         self.creation_retry_allowed = allowed
             && matches!(&response, Ok(OwnerResponse::Rejected { code }) if code == super::seam::OWNER_BUSY);
         response

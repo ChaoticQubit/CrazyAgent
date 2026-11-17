@@ -96,3 +96,7 @@ pub mod verification;
 pub mod version;
 pub mod worker_dispatch;
 pub mod worktrees;
+
+#[cfg(all(test, unix))]
+#[path = "../tests/poll_support/mod.rs"]
+mod poll_support;

@@ -1037,6 +1037,9 @@ async fn controller_epoch_reconnect_invalidates_cursor_and_preserves_known_pendi
     assert!(matches!(count.data, OwnerData::Page { items, .. } if items.len() == 1));
 }
 
+/// A change sent from a stale revision comes back as the engine's recorded inner refusal.
+/// Its last read is `Capabilities`, which carries no form data, so the controller does not
+/// resend it after the intervening write (V250-OWN-REVISION-RETRY).
 #[tokio::test]
 async fn controller_stale_decision_is_inner_rejected_not_success() {
     use crazyagent::client_controller::OwnerController;
@@ -1055,10 +1058,7 @@ async fn controller_stale_decision_is_inner_rejected_not_success() {
     )
     .await
     .unwrap();
-    let state = controller
-        .read_page(OwnerView::Baselines, None, None)
-        .await
-        .unwrap();
+    let state = controller.read(OwnerRead::Capabilities).await.unwrap();
     let expected = state.revision;
     let config_identity = state.config_id;
     let pending = controller

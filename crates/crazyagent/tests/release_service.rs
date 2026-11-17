@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod poll_support;
+
 use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::paths::{Layout, Platform};
 use crazyagent::service::{EngineCheck, READY_TIMEOUT, Service, Started};
@@ -507,16 +509,17 @@ fn a_start_while_a_restore_still_copies_refuses_and_leaves_the_engine_process_ru
     );
     let installed = Installed(service.clone());
     service.install().unwrap();
-    let pid = (0..100)
-        .find_map(|_| {
-            let status = service.status().unwrap();
-            if status.running {
-                return status.pid;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-            None
-        })
-        .expect("launchd runs the stand-in for the copying engine process");
+    let mut pid = None;
+    let ran = poll_support::poll_until(Instant::now() + Duration::from_secs(10), || {
+        let status = service.status().unwrap();
+        pid = status.pid.filter(|_| status.running);
+        pid.is_some()
+    });
+    assert!(
+        ran,
+        "launchd runs the stand-in for the copying engine process"
+    );
+    let pid = pid.unwrap();
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
