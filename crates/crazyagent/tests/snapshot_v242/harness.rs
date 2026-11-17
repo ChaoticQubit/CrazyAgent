@@ -3,6 +3,7 @@ use crazyagent::harnesses::interactive::{self, InteractiveCommand, Run, Support,
 use crazyagent::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchLimits, LaunchRequest, Secret, command, route,
 };
+use crazyagent::model_gateway::relay::Relay;
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -29,8 +30,9 @@ const LISTED_MAX: usize = 4096;
 /// The deepest folder one home listing reads.
 const LISTED_DEPTH_MAX: usize = 16;
 
-/// The URL a keyless endpoint account points at: a loopback port nothing is asked on.
-const LOOPBACK_URL: &str = "http://127.0.0.1:11434/v1";
+/// The URL a keyless endpoint account points at: no loopback address, whose port the runner
+/// masks, and a host that never resolves; no launch here dials it.
+const ENDPOINT_URL: &str = "https://models.example.invalid:8443/v1";
 
 /// Lists the harness scenarios: the static catalog, the headless launch spec and the terminal
 /// pane spec of every launch adapter, and their refusals. Output: the scenarios in order.
@@ -181,7 +183,7 @@ fn request(harness: &str, folders: &Folders, shape: Shape) -> Result<LaunchReque
         Account::Subscription => AccountBinding::Subscription { home },
         Account::Url => AccountBinding::Url {
             home,
-            base_url: LOOPBACK_URL.to_owned(),
+            base_url: ENDPOINT_URL.to_owned(),
             key: None,
         },
         Account::RoutedKey => AccountBinding::ApiKey {
@@ -278,15 +280,37 @@ fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
     }))
 }
 
+/// Stable facts about what a launch hands over, since the runner masks the relay's loopback
+/// port and the capture keeps variable names only: whether an argument or variable names the
+/// relay's own address (none when no relay runs), and whether the dummy key is absent from
+/// every argument, variable and the key file. Inputs: the arguments and variable values, the
+/// relay and the account home. Output: the facts.
+fn handover(words: &[String], relay: Option<&Relay>, home: &Path) -> Value {
+    let names_the_relay = relay.map(|relay| {
+        let address = format!("127.0.0.1:{}", relay.port());
+        words.iter().any(|word| word.contains(&address))
+    });
+    let key_file = std::fs::read_to_string(home.join(interactive::KEY_FILE)).unwrap_or_default();
+    let key_absent =
+        !key_file.contains(DUMMY_KEY) && !words.iter().any(|word| word.contains(DUMMY_KEY));
+    json!({"names_the_relay": names_the_relay, "key_absent": key_absent})
+}
+
 /// Captures the headless launch spec of one harness and shape, routing a keyed account
-/// through the key relay first, as the engine does. Inputs: the scratch folder, the harness
-/// and the shape. Output: the surface as JSON.
+/// through the key relay first, as the engine does, with the hand-over facts. Inputs: the
+/// scratch folder, the harness and the shape. Output: the surface as JSON.
 fn headless(scratch: &Path, harness: &str, shape: Shape) -> Result<Value, String> {
     let folders = folders(scratch)?;
     let (routed, relay) = route(request(harness, &folders, shape)?).map_err(code)?;
     assert_eq!(relay.is_some(), matches!(shape.account, Account::RoutedKey));
     let built = command(&routed).map_err(code)?;
-    let spec = headless_spec(&built, &folders.home)?;
+    let mut spec = headless_spec(&built, &folders.home)?;
+    let words: Vec<String> = built
+        .get_args()
+        .chain(built.get_envs().filter_map(|(_, value)| value))
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
+    spec["handover"] = handover(&words, relay.as_ref(), &folders.home);
     drop(relay);
     Ok(spec)
 }
@@ -427,7 +451,7 @@ fn headless_refusals(scratch: &Path) -> Result<Value, String> {
     let mut query = request("codex", &folders, CONFINED)?;
     query.account = AccountBinding::Url {
         home: folders.home.clone(),
-        base_url: format!("{LOOPBACK_URL}?region=1"),
+        base_url: format!("{ENDPOINT_URL}?region=1"),
         key: None,
     };
     note("url-with-query", outcome(command(&query)));
@@ -471,9 +495,9 @@ fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
     }))
 }
 
-/// Captures the pane spec of one harness and shape with no installed project context: a
-/// keyed account is routed and its placeholder written to the key file the run names, as
-/// the engine does. Inputs: the scratch folder, the harness, the shape and whether the run
+/// Captures the pane spec of one harness and shape with no installed project context, with
+/// the hand-over facts: a keyed account is routed and its placeholder written to the key file
+/// the run names, as the engine does. Inputs: the scratch folder, the harness, the shape and whether the run
 /// resumes. Output: the surface as JSON.
 fn pane(scratch: &Path, harness: &str, shape: Shape, resume: bool) -> Result<Value, String> {
     let folders = folders(scratch)?;
@@ -490,7 +514,14 @@ fn pane(scratch: &Path, harness: &str, shape: Shape, resume: bool) -> Result<Val
         resume,
     };
     let built = interactive::command(&routed, None, &run).map_err(code)?;
-    let spec = pane_spec(&built, &folders.home)?;
+    let mut spec = pane_spec(&built, &folders.home)?;
+    let words: Vec<String> = built
+        .argv
+        .iter()
+        .chain(built.env.iter().map(|(_, value)| value))
+        .cloned()
+        .collect();
+    spec["handover"] = handover(&words, relay.as_ref(), &folders.home);
     drop(relay);
     Ok(spec)
 }
