@@ -129,7 +129,9 @@ fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
 
 /// #359 r2, rv-code2 r2 F1: the desktop joins whole events into one input, and no
 /// `send-keys` run ends inside one of them, so an app never reads half an escape sequence
-/// and takes its lone ESC for the Escape key.
+/// and takes its lone ESC for the Escape key. V243-PASTE-SS3-X10-UTF8: that holds for an SS3
+/// key whose final is a UTF-8 character, and for an X10 report past column 95, whose
+/// coordinates xterm.js sends as 2-byte UTF-8 characters.
 #[test]
 fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
     let text = |times: usize| vec![&b"x"[..]; times];
@@ -139,6 +141,14 @@ fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
         ("held application arrow keys", vec![&b"\x1bOA"[..]; 300]),
         ("alt keys", [text(1), vec![&b"\x1bx"[..]; 300]].concat()),
         ("x10 mouse reports", vec![&b"\x1b[M`!!"[..]; 100]),
+        (
+            "x10 mouse reports past column 95",
+            [text(1), vec![&b"\x1b[M \xc2\x84\xc2\x98"[..]; 100]].concat(),
+        ),
+        (
+            "ss3 keys with a utf-8 final",
+            [text(1), vec![&b"\x1bO\xc3\xa9"[..]; 100]].concat(),
+        ),
         (
             "osc replies",
             vec![&b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07"[..]; 20],
