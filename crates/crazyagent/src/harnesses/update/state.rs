@@ -1055,7 +1055,7 @@ mod windows_tests {
         std::fs::copy(&shipped, &curl).unwrap();
         assert!(version_if_runs(&curl, &home, &places).is_some());
 
-        let granted = crate::spawn_gate::output(
+        let granted = crate::spawn_gate::collected(
             std::process::Command::new("icacls")
                 .arg(&kept)
                 .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),

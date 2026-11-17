@@ -474,7 +474,7 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("README.md"), "shop\n").unwrap();
     let git = |args: &[&str]| {
-        let done = crate::spawn_gate::output(
+        let done = crate::spawn_gate::collected(
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&source)
@@ -546,7 +546,7 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
 }
 
 fn git_in(folder: &Path, args: &[&str]) {
-    let done = crate::spawn_gate::output(
+    let done = crate::spawn_gate::collected(
         std::process::Command::new("git")
             .arg("-C")
             .arg(folder)

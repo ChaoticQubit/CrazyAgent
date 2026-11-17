@@ -270,7 +270,7 @@ mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
 ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
 ln "$admin/index" "$away/index" 2>>"$err" && echo linked
 exit 0"#;
-    let output = crazyagent::spawn_gate::output(
+    let output = crazyagent::spawn_gate::collected(
         helper_command()
             .args(["--read", "/", "--write"])
             .arg(&case.tmp)
@@ -2550,7 +2550,7 @@ fn the_helper_refuses_the_variables_that_load_code_in_every_mode() {
     let modes = [nest, vec!["--probe".into()], vec!["--scoped".into()]];
     for mode in &modes {
         for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES", "GCONV_PATH"] {
-            let output = crazyagent::spawn_gate::output(
+            let output = crazyagent::spawn_gate::collected(
                 Command::new(HELPER)
                     .args(mode)
                     .env_clear()
@@ -2726,7 +2726,7 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
 /// `iptables-restore` on the nf_tables backend. No input. Output: true when it has both.
 fn routing_tools() -> bool {
     let slirp = SLIRP_PATHS.iter().all(|path| Path::new(path).is_file());
-    let version = crazyagent::spawn_gate::output(
+    let version = crazyagent::spawn_gate::collected(
         Command::new("/usr/sbin/iptables-restore")
             .arg("--version")
             .stdin(Stdio::null()),
