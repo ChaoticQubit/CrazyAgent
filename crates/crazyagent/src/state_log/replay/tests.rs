@@ -19,6 +19,7 @@ fn store() -> Connection {
         INSERT INTO state VALUES (1,0); {LEASES};"
     ))
     .unwrap();
+    fence::seed(&db);
     db
 }
 
@@ -100,7 +101,7 @@ fn record(
 ) -> u64 {
     let body = serde_json::to_vec(&body).unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let draft = Draft {
         aggregate,
         kind,
@@ -257,7 +258,7 @@ fn replay_reads_at_most_its_batch_and_a_store_without_a_log_replays_nothing() {
         7
     );
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let tick = Draft {
         aggregate: Aggregate::Ide,
         kind: "Tick",
@@ -309,7 +310,7 @@ fn replay_refuses_a_gap_in_seq_or_a_revision_that_goes_down_and_resumes_after_a_
 fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     for aggregate in [
         Aggregate::Worktrees,
         Aggregate::Ide,
@@ -529,7 +530,7 @@ fn a_log_that_opens_with_a_snapshot_run_rebuilds_equal_and_a_changed_chunk_is_re
     live.execute_batch("INSERT INTO leases VALUES (1,'/a',5),(2,'/b',5);")
         .unwrap();
     let tx = live.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let run = vec![Chunk {
         table: "leases".into(),
         rows: vec![
@@ -620,8 +621,8 @@ fn a_redacted_event_keeps_its_place_replay_skips_it_and_the_rebuild_stays_equal(
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .unwrap();
     let tx = live.transaction().unwrap();
-    redact(&tx, taken).unwrap();
-    redact(&tx, taken).unwrap();
+    redact(&tx, taken, &fence::engine()).unwrap();
+    redact(&tx, taken, &fence::engine()).unwrap();
     let after: i64 = tx
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .unwrap();
@@ -646,7 +647,7 @@ fn a_redacted_event_keeps_its_place_replay_skips_it_and_the_rebuild_stays_equal(
     assert_eq!(last, 3);
     assert_eq!(rows(&rebuilt, "leases").unwrap(), expected);
     let tx = live.transaction().unwrap();
-    redact(&tx, kept).unwrap();
+    redact(&tx, kept, &fence::engine()).unwrap();
     let (rebuilt, _) = rebuild(&tx, worktrees, LEASES, leases, None).unwrap();
     assert_ne!(
         rows(&rebuilt, "leases").unwrap(),
@@ -660,14 +661,14 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     let mut empty = store();
     let tx = empty.transaction().unwrap();
     assert_eq!(
-        code(redact(&tx, 1)),
+        code(redact(&tx, 1, &fence::engine())),
         Some("state_log_redact_missing".into()),
         "a store with no log"
     );
     drop(tx);
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let run = vec![Chunk {
         table: "ide".into(),
         rows: Vec::new(),
@@ -685,14 +686,14 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     );
     for seq in [99, u64::MAX] {
         assert_eq!(
-            code(redact(&tx, seq)),
+            code(redact(&tx, seq, &fence::engine())),
             Some("state_log_redact_missing".into()),
             "{seq}"
         );
     }
     for seq in [done - 1, done] {
         assert_eq!(
-            code(redact(&tx, seq)),
+            code(redact(&tx, seq, &fence::engine())),
             Some("state_log_redact_snapshot".into()),
             "{seq}"
         );
@@ -713,6 +714,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
+    fence::seed(&db);
     db.execute_batch("PRAGMA secure_delete=OFF;").unwrap();
     let pragma = |name: &str| -> i64 {
         db.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
@@ -723,7 +725,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let marker = b"redact-marker-31d7";
     let body = marker.repeat(1_200);
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx).unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
     let seq = log
         .append(&Draft {
             aggregate: Aggregate::Worktrees,
@@ -737,7 +739,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     checkpoint(&db);
     assert!(holds(&path, marker), "the body spills into the file first");
     let tx = db.transaction().unwrap();
-    redact(&tx, seq).unwrap();
+    redact(&tx, seq, &fence::engine()).unwrap();
     tx.commit().unwrap();
     let secure: i64 = db
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
