@@ -176,7 +176,7 @@ pub(crate) fn remove_generated_home(
 /// copy's folder, the profile reference and whether the generated home moves. Output: Ok,
 /// also when nothing is there; a refusal for a link or an unsafe folder on the way, a slot in
 /// use or a failed rename keeps it in place.
-pub(crate) fn move_profile_into_copy(
+pub(crate) fn move_aside(
     root: &Path,
     copy: &Path,
     profile_ref: &CredentialRef,

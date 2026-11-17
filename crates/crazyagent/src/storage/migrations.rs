@@ -673,7 +673,7 @@ const PROFILES: &str = "account-profiles";
 
 /// Moves each generated SDK home and native profile slot the replaced 2.5 copy names, by its
 /// saved accounts and by its trash notes, that `named` does not keep, into the same folder of
-/// that dated copy ([`crate::engine::bootstrap::move_profile_into_copy`]); every keep test
+/// that dated copy ([`crate::engine::bootstrap::move_aside`]); every keep test
 /// runs before the first move, and a failed move keeps that one in place and does not stop
 /// the others. Inputs: the engine root, the copy's folder and the keep test by kind and name.
 /// Output: how many moved, or the copy's or keep test's failure, or the first failed move.
@@ -695,7 +695,7 @@ fn move_replaced_profiles(
             .map_err(|_| error("account_key_reference_invalid"));
         let home = *kind == super::trash::GENERATED_HOME;
         match reference.and_then(|reference| {
-            crate::engine::bootstrap::move_profile_into_copy(root, copy, &reference, home)
+            crate::engine::bootstrap::move_aside(root, copy, &reference, home)
         }) {
             Ok(()) => moved += 1,
             Err(cause) => {

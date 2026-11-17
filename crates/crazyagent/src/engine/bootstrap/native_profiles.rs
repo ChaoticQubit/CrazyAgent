@@ -28,7 +28,7 @@ use staging::{ROOT_STAGING, STAGING, Staging, step};
 
 const ROOT: &str = super::NATIVE_PROFILES_FOLDER;
 pub(crate) use retire::{
-    generated_home_needs_key, move_profile_into_copy, remove_generated_home, remove_sign_in,
+    generated_home_needs_key, move_aside, remove_generated_home, remove_sign_in,
 };
 
 const MANIFEST: &str = "identity.json";
