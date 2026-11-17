@@ -9,6 +9,9 @@ const ACL_HEADER_BYTES: usize = 8;
 const ACE_HEADER_BYTES: usize = 8;
 const ACCESS_ALLOWED: u8 = 0;
 const ACCESS_DENIED: u8 = 1;
+/// The entry types that only take rights away: the plain, object, callback and callback
+/// object deny entries.
+pub const DENY_TYPES: [u8; 4] = [ACCESS_DENIED, 6, 10, 12];
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
 const INHERIT_ONLY: u8 = 0x08;
@@ -246,9 +249,11 @@ pub fn trusted_owner(owner: &[u8], user: &[u8]) -> bool {
 /// The first SID other than SYSTEM, the administrators, TrustedInstaller, OWNER RIGHTS and
 /// the engine's own user that an allow entry applying to the object itself gives any of
 /// `rights`: inherited entries count, inherit-only ones do not, and deny entries are not
-/// counted, as they only take rights away. Inputs: the access list bytes, the user's SID bytes
-/// and the rights. Output: that SID, none when only those may change the object, or the
-/// reason the list is malformed.
+/// counted, as they only take rights away. An applying entry of any other type, such as a
+/// conditional, object or compound allow entry this reader does not parse, is an error the
+/// caller refuses on (#317 r2 F2). Inputs: the access list bytes, the user's SID bytes and
+/// the rights. Output: that SID, none when only those may change the object, or the reason
+/// the list is malformed or holds an entry the check cannot read.
 pub fn other_writer<'a>(
     acl: &'a [u8],
     user: &[u8],
@@ -263,15 +268,23 @@ pub fn other_writer<'a>(
         &OWNER_RIGHTS[..],
         user,
     ];
-    Ok(entries(acl)?
-        .into_iter()
-        .find(|entry| {
-            entry.allows
-                && entry.flags & INHERIT_ONLY == 0
-                && entry.mask & rights != 0
-                && !allowed.contains(&entry.sid)
-        })
-        .map(|entry| entry.sid))
+    for span in spans(acl)? {
+        let kind = acl[span.range.start];
+        if acl[span.range.start + 1] & INHERIT_ONLY != 0 {
+            continue;
+        }
+        match span.entry {
+            Some(entry)
+                if entry.allows && entry.mask & rights != 0 && !allowed.contains(&entry.sid) =>
+            {
+                return Ok(Some(entry.sid));
+            }
+            Some(_) => {}
+            None if DENY_TYPES.contains(&kind) => {}
+            None => return Err("the access list holds an allow entry this check cannot read"),
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -589,6 +602,37 @@ mod tests {
         let mut broken = acl(&[ace(ACCESS_ALLOWED, 0, MODIFY, &USERS)]);
         broken[2..4].copy_from_slice(&200u16.to_le_bytes());
         assert!(other_writer(&broken, &OWNER, FILE_CHANGES).is_err());
+    }
+
+    /// #317 r2 F2: an allow entry of a type the reader does not parse, here a conditional
+    /// entry giving another account full control, refuses instead of passing, while an
+    /// inherit-only one and the deny kinds still name no one.
+    #[test]
+    fn an_allow_entry_the_check_cannot_read_refuses_and_deny_kinds_do_not() {
+        const ALLOWED_CALLBACK: u8 = 9;
+        for kind in [ALLOWED_CALLBACK, 4, 5, 11] {
+            let list = acl(&[ace(kind, 0, FULL, &OTHER_ACCOUNT)]);
+            assert!(other_writer(&list, &OWNER, FILE_CHANGES).is_err(), "{kind}");
+            let later = acl(&[ace(
+                kind,
+                INHERIT_ONLY | CONTAINER_INHERIT,
+                FULL,
+                &OTHER_ACCOUNT,
+            )]);
+            assert_eq!(
+                other_writer(&later, &OWNER, FILE_CHANGES),
+                Ok(None),
+                "{kind}"
+            );
+        }
+        for kind in DENY_TYPES {
+            let list = acl(&[ace(kind, 0, FULL, &OTHER_ACCOUNT)]);
+            assert_eq!(
+                other_writer(&list, &OWNER, FILE_CHANGES),
+                Ok(None),
+                "{kind}"
+            );
+        }
     }
 
     /// #306 sec F1: SYSTEM, the administrators, TrustedInstaller and the engine's own user may
