@@ -1364,14 +1364,16 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
 
 /// The phrases every hand-off task description holds: the finding, the agent's part, its
 /// acceptance check, and a probe that costs the owner asked for once, else an UNCONFIRMED
-/// cause the agent reproduces first (V243-MASTER-ANALYZE-FIRST, #388 F1, leader 16:33).
-const HAND_OFF_PARTS: [&str; 6] = [
+/// cause, the owner's refusal and a first step that reproduces it without what the owner
+/// declined (V243-MASTER-ANALYZE-FIRST, #388 F1, V243-MASTER-PROBE-REFUSAL-CARRY).
+const HAND_OFF_PARTS: [&str; 7] = [
     "what you found",
     "this agent's part of your plan",
     "its acceptance check",
     "ask the owner once for a small probe",
     "UNCONFIRMED",
-    "reproducing it the agent's first step",
+    "say what the owner declined",
+    "reproducing it without those resources the agent's first step",
 ];
 
 /// The spawn tool asks for what the master found and the agent's acceptance check with each
