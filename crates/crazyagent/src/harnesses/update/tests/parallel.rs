@@ -257,3 +257,22 @@ fn two_npm_updates_into_one_prefix_take_turns_and_both_finish() {
         assert!(done.last.unwrap().ok, "{id}");
     }
 }
+
+/// V243-SETUP-PARALLEL: setup jobs share the harness jobs' line under their tools' program
+/// names and one run name, so no catalog harness may go by one of those names.
+#[test]
+fn no_catalog_harness_goes_by_a_setup_tool_or_the_setup_run_name() {
+    let setup: Vec<&str> = crate::setup::Dependency::ALL
+        .iter()
+        .map(|dep| dep.program())
+        .chain([crate::setup::SETUP_JOB])
+        .collect();
+    assert_eq!(setup.len(), crate::setup::Dependency::ALL.len() + 1);
+    for spec in harnesses::specs() {
+        assert!(!setup.contains(&spec.id), "{}", spec.id);
+    }
+    assert_eq!(
+        super::super::turn::jobs_max(),
+        harnesses::specs().len() + setup.len()
+    );
+}

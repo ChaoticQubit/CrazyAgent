@@ -3,6 +3,7 @@ mod state;
 #[cfg(all(test, unix))]
 mod tests;
 mod turn;
+pub(crate) use turn::Turns;
 
 pub use run::{
     AS_ROOT, CHECK_TIME, LOOKUP_FAILED, POINTER_TIME, Ran, SHOWN_BYTES_MAX, START_FAILED, TIMEOUT,

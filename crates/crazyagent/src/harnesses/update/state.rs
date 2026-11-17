@@ -570,6 +570,12 @@ impl Updates {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The engine's one line of install jobs, which setup jobs share with harness jobs so
+    /// two jobs never change one folder at once. Output: the line.
+    pub(crate) fn turns(&self) -> &Turns {
+        &self.turns
+    }
+
     /// Reports whether no update or install is running. Output: true when no job runs.
     pub fn idle(&self) -> bool {
         self.state().running.is_empty()

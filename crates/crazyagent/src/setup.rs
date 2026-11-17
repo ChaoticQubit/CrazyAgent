@@ -103,6 +103,11 @@ pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64
     "unknown"
 };
 
+/// The job name a setup run's steps go by in the engine's line of install jobs
+/// ([`crate::harnesses::update::Turns`]); a lone install or fix of one tool goes by its
+/// program name ([`Dependency::program`]).
+pub const SETUP_JOB: &str = "setup";
+
 /// A system tool the app needs: tmux runs agent terminals, uv installs Graphify,
 /// Graphify builds each project's code graph and Node runs the harnesses npm installs.
 /// Setup finds each one or installs it.
