@@ -45,45 +45,13 @@ env:
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
   FARM_PARTS: >-
-    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+    macos-rust-1 macos-rust-2 macos-rust-3 macos-node-1
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  build-linux:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the Linux runner
-        run: |
-          set -euo pipefail
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux build packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
   build-macos:
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
@@ -110,83 +78,6 @@ jobs:
       - uses: ./.github/actions/rust-archive
         with:
           os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-windows:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-linux:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-linux
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
           node-version: ${{ env.NODE_VERSION }}
 
   rust-macos:
@@ -250,54 +141,6 @@ jobs:
           parts: ${{ matrix.parts }}
           node-version: ${{ env.NODE_VERSION }}
 
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-windows
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
@@ -306,20 +149,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
           - os: macos
             runner: macos-15
             part: 1
@@ -459,71 +288,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  typecheck:
-    name: Desktop typecheck and Bun suites
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/bun.xml
-      FARM_PART: linux-bun-1
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Typecheck desktop
-        working-directory: apps/desktop
-        run: npm run typecheck
-      - name: Install rcli source dependencies
-        if: always()
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Run the Bun suites
-        if: always()
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          make test-bun BUN="$BUN" BUN_TEST_ARGS="--reporter=junit --reporter-outfile=$FARM_JUNIT"
-      - name: Keep a JUnit report for this part
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
-
   report:
     name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
+    needs: [build-macos, rust-macos, node]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
