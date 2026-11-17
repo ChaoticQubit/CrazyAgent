@@ -2715,10 +2715,8 @@ fn owner_apply_with(
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
     assert!(redacted == 0 || changed, "only an applied removal redacts");
-    if redacted > 0
-        && let Err(failure) = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
-    {
-        eprintln!("state_log_redact_checkpoint_deferred cause={failure}");
+    if redacted > 0 && !crate::state_log::replay::checkpoint(db) {
+        eprintln!("state_log_redact_checkpoint_busy");
     }
     if changed
         && let OwnerOperation::Apply {
