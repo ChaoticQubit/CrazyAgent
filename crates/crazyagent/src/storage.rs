@@ -2970,7 +2970,7 @@ fn owner_read(
             assert!(names.len() <= 25 + usize::from(config.settings.model_access.is_some()));
             OwnerData::Settings { names }
         }
-        OwnerRead::Setting { name } => read_owner_setting(config, name)?,
+        OwnerRead::Setting { name } => settings::read_owner_setting(config, name)?,
         OwnerRead::ConversationHistory {
             project_id,
             cursor,
@@ -3320,19 +3320,6 @@ fn pool_summaries(
         .transpose()?;
     assert!(end <= all.len());
     Ok(OwnerData::PoolSummaries { pools, next_offset })
-}
-
-fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {
-    let descriptor = config
-        .descriptors
-        .get(name)
-        .ok_or_else(|| error("owner_setting_not_found"))?;
-    assert_eq!(descriptor.name, name);
-    assert!(config.validate().is_ok());
-    assert!(config.descriptors.len() <= 25 + usize::from(config.settings.model_access.is_some()));
-    Ok(OwnerData::Setting {
-        descriptor: Box::new(descriptor.clone()),
-    })
 }
 
 fn read_owner_baseline(tx: &Transaction<'_>, id: &BaselineId) -> Result<OwnerData, EngineError> {

@@ -629,6 +629,24 @@ fn load_pending(db: &Connection) -> Result<Option<Pending>, EngineError> {
     .transpose()
 }
 
+/// One setting's descriptor for the owner's settings read. Inputs: the effective config
+/// and the setting name. Output: the descriptor, or `owner_setting_not_found`.
+pub(super) fn read_owner_setting(
+    config: &EffectiveConfig,
+    name: &str,
+) -> Result<OwnerData, EngineError> {
+    let descriptor = config
+        .descriptors
+        .get(name)
+        .ok_or_else(|| error("owner_setting_not_found"))?;
+    assert_eq!(descriptor.name, name);
+    assert!(config.validate().is_ok());
+    assert!(config.descriptors.len() <= 25 + usize::from(config.settings.model_access.is_some()));
+    Ok(OwnerData::Setting {
+        descriptor: Box::new(descriptor.clone()),
+    })
+}
+
 pub(super) fn pending(db: &Connection) -> Result<bool, EngineError> {
     Ok(load_pending(db)?.is_some())
 }
