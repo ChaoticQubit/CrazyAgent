@@ -60,6 +60,7 @@ fn scenarios() -> Vec<Scenario> {
     }];
     all.extend(check::scenarios());
     all.extend(harness::scenarios());
+    all.extend(launch::scenarios());
     all.extend(provider::scenarios());
     all.extend(role::scenarios());
     all.extend(workflow::scenarios());

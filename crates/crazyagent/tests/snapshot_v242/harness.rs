@@ -260,10 +260,11 @@ pub(super) fn home_files(home: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
-/// The headless launch spec of one built command: program, arguments, variable names,
-/// working folder and the files below the account home. Inputs: the command and the home.
-/// Output: the surface as JSON.
-fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
+/// The headless launch spec of one built command: program, arguments, variable names
+/// without `SDKROOT` and whether it came as the engine gives it on this Mac, working folder
+/// and the files below the account home. Inputs: the command, the home and whether tools
+/// are on, the only headless runs given toolchain variables. Output: the surface as JSON.
+fn headless_spec(built: &Command, home: &Path, tools: bool) -> Result<Value, String> {
     let argv = built
         .get_args()
         .map(utf8)
@@ -273,6 +274,7 @@ fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
         .map(|(name, _)| utf8(name))
         .collect::<Result<Vec<String>, String>>()?;
     env_names.sort();
+    let sdkroot = super::launch::sdkroot_fact(&mut env_names, tools)?;
     let cwd = built
         .get_current_dir()
         .map(|dir| utf8(dir.as_os_str()))
@@ -281,6 +283,7 @@ fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
         "program": utf8(built.get_program())?,
         "argv": argv,
         "env_names": env_names,
+        "sdkroot": sdkroot,
         "cwd": cwd,
         "home_files": home_files(home)?,
     }))
@@ -310,7 +313,7 @@ fn headless(scratch: &Path, harness: &str, shape: Shape) -> Result<Value, String
     let (routed, relay) = route(request(harness, &folders, shape)?).map_err(code)?;
     assert_eq!(relay.is_some(), matches!(shape.account, Account::RoutedKey));
     let built = command(&routed).map_err(code)?;
-    let mut spec = headless_spec(&built, &folders.home)?;
+    let mut spec = headless_spec(&built, &folders.home, shape.tools)?;
     let words: Vec<String> = built
         .get_args()
         .chain(built.get_envs().filter_map(|(_, value)| value))
@@ -471,11 +474,12 @@ fn headless_refusals(scratch: &Path) -> Result<Value, String> {
 }
 
 /// The pane spec of one built interactive command: argv, working folder, variable names in
-/// the order the pane gets them, where the harness records its session (by kind, as a place
+/// the order the pane gets them without `SDKROOT` and whether it came as the engine gives it, where the harness records its session (by kind, as a place
 /// below the account home) and the files below the home. Inputs: the command and the home.
 /// Output: the surface as JSON.
 fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
-    let env_names: Vec<&str> = built.env.iter().map(|(name, _)| name.as_str()).collect();
+    let mut env_names: Vec<String> = built.env.iter().map(|(name, _)| name.clone()).collect();
+    let sdkroot = super::launch::sdkroot_fact(&mut env_names, true)?;
     let transcript = match &built.transcript {
         Transcript::CodexRollouts { sessions } => json!({
             "kind": "codex_rollouts",
@@ -496,6 +500,7 @@ fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
         "argv": built.argv,
         "cwd": utf8(built.cwd.as_os_str())?,
         "env_names": env_names,
+        "sdkroot": sdkroot,
         "transcript": transcript,
         "home_files": home_files(home)?,
     }))
@@ -763,14 +768,17 @@ fn at_level(view: &PolicyView, access: AgentAccess) -> AgentPolicy {
     }
 }
 
-/// The result an owner change was recorded with. Input: the engine's response. Output: the
-/// result, or the response when it was not recorded.
+/// The result an owner change was recorded with now, never an earlier change the engine
+/// replays for a generation it already saw. Input: the engine's response. Output: the
+/// result, or the response when it was not recorded now.
 pub(super) fn recorded(response: OwnerResponse) -> Result<OwnerResult, String> {
     match response {
-        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+            if !operation.historical_replay =>
+        {
             Ok(operation.result)
         }
-        other => Err(format!("the owner change was not recorded: {other:?}")),
+        other => Err(format!("the owner change was not recorded now: {other:?}")),
     }
 }
 
@@ -821,7 +829,8 @@ pub(super) async fn set_level(
 /// Captures the agent policy a new project's agents get at one access level, as the owner's
 /// policy screen reads it: the level, network, the choices offered, the grants and their
 /// log, apply timing, shared and local folders and the temp folder a grant would hand over,
-/// all but the fields that read this Mac's installs. Inputs: the scratch folder and the
+/// with whether that folder is the owner's own private temp folder, since the runner masks
+/// it, all but the fields that read this Mac's installs. Inputs: the scratch folder and the
 /// level. Output: the view as JSON.
 fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
     let projects = scratch
@@ -850,6 +859,9 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
         (owner, view)
     })?;
     assert_eq!(view.access, access);
+    let owner_temp = crazyagent::sandbox::grants::owner_temp_folder().ok();
+    let temp_folder_is_the_owners =
+        view.temp_folder.path.as_deref() == owner_temp.as_deref().and_then(Path::to_str);
     let mut captured = serde_json::to_value(view).map_err(|error| error.to_string())?;
     let fields = captured
         .as_object_mut()
@@ -857,6 +869,10 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
     for field in MACHINE_FIELDS {
         fields.remove(field);
     }
+    fields.insert(
+        "temp_folder_is_the_owners".to_owned(),
+        Value::Bool(temp_folder_is_the_owners),
+    );
     Ok(captured)
 }
 

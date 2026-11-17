@@ -252,8 +252,9 @@ fn endpoint_base_url(_scratch: &Path) -> Result<Value, String> {
 /// A key that is no real provider's and starts with no token prefix the golden writer refuses.
 const DUMMY_KEY: &str = "snapshot-dummy-provider-key-0001";
 
-/// The most requests one loopback recorder answers.
-const HEARD_MAX: usize = 8;
+/// The most requests one loopback recorder answers; an engine team checks its account more
+/// than once before a launch.
+const HEARD_MAX: usize = 64;
 
 /// The longest request head a loopback recorder reads.
 const HEAD_BYTES_MAX: usize = 16 * 1024;
@@ -436,7 +437,7 @@ fn local_models(scratch: &Path, tags: bool) -> Result<Value, String> {
     let recorder = Recorder::start(tags)?;
     let engine = engine(scratch, None)?;
     let url = format!("http://127.0.0.1:{}", recorder.port);
-    let answer = with_owner(&engine, |owner| async move {
+    let answer = with_owner(&engine, |mut owner| async move {
         let answer = match owner.controller.local_models(url).await {
             Ok(models) => json!({"models": models}),
             Err(error) => json!({"refused": error.0}),
@@ -468,7 +469,7 @@ fn request_check_compatible_key(scratch: &Path) -> Result<Value, String> {
         model: Some(MODEL.to_owned()),
     };
     let key = AccountSecret::new(DUMMY_KEY.as_bytes().to_vec()).map_err(|error| error.0)?;
-    let (added, check) = with_owner(&engine, |owner| async move {
+    let (added, check) = with_owner(&engine, |mut owner| async move {
         let added = match owner.controller.add_account(draft, Some(key)).await {
             Ok(view) => view,
             Err(error) => return (owner, Err(format!("add_account: {}", error.0))),
