@@ -224,7 +224,7 @@ fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, Engi
         return Ok(Vec::new());
     }
     let mut statement = db
-        .prepare_cached(
+        .prepare(
             "SELECT seq, revision, aggregate, kind, schema, at_ms,
             CASE WHEN length(body) <= ?3 THEN body END FROM state_log
             WHERE seq>?1 ORDER BY seq LIMIT ?2",
