@@ -605,6 +605,28 @@ fn an_engine_that_created_the_questions_log_restarts_ready() {
     owner_stop(&mut db, &restarted.host).unwrap();
 }
 
+/// V250-OWNER-TEXT r2 (#347 F1): the kept-text tables keep out of the names the owner schema
+/// check reserves, so an engine that kept a text starts its owner runtime again. Input: a
+/// fresh engine database. Output: none; the second owner start succeeds.
+#[test]
+fn an_engine_that_kept_an_owner_text_restarts_ready() {
+    let (_root, path, _cfg) = fixture();
+    let (mut db, _lock) = open_database(&path, false).unwrap();
+    let started = owner_start(&mut db).unwrap();
+    owner_stop(&mut db, &started.host).unwrap();
+    let tx = db.transaction().unwrap();
+    let holder = "landing_change_sets/c1/summary";
+    let digest = crate::owner_texts::keep(&tx, holder, None, b"kept").unwrap();
+    tx.commit().unwrap();
+    let restarted = owner_start(&mut db).unwrap();
+    owner_stop(&mut db, &restarted.host).unwrap();
+    assert_eq!(
+        crate::owner_texts::text(&db, &digest).unwrap().as_deref(),
+        Some(&b"kept"[..]),
+        "the owner start leaves kept texts alone"
+    );
+}
+
 #[test]
 fn owner_schema_is_additive_and_unknown_schema_is_preserved() {
     let (_root, path, _cfg) = fixture();

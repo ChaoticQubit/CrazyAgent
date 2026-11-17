@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 const HOLDER: &str = "landing_change_sets/c1/summary";
@@ -220,4 +220,46 @@ fn a_project_clear_takes_its_texts_and_keeps_a_shared_one() {
     release(&tx, "user_profile/owner/bio").unwrap();
     assert_eq!(text(&tx, &own).unwrap(), None);
     assert_eq!(count(&tx, "owner_text_refs"), 1);
+}
+
+/// V250-OWNER-TEXT r2 (#347 F1): no kept-text table, index or trigger takes a name the owner
+/// schema check reserves (`owner_*`), which would stop the owner runtime's next start.
+#[test]
+fn no_kept_text_object_takes_an_owner_schema_name() {
+    let db = store();
+    initialize(&db).unwrap();
+    let (objects, reserved): (i64, i64) = db
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(name GLOB 'owner_*'), 0) FROM sqlite_schema \
+             WHERE sql IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(objects, 7, "three tables, two indexes, two triggers");
+    assert_eq!(reserved, 0);
+}
+
+/// V250-OWNER-TEXT r2 (#347 F2): a read before any text was kept finds nothing and writes
+/// nothing, so it works on a read-only connection and leaves a writable one without tables.
+#[test]
+fn a_read_before_any_kept_text_finds_nothing_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE seed(x)")
+        .unwrap();
+    let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let digest = TextDigest::new("a".repeat(64)).unwrap();
+    assert_eq!(text(&reader, &digest).unwrap(), None);
+    let mut missing = Vec::new();
+    assert_eq!(replayed(&reader, &digest, &mut missing).unwrap(), b"");
+    assert_eq!(missing, [digest.clone()]);
+    let writable = store();
+    assert_eq!(text(&writable, &digest).unwrap(), None);
+    let objects: i64 = writable
+        .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(objects, 0, "a read made no table");
 }
