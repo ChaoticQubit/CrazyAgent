@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Lists the engine launch scenarios: one Codex sub agent, tools off, delegated by the owner
-/// at each access level, captured as the engine itself launched it.
+/// at each access level, captured as the engine itself launched it, and the pool list of
+/// the team those scenarios seed.
 pub(super) fn scenarios() -> Vec<Scenario> {
     let scenario = |name: &'static str, capture: fn(&Path) -> Result<Value, String>| Scenario {
         kind: "harness",
@@ -32,7 +33,28 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         scenario("engine-codex-sub-sandboxed", engine_codex_sub_sandboxed),
         scenario("engine-codex-sub-own-branch", engine_codex_sub_own_branch),
         scenario("engine-codex-sub-full-access", engine_codex_sub_full_access),
+        Scenario {
+            kind: "provider",
+            name: "pool-summaries",
+            capture: pool_summaries,
+        },
     ]
+}
+
+/// Captures the pool list the owner's pools screen reads for a pool of one keyless
+/// OpenAI-compatible account assigned to one project. Input: the scratch folder. Output:
+/// the summaries.
+fn pool_summaries(scratch: &Path) -> Result<Value, String> {
+    let team = Team::start(scratch, AgentAccess::Sandboxed, false)?;
+    let pools = as_owner(&team.engine, |mut owner| async move {
+        let pools = owner
+            .controller
+            .pool_summaries()
+            .await
+            .map_err(|error| error.0);
+        (owner, pools)
+    })?;
+    serde_json::to_value(pools).map_err(|error| error.to_string())
 }
 
 /// Captures the launch of the Codex sub agent the owner delegates one task to, tools off,
