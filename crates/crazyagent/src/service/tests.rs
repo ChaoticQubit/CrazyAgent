@@ -12,6 +12,7 @@ fn service(platform: Platform) -> Service {
         executable: PathBuf::from("/Applications/CrazyAgent.app/Contents/MacOS/crazyagent"),
         root: PathBuf::from("/Users/owner/Library/Application Support/CrazyAgent/engine"),
         path: OsString::from("/Users/owner/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"),
+        home: Some(PathBuf::from("/Users/owner")),
         definition: PathBuf::from("/Users/owner/Library/LaunchAgents/dev.crazyagent.engine.plist"),
         user: None,
     }
@@ -52,6 +53,8 @@ fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
 \t<dict>
 \t\t<key>PATH</key>
 \t\t<string>/Users/owner/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+\t\t<key>HOME</key>
+\t\t<string>/Users/owner</string>
 \t</dict>
 \t<key>RunAtLoad</key>
 \t<true/>
@@ -75,6 +78,19 @@ fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
         service(Platform::MacOs).definition_text().unwrap(),
         expected
     );
+}
+
+/// A launchd property list gives the engine the HOME of the process that defined the service,
+/// escaped as every other path, so a run on a scratch HOME never starts an engine on the
+/// owner's real one.
+#[test]
+fn launchd_plist_gives_the_engine_the_defining_home_escaped() {
+    let mut odd = service(Platform::MacOs);
+    odd.home = Some(PathBuf::from("/Users/o&<w>"));
+    let text = odd.definition_text().unwrap();
+    let home = "\t\t<key>HOME</key>\n\t\t<string>/Users/o&amp;&lt;w&gt;</string>\n";
+    assert!(text.contains(home), "{text}");
+    assert!(!text.contains("o&<"));
 }
 
 #[test]
@@ -190,6 +206,12 @@ fn definitions_refuse_control_characters_and_relative_paths() {
     let mut no_path = service(Platform::Linux);
     no_path.path = OsString::new();
     assert!(no_path.definition_text().is_err());
+    let mut relative_home = service(Platform::MacOs);
+    relative_home.home = Some(PathBuf::from("owner"));
+    assert!(relative_home.definition_text().is_err());
+    let mut odd_home = service(Platform::MacOs);
+    odd_home.home = Some(PathBuf::from("/Users/owner\n<key>"));
+    assert!(odd_home.definition_text().is_err());
     for expanded in ["/c/Users/100%owner/engine", "/c/Users/\"owner\"/engine"] {
         let mut windows = service(Platform::Windows);
         windows.path = OsString::new();

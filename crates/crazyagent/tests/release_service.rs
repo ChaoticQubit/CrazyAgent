@@ -229,6 +229,7 @@ fn unused_service(temp: &Path, root: &Path) -> Service {
         executable: PathBuf::from(BIN),
         root: root.to_path_buf(),
         path: OsString::from(BARE_PATH),
+        home: None,
         definition: temp.join("not-installed.plist"),
         user: None,
     }
@@ -333,12 +334,15 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
             .unwrap()
             .as_nanos()
     );
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
     let service = Service {
         platform: Platform::MacOs,
         name: label.clone(),
         executable: std::fs::canonicalize(BIN).unwrap(),
         root: layout.root().to_path_buf(),
         path: OsString::from(BARE_PATH),
+        home: Some(home),
         definition: temp.path().join(format!("{label}.plist")),
         user: None,
     };
@@ -418,12 +422,17 @@ fn scripted_service(tag: &str, temp: &Path, root: &Path, beside: &Path, body: &s
             .unwrap()
             .as_nanos()
     );
+    let home = temp.join("home");
+    if !home.is_dir() {
+        std::fs::create_dir(&home).unwrap();
+    }
     Service {
         platform: Platform::MacOs,
         name: label.clone(),
         executable: script,
         root: root.to_path_buf(),
         path: OsString::from(BARE_PATH),
+        home: Some(home),
         definition: temp.join(format!("{label}.plist")),
         user: None,
     }

@@ -1030,7 +1030,10 @@ fn the_gate_starts_the_engine_with_the_login_service_arguments_and_environment()
             root.to_str().unwrap().to_owned()
         ]
     );
-    assert_eq!(plist_keys(&text, "EnvironmentVariables"), ["PATH"]);
+    assert_eq!(plist_keys(&text, "EnvironmentVariables"), ["PATH", "HOME"]);
+    let home = std::env::var("HOME").unwrap();
+    let written = format!("<key>HOME</key>\n\t\t<string>{home}</string>");
+    assert!(text.contains(&written), "the plist gives the engine this HOME: {text}");
 }
 
 /// The stand-in's folder line reads whole however the pane hands it over: as the raw

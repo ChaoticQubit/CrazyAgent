@@ -69,6 +69,10 @@ pub struct Service {
     pub executable: PathBuf,
     pub root: PathBuf,
     pub path: OsString,
+    /// The HOME of the process that defined the service. A launchd property list gives it to
+    /// the engine, so the engine sees the HOME its CLI or app saw; none when that process had
+    /// none, and only macOS writes it.
+    pub home: Option<PathBuf>,
     pub definition: PathBuf,
     pub user: Option<String>,
 }
@@ -241,6 +245,7 @@ impl Service {
                 home.as_deref(),
                 std::env::var_os("APPDIR").as_deref().map(Path::new),
             ),
+            home: home.clone(),
             definition,
             user: user.filter(|_| platform == Platform::Windows),
         })
