@@ -374,6 +374,36 @@ fn granted(bin: &Path, npm: &Path) -> String {
     )
 }
 
+/// WIN-1 (DEC-193): npm's staging folder is a job folder, so the boundary profile npm's
+/// command writes holds no project guard and still hides the engine's secrets; the row fails
+/// if `npm_command` stops marking the folder.
+#[test]
+fn the_npm_staging_folder_holds_no_project_guards() {
+    use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard};
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    assert_eq!(staged.parent(), Some(npm.as_path()));
+    npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
+    let loaded = BoundaryProfile::load(&npm.join(format!("{prefix}.sb"))).unwrap();
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .all(|item| item.guard != Guard::ReadOnly),
+        "{:?}",
+        loaded.guarded
+    );
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .any(|item| item.guard == Guard::Hidden)
+    );
+}
+
 /// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
 /// package into a fresh staging folder, a job folder with no project guards, so npm adds
 /// `node_modules` at its top and only the pin refuses the unpinned tarball, by hand and

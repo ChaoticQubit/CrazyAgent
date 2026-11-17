@@ -1088,10 +1088,24 @@ mod tests {
                 "only a project holds project guards"
             );
             assert!(guarded.iter().any(|item| item.guard == Guard::Hidden));
+            let src = project.join("src");
+            fs::create_dir_all(&src).unwrap();
+            fs::write(src.join("work.txt"), "work\r\n").unwrap();
             let profile = folders.profiles.join("agent.sb");
             let installed =
                 WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
             let run = |line: &str| shell(&installed, &folders, line);
+            assert!(
+                run(r"echo changed>src\work.txt"),
+                "the agent started: job {job}"
+            );
+            let top = project.join("top.txt");
+            let moved = call(&installed, &folders, &[&src.join("work.txt"), &top]);
+            if job {
+                assert!(moved.status.success() && top.is_file(), "{moved:?}");
+            } else {
+                assert!(denied(&moved) && !top.exists(), "{moved:?}");
+            }
             assert_eq!(run("echo new>notes.txt"), job, "job {job}");
             assert_eq!(run("mkdir docs"), job, "job {job}");
             assert_eq!(project.join("notes.txt").is_file(), job);
