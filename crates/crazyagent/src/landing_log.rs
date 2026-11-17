@@ -266,14 +266,14 @@ pub(crate) fn record(tx: &Transaction<'_>, change: &Change) -> Result<u64, Engin
     Ok(seq)
 }
 
-/// Writes one landing change. Outside a transaction it opens one, records the event and
-/// commits. Inside a caller's transaction, which is the open's sweep (leader 09:40, DEC
-/// 250-L9-LANDING C3), it only applies: the sweep covers changed landing rows with one
-/// snapshot run. Inputs: the connection and the change. Output: Ok, or the refusal, which
-/// rolls the write back.
+/// Writes one landing change in a transaction of its own: opens it, records the event and
+/// commits. Every landing writer runs outside a transaction (none runs inside the open's
+/// sweep), so one called inside a caller's transaction is refused rather than left without
+/// its event. Inputs: the connection and the change. Output: Ok, or the refusal
+/// (`landing_log_unavailable` inside a transaction), which writes nothing.
 pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError> {
     if !db.is_autocommit() {
-        return apply(db, change);
+        return Err(failure("landing_log_unavailable"));
     }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
         .map_err(|_| failure("landing_log_unavailable"))?;
