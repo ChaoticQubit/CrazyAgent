@@ -157,8 +157,9 @@ pub(super) struct Team {
     pub(super) engine: Engine,
     pub(super) project: ProjectId,
     stand_in: String,
+    projects: PathBuf,
     tmux: Option<PathBuf>,
-    _recorder: Recorder,
+    recorder: Recorder,
 }
 
 impl Drop for Team {
@@ -260,6 +261,7 @@ impl Team {
             .map_err(|error| error.to_string())?
             .join("projects");
         std::fs::create_dir(&projects).map_err(|error| error.to_string())?;
+        let projects_home = projects.clone();
         let recorder = Recorder::start(false)?;
         let engine = engine(scratch, Some(("--codex-executable", folder.join(HARNESS))))?;
         let tmux = installed(engine.path());
@@ -311,8 +313,9 @@ impl Team {
             engine,
             project,
             stand_in,
+            projects: projects_home,
             tmux,
-            _recorder: recorder,
+            recorder,
         })
     }
 
@@ -396,7 +399,8 @@ impl Team {
     /// with, the files in the agent's own home and the Seatbelt profile the engine
     /// installed for it (none when it installed none), with the stand-in's folder read as
     /// [`HARNESS_TOKEN`], the rules naming this Mac's own tool installs taken out and stable
-    /// facts in their place.
+    /// facts in their place, facts about its loopback remotes, and the engine root,
+    /// projects home and agent home the masked paths in it stand for.
     /// Input: the agent id. Output: the capture.
     fn capture(&self, id: i64) -> Result<Value, String> {
         let record = self.record(id);
@@ -410,17 +414,28 @@ impl Team {
             .collect();
         env_names.sort();
         env_names.dedup();
-        let sdkroot = sdkroot_fact(&mut env_names)?;
+        let sdkroot = sdkroot_fact(&mut env_names, true)?;
         let state = self.state();
         let home = crazyagent::team::runtime::agent_home(&state, id);
         let installed = crazyagent::team::runtime::agent_profile(&state, id);
-        let (profile, machine_reads) = if installed.exists() {
+        let (profile, machine_reads, network) = if installed.exists() {
             let text = bounded(&installed)?.replace(&self.stand_in, HARNESS_TOKEN);
             let (text, facts) = without_machine_reads(&text, &machine_folders()?);
-            (Some(text), facts)
+            let network = loopback_facts(&text, self.recorder.port);
+            (Some(text), facts, network)
         } else {
-            (None, Value::Null)
+            (None, Value::Null, Value::Null)
         };
+        let canonical = |folder: &Path| {
+            folder
+                .canonicalize()
+                .map_err(|error| format!("{}: {error}", folder.display()))
+        };
+        let anchors = json!({
+            "engine_root": canonical(self.engine.path())?,
+            "projects_home": canonical(&self.projects)?,
+            "agent_home": canonical(&home)?,
+        });
         Ok(json!({
             "argv": argv,
             "env_names": env_names,
@@ -428,8 +443,26 @@ impl Team {
             "home_files": home_files(&home)?,
             "profile": profile.as_deref().map(|text| text.lines().collect::<Vec<&str>>()),
             "machine_reads": machine_reads,
+            "network": network,
+            "anchors": anchors,
         }))
     }
+}
+
+/// Stable facts about the loopback remotes a profile lets the agent reach, since the runner
+/// masks loopback ports: whether the account's own endpoint port is allowed and how many
+/// other loopback ports are. Inputs: the profile and the endpoint port. Output: the facts.
+pub(super) fn loopback_facts(profile: &str, endpoint: u16) -> Value {
+    let ports: Vec<&str> = profile
+        .split("\"localhost:")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    let own = endpoint.to_string();
+    json!({
+        "endpoint_allowed": ports.contains(&own.as_str()),
+        "other_loopback_remotes": ports.iter().filter(|port| **port != own).count(),
+    })
 }
 
 /// Reads a whole text file of at most [`READ_BYTES_MAX`] bytes. Input: the file. Output:
@@ -470,13 +503,18 @@ fn machine_folders() -> Result<Vec<String>, String> {
 
 /// Takes `SDKROOT` out of a launch's variable names and states whether it was there
 /// exactly when the engine gives it on this Mac, so the names read the same on a Mac
-/// without developer tools. Input: the sorted names. Output: `as_the_engine_gives_it`,
-/// `unexpected` or `missing`.
-pub(super) fn sdkroot_fact(env_names: &mut Vec<String>) -> Result<&'static str, String> {
+/// without developer tools. Inputs: the names and whether this launch path gives the
+/// toolchain variables at all (a pane always, a headless run only with tools on).
+/// Output: `as_the_engine_gives_it`, `unexpected` or `missing`.
+pub(super) fn sdkroot_fact(
+    env_names: &mut Vec<String>,
+    tool_variables: bool,
+) -> Result<&'static str, String> {
     let homes = ToolHomes::owner().map_err(|error| format!("{error:?}"))?;
-    let expected = toolchains::agent_env(Path::new("/"), &homes)
-        .iter()
-        .any(|(name, _)| *name == SDKROOT);
+    let expected = tool_variables
+        && toolchains::agent_env(Path::new("/"), &homes)
+            .iter()
+            .any(|(name, _)| *name == SDKROOT);
     let given = env_names.iter().any(|name| name == SDKROOT);
     env_names.retain(|name| name != SDKROOT);
     Ok(match (given, expected) {
@@ -568,4 +606,17 @@ fn a_machine_folder_in_a_write_rule_turns_the_read_only_fact() {
     let (kept, facts) = without_machine_reads(&profile, &[developer]);
     assert_eq!(kept, "(allow file-write*\n  (subpath \"/opt/w\"))\n");
     assert_eq!(facts, json!({"read_only": false, "named_elsewhere": false}));
+}
+
+#[test]
+fn loopback_facts_name_the_endpoint_port_and_count_the_others() {
+    let profile = "(allow network-outbound (remote ip \"localhost:41234\"))\n(allow network-outbound (remote ip \"localhost:5000\"))\n";
+    assert_eq!(
+        loopback_facts(profile, 41234),
+        json!({"endpoint_allowed": true, "other_loopback_remotes": 1})
+    );
+    assert_eq!(
+        loopback_facts(profile, 41235),
+        json!({"endpoint_allowed": false, "other_loopback_remotes": 2})
+    );
 }
