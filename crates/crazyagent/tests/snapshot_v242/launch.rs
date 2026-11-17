@@ -208,11 +208,12 @@ for a in "$@"; do printf '%s\000' "$a"; done > "$r.part/argv"
 while IFS= read -r line; do :; done
 "#;
 
-/// Writes the stand-in as `codex` and `claude` at its one fixed place below cargo's
-/// per-target temp folder, outside every temp folder the engine refuses a harness in.
+/// Writes the stand-in as `codex` and `claude` at its one fixed place directly below the
+/// cargo target folder: outside every temp folder the engine refuses a harness in, and not
+/// below cargo's `tmp`, whose name after `<target>` the runner would read as a temp folder.
 /// Output: the canonical folder holding both.
 pub(super) fn stand_in() -> Result<PathBuf, String> {
-    let folder = Path::new(env!("CARGO_TARGET_TMPDIR")).join("snapshot-v242");
+    let folder = Path::new(&target()?).join("snapshot-v242");
     std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
         .map_err(|error| error.to_string())?;
@@ -306,13 +307,22 @@ fn applied(what: &str, result: OwnerResult) -> Result<(), String> {
 }
 
 /// Sends one model access change as the owner's model access screen does, against a fresh
-/// read of the settings. Inputs: the owner, the change and what it is, for the message.
-/// Output: nothing, or why the change was not applied.
+/// read of the page of the collection it changes. Inputs: the owner, the change and what it
+/// is, for the message. Output: nothing, or why the change was not applied.
 async fn model_access(owner: &mut Owner, edit: ModelAccessEdit, what: &str) -> Result<(), String> {
+    let collection = match &edit {
+        ModelAccessEdit::AddAccount { .. } | ModelAccessEdit::RemoveAccount { .. } => {
+            ModelAccessCollection::Accounts
+        }
+        ModelAccessEdit::CreateConnection { .. }
+        | ModelAccessEdit::ReplaceConnection { .. }
+        | ModelAccessEdit::RemoveConnection { .. } => ModelAccessCollection::Connections,
+        _ => ModelAccessCollection::Pools,
+    };
     let page = owner
         .controller
         .read(OwnerRead::ModelAccessPage {
-            collection: ModelAccessCollection::Pools,
+            collection,
             cursor: None,
             limit: 1,
         })
@@ -371,10 +381,10 @@ async fn create_pool(
     .await
 }
 
-/// Adds the keyless Anthropic Messages connection on the loopback recorder, with its
-/// account, as the owner's model access screen adds a connected account; Claude Code runs
-/// only on that protocol and no account draft offers it off Anthropic's own host. Inputs:
-/// the owner and the endpoint address. Output: the connection, or why it was not added.
+/// Adds the keyless Anthropic Messages connection on the loopback recorder after its
+/// account, the two changes the owner's model access screen sends; Claude Code runs only
+/// on that protocol and no account draft offers it off Anthropic's own host. Inputs: the
+/// owner and the endpoint address. Output: the connection, or why it was not added.
 async fn add_anthropic(owner: &mut Owner, url: String) -> Result<CredentialRef, String> {
     let connection = ModelConnection {
         id: reference(ANTHROPIC_CONNECTION)?,
@@ -390,7 +400,11 @@ async fn add_anthropic(owner: &mut Owner, url: String) -> Result<CredentialRef, 
         auth: ModelAuthentication::None {},
     };
     let id = connection.id.clone();
-    let edit = ModelAccessEdit::AddConnectedAccount { connection };
+    let account = ModelAccessEdit::AddAccount {
+        account_ref: connection.account_ref.clone(),
+    };
+    model_access(owner, account, "add the Anthropic Messages account").await?;
+    let edit = ModelAccessEdit::CreateConnection { connection };
     model_access(owner, edit, "add the Anthropic Messages connection").await?;
     Ok(id)
 }
@@ -841,8 +855,8 @@ fn the_target_folder_is_replaced_only_as_a_whole_path_prefix() {
         ),
         ("\"/w/.local-state/target\"", "\"<target>\""),
         (
-            "/w/.local-state/target/tmp/snapshot-v242/codex",
-            "<target>/tmp/snapshot-v242/codex",
+            "/w/.local-state/target/snapshot-v242/codex",
+            "<target>/snapshot-v242/codex",
         ),
         (
             "\"/w/.local-state/target2/debug\"",
