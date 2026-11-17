@@ -4483,8 +4483,9 @@ fn the_move_ask_lists_the_folders_a_move_leaves_in_icloud_and_space_downloads_ev
     use crate::projects_home::AddMode;
     use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
     let project = ProjectId::new("kept").unwrap();
-    let mut screen = ProjectScreen::new(project, "Kept".into(), None);
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
     assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
     let reading = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
     assert!(reading.contains("Reading the folder..."), "{reading}");
@@ -4512,7 +4513,7 @@ fn the_move_ask_lists_the_folders_a_move_leaves_in_icloud_and_space_downloads_ev
         "node_modules (57108 files)",
         "web/.venv (files not counted)",
         "and 1968 more folders (1968 files)",
-        "They stay in the old folder;",
+        "They stay in /private/tmp/ca-notes-cli;",
         "[ ] Download everything (slow)",
     ] {
         assert!(shown.contains(line), "{line} missing: {shown}");
@@ -4548,6 +4549,17 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     let project = ProjectId::new("kept").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert!(
+        !screen.confirm_move,
+        "no ask before the project folder is known"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the project folder. Try again.")
+    );
+    screen.problem = None;
+    screen.setup = Some(stored(&project));
     let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
     assert!(shown.contains("M Move into CrazyAgent folder"), "{shown}");
     assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);

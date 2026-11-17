@@ -2498,26 +2498,44 @@ impl ProjectScreen {
     /// Takes the folder read for the move ask: the rebuildable folders a move would leave in
     /// iCloud, empty when there are none or the read failed. Takes the folders.
     pub fn move_read(&mut self, left: crate::projects_home::icloud::SkippedFolders) {
-        let _ = left;
+        if self.confirm_move {
+            self.move_left = Some(left);
+        }
     }
 
     /// Answers one key in the move ask: m moves the project into the projects home, c copies
-    /// it there, and n or Esc keeps it where it is. Takes the key. Returns the move to send,
-    /// or Handled.
+    /// it there, both only once the folder read landed, Space switches Download everything
+    /// while the read names folders a move leaves in iCloud, and n or Esc keeps it where it is.
+    /// Takes the key. Returns the move to send with the switch, or Handled.
     fn move_key(&mut self, key: KeyEvent) -> ProjectReply {
         use crate::projects_home::AddMode;
         assert!(self.confirm_move);
+        let leaves = self.move_left.as_ref().is_some_and(|left| !left.is_empty());
         let mode = match key.code {
-            KeyCode::Char('m') => AddMode::Move,
-            KeyCode::Char('c') => AddMode::Copy,
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.confirm_move = false;
+                self.close_move();
                 return ProjectReply::Handled;
             }
+            _ if self.move_left.is_none() => return ProjectReply::Handled,
+            KeyCode::Char(' ') if leaves => {
+                self.move_everything = !self.move_everything;
+                return ProjectReply::Handled;
+            }
+            KeyCode::Char('m') => AddMode::Move,
+            KeyCode::Char('c') => AddMode::Copy,
             _ => return ProjectReply::Handled,
         };
+        let everything = self.move_everything;
+        assert!(leaves || !everything);
+        self.close_move();
+        ProjectReply::MoveHome(mode, everything)
+    }
+
+    /// Closes the move ask and forgets its folder read and switch.
+    fn close_move(&mut self) {
         self.confirm_move = false;
-        ProjectReply::MoveHome(mode, false)
+        self.move_left = None;
+        self.move_everything = false;
     }
 
     /// Closes the remove ask and forgets its preview, choice and typed name.
@@ -2680,8 +2698,14 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('M') => {
+                if self.setup.is_none() {
+                    self.problem = Some("Still loading the project folder. Try again.".into());
+                    return ProjectReply::Handled;
+                }
                 self.confirm_move = true;
-                ProjectReply::Handled
+                self.move_left = None;
+                self.move_everything = false;
+                ProjectReply::MoveRead
             }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('G') => ProjectReply::GitHubRules,
@@ -3049,6 +3073,7 @@ impl ProjectScreen {
             self.confirm_move,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        assert!(self.confirm_move || (self.move_left.is_none() && !self.move_everything));
         if self.remove_choice == RemoveChoice::Everything {
             assert!(self.confirm_remove);
             assert!(

@@ -36,6 +36,12 @@ test("#383 F1: a done add counts the left folders the engine named no more of", 
     / a\/node_modules, b\/node_modules, c\/node_modules and 1997 more were not copied; reinstall them/);
 });
 
+test("#383 code F1: a done project move says which rebuildable folders stayed in the old folder", () => {
+  const left = [{ path: "packages/web/node_modules", files: 57108 }];
+  assert.equal(intake.jobLine(job({ state: "done" }, { kind: "move_project", project_id: "reading", source: "/Users/mira/Code/reading-list", left })),
+    "reading-list is now in your projects folder. Start the team again from Team. packages/web/node_modules stayed in /Users/mira/Code/reading-list; reinstall it in the project.");
+});
+
 test("an intake job line says what it does now, with counts as files land", () => {
   assert.equal(intake.jobLine(job(downloading(0, 0))), "Downloading shop from iCloud...");
   assert.equal(intake.jobLine(job(downloading(12, 3000))), "macOS is downloading shop: 12 of 3000 files");

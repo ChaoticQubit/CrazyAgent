@@ -185,15 +185,32 @@ export function ICloudDialog({ open, name, source, placeholders, way, skipped, s
   const title = fetches ? `Download ${name} from iCloud first?` : `Some of ${name} stays in iCloud`;
   return <Dialog open={open} title={title} onClose={onCancel} footer={footer}>
     {fetches && <p>{icloudCountLine(wanted)}</p>}
-    {skipped.length > 0 && <>
-      <p>{everything ? "Downloaded too:" : "Left in iCloud, as they can be rebuilt:"}</p>
-      <ul>{skipped.map((folder) => <li key={folder.path} className="pj-mono">{icloudSkippedLine(folder)}</li>)}
-        {skippedMore && <li>{icloudSkippedMoreLine(skippedMore)}</li>}</ul>
-      {!everything && <p className="pj-secondary">They stay in {displayText(source)}; reinstall them in the project after the add.</p>}
-      <Switch id="icloud-everything" label="Download everything (slow)" checked={everything} onChecked={onEverything} />
-    </>}
+    {leftInIcloud({ skipped, skippedMore, everything, onEverything, source, job: "add" })}
     <Notice tone="info">{icloudMoveLine(source)}</Notice>
   </Dialog>;
+}
+
+/** The rebuildable folders an add or a project move leaves in iCloud: each named folder with
+ * its file count, the counted rest, where they stay unless everything is downloaded, and the
+ * Download everything (slow) switch that downloads them too. Inputs: the folders, the counted
+ * rest, the switch and its handler, the old folder and the job's word. Output: the block, or
+ * nothing when no folder is left. */
+export function leftInIcloud({ skipped, skippedMore, everything, onEverything, source, job }: {
+  skipped: SkippedFolder[];
+  skippedMore: SkippedMore | null;
+  everything: boolean;
+  onEverything: (everything: boolean) => void;
+  source: string;
+  job: "add" | "move" | "copy";
+}) {
+  if (skipped.length === 0 && skippedMore === null) return null;
+  return <>
+    <p>{everything ? "Downloaded too:" : "Left in iCloud, as they can be rebuilt:"}</p>
+    <ul>{skipped.map((folder) => <li key={folder.path} className="pj-mono">{icloudSkippedLine(folder)}</li>)}
+      {skippedMore && <li>{icloudSkippedMoreLine(skippedMore)}</li>}</ul>
+    {!everything && <p className="pj-secondary">They stay in {displayText(source)}; reinstall them in the project after the {job}.</p>}
+    <Switch id="icloud-everything" label="Download everything (slow)" checked={everything} onChecked={onEverything} />
+  </>;
 }
 
 /** Add an existing folder: picks it in the macOS chooser and reads its size and git links. By

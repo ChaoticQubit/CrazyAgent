@@ -634,6 +634,81 @@ fn a_move_out_of_icloud_leaves_rebuildable_folders_still_in_icloud_at_the_source
     );
 }
 
+/// #383 code F1: a move out of iCloud whose left folder sits deeper, as in a monorepo's
+/// packages/web/node_modules, keeps at the source only that folder and the folders holding
+/// it, clears every other entry there, and the copy has the rest of packages/web.
+#[test]
+fn a_move_out_of_icloud_keeps_only_a_nested_left_folder_and_the_folders_holding_it() {
+    use std::os::unix::fs::PermissionsExt;
+    super::super::icloud::fake::placeholders();
+    let root = tempfile::tempdir().unwrap();
+    let source = fs::canonicalize(root.path()).unwrap().join("mono");
+    for dir in [
+        "packages/web/src",
+        "packages/web/node_modules/react",
+        "packages/api",
+    ] {
+        fs::create_dir_all(source.join(dir)).unwrap();
+    }
+    for file in [
+        "README.md",
+        "packages/web/package.json",
+        "packages/web/src/app.js",
+        "packages/web/node_modules/react/index.js",
+        "packages/api/main.py",
+    ] {
+        fs::write(source.join(file), "1\n").unwrap();
+    }
+    fs::set_permissions(
+        source.join("packages/web/node_modules/react/index.js"),
+        fs::Permissions::from_mode(super::super::icloud::fake::MODE),
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let destination = fs::canonicalize(home.path()).unwrap().join("mono");
+    let plan = AddPlan::new(
+        source.clone(),
+        destination.clone(),
+        AddMode::Move,
+        skipping(),
+    );
+    let Placed::Copied(old) = plan.place_by_copy(&Tally::default()).unwrap() else {
+        panic!("a move by copy leaves its source to clear");
+    };
+    old.clear().unwrap();
+    for file in [
+        "README.md",
+        "packages/web/package.json",
+        "packages/web/src/app.js",
+        "packages/api/main.py",
+    ] {
+        assert!(destination.join(file).is_file(), "{file}");
+    }
+    assert!(fs::symlink_metadata(destination.join("packages/web/node_modules")).is_err());
+    let mut kept = Vec::new();
+    let mut stack = vec![source.clone()];
+    while let Some(folder) = stack.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path.clone());
+            }
+            kept.push(path.strip_prefix(&source).unwrap().display().to_string());
+        }
+    }
+    kept.sort();
+    assert_eq!(
+        kept,
+        [
+            "packages",
+            "packages/web",
+            "packages/web/node_modules",
+            "packages/web/node_modules/react",
+            "packages/web/node_modules/react/index.js",
+        ]
+    );
+}
+
 #[test]
 fn a_copy_out_of_icloud_leaves_the_same_folders_out_and_download_everything_still_refuses() {
     super::super::icloud::fake::placeholders();

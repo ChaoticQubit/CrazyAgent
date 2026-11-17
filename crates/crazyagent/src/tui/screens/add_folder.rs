@@ -1254,10 +1254,6 @@ fn question_lines(
     lines.push(buttons(&[keep, anyway], Some(question.choice), theme));
 }
 
-/// Draws the iCloud question: how many files are only in iCloud, the rebuildable folders the
-/// add leaves there with their file counts and where they stay, the Download everything
-/// switch, that a move takes the folder out of iCloud on the owner's other Macs, and the
-
 /// A count of files as the iCloud question shows it. Takes the count, None when it is not
 /// known. Returns "1 file", "N files" or "files not counted".
 fn files_label(files: Option<u64>) -> String {
@@ -1267,6 +1263,62 @@ fn files_label(files: Option<u64>) -> String {
         None => "files not counted".to_owned(),
     }
 }
+
+/// Words for the rebuildable folders an add or a project move leaves in iCloud: the heading,
+/// each named folder with its file count, the counted rest, where they stay unless everything
+/// is downloaded, and the Download everything switch. Takes the folders, the switch, the old
+/// folder and the job's word, "add" or "move". Returns the lines, none when nothing is left.
+pub(in crate::tui) fn left_texts(
+    skipped: &SkippedFolders,
+    everything: bool,
+    source: &str,
+    job: &str,
+) -> Vec<String> {
+    let mut texts = Vec::new();
+    if skipped.is_empty() {
+        return texts;
+    }
+    texts.push(
+        match everything {
+            true => "Downloaded too:",
+            false => "Left in iCloud, as they can be rebuilt:",
+        }
+        .to_owned(),
+    );
+    texts.extend(
+        skipped
+            .listed
+            .iter()
+            .map(|folder| format!("  {} ({})", folder.path, files_label(folder.files))),
+    );
+    if let Some(more) = skipped.more {
+        let folders = if more.folders == 1 {
+            "folder"
+        } else {
+            "folders"
+        };
+        texts.push(format!(
+            "  and {} more {folders} ({})",
+            more.folders,
+            files_label(more.files)
+        ));
+    }
+    if !everything {
+        texts.push(format!(
+            "They stay in {source}; reinstall them in the project after the {job}."
+        ));
+    }
+    let mark = if everything { "[x]" } else { "[ ]" };
+    texts.push(format!(
+        "{mark} Download everything (slow): Space switches it"
+    ));
+    assert!(texts.len() >= 3);
+    texts
+}
+
+/// Draws the iCloud question: how many files are only in iCloud, the rebuildable folders the
+/// add leaves there with their file counts and where they stay, the Download everything
+/// switch, that a move takes the folder out of iCloud on the owner's other Macs, and the
 /// three answers. Takes the question, the width, the context and the lines to add to.
 fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'static>>) {
     let theme = &ctx.theme;
@@ -1281,44 +1333,12 @@ fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'
     if wanted != Some(0) {
         texts.push(icloud_count(wanted));
     }
-    if !icloud.skipped.is_empty() {
-        texts.push(
-            match icloud.everything {
-                true => "Downloaded too:",
-                false => "Left in iCloud, as they can be rebuilt:",
-            }
-            .to_owned(),
-        );
-        texts.extend(
-            icloud
-                .skipped
-                .listed
-                .iter()
-                .map(|folder| format!("  {} ({})", folder.path, files_label(folder.files))),
-        );
-        if let Some(more) = icloud.skipped.more {
-            let folders = if more.folders == 1 {
-                "folder"
-            } else {
-                "folders"
-            };
-            texts.push(format!(
-                "  and {} more {folders} ({})",
-                more.folders,
-                files_label(more.files)
-            ));
-        }
-        if !icloud.everything {
-            texts.push(format!(
-                "They stay in {}; reinstall them in the project after the add.",
-                icloud.source
-            ));
-        }
-        let mark = if icloud.everything { "[x]" } else { "[ ]" };
-        texts.push(format!(
-            "{mark} Download everything (slow): Space switches it"
-        ));
-    }
+    texts.extend(left_texts(
+        &icloud.skipped,
+        icloud.everything,
+        &icloud.source,
+        "add",
+    ));
     let place = icloud_place(&icloud.source, ctx.home.as_deref());
     texts.push(format!(
         "Moving takes the folder out of {place} on your other Macs too."

@@ -627,6 +627,32 @@ fn the_download_line_says_macos_downloads_with_the_files_and_bytes_landed() {
     );
 }
 
+/// #383 code F1 (DEC-198): a done project move says after its start-the-team line which
+/// rebuildable folders stayed in the old folder, nested ones by their path below it, and
+/// that the owner reinstalls them.
+#[test]
+fn a_done_project_move_says_which_rebuildable_folders_stayed_in_the_old_folder() {
+    let moved = JobView {
+        kind: crate::projects_home::job::JobKind::MoveProject,
+        left: vec![crate::projects_home::icloud::Skipped {
+            path: "packages/web/node_modules".into(),
+            files: Some(57_108),
+        }],
+        mode: AddMode::Move,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&moved).ends_with(
+            "is now in your projects folder. Start the team again from Team. \
+             packages/web/node_modules stayed in \
+             /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; \
+             reinstall it in the project."
+        ),
+        "{}",
+        line(&moved)
+    );
+}
+
 #[test]
 fn a_done_add_counts_the_left_folders_it_does_not_name() {
     let folder = |path: &str| crate::projects_home::icloud::Skipped {
