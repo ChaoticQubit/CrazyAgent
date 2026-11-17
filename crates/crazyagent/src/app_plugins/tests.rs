@@ -22,7 +22,10 @@ fn every_code_the_reader_and_the_manifest_refuse_with_has_its_plain_sentence() {
         .collect();
     assert!(codes.len() > 40, "the codes are read: {codes:?}");
     for code in codes {
-        assert!(plain_problem(code).is_some(), "{code} has no plain sentence");
+        assert!(
+            plain_problem(code).is_some(),
+            "{code} has no plain sentence"
+        );
     }
     assert!(
         PLAIN
