@@ -556,7 +556,7 @@ fn each_claude_free_resets_source_picks_the_detail_user_agent_or_none() {
 fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
     use super::spend::{ResetsSource, SpendSettings};
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::harnesses::finding::outside_temp("ca-usage-");
     let team = root.path().join("team");
     std::fs::create_dir(&team).unwrap();
     let claude = root.path().join("claude");
@@ -580,7 +580,10 @@ fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
     assert_eq!(detail_agent(fresh, Some("2.1.330")), None);
     extras::request_detail(&usage.db, NOW).unwrap();
     usage.step(NOW).unwrap();
-    assert_eq!(usage.detail_ms, Some(NOW), "the detail reads were due");
+    assert_eq!(
+        usage.detail_ms, None,
+        "Don't read makes no detail read, so it stamps none"
+    );
     assert_eq!(ran(), 0, "Don't read asks Claude Code nothing");
     let stored = SpendSettings {
         resets_source: ResetsSource::ThroughClaudeCode,
@@ -592,6 +595,83 @@ fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
     usage.step(later).unwrap();
     assert_eq!(usage.detail_ms, Some(later));
     assert_eq!(ran(), 1, "a stored Through Claude Code asks it");
+}
+
+/// A reading source picked after Don't read shows its free resets at once under an open Pools
+/// page: the next step reads, also within `DETAIL_EVERY_MS` of a read made before Don't read,
+/// while an unchanged source and a change between Through and As Claude Code, which make the
+/// same call, rest `DETAIL_EVERY_MS` between reads (V243-RESETS-SETTING-REFRESH).
+#[cfg(unix)]
+#[test]
+fn a_claude_free_resets_source_picked_after_dont_read_reads_on_the_next_step() {
+    use super::spend::{ResetsSource, SpendSettings};
+    use std::os::unix::fs::PermissionsExt;
+    let root = crate::harnesses::finding::outside_temp("ca-usage-");
+    let team = root.path().join("team");
+    std::fs::create_dir(&team).unwrap();
+    let claude = root.path().join("claude");
+    let runs = root.path().join("runs");
+    let script = format!(
+        "#!/bin/sh\necho x >> '{}'\necho '2.1.330 (Claude Code)'\n",
+        runs.display()
+    );
+    std::fs::write(&claude, script).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ran = || std::fs::read_to_string(&runs).map_or(0, |text| text.lines().count());
+    let mut usage = Usage::open(
+        &root.path().join("engine.db"),
+        &team,
+        Box::new(|| None),
+        BTreeMap::from([("claude-code", claude)]),
+    )
+    .unwrap();
+    let pick = |usage: &Usage, source: ResetsSource| {
+        let stored = SpendSettings {
+            resets_source: source,
+            ..spend::read(&usage.db).unwrap()
+        };
+        spend::write(&usage.db, stored).unwrap();
+    };
+    extras::request_detail(&usage.db, NOW).unwrap();
+    usage.step(NOW).unwrap();
+    assert_eq!(
+        (ran(), usage.detail_ms),
+        (0, None),
+        "Don't read reads nothing"
+    );
+    pick(&usage, ResetsSource::AsClaudeCode);
+    usage.step(NOW + 5_000).unwrap();
+    assert_eq!(
+        (ran(), usage.detail_ms),
+        (1, Some(NOW + 5_000)),
+        "the pick reads on the next step"
+    );
+    usage.step(NOW + 10_000).unwrap();
+    assert_eq!(
+        usage.detail_ms,
+        Some(NOW + 5_000),
+        "an unchanged source rests between reads"
+    );
+    pick(&usage, ResetsSource::ThroughClaudeCode);
+    usage.step(NOW + 15_000).unwrap();
+    assert_eq!(
+        usage.detail_ms,
+        Some(NOW + 5_000),
+        "a change between Through and As makes the same call, so it rests"
+    );
+    pick(&usage, ResetsSource::Off);
+    usage.step(NOW + 20_000).unwrap();
+    assert_eq!(
+        usage.detail_ms, None,
+        "a move to Don't read changes the detail call, so it clears the rest and stamps no read"
+    );
+    pick(&usage, ResetsSource::AsClaudeCode);
+    usage.step(NOW + 25_000).unwrap();
+    assert_eq!(
+        usage.detail_ms,
+        Some(NOW + 25_000),
+        "a pick after Don't read reads on the next step, within the rest of an earlier read"
+    );
 }
 
 /// "Don't read" forgets the stored free resets of every Claude account and only those, so
@@ -651,7 +731,7 @@ fn dont_read_forgets_the_stored_claude_free_resets_and_keeps_codex() {
 fn the_detail_user_agent_names_the_installed_claude_code_and_reads_it_again_after_an_update() {
     use super::spend::ResetsSource;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::harnesses::finding::outside_temp("ca-usage-");
     let team = root.path().join("team");
     std::fs::create_dir(&team).unwrap();
     let bin = root.path().join("bin");

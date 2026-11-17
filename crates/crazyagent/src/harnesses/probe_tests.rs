@@ -20,7 +20,7 @@ fn install(folder: &Path) {
 /// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
 /// ([`crate::tools::homebrew_folders`]); the catalog's built-in folders come from there too,
 /// so the catalog and the pin never find this Mac's own Homebrew harness under the gate.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 #[test]
 fn the_catalog_looks_in_homebrew_where_the_tool_resolver_does() {
     let homebrew = crate::tools::homebrew_folders();

@@ -1,14 +1,16 @@
 use super::app_setup::{setup_plain, setup_reason};
 use super::harness_setup::{
     CANT_RUN, INSTALL_NODE, INSTALLING_NODE, NodeOffer, TRY_AGAIN, node_needed, node_offer,
-    node_reads_again,
+    node_reads_again, node_row,
 };
 use super::project_markdown::sanitize;
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::harnesses::finding::{self, Found};
-use crate::harnesses::update::{HarnessVersions, Latest, Method, UpdateMode, UpdateSettings};
+use crate::harnesses::update::{
+    HarnessVersions, Latest, Method, UNSUPPORTED_HERE, UpdateMode, UpdateSettings,
+};
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
@@ -117,7 +119,7 @@ const COPY: [(&str, &str); 28] = [
     ),
     (
         "harness_update_busy",
-        "Another harness update or install is running.",
+        "This harness is already updating or installing.",
     ),
     (
         "harness_update_not_installed",
@@ -326,22 +328,33 @@ pub(super) fn last_line(versions: &HarnessVersions, name: &str) -> Option<String
     })
 }
 
-/// The sentence under the version line of an installed harness: a running update, how the
-/// last job ended, or why Update is not offered. Inputs: the versions and the harness name.
+/// What a running job's row says: the harness whose job it waits behind, else the given
+/// word. Inputs: the waited-for harness's name and the word. Output: the sentence.
+pub(super) fn running_line(waits: Option<&str>, word: &str) -> String {
+    waits.map_or_else(
+        || word.to_owned(),
+        |name| format!("Waiting for {name} to finish..."),
+    )
+}
+
+/// The sentence under the version line of an installed harness: a running update, or the
+/// harness its update waits behind, how the last job ended, or why Update is not offered.
+/// Inputs: the versions, the harness name and the waited-for harness's name.
 /// Output: the sentence, or None.
-fn update_state(versions: &HarnessVersions, name: &str) -> Option<String> {
+fn update_state(versions: &HarnessVersions, name: &str, waits: Option<&str>) -> Option<String> {
     if versions.running {
-        return Some("Updating...".to_owned());
+        return Some(running_line(waits, "Updating..."));
     }
     last_line(versions, name).or_else(|| refusal(versions))
 }
 
-/// The sentence for a harness that is not installed: a running install, how the last one
-/// ended, the key that installs it, or why it can't be installed from here.
-/// Inputs: the versions and the harness name. Output: the sentence.
-fn install_state(versions: &HarnessVersions, name: &str) -> String {
+/// The sentence for a harness that is not installed: a running install, or the harness its
+/// install waits behind, how the last one ended, the key that installs it, or why it can't
+/// be installed from here. Inputs: the versions, the harness name and the waited-for
+/// harness's name. Output: the sentence.
+fn install_state(versions: &HarnessVersions, name: &str, waits: Option<&str>) -> String {
     if versions.running {
-        return "Installing...".to_owned();
+        return running_line(waits, "Installing...");
     }
     if let Some(line) = last_line(versions, name) {
         return line;
@@ -495,7 +508,7 @@ pub struct Harnesses {
     asking: BTreeSet<String>,
     confirm: Option<Confirm>,
     wants: Option<(String, Job)>,
-    running: Option<(String, usize)>,
+    running: BTreeMap<String, usize>,
     found: BTreeMap<String, Found>,
     finding: BTreeSet<String>,
     choosing: Option<(String, TextField)>,
@@ -529,7 +542,7 @@ impl Harnesses {
             asking: BTreeSet::new(),
             confirm: None,
             wants: None,
-            running: None,
+            running: BTreeMap::new(),
             found: BTreeMap::new(),
             finding: BTreeSet::new(),
             choosing: None,
@@ -665,11 +678,7 @@ impl Harnesses {
         };
         let waited = self.node_offer() == NodeOffer::Installing;
         self.setup_busy = status.running;
-        self.node = status
-            .dependencies
-            .iter()
-            .find(|tool| tool.name == Dependency::Node)
-            .map(|tool| tool.state.clone());
+        self.node = node_row(status);
         let settled = matches!(
             self.node,
             Some(DependencyState::Found { .. } | DependencyState::Installed { .. })
@@ -895,14 +904,14 @@ impl Harnesses {
             .to_owned()
     }
 
-    /// Says why no job can start while one runs, naming the harness that is busy: the engine
-    /// runs one update or install at a time. Inputs: the lead sentence and the context.
-    /// Output: whether a job runs, in which case the owner was told.
-    fn job_runs(&self, lead: &str, ctx: &mut Ctx) -> bool {
-        let Some((running, _)) = &self.running else {
+    /// Says why a harness takes no second job while its own runs; jobs of other harnesses
+    /// may run beside it. Inputs: the harness id, the lead sentence and the context.
+    /// Output: whether its job runs, in which case the owner was told.
+    fn job_runs(&self, id: &str, lead: &str, ctx: &mut Ctx) -> bool {
+        if !self.running.contains_key(id) {
             return false;
-        };
-        let name = self.name_of(running);
+        }
+        let name = self.name_of(id);
         ctx.say(Message::error(
             lead,
             &format!("{name} is being updated or installed. Wait until that ends."),
@@ -923,7 +932,7 @@ impl Harnesses {
     /// versions and the context. Output: none.
     fn offer(&mut self, id: &str, job: Job, versions: &HarnessVersions, ctx: &mut Ctx) {
         let lead = cant(job, &self.name_of(id));
-        if self.job_runs(&lead, ctx) {
+        if self.job_runs(id, &lead, ctx) {
             return;
         }
         if let Some(line) = job_line(versions, job) {
@@ -948,16 +957,11 @@ impl Harnesses {
         };
         let (id, name) = (entry.id.clone(), entry.name.clone());
         let lead = cant(Job::Update, &name);
-        let blocked = match self.mode() {
-            UpdateMode::Off => Some("harness_update_off"),
-            UpdateMode::CheckOnly => Some("harness_update_check_only"),
-            UpdateMode::CheckAndUpdate => None,
-        };
-        if let Some(code) = blocked {
+        if let Some(code) = update_blocked(self.mode()) {
             ctx.say(Message::error(&lead, update_copy(code)));
             return;
         }
-        if self.job_runs(&lead, ctx) {
+        if self.job_runs(&id, &lead, ctx) {
             return;
         }
         self.ask_for(id, Job::Update, ctx);
@@ -972,7 +976,7 @@ impl Harnesses {
             return;
         };
         let (id, name) = (entry.id.clone(), entry.name.clone());
-        if self.job_runs(&cant(Job::Install, &name), ctx) {
+        if self.job_runs(&id, &cant(Job::Install, &name), ctx) {
             return;
         }
         self.ask_for(id, Job::Install, ctx);
@@ -985,7 +989,7 @@ impl Harnesses {
         if *key != Key::Char('y') {
             return;
         }
-        if self.job_runs(&cant(job, &self.name_of(&id)), ctx) {
+        if self.job_runs(&id, &cant(job, &self.name_of(&id)), ctx) {
             return;
         }
         let request = match job {
@@ -993,22 +997,31 @@ impl Harnesses {
             Job::Install => SettingsJob::HarnessInstall { id: id.clone() },
         };
         send(ctx, request);
-        self.running = Some((id, 0));
+        self.running.insert(id, 0);
+        assert!(self.running.len() <= self.entries.len());
     }
 
+    /// Reads each running job's harness again, once per refresh while no read of it is out,
+    /// at most `UPDATE_POLLS_MAX` reads for each stretch of its wait and of its own run.
+    /// Input: the context. Output: none.
     fn poll(&mut self, ctx: &mut Ctx) {
-        let Some((id, polls)) = self.running.clone() else {
-            return;
-        };
-        if self.asking.contains(&id) {
-            return;
+        let due: Vec<String> = self
+            .running
+            .keys()
+            .filter(|id| !self.asking.contains(*id))
+            .cloned()
+            .collect();
+        for id in due {
+            let Some(polls) = self.running.get_mut(&id) else {
+                continue;
+            };
+            if *polls >= UPDATE_POLLS_MAX {
+                self.running.remove(&id);
+                continue;
+            }
+            *polls += 1;
+            self.ask_versions(&id, false, ctx);
         }
-        if polls >= UPDATE_POLLS_MAX {
-            self.running = None;
-            return;
-        }
-        self.running = Some((id.clone(), polls + 1));
-        self.ask_versions(&id, false, ctx);
     }
 
     fn arrive_versions(
@@ -1045,6 +1058,10 @@ impl Harnesses {
             }
         };
         let cleared = versions.needs.is_none() && !versions.running && self.needed_before(id);
+        let waited = self
+            .versions
+            .get(id)
+            .and_then(|before| before.waiting.clone());
         self.versions.insert(id.to_owned(), versions.clone());
         assert!(self.versions.len() <= self.entries.len());
         if self.node.is_none() && node_needed(versions) {
@@ -1064,15 +1081,19 @@ impl Harnesses {
                 "Press the key again to see what CrazyAgent would run now.",
             ));
         }
-        if versions.running && self.running.is_none() {
-            self.running = Some((id.to_owned(), 0));
+        if versions.running && !self.running.contains_key(id) {
+            self.running.insert(id.to_owned(), 0);
+            assert!(self.running.len() <= self.entries.len());
         }
-        let running = self
+        if let Some(polls) = self
             .running
-            .as_ref()
-            .is_some_and(|(running, _)| running == id);
-        if running && !versions.running {
-            self.running = None;
+            .get_mut(id)
+            .filter(|_| versions.waiting != waited)
+        {
+            *polls = 0;
+        }
+        if self.running.contains_key(id) && !versions.running {
+            self.running.remove(id);
             self.reload(ctx);
         }
         if let Some(job) = wanted {
@@ -1085,13 +1106,7 @@ impl Harnesses {
         match result {
             Ok(()) => self.poll(ctx),
             Err(code) => {
-                if self
-                    .running
-                    .as_ref()
-                    .is_some_and(|(running, _)| running == id)
-                {
-                    self.running = None;
-                }
+                self.running.remove(id);
                 let verb = match job {
                     Job::Update => "update",
                     Job::Install => "install",
@@ -1136,6 +1151,7 @@ impl Harnesses {
         versions: Option<&HarnessVersions>,
         found: Option<&Found>,
         off: bool,
+        waits: Option<&str>,
         limit: usize,
         ctx: &Ctx,
     ) -> Vec<Line<'static>> {
@@ -1187,7 +1203,7 @@ impl Harnesses {
                 }
                 if let Some(versions) = versions.filter(|_| needs.is_none() && !off) {
                     let mut text = version_line(versions);
-                    if let Some(state) = update_state(versions, &entry.name) {
+                    if let Some(state) = update_state(versions, &entry.name, waits) {
                         text = format!("{text} {state}");
                     }
                     for (index, part) in wrap(&text, room).into_iter().enumerate() {
@@ -1220,7 +1236,7 @@ impl Harnesses {
                         "Install it yourself, then press r to check again.",
                     )),
                     Some(versions) => {
-                        let state = install_state(versions, &entry.name);
+                        let state = install_state(versions, &entry.name, waits);
                         lines.extend(wrap(&state, limit.max(8)).into_iter().map(Line::raw));
                         if let Some(guide) = versions
                             .guide
@@ -1344,11 +1360,17 @@ impl Harnesses {
         lines.extend(self.node_lines(limit, ctx));
         if let Some(entry) = self.entries.get(selected) {
             lines.push(Line::default());
+            let waits = self
+                .versions
+                .get(&entry.id)
+                .and_then(|versions| versions.waiting.as_deref())
+                .map(|id| self.name_of(id));
             lines.extend(Self::detail(
                 entry,
                 self.versions.get(&entry.id),
                 self.found.get(&entry.id),
                 self.mode() == UpdateMode::Off,
+                waits.as_deref(),
                 limit,
                 ctx,
             ));
@@ -1477,7 +1499,7 @@ impl Screen for Harnesses {
         }
         if self.chosen().is_some() && mode != UpdateMode::Off {
             hints.push(hint("c", "Check for updates"));
-            if mode == UpdateMode::CheckAndUpdate {
+            if update_blocked(mode).is_none() {
                 hints.push(hint("u", "Update"));
             }
         }
@@ -1697,7 +1719,7 @@ impl Screen for Harnesses {
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.waiting
             || !self.asking.is_empty()
-            || self.running.is_some()
+            || !self.running.is_empty()
             || !self.finding.is_empty()
             || self.sending_node
     }
@@ -1717,5 +1739,42 @@ pub(super) fn plain_update(code: &str) -> &'static str {
     }
 }
 
+/// Why Update is not offered with these settings here, as an update code: updates are off,
+/// set to check only, or this is Windows, where the engine runs no updater (DEC-194: Update
+/// is hidden there and the engine's own refusal stays the guard). Input: the update mode.
+/// Output: the code, or none when Update is offered.
+fn update_blocked(mode: UpdateMode) -> Option<&'static str> {
+    match mode {
+        UpdateMode::Off => Some("harness_update_off"),
+        UpdateMode::CheckOnly => Some("harness_update_check_only"),
+        UpdateMode::CheckAndUpdate if !cfg!(unix) => Some(UNSUPPORTED_HERE),
+        UpdateMode::CheckAndUpdate => None,
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// W1 (leader 01:25, DEC-194): Windows offers no Update in any update mode, so the key bar
+    /// shows no `u`, and a press says CrazyAgent can't update it on this computer.
+    #[test]
+    fn windows_offers_no_update_in_any_mode() {
+        assert_eq!(
+            update_blocked(UpdateMode::CheckAndUpdate),
+            Some(UNSUPPORTED_HERE)
+        );
+        assert_eq!(
+            update_blocked(UpdateMode::CheckOnly),
+            Some("harness_update_check_only")
+        );
+        assert_eq!(update_blocked(UpdateMode::Off), Some("harness_update_off"));
+        assert_eq!(
+            update_copy(UNSUPPORTED_HERE),
+            "CrazyAgent can't update it on this computer."
+        );
+    }
+}

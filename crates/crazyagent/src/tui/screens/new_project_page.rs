@@ -207,7 +207,7 @@ pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<Harn
 }
 
 /// The New project wizard as a shell screen.
-/// Holds the wizard, its last drawn view and the catalog read it waits for.
+/// Holds the wizard, its last drawn view and the catalog and GitHub sign-in reads it waits for.
 /// Engine reads go through the shell queue; creation runs as the engine's New Project job.
 /// A page the shell closed while its creation runs is carried, and then saves the picked
 /// agent access itself, since no project page opens for it.
@@ -216,6 +216,7 @@ pub(in crate::tui) struct NewProjectPage {
     view: View,
     creation: Option<Creation>,
     checking: bool,
+    reading_github: bool,
     asked: bool,
     carried: bool,
 }
@@ -310,6 +311,7 @@ impl NewProjectPage {
             view: View::default(),
             creation: None,
             checking: false,
+            reading_github: false,
             asked: false,
             carried: false,
         };
@@ -322,6 +324,16 @@ impl NewProjectPage {
         if !self.checking {
             self.checking = true;
             ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
+        }
+    }
+
+    /// Asks the engine for the GitHub sign-in unless that read is already on its way, so a
+    /// page shown again when the engine connects asks once. Takes the context. Returns
+    /// nothing; the answer arrives as an intake event.
+    fn ask_github(&mut self, ctx: &mut Ctx) {
+        if !self.reading_github {
+            self.reading_github = true;
+            intake::ask(ctx, IntakeQuery::GitHubStatus);
         }
     }
 
@@ -354,6 +366,9 @@ impl NewProjectPage {
         result: &Result<IntakeView, String>,
         ctx: &mut Ctx,
     ) {
+        if *query == IntakeQuery::GitHubStatus {
+            self.reading_github = false;
+        }
         if let Some(next) = self.wizard.publish.arrived(query, result) {
             intake::ask(ctx, next);
         }
@@ -463,14 +478,10 @@ impl NewProjectPage {
             }
         } else if let Stage::Checking(code) = &creation.stage
             && event.query == IntakeQuery::JobStatus
-            && matches!(event.result, Ok(IntakeView::Job(_)))
+            && matches!(event.result, Ok(IntakeView::Jobs(_)))
         {
             let code = code.clone();
-            let found = ctx
-                .store
-                .intake
-                .as_ref()
-                .is_some_and(|job| job.id == creation.id);
+            let found = ctx.store.intake.iter().any(|job| job.id == creation.id);
             if !found {
                 self.creation = None;
                 self.wizard.failed(&code);
@@ -484,7 +495,7 @@ impl NewProjectPage {
         Flow::Handled
     }
 
-    /// Follows this page's New Project in the job the shell keeps, by its id. Once it ended,
+    /// Follows this page's New Project in the jobs the shell keeps, by its id. Once it ended,
     /// the page takes it over and dismisses it before anything else, so the empty read after
     /// that dismiss is never a lost job; a made project then gets its pool and agent access
     /// and opens, any other end keeps the draft with its code. Takes the context. Returns the
@@ -495,7 +506,7 @@ impl NewProjectPage {
             .as_mut()
             .expect("only a started creation follows its job");
         assert_eq!(creation.stage, Stage::Following);
-        let job = ctx.store.intake.as_ref();
+        let job = ctx.store.intake.iter().find(|job| job.id == creation.id);
         let Some(ended) = creation.ended(job) else {
             return Flow::Handled;
         };
@@ -720,6 +731,7 @@ impl Drop for NewProjectPage {
                 view: View::default(),
                 creation: self.creation.take(),
                 checking: false,
+                reading_github: false,
                 asked: false,
                 carried: true,
             });
@@ -804,6 +816,7 @@ impl Screen for NewProjectPage {
         }
         if matches!(arrival, Arrival::Disconnected(_)) {
             self.checking = false;
+            self.reading_github = false;
             return Flow::Handled;
         }
         match arrival {
@@ -845,7 +858,7 @@ impl Screen for NewProjectPage {
             self.ask_harnesses(false, ctx);
         }
         self.ask_catalog(ctx);
-        intake::ask(ctx, IntakeQuery::GitHubStatus);
+        self.ask_github(ctx);
         self.redraw(ctx);
     }
 

@@ -16,6 +16,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "changes_git_failed",
     "changes_git_hooks",
     "changes_git_include",
+    "changes_git_old",
     "changes_git_unsupported",
     "changes_unavailable",
     "cleanup_agent_has_task",
