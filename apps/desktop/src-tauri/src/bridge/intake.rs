@@ -279,14 +279,16 @@ const SETUP_CODES: [&str; 48] = [
 /// of its files are only in iCloud (0 when unmeasured), the
 /// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
 /// folders, whether a Move keeps its git links and which link it breaks, whether a Copy keeps
-/// its own git data, whether it has git at all, and whether it is on the projects folder's
-/// disk (None when that is unknown).
+/// its own git data, whether it has git at all, whether it is on the projects folder's
+/// disk (None when that is unknown), and the rebuildable folders an add leaves in iCloud.
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_problem: Option<&'static str>,
     pub placeholders: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<crazyagent::projects_home::icloud::Skipped>,
     pub github: Option<String>,
     pub worktrees: usize,
     pub worktree_paths: Vec<String>,
@@ -554,18 +556,19 @@ impl NativeBridge {
             _ => return Err(failure("owner_read_failed")),
         };
         let read = self.owner_read(OwnerRead::FolderSize { path }).await;
-        let (bytes, placeholders, size_problem) = match read {
+        let (bytes, placeholders, skipped, size_problem) = match read {
             Ok(OwnerData::FolderSize {
                 bytes,
                 placeholders,
-            }) => (Some(bytes), placeholders, None),
+                skipped,
+            }) => (Some(bytes), placeholders, skipped, None),
             Ok(_) => return Err(failure("owner_read_failed")),
             Err(error) => match SIZE_PROBLEMS
                 .iter()
                 .copied()
                 .find(|code| *code == error.code)
             {
-                Some(code) => (None, 0, Some(code)),
+                Some(code) => (None, 0, Vec::new(), Some(code)),
                 None => return Err(error),
             },
         };
@@ -575,6 +578,7 @@ impl NativeBridge {
             bytes,
             size_problem,
             placeholders,
+            skipped,
             github,
             worktrees,
             worktree_paths,

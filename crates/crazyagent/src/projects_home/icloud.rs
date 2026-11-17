@@ -796,6 +796,9 @@ impl Paced<'_> {
     fn run(&self, pacer: &Pacer) -> Result<u64, EngineError> {
         let started = Instant::now();
         let listing = survey(self.root, self.root, 0, self.bounds, self.look)?;
+        if !listing.skipped.is_empty() {
+            eprintln!("icloud_download_skipped folders={}", listing.skipped.len());
+        }
         let mut entries = listing.entries;
         let mut queue = Queue::default();
         queue.add(listing.wanted);
