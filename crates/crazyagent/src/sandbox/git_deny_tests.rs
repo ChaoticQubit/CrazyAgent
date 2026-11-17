@@ -222,7 +222,7 @@ fn every_protected_git_path_is_denied_by_an_any_case_regex() {
     }
     for (path, below) in &rules {
         let rule = if *below {
-            format!("(regex #\"^{pattern}/{path}$\") (regex #\"^{pattern}/{path}/\")")
+            format!("(regex #\"^{pattern}/{path}(/|$)\")")
         } else {
             format!("(regex #\"^{pattern}/{path}$\")")
         };
@@ -233,7 +233,7 @@ fn every_protected_git_path_is_denied_by_an_any_case_regex() {
         any_case("worktrees"),
         any_case("modules")
     );
-    let submodules = format!("(regex #\"^{modules}$\") (regex #\"^{modules}/\")");
+    let submodules = format!("(regex #\"^{modules}(/|$)\")");
     assert!(text.contains(&submodules), "{submodules}\n{text}");
     assert!(text.contains(&format!(
         "(regex #\"^{}/{git}$\")",
@@ -263,7 +263,7 @@ fn every_protected_git_path_is_denied_by_an_any_case_regex() {
             seatbelt_pattern(&admin),
             any_case("HEAD")
         ),
-        format!("(regex #\"^{held}$\") (regex #\"^{held}/\")"),
+        format!("(regex #\"^{held}(/|$)\")"),
     ] {
         assert!(text.contains(&rule), "{rule}\n{text}");
     }
@@ -467,9 +467,9 @@ fn widened(case: &Case) -> (ProjectSandbox, PathBuf, PathBuf) {
 
 /// RV-DS241-16: every root the agent may write is listed in the nested-repository rule, its
 /// working tree with a `.git` denied below its top, every other root, the owner's temp folder
-/// and a shared writable folder included, with a `.git` denied at any depth; each as an `X$`
-/// and an `X/` regex rather than one with an optional `(/.*)?$` tail
-/// (V243-FARM2-PRODUCT-SMALL).
+/// and a shared writable folder included, with a `.git` denied at any depth; each as one
+/// `X(/|$)` regex rather than one with an optional `(/.*)?$` tail (V243-FARM2-PRODUCT-SMALL,
+/// V243-PROFILE-CAP-ROW).
 #[test]
 fn every_writable_root_is_under_the_nested_git_rule() {
     let case = case();
@@ -485,7 +485,7 @@ fn every_writable_root_is_under_the_nested_git_rule() {
         } else {
             format!("{pattern}/(.+/)?{dot_git}")
         };
-        let rule = format!("(regex #\"^{below}$\") (regex #\"^{below}/\")");
+        let rule = format!("(regex #\"^{below}(/|$)\")");
         assert!(text.contains(&rule), "{}\n{text}", root.display());
     }
 }

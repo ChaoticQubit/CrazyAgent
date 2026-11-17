@@ -5998,9 +5998,9 @@ mod profile_string_tests {
     }
 
     /// V243-FARM2-PRODUCT-SMALL: the agent home's config and kept-entry denies and the
-    /// regranted flag and `.git` denies match a path and everything below it as an `X$` and
-    /// an `X/` regex, never as one regex with a `(/.*)` tail, which libsandbox fails to
-    /// compile again in lower case after a fold group with no bracket class before it.
+    /// regranted flag and `.git` denies match a path and everything below it as one `X(/|$)`
+    /// regex, never with a `(/.*)` tail, which libsandbox fails to compile again in lower case
+    /// after a fold group with no bracket class before it (V243-PROFILE-CAP-ROW).
     #[test]
     fn home_denies_match_at_or_below_without_an_optional_tail() {
         let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
@@ -6012,7 +6012,7 @@ mod profile_string_tests {
         let flagged = seatbelt_pattern(home);
         assert!(
             regranted.contains(&format!(
-                "(deny file-write-flags file-write-acl (regex #\"^{flagged}$\") (regex #\"^{flagged}/\"))"
+                "(deny file-write-flags file-write-acl (regex #\"^{flagged}(/|$)\"))"
             )),
             "{regranted}"
         );
@@ -6020,7 +6020,7 @@ mod profile_string_tests {
         for root in [home, data] {
             let below = format!("{}/(.+/)?{git}", seatbelt_pattern(root));
             assert!(
-                regranted.contains(&format!("(regex #\"^{below}$\") (regex #\"^{below}/\")")),
+                regranted.contains(&format!("(regex #\"^{below}(/|$)\")")),
                 "{regranted}"
             );
         }
@@ -6029,8 +6029,9 @@ mod profile_string_tests {
     /// V243-FARM2-PRODUCT-SMALL: no regex of a closed-tops agent's profile, a clone's store
     /// denies or a home's config denies holds a `(/.*)` tail. libsandbox fails its second,
     /// lower-case compile of one after a fold group with no bracket class or wildcard before
-    /// it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is `X$` and `X/` instead. The HFS
-    /// rule alone keeps one, after its leading `(.*/)?`, which compiles.
+    /// it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is one `X(/|$)` regex instead
+    /// (V243-PROFILE-CAP-ROW). The HFS rule alone keeps a tail, after its leading `(.*/)?`,
+    /// which compiles.
     #[test]
     fn no_profile_regex_has_a_slash_tail() {
         let temp = tempfile::tempdir().unwrap();
@@ -6065,5 +6066,7 @@ mod profile_string_tests {
             .filter(|body| body.contains("(/.*)"))
             .collect();
         assert!(tailed.is_empty(), "{tailed:#?}");
+        let below = bodies.iter().filter(|body| body.ends_with("(/|$)")).count();
+        assert!(below >= 20, "{below}");
     }
 }
