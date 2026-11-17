@@ -321,3 +321,96 @@ fn removal(db: &Connection, project: &ProjectId, kept: bool) {
     assert!(log.append(&draft).unwrap() > 0);
     tx.commit().unwrap();
 }
+
+/// An engine store with the landing tables and no engine host, as the upgrade step finds
+/// it. Output: the store, at revision 0.
+fn unhosted() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch(
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
+        INSERT INTO state VALUES (1,0);",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    db
+}
+
+/// The landing tables the first run rows write, as they stand. Input: the store. Output:
+/// each table's rows.
+fn landing_rows(db: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let tables = [
+        "landing_agent_branches",
+        "landing_bases",
+        "landing_owner_edits",
+        "github_publish_prompt",
+    ];
+    tables
+        .iter()
+        .map(|table| rows(db, table).unwrap())
+        .collect()
+}
+
+/// Runs the first run in one upgrade transaction and commits it. Input: the store. Output:
+/// whether a run was appended.
+fn first_run(db: &Connection) -> bool {
+    use crate::storage::opening::Opening;
+    let behavior = rusqlite::TransactionBehavior::Immediate;
+    let tx = rusqlite::Transaction::new_unchecked(db, behavior).unwrap();
+    let appended = crate::landing_log::first_run(&tx, Opening::for_test(3)).unwrap();
+    tx.commit().unwrap();
+    appended
+}
+
+/// V250-L9 step 14: landing rows written before the log reach replay through one snapshot
+/// run at one revision, through the open's proof; integers and empty cells come back as
+/// they were, and a table the store lacks (verification_current) is an empty chunk.
+#[test]
+fn the_first_run_puts_landing_rows_from_before_the_log_on_it() {
+    let db = unhosted();
+    db.execute_batch(crate::landing::owner_edit::SCHEMA)
+        .unwrap();
+    db.execute_batch(crate::github::PROMPT_SCHEMA).unwrap();
+    let base = "a".repeat(40);
+    db.execute_batch(&format!(
+        "INSERT INTO landing_agent_branches VALUES ('/repo/.wt/one','/repo','{BRANCH}');
+        INSERT INTO landing_bases VALUES ('/repo/.wt/one','{base}');
+        INSERT INTO landing_owner_edits VALUES ('/repo/.wt/one','src/a.rs',5,'');
+        INSERT INTO github_publish_prompt VALUES ('app',NULL,1);
+        INSERT INTO github_publish_prompt VALUES ('web',7,0);"
+    ))
+    .unwrap();
+    let live = landing_rows(&db);
+    assert!(first_run(&db));
+    assert_eq!(revision(&db), 1, "one run, one revision");
+    let kinds: Vec<String> = events(&db).into_iter().map(|(kind, _)| kind).collect();
+    assert_eq!(
+        kinds.len(),
+        7,
+        "a chunk per table and the closing event: {kinds:?}"
+    );
+    assert_eq!(landing_rows(&db), live, "the run changes no row");
+    rebuild(&db).unwrap();
+    assert_eq!(landing_rows(&db), live);
+}
+
+/// V250-L9 step 14: a store with no landing row, or without the `state` table, gets no run,
+/// so the step moves no revision.
+#[test]
+fn the_first_run_writes_nothing_without_landing_rows() {
+    let db = unhosted();
+    assert!(!first_run(&db));
+    assert_eq!(revision(&db), 0);
+    assert!(events(&db).is_empty());
+
+    let stateless = Connection::open_in_memory().unwrap();
+    initialize(&stateless).unwrap();
+    stateless
+        .execute(
+            "INSERT INTO landing_bases VALUES ('/repo/.wt/one', ?1)",
+            ["a".repeat(40)],
+        )
+        .unwrap();
+    assert!(!first_run(&stateless), "no state table");
+    assert!(events(&stateless).is_empty());
+}

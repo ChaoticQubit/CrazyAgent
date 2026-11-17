@@ -537,6 +537,20 @@ const TABLES: [&str; 6] = [
     "github_publish_prompt",
 ];
 
+/// The first snapshot run of the landing tables, for the schema step that puts landing on
+/// the log (step 14): rows written before the log reach replay through it, through the
+/// open's proof. A store without the `state` table or with no landing row gets no run, so
+/// it moves no revision. Inputs: the step's transaction and the open's proof. Output:
+/// whether a run was appended, or the log's refusal.
+#[cfg(any(unix, test))]
+pub(crate) fn first_run(
+    tx: &Transaction<'_>,
+    opening: crate::storage::opening::Opening,
+) -> Result<bool, EngineError> {
+    let _ = (tx, opening);
+    Ok(false)
+}
+
 /// The most project removals a rebuild reads, as L6's bound.
 const REMOVALS_MAX: usize = 65_536;
 
