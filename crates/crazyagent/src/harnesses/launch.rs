@@ -595,7 +595,6 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
         "claude-code" => CLAUDE_DEFAULT_BASE_URL,
         _ => return Err(failure("launch_key_relay_unsupported")),
     };
-    assert!(super::KEY_RELAYED.contains(&harness_id(&request)));
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
         .map_err(|_| failure("launch_secret_invalid"))?;

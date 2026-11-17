@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, ResearchJob, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -75,27 +75,7 @@ export interface StoredSetup {
   revision: number;
 }
 
-export interface ResearchJob {
-  id: number;
-  project_id: string;
-  kind: JobKind;
-  kind_label: string;
-  status: ResearchStatus;
-  status_label: string;
-  report_path: string;
-  harness: string;
-  tools: boolean;
-  attempts: number;
-  claimer: string | null;
-  error: string | null;
-  cancel_requested: boolean;
-  output_bytes: number;
-  created_ms: number;
-  started_ms: number | null;
-  heartbeat_ms: number | null;
-  finished_ms: number | null;
-  retryable: boolean;
-}
+export type { ResearchJob } from "./engine-client";
 
 export type ActivityKind =
   | "created"

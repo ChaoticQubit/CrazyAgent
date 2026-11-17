@@ -428,7 +428,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
         .join("Packages")
         .join(name);
     assert!(container.is_dir());
-    let cleared = remove_check_folder(&checks, ID);
+    let cleared = check_folders::remove_check_folder(&checks, ID);
     assert!(!checks.join(ID).exists());
     cleared.await.unwrap();
     assert_eq!(containers(), before);
@@ -454,10 +454,10 @@ async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends()
     assert!(!checks.join(IDLE).exists());
     removed_server_checks(&checks, ID);
     assert!(checks.join(ID).is_dir());
-    assert!(checking().removed.iter().any(|removed| removed == ID));
+    assert!(check_folders::checking().removed.contains(&ID.to_owned()));
     drop(counted);
     assert!(!checks.join(ID).exists());
-    assert!(!checking().removed.iter().any(|removed| removed == ID));
-    assert!(!checking().running.iter().any(|running| running == ID));
+    assert!(!check_folders::checking().removed.contains(&ID.to_owned()));
+    assert!(!check_folders::checking().running.contains(&ID.to_owned()));
     drop(slot);
 }

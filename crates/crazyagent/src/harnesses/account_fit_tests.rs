@@ -181,6 +181,7 @@ fn a_relayed_harness_is_offered_keyed_accounts_only_where_the_key_relay_starts()
         .filter(|(.., connection)| matches!(connection.auth, ModelAuthentication::ApiKey { .. }))
         .collect();
     assert!(!keyed.is_empty());
+    let listed = super::catalog(&super::Search::new(Vec::new(), None, Vec::new()));
     for id in KEY_RELAYED {
         let harness = spec(id).unwrap();
         assert!(harness.account_kinds.contains(&AccountKind::ApiKey));
@@ -189,6 +190,8 @@ fn a_relayed_harness_is_offered_keyed_accounts_only_where_the_key_relay_starts()
             account_kinds_here(harness).contains(&AccountKind::ApiKey),
             here
         );
+        let entry = listed.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(entry.account_kinds, account_kinds_here(harness));
         if !here {
             assert!(
                 keyed

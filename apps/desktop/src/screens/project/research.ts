@@ -371,9 +371,8 @@ export interface ResearchRow {
 }
 
 /** What the owner can do with one research agent: read its log once it started, stop it while it
- * runs, cancel it while it waits, and try again after it failed or was stopped where the engine
- * can run it again. Input: the job. Output: whether to offer the log, the stop label or null, and
- * Try again. */
+ * runs, cancel it while it waits, and try again when the engine says it can run again.
+ * Input: the job. Output: whether to offer the log, the stop label or null, and Try again. */
 export function researchActions(job: Pick<ResearchJob, "status" | "started_ms" | "cancel_requested" | "retryable">): { log: boolean; stop: "Stop" | "Cancel" | null; retry: boolean } {
   const stop = job.cancel_requested ? null : job.status === "running" ? "Stop" : job.status === "queued" || job.status === "needs_pool" ? "Cancel" : null;
   return { log: job.started_ms !== null, stop, retry: job.retryable };

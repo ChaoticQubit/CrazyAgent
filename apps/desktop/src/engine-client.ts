@@ -485,12 +485,7 @@ export function createProject(spec: ProjectSpec, generation: number): Promise<In
 }
 
 export type Platform = "website" | "mobile_app" | "desktop_app" | "cli" | "api_backend" | "other";
-export type ResearchKind =
-  | "market_research"
-  | "competitor_research"
-  | "design_research"
-  | "front_end_design"
-  | "tech_stack_research";
+export type ResearchKind = "market_research" | "competitor_research" | "design_research" | "front_end_design" | "tech_stack_research";
 export type ResearchStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
 export type JobKind = ResearchKind | "roadmap_planning";
 

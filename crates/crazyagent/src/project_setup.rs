@@ -3,6 +3,8 @@ use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::research::jobs::RUN_AGAIN;
 use crate::sandbox::policy::LevelView;
+use retry::retry_research;
+pub use retry::{RESEARCH_UNAVAILABLE_HERE, retryable};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -615,18 +617,6 @@ pub struct ResearchJob {
     pub heartbeat_ms: Option<i64>,
     pub finished_ms: Option<i64>,
     pub retryable: bool,
-}
-
-/// The code a retry gets where this engine runs no research ([`retryable`]).
-pub const RESEARCH_UNAVAILABLE_HERE: &str = "research_unavailable_here";
-
-/// Whether a job in this status can run again on this engine's system: a failed or stopped
-/// job, where the engine runs research at all ([`crate::research::runner::confined_unavailable`]),
-/// so no client offers a Retry that could only fail again. Input: the status. Output: the
-/// answer.
-pub fn retryable(status: ResearchStatus) -> bool {
-    matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled)
-        && crate::research::runner::confined_unavailable(std::env::consts::OS).is_none()
 }
 
 const RATE_LIMITED: &str = "rate_limited until ";
@@ -2470,53 +2460,6 @@ fn cancel_research(
     Ok(Outcome::Applied)
 }
 
-/// Queues a failed or cancelled research job again with a fresh attempt budget. A job whose
-/// kind was turned off turns it back on, so the next setup edit does not cancel it again.
-/// Takes the transaction, configuration, project and job id. Returns Applied,
-/// `research_job_missing`, `project_setup_missing`, `setup_unconfirmed` for a kind turned off in
-/// an unconfirmed setup review, or `research_job_not_retryable` for a job that is not stopped.
-fn retry_research(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    project_id: &ProjectId,
-    id: i64,
-) -> Result<Outcome, EngineError> {
-    let Some(job) = project_job(tx, project_id, id)? else {
-        return Ok(rejected("research_job_missing"));
-    };
-    if !matches!(
-        job.status,
-        ResearchStatus::Failed | ResearchStatus::Cancelled
-    ) {
-        return Ok(rejected("research_job_not_retryable"));
-    }
-    if !retryable(job.status) {
-        return Ok(rejected(RESEARCH_UNAVAILABLE_HERE));
-    }
-    let Some(mut stored) = load_setup(tx, project_id)? else {
-        return Ok(rejected("project_setup_missing"));
-    };
-    if !stored.research.contains(&job.kind) && unconfirmed(tx, project_id, &stored)? {
-        return Ok(rejected("setup_unconfirmed"));
-    }
-    let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
-    let changed = tx
-        .execute(
-            &format!(
-                "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
-                cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
-                finished_ms=NULL, {RUN_AGAIN} WHERE id=?1 AND status IN ('failed','cancelled')"
-            ),
-            params![id, status.stored()],
-        )
-        .map_err(error)?;
-    if changed != 1 {
-        return Ok(rejected("research_job_not_retryable"));
-    }
-    turn_on(tx, &mut stored, job.kind)?;
-    Ok(Outcome::Applied)
-}
-
 /// Whether a found or cloned project's setup review is still open, so its setup was never saved.
 /// Takes the transaction, project and stored setup. Returns true until the owner confirms it.
 fn unconfirmed(
@@ -4159,5 +4102,6 @@ pub mod links;
 /// The removal record (DEC-178 addendum 1): which ids removals hold, which folder a
 /// project removed from the dashboard comes back from, and the id a new onboarding gets.
 pub(crate) mod removed;
+mod retry;
 #[cfg(all(test, unix))]
 mod tests;
