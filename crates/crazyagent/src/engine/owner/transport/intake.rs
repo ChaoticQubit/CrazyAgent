@@ -26,9 +26,6 @@ pub(super) const JOBS_ENDED_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX;
 /// The most jobs held at once: the live ones and the ended ones kept.
 const JOBS_HELD_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX + JOBS_ENDED_MAX;
 
-/// How often an add waiting for the download slot looks for a stop (#380 F4).
-const TURN_STOP_EVERY: Duration = Duration::from_millis(20);
-
 /// The most bytes of JSON a status reply takes: every job held at its largest view, the
 /// commas between them and the reply's kind around the list, within one frame (#380 N3).
 const JOBS_REPLY_BYTES_MAX: usize = JOBS_HELD_MAX * JOB_VIEW_BYTES_MAX + JOBS_HELD_MAX + 64;
@@ -56,7 +53,6 @@ pub(super) struct Intake {
     held: Mutex<Vec<Held>>,
     direct: std::sync::atomic::AtomicUsize,
     claims: std::sync::atomic::AtomicUsize,
-    pub(super) downloads: tokio::sync::Mutex<()>,
 }
 
 /// A job's claim on its request id, counted among the intake's claims until it is dropped,
@@ -907,29 +903,28 @@ impl Drop for Ending {
     }
 }
 
-/// Downloads what of the job's folder is only in iCloud, holding the engine's download slot
-/// once the downloads of the jobs before it ended, so jobs take turns instead of refusing
-/// each other; a stop asked while the job waits for the slot ends the wait at once (#380 F4).
-/// Input: the authority and the job. Output: Ok once every file is on this Mac, else the
-/// download's code, `icloud_download_busy` while a client's own download runs.
+/// Downloads what of the job's folder is only in iCloud, side by side with the other running
+/// jobs' downloads through the engine's shared paced downloads (DEC-197); a stop cancels the
+/// job's download, which ends at its next check (#380 F4). Input: the authority and the job.
+/// Output: Ok once every file is on this Mac, else the download's code,
+/// `icloud_download_busy` while the engine holds its most downloads.
 async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), EngineError> {
-    let turn = authority.intake.downloads.lock();
-    tokio::pin!(turn);
-    let _turn = loop {
-        tokio::select! {
-            taken = &mut turn => break taken,
-            () = tokio::time::sleep(TURN_STOP_EVERY) => {
-                if job.download().cancelled() {
-                    return Err(failure("home_icloud_not_downloaded"));
-                }
-            }
-        }
-    };
+    fetch_with(authority, job, icloud::download).await
+}
+
+/// Runs the job's download as `fetch` does, with `pull` in place of the iCloud download, so a
+/// test can watch when downloads run. Inputs: the authority, the job and the download to run.
+/// Output: Ok once `pull` brought every file within the job's bounds, else its code.
+pub(super) async fn fetch_with(
+    authority: &Arc<Authority>,
+    job: &Arc<IntakeJob>,
+    pull: fn(&str, &icloud::Download, crate::projects_home::CopyBounds) -> Result<u64, EngineError>,
+) -> Result<(), EngineError> {
     let claim = authority.icloud.claim_for(job.download())?;
     let download = claim.download();
     let path = job.source().to_owned();
     let bounds = crate::projects_home::add_bounds(job.overrides());
-    let fetched = tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
+    let fetched = tokio::task::spawn_blocking(move || pull(&path, &download, bounds))
         .await
         .map_err(|_| failure("home_icloud_not_downloaded"));
     drop(claim);
