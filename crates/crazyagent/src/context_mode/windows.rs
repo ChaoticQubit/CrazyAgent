@@ -70,16 +70,43 @@ pub(super) fn open_plain(path: &Path) -> Option<File> {
     open_no_link(OpenOptions::new().read(true), path)
 }
 
+/// Opens a lock file, created when missing, with no link followed. Input: the lock file.
+/// Output: the file, or `setup_store_unavailable`.
+fn open_lock(path: &Path) -> Result<File, InstallError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    open_no_link(&mut options, path).ok_or(InstallError("setup_store_unavailable"))
+}
+
 /// Takes the exclusive lock on an install's lock file, created with no link followed,
 /// waiting while another installer holds it. Input: the lock file. Output: the held lock, or
 /// `setup_store_unavailable`.
 pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
-    let unavailable = InstallError("setup_store_unavailable");
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    let file = open_no_link(&mut options, path).ok_or(unavailable)?;
-    file.lock().map_err(|_| unavailable)?;
+    let file = open_lock(path)?;
+    file.lock()
+        .map_err(|_| InstallError("setup_store_unavailable"))?;
     Ok(Lock(file))
+}
+
+/// Takes a shared lock on a lock file, waiting only while an exclusive holder has it. Input:
+/// the lock file. Output: the held lock, or `setup_store_unavailable`.
+pub(super) fn lock_shared(path: &Path) -> Result<Lock, InstallError> {
+    let file = open_lock(path)?;
+    file.lock_shared()
+        .map_err(|_| InstallError("setup_store_unavailable"))?;
+    Ok(Lock(file))
+}
+
+/// Takes the exclusive lock on a lock file only when no other handle holds it, never
+/// waiting. Input: the lock file. Output: the held lock, none while another handle holds it,
+/// or `setup_store_unavailable`.
+pub(super) fn try_lock(path: &Path) -> Result<Option<Lock>, InstallError> {
+    let file = open_lock(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(_)) => Err(InstallError("setup_store_unavailable")),
+    }
 }
 
 /// Creates a folder and its parents, or checks an existing one, refusing a link or a file

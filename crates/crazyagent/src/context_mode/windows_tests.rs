@@ -491,11 +491,12 @@ fn the_node_probe_leaves_no_container_behind() {
     let before = entries(&case.bin);
     assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
     assert_eq!(entries(&case.bin), before);
-    assert_eq!(
-        fs::read_dir(&npm).unwrap().count(),
-        0,
-        "no scratch folder is left"
-    );
+    let left: Vec<_> = fs::read_dir(&npm)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != NODE_CHECK_LOCK)
+        .collect();
+    assert!(left.is_empty(), "no scratch folder is left: {left:?}");
 }
 
 /// V243-WIN-CONTAINER-RELEASE: an npm install releases its container before its staging
