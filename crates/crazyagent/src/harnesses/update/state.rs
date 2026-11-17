@@ -381,22 +381,33 @@ fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> 
 
 /// Lets a program be started for a version read on Windows only when SYSTEM, the
 /// administrators, TrustedInstaller and this user alone can change it and every folder above
-/// it ([`crazyagent_win_sandbox::owner_only`]), the twin of [`super::trusted`]. Logs a
-/// refusal. Input: the absolute program. Output: Some when it may start.
+/// it ([`crazyagent_win_sandbox::owner_only`]), the twin of [`super::trusted`]. Logs the
+/// bare reason, or the step and Windows code that failed. Input: the absolute program.
+/// Output: Some when it may start.
 #[cfg(windows)]
 fn owner_only(program: &Path) -> Option<()> {
+    use crazyagent_win_sandbox::BoundaryError;
     crazyagent_win_sandbox::owner_only(program)
-        .map_err(|refused| eprintln!("harness_version_owner_refused cause={refused}"))
+        .map_err(|refused| match refused {
+            BoundaryError::Refused(reason) => {
+                eprintln!("harness_version_owner_refused cause={reason}");
+            }
+            BoundaryError::Windows { step, code } => {
+                eprintln!("harness_version_owner_refused cause={step} code={code}");
+            }
+            BoundaryError::Profile(_) => eprintln!("harness_version_owner_refused cause=profile"),
+        })
         .ok()
 }
 
 /// Asks a harness for its version only when it passes [`version_gate`] and the tool resolver
 /// would run it and every interpreter its first line names, with no refused copy of one in
 /// its own folder ([`super::vetted`]), so a file agents can write, or one whose program is
-/// missing, is never started for a version. It runs the real file the resolver checked, once that file passes
-/// again by its own path, with the entry's folder kept as the search an interpreter asked for
-/// by name is found in, so no link of the entry's chain is followed after the check. On
-/// Windows that real file must also pass [`owner_only`], since no link on its way is read.
+/// missing, is never started for a version. It runs the real file the resolver checked,
+/// once that file passes again by its own path, with the entry's folder kept as the search
+/// an interpreter asked for by name is found in, so no link of the entry's chain is
+/// followed after the check. On Windows that real file must also pass [`owner_only`],
+/// since no link on its way is read.
 /// Inputs: the harness executable, the home folder and the resolver's places. Output: the
 /// version, or none.
 pub(super) fn version_if_runs(

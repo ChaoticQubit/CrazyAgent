@@ -1,7 +1,8 @@
 use super::acl::{ACL_BYTES_MAX, Local};
 use super::{BoundaryError, last_error, windows};
 use crate::dacl::{
-    ANCESTOR_CHANGES, FILE_CHANGES, OWN_FOLDER_CHANGES, SID_BYTES_MAX, other_writer, trusted_owner,
+    ANCESTOR_CHANGES, DENY_TYPES, FILE_CHANGES, OWN_FOLDER_CHANGES, SID_BYTES_MAX, other_writer,
+    trusted_owner,
 };
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -20,6 +21,10 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
     WRITE_OWNER,
+};
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
+    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -44,6 +49,12 @@ const _: () = assert!(
         == FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL
 );
 const _: () = assert!(size_of::<TOKEN_USER>() < TOKEN_USER_BYTES_MAX);
+const _: () = assert!(
+    DENY_TYPES[0] as u32 == ACCESS_DENIED_ACE_TYPE
+        && DENY_TYPES[1] as u32 == ACCESS_DENIED_OBJECT_ACE_TYPE
+        && DENY_TYPES[2] as u32 == ACCESS_DENIED_CALLBACK_ACE_TYPE
+        && DENY_TYPES[3] as u32 == ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE
+);
 
 /// Refuses a program the engine would start with its own rights unless only SYSTEM, the
 /// administrators, TrustedInstaller and the engine's own user can change it, the Windows twin
