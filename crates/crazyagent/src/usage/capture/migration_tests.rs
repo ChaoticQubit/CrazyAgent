@@ -294,3 +294,36 @@ fn insert_new(db: &Connection) {
     )
     .unwrap();
 }
+
+/// W10b: progress an older Windows build stored names no file, (0, 0). While the record's
+/// first bytes still match, it keeps its place and takes the live identity, so the first
+/// scan after the upgrade reads only the lines appended since and counts none twice.
+#[test]
+fn progress_stored_without_a_file_identity_keeps_its_place_while_the_head_matches() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("s7.jsonl");
+    let line = |id: &str, input: u64| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"id": id,
+                "usage": {"input_tokens": input, "output_tokens": 1}}})
+        )
+    };
+    std::fs::write(&file, line("msg_a", 6)).unwrap();
+    let mut progress = Progress::default();
+    read_record(&file, Format::Claude, &mut progress, 1_795_000_000_000);
+    let (live, read_to) = (progress.identity, progress.offset);
+    assert_ne!(read_to, 0);
+    progress.identity = (0, 0);
+    let mut more = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    std::io::Write::write_all(&mut more, line("msg_b", 3).as_bytes()).unwrap();
+    drop(more);
+    let usages = read_record(&file, Format::Claude, &mut progress, 1_795_000_000_001).0;
+    let input: u64 = usages.iter().map(|usage| usage.tokens.input).sum();
+    assert_eq!(input, 3);
+    assert_eq!(progress.identity, live);
+    assert_eq!(progress.offset, std::fs::metadata(&file).unwrap().len());
+}
