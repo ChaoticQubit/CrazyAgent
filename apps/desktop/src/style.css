@@ -16,7 +16,7 @@ h1 { font-size: 22px; line-height: 28px; font-weight: 600; letter-spacing: -0.01
 h2 { font-size: 16px; line-height: 22px; font-weight: 600; letter-spacing: -0.01em; }
 h3 { font-size: 14px; line-height: 20px; font-weight: var(--weight-ui); }
 strong, b { font-weight: var(--weight-ui); }
-:is(h1, h2) :is(strong, b) { font-weight: inherit; }
+:is(h1, h2, h3, h4, h5, h6, th) :is(strong, b) { font-weight: inherit; }
 a { color: var(--accent-text); }
 button, input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
