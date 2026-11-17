@@ -989,8 +989,21 @@ impl Storage {
                                     mutation: OwnerMutation::RemoveProject { .. }
                                 }
                             );
+                            let team = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::Team { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if team
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied)
+                            {
+                                crate::team::runtime::wake_loops();
+                            }
                             let restart = set_home && result.is_ok();
                             let forgotten = forgetting
                                 && result

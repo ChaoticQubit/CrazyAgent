@@ -48,9 +48,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -12398,23 +12398,20 @@ fn next_lead_turn(
                 Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
                 Err(RecvTimeoutError::Timeout) => {}
             }
-        } else {
-            if own.held.is_none() {
-                match orders.try_recv() {
-                    Ok(Order::Start(instructions, grant)) => {
-                        own.held = Some(Next::Start(instructions, grant));
-                    }
-                    Ok(Order::Turn(prompt, grant, typed)) => {
-                        *rules = typed;
-                        own.held = Some(Next::Turn(prompt, grant, typed));
-                    }
-                    Ok(Order::Rules(next)) => *rules = next,
-                    Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        return Next::Stop;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        } else if own.held.is_none() {
+            match orders.recv_timeout(ORDER_WAIT) {
+                Ok(Order::Start(instructions, grant)) => {
+                    own.held = Some(Next::Start(instructions, grant));
                 }
+                Ok(Order::Turn(prompt, grant, typed)) => {
+                    *rules = typed;
+                    own.held = Some(Next::Turn(prompt, grant, typed));
+                }
+                Ok(Order::Rules(next)) => *rules = next,
+                Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
+                Err(RecvTimeoutError::Timeout) => {}
             }
+        } else {
             std::thread::sleep(ORDER_WAIT);
         }
         match session.next_event(IDLE_EVENT_WAIT) {
@@ -14002,6 +13999,35 @@ fn turn(
     (text, end, cause)
 }
 
+static WAKES: Mutex<u64> = Mutex::new(0);
+static WOKEN: Condvar = Condvar::new();
+
+/// Wakes every team loop in this engine at once, as an owner request that has landed
+/// does (DEC-200), so the loop acts on it without waiting out its tick. A wake that lands
+/// while a loop ticks ends that loop's next wait at once. Output: none.
+pub(crate) fn wake_loops() {
+    let mut wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    *wakes = wakes.wrapping_add(1);
+    WOKEN.notify_all();
+}
+
+/// The count of team loop wakes so far, read before a tick so a wake during it is not
+/// missed. Output: the count.
+fn wakes_seen() -> u64 {
+    *WAKES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Waits until a wake newer than `seen` or `tick` has passed. Inputs: the count read before
+/// the tick and the tick. Output: the count now.
+fn wait_for_wake(seen: u64, tick: Duration) -> u64 {
+    let wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    let (wakes, waited) = WOKEN
+        .wait_timeout_while(wakes, tick, |wakes| *wakes == seen)
+        .unwrap_or_else(PoisonError::into_inner);
+    assert!(waited.timed_out() || *wakes != seen);
+    *wakes
+}
+
 /// Background loop that keeps every project's team moving.
 pub struct TeamService {
     stop: Arc<AtomicBool>,
@@ -14009,8 +14035,8 @@ pub struct TeamService {
 }
 
 impl TeamService {
-    /// Starts the loop on its own thread, ticking at `tick`.
-    /// Takes an opened runtime.
+    /// Starts the loop on its own thread, ticking at `tick` and at once on each wake
+    /// ([`wake_loops`]) that lands while it waits or ticks. Takes an opened runtime.
     /// Returns the running service; stopping it stops every agent process group.
     pub fn start(mut runtime: TeamRuntime, tick: Duration) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -14019,6 +14045,7 @@ impl TeamService {
             .name("team-runtime".into())
             .spawn(move || {
                 let mut last = None;
+                let mut seen = wakes_seen();
                 while !flag.load(Ordering::SeqCst) {
                     let problem = runtime.tick().err().map(|e| e.0);
                     if problem.is_some() && problem != last {
@@ -14028,7 +14055,7 @@ impl TeamService {
                         );
                     }
                     last = problem;
-                    std::thread::sleep(tick);
+                    seen = wait_for_wake(seen, tick);
                 }
                 if let Err(problem) = runtime.shutdown() {
                     eprintln!("team runtime shutdown: {}", bound_text(&problem.0, 300));
@@ -14046,6 +14073,7 @@ impl TeamService {
 
     fn halt(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        wake_loops();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
