@@ -848,7 +848,9 @@ impl Tmux {
             return Err(failure("terminal_input_bounds"));
         }
         for line in send_keys_lines(target, bytes) {
+            crate::hop_trace::hop("tmux_run_start", line.len(), target);
             control.run(&line)?;
+            crate::hop_trace::hop("tmux_run_done", 0, target);
         }
         Ok(())
     }
@@ -2032,7 +2034,9 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
                 .map_or((rest, &b""[..]), |space| {
                     (&rest[..space], &rest[space + 1..])
                 });
-            deliver(&mut state, pane, &decode(data));
+            let decoded = decode(data);
+            crate::hop_trace::hop("tmux_output", decoded.len(), &String::from_utf8_lossy(pane));
+            deliver(&mut state, pane, &decoded);
         } else if let Some(rest) =
             guard(&line, b"%window-close").or_else(|| guard(&line, b"%unlinked-window-close"))
         {

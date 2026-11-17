@@ -655,6 +655,7 @@ async fn watch(
             let Ok(request) = serde_json::from_slice::<TerminalRequest>(&frame[4..]) else {
                 break;
             };
+            crate::hop_trace::request("engine_read", &request);
             if requests.send(request).await.is_err() {
                 break;
             }
@@ -760,9 +761,11 @@ async fn pump(
         tokio::select! {
             chunk = viewer.next() => match chunk {
                 Some(Chunk::Output(bytes)) => {
+                    crate::hop_trace::hop("engine_output", bytes.len(), "");
                     if write(writer, &TerminalFrame::Output { bytes }).await.is_err() {
                         break VIEWER_GONE;
                     }
+                    crate::hop_trace::hop("engine_output_written", 0, "");
                 }
                 Some(Chunk::Behind) => match attach_again(host.clone(), agent.clone()).await {
                     Ok(fresh) => {
@@ -780,6 +783,7 @@ async fn pump(
                 sending.as_mut().expect("polled only while a send runs").await
             }, if sending.is_some() => {
                 sending = None;
+                crate::hop_trace::hop("engine_send_done", 0, "");
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
                     Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
                     Err(_) | Ok(None) => {}
@@ -800,6 +804,7 @@ async fn pump(
                 }
                 Some(request) => {
                     viewing.typed(&request);
+                    crate::hop_trace::request("engine_send_start", &request);
                     sending = Some(send(&host, &agent, viewer.at.clone(), request));
                 }
             },

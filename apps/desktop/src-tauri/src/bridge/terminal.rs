@@ -583,6 +583,7 @@ impl Terminals {
         if !request_valid(&request) {
             return Err(failure("terminal_request_invalid"));
         }
+        crazyagent::hop_trace::request("desktop_queue", &request);
         let requests = self
             .views()?
             .windows
@@ -652,6 +653,7 @@ impl Terminals {
 
 async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalRequest>) {
     while let Some(request) = queue.recv().await {
+        crazyagent::hop_trace::request("desktop_write_start", &request);
         let sent = match request {
             TerminalRequest::Input { bytes } => control.input(bytes).await,
             TerminalRequest::Scroll { bytes } => control.scroll(bytes).await,
@@ -662,6 +664,7 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
             | TerminalRequest::AttachSized { .. }
             | TerminalRequest::Detach => continue,
         };
+        crazyagent::hop_trace::hop("desktop_write_done", 0, "");
         if sent.is_err() {
             return;
         }
@@ -679,7 +682,12 @@ async fn read(
 ) {
     loop {
         let (message, last) = match stream.next().await {
-            Ok(frame) => channel_message(&key.agent, frame),
+            Ok(frame) => {
+                if let TerminalFrame::Output { bytes } = &frame {
+                    crazyagent::hop_trace::hop("desktop_output", bytes.len(), "");
+                }
+                channel_message(&key.agent, frame)
+            }
             Err(error) if error.0 == "terminal_closed" => {
                 (json(&closed("terminal_connection_closed")), true)
             }
@@ -688,7 +696,9 @@ async fn read(
                 true,
             ),
         };
-        if output.send(message).is_err() || last {
+        let sent = output.send(message);
+        crazyagent::hop_trace::hop("desktop_output_sent", 0, "");
+        if sent.is_err() || last {
             break;
         }
     }
