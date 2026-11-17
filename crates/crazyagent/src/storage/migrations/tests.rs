@@ -1112,6 +1112,39 @@ fn step_11_lets_the_delete_record_hold_run_names_of_the_recorded_width_keeping_i
 
 /// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
 /// still refuses a kind it does not know.
+/// Fails unless the database holds the three app plugin store tables, each empty. Input:
+/// the connection. Output: none.
+fn empty_app_plugin_tables(db: &Connection) {
+    for table in ["app_plugin_secrets", "app_plugin_state", "app_plugin_trust"] {
+        let rows: i64 = db
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|cause| panic!("{table}: {cause}"));
+        assert_eq!(rows, 0, "{table}");
+    }
+}
+
+/// Step 12 (V250-H2): an upgrade from 2.4.2's version 11 adds the app plugin store's three
+/// tables, empty, and a new database gets the same three at its first open, so both shapes
+/// match.
+#[tokio::test]
+async fn step_12_and_a_new_database_both_hold_the_empty_app_plugin_store_tables() {
+    let old = Root::new();
+    let mut db = old.connection();
+    db.execute_batch("CREATE TABLE unrelated (id INTEGER); PRAGMA user_version = 11;")
+        .unwrap();
+    upgrade(&mut db, &old.database(), None, STEPS).unwrap();
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    empty_app_plugin_tables(&db);
+
+    let root = Root::new();
+    close(root.open().await.unwrap()).await;
+    let fresh = root.connection();
+    assert_eq!(version(&fresh).unwrap(), latest(STEPS));
+    empty_app_plugin_tables(&fresh);
+}
+
 #[test]
 fn an_upgrade_from_eight_lets_the_trash_hold_account_files_keeping_every_note() {
     let root = Root::new();
