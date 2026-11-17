@@ -1718,23 +1718,29 @@ mod import {
     }
 
     /// RV-DS241-202: project instructions a folder arrived with that cannot be read, over the
-    /// size limit, not UTF-8 or a link, refuse the label with their own plain code and stay as
-    /// they are, rather than pass unlabelled and become the owner's text once made readable.
+    /// size limit or not UTF-8, refuse the label with their own plain code, and a link with
+    /// the layout check's, and stay as they are, rather than pass unlabelled and become the
+    /// owner's text once made readable.
     #[test]
     fn arrived_project_instructions_that_cannot_be_read_refuse_the_label_and_stay() {
         let outside = tempfile::tempdir().unwrap();
         let target = outside.path().join("rules.md");
         write(&target, "LINKED-RULE-202\n");
-        let shapes: [(&str, Vec<u8>); 3] = [
+        let shapes: [(&str, Vec<u8>, &str); 3] = [
             (
                 "over the limit",
                 "d".repeat(crate::agent_home::TEXT_BYTES_MAX + 1)
                     .into_bytes(),
+                "onboarding_instructions_unreadable",
             ),
-            ("not UTF-8", b"ARRIVED-RULE-202 \xff\xfe\n".to_vec()),
-            ("a link", Vec::new()),
+            (
+                "not UTF-8",
+                b"ARRIVED-RULE-202 \xff\xfe\n".to_vec(),
+                "onboarding_instructions_unreadable",
+            ),
+            ("a link", Vec::new(), "process_folder_unsafe"),
         ];
-        for (shape, bytes) in shapes {
+        for (shape, bytes, code) in shapes {
             let plain = tempfile::tempdir().unwrap();
             let folder = fs::canonicalize(plain.path()).unwrap();
             let file = folder.join(".crazyagent/instructions.md");
@@ -1745,11 +1751,7 @@ mod import {
                 fs::write(&file, &bytes).unwrap();
             }
             assert!(crate::agent_home::read_project(&folder).is_err(), "{shape}");
-            assert_eq!(
-                label_arrived(&folder).unwrap_err().0,
-                "onboarding_instructions_unreadable",
-                "{shape}"
-            );
+            assert_eq!(label_arrived(&folder).unwrap_err().0, code, "{shape}");
             if bytes.is_empty() {
                 assert_eq!(fs::read_link(&file).unwrap(), target, "{shape}");
             } else {

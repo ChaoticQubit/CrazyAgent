@@ -581,9 +581,11 @@ fn refused<E>(_: E) -> InstallError {
 
 /// Installs `source` into the staging folder with package scripts off, so no script of the
 /// package or any dependency ever runs, then checks npm's record of the tarball hash and the
-/// program's own hash against the pins. Inputs: the engine root, staging and work folders,
-/// npm's folder, the version and what npm installs. Output: Ok once checked; the caller
-/// re-checks before the rename.
+/// program's own hash against the pins. npm's `node_modules`, the only entry it adds at the
+/// top of the staging folder, is made before the boundary, since on Windows the boundary
+/// lets npm add entries only inside folders already there (DEC-193). Inputs: the engine
+/// root, staging and work folders, npm's folder, the version and what npm installs. Output:
+/// Ok once checked; the caller re-checks before the rename.
 fn fill(
     root: &Path,
     staged: &Path,
@@ -592,7 +594,11 @@ fn fill(
     version: &str,
     source: &OsStr,
 ) -> Result<(), InstallError> {
+    let modules = staged.join(MODULES);
+    std::fs::create_dir(&modules).map_err(|_| InstallError("setup_store_unavailable"))?;
+    assert!(modules.is_dir());
     let mut command = npm_command(root, staged, work, bin, version)?;
+    assert!(modules.is_dir());
     command
         .arg("install")
         .arg("--prefix")

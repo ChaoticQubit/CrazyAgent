@@ -28,10 +28,10 @@ pub const SEATBELT_MISSING: &str =
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
 /// The lock file git writes beside `.git\config` while it changes the config. The Windows
-/// boundary leaves it out of the protected paths: Windows cannot deny creating one name, so
-/// guarding a lock that is normally missing would stop new entries in all of `.git`, git's own
-/// `index.lock` among them. A lock an agent creates never becomes the config, since `config`
-/// denies writing and deleting and `.git` denies deleting its children.
+/// boundary leaves it out of the protected paths: Windows cannot refuse creating one name, so
+/// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
+/// own `index.lock` among them. A lock an agent makes never becomes the config: `config` is
+/// read only, so no agent replaces or deletes it (DEC-193 D6, step 0c).
 const GIT_CONFIG_LOCK: &str = "config.lock";
 
 /// The folder in the engine's data root where the boundary helper records the access entries
@@ -59,9 +59,9 @@ const PINNED_VARIABLES: &[&str] = &[
 ];
 
 /// The Windows boundary for one project agent. The helper runs the agent in an AppContainer
-/// of its own with read and execute on its read roots, modify on its writable roots, write
-/// denied on the protected paths and every access denied on secret paths inside a granted
-/// root, inside a job that kills the agent's whole tree when the helper ends.
+/// of its own with read and execute on its read roots, modify on its writable roots, read and
+/// execute only on the protected paths and nothing on secret paths inside a granted root,
+/// inside a job that kills the agent's whole tree when the helper ends (DEC-193).
 #[derive(Debug)]
 pub struct WindowsSandbox {
     sandbox: ProjectSandbox,
@@ -77,6 +77,8 @@ impl WindowsSandbox {
     /// what it grants each container, must lie outside them too. Inputs: the policy, the
     /// helper, the profile path and the grants folder. Output: the sandbox, `Unavailable` for
     /// a missing helper or an endpoint limit, or `Invalid` for an unsafe path or policy.
+    /// Before the profile, it makes each missing guarded folder (see
+    /// [`make_guarded_folders`]).
     pub fn install(
         sandbox: ProjectSandbox,
         helper: &Path,
@@ -86,6 +88,7 @@ impl WindowsSandbox {
         let grants = Some(grants)
             .filter(|grants| clean_absolute(grants) && grants.is_dir())
             .ok_or_else(|| invalid("grants folder must exist"))?;
+        make_guarded_folders(&sandbox)?;
         let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
         let helper = existing_helper(helper)?;
         let parent = profile
@@ -271,7 +274,10 @@ pub fn container_name(sandbox: &ProjectSandbox) -> String {
 }
 
 /// The boundary profile for a policy: container, network capabilities, read and writable
-/// roots, the protected paths but git's config lock kept read-only, plain drive secret paths
+/// roots, the protected paths kept read-only but git's config lock, and the project's root
+/// `context` while `.crazyagent` is a real folder, since the state folder then holds the
+/// context the engine reads ([`crate::projects_home::state_folder`]) and a missing root
+/// `context` would keep the project root from taking new entries; plain drive secret paths
 /// hidden, and the grants folder. The helper's plan check runs here too, so a policy it would
 /// refuse, such as a grants folder in a writable root, is refused at install. Inputs: the
 /// policy and the grants folder. Output: the profile, or the refusal.
@@ -289,11 +295,13 @@ pub fn boundary_profile(
         .writable_roots()
         .map(|root| drive_path(root))
         .collect::<Result<Vec<_>, _>>()?;
-    let config_lock = sandbox.project_root().join(".git").join(GIT_CONFIG_LOCK);
+    let root = sandbox.project_root();
+    let config_lock = root.join(".git").join(GIT_CONFIG_LOCK);
+    let unread = (crate::projects_home::state_folder(root) != root).then(|| root.join("context"));
     let mut guarded = sandbox
         .protected_paths()
         .iter()
-        .filter(|path| **path != config_lock)
+        .filter(|path| **path != config_lock && Some(*path) != unread.as_ref())
         .map(|path| {
             Ok(Guarded {
                 path: drive_path(path)?,
@@ -321,6 +329,42 @@ pub fn boundary_profile(
         .map_err(|error| invalid(&error.to_string()))?;
     plan(&profile, |_| true).map_err(invalid)?;
     Ok(profile)
+}
+
+/// Makes `.git\hooks`, `.git\modules` and `.crazyagent\context` when missing, empty, in a parent
+/// that is a real folder, never replacing an entry and never making `.git` or `.crazyagent`,
+/// which would move a legacy project's state folder (DEC-193 F2): the helper keeps the entries
+/// of the folder above a missing guarded path, which would stop git's `index.lock`. Input: the
+/// policy. Output: how many were made, or the failure.
+fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError> {
+    let root = sandbox.project_root();
+    let git = root.join(".git");
+    let state = root.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    let wanted = [
+        git.join("hooks"),
+        git.join("modules"),
+        state.join("context"),
+    ];
+    let guarded = sandbox.protected_paths();
+    assert!(wanted.iter().all(|folder| guarded.contains(folder)));
+    let mut made = 0;
+    for folder in &wanted {
+        let parent = folder
+            .parent()
+            .expect("a guarded folder sits in the project");
+        let real = fs::symlink_metadata(parent)
+            .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
+        if !real {
+            continue;
+        }
+        match fs::create_dir(folder) {
+            Ok(()) => made += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    assert!(made <= wanted.len());
+    Ok(made)
 }
 
 fn drive_path(path: &Path) -> Result<String, SandboxError> {
@@ -703,9 +747,9 @@ mod tests {
         drop(stdin);
     }
 
-    #[test]
-    fn a_wrapped_agent_cannot_vacate_or_create_a_protected_path_but_still_edits_the_project() {
-        let folders = folders();
+    const CALL: &str = "BOUNDARY_FILE_CALL";
+
+    fn helper() -> PathBuf {
         let tests = std::env::current_exe().unwrap();
         let helper = tests.parent().unwrap().with_file_name(HELPER_NAME);
         assert!(
@@ -713,6 +757,156 @@ mod tests {
             "build crazyagent-win-boundary first: {}",
             helper.display()
         );
+        helper
+    }
+
+    fn quiet(installed: &WindowsSandbox, command: &Command) -> bool {
+        crate::spawn_gate::status(
+            Sandbox::wrap(installed, command)
+                .unwrap()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .success()
+    }
+
+    fn shell(installed: &WindowsSandbox, folders: &Folders, line: &str) -> bool {
+        let mut command = Command::new(cmd());
+        command.arg("/C").arg(line).current_dir(&folders.project);
+        quiet(installed, &command)
+    }
+
+    fn call(installed: &WindowsSandbox, folders: &Folders, step: &[&Path]) -> std::process::Output {
+        assert!(!step.is_empty() && step.len() <= 2);
+        let probe = folders.home.join("file-call.exe");
+        if !probe.is_file() {
+            fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
+        }
+        let line = |verb: &str| {
+            let paths: Vec<&str> = step.iter().map(|path| path.to_str().unwrap()).collect();
+            format!("{verb}|{}", paths.join("|"))
+        };
+        let verb = if step.len() == 2 { "rename" } else { "rmtree" };
+        let mut command = Command::new(&probe);
+        command
+            .args([
+                "sandbox::windows::tests::file_call_child",
+                "--exact",
+                "--nocapture",
+                "--test-threads",
+                "1",
+            ])
+            .env(CALL, line(verb))
+            .current_dir(&folders.project);
+        let mut wrapped = Sandbox::wrap(installed, &command).unwrap();
+        crate::spawn_gate::collected(&mut wrapped).unwrap()
+    }
+
+    fn denied(output: &std::process::Output) -> bool {
+        output.status.code() == Some(1)
+            && String::from_utf8_lossy(&output.stdout).contains("(os error 5)")
+    }
+
+    #[test]
+    fn file_call_child() {
+        let Ok(line) = std::env::var(CALL) else {
+            return;
+        };
+        let parts: Vec<&str> = line.split('|').collect();
+        let done = match parts.as_slice() {
+            ["rename", from, to] => fs::rename(from, to),
+            ["rmtree", path] => fs::remove_dir_all(path),
+            _ => panic!("unknown file call {line}"),
+        };
+        if let Err(error) = done {
+            println!("CALL {line} => {error}");
+            std::process::exit(1);
+        }
+    }
+
+    #[test]
+    fn install_makes_each_missing_guarded_folder_and_leaves_what_is_there() {
+        let folders = folders();
+        let helper = std::env::current_exe().unwrap();
+        let git = folders.project.join(".git");
+        let state = folders.project.join(".crazyagent");
+        fs::create_dir_all(&git).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let first = folders.profiles.join("a.sb");
+        WindowsSandbox::install(sandbox.clone(), &helper, &first, &folders.grants).unwrap();
+        for folder in [
+            git.join("hooks"),
+            git.join("modules"),
+            state.join("context"),
+        ] {
+            assert!(
+                folder.is_dir() && fs::read_dir(&folder).unwrap().next().is_none(),
+                "{} is made empty",
+                folder.display()
+            );
+        }
+        fs::write(git.join("hooks").join("pre-commit"), "owner\n").unwrap();
+        fs::remove_dir(git.join("modules")).unwrap();
+        fs::write(git.join("modules"), "owner\n").unwrap();
+        let second = folders.profiles.join("b.sb");
+        WindowsSandbox::install(sandbox, &helper, &second, &folders.grants).unwrap();
+        assert_eq!(
+            fs::read_to_string(git.join("hooks").join("pre-commit")).unwrap(),
+            "owner\n"
+        );
+        assert_eq!(
+            fs::read_to_string(git.join("modules")).unwrap(),
+            "owner\n",
+            "an entry already there is never replaced"
+        );
+    }
+
+    #[test]
+    fn a_legacy_project_gets_no_state_folder_and_keeps_its_root_context_guarded() {
+        let folders = folders();
+        let helper = std::env::current_exe().unwrap();
+        let project = &folders.project;
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        let profile = folders.profiles.join("a.sb");
+        WindowsSandbox::install(sandbox.clone(), &helper, &profile, &folders.grants).unwrap();
+        assert!(
+            !project.join(".git").exists(),
+            "a git-less project stays git-less"
+        );
+        assert!(
+            !project.join(".crazyagent").exists(),
+            "making .crazyagent would move the project's state folder"
+        );
+        let guarded = |sandbox: &ProjectSandbox| -> Vec<String> {
+            boundary_profile(sandbox, &folders.grants)
+                .unwrap()
+                .guarded
+                .into_iter()
+                .map(|item| item.path)
+                .collect()
+        };
+        let root_context = drive_path(&project.join("context")).unwrap();
+        assert!(guarded(&sandbox).contains(&root_context));
+        fs::create_dir_all(project.join(".crazyagent")).unwrap();
+        assert_eq!(
+            crate::projects_home::state_folder(project),
+            project.join(".crazyagent")
+        );
+        let moved = guarded(&sandbox);
+        assert!(
+            !moved.contains(&root_context),
+            "the root context is unread once .crazyagent holds the state"
+        );
+        assert!(moved.contains(&drive_path(&project.join(".crazyagent").join("context")).unwrap()));
+    }
+
+    #[test]
+    fn a_wrapped_agent_cannot_vacate_or_create_a_protected_path_but_still_edits_the_project() {
+        let folders = folders();
+        let helper = helper();
         let project = &folders.project;
         let git = project.join(".git");
         fs::create_dir_all(git.join("hooks")).unwrap();
@@ -720,42 +914,38 @@ mod tests {
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("README.md"), "readme\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
-        let installed = WindowsSandbox::install(
-            sandbox,
-            &helper,
-            &folders.profiles.join("agent.sb"),
-            &folders.grants,
-        )
-        .unwrap();
-        let run = |line: &str| {
-            let mut shell = Command::new(cmd());
-            shell.arg("/C").arg(line).current_dir(project);
-            crate::spawn_gate::status(
-                Sandbox::wrap(&installed, &shell)
-                    .unwrap()
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null()),
-            )
-            .unwrap()
-            .success()
-        };
-        assert!(!run("ren .git .git-moved"));
+        let profile = folders.profiles.join("agent.sb");
+        let installed =
+            WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+        let run = |line: &str| shell(&installed, &folders, line);
+        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
+        assert!(denied(&moved), "{moved:?}");
         assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
         assert!(!run(r"mkdir .crazyagent\context"));
         assert!(!project.join(".crazyagent").exists());
-        assert!(!run(
-            r"echo planted>.git\config.lock&& move /Y .git\config.lock .git\config"
-        ));
+        assert!(run(r"echo planted>.git\config.lock"));
+        let lock = git.join("config.lock");
+        let replaced = call(&installed, &folders, &[&lock, &git.join("config")]);
+        assert!(denied(&replaced), "{replaced:?}");
         assert_eq!(
             fs::read_to_string(git.join("config")).unwrap(),
             "[core]\r\n"
         );
         assert!(!run(r"mkdir .git\hooks\planted"));
         assert!(!git.join("hooks").join("planted").exists());
-        assert!(!run("ren context context-moved"));
-        assert!(project.join("context").join("brief.md").is_file());
+        let context = project.join("context");
+        let vacated = call(&installed, &folders, &[&context, &project.join("moved")]);
+        assert!(denied(&vacated), "{vacated:?}");
+        assert!(context.join("brief.md").is_file());
         assert!(run(r"echo changed>src\work.txt"));
+        let src = project.join("src");
+        let renamed = call(
+            &installed,
+            &folders,
+            &[&src.join("work.txt"), &src.join("done.txt")],
+        );
+        assert!(renamed.status.success(), "{renamed:?}");
+        assert!(src.join("done.txt").is_file() && !src.join("work.txt").exists());
         assert!(run("echo changed>README.md"));
         assert_eq!(
             fs::read_to_string(project.join("README.md")).unwrap(),
@@ -766,51 +956,42 @@ mod tests {
     #[test]
     fn a_wrapped_agent_without_a_checkout_adds_top_level_files_and_takes_git_locks() {
         let folders = folders();
-        let tests = std::env::current_exe().unwrap();
-        let helper = tests.parent().unwrap().with_file_name(HELPER_NAME);
-        assert!(
-            helper.is_file(),
-            "build crazyagent-win-boundary first: {}",
-            helper.display()
-        );
+        let helper = helper();
         let project = &folders.project;
         let git = project.join(".git");
+        let state = project.join(".crazyagent").join("context");
         fs::create_dir_all(git.join("hooks")).unwrap();
         fs::write(git.join("config"), "[core]\r\n").unwrap();
-        fs::create_dir_all(project.join(".crazyagent").join("context")).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("brief.md"), "brief\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
-        let installed = WindowsSandbox::install(
-            sandbox,
-            &helper,
-            &folders.profiles.join("agent.sb"),
-            &folders.grants,
-        )
-        .unwrap();
-        let run = |line: &str| {
-            let mut shell = Command::new(cmd());
-            shell.arg("/C").arg(line).current_dir(project);
-            crate::spawn_gate::status(
-                Sandbox::wrap(&installed, &shell)
-                    .unwrap()
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null()),
-            )
-            .unwrap()
-            .success()
-        };
+        let profile = folders.profiles.join("agent.sb");
+        let installed =
+            WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+        let run = |line: &str| shell(&installed, &folders, line);
         assert!(run(r"echo lock>.git\index.lock"));
-        assert!(run(r"move /Y .git\index.lock .git\index"));
-        assert!(git.join("index").is_file() && !git.join("index.lock").exists());
+        let lock = git.join("index.lock");
+        let staged = call(&installed, &folders, &[&lock, &git.join("index")]);
+        assert!(staged.status.success(), "{staged:?}");
+        assert!(git.join("index").is_file() && !lock.exists());
         assert!(run("echo new>notes.txt"));
         assert!(run("mkdir docs"));
         assert!(project.join("notes.txt").is_file() && project.join("docs").is_dir());
         assert!(!run(r"echo planted>.git\hooks\pre-commit"));
         assert!(!git.join("hooks").join("pre-commit").exists());
         assert!(!run(r"echo planted>.crazyagent\context\brief.md"));
-        assert!(!run("ren .git .git-moved"));
-        assert!(!run("rmdir /S /Q context"));
-        assert!(project.join("context").join("brief.md").is_file());
+        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
+        assert!(denied(&moved), "{moved:?}");
+        let removed = call(&installed, &folders, &[&state]);
+        assert!(denied(&removed), "{removed:?}");
+        assert_eq!(
+            fs::read_to_string(state.join("brief.md")).unwrap(),
+            "brief\r\n"
+        );
+        assert!(
+            run(r"echo note>context\brief.md"),
+            "the root context is the agent's to change once .crazyagent holds the state"
+        );
         assert_eq!(
             fs::read_to_string(git.join("config")).unwrap(),
             "[core]\r\n"

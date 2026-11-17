@@ -780,7 +780,7 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
 
     let clock = Duration::from_secs(2);
     let mut fixture = MasterFixture::new("claude");
-    let quiet = "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/cat > /dev/null\n";
+    let quiet = "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n";
     let mut claude = stand_in_master_under(&mut fixture, quiet, false, Some(clock)).await;
     tokio::time::sleep(clock + Duration::from_secs(1)).await;
     let closed = claude.close().await;

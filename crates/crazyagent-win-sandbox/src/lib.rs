@@ -7,6 +7,7 @@ pub mod plan;
 pub mod profile;
 pub mod quote;
 pub mod request;
+pub mod snapshot;
 #[cfg(windows)]
 mod win;
 

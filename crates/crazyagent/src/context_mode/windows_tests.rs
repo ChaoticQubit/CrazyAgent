@@ -273,3 +273,106 @@ fn the_windows_install_steps_take_strict_off_whatever_is_stored() {
         (LinuxSupervisor::On, LinuxStrict::Off)
     );
 }
+
+/// The runner's own Node folder: the first folder on PATH holding `node.exe` and npm's own
+/// `npm-cli.js`, canonical as the resolver hands it. Output: the folder; the row fails with
+/// UNAVAILABLE when PATH has none.
+fn system_bin() -> PathBuf {
+    let found = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .find(|folder| folder.join(NODE).is_file() && npm_cli(folder).is_file())
+    });
+    let Some(bin) = found else {
+        panic!("UNAVAILABLE: node.exe and npm's npm-cli.js on PATH");
+    };
+    let bin = crate::sandbox::canonical(&bin).unwrap();
+    assert!(bin.join(NODE).is_file());
+    bin
+}
+
+/// Packs a package named context-mode at the pinned version, its `package.json` and an empty
+/// program, with Windows' own `tar.exe`. Input: the folder to pack in. Output: the tarball.
+fn local_tarball(folder: &Path) -> PathBuf {
+    let package = folder.join("package");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        format!("{{\"name\":\"{PACKAGE}\",\"version\":\"{VERSION}\"}}"),
+    )
+    .unwrap();
+    fs::write(package.join(PROGRAM), "").unwrap();
+    let tarball = folder.join(format!("{PACKAGE}-{VERSION}.tgz"));
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let packed = crate::spawn_gate::status(
+        std::process::Command::new(system.join("tar.exe"))
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(folder)
+            .arg("package"),
+    )
+    .unwrap();
+    assert!(packed.success());
+    assert!(tarball.is_file());
+    tarball
+}
+
+/// The install step `fill` runs, with its arguments, for a staging folder `fill` did not
+/// prepare. Inputs: the case, the staging and work folders, npm's folder and the tarball.
+/// Output: whether npm passed.
+fn bare_install(case: &Case, staged: &Path, work: &Path, bin: &Path, tarball: &Path) -> bool {
+    let mut command = npm_command(&case.root, staged, work, bin, VERSION).unwrap();
+    command
+        .arg("install")
+        .arg("--prefix")
+        .arg(staged)
+        .args([
+            "--no-audit",
+            "--no-fund",
+            "--no-update-notifier",
+            "--loglevel=error",
+            "--ignore-scripts",
+            "--no-save",
+        ])
+        .arg(tarball);
+    run_quiet(command, INSTALL_TIME).unwrap()
+}
+
+/// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
+/// package into a fresh staging folder, whose root lets it add entries only inside folders
+/// already there, so only the pin refuses the unpinned tarball. The same install into a
+/// staging folder without the `node_modules` that `fill` makes first is refused, so the row
+/// fails if `fill` stops making it.
+#[test]
+fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first() {
+    let bin = system_bin();
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let packing = work.join("tmp");
+    private_folder(&packing).unwrap();
+    let tarball = local_tarball(&packing);
+    assert_eq!(
+        fill(
+            &case.root,
+            &staged,
+            &work,
+            &bin,
+            VERSION,
+            tarball.as_os_str()
+        ),
+        Err(InstallError("context_mode_integrity_mismatch")),
+        "npm installs; only the pin refuses a tarball other than the pinned one"
+    );
+    let installed = staged.join(MODULES).join(PACKAGE);
+    assert!(installed.join("package.json").is_file());
+    assert!(installed.join(PROGRAM).is_file());
+    let bare = staging_folder(&npm, &prefix).unwrap();
+    assert!(
+        !bare_install(&case, &bare, &work, &bin, &tarball),
+        "npm cannot add node_modules at the top of a staging folder"
+    );
+    assert!(!bare.join(MODULES).exists());
+}

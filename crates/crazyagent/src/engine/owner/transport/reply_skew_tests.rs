@@ -492,7 +492,18 @@ fn every_exchange_names_its_reads_and_only_its_reads() {
             &["List", "Diff", "Branches", "Waiting", "OwnerDirty"],
         ),
         ("cleanup", &["Finished", "Removal"]),
-        ("github", &["Status", "Repos"]),
+        (
+            "github",
+            &[
+                "PublishPrompt",
+                "Status",
+                "Repos",
+                "Owners",
+                "PublishStatus",
+                "RuleDefaults",
+                "Rules",
+            ],
+        ),
         ("ide_extensions", &["Asks"]),
         ("ide_tab", &["State"]),
         (

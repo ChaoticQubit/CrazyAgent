@@ -11,6 +11,109 @@ Status of each version:
 
 ## [Unreleased]
 
+## [2.4.2] - 2026-11-17 - Dev build
+
+- Version set to 2.4.2 on 2026-11-17 01:07 UTC (edf720af8).
+- Work merged into the 2.4.2 line from 2026-11-15 17:23 UTC to 2026-11-17 00:55 UTC, last merge 593a5ffe1. Built on [2.4.1].
+- No stable tag yet. Latest stable stays [2.3.2].
+
+### Added
+
+- Publish a project to GitHub. New Project has Publish this project on GitHub, on by default: private, under your personal account or an organization your GitHub sign-in can create repositories in, named and described from the project, with the docs folder left out unless you add it.
+- Before the first push, the project's agent proposes .gitignore lines from the project's file names, and you edit and approve them. A file that looks like a secret stops the push until you leave it out or check again. The Overview shows the publish while it runs, and a publish cut short goes on from its last recorded step.
+- A published repository gets CrazyAgent's standard secure rules, such as pull requests into main, no force push or deletion of main, and secret scanning where your plan allows. Settings, GitHub sets the rules new repositories start with, and a project's Settings, GitHub reads its live rules and switches them one at a time.
+- A project with no git remote and no publish asks in its Overview: "This project is not on GitHub. Publish it?", with Publish, Not now and Don't ask again.
+- Agents can propose a GitHub rule change for their project's repository. You approve or decline it as a question, and the engine applies it with your GitHub sign-in, which agents never get.
+- Move to projects home, Delete everything and New Project setup run as engine background jobs, one at a time, with job views in the app and the TUI, and they show how they ended after an engine restart.
+- Remove from dashboard keeps a project's notes, imports and research picks, and adding the same folder again brings the project back. Delete everything forgets them, and a new project never takes a removed project's id.
+- Edit with AI also checks the instructions file, on the project's master harness, and lists what it found above the diff: contradictions, references to files, skills, MCP servers or commands that don't exist, duplicates, and length over budget.
+- A Tool caches in agent homes setting: Keep, Clear when access is raised (the default) or Clear every launch, in the TUI and on the app's Agent access page. Clearing removes an agent home's .cache and npm cache, so code planted there cannot run with more access in a later launch.
+- The app icon follows the app theme: the macOS Dock tile and the app's windows change with it, System follows the operating system's changes, and the macOS app ships light and dark icons. Windows sets its icon too, and Linux keeps one icon.
+
+### Faster
+
+- The two most recently used agent terminals stay loaded while hidden, so switching back shows one at once with its scrollback instead of connecting again. A native lead's terminal and its teammates' pane views stay loaded side by side, and keys, prompts and size changes reach only the view they were typed in. At start the app loads the two terminals used last in the background once the window draws, a kept terminal that ended connects again when shown, and one shown again takes back its size if another window changed it meanwhile.
+- The IDE you used last stays loaded while hidden, so going back to its tab or project shows it at once, with no call to the engine. At start the app loads it in the background without taking focus.
+- Typing in a live agent terminal is faster. Keys typed while an earlier one is still being sent go out together in one send, a teammate's pane view types straight into its pane instead of listing the panes on every key, and the terminal keeps showing output while a key is being sent.
+- The app reads less while idle: Add folder and move status every 30 seconds and again when the window gets focus, found projects every 3 seconds on Home only (30 seconds elsewhere), and the Overview when the engine says it is due, at least 5 seconds apart.
+- Removing the IDE's temp folder no longer holds the IDE up: the removal is bounded and the rest is swept in the background.
+- The engine starts faster on a busy Mac. Its login service now runs it as an interactive process, so macOS no longer limits its CPU and disk use. An engine service set up by an earlier version is set up again the next time CrazyAgent starts or updates the engine.
+
+### Fixed
+
+- After an engine restart, accounts read Checking sign-in while the engine checks them again, then Signed in, instead of all reading signed out. An account the check skips reads Not signed in at once.
+- The update screen waits for the new engine to answer and says where it stands, and the command line's service start and install wait for the engine while its service manager runs it.
+- At launch, an engine older than the app, run by the login service, is replaced once on its own, and the app says it updated the engine to match.
+- An engine start that runs out of time checking an agent's worktree keeps that worktree for recovery and checks it again at the next start, instead of setting it aside for good.
+- Removing an account no longer deletes an API key file another account still uses, and a removed account's key and sign-in files are cleaned up once nothing names them.
+- An engine stop that leaves an agent's terminal running interrupts the turns of the teammates a native lead split off in that window too, so they don't run on while the engine is closed. When a native lead ends, its teammates' terminal keepers end with it, and both apps show their terminal server as ended.
+- A change set left Updating after an interruption is handed over again instead of being merged a second time, and when two answers reach it at once the second is told the changes moved on.
+- A terminal attach whose reply tmux cut short under load fails only that attach, not the whole terminal connection.
+- After an engine restart, an adopted agent terminal counts as idle only when it waits at its input prompt with no stopped process.
+- A Claude master keeps its retry count across its environment reset, and a rate-limit reply with an unknown status, type or reason reads Unknown instead of ending the session.
+- A move into the projects home remembers the old folder until it is cleared and tells you about it after an engine stop cut the move short, and a project registered during a move waits until the move lands. Your own text in a project's instruction files stays yours after a Move or Copy.
+- An Add folder refused because another folder took its destination is no longer reported as landed.
+- Hook switches you turned off stay off when a plugin updates or a hook moves to another event, and a stored server that cannot start says why.
+- A research job refused for a worktree only you can clear fails once, with a line saying so.
+- Gone-agent notices are finished as Unknown at engine start, and a skills import never lists a folder without a SKILL.md.
+- The planning line's rate limit shows in the TUI and the app, five more setup refusals have sentences in the app, and a research job's waiting lines show whole on the Overview work list. On the TUI's engine-down screen, r starts the engine or repairs its login service in the background, then reconnects.
+- A 5-hour usage line read over 5 hours ago says when it was read, in both apps.
+- An Overview writing run saves, offers its tabs and closes in one step.
+- A sandbox settings save from an outdated read is refused instead of overwriting a newer one, and the TUI says so in the same words as other settings.
+- A dismissed setup job leaves Home at once, the TUI's Add folder and move lines show a plain state for whatever the engine reports, and profile form errors clear once fixed.
+- Private files the engine writes, such as an agent's API key file, the teammate command and the IDE token, get their permissions on the open file. An unexpected umask or a cut-short write is refused and the file removed, instead of a crash or a partial key.
+- An agent home reset that would walk more than 4,096 folder listings stops and says so in both apps and the team panel.
+- The built-in IDE extension says why its access is already in use: another extension, a second window at the same time, or a retry after its access file could not be removed.
+- On Windows and Linux, the app's Add MCP server dialog says this computer instead of this Mac.
+- The TUI's Pick a pool box wraps its sentence inside the box instead of cutting it off.
+- On a project's Settings tab in the TUI, Move into CrazyAgent folder takes M instead of m, which the plugins section on that tab took for Add MCP server, so the move never started. Restart them, for the agents that can still open a hidden folder, takes R.
+- New Project asks for your GitHub sign-in once when the engine connects after the page opened, instead of twice.
+- The macOS release builds stopped at the app icon check: the dark app icon needs actool from Xcode 26, and the build machine's default Xcode is older. The build now runs actool from an installed Xcode 26 or newer, and stops before the long compile when none is installed.
+
+### Security
+
+- Secrets are wiped from memory when no longer needed, with a write the compiler cannot drop, in the engine and the app. Credential copies for agents are parsed without extra copies, and the secret text for GitHub, the model relay, the system keyring, the macOS keychain and the MCP server settings written for Claude Code and Codex agents is built in one buffer that is wiped.
+- API key files are written and removed through the account folder opened once without following links, so a swapped folder cannot redirect them.
+- Claude Code's auto-memory is off for every run CrazyAgent starts, and every agent home reset removes stored memory, so one run's memory never reaches a later run.
+- Runs that started before you hid a folder stay on the hidden folders list until they end: team agents (with Restart), master turns, research, read-only, code graph and lockfile runs, and runs whose stop left processes behind. Both apps say what the list covers and read it again every 3 seconds while runs are listed.
+- A running RCLI master turn stops when your saved access no longer covers what its sandbox was given, as other masters' turns do, and its .cargo is reset to its allowed files each turn with the registry and git caches linked read-only to yours.
+- A master on a local model refuses its config file once it changed on disk during a conversation, even when it was put back, and says to end the conversation and send again. A config replaced or edited on disk says so in its own line.
+- Stopping a run on macOS also ends the processes it started in a new session, such as ssh -f or an SSH ControlPersist master.
+- No agent reaches a cloud metadata service: routed and tunnelled agents' rules drop link-local addresses and the known metadata addresses outside them. An account check never dials one either, and both apps refuse to save an account endpoint on another machine at port 80, 32526 or 988, the ports metadata services answer on. An endpoint saved earlier keeps its port.
+- A git config include or includeIf target inside the checkout or work tree is refused with its own line in both apps. Refresh and compare on agent worktrees run confined, a landing step reads your global ignore file only when it writes the index alone, and the turn-end add uses your ignore patterns as excludes.
+- A GitHub publish commit is built on a private index, and its tree is scanned before it is written.
+- The IDE proxy sends nothing to the IDE server until it saw that server ready, checks each connection's listening process, and takes its port exclusively. Only a foreign listener on the IDE's exact address stops a project's IDE start.
+- ACL and flag clears on agent files work on each file's own handle, the IDE terminal's included, and never through a path another program could swap.
+- macOS sandbox name denies hold in every spelling macOS treats as the same name, including characters it ignores.
+- A confined agent can no longer create a nested .git spelled with a dotless ı, which an NTFS volume opens as .git: the macOS sandbox's nested repository deny spells .git as its other name rules do.
+- Setup's Python comes from a uv-managed install, never from a folder other accounts can change.
+- A harness update command's interpreter and #! line are checked when the update runs. Lookups judge every link of a found file, a found RCLI host is pinned only after its real file passes the start checks, and a harness file the trust check refuses is never run to ask its version.
+- The check for folders other users can change no longer trusts an ACL answer read in the same second the folder changed.
+- The MCP approval box shows the full command before you approve it.
+- Project instructions that arrived with a folder and cannot be read stop onboarding with their own line, and project text CrazyAgent did not write goes last, under the Imported heading, at each launch. Onboarding keeps out what your global git ignore file names even when the repository's ignore file negates it, and skips an ignore file it cannot read.
+- Model relay request bodies never touch disk. Agents on an API key relay are not kept at quit, and they and their teammates end when the engine ends.
+- An agent home reset removes shell startup files only from homes inside the engine's data folder, an agent whose last sandboxed run still has commands left is refused until they end, and only a Codex home keeps skills across the reset.
+- The IDE server's data folder keeps its sandbox denies on every start, and git object and link files cannot be changed through a hard link.
+- Add folder copies refill and make files writable only through handles that follow no link.
+- The kept sign-in route checks its reply as a normal sign-in does.
+
+### Linux
+
+- Agents run with Landlock nested inside bubblewrap where the host allows it, and the deb depends on bubblewrap. A launch whose nested start check fails is refused, never run with Landlock alone.
+- A Linux call supervisor setting, On by default, in Settings, Sandbox in the app and Settings in the TUI. Under it, an agent's connections, writes near its own git folders and signals are checked where the host supports it. A launch without it says so, and it never runs as root.
+- A Refuse agents without the full Linux sandbox switch, off by default.
+- An agent limited to ports on any host gets a network of its own: it leaves only through those ports and reaches this computer's loopback only through its bridged ports. A launch that could not be routed says why.
+- The deb installs an AppArmor profile for the Linux helper and bubblewrap, loaded only where AppArmor restricts user namespaces, and the access lines say when AppArmor is why agents share your process space.
+- Stopping a sandboxed run ends its whole process lineage.
+- The context-mode install runs in the Linux sandbox.
+- Landing's untracked file listings keep your own git ignore patterns.
+- One slow loopback connection no longer holds up every other agent's relayed connections.
+
+### Windows
+
+- context-mode works on Windows from the checked shared install. Its npm install runs with open network, since Windows cannot limit it to one port, but with package scripts off, the engine's secrets denied, a fresh home and cache, and the pinned hashes checked.
+- The pack's MCP servers that need no checkout (context-mode, serena and linear) are set up on Windows instead of failing as unsupported. The uv they use must pass the tool place checks, and the Add MCP server form takes drive paths such as C:\Program Files\nodejs\npx.cmd.
+
 ## [2.4.1] - 2026-11-16 - Dev build
 
 - Version set to 2.4.1 on 2026-11-16 03:51 UTC (36c3c56d2).
