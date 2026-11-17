@@ -67,7 +67,7 @@ export function messageCount(line) {
 /** Reads the rows of the live master terminal as text, from its buffer, so they read the
  * same under every Terminal renderer. Output: one string per row. */
 export function masterRows() {
-  return browser.execute(() => document.querySelector(".pj-master-live .tg-terminal-screen .tg-terminal-host")?.readScreen() ?? []);
+  return browser.execute(() => document.querySelector(".pj-master-live .tg-terminal-screen .tg-terminal-host")?.readScreen?.() ?? []);
 }
 
 /** Reads the Sessions bar's live session line. Output: its text, or "" when it is not shown. */

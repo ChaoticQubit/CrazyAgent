@@ -19,10 +19,10 @@ export type GpuProbe = { webgl2: boolean; identity: string; wayland: boolean };
 let probed: GpuProbe | null = null;
 let autoFailed = false;
 
-/** The choice a window starts on before the owner picks one: GPU on macOS and Windows, whose
- * webviews report the real renderer, and Standard anywhere else. On Linux, WebKit reports
- * "Apple GPU" even over llvmpipe, so the software check cannot see it there (hresearch
- * NOTE-1215). Input: the platform name, by default the window's. Output: the choice. */
+/** The choice a window starts on before the owner picks one: GPU on macOS and Windows, and
+ * Standard anywhere else. On Linux, WebKit reports "Apple GPU" even over llvmpipe, so the
+ * software check cannot see a software renderer there (hresearch NOTE-1215). Input: the
+ * platform name, by default the window's. Output: the choice. */
 export function rendererDefault(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): RendererChoice {
   return isMac(platform) || isWindows(platform) ? "gpu" : "standard";
 }

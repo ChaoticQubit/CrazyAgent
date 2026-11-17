@@ -208,7 +208,7 @@ export function terminalView(label) {
       .find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
     if (!section) return null;
     const jump = [...section.querySelectorAll("button")].some((button) => button.textContent.trim() === "Jump to latest");
-    const lines = section.querySelector(".tg-terminal-host")?.readScreen() ?? [];
+    const lines = section.querySelector(".tg-terminal-host")?.readScreen?.() ?? [];
     return {
       state: section.querySelector(".tg-terminal-state")?.innerText ?? "",
       rows: lines.join("\n"),
@@ -312,7 +312,7 @@ export function rowTexts(label) {
   return browser.execute((label) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
       .find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
-    return section?.querySelector(".tg-terminal-host")?.readScreen() ?? [];
+    return section?.querySelector(".tg-terminal-host")?.readScreen?.() ?? [];
   }, label);
 }
 
@@ -326,7 +326,7 @@ export function selectRow(label, index) {
   return browser.execute((label, index) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
       .find((node) => node.getAttribute("aria-label") === `${label} terminal` && node.getClientRects().length);
-    const lines = section?.querySelector(".tg-terminal-host")?.readScreen() ?? [];
+    const lines = section?.querySelector(".tg-terminal-host")?.readScreen?.() ?? [];
     const screen = section?.querySelector(".xterm-screen");
     if (!screen || index < 0 || index >= lines.length) return null;
     const box = screen.getBoundingClientRect();
@@ -335,7 +335,7 @@ export function selectRow(label, index) {
     screen.dispatchEvent(new MouseEvent("mousedown", { ...at, button: 0, buttons: 1, detail: 3, altKey: true }));
     document.dispatchEvent(new MouseEvent("mouseup", { ...at, button: 0, buttons: 0, detail: 3, altKey: true }));
     screen.dispatchEvent(new MouseEvent("contextmenu", { ...at, button: 2, buttons: 2 }));
-    const rows = section.querySelector(".tg-terminal-host").readScreen();
+    const rows = section.querySelector(".tg-terminal-host").readScreen?.() ?? [];
     return { row: rows[index], rows };
   }, label, index);
 }
