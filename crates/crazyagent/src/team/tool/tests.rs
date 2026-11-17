@@ -1362,6 +1362,24 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
     );
 }
 
+/// The spawn tool asks for what the master found and the agent's acceptance check with each
+/// task, so a hand-off carries the diagnosis and its part of the plan, not only an order
+/// (V243-MASTER-ANALYZE-FIRST).
+#[test]
+fn a_spawn_task_carries_the_finding_and_the_acceptance_check() {
+    let task = spec(SPAWN_TOOL)["inputSchema"]["properties"]["task"]["description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for part in [
+        "what you found",
+        "this agent's part of your plan",
+        "its acceptance check",
+    ] {
+        assert!(task.contains(part), "{part}: {task}");
+    }
+}
+
 #[test]
 fn update_work_says_a_reply_answers_a_question_or_work_and_a_note_takes_none() {
     let tool = spec(UPDATE_WORK_TOOL);

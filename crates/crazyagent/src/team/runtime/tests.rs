@@ -2254,6 +2254,56 @@ fn the_master_framing_names_the_harnesses_an_empty_plan_can_use() {
     assert!(!typed.contains("record_answer"));
 }
 
+/// The master diagnoses and plans before it hands out work: its live role text and its
+/// opening frame, with or without team tools, tell it to find out what is wrong itself,
+/// reproduce or probe it, and give each sub-agent its part with an acceptance check, and
+/// no longer leave all hands-on work to sub-agents (V243-MASTER-ANALYZE-FIRST).
+#[test]
+fn the_master_diagnoses_and_plans_before_it_hands_out_work() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    for team_tool in [true, false] {
+        for text in [
+            framing(&setup, team_tool, &[], &[]),
+            live_instructions(&setup, team_tool),
+        ] {
+            assert!(!text.contains("Sub-agents do the hands-on work"), "{text}");
+            for rule in [
+                "## Your own task first",
+                "reproduce the failure or probe it",
+                "never a sub-agent's",
+                "Then plan:",
+                "the acceptance check",
+                "Name a cause you could not confirm as unconfirmed.",
+            ] {
+                assert!(text.contains(rule), "{rule}: {text}");
+            }
+        }
+    }
+}
+
 #[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
