@@ -23,11 +23,14 @@ use rusqlite::types::Value;
 #[path = "profile_tests.rs"]
 mod profile_tests;
 
-/// The `state` row at revision 0 and the `events` table a store holds before any write.
+/// The `state` row at revision 0 and the `events` table a store holds before any write, and
+/// the `projects` table holding project p1.
 const STATE: &str =
     "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
     CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
-    INSERT INTO state VALUES (1,0);";
+    CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+    INSERT INTO state VALUES (1,0);
+    INSERT INTO projects VALUES ('p1','{}');";
 
 /// A store with the `state` row at revision 0, the owner tables holding the test host
 /// started, and every settings table. Output: the connection.
@@ -523,6 +526,46 @@ fn each_engine_settings_writer_logs_once_and_moves_the_revision_once() {
         .unwrap();
     assert_eq!(settled, (0, None), "off settles the status row");
     replays_to_live(&mut db);
+}
+
+/// v2.5 L10 r1 sec F1: a project removal that commits after the transport's project check
+/// leaves the roadmap refresh save refused inside its own transaction, so no roadmap event
+/// names the project after the removal redacted it and no settings row for it comes back,
+/// live or on replay.
+#[test]
+fn a_roadmap_refresh_saved_after_its_project_is_removed_is_refused_and_logs_nothing() {
+    let mut db = store();
+    let p1 = project("p1");
+    roadmap_refresh(&db, &p1, Refresh::Off).unwrap();
+    let named = |db: &Connection| -> (i64, i64) {
+        db.query_row(
+            "SELECT (SELECT COUNT(*) FROM state_log WHERE kind=?1 AND instr(body, '\"p1\"') > 0),
+                (SELECT COUNT(*) FROM roadmap_status_settings WHERE project='p1')",
+            [KIND_ROADMAP],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(named(&db), (1, 1), "the save before the removal");
+
+    let tx = db.transaction().unwrap();
+    tx.execute("DELETE FROM projects WHERE id='p1'", [])
+        .unwrap();
+    tx.execute("DELETE FROM roadmap_status_settings WHERE project='p1'", [])
+        .unwrap();
+    assert_eq!(forget_project(&tx, "p1", None, &engine()).unwrap(), 1);
+    tx.commit().unwrap();
+    assert_eq!(named(&db), (0, 0), "the removal leaves no event or row");
+
+    let before = moved(&db);
+    assert_eq!(
+        code(roadmap_refresh(&db, &p1, Refresh::RefreshOnly)),
+        Some("roadmap_status_project_missing".into())
+    );
+    assert_eq!(moved(&db), before, "no revision, event or events row");
+    assert_eq!(named(&db), (0, 0), "no event names the removed project");
+    replays_to_live(&mut db);
+    assert_eq!(named(&db), (0, 0), "replay brings no row back");
 }
 
 /// v2.5 L10 and L6 Q9: before an owner runtime starts the store, every engine settings
