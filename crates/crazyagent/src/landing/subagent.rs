@@ -629,7 +629,9 @@ pub(super) fn claim(
 /// Every git step in the lead's clone runs with the lead's own rights, under its profile:
 /// the branch `<task>--<name>` is created or moved forward there, then merged with
 /// `--no-ff`; a conflicting merge is aborted, leaving that branch for the lead to merge by
-/// hand. No git runs in the sub-agent's clone. Inputs: the engine database, the project,
+/// hand. No git runs in the sub-agent's clone. A branch the lead's tip already has needs git
+/// 2.40 to check its work, so an older git refuses with `changes_git_old` rather than call
+/// the work absent (#274). Inputs: the engine database, the project,
 /// the lead, the sub-agent and the lead's git. Output: what the merge did, or a plain
 /// `changes_*` refusal the lead can act on.
 pub(super) fn merge(
@@ -703,6 +705,7 @@ pub(super) fn merge(
     )?;
     let shared = shared(&lead_place.repository)?;
     if shared.test(&["merge-base", "--is-ancestor", &sub_tip, &lead_tip])? {
+        shared.check_merge_version()?;
         if close_held(db, &sub_place, &sub_tip, &lead_tip)? {
             return Ok(MergeOutcome::WorkAbsent { branch });
         }
