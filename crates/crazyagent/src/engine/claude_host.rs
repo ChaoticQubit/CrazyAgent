@@ -12,6 +12,8 @@ use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 use crate::master_step_limit::StepLimit;
 #[cfg(unix)]
 use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
+#[cfg(unix)]
+use crate::platform::fd_wait::{self, Wake};
 
 /// The code a Claude master stops with when it has not started by its start bound: the
 /// run clock's end when the owner's time limit bounds it, as the other masters stop, else
@@ -525,6 +527,7 @@ pub(in crate::engine) struct ClaudeHost {
     close_time: Duration,
     expires: Option<tokio::time::Instant>,
     frame_bytes: usize,
+    wake: Wake,
     #[cfg(test)]
     passes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -578,6 +581,8 @@ impl ClaudeHost {
         let kept = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
         let passes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (wake, woken) =
+            fd_wait::wake_pair().map_err(|_| failure("claude_host_custodian_unavailable"))?;
         let mut host = Self {
             turns,
             events,
@@ -596,6 +601,7 @@ impl ClaudeHost {
                 .run_time
                 .map(|time| tokio::time::Instant::now() + time),
             frame_bytes,
+            wake,
             #[cfg(test)]
             passes: Arc::clone(&passes),
         };
@@ -617,6 +623,7 @@ impl ClaudeHost {
                         doubt,
                         group,
                         diagnostic: kept,
+                        woken,
                         #[cfg(test)]
                         passes,
                     },
@@ -667,6 +674,7 @@ impl ClaudeHost {
                 reply,
             })
             .map_err(|_| failure("claude_host_input_unavailable"))?;
+        self.wake.rouse();
         loop {
             let current = *self.status.borrow();
             if current.phase != Phase::Running {
@@ -683,7 +691,7 @@ impl ClaudeHost {
                     changed.map_err(|_| failure("claude_host_custodian_lost"))?;
                 }
                 () = expired(self.expires) => {
-                    self.stop.store(true, Ordering::Release);
+                    self.halt();
                     return Err(failure("claude_host_deadline"));
                 }
             }
@@ -715,7 +723,7 @@ impl ClaudeHost {
                     changed.map_err(|_| failure("claude_host_custodian_lost"))?;
                 }
                 () = expired(self.expires) => {
-                    self.stop.store(true, Ordering::Release);
+                    self.halt();
                     return Err(failure("claude_host_deadline"));
                 }
             }
@@ -740,6 +748,13 @@ impl ClaudeHost {
             .clone()
     }
 
+    /// Stops the host: sets the stop flag, then rouses the custodian so its drive loop sees
+    /// the stop at once instead of at the end of its wait. Input: the host. Output: none.
+    fn halt(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.wake.rouse();
+    }
+
     /// How many passes the custodian's drive loop has made, shared, so a row can count them
     /// while it stops the host. Output: the shared count.
     #[cfg(test)]
@@ -748,12 +763,12 @@ impl ClaudeHost {
     }
 
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
-        self.stop.store(true, Ordering::Release);
+        self.halt();
         self.close().await
     }
 
     pub(in crate::engine) async fn close(&mut self) -> Result<(), EngineError> {
-        self.stop.store(true, Ordering::Release);
+        self.halt();
         let deadline = tokio::time::Instant::now() + self.close_time;
         loop {
             let current = *self.status.borrow();
@@ -782,7 +797,7 @@ impl ClaudeHost {
 #[cfg(unix)]
 impl Drop for ClaudeHost {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.halt();
     }
 }
 

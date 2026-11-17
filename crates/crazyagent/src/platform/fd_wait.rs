@@ -42,8 +42,9 @@ pub(crate) fn wake_pair() -> io::Result<(Wake, Wake)> {
 
 impl Wake {
     /// Wakes the thread waiting on the other end by writing one byte. A full buffer already
-    /// holds a wake and a closed end has no waiter, so neither is an error; any other failure
-    /// leaves the waiter to its own wait bound. Input: the end. Output: none.
+    /// holds a wake and a closed end has no waiter, so neither is an error (Rust programs
+    /// ignore SIGPIPE, so a closed end only fails the write); any other failure leaves the
+    /// waiter to its own wait bound. Input: the end. Output: none.
     pub(crate) fn rouse(&self) {
         #[cfg(unix)]
         {

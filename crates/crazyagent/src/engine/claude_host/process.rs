@@ -6,9 +6,11 @@ use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::platform::fd_wait::{self, Wake};
 use crate::protocol::ProjectId;
 use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
+use rustix::event::{PollFd, PollFlags};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
@@ -24,6 +26,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
 const POLL_TIME: Duration = Duration::from_millis(5);
+/// The longest one wait of the drive loop: a missed wake still lets it see the stop.
+const WAIT_MAX: Duration = Duration::from_millis(250);
+/// The first wait for an exit no pipe reports; each pass doubles it up to [`WAIT_MAX`].
+const EXIT_WAIT_MIN: Duration = Duration::from_millis(1);
 const READ_BATCH: usize = 16;
 /// The longest stream line a host keeps, its newline included; a longer line before the
 /// turn's result retires the host with `claude_host_frame_limit`.
@@ -42,6 +48,7 @@ pub(super) struct Channels {
     pub(super) doubt: Arc<AtomicBool>,
     pub(super) group: Arc<AtomicU32>,
     pub(super) diagnostic: Arc<Mutex<Option<StreamDiagnostic>>>,
+    pub(super) woken: Wake,
     #[cfg(test)]
     pub(super) passes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -82,6 +89,7 @@ struct Process {
     deadline: Option<Instant>,
     record: StreamDiagnostic,
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
+    woken: Wake,
     #[cfg(test)]
     passes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -108,6 +116,7 @@ pub(super) fn run(
         doubt,
         group,
         diagnostic,
+        woken,
         #[cfg(test)]
         passes,
     } = channels;
@@ -217,6 +226,7 @@ pub(super) fn run(
         deadline: limits.run_time.map(|time| Instant::now() + time),
         record: StreamDiagnostic::default(),
         kept: diagnostic,
+        woken,
         #[cfg(test)]
         passes,
     };
@@ -277,6 +287,7 @@ impl Process {
     fn drive(&mut self) {
         assert!(self.status.is_none());
         assert!(self.pending.is_none());
+        let mut exit_wait = EXIT_WAIT_MIN;
         loop {
             #[cfg(test)]
             self.passes.fetch_add(1, Ordering::SeqCst);
@@ -295,7 +306,7 @@ impl Process {
                 let held = Fault::Exit(code).held();
                 if !held && self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some())
                 {
-                    std::thread::sleep(POLL_TIME);
+                    exit_wait = self.wait(exit_wait);
                     continue;
                 }
                 if held {
@@ -315,7 +326,7 @@ impl Process {
             }
             if self.stdout.is_none() {
                 if self.protocol.state() == State::Idle && self.completed_turns > 0 {
-                    std::thread::sleep(POLL_TIME);
+                    exit_wait = self.wait(exit_wait);
                     continue;
                 }
                 self.fail(Fault::Host("claude_host_disconnected"));
@@ -325,7 +336,42 @@ impl Process {
             if self.fault.is_some() {
                 return;
             }
+            exit_wait = self.wait(exit_wait);
+        }
+    }
+
+    /// Waits until a pipe the loop still reads is ready, stdin can take the pending input, the
+    /// host is roused, or the bound passes: the deadline or [`WAIT_MAX`]. With no pipe left and
+    /// the harness not reaped, nothing reports its exit, so the bound is `exit_wait`, doubled
+    /// for the next pass; a failed poll sleeps [`POLL_TIME`]. Input: the exit wait. Output: the
+    /// exit wait for the next pass.
+    fn wait(&self, exit_wait: Duration) -> Duration {
+        assert!(exit_wait >= EXIT_WAIT_MIN && exit_wait <= WAIT_MAX);
+        let mut fds = Vec::with_capacity(4);
+        if let Some(stdout) = &self.stdout {
+            fds.push(PollFd::new(stdout, PollFlags::IN));
+        }
+        if let Some(stderr) = &self.stderr {
+            fds.push(PollFd::new(stderr, PollFlags::IN));
+        }
+        let exiting = fds.is_empty() && self.status.is_none();
+        if let (Some(stdin), Some(_)) = (&self.stdin, &self.pending) {
+            fds.push(PollFd::new(stdin, PollFlags::OUT));
+        }
+        fds.push(PollFd::new(&self.woken, PollFlags::IN));
+        let bound = if exiting { exit_wait } else { WAIT_MAX };
+        let mut until = Instant::now() + bound;
+        if let Some(deadline) = self.deadline {
+            until = until.min(deadline);
+        }
+        if fd_wait::ready(&mut fds, Some(until)).is_err() {
             std::thread::sleep(POLL_TIME);
+        }
+        self.woken.drain();
+        if exiting {
+            (exit_wait * 2).min(WAIT_MAX)
+        } else {
+            EXIT_WAIT_MIN
         }
     }
 
