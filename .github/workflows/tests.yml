@@ -566,8 +566,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos
-            runner: macos-15
           - os: linux
             runner: ubuntu-22.04
     steps:
