@@ -209,6 +209,40 @@ fn a_stale_staging_folder_is_removed_under_the_lock() {
     assert!(case.staged().is_empty());
 }
 
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a node probe that crashed before its release left its
+/// scratch folder; the next probe, with no other probe running, ends it whatever the probe
+/// itself answers.
+#[test]
+fn a_node_probe_removes_the_scratch_a_crashed_probe_left() {
+    let case = case("/usr/bin/false");
+    let left = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    fs::write(left.join(NODE_PROFILE), "from a crashed probe").unwrap();
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(!left.exists(), "the crashed probe's scratch is ended");
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: while another probe holds the check lock, a probe
+/// leaves every scratch folder alone, since it may be that probe's live one; once the lock
+/// is free the next probe ends it.
+#[test]
+fn a_node_probe_leaves_a_scratch_alone_while_another_probe_holds_the_check_lock() {
+    let case = case("/usr/bin/false");
+    let left = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(case.npm().join("node-check.lock"))
+        .unwrap();
+    held.lock_shared().unwrap();
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(left.is_dir(), "a live probe's scratch is never touched");
+    drop(held);
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(!left.exists(), "with the lock free the scratch is ended");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failed_npm_run_leaves_no_staging_folder_and_records_when_it_failed() {

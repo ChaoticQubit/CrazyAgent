@@ -579,3 +579,95 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
     assert!(profile.is_file());
     assert!(!grants.join(format!("container-{derived}.lock")).exists());
 }
+
+/// Runs a node probe's job in a fresh scratch folder and stops before its release, as a probe
+/// that crashed there would. Input: the case. Output: the scratch folder, the grants record
+/// and the AppContainer folder its job left.
+fn crashed_probe(case: &Case) -> (PathBuf, PathBuf, PathBuf) {
+    let npm = case.root.join("setup").join("npm");
+    let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
+    let base = crate::sandbox::canonical(&scratch).unwrap();
+    let name = crate::sandbox::windows::container_for(&base.join("project"), &base.join("home"));
+    let (record, package) = container_files(&name);
+    let mut command = node_command(&case.root, &scratch, &case.bin).unwrap();
+    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    assert!(record.is_file(), "{}", shown(&ran));
+    assert!(package.is_dir(), "{}", shown(&ran));
+    (scratch, record, package)
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a node probe that crashed before its release left its
+/// container; the next probe, with no other probe running, releases it, so npx's folder keeps
+/// no entry for it and its record, AppContainer folder and scratch folder are gone.
+#[test]
+fn a_node_probe_releases_the_container_a_crashed_probe_left() {
+    let case = case();
+    let before = entries(&case.bin);
+    let (scratch, record, package) = crashed_probe(&case);
+    assert_ne!(entries(&case.bin), before);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(entries(&case.bin), before);
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!scratch.exists());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: while another probe holds the check lock, a probe
+/// releases no container of a scratch folder it finds, since it may be that probe's live one;
+/// once the lock is free the next probe releases it.
+#[test]
+fn a_node_probe_leaves_a_live_probe_container_alone() {
+    let case = case();
+    let (scratch, record, package) = crashed_probe(&case);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(case.root.join("setup").join("npm").join("node-check.lock"))
+        .unwrap();
+    held.lock_shared().unwrap();
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert!(record.is_file());
+    assert!(package.is_dir());
+    assert!(scratch.is_dir());
+    drop(held);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!scratch.exists());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an npm install that crashed before its release left its
+/// staging and work folders, paired by one random suffix, and its container; the next install
+/// of that version, under the version's lock, releases that container before it removes the
+/// folders, so npx's folder keeps no entry for it.
+#[test]
+fn an_npm_install_releases_the_container_a_crashed_install_left() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let before = entries(&case.bin);
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    let work = npm.join(format!(".{prefix}-work-{random}"));
+    fs::create_dir(&work).unwrap();
+    let job = crate::sandbox::canonical(&staged).unwrap();
+    let home = crate::sandbox::canonical(&work).unwrap().join("home");
+    let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
+    let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
+    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    assert!(record.is_file(), "{}", shown(&ran));
+    assert!(package.is_dir(), "{}", shown(&ran));
+    assert_ne!(entries(&case.bin), before);
+    let folder = install_folder(&case.root, VERSION);
+    assert_eq!(
+        replace(&case.root, &folder, &case.bin, VERSION),
+        Err(InstallError("context_mode_install_failed"))
+    );
+    assert_eq!(entries(&case.bin), before);
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!staged.exists());
+    assert!(!work.exists());
+}
