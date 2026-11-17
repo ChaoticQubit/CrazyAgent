@@ -835,7 +835,7 @@ impl AppSetup {
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
         if let Some(name) = self.fixing {
             self.fixed(name, status, ctx);
-            if self.fixing.is_some() || !self.started {
+            if !self.started {
                 return Flow::Handled;
             }
         }
@@ -846,8 +846,11 @@ impl AppSetup {
         if !self.started {
             return Flow::Handled;
         }
-        self.started = false;
         let problems = self.problems();
+        if problems == 0 && self.first_run && self.fixing.is_some() {
+            return Flow::Handled;
+        }
+        self.started = false;
         if problems == 0 {
             if self.first_run {
                 return Self::next_step(ctx);
