@@ -495,7 +495,7 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
         Change::OwnerEditKept(kept) => db.execute(
             "INSERT INTO landing_owner_edits(worktree, path, at_ms) VALUES (?1,?2,?3) \
              ON CONFLICT(worktree, change_set, path) DO UPDATE SET at_ms=excluded.at_ms",
-            params![kept.worktree, kept.path, kept.at_ms],
+            params![kept.worktree, kept.path, stored(kept.at_ms)?],
         ),
         Change::OwnerEditsSettled(set) => db.execute(
             "UPDATE OR REPLACE landing_owner_edits SET change_set=?2 \
@@ -516,7 +516,7 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
         ),
         Change::ChangeSetNumbered(set) => db.execute(
             "INSERT INTO landing_change_set_numbers(change_set,project,number) VALUES (?1,?2,?3)",
-            params![set.change_set, set.project, set.number],
+            params![set.change_set, set.project, stored(set.number)?],
         ),
         Change::BaselineApproved(approved) => db
             .execute(
@@ -541,6 +541,13 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
             [&never.project],
         ),
     }
+}
+
+/// A u64 body value as SQLite stores it; a closed body holds it within i64, so the refusal
+/// is never reached from a parsed or built change. Input: the value. Output: the value, or
+/// a conversion failure.
+fn stored(value: u64) -> rusqlite::Result<i64> {
+    i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 /// The tables on the landing log, each with its columns in schema order and, for a table its
