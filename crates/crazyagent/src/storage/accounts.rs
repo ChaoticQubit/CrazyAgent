@@ -332,6 +332,61 @@ pub(crate) fn remove_staged_in(root: &Path, folder: &str) -> Result<(), EngineEr
         .map_err(|_| error("account_key_store_unavailable"))
 }
 
+/// The most entries one restore reads from one key folder; any more stay, and the restore
+/// logs `restore_key_sweep_bounded`.
+#[cfg(unix)]
+const KEY_SWEEP_MAX: usize = 10_000;
+
+/// Deletes, after a restore to a 2.4 copy (V250-L5-N5), the staged copies and every key in
+/// one of the engine root's owner-only key folders that `kept` does not keep, reading at most
+/// [`KEY_SWEEP_MAX`] entries; a name that is no plain reference is left alone. Inputs: the
+/// engine root, a folder from [`KEY_FOLDERS`] and the keep test by key name. Output: how many
+/// keys went, or the first refusal of the folder, the keep test or a removal.
+#[cfg(unix)]
+pub(crate) fn remove_unkept_in(
+    root: &Path,
+    folder: &str,
+    kept: impl Fn(&str) -> Result<bool, EngineError>,
+) -> Result<usize, EngineError> {
+    remove_staged_in(root, folder)?;
+    let Some(directory) = open_key_folder(root, folder)? else {
+        return Ok(0);
+    };
+    let mut names = Vec::new();
+    let mut read = 0;
+    for entry in rustix::fs::Dir::read_from(&directory)
+        .map_err(|_| error("account_key_store_unavailable"))?
+    {
+        if read == KEY_SWEEP_MAX {
+            eprintln!("restore_key_sweep_bounded folder={folder}");
+            break;
+        }
+        read += 1;
+        let entry = entry.map_err(|_| error("account_key_store_unavailable"))?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if !name.starts_with('.') && CredentialRef::new(name).is_ok() {
+            names.push(name.to_owned());
+        }
+    }
+    assert!(names.len() <= read && read <= KEY_SWEEP_MAX);
+    let mut removed = 0;
+    for name in &names {
+        if !kept(name.as_str())? {
+            remove_key_in(root, folder, name)?;
+            removed += 1;
+        }
+    }
+    assert!(removed <= names.len());
+    if removed > 0 {
+        directory
+            .sync_all()
+            .map_err(|_| error("account_key_store_unavailable"))?;
+    }
+    Ok(removed)
+}
+
 /// Refuses to read an account key where the Unix owner-only key folder does not exist.
 /// Inputs: the engine root and credential, both unused. Output: `account_key_store_unavailable`.
 #[cfg(not(unix))]
