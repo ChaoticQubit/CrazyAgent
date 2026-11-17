@@ -467,13 +467,14 @@ fn terminal_launch(
     (record, extra)
 }
 
+/// A launch kind's build for one case: the roots, the harness, the account kind and whether
+/// tools are on, to the case's record and its extra files.
+type BuildCase = fn(&Roots, &str, &str, bool) -> (Value, Vec<(String, String)>);
+
 /// Runs one launch kind over every case: Codex and Claude Code, on a sign-in and on a key,
 /// with tools off and on. Inputs: the snapshot name and the build. Output: the record of
 /// every case by name.
-fn every_case(
-    name: &str,
-    build: fn(&Roots, &str, &str, bool) -> (Value, Vec<(String, String)>),
-) -> Value {
+fn every_case(name: &str, build: BuildCase) -> Value {
     let mut cases = Map::new();
     for harness in HARNESSES {
         for kind in ACCOUNTS {
