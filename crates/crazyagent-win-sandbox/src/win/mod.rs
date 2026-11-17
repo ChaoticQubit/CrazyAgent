@@ -4,8 +4,10 @@ mod job;
 mod launch;
 mod name;
 mod record;
+mod tree;
 
 pub use name::final_name;
+pub use tree::ProcessTree;
 
 use crate::plan::plan;
 use crate::profile::{BoundaryProfile, ProfileError};

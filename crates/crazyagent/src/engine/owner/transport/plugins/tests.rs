@@ -327,3 +327,44 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         "the check lists the context-mode tools: {tools:?}"
     );
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
+    const ID: &str = "mcp-0123456789abcdef01234567";
+    let directory = tempfile::tempdir().unwrap();
+    let root = crate::sandbox::canonical(directory.path())
+        .unwrap()
+        .join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let check = |command: &Path| {
+        boundary_check(
+            &root,
+            ID,
+            command.to_str().unwrap(),
+            &["--list".to_owned()],
+            &[],
+            &[],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap_err()
+    };
+    assert_eq!(
+        check(&root.join("missing-server.exe")),
+        "server_command_not_found"
+    );
+    let server = std::env::current_exe().unwrap();
+    let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
+    let checked = check(&server);
+    if helper.is_file() {
+        assert_eq!(checked, "server_exited");
+    } else {
+        assert_eq!(
+            checked,
+            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+        );
+    }
+    for name in ["project", "home", "tmp"] {
+        assert!(root.join(CHECK_FOLDER).join(ID).join(name).is_dir());
+    }
+}

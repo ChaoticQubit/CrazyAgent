@@ -1513,7 +1513,6 @@ async fn start_check(
 /// server id, approved command, arguments, secret values and the configured local model
 /// ports to keep. Output: the tool names, or a plain rejection code, or for a boundary that
 /// cannot hold the check the boundary's own reason ([`crate::plugins::check_refused`]).
-#[cfg(unix)]
 fn boundary_check(
     root: &Path,
     id: &str,
@@ -1523,9 +1522,7 @@ fn boundary_check(
     kept: &[u16],
     network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, String> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxError};
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxError, canonical};
     assert!(valid_id(id));
     use crate::context_mode::ForCheck;
     let approved = ServerSpec::Stdio {
@@ -1563,11 +1560,17 @@ fn boundary_check(
     };
     let install = crate::context_mode::shared_install(&launched);
     let program = Path::new(command);
+    #[cfg(unix)]
+    let runnable = |found: &std::fs::Metadata| {
+        std::os::unix::fs::PermissionsExt::mode(&found.permissions()) & 0o111 != 0
+    };
+    #[cfg(windows)]
+    let runnable = |_: &std::fs::Metadata| true;
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err("server_command_not_found".into());
         }
-        Ok(found) if found.is_file() && found.permissions().mode() & 0o111 != 0 => {}
+        Ok(found) if found.is_file() && runnable(&found) => {}
         _ => return Err("server_command_not_runnable".into()),
     }
     let refused = |cause: &dyn std::fmt::Display| {
@@ -1582,30 +1585,24 @@ fn boundary_check(
         other => refused(&other).to_owned(),
     };
     let checks = root.join(CHECK_FOLDER);
+    let mut private = std::fs::DirBuilder::new();
+    private.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
     let mut folders = Vec::with_capacity(3);
     for name in ["project", "home", "tmp"] {
         let folder = checks.join(id).join(name);
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&folder)
-            .map_err(|error| refused(&error))?;
-        let plain = checks
-            .join(id)
-            .canonicalize()
+        private.create(&folder).map_err(|error| refused(&error))?;
+        let plain = canonical(&checks.join(id))
             .map_err(|error| refused(&error))?
             .join(name);
-        if folder.canonicalize().map_err(|error| refused(&error))? != plain {
+        if canonical(&folder).map_err(|error| refused(&error))? != plain {
             return Err(refused(&"check folder is not the plain folder the engine made").into());
         }
         folders.push(plain);
     }
     let profiles = checks.join(CHECK_PROFILES);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&profiles)
-        .map_err(|error| refused(&error))?;
+    private.create(&profiles).map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
     #[cfg(target_os = "linux")]
     let (calls, strict) = {
@@ -1632,26 +1629,10 @@ fn boundary_check(
     server.args(args).current_dir(&folders[0]);
     let mut process = sandbox.wrap(&server).map_err(boundary)?;
     for (name, value) in secrets {
-        process.env(name, std::ffi::OsStr::from_bytes(value));
+        process.env(name, check::env_value(value)?);
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
     check::check_command(process, check::CHECK_TIME, sandbox.lineage_check()).map_err(String::from)
-}
-
-/// Refuses to check a command server where no process group can be stopped. Takes the
-/// engine folder, server id, command, arguments, secrets and kept ports, all unused. Returns
-/// `server_check_unavailable`, like [`check::check_stdio`] on this system.
-#[cfg(not(unix))]
-fn boundary_check(
-    _root: &Path,
-    _id: &str,
-    _command: &str,
-    _args: &[String],
-    _secrets: &[(String, Vec<u8>)],
-    _kept: &[u16],
-    _network: crate::sandbox::SandboxNetwork,
-) -> Result<Vec<String>, String> {
-    Err("server_check_unavailable".into())
 }
 
 async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineError> {
