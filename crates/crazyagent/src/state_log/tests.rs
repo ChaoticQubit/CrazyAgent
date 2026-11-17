@@ -477,17 +477,29 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 5] = [
+const KINDS: [&str; 10] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
     crate::project_setup::removed::event::KIND,
     crate::master_session::SESSION_DELETED,
+    crate::ide::log::IDE_ASKED,
+    crate::ide::log::RUN_MODE_SET,
+    crate::ide::log::FILE_UNLOCKED,
+    crate::ide::log::WORKSPACE_WRITTEN,
+    crate::ide::log::WORKSPACE_FORGOTTEN,
 ];
+
+/// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
+/// path inside a worktree, which decodes only through `landing::owner_edit::check_path`, so
+/// it is never empty, absolute, NUL-bearing, `.` or `..` in a part, or over its byte bound.
+const FREE_FORM: [(&str, &str); 1] = [(crate::ide::log::FILE_UNLOCKED, "path")];
 
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-const WRITERS: [(&str, &[&str]); 3] = [
+/// ide/log.rs writes `change.kind()`, which maps each `Change` variant to one of its kinds.
+const WRITERS: [(&str, &[&str]); 4] = [
+    ("ide/log.rs", &["change.kind(),"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
     ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
     (
@@ -506,9 +518,24 @@ fn free_text() -> String {
 }
 
 /// Checks a typed body: the sample decodes, its keys are exactly `keys`, and the decoder
-/// refuses it with free text in any one key or with one key more. Inputs: whether the kind's
-/// decoder takes a body, the sample and its keys.
-fn closed_body(decodes: impl Fn(&[u8]) -> bool, sample: serde_json::Value, keys: &[&str]) {
+/// refuses it with free text in any one key but the kind's [`FREE_FORM`] key, which must
+/// refuse every path `check_path` refuses, or with one key more. Inputs: the kind, whether
+/// its decoder takes a body, the sample and its keys.
+fn closed_body(
+    kind: &str,
+    decodes: impl Fn(&[u8]) -> bool,
+    sample: serde_json::Value,
+    keys: &[&str],
+) {
+    let free: Vec<&str> = FREE_FORM
+        .iter()
+        .filter(|(named, _)| *named == kind)
+        .map(|(_, key)| *key)
+        .collect();
+    assert!(
+        free.iter().all(|key| keys.contains(key)),
+        "{kind}: {free:?}"
+    );
     let mut found: Vec<&str> = sample
         .as_object()
         .unwrap()
@@ -520,7 +547,21 @@ fn closed_body(decodes: impl Fn(&[u8]) -> bool, sample: serde_json::Value, keys:
     wanted.sort_unstable();
     assert_eq!(found, wanted);
     assert!(decodes(&serde_json::to_vec(&sample).unwrap()), "{sample}");
-    for key in keys {
+    for key in &free {
+        let too_long = "a".repeat(crate::landing::owner_edit::PATH_BYTES_MAX + 1);
+        for path in ["", "/etc/hosts", "a//b", "./a", "a/../b", "a\0b", &too_long] {
+            let mut changed = sample.clone();
+            changed[*key] = json!(path);
+            assert!(
+                !decodes(&serde_json::to_vec(&changed).unwrap()),
+                "{kind}: {key} took {path:?}"
+            );
+        }
+        let mut number = sample.clone();
+        number[*key] = json!(7);
+        assert!(!decodes(&serde_json::to_vec(&number).unwrap()), "{kind}");
+    }
+    for key in keys.iter().filter(|key| !free.contains(key)) {
         let mut changed = sample.clone();
         changed[*key] = json!(free_text());
         assert!(
@@ -576,14 +617,19 @@ fn writer_sources() -> Vec<(String, String)> {
     found
 }
 
-/// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each typed kind's
-/// body holds a closed set of keys, and its decoder refuses free text in any of them and any
-/// key more; ids decode only as 1 to 128 safe ASCII bytes. A snapshot's closing hash is 64
-/// hex digits. A chunk's rows are any JSON, so no writer outside this module takes a
-/// snapshot until a rule names the tables one may carry. The writers outside tests are the
-/// files in [`WRITERS`], each appending only its own kind.
+/// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each kind's body
+/// has closed keys whose decoder refuses free text and any key more (ids: 1 to 128 safe ASCII
+/// bytes), but for one [`FREE_FORM`] path that refuses what `check_path` refuses. A closing
+/// hash is 64 hex digits; only state_log.rs snapshots, since chunk rows are any JSON. The
+/// writers outside tests are the files in [`WRITERS`], each appending only its own kinds.
 #[test]
 fn no_event_body_can_carry_a_secret() {
+    for kind in crate::ide::log::KINDS {
+        assert!(
+            KINDS.contains(&kind),
+            "the ide kind {kind} needs a body rule"
+        );
+    }
     let writers = writer_sources();
     let mut names: Vec<&str> = writers.iter().map(|(name, _)| name.as_str()).collect();
     names.sort_unstable();
@@ -639,11 +685,13 @@ fn no_event_body_can_carry_a_secret() {
                 );
             }
             replay::PROCESS_EXITED => closed_body(
+                kind,
                 |body| serde_json::from_slice::<replay::ProcessExited>(body).is_ok(),
                 json!({"pid": 7, "code": 0, "signal": null}),
                 &["pid", "code", "signal"],
             ),
             crate::project_setup::removed::event::KIND => closed_body(
+                kind,
                 |body| {
                     serde_json::from_slice::<crate::project_setup::removed::event::ProjectRemoved>(
                         body,
@@ -654,11 +702,43 @@ fn no_event_body_can_carry_a_secret() {
                 &["project", "kept"],
             ),
             crate::master_session::SESSION_DELETED => closed_body(
+                kind,
                 |body| {
                     serde_json::from_slice::<crate::master_session::SessionDeleted>(body).is_ok()
                 },
                 json!({"project": "app", "session": "s1"}),
                 &["project", "session"],
+            ),
+            crate::ide::log::IDE_ASKED => closed_body(
+                kind,
+                |body| serde_json::from_slice::<crate::ide::log::IdeAsked>(body).is_ok(),
+                json!({"project": "app", "entry": "m1", "version": 3, "decision": "approve",
+                       "asked_ms": 5}),
+                &["project", "entry", "version", "decision", "asked_ms"],
+            ),
+            crate::ide::log::RUN_MODE_SET => closed_body(
+                kind,
+                |body| serde_json::from_slice::<crate::ide::log::RunModeSet>(body).is_ok(),
+                json!({"project": "app", "mode": "type_only"}),
+                &["project", "mode"],
+            ),
+            crate::ide::log::FILE_UNLOCKED => closed_body(
+                kind,
+                |body| serde_json::from_slice::<crate::ide::log::FileUnlocked>(body).is_ok(),
+                json!({"project": "app", "agent": 7, "path": "src/main file.rs", "turns": 2}),
+                &["project", "agent", "path", "turns"],
+            ),
+            crate::ide::log::WORKSPACE_WRITTEN => closed_body(
+                kind,
+                |body| serde_json::from_slice::<crate::ide::log::WorkspaceWritten>(body).is_ok(),
+                json!({"project": "app", "show_all": true}),
+                &["project", "show_all"],
+            ),
+            crate::ide::log::WORKSPACE_FORGOTTEN => closed_body(
+                kind,
+                |body| serde_json::from_slice::<crate::ide::log::WorkspaceForgotten>(body).is_ok(),
+                json!({"project": "app"}),
+                &["project"],
             ),
             other => panic!("the kind {other} has no body rule"),
         }
