@@ -495,7 +495,7 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
 /// Whether this system offers no hidden folders, so neither app shows the setting (DEC-194):
 /// true where the tracked-files check runs no confined git and [`git_tracks`] refuses every
 /// folder (V243-WIN-HIDDEN-GIT). The engine's refusal on a save stays the guard.
-pub const UNAVAILABLE: bool = false;
+pub const UNAVAILABLE: bool = cfg!(not(unix));
 
 /// Refuses the tracked-files check where no confined git runs. Inputs unused. Output:
 /// `Err("hidden_path_unchecked")`, so the caller fails closed.
