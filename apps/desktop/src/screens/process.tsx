@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { listSkills, poolSummaries, type Result } from "../api";
+import { harnessCatalog, listSkills, poolSummaries, type Result } from "../api";
 import { loadTeamStatus } from "../api-projects";
 import { type ImportFile, type TeamStatus } from "../engine-client";
 import {
   DEFAULT_INSTRUCTION_SETTINGS, afterSettingsSave, EDIT_DELIVERIES, FINDING_KINDS, findingLines, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, REPEATED_LINES, lineDiff, loadAppInstructionSettings, proposeProcess, saveAppInstructionSettings, commitInstructionImport, committedMessage, confirmInstructionImport,
-  defaultProcess, flagWords, importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
+  defaultProcess, flagWords, importInstructionSource, importInstructionsFile, importRefusal, loadInstructionSources, type InstructionSource, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadGivenText, loadProcess, processMessage,
   processTextError, repeatedNote, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionMode,
   type AppInstructionSettings, type InstructionSettings, type InstructionView, type Proposal, type SavedText, type SkillEntry, type EditDelivery, type Finding,
 } from "../api-process";
@@ -14,7 +14,7 @@ import { navigate } from "../ui/router";
 import { displayText } from "./conversation";
 import { ConflictView, keepMine, type Conflict } from "./conflict";
 import { SkillTag, skillEntries } from "./skill-tag";
-import { HARNESS_NAMES } from "./team/coordination";
+import { harnessName } from "./new-project/team-editor";
 import "./process.css";
 
 /** Where an instructions text applies: every project, or one project. */
@@ -215,13 +215,13 @@ function CleanupView({ cleanup, saved, saving, onPick, onPropose, onAccept, onDi
 export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, view = "read", all = false, given = { kind: "loading" }, mode = "both", subtitle = MODE_SUBTITLES.both, editNote: note = "",
   cleanup = null, editWithAi = true, aiSetting = null,
   onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay, onView, onAll, onUseDefault,
-  onEditWithAi, onPickPool, onPropose, onAccept, onDiscardProposal, onAiSetting }: {
+  onEditWithAi, onPickPool, onPropose, onAccept, onDiscardProposal, onAiSetting, sources = [], onImportSource }: {
   scope: ProcessScope;
   saved: Loaded<string>;
   draft: string;
   skills: readonly SkillEntry[];
   failure: string;
-  busy: "save" | "import" | "default" | null;
+  busy: "save" | "import" | "default" | `source:${string}` | null;
   preview: ProcessPreview | null;
   conflict: Conflict<string> | null;
   leaving?: SkillEntry | null;
@@ -255,6 +255,8 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onAccept?: () => void;
   onDiscardProposal?: () => void;
   onAiSetting?: (on: boolean) => void;
+  sources?: readonly InstructionSource[];
+  onImportSource?: (harness: string) => void;
 }) {
   if (saved.kind === "loading") return <Skeleton shape="card" count={2} />;
   if (saved.kind === "not_ready") return <NotReady what="Instructions" />;
@@ -321,10 +323,13 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
       <TaggedText text={conflict.current} skills={skills} />
     </ConflictView>}
     {proposal}
-    <SettingSection title="Start from" about="Both open a preview first. Nothing changes until you save.">
+    <SettingSection title="Start from" about={sources.length === 0 ? "Both open a preview first. Nothing changes until you save." : "Each opens a preview first. Nothing changes until you save."}>
       <SettingLine label="Your own file" help="Read a text file into the editor.">
         <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null || locked} onClick={onImport}>Import from file</Button>
       </SettingLine>
+      {sources.map((source) => <SettingLine key={source.harness} label={`${source.name}'s own file`} help={`Read ~/${source.path} into the editor.`}>
+        <Button icon="upload" pending={busy === `source:${source.harness}`} pendingLabel="Reading..." disabled={busy !== null || locked} onClick={() => onImportSource?.(source.harness)}>{`Import from ${source.name}`}</Button>
+      </SettingLine>)}
       <SettingLine label="CrazyAgent default" help="The process CrazyAgent ships with.">
         <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null || locked} onClick={onDefault}>Use the CrazyAgent default process</Button>
       </SettingLine>
@@ -539,11 +544,12 @@ function skillsUsed(skills: readonly string[], agent: AgentAdoption): string {
 /** Who follows a project's instructions, as a pure view: one row per agent with whether it
  * asked the graph before its edits and used the context tools, the skills it used and its
  * flags, marked once it was reminded. A clicked row shows the agent's counts; stopped agents
- * wait behind Show finished. Inputs: the adoption read, the agents' names by id, whether
- * finished agents show, the open row and the actions. */
-export function FollowingView({ adoption, names, finished, expanded, onFinished, onExpand, onMetrics, onRetry }: {
+ * wait behind Show finished. Inputs: the adoption read, the agents' names by id, how the
+ * harness catalog names each harness, whether finished agents show, the open row and the actions. */
+export function FollowingView({ adoption, names, harness, finished, expanded, onFinished, onExpand, onMetrics, onRetry }: {
   adoption: Loaded<Adoption>;
   names: Map<number, string>;
+  harness: (harness: string) => string;
   finished: boolean;
   expanded: number | null;
   onFinished: () => void;
@@ -571,7 +577,7 @@ export function FollowingView({ adoption, names, finished, expanded, onFinished,
           const isOpen = expanded === agent.agent;
           const row = <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
             <th scope="row"><button type="button" className="pr-link pr-agent" aria-expanded={isOpen} onClick={() => onExpand(isOpen ? null : agent.agent)}>{name}</button>
-              {" "}<span className="muted small">{HARNESS_NAMES[agent.harness as keyof typeof HARNESS_NAMES] ?? agent.harness}</span></th>
+              {" "}<span className="muted small">{harness(agent.harness)}</span></th>
             <td><Check state={graphState(agent)} /></td>
             <td><Check state={contextState(agent)} /></td>
             <td className="secondary">{skillsUsed(skills, agent)}</td>
@@ -601,10 +607,11 @@ export function FollowingView({ adoption, names, finished, expanded, onFinished,
 export function ProjectFollowing({ projectId }: { projectId: string }) {
   const [adoption, reload] = useLoad(() => loadAdoption(projectId), [projectId]);
   const [status] = useLoad<TeamStatus>(() => loadTeamStatus(projectId), [projectId]);
+  const [catalog] = useLoad(harnessCatalog, [], "harness-catalog");
   const [finished, setFinished] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
   const names = new Map(status.kind === "ok" ? status.value.agents.map((agent) => [agent.id, displayText(agent.label)]) : []);
-  return <FollowingView adoption={adoption} names={names} finished={finished} expanded={expanded}
+  return <FollowingView adoption={adoption} names={names} harness={(id) => harnessName(catalog.kind === "ok" ? catalog.value : null, id)} finished={finished} expanded={expanded}
     onFinished={() => setFinished((old) => !old)} onExpand={setExpanded} onRetry={reload}
     onMetrics={() => navigate({ name: "project", id: projectId, tab: "metrics" })} />;
 }
@@ -642,7 +649,9 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const [all, setAll] = useState(false);
   const [draft, setDraft] = useState("");
   const [failure, setFailure] = useState("");
-  const [busy, setBusy] = useState<"save" | "import" | "default" | null>(null);
+  const [busy, setBusy] = useState<"save" | "import" | "default" | `source:${string}` | null>(null);
+  const [sources] = useLoad<InstructionSource[]>(() => projectId === null ? loadInstructionSources() : Promise.resolve({ kind: "ok", value: [] }), [projectId]);
+  const offered = sources.kind === "ok" ? sources.value : [];
   const [preview, setPreview] = useState<ProcessPreview | null>(null);
   const [conflict, setConflict] = useState<Conflict<string> | null>(null);
   const [leaving, setLeaving] = useState<SkillEntry | null>(null);
@@ -672,6 +681,14 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     setBusy(null);
     if (result.kind !== "ok") fail(result);
     else if (result.value !== null) setPreview({ source, text: result.value });
+  };
+  const seedSource = async (harness: string) => {
+    setFailure("");
+    setBusy(`source:${harness}`);
+    const result = session.noteResult(await importInstructionSource(harness));
+    setBusy(null);
+    if (result.kind !== "ok") fail(result);
+    else setPreview({ source: "import", text: result.value });
   };
   const save = async (shown: Conflict<string> | null) => {
     if (loaded.kind !== "ok") return;
@@ -760,6 +777,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     view={view} all={all} given={given} mode={mode} subtitle={MODE_SUBTITLES[current.mode]} editNote={editNote(current.edits)}
     onView={setView} onAll={() => setAll((old) => !old)} onUseDefault={() => setDraft("")}
     onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
+    sources={offered} onImportSource={(harness) => void seedSource(harness)}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
     onReload={reloadConflict} onKeepMine={() => void save(conflict)}
     cleanup={cleanup} editWithAi={projectId === null ? appAi : settings.kind === "ok" && current.edit_with_ai !== false}

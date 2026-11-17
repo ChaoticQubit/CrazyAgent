@@ -1853,6 +1853,7 @@ fn every_harness_kind_maps_background_commands_at_task_end() {
                 assert!(reader.reports_background());
             }
             HarnessKind::Rcli => assert_eq!(crate::team::launch_harness("rcli"), None),
+            HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         }
     }
 }
@@ -1934,4 +1935,18 @@ fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles(
         conversation_messages("claude-code", &claude),
         vec![(Speaker::Input, "Fix the login page".to_owned())]
     );
+}
+
+#[test]
+fn a_record_stored_under_the_claude_alias_reads_no_messages_as_before() {
+    let typed = serde_json::json!({"type": "user",
+        "message": {"role": "user", "content": "Fix the login page"}})
+    .to_string();
+
+    assert_eq!(
+        record_message("claude-code", typed.as_bytes()),
+        Some(("typed", "Fix the login page".to_owned()))
+    );
+    assert_eq!(record_message("claude", typed.as_bytes()), None);
+    assert_eq!(record_message("Claude-Code", typed.as_bytes()), None);
 }

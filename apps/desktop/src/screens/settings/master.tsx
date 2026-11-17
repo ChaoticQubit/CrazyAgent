@@ -17,7 +17,7 @@ export const STEP_LIMIT_CHOICES: { choice: StepLimit; title: string; help: strin
 ];
 
 /** What a step is and what a stopped turn says, the same words in the TUI. */
-export const STEP_LIMIT_NOTE = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers Claude and Codex masters with tools on. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it.";
+export const STEP_LIMIT_NOTE = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers Claude and Codex masters with tools on. A master with tools off, and an RCLI master, which has no tools, answers each turn in one step, so the limit never stops it.";
 
 /** The setting an owner has until they pick another: the engine's `MasterTimeSettings` default. */
 export const TIME_LIMIT_DEFAULT: MasterTimeSettings = { limit: "no_limit" };
@@ -33,7 +33,7 @@ export const TIME_LIMIT_CHOICES: { choice: TimeLimit; title: string; help: strin
 
 /** What a turn stopped by the time limit says and which masters the limit covers, the same
  * words in the TUI. */
-export const TIME_LIMIT_NOTE = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
+export const TIME_LIMIT_NOTE = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and RCLI.";
 
 /** The setting an owner has until they pick another: the engine's `MasterFrameSettings` default. */
 export const FRAME_LIMIT_DEFAULT: MasterFrameSettings = { limit: "kib64" };
@@ -48,7 +48,7 @@ export const FRAME_LIMIT_CHOICES: { choice: FrameSize; title: string; help: stri
 
 /** What a turn stopped by the frame size limit says and which masters the limit covers, the
  * same words in the TUI. */
-export const FRAME_LIMIT_NOTE = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, or at 1 MiB shorten the message or the instructions, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
+export const FRAME_LIMIT_NOTE = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, or at 1 MiB shorten the message or the instructions, then send again. The limit covers Claude and Codex masters; RCLI keeps 64 KiB.";
 
 const MASTER_TOP = <div className="settings-top"><div>
   <h2>Master</h2>

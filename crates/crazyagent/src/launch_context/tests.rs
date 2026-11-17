@@ -4,6 +4,9 @@ use crate::project_setup::TeamPlan;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
+#[path = "context_mode_off_tests.rs"]
+mod context_mode_off_tests;
+
 fn stored(folder: &Path) -> StoredSetup {
     StoredSetup {
         project_id: ProjectId::new("bounds").unwrap(),
@@ -215,6 +218,8 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -448,6 +453,8 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
 
     let held = lock_only(&home, "codex").unwrap();
@@ -511,6 +518,8 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -567,6 +576,8 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -616,6 +627,8 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let context = fresh()
         .with_team_tool(engine, &record, &mailbox, &[])
@@ -744,6 +757,8 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     }
     .with_index(&plugins, &RoleSkills::default());
     let home = root.join("codex");
@@ -786,6 +801,8 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let first = context.install("codex", &home, true).unwrap();
     let planted = home.join("skills").join(".system").join("planted");
@@ -861,6 +878,8 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
+            tool_home: None,
         };
         let first = context.install("codex", &home, true).unwrap();
         drop(first);
@@ -923,6 +942,8 @@ fn a_parked_name_is_left_alone_and_a_home_denying_removals_still_loses_planted_s
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let first = context.install("codex", &home, true).unwrap();
     drop(first);
@@ -1086,6 +1107,8 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
+            tool_home: None,
         };
         let system = home.join("skills").join(CODEX_SYSTEM_SKILLS);
         for launch in 1..=2 {
@@ -1185,6 +1208,8 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     agents.shell(&format!(
         "ln -s '{}' '{}'",
@@ -1259,6 +1284,8 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
 
     for launch in 1..=2 {
@@ -1313,6 +1340,8 @@ fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
+            tool_home: None,
         };
 
         let launch = context.install("codex", &home, true);
@@ -1679,6 +1708,8 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
 
     agents.shell(&plant);
@@ -1844,6 +1875,8 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let start = "# Project context from CrazyAgent\n";
     assert!(!fresh(start.into()).instructions().contains(rule));
@@ -2041,6 +2074,8 @@ fn a_launch_clears_its_home_caches_when_its_context_names_a_wider_level() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let home = root.join("claude");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
@@ -2102,6 +2137,8 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -2200,6 +2237,8 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
+            tool_home: None,
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
@@ -2262,6 +2301,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
             skills: Vec::new(),
             servers: vec![LaunchServer {
                 name: "tools".into(),
+                engine: false,
                 spec: ServerSpec::Stdio {
                     command: "/usr/bin/true".into(),
                     args: Vec::new(),
@@ -2287,6 +2327,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
         harness: "codex".into(),
@@ -2391,6 +2433,7 @@ impl LeftPane {
                 skills: Vec::new(),
                 servers: vec![LaunchServer {
                     name: "tools".into(),
+                    engine: false,
                     spec: ServerSpec::Stdio {
                         command: "/usr/bin/true".into(),
                         args: Vec::new(),
@@ -2414,6 +2457,8 @@ impl LeftPane {
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            handover: None,
+            tool_home: None,
         };
         let request = crate::harnesses::launch::LaunchRequest {
             harness: "codex".into(),
@@ -2610,6 +2655,8 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let restart = " After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n";
     let clone = fresh()
@@ -2660,6 +2707,8 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
     for (context, subcommand) in [
@@ -2754,6 +2803,8 @@ fn context_with(
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     }
 }
 
@@ -2769,6 +2820,7 @@ fn private_home(root: &Path, name: &str) -> PathBuf {
 fn command_server(name: &str) -> LaunchServer {
     LaunchServer {
         name: name.into(),
+        engine: false,
         spec: ServerSpec::Stdio {
             command: "/usr/bin/true".into(),
             args: Vec::new(),
@@ -3654,6 +3706,8 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -3874,6 +3928,8 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     }
 }
 
@@ -4996,6 +5052,8 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     let base_url = format!("model_providers.stand.base_url=\"http://127.0.0.1:{port}/v1\"");
     let codex = |turn: &[&str]| -> String {
@@ -5112,51 +5170,6 @@ fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_
     assert!(!prompt.contains("context-mode is off"), "{prompt}");
 }
 
-#[test]
-fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
-    use crate::plugins::ContextModeOff;
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    for (off, line) in [
-        (
-            ContextModeOff::SettingUp,
-            "- context-mode is off for this launch: CrazyAgent is still setting it up on this computer. Use the shell instead; agents started once it is set up get it.\n",
-        ),
-        (
-            ContextModeOff::Failed,
-            "- context-mode is off for this launch: setting it up failed on this computer. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
-        ),
-        (
-            ContextModeOff::Mismatch,
-            "- context-mode is off for this launch: its installed files did not match the copy the default pack pins, so CrazyAgent did not run them. Use the shell instead, and tell the owner in your report.\n",
-        ),
-        (
-            ContextModeOff::NodeTooOld,
-            "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
-        ),
-        (
-            ContextModeOff::NpxNotFound,
-            "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
-        ),
-    ] {
-        let plugins = LaunchPlugins {
-            skills: Vec::new(),
-            servers: vec![command_server("graph")],
-            context_mode_off: Some(off),
-            left_out: Vec::new(),
-        };
-        let home = private_home(&root, &format!("{off:?}").to_lowercase());
-        let installed = context_with(&root, plugins, Vec::new())
-            .install("claude-code", &home, true)
-            .unwrap();
-        let prompt = fs::read_to_string(home.join(STATE).join("instructions.md")).unwrap();
-        drop(installed);
-        let section = tools_section(&prompt);
-        assert!(section.contains(line), "{off:?}: {section}");
-        assert!(!section.contains("ctx_execute"), "{off:?}: {section}");
-    }
-}
-
 /// SECRET-CLAUDE-CONFIG: both MCP config texts hold each secret exactly, a double quote and
 /// a backslash in it included, and a name given twice keeps its last value in both.
 #[test]
@@ -5168,6 +5181,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
     let servers = [
         LaunchServer {
             name: "tools".into(),
+            engine: false,
             spec: ServerSpec::Stdio {
                 command: "/usr/bin/true".into(),
                 args: vec!["--stdio".into()],
@@ -5180,6 +5194,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
         },
         LaunchServer {
             name: "remote.docs".into(),
+            engine: false,
             spec: ServerSpec::Http {
                 url: "https://mcp.example.invalid/mcp".into(),
             },
@@ -5187,6 +5202,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
         },
         LaunchServer {
             name: "keyless".into(),
+            engine: false,
             spec: ServerSpec::Http {
                 url: "https://keyless.example.invalid/mcp".into(),
             },
@@ -5294,6 +5310,7 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
             servers: vec![
                 LaunchServer {
                     name: "tools".into(),
+                    engine: false,
                     spec: ServerSpec::Stdio {
                         command: "/usr/bin/true".into(),
                         args: vec!["--stdio".into()],
@@ -5305,6 +5322,7 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
                 },
                 LaunchServer {
                     name: "remote.docs".into(),
+                    engine: false,
                     spec: ServerSpec::Http {
                         url: "https://mcp.example.invalid/mcp".into(),
                     },
@@ -5325,6 +5343,8 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        handover: None,
+        tool_home: None,
     };
     context
         .install("codex", Path::new(&home), true)

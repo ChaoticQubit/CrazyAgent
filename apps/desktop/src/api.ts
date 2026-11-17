@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -643,7 +643,7 @@ export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<
   return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
 }
 
-export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
+export type AccountProvider = "chatgpt" | "claude" | "gemini" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
 export type SignInMethod = "subscription" | "api_key" | "url";
 export type AccountField = "hidden" | "optional" | "required";
 export type AccountStatus = "signed_in" | "not_signed_in" | "key_saved" | "unreachable" | "signing_in";
@@ -1011,6 +1011,10 @@ export async function deletePool(id: string): Promise<Result<void>> {
 
 export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
+/** One harness as the engine's catalog lists it: what was found on this machine, and what
+ * its manifest lets it be. `terminal` is true when the engine reads its replies back from a
+ * live terminal, `master` and `research` when it can run those; `sub_agents` says how its
+ * lead gets sub-agents and `account_protocols` the wire formats of its endpoint accounts. */
 export interface HarnessEntry {
   id: string;
   name: string;
@@ -1023,6 +1027,11 @@ export interface HarnessEntry {
   account_kinds: HarnessAccountKind[];
   team: TeamUse;
   aliases: string[];
+  terminal: boolean;
+  master: boolean;
+  research: boolean;
+  sub_agents: HarnessSubAgents;
+  account_protocols: string[];
 }
 
 /** Reads the harness catalog with what is installed on this Mac, from the engine's last look

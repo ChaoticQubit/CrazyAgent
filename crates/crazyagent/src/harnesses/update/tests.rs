@@ -67,7 +67,7 @@ fn claude_from_the_latest_cask_updates_with_that_prefixs_brew_and_that_cask() {
     assert_eq!(fixed.program, brew);
     assert_eq!(fixed.args, ["upgrade", "--cask", "claude-code@latest"]);
     assert_eq!(
-        shown(&fixed),
+        super::shown(&fixed),
         format!("{} upgrade --cask claude-code@latest", brew.display())
     );
     let check = check_command("claude-code", &real, &machine.roots())
@@ -140,7 +140,7 @@ fn a_standalone_codex_install_updates_itself_and_the_installer_script_is_never_a
     let fixed = update_command("codex", &entry, &real, &machine.roots()).unwrap();
     assert_eq!(fixed.program, entry);
     assert_eq!(fixed.args, ["update"]);
-    assert!(!shown(&fixed).contains("install.sh"));
+    assert!(!super::shown(&fixed).contains("install.sh"));
 }
 
 #[test]
@@ -464,7 +464,7 @@ fn every_catalog_harness_but_rcli_has_one_recipe_with_an_https_guide_and_plain_n
         assert!(link.starts_with("https://"), "{}", spec.id);
         seen += 1;
     }
-    assert_eq!(seen, 22);
+    assert_eq!(seen, 17);
     for name in table_names() {
         assert!(
             name.bytes().all(|byte| byte.is_ascii_lowercase()
@@ -502,7 +502,7 @@ fn the_installed_version_is_found_among_the_first_words_of_other_harnesses_too()
     );
     assert_eq!(installed_version("v1.5.2\n").as_deref(), Some("1.5.2"));
     assert_eq!(
-        installed_version("Kiro CLI 3.2.0\n").as_deref(),
+        installed_version("Kimi CLI 3.2.0\n").as_deref(),
         Some("3.2.0")
     );
     assert_eq!(installed_version("2026.11.10-731fb78\n"), None);
@@ -624,7 +624,6 @@ fn install_uses_homebrew_first_with_the_table_name_and_its_kind() {
         ("goose", ["install", "--formula", "block-goose-cli"]),
         ("kimi", ["install", "--formula", "kimi-code"]),
         ("copilot", ["install", "--cask", "copilot-cli"]),
-        ("antigravity", ["install", "--cask", "antigravity-cli"]),
         ("opencode", ["install", "--formula", "opencode"]),
     ] {
         let fixed = install_command(id, &machine.roots()).unwrap();
@@ -692,7 +691,7 @@ fn a_harness_whose_homebrew_formula_is_deprecated_installs_with_npm_even_when_ho
 fn a_homebrew_only_harness_without_homebrew_and_a_harness_with_no_package_get_no_install_command() {
     let machine = Machine::new();
     machine.npm("brew");
-    for id in ["aider", "goose", "cursor-agent", "kiro", "antigravity"] {
+    for id in ["aider", "goose"] {
         assert_eq!(
             install_command(id, &machine.roots()).unwrap_err(),
             NO_INSTALLER,
@@ -700,6 +699,14 @@ fn a_homebrew_only_harness_without_homebrew_and_a_harness_with_no_package_get_no
         );
     }
     machine.program("brew/bin/brew", 0o755);
+    for gone in ["antigravity", "cursor-agent", "amp", "kiro", "auggie"] {
+        assert_eq!(
+            install_command(gone, &machine.roots()).unwrap_err(),
+            UNKNOWN_INSTALL,
+            "{gone}"
+        );
+        assert!(guide(gone).is_none(), "{gone}");
+    }
     for id in ["fx", "openhands"] {
         assert_eq!(
             install_command(id, &machine.roots()).unwrap_err(),
@@ -719,7 +726,7 @@ fn a_homebrew_only_harness_without_homebrew_and_a_harness_with_no_package_get_no
 }
 
 #[test]
-fn where_casks_are_not_supported_a_cask_harness_falls_to_npm_or_to_the_guide() {
+fn where_casks_are_not_supported_a_cask_harness_falls_to_npm() {
     let machine = Machine::new();
     machine.program("brew/bin/brew", 0o755);
     let npm = machine.npm("brew");
@@ -728,10 +735,6 @@ fn where_casks_are_not_supported_a_cask_harness_falls_to_npm_or_to_the_guide() {
         ..machine.roots()
     };
     assert_eq!(install_command("codex", &roots).unwrap().program, npm);
-    assert_eq!(
-        install_command("cursor-agent", &roots).unwrap_err(),
-        NO_INSTALLER
-    );
     assert_eq!(
         install_command("aider", &roots).unwrap().args,
         ["install", "--formula", "aider"]
@@ -781,12 +784,8 @@ fn no_install_command_ever_names_a_look_alike_package_a_script_or_sudo() {
             let package = *fixed.args.last().unwrap();
             for wrong in [
                 "fx",
-                "amp",
                 "goose",
                 "copilot",
-                "cursor-agent",
-                "antigravity",
-                "kiro-cli",
                 "goose-cli",
                 "kimi-cli",
                 "openhands",
@@ -814,7 +813,7 @@ fn no_install_command_ever_names_a_look_alike_package_a_script_or_sudo() {
             }
         }
     }
-    assert_eq!(built, 20 + 15);
+    assert_eq!(built, 15 + 13);
 }
 
 fn executable(path: &Path, text: &str) {
@@ -1120,7 +1119,7 @@ fn a_cask_check_also_asks_about_casks_that_update_themselves() {
         ]
     );
     assert!(check.args.len() <= ARGS_MAX);
-    assert!(shown(&check).ends_with("--greedy-auto-updates --json=v2 droid"));
+    assert!(super::shown(&check).ends_with("--greedy-auto-updates --json=v2 droid"));
 }
 
 #[test]
@@ -1933,7 +1932,7 @@ fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_
             "{id}"
         );
     }
-    for id in ["aider", "goose", "cursor-agent"] {
+    for id in ["aider", "goose", "fx"] {
         assert_eq!(
             install_command(id, &machine.roots()).unwrap_err(),
             NO_INSTALLER,
@@ -2939,6 +2938,47 @@ fn an_installed_version_is_below_a_sign_in_minimum_only_when_it_reads_lower() {
     }
 }
 
+/// Task 21 (DEC-166): the versions row of a harness below the oldest version CrazyAgent
+/// drives reads "needs X or newer" in the words both clients show; at or past the floor, with
+/// no floor or one that is not plain, or with an installed version unknown or not plain, it
+/// reads nothing.
+#[test]
+fn a_harness_below_the_floor_it_runs_at_reads_needs_x_or_newer() {
+    let row = |installed: Option<&str>, floor: Option<&str>| HarnessVersions {
+        id: "claude-code".into(),
+        method: Method::Unknown,
+        installed: installed.map(str::to_owned),
+        latest: Latest::NotChecked,
+        command: None,
+        install: None,
+        refusal: None,
+        guide: None,
+        running: false,
+        last: None,
+        needs: None,
+        sign_in_min: None,
+        run_min: floor.map(str::to_owned),
+    };
+    assert_eq!(
+        needs_newer_line("Claude Code", &row(Some("2.1.200"), Some("2.1.250"))).as_deref(),
+        Some("Claude Code 2.1.200 is too old for CrazyAgent; it needs 2.1.250 or newer.")
+    );
+    for (installed, floor) in [
+        (Some("2.1.250"), Some("2.1.250")),
+        (Some("2.1.325"), Some("2.1.250")),
+        (Some("garbage"), Some("2.1.250")),
+        (None, Some("2.1.250")),
+        (Some("2.1.200"), None),
+        (Some("2.1.200"), Some("2.1.x")),
+    ] {
+        assert_eq!(
+            needs_newer_line("Claude Code", &row(installed, floor)),
+            None,
+            "{installed:?} {floor:?}"
+        );
+    }
+}
+
 /// DEC-166: a sign-in is refused as too old only for a harness that has a minimum and a
 /// known installed version below it; an unknown version runs as before.
 #[test]
@@ -2988,6 +3028,17 @@ fn a_versions_row_names_the_sign_in_minimum_of_a_harness_that_signs_in() {
     let claude = machine.program("brew/bin/claude", 0o755);
     let installed = Case::new(machine, entry("claude-code", Some(claude)), None).versions(false);
     assert_eq!(installed.sign_in_min.as_deref(), Some("2.1.268"));
+}
+
+/// Task 18: the versions row of every bundled harness carries the floor its manifest names,
+/// so both clients can show "needs X or newer" beside the Update line.
+#[test]
+fn a_versions_row_names_the_manifest_floor_of_every_bundled_harness() {
+    for harness in crate::harnesses::registry::registry().all() {
+        let id = harness.id();
+        let row = Case::new(Machine::new(), entry(id, None), None).versions(false);
+        assert_eq!(row.run_min.as_deref(), harness.minimum_version(), "{id}");
+    }
 }
 
 /// RV-DS241-59: a check or update program is trusted only as the tool resolver trusts one:
@@ -3140,4 +3191,79 @@ fn the_user_agent_version_read_never_runs_a_node_others_can_change() {
     std::os::unix::fs::symlink(open.join("node"), entry.with_file_name("node")).unwrap();
     assert_eq!(version_under_home(&entry), None);
     assert!(!marker.exists(), "a node others can change never runs");
+}
+
+fn shown(recipe: &Recipe) -> String {
+    let own = recipe.own.as_ref().map_or_else(String::new, |own| {
+        let format = match own.pointer.format {
+            PointerFormat::PlainVersion => "plain".to_owned(),
+            PointerFormat::JsonTag { field, prefix } => format!("json {field} {prefix}"),
+        };
+        format!(
+            "{} {} {} {format} {}",
+            own.root,
+            own.args.join(" "),
+            own.pointer.url,
+            own.pointer.bytes_max
+        )
+    });
+    let brews: Vec<String> = recipe
+        .brews
+        .iter()
+        .map(|brew| format!("{} {} {}", flag(brew.kind), brew.name, brew.install))
+        .collect();
+    let npm = recipe.npm.as_ref().map_or_else(String::new, |npm| {
+        format!(
+            "{} {} {} {} {}",
+            npm.scope,
+            npm.name,
+            npm.package,
+            npm.spec,
+            npm.flags.join(" ")
+        )
+    });
+    format!(
+        "{}|{own}|{}|{npm}|{}",
+        recipe.id,
+        brews.join(","),
+        recipe.guide
+    )
+}
+
+const RECIPES_FROZEN: [&str; 17] = [
+    "codex|.codex/packages/standalone update https://releases.openai.com/codex/channels/latest json tag_name rust-v 262144|--cask codex true|@openai codex @openai/codex @openai/codex |https://developers.openai.com/codex/cli",
+    "claude-code|.local/share/claude/versions update https://downloads.claude.ai/claude-code-releases/latest plain 64|--cask claude-code true,--cask claude-code@latest false|@anthropic-ai claude-code @anthropic-ai/claude-code @anthropic-ai/claude-code@latest |https://code.claude.com/docs/en/setup",
+    "opencode||--formula opencode true|@opencode cli @opencode/cli @opencode/cli |https://opencode.ai/docs/",
+    "gemini-cli||--formula gemini-cli false|@google gemini-cli @google/gemini-cli @google/gemini-cli |https://github.com/google-gemini/gemini-cli#readme",
+    "fx||||https://vercel.com/docs/ai-gateway/coding-agents/fx",
+    "openclaw||--formula openclaw-cli true| openclaw openclaw openclaw@latest --allow-scripts=openclaw|https://docs.openclaw.ai/install",
+    "pi||--formula pi-coding-agent true|@earendil-works pi-coding-agent @earendil-works/pi-coding-agent @earendil-works/pi-coding-agent --ignore-scripts|https://pi.dev/",
+    "goose||--formula block-goose-cli true||https://goose-docs.ai/docs/getting-started/installation",
+    "aider||--formula aider true||https://aider.chat/docs/install.html",
+    "qwen-code||--formula qwen-code true|@qwen-code qwen-code @qwen-code/qwen-code @qwen-code/qwen-code@latest |https://github.com/QwenLM/qwen-code#readme",
+    "crush|||@charmland crush @charmland/crush @charmland/crush |https://github.com/charmbracelet/crush#readme",
+    "droid||--cask droid true| droid droid droid |https://docs.factory.ai/cli/getting-started/quickstart",
+    "copilot||--cask copilot-cli true,--cask copilot-cli@prerelease false|@github copilot @github/copilot @github/copilot |https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli",
+    "cline||--formula cline false| cline cline cline |https://docs.cline.bot/usage/cli-overview",
+    "continue|||@continuedev cli @continuedev/cli @continuedev/cli |https://github.com/continuedev/continue/tree/main/extensions/cli",
+    "openhands||||https://docs.openhands.dev/openhands/usage/cli/installation",
+    "kimi||--formula kimi-code true,--formula kimi-cli false|@moonshot-ai kimi-code @moonshot-ai/kimi-code @moonshot-ai/kimi-code |https://moonshotai.github.io/kimi-code/en/guides/getting-started",
+];
+
+#[test]
+fn the_install_and_update_recipes_read_as_they_did_before_the_manifests() {
+    let listed: Vec<&str> = crate::harnesses::specs()
+        .iter()
+        .map(|spec| spec.id)
+        .filter(|id| recipe(id).is_some())
+        .collect();
+    assert_eq!(listed.len(), RECIPES_FROZEN.len());
+    for (id, frozen) in listed.iter().zip(RECIPES_FROZEN) {
+        assert_eq!(shown(recipe(id).unwrap()), frozen);
+    }
+    assert!(recipe("rcli").is_none());
+    assert!(
+        recipe("claude").is_none(),
+        "a recipe is found by catalog id only"
+    );
 }

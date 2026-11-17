@@ -19,6 +19,7 @@ fn catalog_lists_every_provider_with_plain_ordered_methods() {
         [
             "ChatGPT / Codex",
             "Claude",
+            "Gemini API",
             "OpenRouter",
             "OpenAI API",
             "Anthropic API",
@@ -44,12 +45,13 @@ fn catalog_lists_every_provider_with_plain_ordered_methods() {
         labels(Provider::Claude),
         ["Sign in with your Claude subscription", "Use an API key"]
     );
+    assert_eq!(labels(Provider::Gemini), ["Use an API key"]);
     assert_eq!(labels(Provider::Openrouter), ["Use an API key"]);
     assert_eq!(labels(Provider::OpenaiApi), ["Use an API key"]);
     assert_eq!(labels(Provider::AnthropicApi), ["Use an API key"]);
     assert_eq!(labels(Provider::OpenaiCompatible), ["Connect a URL"]);
     assert_eq!(labels(Provider::Local), ["Connect a URL"]);
-    let local = &catalog[6].methods[0];
+    let local = &catalog[7].methods[0];
     assert_eq!(local.url, Field::Required);
     assert_eq!(
         local.url_preset.as_deref(),
@@ -57,12 +59,12 @@ fn catalog_lists_every_provider_with_plain_ordered_methods() {
     );
     assert_eq!(local.key, Field::Hidden);
     assert_eq!(local.model, Field::Required);
-    let compatible = &catalog[5].methods[0];
+    let compatible = &catalog[6].methods[0];
     assert_eq!(
         (compatible.url, compatible.key, compatible.model),
         (Field::Required, Field::Optional, Field::Required)
     );
-    let openrouter = &catalog[2].methods[0];
+    let openrouter = &catalog[3].methods[0];
     assert_eq!(openrouter.url, Field::Hidden);
     assert_eq!(
         openrouter.url_preset.as_deref(),
@@ -333,4 +335,108 @@ fn statuses_have_plain_labels() {
     assert_eq!(AccountStatus::KeySaved.label(), "Key saved");
     assert_eq!(AccountStatus::Unreachable.label(), "Can't reach this URL");
     assert_eq!(AccountStatus::SigningIn.label(), "Signing in...");
+}
+
+/// Task 17 (DEC-180 addendum 2, answer 3): the engine has a Gemini API key kind: one
+/// method, a key and a model on Google's own address, stored in the Gemini wire format, so
+/// it fits only a harness that speaks that format. Task 21 serves it in the catalog right
+/// after Claude, so the Add account tiles of both apps offer it right after Anthropic.
+#[test]
+fn a_gemini_api_key_is_an_account_kind_on_googles_address_in_its_own_wire_format() {
+    let gemini: Provider =
+        serde_json::from_value(serde_json::json!("gemini")).expect("the pool has a Gemini kind");
+    assert_eq!(provider_name(gemini), "Gemini API");
+    let mut unnamed = draft(gemini, SignInMethod::ApiKey);
+    assert_eq!(
+        unnamed.build(true, "0123456789abcdef0123").unwrap_err().0,
+        "account_model_required"
+    );
+    unnamed.model = Some("bad model".into());
+    assert_eq!(
+        unnamed.build(true, "0123456789abcdef0123").unwrap_err().0,
+        "account_model_invalid"
+    );
+    assert_eq!(
+        draft(gemini, SignInMethod::Subscription)
+            .build(false, "0123456789abcdef0123")
+            .unwrap_err()
+            .0,
+        "account_method_unavailable"
+    );
+    let mut value = draft(gemini, SignInMethod::ApiKey);
+    value.model = Some("gemini-2.5-pro".into());
+    assert_eq!(
+        value.build(false, "0123456789abcdef0123").unwrap_err().0,
+        "account_key_required"
+    );
+    let (connection, details) = value.build(true, "0123456789abcdef0123").unwrap();
+    assert_eq!(
+        connection.endpoint,
+        ModelEndpoint::Http {
+            url: "https://generativelanguage.googleapis.com".into()
+        }
+    );
+    assert_eq!(connection.protocol.as_str(), "gemini");
+    assert_eq!(connection.provider.as_str(), "google");
+    assert_eq!(connection.model.author.as_str(), "google");
+    assert_eq!(connection.model.id, "gemini-2.5-pro");
+    assert!(connection.id.as_str().starts_with("gemini-account-"));
+    assert!(matches!(
+        &connection.auth,
+        ModelAuthentication::ApiKey { credential_ref } if credential_ref.as_str().starts_with("gemini-key-")
+    ));
+    assert_eq!(details.name, "Gemini API");
+    assert_eq!(details.provider, gemini);
+    assert_eq!(method_of(&connection, gemini), SignInMethod::ApiKey);
+    assert_eq!(provider_of(&connection), gemini);
+    value.url = Some("https://gateway.example.invalid".into());
+    assert_eq!(
+        value.build(true, "0123456789abcdef0123").unwrap_err().0,
+        "account_url_not_allowed"
+    );
+    assert_eq!(
+        serde_json::to_value(gemini).unwrap(),
+        serde_json::json!("gemini")
+    );
+    let served = catalog();
+    let at = served.iter().position(|entry| entry.provider == gemini);
+    assert_eq!(at, Some(2), "the Gemini API is served right after Claude");
+    assert_eq!(served[2].name, "Gemini API");
+    assert_eq!(served[2].methods.len(), 1);
+    let key = &served[2].methods[0];
+    assert_eq!(key.method, SignInMethod::ApiKey);
+    assert_eq!(
+        (key.url, key.key, key.model),
+        (Field::Hidden, Field::Required, Field::Required)
+    );
+    assert_eq!(
+        key.url_preset.as_deref(),
+        Some("https://generativelanguage.googleapis.com")
+    );
+}
+
+/// Task 17: a Gemini API key is stored for Gemini CLI, not for RCLI, so neither the RCLI
+/// master, which takes any HTTP account stored for RCLI, nor the RCLI home takes an account
+/// RCLI cannot run.
+#[test]
+fn a_gemini_api_key_is_stored_for_gemini_cli_so_the_rcli_master_never_takes_it() {
+    use crate::master_session::MasterBackend;
+    let gemini: Provider =
+        serde_json::from_value(serde_json::json!("gemini")).expect("the pool has a Gemini kind");
+    let mut value = draft(gemini, SignInMethod::ApiKey);
+    value.model = Some("gemini-2.5-pro".into());
+    let (connection, _) = value.build(true, "0123456789abcdef0123").unwrap();
+    assert_eq!(connection.harness.as_str(), "gemini-cli");
+    for backend in [
+        MasterBackend::Rcli,
+        MasterBackend::Codex,
+        MasterBackend::Claude,
+    ] {
+        assert!(
+            !crate::master_session::backend_member(backend, &connection),
+            "{backend:?}"
+        );
+    }
+    assert_eq!(crate::config::connection_destination(&connection), None);
+    assert!(!crate::harnesses::account_fits("rcli", &connection));
 }

@@ -8,16 +8,16 @@
     Claude Code   ✓ Ready          Full control       Claude, Anthropic API     
     OpenCode      ⊘ Not installed  ? Unknown          Any API key or URL        
     Gemini CLI    ⊘ Not installed  ? Unknown          Google, Gemini API key    
-  > Cursor CLI    ⊘ Not installed  ◧ Limited control  Cursor account            
-    fx by Vercel  ⊘ Not installed  ? Unknown          Not known yet             
-    Antigravity   ⊘ Not installed  ◧ Limited control  Google account            
-    OpenClaw      ⊘ Not installed  ? Unknown          Any API key or URL        
-    Pi            ⊘ Not installed  ? Unknown          Any API key or URL        
+  > fx by Vercel  ⊘ Not installed  ◧ Limited control  Any API key or URL        
+    OpenClaw      ⊘ Not installed  ◧ Limited control  Subscription, API key     
+    Pi            ⊘ Not installed  ? Unknown          Any account               
+    RCLI          ⊘ Not installed  ◧ Limited control  Any API key or URL        
+    Goose         ⊘ Not installed  ? Unknown          Any API key or URL        
                                                                                 
-  Cursor CLI   ⊘ Not installed                                                  
-  Limited control: closed source. Tools on or off is enforced by the project    
-  sandbox, not inside Cursor.                                                   
+  fx by Vercel  ⊘ Not installed                                                 
+  Limited control: no documented switch to turn tools off.                      
   Install it yourself, then press r to check again.                             
+                                                                                
                                                                                 
                                                                                 
                                                                                 

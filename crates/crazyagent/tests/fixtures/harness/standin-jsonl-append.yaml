@@ -1,0 +1,85 @@
+schema: 1
+kind: harness
+id: "standin-jsonl-append"
+name: "Stand-in JSON lines record"
+binaries:
+  - "standin-jsonl-append"
+headless: "none: standin-jsonl-append runs in a terminal pane only"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+account_protocols:
+  - "openai-chat"
+accounts:
+  openai-chat:
+    env:
+      OPENAI_BASE_URL: "{relay_url}"
+      OPENAI_API_KEY: "{token}"
+home:
+  env_prefixes:
+    - "STANDIN_APPEND_"
+  env:
+    STANDIN_APPEND_CONFIG: "{home}/config"
+mcp:
+  render: "json-mcp-servers"
+  path: "{home}/config/mcp.json"
+instructions:
+  render: "file"
+  path: "{home}/config/AGENTS.md"
+roles:
+  - "agent"
+  - "master"
+sub_agents: "app"
+terminal:
+  argv:
+    - "--home"
+    - "{home}"
+    - "--session"
+    - "{session}"
+  resume:
+    - "--home"
+    - "{home}"
+    - "--resume"
+    - "{session}"
+  submit: "enter"
+  interrupt: "ctrl-c"
+  first_screen:
+    trust:
+      seen: "Trust this folder?"
+      press: "enter"
+  record:
+    reader: "jsonl-append"
+    path: "{home}/standin/records/{session}.jsonl"
+    rules: "standin-record"
+rules:
+  standin-record:
+    started:
+      when:
+        type: "started"
+      emit: "turn_started"
+      text: "prompt"
+    text:
+      when:
+        type: "text"
+      emit: "text"
+      text: "delta"
+    tool:
+      when:
+        type: "tool"
+      emit: "tool_use"
+      name: "name"
+    stopped:
+      when:
+        type: "stopped"
+      emit: "interrupted"
+    done:
+      when:
+        type: "done"
+      emit: "turn_finished"
+      success: "ok"
+    error:
+      when:
+        type: "error"
+      emit: "turn_error"

@@ -20,6 +20,7 @@ pub enum Provider {
     AnthropicApi,
     OpenaiCompatible,
     Local,
+    Gemini,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,10 +117,12 @@ const OPENAI_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 const OLLAMA_URL: &str = "http://127.0.0.1:11434/v1";
+const GEMINI_URL: &str = "https://generativelanguage.googleapis.com";
 
-const PROVIDERS: [Provider; 7] = [
+const PROVIDERS: [Provider; 8] = [
     Provider::Chatgpt,
     Provider::Claude,
+    Provider::Gemini,
     Provider::Openrouter,
     Provider::OpenaiApi,
     Provider::AnthropicApi,
@@ -142,13 +145,32 @@ pub fn provider_name(provider: Provider) -> &'static str {
         Provider::AnthropicApi => "Anthropic API",
         Provider::OpenaiCompatible => "Any OpenAI-compatible URL",
         Provider::Local => "Local models (Ollama)",
+        Provider::Gemini => "Gemini API",
+    }
+}
+
+/// The kind of account one Add account choice makes, in the words a sentence asks the owner
+/// to add it with: the sign-in for a subscription, the key's provider for an API key, the
+/// address kind for a URL. Two choices that store the same kind share the phrase.
+/// Inputs: the provider and its sign-in method. Output: the phrase, such as
+/// "an OpenAI API key".
+pub fn account_phrase(provider: Provider, method: SignInMethod) -> &'static str {
+    match (provider, method) {
+        (Provider::Chatgpt, SignInMethod::Subscription) => "a ChatGPT sign-in",
+        (_, SignInMethod::Subscription) => "a Claude sign-in",
+        (Provider::Chatgpt | Provider::OpenaiApi, _) => "an OpenAI API key",
+        (Provider::Claude | Provider::AnthropicApi, _) => "an Anthropic API key",
+        (Provider::Openrouter, _) => "an OpenRouter API key",
+        (Provider::Gemini, _) => "a Gemini API key",
+        (Provider::OpenaiCompatible, _) => "an OpenAI-compatible URL",
+        (Provider::Local, _) => "a local model (Ollama)",
     }
 }
 
 fn methods(provider: Provider) -> &'static [SignInMethod] {
     match provider {
         Provider::Chatgpt | Provider::Claude => &[SignInMethod::Subscription, SignInMethod::ApiKey],
-        Provider::Openrouter | Provider::OpenaiApi | Provider::AnthropicApi => {
+        Provider::Openrouter | Provider::OpenaiApi | Provider::AnthropicApi | Provider::Gemini => {
             &[SignInMethod::ApiKey]
         }
         Provider::OpenaiCompatible | Provider::Local => &[SignInMethod::Url],
@@ -194,6 +216,10 @@ fn spec(provider: Provider, method: SignInMethod) -> Option<Spec> {
             keyed("anthropic-messages", "anthropic", ANTHROPIC_URL)
         }
         (Provider::Openrouter, _) => keyed("openai-chat", "openrouter", OPENROUTER_URL),
+        (Provider::Gemini, _) => Spec {
+            harness: "gemini-cli",
+            ..keyed("gemini", "google", GEMINI_URL)
+        },
         (Provider::OpenaiCompatible, _) => Spec {
             harness: "rcli",
             protocol: "openai-chat",
@@ -243,6 +269,14 @@ pub fn catalog() -> Vec<ProviderEntry> {
     assert_eq!(entries.len(), PROVIDERS.len());
     assert!(entries.iter().all(|entry| !entry.methods.is_empty()));
     entries
+}
+
+/// The harness and wire format an account made with one provider and sign-in method is
+/// stored with, so a harness can tell which Add account choices fit it without making an
+/// account. Inputs: the provider and the method. Output: the harness and the wire format,
+/// `native` for a sign-in, or none for a method the provider does not offer.
+pub fn stored_as(provider: Provider, method: SignInMethod) -> Option<(&'static str, &'static str)> {
+    spec(provider, method).map(|spec| (spec.harness, spec.protocol))
 }
 
 /// Checks one owner-entered account name: trimmed, bounded and free of control or
@@ -411,6 +445,7 @@ impl AccountDraft {
             Provider::AnthropicApi => "anthropic",
             Provider::OpenaiCompatible => "url",
             Provider::Local => "local",
+            Provider::Gemini => "gemini",
         };
         let reference = |kind: &str| {
             CredentialRef::new(format!("{prefix}-{kind}-{nonce}"))
@@ -485,6 +520,7 @@ pub fn provider_of(connection: &ModelConnection) -> Provider {
         ("claude" | "claude-code", ..) => Provider::Claude,
         (_, "openrouter", _) => Provider::Openrouter,
         (_, _, "anthropic-messages") => Provider::AnthropicApi,
+        (_, _, "gemini") => Provider::Gemini,
         (_, "openai", _) => Provider::OpenaiApi,
         _ if matches!(connection.auth, ModelAuthentication::None {})
             && http

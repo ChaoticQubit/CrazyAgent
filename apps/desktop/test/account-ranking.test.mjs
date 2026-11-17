@@ -61,7 +61,7 @@ test("the Metrics page's account section carries the next accounts panel", () =>
   const limits = { pools: new Map(), failure: "", busy: null, next: panel, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
   const html = renderToStaticMarkup(createElement(MetricsPage, {
     projectId: null, usage: { kind: "ok", value: report }, metrics: { kind: "ok", value: metrics }, adoption: null, range: "7d", by: "project",
-    names: { agents: new Map(), accounts: new Map() }, sinceMs: monday - 7 * 86_400_000, nowMs: monday, updatedMs: monday, offset: 0,
+    names: { agents: new Map(), accounts: new Map(), harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id }, sinceMs: monday - 7 * 86_400_000, nowMs: monday, updatedMs: monday, offset: 0,
     filter: { projects: [], onProject: forbidden, limits }, onRange: forbidden, onBy: forbidden, onRetry: forbidden,
   }));
   assert.ok(html.indexOf("Account limits") < html.indexOf("Next accounts"), html);

@@ -6,15 +6,20 @@ use super::launch::{
     LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
     codex_launch_settings, failure, harness_id, key_file_text, validate,
 };
+use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
+use crate::harnesses::accounts::Handover;
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+pub mod settings;
+use settings::TerminalSettings;
 
 pub const KEY_FILE: &str = ".crazyagent-key";
 pub const CLAUDE_PROJECT_NAME_MAX: usize = 200;
@@ -23,6 +28,8 @@ const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
+/// Why a catalog harness has no live terminal while the engine has no reader for its record.
+const REPLIES_UNREAD: &str = "CrazyAgent cannot read its replies yet";
 /// Runs a tools-on Codex agent as an app-server and a TUI attached to it with `--remote`, so
 /// the engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
 /// the home's `unix://` control socket; when it has not bound within 5 s, or exits, the
@@ -41,6 +48,16 @@ if [ -n "$r" ]; then ${n:+"$n"} "$e" "$@" resume "$r"; else ${n:+"$n"} "$e" "$@"
 c=$?
 kill "$a" 2>/dev/null
 exit "$c"
+"#;
+/// Starts a listed harness inside its sandbox with the value its account hand-over gives
+/// under the names the hand-over lists, which the terminal host's variable guard keeps out
+/// of a pane's own variables. Arguments: `file` and the key file holding a keyed account's
+/// relay token, or `word` and the keyless placeholder, the names joined by spaces, then the
+/// harness's own command, which replaces the shell.
+const HANDED_SCRIPT: &str = r#"case $1 in file) k=$(/bin/cat -- "$2") || exit 1;; *) k=$2;; esac
+for n in $3; do export "$n=$k"; done
+shift 3
+exec "$@"
 "#;
 /// The variable that hands [`CODEX_BRIDGE_SCRIPT`] the absolute interpreter of a Codex that
 /// asks `env` for `node`, so the bridge runs it with no search path.
@@ -102,11 +119,13 @@ pub struct InteractiveCommand {
 }
 
 /// Where a harness writes its own session record, which the engine reads for status,
-/// replies and task blocks instead of reading the screen.
+/// replies and task blocks instead of reading the screen: a Codex rollout, a Claude Code
+/// transcript, or the record a manifest harness's terminal settings name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transcript {
     CodexRollouts { sessions: PathBuf },
     ClaudeSession { file: PathBuf },
+    Records(records::Records),
     Unavailable,
 }
 
@@ -128,7 +147,8 @@ pub struct DisplaySwitches {
 /// its `tui.alternate_screen` setting, `never` for Classic and `always` for Fullscreen, its
 /// own view with mouse reporting on (OB-8); a `-c` setting, because the app server a tools-on
 /// launch starts first takes `-c` and exits on `--no-alt-screen`. RCLI runs one turn at a
-/// time with no view of its own, so it has no switches and only Classic holds for it.
+/// time with no view of its own, so it has no switches and only Classic holds for it. A
+/// listed harness has no switches the engine knows, so neither display holds for it.
 /// Inputs: the kind and the display. Output: the switches.
 pub fn display_switches(harness: HarnessKind, display: TerminalDisplay) -> DisplaySwitches {
     let (variables, arguments, honoured): (&'static [(&str, &str)], &'static [&str], bool) =
@@ -152,6 +172,7 @@ pub fn display_switches(harness: HarnessKind, display: TerminalDisplay) -> Displ
             }
             (HarnessKind::Rcli, TerminalDisplay::Classic) => (&[], &[], true),
             (HarnessKind::Rcli, TerminalDisplay::Fullscreen) => (&[], &[], false),
+            (HarnessKind::Listed(_), _) => (&[], &[], false),
         };
     DisplaySwitches {
         variables,
@@ -199,7 +220,7 @@ struct Plain {
     model_flag: Option<&'static str>,
 }
 
-const PLAIN: [Plain; 20] = [
+const PLAIN: [Plain; 15] = [
     Plain {
         id: "opencode",
         subcommand: &[],
@@ -211,17 +232,7 @@ const PLAIN: [Plain; 20] = [
         model_flag: Some("--model"),
     },
     Plain {
-        id: "cursor-agent",
-        subcommand: &[],
-        model_flag: Some("--model"),
-    },
-    Plain {
         id: "fx",
-        subcommand: &[],
-        model_flag: None,
-    },
-    Plain {
-        id: "antigravity",
         subcommand: &[],
         model_flag: None,
     },
@@ -234,11 +245,6 @@ const PLAIN: [Plain; 20] = [
         id: "pi",
         subcommand: &[],
         model_flag: Some("--model"),
-    },
-    Plain {
-        id: "amp",
-        subcommand: &[],
-        model_flag: None,
     },
     Plain {
         id: "goose",
@@ -266,11 +272,6 @@ const PLAIN: [Plain; 20] = [
         model_flag: None,
     },
     Plain {
-        id: "kiro",
-        subcommand: &["chat"],
-        model_flag: None,
-    },
-    Plain {
         id: "copilot",
         subcommand: &[],
         model_flag: Some("--model"),
@@ -291,32 +292,37 @@ const PLAIN: [Plain; 20] = [
         model_flag: None,
     },
     Plain {
-        id: "auggie",
-        subcommand: &[],
-        model_flag: None,
-    },
-    Plain {
         id: "kimi",
         subcommand: &[],
         model_flag: None,
     },
 ];
 
-/// Tells whether a catalog harness runs as its own interactive app in a terminal pane.
-/// Input: a catalog id or a connection harness name. Output: `Terminal` when the engine reads
-/// its session record, `Unavailable` for the other apps until a reader exists, or
-/// `HeadlessOnly` with the reason for RCLI, which runs only as a master, and unknown names.
+/// Tells whether a catalog harness runs as its own interactive app in a terminal pane, from
+/// the record reader its manifest names. Input: a catalog id or a connection harness name.
+/// Output: `Terminal` when the engine reads its session record; `HeadlessOnly` for a harness
+/// with a piped driver and no record the engine reads, with its manifest's reason, such as
+/// RCLI's "runs only as a CrazyAgent master", and for unknown names; `Unavailable` for the
+/// other apps until a reader exists.
 pub fn support(harness: &str) -> Support {
-    match super::spec(harness).map(|spec| spec.id) {
-        Some("codex" | "claude-code") => Support::Terminal,
-        Some(id) if PLAIN.iter().any(|plain| plain.id == id) => Support::Unavailable {
-            reason: "CrazyAgent cannot read its replies yet",
-        },
-        Some("rcli") => Support::HeadlessOnly {
-            reason: "runs only as a CrazyAgent master",
-        },
-        _ => Support::HeadlessOnly {
+    let Some(found) = super::registry::registry().get(harness) else {
+        return Support::HeadlessOnly {
             reason: "not in the harness catalog",
+        };
+    };
+    if records::of(found.record()).is_ok() {
+        return Support::Terminal;
+    }
+    match found.piped() {
+        Some(_) => Support::HeadlessOnly {
+            reason: found
+                .manifest()
+                .cannot_start
+                .as_deref()
+                .unwrap_or(REPLIES_UNREAD),
+        },
+        None => Support::Unavailable {
+            reason: REPLIES_UNREAD,
         },
     }
 }
@@ -333,7 +339,25 @@ pub fn command(
     installed: Option<&Installed>,
     run: &Run<'_>,
 ) -> Result<InteractiveCommand, LaunchError> {
+    command_with(request, installed, run, None)
+}
+
+/// Builds what the terminal host runs for one interactive agent as [`command`] does, from
+/// given terminal settings instead of the catalog's, such as a stand-in's, which give its
+/// arguments and record. A key without its account hand-over, tools off, Full access, a
+/// project context unless [`takes_context`] holds and a hand-over for another binding are refused.
+/// Inputs: as for `command`, and the settings. Output: the command, or a refusal code.
+pub fn command_with(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    run: &Run<'_>,
+    settings: Option<&TerminalSettings>,
+) -> Result<InteractiveCommand, LaunchError> {
     validate(request)?;
+    let handover = installed.and_then(Installed::handover);
+    if handover.is_some() && request.sandbox_profile.is_none() {
+        return Err(failure("launch_environment_refused"));
+    }
     if request.account.key().is_some() != run.key_file.is_some() {
         return Err(failure("launch_key_file_invalid"));
     }
@@ -348,12 +372,15 @@ pub fn command(
         None => Vec::new(),
     };
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
+    let tool_home = installed
+        .and_then(Installed::tool_home)
+        .unwrap_or(request.account.home());
     let mut env = vec![
         ("HOME".to_owned(), home.clone()),
         (
             "PATH".to_owned(),
             toolchains::with_agent_git(
-                request.account.home(),
+                tool_home,
                 if request.tools {
                     toolchains::agent_path(&homes, TOOLS_ON_PATH)
                 } else {
@@ -372,13 +399,49 @@ pub fn command(
         );
     }
     let launch = launch_words(&request.executable)?;
-    let native_lead =
-        harness_id(request) == "claude-code" && installed.and_then(Installed::native).is_some();
+    let reader = records::reader(&request.harness);
+    let manifest_record = matches!(reader, Ok(Reader::JsonlAppend | Reader::JsonRewrite));
+    let catalog = if settings.is_none() && manifest_record {
+        Some(catalog_settings(&request.harness)?)
+    } else {
+        None
+    };
+    let settings = settings.or(catalog.as_ref());
+    let native_lead = matches!(reader, Ok(Reader::ClaudeSession))
+        && installed.and_then(Installed::native).is_some();
     let display = installed
         .map(Installed::terminal_display)
         .unwrap_or_default();
-    let transcript = match harness_id(request) {
-        "codex" => {
+    let transcript = match (settings, reader) {
+        (Some(settings), _) => {
+            if request.account.key().is_some() && handover.is_none() {
+                return Err(failure("launch_key_relay_unsupported"));
+            }
+            if !request.tools {
+                return Err(failure("launch_tools_off_unsupported"));
+            }
+            if request.unconfined {
+                return Err(failure("launch_harness_unsupported"));
+            }
+            let harness = request.harness.as_str();
+            if installed.is_some_and(|installed| !takes_context(settings, installed, harness)) {
+                return Err(failure("launch_context_unsupported"));
+            }
+            if !records::json_files::session_shaped(run.session_id) {
+                return Err(failure("launch_session_id_invalid"));
+            }
+            argv.extend(launch);
+            let (model, place) = (request.model.as_deref(), text(&cwd)?);
+            let arguments = settings.arguments(run.resume, &home, run.session_id, &place, model)?;
+            argv.extend(arguments);
+            let record = if run.resume || settings.takes_session() {
+                settings.records(request.account.home(), run.session_id)?
+            } else {
+                settings.learned_records(request.account.home())?
+            };
+            Transcript::Records(record)
+        }
+        (None, Ok(Reader::CodexRollouts)) => {
             let resume = if run.resume {
                 Some(session_id_checked(run.session_id)?.to_owned())
             } else {
@@ -417,7 +480,7 @@ pub fn command(
                 sessions: request.account.home().join("sessions"),
             }
         }
-        "claude-code" => {
+        (None, Ok(Reader::ClaudeSession)) => {
             argv.extend(launch);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
             let team = installed.and_then(Installed::native);
@@ -448,16 +511,19 @@ pub fn command(
                     .join(format!("{}.jsonl", session_id_checked(run.session_id)?)),
             }
         }
-        id => {
+        (None, Ok(Reader::JsonlAppend | Reader::JsonRewrite)) => {
+            unreachable!("the terminal settings of a manifest record are read above")
+        }
+        (None, Err(_)) => {
             argv.extend(launch);
-            argv.extend(plain(id, request, installed)?);
+            argv.extend(plain(harness_id(request), request, installed)?);
             Transcript::Unavailable
         }
     };
-    for (name, value) in toolchains::agent_env(request.account.home(), &homes) {
+    for (name, value) in toolchains::agent_env(tool_home, &homes) {
         env.push((name.to_owned(), text(Path::new(&value))?));
     }
-    if let Some(tmp) = toolchains::existing_tmp(request.account.home()) {
+    if let Some(tmp) = toolchains::existing_tmp(tool_home) {
         let tmp = if native_lead {
             toolchains::native_lead_tmp(&tmp)
         } else {
@@ -471,7 +537,32 @@ pub fn command(
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
-    let env = agent_env(&env)?;
+    if let Some(handover) = handover {
+        super::launch::handover_fits(request, handover)?;
+    }
+    let listed = installed.map(Installed::environment).unwrap_or_default();
+    let env = agent_env(&env, listed, handover)?;
+    let (env, handed) = handed_apart(env, handover);
+    if let Some(handover) = handover.filter(|_| !handed.is_empty()) {
+        assert_eq!(argv[0], SANDBOX_EXEC);
+        let placeholder = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+        let (from, value) = match key_file.as_deref() {
+            Some(file) => ("file", file),
+            None => ("word", handover.token()),
+        };
+        assert!(from == "file" || value == placeholder);
+        let names = handed.join(" ");
+        let bridge = [
+            "/bin/sh",
+            "-c",
+            HANDED_SCRIPT,
+            "handed",
+            from,
+            value,
+            names.as_str(),
+        ];
+        argv.splice(3..3, bridge.map(str::to_owned));
+    }
     let built = InteractiveCommand {
         argv,
         cwd,
@@ -485,21 +576,100 @@ pub fn command(
     Ok(built)
 }
 
-/// Passes a pane's variables through the one agent environment builder, so a pane gets
-/// the same refusals and git settings as every other agent process.
-/// Input: the variables in order. Output: them with [`crate::sandbox::AGENT_GIT_ENV`]
-/// appended, or `launch_environment_refused`.
-fn agent_env(env: &[(String, String)]) -> Result<Vec<(String, String)>, LaunchError> {
+/// Tells whether a pane run from a manifest's terminal settings may take an installed
+/// project context: one a listed launch wrote for a manifest that renders MCP servers, so
+/// the team tools reach the harness through its MCP file and no other way. A listed
+/// context was written for the settings' harness, the request's own. Inputs: the settings,
+/// the installed context and the request's harness. Output: the answer.
+fn takes_context(settings: &TerminalSettings, installed: &Installed, harness: &str) -> bool {
+    let id = settings.manifest().id.as_str();
+    let listed = installed.files().filter(|files| files.listed);
+    if let Some(files) = listed {
+        let written = files.home.parent().and_then(Path::file_name);
+        let other = "a listed context written for another harness";
+        assert_eq!(written, Some(OsStr::new(id)), "{other}");
+        let named = super::registry::registry().get(harness);
+        let named = named.map_or(harness, |found| found.manifest().id.as_str());
+        let mismatched = "a pane request for another harness than its settings";
+        assert_eq!(named, id, "{mismatched}");
+    }
+    let renders = super::render::read(settings.manifest());
+    listed.is_some() && renders.is_ok_and(|renders| renders.mcp.is_some())
+}
+
+/// Reads the terminal settings of a catalog harness whose manifest names a manifest
+/// record. Input: the catalog id or an alias. Output: the settings, or
+/// `launch_harness_unsupported` for a name outside the catalog or refused settings.
+pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, LaunchError> {
+    let found = super::registry::registry()
+        .get(harness)
+        .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    TerminalSettings::read(found.manifest()).map_err(|refused| {
+        eprintln!("launch_terminal_settings_refused code={}", refused.code);
+        failure("launch_harness_unsupported")
+    })
+}
+
+/// Passes a pane's variables through the one agent environment builder, as every agent
+/// process's, with a listed harness's home block variables and account hand-over after them
+/// as its piped launch has them, the hand-over's placeholder the one exception to the guard.
+/// Inputs: the variables, the home block's and the hand-over. Output: the variables with
+/// [`crate::sandbox::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
+fn agent_env(
+    env: &[(String, String)],
+    listed: &[(OsString, OsString)],
+    handover: Option<&Handover>,
+) -> Result<Vec<(String, String)>, LaunchError> {
     let base: Vec<(&str, &OsStr)> = env
         .iter()
         .map(|(name, value)| (name.as_str(), OsStr::new(value)))
         .collect();
-    crate::sandbox::agent_env(&base, std::iter::empty())
-        .map_err(|_| failure("launch_environment_refused"))?
+    let handed_env = handover.map(Handover::env).unwrap_or_default();
+    let harness = listed
+        .iter()
+        .map(|(name, value)| (name.as_os_str(), Some(value.as_os_str())))
+        .chain(
+            handed_env
+                .iter()
+                .map(|(name, value)| (OsStr::new(name), Some(OsStr::new(value)))),
+        );
+    let names: Vec<&str> = handed_env
+        .iter()
+        .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
+    let built = match handover {
+        Some(handover) => {
+            let handed = crate::sandbox::Handed::new(&names, handover.token()).map_err(refused)?;
+            crate::sandbox::agent_env_handing(&base, harness, handed)
+        }
+        None => crate::sandbox::agent_env(&base, harness),
+    };
+    built
+        .map_err(refused)?
         .into_iter()
         .map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| failure("launch_environment_refused"))
+}
+
+/// Takes the names an account hand-over lists out of a pane's variables: those it lists
+/// that hold exactly its value, which the terminal host's variable guard refuses in a pane,
+/// so [`HANDED_SCRIPT`] sets them inside the sandbox instead. Inputs: the variables, already
+/// checked, and the hand-over. Output: the other variables and those names, in order.
+fn handed_apart(
+    env: Vec<(String, String)>,
+    handover: Option<&Handover>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let Some(handover) = handover else {
+        return (env, Vec::new());
+    };
+    let listed = |name: &str| handover.env().iter().any(|pair| pair.0 == name);
+    let (handed, kept): (Vec<_>, Vec<_>) = env
+        .into_iter()
+        .partition(|(name, value)| value == handover.token() && listed(name));
+    (kept, handed.into_iter().map(|(name, _)| name).collect())
 }
 
 fn exposes(command: &InteractiveCommand, key: &Secret) -> bool {

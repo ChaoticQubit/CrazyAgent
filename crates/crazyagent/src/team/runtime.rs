@@ -256,7 +256,7 @@ struct Grant {
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with;
 /// `native_threads` is a native-mode Codex lead's sub-agent thread cap (PA-7); `hookless`
-/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
+/// marks a launch that fires no hooks, as [`starts_hookless`] says (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `relay` is the key relay a keyed
@@ -389,9 +389,7 @@ impl Plan {
         }
         assert_eq!(
             self.hookless,
-            crate::coord::settings::HarnessKind::from_harness(&self.harness)
-                == Some(crate::coord::settings::HarnessKind::ClaudeCode)
-                && claude_bare(&account),
+            starts_hookless(&self.harness, claude_bare(&account)),
             "an agent's recorded hooks state is the one its launch gets"
         );
         Ok(LaunchRequest {
@@ -3532,9 +3530,10 @@ impl TeamRuntime {
 
     /// Lists a project's idle sub-agents in a kept session that the Delivery setting leaves
     /// no channel of their own ([`crate::coord::delivery::no_channel`]): a tools-off Codex
-    /// agent under Native only has no bridge and is never typed into, so `wake_for_messages`
-    /// brings it its messages as a task of their own, as it does an asleep agent's (PA-11).
-    /// Takes the project. Returns their ids, or a database failure.
+    /// agent under Native only has no bridge and is never typed into, nor is a listed-harness
+    /// agent, tools on or off, so `wake_for_messages` brings it its messages as a task of
+    /// their own, as it does an asleep agent's (PA-11, T19). Takes the project. Returns their
+    /// ids, or a database failure.
     fn unreached(&self, project: &ProjectId) -> Result<BTreeSet<i64>, EngineError> {
         let mut found = BTreeSet::new();
         for (id, worker) in &self.workers {
@@ -3557,11 +3556,15 @@ impl TeamRuntime {
                 found.insert(*id);
             }
         }
-        assert!(
-            found
-                .iter()
-                .all(|id| self.workers[id].role == AgentRole::Sub && !self.workers[id].tools)
-        );
+        assert!(found.iter().all(|id| {
+            let worker = &self.workers[id];
+            worker.role == AgentRole::Sub
+                && (!worker.tools
+                    || matches!(
+                        crate::coord::settings::HarnessKind::from_harness(&worker.harness),
+                        Some(crate::coord::settings::HarnessKind::Listed(_))
+                    ))
+        }));
         Ok(found)
     }
 
@@ -9328,6 +9331,7 @@ impl TeamRuntime {
         switch: bool,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
+        let kind = crate::coord::settings::HarnessKind::parse(launch);
         let executable = &self.harness(launch).ok_or("harness is not installed")?;
         if let Some(line) = confined_unavailable(std::env::consts::OS) {
             return Err(line.to_owned());
@@ -9354,7 +9358,9 @@ impl TeamRuntime {
                 .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
         #[cfg(target_os = "macos")]
-        if launch == "claude-code" && matches!(account.reach, TeamReach::Endpoint { .. }) {
+        if kind == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            && matches!(account.reach, TeamReach::Endpoint { .. })
+        {
             crate::engine::keychain::fresh_profile_keychain(&self.state, &own_home, &[]).map_err(
                 |_| {
                     with_code(
@@ -9381,6 +9387,17 @@ impl TeamRuntime {
             .map(|relay| Secret::new(relay.token().to_owned()))
             .transpose()
             .map_err(|e| with_code(key_relay_sentence(&e.0), Some(&e.0)))?;
+        let handover = match (&kind, &account.reach) {
+            (Some(crate::coord::settings::HarnessKind::Listed(_)), TeamReach::Endpoint { .. }) => {
+                listed_handover(
+                    &(self.access)().unwrap_or_default(),
+                    launch,
+                    &account.connection,
+                    relay.as_deref(),
+                )?
+            }
+            _ => None,
+        };
         let (home, remote, model) = match &account.reach {
             TeamReach::Endpoint {
                 base_url, model, ..
@@ -9400,11 +9417,7 @@ impl TeamRuntime {
             }
         };
         let endpoint = matches!(account.reach, TeamReach::Endpoint { .. });
-        let hookless =
-            crate::coord::settings::HarnessKind::from_harness(launch).is_some_and(|kind| {
-                kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
-                    .is_some()
-            });
+        let hookless = starts_hookless(launch, endpoint);
         self.connection
             .execute(
                 "UPDATE team_agents SET hookless=?2 WHERE id=?1",
@@ -9559,7 +9572,7 @@ impl TeamRuntime {
         (sandbox, _) = sandbox
             .allow_extra_reads(&toolchains::graphify(&homes))
             .map_err(sandboxed)?;
-        if launch == "codex"
+        if kind == Some(crate::coord::settings::HarnessKind::Codex)
             && let Some(socket) = crate::coord::delivery::codex::socket(&home)
             && crate::coord::delivery::codex::prepare_folder().is_ok()
         {
@@ -9812,15 +9825,28 @@ impl TeamRuntime {
                 .map(|folder| crate::sandbox::hidden_paths::digest(folder))
                 .collect(),
         };
+        let listed = matches!(kind, Some(crate::coord::settings::HarnessKind::Listed(_)));
         let mode = match &account.reach {
-            TeamReach::Endpoint { base_url, .. } => Mode::Kept {
-                account: AccountBinding::Url {
-                    home,
-                    base_url: relay_url.unwrap_or_else(|| base_url.clone()),
-                    key: relay_token,
-                },
-                context: Box::new(context),
-            },
+            TeamReach::Endpoint { base_url, .. } => {
+                let (binding, context) = match listed {
+                    true => (
+                        listed_home(&home, launch, &account.connection)?,
+                        context.with_tool_home(&home),
+                    ),
+                    false => (home, context),
+                };
+                Mode::Kept {
+                    account: AccountBinding::Url {
+                        home: binding,
+                        base_url: relay_url.unwrap_or_else(|| base_url.clone()),
+                        key: relay_token,
+                    },
+                    context: Box::new(match handover {
+                        Some(handover) => context.with_handover(handover),
+                        None => context,
+                    }),
+                }
+            }
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
         made.keep();
@@ -11835,8 +11861,10 @@ fn live_serve(
                     let _ = reports.send(Report::InputReady);
                 }
                 Err(problem) if problem.0 == "launch_closed" => reads_keys = true,
-                Err(found) if crate::harnesses::codex_folder::ended_the_launch(&found) => {
-                    problem = Some(with_code(PROCESS_CLOSED, Some(&found.0)));
+                Err(found) if crate::harnesses::terminal_session::ended_the_launch(&found) => {
+                    let reason = session.first_screen_reason();
+                    let sentence = reason.as_deref().unwrap_or(PROCESS_CLOSED);
+                    problem = Some(with_code(sentence, Some(&found.0)));
                     break;
                 }
                 Err(_) => {}
@@ -13772,13 +13800,14 @@ fn io_code(error: &std::io::Error) -> &'static str {
 /// endpoint. Inputs: the launch harness and the account's reach. Output: the hosts, or the
 /// plain refusal for an endpoint no proxy can reach by name or a harness with no list.
 fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String> {
+    use crate::coord::settings::HarnessKind;
     let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
         hosts
             .iter()
             .filter_map(|(name, port)| ModelHost::new(name, *port))
             .collect()
     };
-    let hosts = match (reach, launch) {
+    let hosts = match (reach, HarnessKind::parse(launch)) {
         (TeamReach::Endpoint { base_url, .. }, _) => match endpoint_model_host(base_url) {
             Some(host) => vec![host],
             None => {
@@ -13788,9 +13817,9 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
                 ));
             }
         },
-        (TeamReach::Managed { .. }, "codex") => fixed(CODEX_MODEL_HOSTS),
-        (TeamReach::Managed { .. }, "claude-code") => fixed(CLAUDE_MODEL_HOSTS),
-        (TeamReach::Managed { .. }, _) => {
+        (TeamReach::Managed { .. }, Some(HarnessKind::Codex)) => fixed(CODEX_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, Some(HarnessKind::ClaudeCode)) => fixed(CLAUDE_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, Some(HarnessKind::Rcli | HarnessKind::Listed(_)) | None) => {
             return Err(with_code(
                 "this harness has no model hosts for the no network setting",
                 Some("network_none_harness_unlisted"),
@@ -14256,6 +14285,79 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("agents")
         .join(format!("agent-{id}"))
         .join("home")
+}
+
+/// Tells whether an agent of one launch harness starts with no hooks, so with no receipts,
+/// owner hooks or edit guard (DEC-141 PA-12): what its harness kind lacks for receipts on
+/// that account kind, true for Claude Code on an API key or URL account and for every
+/// listed harness. `prepare` records it and every start of the plan checks it. Inputs: the
+/// launch harness and whether the account is anything but a signed-in subscription.
+/// Output: the answer.
+fn starts_hookless(harness: &str, endpoint: bool) -> bool {
+    crate::coord::settings::HarnessKind::from_harness(harness).is_some_and(|kind| {
+        kind.lacks(endpoint, crate::coord::settings::Protection::Receipts)
+            .is_some()
+    })
+}
+
+/// The private home a team agent of a listed harness runs in on one account (T18 LEAD-1),
+/// `<agent home>/<harness id>/<account>`, made 0700 through no-follow steps inside the agent
+/// home its sandbox allows. Inputs: the agent home, the launch harness and the account.
+/// Output: the home, or the owner line with the private home's refusal code.
+fn listed_home(own: &Path, launch: &str, account: &CredentialRef) -> Result<PathBuf, String> {
+    let home = crate::harnesses::home::prepare(own, launch, account).map_err(|error| {
+        with_code(
+            "the agent's private harness home could not be made",
+            Some(&error.0),
+        )
+    })?;
+    assert!(home.starts_with(own) && home != own);
+    Ok(home)
+}
+
+/// The account hand-over a team agent of a listed harness starts with (T19b 19b-2): the
+/// stored connection's wire format picks the manifest's `accounts` entry, filled with the
+/// relay of a keyed account or the address and local placeholder of a keyless one, for a
+/// piped and a terminal-only harness alike. A harness with no `accounts` block reads no
+/// connection here. Inputs: the live access, the launch harness, the account and its relay.
+/// Output: the hand-over, none for a harness with no entry for the format, or the owner
+/// line with the refusal code.
+fn listed_handover(
+    access: &ModelAccess,
+    launch: &str,
+    account: &CredentialRef,
+    relay: Option<&crate::model_gateway::relay::Relay>,
+) -> Result<Option<crate::harnesses::accounts::Handover>, String> {
+    let harness = crate::harnesses::registry::registry()
+        .get(launch)
+        .ok_or("harness has no launch adapter")?;
+    if harness.manifest().block("accounts").is_none() {
+        return Ok(None);
+    }
+    let connection = access
+        .connections
+        .iter()
+        .find(|connection| &connection.id == account)
+        .ok_or_else(|| {
+            with_code(
+                "the agent's account is no longer in its pool",
+                Some("team_account_left_pool"),
+            )
+        })?;
+    if !crate::harnesses::accounts::hands_over(harness, connection.protocol.as_str()) {
+        return Ok(None);
+    }
+    let handover =
+        crate::harnesses::accounts::handover(harness, connection, relay).map_err(|error| {
+            with_code(
+                "the account could not be handed to the agent's harness",
+                Some(&error.0),
+            )
+        })?;
+    assert!(crate::model_gateway::relay::is_placeholder(
+        handover.token()
+    ));
+    Ok(Some(handover))
 }
 
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.

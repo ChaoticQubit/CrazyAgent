@@ -184,7 +184,7 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let catalog = client.account_catalog().await.unwrap();
-    assert_eq!(catalog.len(), 7);
+    assert_eq!(catalog.len(), 8);
     assert_eq!(catalog[0].methods[0].label, "Sign in with ChatGPT");
     assert!(all_accounts(&client).await.is_empty());
 

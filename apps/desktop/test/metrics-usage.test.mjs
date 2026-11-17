@@ -31,7 +31,7 @@ const report = (patch = {}) => ({
   limits: [limits()], partial_homes: 0,
   money: { settings: { main_number: "tokens", prices: "off" }, shown: "tokens", as_of: null, cost_nanos: 0, unpriced_tokens: 0 }, ...patch,
 });
-const names = { agents: new Map(), accounts: new Map([["acct-claude", "Work Claude"]]) };
+const names = { agents: new Map(), accounts: new Map([["acct-claude", "Work Claude"]]), harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id };
 const PROJECTS = [{ id: "project-harbor", name: "Harbor Notes" }];
 const LIMITS = { pools: new Map([["pool-main", "Main pool"]]), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
 const counted = (rows) => rows.filter((item) => !item.not_reported_by || usage.headlineTokens(item.tokens) > 0);
@@ -409,7 +409,7 @@ test("a key, URL or local account says what it has in place of limits, every acc
   const sentence = (name) => engine.match(new RegExp(`pub const ${name}: &str =\\s*"([^"]+)";`, "u"))?.[1];
   const [key, url, local] = ["NO_WINDOW_KEY", "NO_WINDOW_URL", "NO_WINDOW_LOCAL"].map(sentence);
   assert.ok(key && url && local, "the engine names each sentence once");
-  for (const provider of ["chatgpt", "claude", "openrouter", "openai_api", "anthropic_api", "openai_compatible", "local"]) {
+  for (const provider of ["chatgpt", "claude", "gemini", "openrouter", "openai_api", "anthropic_api", "openai_compatible", "local"]) {
     assert.equal(limitsView.noWindow({ method: "subscription", provider }), null, provider);
     for (const method of ["api_key", "url"]) {
       assert.equal(limitsView.noWindow({ method, provider }), provider === "local" ? local : method === "api_key" ? key : url, `${method} ${provider}`);

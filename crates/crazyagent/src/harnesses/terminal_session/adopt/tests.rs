@@ -1040,3 +1040,138 @@ fn a_pane_whose_process_is_not_the_recorded_one_is_not_adopted_and_its_group_is_
         "a pane that is not the record's is left running"
     );
 }
+
+/// DEC-180 Task 16: a manifest pane's record keeps its harness, its private home and its
+/// session, never a record file, and a stored one whose home is not absolute is refused.
+#[test]
+fn a_manifest_pane_record_keeps_its_harness_home_and_session_and_refuses_a_relative_home() {
+    let text = include_str!("../../../../tests/fixtures/harness/standin-jsonl-append.yaml");
+    let manifest = crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&manifest).unwrap();
+    let records = settings.records(Path::new("/agent/home"), "s-1");
+    assert!(records.is_ok(), "{records:?}");
+    let transcript = Transcript::Records(records.unwrap());
+    let (cwd, since) = (Path::new("/work"), SystemTime::now());
+    let record = PaneRecord::new(&transcript, cwd, since, 4242, None);
+    assert!(record.is_some());
+    let record = record.unwrap();
+    let stored = record.encode();
+    assert!(stored.is_some());
+    let stored = stored.unwrap();
+    let source = concat!(
+        r#"{"kind":"manifest","harness":"standin-jsonl-append","#,
+        r#""home":"/agent/home","session":"s-1"}"#,
+    );
+    assert!(stored.contains(source), "{stored}");
+    assert_eq!(PaneRecord::decode(&stored), Some(record));
+    let relative = stored.replace(r#""home":"/agent/home""#, r#""home":"agent/home""#);
+    assert_ne!(relative, stored);
+    assert_eq!(PaneRecord::decode(&relative), None);
+}
+
+/// DEC-180 Task 16: a manifest pane's record is found again only through the settings of
+/// its own harness, for an absolute home; with none, another harness's, or a relative home
+/// it is refused, and settings never stand in for a Codex or Claude Code record.
+#[test]
+fn a_manifest_pane_record_is_found_again_only_through_its_own_harness_s_settings() {
+    let append = include_str!("../../../../tests/fixtures/harness/standin-jsonl-append.yaml");
+    let rewrite = include_str!("../../../../tests/fixtures/harness/standin-json-rewrite.yaml");
+    let [append, rewrite] = [append, rewrite].map(|text| {
+        let manifest = crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+        TerminalSettings::read(&manifest).unwrap()
+    });
+    let home = Path::new("/agent/home");
+    let records = append.records(home, "s-1");
+    assert!(records.is_ok(), "{records:?}");
+    let transcript = Transcript::Records(records.unwrap());
+    let (cwd, since) = (Path::new("/work"), SystemTime::now());
+    let record = PaneRecord::new(&transcript, cwd, since, 4242, None);
+    assert!(record.is_some());
+    let record = record.unwrap();
+    assert_eq!(record.transcript(Some(&append)), Ok(transcript));
+    let unsupported = Err(failure("launch_harness_unsupported"));
+    assert_eq!(record.transcript(Some(&rewrite)), unsupported);
+    assert_eq!(record.transcript(None), unsupported);
+    let relative = PaneRecord {
+        source: RecordSource::Manifest {
+            harness: append.harness().to_owned(),
+            home: PathBuf::from("agent/home"),
+            session: "s-1".to_owned(),
+        },
+        ..record.clone()
+    };
+    assert_eq!(relative.transcript(Some(&append)), unsupported);
+    let sessions = home.join("sessions");
+    let codex = PaneRecord {
+        source: RecordSource::CodexRollouts { sessions },
+        ..record
+    };
+    assert_eq!(codex.transcript(Some(&append)), unsupported);
+    assert!(codex.transcript(None).is_ok());
+}
+
+/// DEC-180 Task 16: an adoption reads a manifest record on past a read that takes only part
+/// of a long line and finds no object, so it sees the turn left open after that line and
+/// leaves none of the record for the session's polls.
+#[test]
+fn an_adoption_reads_a_manifest_record_on_past_a_read_that_finds_no_object() {
+    use crate::harnesses::records::json_files::tests::{Home, NEW, SESSION_ID};
+    let home = Home::new();
+    let text = include_str!("../../../../tests/fixtures/harness/standin-jsonl-append.yaml");
+    let manifest = crate::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let settings = TerminalSettings::read(&manifest).unwrap();
+    let records = settings.records(&home.path(), SESSION_ID);
+    assert!(records.is_ok(), "{records:?}");
+    let long = format!("\"{}\"\n", "x".repeat(2 * READ_BYTES_MAX));
+    let open = "{\"type\":\"started\"}\n{\"type\":\"text\",\"delta\":\"a\"}\n";
+    let below = format!("standin/records/{SESSION_ID}.jsonl");
+    home.write(&below, &format!("{long}{open}"), NEW);
+    let source = Transcript::Records(records.unwrap());
+    let mut reader = TranscriptReader::adopted(source, &home.path(), SystemTime::now());
+    let until = Instant::now() + REPLAY_WAIT;
+    assert_eq!(replay(&mut reader, until), Ok(Replayed::Open));
+    assert_eq!(reader.read(), Ok(Vec::new()));
+}
+
+/// T18 LEAD-1 residual (leader 01:49): an engine adopting a keyed listed pane reads its key
+/// file through the no-follow walk from the agent home, so a link planted at the harness
+/// folder after the adopt's walk gives no guard, and the folder the link names keeps its
+/// own key file when the guard would end.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_listed_pane_never_reads_its_key_through_a_link_at_its_harness_folder() {
+    let (agents, victim) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let base = agents.path().canonicalize().unwrap();
+    let target = victim.path().canonicalize().unwrap();
+    let kept = target.join("account-1");
+    std::fs::create_dir(&kept).unwrap();
+    for folder in [&base, &target, &kept] {
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let name = interactive::KEY_FILE;
+    std::fs::write(kept.join(name), "kept").unwrap();
+    let account = crate::protocol::CredentialRef::new("account-1").unwrap();
+    let home = crate::harnesses::home::prepare(&base, "standin-acp", &account).unwrap();
+    let key = home.join(name);
+    std::fs::write(&key, "own").unwrap();
+    let transcript = Transcript::ClaudeSession {
+        file: home.join("record.jsonl"),
+    };
+    let since = SystemTime::now();
+    let mut record = PaneRecord::new(&transcript, &base, since, 1, Some(&key)).unwrap();
+    record.context = Some(InstalledFiles {
+        home: home.clone(),
+        codex: false,
+        rendered: Vec::new(),
+        listed: true,
+    });
+    std::fs::rename(base.join("standin-acp"), base.join("moved")).unwrap();
+    std::os::unix::fs::symlink(&target, base.join("standin-acp")).unwrap();
+
+    let guard = record.key_file();
+
+    assert!(guard.is_none());
+    drop(guard);
+    let left = std::fs::read_to_string(kept.join(name)).ok();
+    assert_eq!(left.as_deref(), Some("kept"));
+}

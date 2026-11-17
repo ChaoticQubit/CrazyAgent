@@ -1891,6 +1891,11 @@ fn entry(
         account_kinds: Vec::new(),
         team,
         aliases: Vec::new(),
+        terminal: false,
+        master: false,
+        research: false,
+        sub_agents: crate::harnesses::manifest::SubAgents::App,
+        account_protocols: Vec::new(),
     }
 }
 
@@ -3418,7 +3423,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
 
     let (lines, _) = view.rows(116, 40, &accounts(), &Look::plain());
     let shown: Vec<String> = lines.iter().map(Row::text).collect();
-    for label in ["rcli sub-agents", "Messages to rcli agents"] {
+    for label in ["RCLI sub-agents", "Messages to RCLI agents"] {
         let line = shown
             .iter()
             .find(|line| line.contains(label))
@@ -3429,7 +3434,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         );
     }
     let before = harness_row(&view, HarnessKind::Rcli);
-    for (row, label) in [(4, "rcli sub-agents"), (5, "Messages to rcli agents")] {
+    for (row, label) in [(4, "RCLI sub-agents"), (5, "Messages to RCLI agents")] {
         view.key(press(KeyCode::Down));
         assert_eq!(view.coord.as_ref().unwrap().row, row);
         assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
@@ -3776,7 +3781,7 @@ fn the_terminal_display_shows_fullscreen_by_default_and_space_flips_it() {
         (TerminalDisplay::Classic, "Classic"),
         (
             TerminalDisplay::Fullscreen,
-            "Fullscreen. rcli stays Classic",
+            "Fullscreen. RCLI stays Classic",
         ),
     ] {
         let mut settings = coordination.settings.clone();
@@ -3817,12 +3822,12 @@ fn the_terminal_display_row_names_only_the_kinds_that_stay_classic() {
     assert_eq!(display_kept(&view, TerminalDisplay::Classic), "");
     assert_eq!(
         display_kept(&view, TerminalDisplay::Fullscreen),
-        " rcli stays Classic."
+        " RCLI stays Classic."
     );
     view.harnesses[1].displays = vec![TerminalDisplay::Classic];
     assert_eq!(
         display_kept(&view, TerminalDisplay::Fullscreen),
-        " Codex and rcli stay Classic."
+        " Codex and RCLI stay Classic."
     );
     for row in &mut view.harnesses {
         row.displays.clear();
@@ -4117,7 +4122,7 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
-    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an rcli agent has no tools, so it starts none.";
+    const SCOPE: &str = "Wait, a grace time and Stop act the same on Claude Code and Codex panes. Agents run per turn, whatever their harness, have their background commands stopped when the turn ends, and an RCLI agent has no tools, so it starts none.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -4826,7 +4831,8 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
             HarnessKind::Codex => {
                 "Native only never types: with tools off, a Codex agent gets its messages as a task of their own once it is idle."
             }
-            HarnessKind::Rcli => "rcli runs no team agents, so no message goes to one here.",
+            HarnessKind::Rcli => "RCLI runs no team agents, so no message goes to one here.",
+            HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         };
         assert!(said.contains(native), "{kind:?}: {said}");
     }
@@ -5426,4 +5432,33 @@ fn hold_rows_stay_in_view_while_the_settings_scroll() {
     assert!(find(&bottom, "Keep warm").contains("Keep warm  Off"));
     assert!(find(&bottom, "Left running  End them").contains("Left running  End them"));
     assert!(find(&bottom, "leads.").contains("Codex leads."));
+}
+
+/// DEC-180 Phase 1: a listed harness kind says what the Delivery choices do there: with no
+/// channel of its own, every message is typed in, and Native only never types.
+#[test]
+fn a_listed_harness_kind_says_what_its_delivery_choices_do() {
+    let said = delivery_scope(HarnessKind::Listed("opencode"));
+    assert_eq!(
+        said,
+        "This harness has no channel of its own: Auto and Typing only type every message in, and Native only never types."
+    );
+    assert!(!said.contains('\u{2014}'), "{said}");
+}
+
+/// Task 21 (DEC-141): a harness kind with no native sub-agents and no reason of its own reads
+/// the engine's general reason, the desktop's words too: in a refusal of Native and for a kind
+/// this build runs natively whose engine row has none.
+#[test]
+fn a_kind_without_native_sub_agents_reads_the_engines_general_reason() {
+    assert_eq!(
+        team_plain("coord_native_unsupported"),
+        crate::coord::settings::LISTED_NATIVE_UNAVAILABLE
+    );
+    for kind in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
+        assert_eq!(
+            native_unavailable(kind),
+            crate::coord::settings::LISTED_NATIVE_UNAVAILABLE
+        );
+    }
 }

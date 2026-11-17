@@ -27,9 +27,10 @@ export const RESEARCH_ICONS: Record<ResearchKind, IconName> = {
 const KNOWN: Record<string, string> = { codex: "Codex", claude: "Claude Code" };
 
 /** Names a harness from the catalog, or from the two built-in names while the catalog is not ready.
+ * A removed harness keeps its product name either way.
  * Inputs: the catalog or null and the harness id. Output: a display name. */
 export function harnessName(harnesses: HarnessEntry[] | null, id: string): string {
-  return harnesses ? harnessLabel(harnesses, id) : KNOWN[id] ?? id;
+  return harnesses ? harnessLabel(harnesses, id) : KNOWN[id] ?? harnessLabel(null, id);
 }
 
 function HarnessSelect({ id, value, harnesses, onChange, label, role }: {

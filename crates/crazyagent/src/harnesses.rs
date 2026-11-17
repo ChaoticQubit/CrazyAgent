@@ -1,16 +1,28 @@
+pub mod accounts;
 pub(crate) mod codex_folder;
+pub mod drivers;
+mod env_names;
 pub mod finding;
+pub mod home;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;
+pub mod manifest;
+pub mod records;
+pub mod registry;
+pub mod render;
 pub mod terminal_session;
 pub mod transcript;
 pub mod update;
 
 #[cfg(test)]
 mod account_fit_tests;
+#[cfg(test)]
+mod catalog_tests;
 #[cfg(all(test, unix))]
 mod finding_tests;
+#[cfg(test)]
+mod floor_tests;
 #[cfg(test)]
 mod probe_tests;
 
@@ -20,7 +32,7 @@ use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
 const SEARCH_DIRECTORIES_MAX: usize = 128;
@@ -139,7 +151,10 @@ pub struct HarnessSpec {
 }
 
 /// One catalog row the engine serves to the clients.
-/// Combines the static spec with what was found on this machine.
+/// Combines the static spec with what was found on this machine and with what the manifest
+/// says the harness can be: read back in a live terminal, a master, a research harness, how
+/// its lead gets sub-agents, and the wire formats of the endpoint accounts it runs on, where
+/// a name that ends in `*` stands for every format that starts with the text before it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessEntry {
@@ -154,6 +169,11 @@ pub struct HarnessEntry {
     pub account_kinds: Vec<AccountKind>,
     pub team: TeamUse,
     pub aliases: Vec<String>,
+    pub terminal: bool,
+    pub master: bool,
+    pub research: bool,
+    pub sub_agents: manifest::SubAgents,
+    pub account_protocols: Vec<String>,
 }
 
 /// Where the catalog looks for harness executables.
@@ -644,59 +664,69 @@ fn runnable(_metadata: &std::fs::Metadata) -> bool {
 }
 
 /// Builds the catalog rows for every known harness, in owner priority order.
-/// Input: the search space. Output: one entry per spec with its detected status.
+/// Input: the search space. Output: one entry per harness of the registry with its
+/// detected status.
 pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
-    let entries: Vec<HarnessEntry> = specs()
+    let harnesses = registry::registry().all();
+    assert_eq!(harnesses.len(), specs().len());
+    let entries: Vec<HarnessEntry> = harnesses
         .iter()
-        .map(|spec| {
-            let executable = search.locate(spec);
-            let status = match (&executable, spec.launch, spec.tools_limited) {
-                (None, _, _) => HarnessStatus::NotInstalled,
-                (Some(_), Some(reason), _) | (Some(_), None, Some(reason)) => {
-                    HarnessStatus::Limited {
-                        reason: reason.into(),
-                    }
-                }
-                (Some(_), None, None) => HarnessStatus::Ready,
-            };
-            HarnessEntry {
-                id: spec.id.into(),
-                name: spec.name.into(),
-                status_label: status.label(),
-                status,
-                executable,
-                headless: spec.headless.into(),
-                tools: spec
-                    .tools_limited
-                    .map_or(ToolControl::Switchable, |reason| ToolControl::Limited {
-                        reason: reason.into(),
-                    }),
-                model_selection: spec.model_selection,
-                account_kinds: spec.account_kinds.to_vec(),
-                team: match interactive::support(spec.id) {
-                    interactive::Support::Terminal => TeamUse::Available,
-                    interactive::Support::HeadlessOnly { reason }
-                        if crate::team::master_backend(spec.id).is_some() =>
-                    {
-                        TeamUse::MasterOnly {
-                            reason: reason.into(),
-                        }
-                    }
-                    interactive::Support::HeadlessOnly { reason }
-                    | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
-                        reason: reason.into(),
-                    },
-                },
-                aliases: CONNECTION_NAMES
-                    .iter()
-                    .filter(|(_, catalog)| *catalog == spec.id)
-                    .map(|(name, _)| (*name).to_owned())
-                    .collect(),
-            }
+        .zip(specs())
+        .map(|(harness, spec)| {
+            assert_eq!(harness.id(), spec.id);
+            entry(harness, search)
         })
         .collect();
     assert_eq!(entries.len(), specs().len());
     entries
+}
+
+/// Builds the catalog row of one harness from its manifest: Limited by the manifest's
+/// reason it cannot start, else by its tools reason, once it is found. Input: the harness
+/// and the search space. Output: the entry with its detected status.
+pub(crate) fn entry(harness: &'static registry::Harness, search: &Search) -> HarnessEntry {
+    let spec = harness.spec();
+    let executable = search.locate(&spec);
+    let status = match (&executable, spec.launch, spec.tools_limited) {
+        (None, _, _) => HarnessStatus::NotInstalled,
+        (Some(_), Some(reason), _) | (Some(_), None, Some(reason)) => HarnessStatus::Limited {
+            reason: reason.into(),
+        },
+        (Some(_), None, None) => HarnessStatus::Ready,
+    };
+    HarnessEntry {
+        id: spec.id.into(),
+        name: spec.name.into(),
+        status_label: status.label(),
+        status,
+        executable,
+        headless: spec.headless.into(),
+        tools: spec
+            .tools_limited
+            .map_or(ToolControl::Switchable, |reason| ToolControl::Limited {
+                reason: reason.into(),
+            }),
+        model_selection: spec.model_selection,
+        account_kinds: spec.account_kinds.to_vec(),
+        team: match interactive::support(spec.id) {
+            interactive::Support::Terminal => TeamUse::Available,
+            interactive::Support::HeadlessOnly { reason } if harness.master() => {
+                TeamUse::MasterOnly {
+                    reason: reason.into(),
+                }
+            }
+            interactive::Support::HeadlessOnly { reason }
+            | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
+                reason: reason.into(),
+            },
+        },
+        aliases: harness.aliases().to_vec(),
+        terminal: harness.record() != manifest::RecordKind::Unavailable,
+        master: harness.master(),
+        research: harness.research(),
+        sub_agents: harness.sub_agents(),
+        account_protocols: harness.account_protocols().to_vec(),
+    }
 }
 
 /// Marks each found harness the tool resolver can't start, read as a launch reads it, as
@@ -904,21 +934,34 @@ async fn probe(search: Search) -> Result<(Vec<HarnessEntry>, Identities), tokio:
 /// model connection or team plan ("claude" for Claude Code).
 /// Input: id such as "codex". Output: the spec, or None for an unknown id.
 pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
-    let id = CONNECTION_NAMES
-        .iter()
-        .find(|(name, _)| *name == id)
-        .map_or(id, |(_, catalog)| catalog);
-    specs().iter().find(|spec| spec.id == id)
+    let index = registry::registry().position(id)?;
+    assert!(index < specs().len());
+    specs().get(index)
 }
 
 /// The oldest version of a harness that CrazyAgent can sign in with, from that harness's
-/// adapter (DEC-166). Input: a catalog id or a stored harness name ("claude").
+/// manifest (DEC-166). Input: a catalog id or a stored harness name ("claude").
 /// Output: the plain minimum, or None for a harness that never signs in from CrazyAgent.
 pub fn sign_in_min(id: &str) -> Option<&'static str> {
-    match spec(id)?.id {
-        "claude-code" => Some(crate::adapters::claude::SIGN_IN_MIN),
-        "codex" => Some(crate::adapters::codex::SIGN_IN_MIN),
-        _ => None,
+    registry::registry().get(id)?.sign_in_minimum()
+}
+
+/// The oldest version of a harness CrazyAgent drives, from that harness's manifest
+/// (`version.minimum`). Input: a catalog id or a stored harness name. Output: the plain
+/// minimum, or None for a harness with no floor or an unknown name.
+pub fn run_min(id: &str) -> Option<&'static str> {
+    registry::registry().get(id)?.minimum_version()
+}
+
+/// Tells whether an installed harness is older than the oldest version CrazyAgent drives,
+/// the test a client's "needs X or newer" line and a launch that knows the installed
+/// version use. Inputs: the harness and the installed version, None when unknown. Output:
+/// true only for a known version below the manifest's floor; a version that is not plain
+/// numbers is never below.
+pub fn too_old(harness: &registry::Harness, installed: Option<&str>) -> bool {
+    match (harness.minimum_version(), installed) {
+        (Some(minimum), Some(installed)) => update::below(installed, minimum),
+        _ => false,
     }
 }
 
@@ -953,31 +996,13 @@ pub fn canonical(id: &str) -> &str {
 /// Tells whether a harness can run on one account (DEC-141 PA-4), the one rule every master,
 /// team agent and research job uses. Inputs: a catalog id or alias and the stored connection.
 /// Output: true for a sign-in of that harness itself, or for an HTTP endpoint account whose
-/// wire format it speaks (Codex any OpenAI format, Claude Code Anthropic Messages, RCLI all);
-/// the harness an endpoint account was stored with is ignored.
+/// wire format its manifest lists (Codex any OpenAI format, Claude Code Anthropic Messages,
+/// RCLI all); the harness an endpoint account was stored with is ignored. False for a name
+/// the registry does not know.
 pub fn account_fits(harness: &str, connection: &crate::config::ModelConnection) -> bool {
-    use crate::config::{ModelAuthentication, ModelEndpoint};
-    let Some(id) = spec(harness).map(|spec| spec.id) else {
-        return false;
-    };
-    let protocol = connection.protocol.as_str();
-    match (&connection.endpoint, &connection.auth) {
-        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { .. }) => {
-            protocol == "native"
-                && id != "rcli"
-                && spec(connection.harness.as_str()).is_some_and(|own| own.id == id)
-        }
-        (
-            ModelEndpoint::Http { .. },
-            ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
-        ) => match id {
-            "codex" => protocol.starts_with("openai"),
-            "claude-code" => protocol == "anthropic-messages",
-            "rcli" => true,
-            _ => false,
-        },
-        _ => false,
-    }
+    registry::registry()
+        .get(harness)
+        .is_some_and(|harness| harness.account_fits(connection))
 }
 
 /// The base URL a harness is given for an endpoint account. Claude Code adds `/v1/messages`
@@ -1008,287 +1033,38 @@ pub(crate) fn key_relay(
     crate::model_gateway::relay::Relay::start(base_url, secret)
 }
 
-const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];
-
-const NO_ADAPTER: &str = "installed, but CrazyAgent cannot start it yet";
-const ALL_ACCOUNTS: &[AccountKind] = &[
-    AccountKind::Subscription,
-    AccountKind::ApiKey,
-    AccountKind::OpenAiCompatibleUrl,
-    AccountKind::Local,
-];
-const KEY_URL_LOCAL: &[AccountKind] = &[
-    AccountKind::ApiKey,
-    AccountKind::OpenAiCompatibleUrl,
-    AccountKind::Local,
-];
-
 /// Lists every harness CrazyAgent knows, owner-named harnesses first in priority order.
-/// Input: none. Output: the static specs; facts and sources are recorded in harnesses.md.
+/// Input: none. Output: one spec per bundled manifest, in the registry's order, built once;
+/// the manifest format is in docs/harness-manifests.md.
 pub fn specs() -> &'static [HarnessSpec] {
-    &SPECS
+    static LISTED: LazyLock<Vec<HarnessSpec>> = LazyLock::new(|| {
+        let listed: Vec<HarnessSpec> = registry::registry()
+            .all()
+            .iter()
+            .map(registry::Harness::spec)
+            .collect();
+        assert_eq!(listed.len(), registry::registry().all().len());
+        listed
+    });
+    &LISTED
 }
 
-static SPECS: [HarnessSpec; 23] = [
-    HarnessSpec {
-        id: "codex",
-        name: "Codex",
-        binaries: &["codex"],
-        locations: &[],
-        headless: "codex app-server: JSON-RPC over stdio",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: ALL_ACCOUNTS,
-        launch: None,
-    },
-    HarnessSpec {
-        id: "claude-code",
-        name: "Claude Code",
-        binaries: &["claude"],
-        locations: &[".claude/local"],
-        headless: "claude --print with stream-json input and output",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: None,
-    },
-    HarnessSpec {
-        id: "opencode",
-        name: "OpenCode",
-        binaries: &["opencode"],
-        locations: &[".opencode/bin"],
-        headless: "opencode run --format json, or opencode serve over HTTP",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: ALL_ACCOUNTS,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "gemini-cli",
-        name: "Gemini CLI",
-        binaries: &["gemini"],
-        locations: &[],
-        headless: "gemini --prompt with --output-format stream-json",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "cursor-agent",
-        name: "Cursor CLI",
-        binaries: &["cursor-agent"],
-        locations: &[".cursor/bin"],
-        headless: "cursor-agent --print with --output-format stream-json",
-        tools_limited: Some("tools are allowed or denied only through Cursor's permission file"),
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "fx",
-        name: "fx by Vercel",
-        binaries: &["fx"],
-        locations: &[".fx/bin"],
-        headless: "fx ask --json: one request, JSON result on stdout",
-        tools_limited: Some("no documented switch to turn tools off"),
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "antigravity",
-        name: "Antigravity",
-        binaries: &["agy", "antigravity"],
-        locations: &[],
-        headless: "agy --print: one prompt, plain text reply",
-        tools_limited: Some("tools cannot be switched off, only approved automatically"),
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "openclaw",
-        name: "OpenClaw",
-        binaries: &["openclaw"],
-        locations: &[],
-        headless: "openclaw agent --message through its gateway",
-        tools_limited: Some("tools are set in OpenClaw's own configuration"),
-        model_selection: true,
-        account_kinds: &[
-            AccountKind::Subscription,
-            AccountKind::ApiKey,
-            AccountKind::Local,
-        ],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "pi",
-        name: "Pi",
-        binaries: &["pi"],
-        locations: &[],
-        headless: "pi --mode json or --mode rpc over stdio",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: ALL_ACCOUNTS,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "rcli",
-        name: "RCLI",
-        binaries: &["crazyagent-rcli"],
-        locations: &[],
-        headless: "CrazyAgent's bundled RCLI host",
-        tools_limited: Some("runs without tools"),
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some("runs only as a CrazyAgent master"),
-    },
-    HarnessSpec {
-        id: "amp",
-        name: "Amp",
-        binaries: &["amp"],
-        locations: &[".amp/bin"],
-        headless: "amp --execute with --stream-json",
-        tools_limited: None,
-        model_selection: false,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "goose",
-        name: "Goose",
-        binaries: &["goose"],
-        locations: &[],
-        headless: "goose run --text with --output-format stream-json",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "aider",
-        name: "Aider",
-        binaries: &["aider"],
-        locations: &[],
-        headless: "aider --message: one prompt, plain text reply",
-        tools_limited: Some("file edits cannot be switched off apart from a dry run"),
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "qwen-code",
-        name: "Qwen Code",
-        binaries: &["qwen"],
-        locations: &[],
-        headless: "qwen --prompt with --output-format stream-json",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: ALL_ACCOUNTS,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "crush",
-        name: "Crush",
-        binaries: &["crush"],
-        locations: &[],
-        headless: "crush run: one prompt, plain text reply",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "droid",
-        name: "Factory Droid",
-        binaries: &["droid"],
-        locations: &[".factory/bin"],
-        headless: "droid exec with --output-format stream-json",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[
-            AccountKind::Subscription,
-            AccountKind::ApiKey,
-            AccountKind::OpenAiCompatibleUrl,
-        ],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "kiro",
-        name: "Kiro CLI",
-        binaries: &["kiro-cli", "kiro"],
-        locations: &[],
-        headless: "kiro-cli chat --no-interactive",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "copilot",
-        name: "GitHub Copilot CLI",
-        binaries: &["copilot"],
-        locations: &[],
-        headless: "copilot --prompt: one prompt, plain text reply",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "cline",
-        name: "Cline CLI",
-        binaries: &["cline"],
-        locations: &[],
-        headless: "cline with --json output",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: ALL_ACCOUNTS,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "continue",
-        name: "Continue CLI",
-        binaries: &["cn"],
-        locations: &[],
-        headless: "cn --print: one prompt, plain text reply",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "openhands",
-        name: "OpenHands CLI",
-        binaries: &["openhands"],
-        locations: &[],
-        headless: "openhands --headless with a task",
-        tools_limited: Some("headless mode always runs its tools"),
-        model_selection: true,
-        account_kinds: KEY_URL_LOCAL,
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "auggie",
-        name: "Auggie",
-        binaries: &["auggie"],
-        locations: &[],
-        headless: "auggie --print: one prompt, plain text reply",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription],
-        launch: Some(NO_ADAPTER),
-    },
-    HarnessSpec {
-        id: "kimi",
-        name: "Kimi CLI",
-        binaries: &["kimi"],
-        locations: &[],
-        headless: "kimi --print with stream-json output",
-        tools_limited: None,
-        model_selection: true,
-        account_kinds: &[AccountKind::Subscription, AccountKind::ApiKey],
-        launch: Some(NO_ADAPTER),
-    },
+/// Names a harness CrazyAgent once listed and no longer supports (DEC-180 addenda 1 and 2).
+/// Input: the id a stored team plan or project may still name. Output: its plain product
+/// name, or none for any other id, a listed harness included.
+pub fn removed(id: &str) -> Option<&'static str> {
+    let name = REMOVED
+        .iter()
+        .find(|(gone, _)| *gone == id)
+        .map(|(_, name)| *name);
+    assert!(name.is_none() || spec(id).is_none(), "{id} is still listed");
+    name
+}
+
+const REMOVED: [(&str, &str); 5] = [
+    ("antigravity", "Antigravity"),
+    ("cursor-agent", "Cursor CLI"),
+    ("amp", "Amp"),
+    ("kiro", "Kiro CLI"),
+    ("auggie", "Auggie"),
 ];
