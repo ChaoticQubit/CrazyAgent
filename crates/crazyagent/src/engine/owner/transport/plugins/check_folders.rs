@@ -1,4 +1,4 @@
-use super::{CHECKS_MAX, CheckSlot, check_profile};
+use super::{CHECKS_MAX, CheckSlot};
 use std::path::{Path, PathBuf};
 
 /// The servers whose checks run now, one entry per running check, and the servers removed
@@ -102,9 +102,9 @@ pub(super) fn remove_check_folder(checks: &Path, id: &str) -> tokio::task::JoinH
             None
         }
     };
-    let profile = check_profile(checks, id);
+    let (checks, id) = (checks.to_path_buf(), id.to_owned());
     tokio::task::spawn_blocking(move || {
-        crate::storage::plugins::withdraw_check_profile(&profile);
+        crate::storage::plugins::withdraw_check_profile(&checks, &id);
         if let Some(aside) = aside
             && let Err(problem) = std::fs::remove_dir_all(aside)
         {

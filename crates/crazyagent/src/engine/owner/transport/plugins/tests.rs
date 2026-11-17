@@ -574,6 +574,65 @@ fn a_check_profile_that_cannot_be_released_stays_for_the_next_start() {
     );
 }
 
+/// A check profile is released only when it names the container the engine derives for its
+/// server from the check folders: one forged to name another container is kept with nothing
+/// of it touched, not even a lock in its grants folder, while the bound one beside it goes.
+/// No boundary helper is needed (V243-WIN-CHECK-PROFILE-BIND, rv-sec2 #311 N1).
+#[cfg(target_os = "windows")]
+#[test]
+fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_released() {
+    const BOUND: &str = "mcp-0123456789abcdef0123456f";
+    const FORGED: &str = "mcp-0123456789abcdef01234570";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let checks = base.join("engine").join(CHECK_FOLDER);
+    let grants = base.join("grants");
+    std::fs::create_dir_all(checks.join(CHECK_PROFILES)).unwrap();
+    std::fs::create_dir_all(&grants).unwrap();
+    let foreign = format!("crazyagent.{}", "0".repeat(32));
+    let mut bound = String::new();
+    for id in [BOUND, FORGED] {
+        let folders = crate::storage::plugins::check_sandbox_folders(&checks, id).unwrap();
+        for folder in &folders {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox = crate::sandbox::ProjectSandbox::new(
+            &folders[0],
+            &folders[1],
+            &folders[2],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
+        let mut profile = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+        if id == FORGED {
+            profile.container = foreign.clone();
+        } else {
+            bound = profile.container.clone();
+        }
+        std::fs::write(check_profile(&checks, id), profile.encode().unwrap()).unwrap();
+    }
+    assert!(bound.starts_with("crazyagent.") && bound != foreign);
+    let lock = |name: &str| grants.join(format!("container-{name}.lock"));
+
+    for id in [BOUND, FORGED] {
+        crate::storage::plugins::withdraw_check_profile(&checks, id);
+    }
+
+    assert!(
+        !check_profile(&checks, BOUND).exists(),
+        "the bound one goes"
+    );
+    assert!(lock(&bound).is_file(), "the bound one is released");
+    assert!(
+        check_profile(&checks, FORGED).is_file(),
+        "the forged one stays"
+    );
+    assert!(
+        !lock(&foreign).exists(),
+        "nothing of the forged one is released"
+    );
+}
+
 /// A server removed while one of its checks runs keeps its check folder until that check
 /// ends, so the check cannot put back what the removal cleared; a server with no check
 /// running is cleared at once.
