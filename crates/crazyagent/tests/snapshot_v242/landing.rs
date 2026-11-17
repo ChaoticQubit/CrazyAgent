@@ -1,7 +1,7 @@
 use super::Scenario;
 use crate::e2e_support::{self, Engine, Owner};
 use crazyagent::agent_git::Layout;
-use crazyagent::engine::owner::OwnerResult;
+use crazyagent::engine::owner::{OwnerResponse, OwnerResult};
 use crazyagent::landing::{
     self, AcceptOutcome, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace,
 };
@@ -109,12 +109,15 @@ async fn seed(
             project_id: project.clone(),
             mode,
         };
-        let response = owner
+        match owner
             .controller
             .team_action(action, generation)
             .await
-            .map_err(debug)?;
-        applied("landing_mode", e2e_support::result(response))?;
+            .map_err(debug)?
+        {
+            OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied => {}
+            other => return Err(format!("landing_mode: {other:?}")),
+        }
     }
     let scope = || Scope::Project {
         project_id: project.clone(),
