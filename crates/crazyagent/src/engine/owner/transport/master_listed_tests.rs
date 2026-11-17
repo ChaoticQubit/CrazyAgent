@@ -889,3 +889,75 @@ fn a_listed_master_turn_not_surely_stopped_stays_listed_after_it_returns() {
         assert_eq!(named, kept, "{ran:?}");
     }
 }
+
+/// H5a sec F1 (RCLI-NARROWING on the listed master): a running listed master turn checks
+/// the saved policy every POLICY_CHECK_EVERY against the toolchains fixed at launch, as RCLI
+/// and native turns do, and stops on a narrowing. What `rcli_policy_covers` answers is
+/// pinned by routing_tests `a_running_rcli_turn_stops_when_the_saved_policy_no_longer_covers_its_launch`.
+#[test]
+fn a_running_listed_master_turn_checks_the_saved_policy_as_rcli_turns_do() {
+    let source = include_str!("master_listed.rs");
+    let launch = source.find("async fn run_listed_master_turn(").unwrap();
+    let start = source.find("async fn drive_listed(").unwrap();
+    let end = start + source[start..].find("async fn begin_listed(").unwrap();
+    let drive = &source[start..end];
+
+    assert!(
+        source[launch..start].contains("prepared.agent_policy.allowed(&prepared.repository)"),
+        "the toolchains are fixed at launch"
+    );
+    assert!(
+        drive.contains("POLICY_CHECK_EVERY"),
+        "the tick paces the check"
+    );
+    assert!(
+        drive.contains(".rcli_policy_covers(prepared, turn_id, &granted)"),
+        "the tick stops the turn on a narrowing"
+    );
+}
+
+/// H5a sec F2: a listed master stop that left processes running holds them under the
+/// owner's leftover setting, keeping what the turn held, as RCLI and native turns do, and
+/// still answers STOP_UNCERTAIN, so the turn stays listed; a confirmed or uncertain stop
+/// holds nothing.
+#[cfg(unix)]
+#[test]
+fn a_listed_master_stop_that_left_processes_holds_them() {
+    use crate::harnesses::leftovers::{HoldBy, LeftoverMode, Lineage, held_in};
+    let project = "h5a-f2-listed-master-left";
+    let by = || HoldBy {
+        project: Some(project.into()),
+        who: "a listed master turn".into(),
+    };
+    let keep = || LeftoverMode::Keep;
+    assert_eq!(listed_stop_settled(Ok(()), None, (), by(), keep), Ok(()));
+    assert_eq!(
+        listed_stop_settled(Err(Unstopped::Uncertain), None, (), by(), keep),
+        Err(failure(STOP_UNCERTAIN))
+    );
+    assert!(held_in(project).is_empty());
+    let mut sleeper = crate::spawn_gate::spawn(
+        Command::new("/usr/bin/perl")
+            .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; sleep 60"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let pid = rustix::process::Pid::from_child(&sleeper);
+    let until = Instant::now() + Duration::from_secs(10);
+    while rustix::process::getsid(Some(pid)) != Ok(pid) {
+        assert!(Instant::now() < until, "the sleeper never left its session");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let left = Lineage::of_sandboxed(sleeper.id(), None).and_then(Lineage::settle);
+    let stopped = listed_stop_settled(left, None, (), by(), keep);
+    let held = held_in(project);
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+
+    assert_eq!(stopped, Err(failure(STOP_UNCERTAIN)));
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0].who, "a listed master turn");
+}

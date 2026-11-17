@@ -5,6 +5,7 @@ mod tests;
 use super::harness_catalog::listed_install;
 use super::master_runtime::{Capture, timed_out};
 use super::{EngineError, OwnerRuntimeHandle, failure};
+use crate::agents::Hold;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::credentials::SecretString;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
@@ -14,6 +15,7 @@ use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, RUN_TIME_MAX, Session,
     listed_command,
 };
+use crate::harnesses::leftovers::{self, Unstopped};
 use crate::harnesses::registry::Harness;
 use crate::launch_context::EngineServer;
 use crate::master_session::{
@@ -22,7 +24,7 @@ use crate::master_session::{
 };
 use crate::model_gateway::relay::Relay;
 use crate::plugins::LaunchServer;
-use crate::protocol::RequestId;
+use crate::protocol::{CredentialRef, RequestId};
 use crate::sandbox::hidden_paths::HiddenRun;
 use crate::storage::{MasterRuntimeObservation, PreparedMasterTurn};
 use crate::usage::capture::Tokens;
@@ -436,6 +438,20 @@ fn listed_turn_ended<T>(listed: HiddenRun, ran: &Result<T, EngineError>) {
     super::master_runtime::keep_listed_if_uncertain(listed, ran);
 }
 
+/// Settles what a listed master turn's stop left: nothing after a confirmed stop, else
+/// [`STOP_UNCERTAIN`], which keeps the turn listed. Inputs: the stop's result, the account,
+/// what a hold keeps, who left it and the owner's leftover setting. Output: Ok, or the code.
+fn listed_stop_settled<K: Send + 'static>(
+    stopped: Result<(), Unstopped>,
+    account: Option<CredentialRef>,
+    kept: K,
+    by: leftovers::HoldBy,
+    mode: impl FnOnce() -> leftovers::LeftoverMode,
+) -> Result<(), EngineError> {
+    let _ = (account, kept, by, mode);
+    stopped.map_err(|_| failure(STOP_UNCERTAIN))
+}
+
 /// The SHA-256 of the program a listed master turn runs, the artifact its stored run names,
 /// read as a stream just before the harness starts. Input: the program. Output: 64
 /// lowercase hex characters, or [`NOT_INSTALLED`] for a file that cannot be read.
@@ -467,11 +483,13 @@ struct ListedTurn {
 }
 
 /// What one listed master turn's process left once its thread stopped it: what the turn
-/// gathered or why it ended without, how the stop went, [`STOP_UNCERTAIN`] when the engine
-/// could not be sure, and the turn's capture with every event recorded.
+/// gathered or why it ended without, how the stop went, naming what it left running when
+/// the engine could not be sure, the launch's home lock and files, none for a harness that
+/// never opened, and the turn's capture with every event recorded.
 struct ListedRun {
     driven: Result<Collected, EngineError>,
-    stopped: Result<(), EngineError>,
+    stopped: Result<(), Unstopped>,
+    lock: Option<crate::launch_context::Installed>,
     capture: Capture,
 }
 
@@ -575,13 +593,14 @@ fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
         mut capture,
     } = turn;
     let opened = open_listed(harness, request, &handover, relay, &instructions);
-    let (_lock, mut session, artifact) = match opened {
+    let (lock, mut session, artifact) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             let _ = signals.started.send(Err(error.clone()));
             return ListedRun {
                 driven: Err(error),
                 stopped: Ok(()),
+                lock: None,
                 capture,
             };
         }
@@ -597,13 +616,11 @@ fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
         }
         Ok(false) | Err(_) => Err(failure(CANCELLED)),
     };
-    let stopped = session
-        .stop()
-        .map(|_| ())
-        .map_err(|_| failure(STOP_UNCERTAIN));
+    let stopped = session.stop().map(|_| ());
     ListedRun {
         driven,
         stopped,
+        lock: Some(lock),
         capture,
     }
 }
@@ -712,7 +729,7 @@ impl OwnerRuntimeHandle {
         let search = self.harness_search()?;
         let (entry, installed) = listed_install(&self.engine, root.clone(), search, id).await;
         let program = listed_program(harness, entry.as_deref(), installed.as_deref())?;
-        let (custody, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
+        let (custody, hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self
             .inspect_master_turn(
                 &prepared.session.project_id,
@@ -747,7 +764,7 @@ impl OwnerRuntimeHandle {
             .map_err(|problem| EngineError(problem.0))?;
         let instructions = instruction_text(&prepared.instructions, given);
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
-        let _folder =
+        let folder =
             super::master_host_launch::MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
         let endpoint = ModelEndpoint::Http {
             url: handover.base_url().to_owned(),
@@ -793,20 +810,27 @@ impl OwnerRuntimeHandle {
             capture,
         };
         let refs = (runtime_ref, capture_ref);
-        self.drive_listed(prepared, turn_id, &custody, generation, turn, refs)
+        let held = (custody, hold, folder);
+        self.drive_listed(prepared, turn_id, held, generation, turn, refs)
             .await
     }
 
     /// Runs one listed master turn's process on a thread of its own and waits for it: once
     /// the harness runs, its group and the turn as running are stored and the prompt goes,
     /// and while it works the stored turn is read again, telling the thread to stop for an
-    /// owner's stop or a revoked scope. Every path waits for the thread to end. Inputs: the
-    /// turn's parts. Output: the observation to store, or the stop code.
+    /// owner's stop or a revoked scope. Every path waits for the thread to end, and its stop
+    /// is settled by [`listed_stop_settled`] with the custody use, its hold and the turn folder
+    /// as what a hold keeps. Inputs: the turn's parts. Output: the observation to store, or
+    /// the stop code.
     async fn drive_listed(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        custody: &NativeProfileUse,
+        held: (
+            NativeProfileUse,
+            Option<Hold>,
+            super::master_host_launch::MasterRuntimeFolder,
+        ),
         generation: u64,
         turn: ListedTurn,
         (runtime_ref, capture_ref): (RequestId, RequestId),
@@ -833,7 +857,7 @@ impl OwnerRuntimeHandle {
             tokio::select! {
                 joined = &mut thread.running => break joined,
                 () = tokio::time::sleep(INSPECT_INTERVAL), if !stop.load(Ordering::SeqCst) => {
-                    let read = self.inspect_listed(prepared, turn_id, generation, custody);
+                    let read = self.inspect_listed(prepared, turn_id, generation, &held.0);
                     match read.await {
                         Ok(current) => cancelled |= current.phase == MasterTurnPhase::Cancelled,
                         Err(error) => scope = Some(error),
@@ -843,12 +867,22 @@ impl OwnerRuntimeHandle {
             }
         };
         let run = joined.map_err(|_| failure(THREAD_LOST))?;
-        opened?;
         let ListedRun {
             driven,
             stopped,
+            lock,
             capture,
         } = run;
+        let project = prepared.session.project_id.as_str();
+        let by = leftovers::HoldBy {
+            project: Some(project.to_owned()),
+            who: "a listed master turn".to_owned(),
+        };
+        let account = Some(held.0.account().clone());
+        let stopped = listed_stop_settled(stopped, account, (held, lock), by, || {
+            leftovers::mode_of(Some(project))
+        });
+        opened?;
         let tokens = driven.as_ref().ok().and_then(|collected| collected.tokens);
         self.count_master_usage(prepared, None, tokens.unwrap_or_default())
             .await;
