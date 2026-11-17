@@ -70,7 +70,9 @@ impl Hosts {
     /// Whether any host of a store is started, whatever its epoch. Input: the store's
     /// `db_instance`. Output: true when one is.
     pub(crate) fn runs(&self, db_instance: &str) -> bool {
-        self.hosts.iter().any(|(instance, _)| instance == db_instance)
+        self.hosts
+            .iter()
+            .any(|(instance, _)| instance == db_instance)
     }
 }
 
@@ -140,7 +142,9 @@ fn check_opening(tx: &Transaction<'_>) -> Result<(), EngineError> {
         .optional()
         .map_err(error)?;
     assert!(
-        instance.as_ref().is_none_or(|instance| instance.len() == 64),
+        instance
+            .as_ref()
+            .is_none_or(|instance| instance.len() == 64),
         "owner_meta keeps a 64-character instance"
     );
     if instance.is_some_and(|instance| hosts().runs(&instance)) {
