@@ -4184,6 +4184,18 @@ async fn desktop_ide_run(
 }
 
 #[tauri::command]
+async fn desktop_ide_reveal(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    project_id: String,
+    path: String,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.ide_reveal(project_id, path)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_ide_run_mode(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5715,6 +5727,7 @@ native_commands! {
     desktop_restart_engine,
     desktop_ide_focus,
     desktop_ide_run,
+    desktop_ide_reveal,
     desktop_ide_run_mode,
     desktop_ide_set_run_mode,
     desktop_overview_read,

@@ -351,6 +351,7 @@ fn main() {
         "desktop_restart_engine",
         "desktop_ide_focus",
         "desktop_ide_run",
+        "desktop_ide_reveal",
         "desktop_ide_run_mode",
         "desktop_ide_set_run_mode",
         "desktop_overview_read",

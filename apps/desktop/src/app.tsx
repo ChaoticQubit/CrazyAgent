@@ -222,7 +222,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
       </Banner>}
       <Screen route={page} session={session} alerts={alerts} />
       <UserDialogLayer asked={asked} under={page} back={back} />
-      <GoToLayer projects={projects ?? []} />
+      <GoToLayer projects={projects ?? []} project={page.name === "project" ? page.id : null} />
     </AppShell>
   </SessionContext.Provider>;
 }

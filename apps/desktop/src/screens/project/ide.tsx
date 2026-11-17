@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, cachedIdeView, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, sameBounds, saveLastIde, showKeptIde, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, cachedIdeView, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, revealCopy, revealInIde, revealWhenOpen, sameBounds, saveLastIde, showKeptIde, touchIde } from "../../api-ide";
 import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
-import { Button, useOverlayShown } from "../../ui";
+import { Button, navigate, useOverlayShown } from "../../ui";
 import "./ide.css";
 
 /** How often a page waiting on the IDE build reads its state again, in milliseconds. */
@@ -46,10 +46,13 @@ export function IdeUnavailable({ view, failure, busy = false, onAction }: { view
  * Context and Changes back when the build fails. A failed move shows on the tab; a failed hide
  * goes to the page, whose line stays outside the box the IDE webview may still cover. The IDE can
  * also move to a window of its own: the tab then says so and offers to bring it forward until
- * that window closes.
- * Inputs: the project id, the view handler and the hide's problem, null once it worked. Output:
- * the tab. */
-export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void }) {
+ * that window closes. A file Go to picked is shown in the IDE once the IDE listens, and the
+ * route then drops it, so going back never shows it again; a refusal shows on the tab.
+ * Inputs: the project id, the file Go to picked, if any, the view handler and the hide's
+ * problem, null once it worked. Output: the tab. */
+export function IdeTab({ projectId, reveal = null, onView, onHideProblem }: {
+  projectId: string; reveal?: string | null; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void;
+}) {
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<IdeTabState | null>(() => cachedIdeView()?.value.state ?? null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -192,6 +195,17 @@ export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string
       hide();
     };
   }, [projectId, ready, covered, out]);
+
+  useEffect(() => {
+    if (!ready || reveal === null) return;
+    let live = true;
+    void revealWhenOpen(() => revealInIde(projectId, reveal), () => live).then((result) => {
+      if (result === null) return;
+      if (result.kind !== "ok") setProblem(failureLine(result, revealCopy));
+      navigate({ name: "project", id: projectId, tab: "ide" }, true);
+    });
+    return () => { live = false; };
+  }, [projectId, reveal, ready]);
 
   const act = async () => {
     setBusy(true);

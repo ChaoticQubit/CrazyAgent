@@ -353,6 +353,7 @@
     "allow-desktop-restart-engine",
     "allow-desktop-ide-focus",
     "allow-desktop-ide-run",
+    "allow-desktop-ide-reveal",
     "allow-desktop-ide-run-mode",
     "allow-desktop-ide-set-run-mode",
     "allow-desktop-overview-read",

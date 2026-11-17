@@ -27,7 +27,7 @@ import { QuestionsTab } from "./questions";
 import { QuestionPopup, popupOn } from "./question-popup";
 import { shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
-import { routeSection, valueOf } from "./shared";
+import { routeSection, sectionFile, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
 import { TeamActivity } from "./team-activity";
@@ -297,7 +297,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}
       {active === "settings" && <SettingsTab key={`${settingsSection ?? ""}-${deleteAsks}`} data={data} section={settingsSection} />}
-      {active === "ide" && <IdeTab key={data.id} projectId={projectId} onView={(value) => setIde({ kind: "ok", value })} onHideProblem={setIdeHideProblem} />}
+      {active === "ide" && <IdeTab key={data.id} projectId={projectId} reveal={sectionFile(settingsSection)} onView={(value) => setIde({ kind: "ok", value })} onHideProblem={setIdeHideProblem} />}
     </div>
     {replaces && <IdeConfirm data={data} />}
     {replaces && <IdeExtensionConfirm data={data} />}

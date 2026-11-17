@@ -95,6 +95,49 @@ const RUN_FAILURES: Record<string, string> = {
   ide_reveal_busy: "The IDE is busy. Try again in a moment.",
 };
 
+/** How long a Go to file waits between asks while the project's IDE is not yet listening. */
+export const REVEAL_WAIT_MS = 500;
+/** How many times a Go to file asks before it says the IDE did not open in time. */
+export const REVEAL_TRIES_MAX = 60;
+
+const REVEAL_FAILURES: Record<string, string> = {
+  ide_not_running: "The IDE didn't open in time to show the file. Pick it in Go to again.",
+  ide_reveal_unanswered: "The IDE didn't show the file. Check the IDE tab, then pick it in Go to again.",
+  ide_reveal_not_listed: "The project's folder isn't in the IDE, so the file wasn't shown.",
+  ide_reveal_missing: "That file is not there any more.",
+  ide_reveal_outside: "CrazyAgent opens only files inside the project's folder.",
+  ide_reveal_invalid: "CrazyAgent opens only files inside the project's folder.",
+  ide_reveal_busy: "The IDE is still showing earlier files. Pick the file in Go to again.",
+};
+
+/** Says why a Go to file was not shown. Input: the refusal code. Output: the plain line, or ""
+ * when the code has none, so the engine's own message shows. */
+export function revealCopy(code: string): string {
+  return REVEAL_FAILURES[code] ?? "";
+}
+
+/** Shows one project file in that project's open IDE, as the TUI's open in IDE does; the
+ * engine checks that the path names a file inside the project's folder. Inputs: the project
+ * and the path relative to it. Output: done once the IDE showed it, or the refusal. */
+export async function revealInIde(projectId: string, path: string): Promise<Result<void>> {
+  const result = await call<null>("desktop_ide_reveal", { projectId, path });
+  return result.kind === "ok" ? { kind: "ok", value: undefined } : result;
+}
+
+/** Asks for a reveal until the IDE listens: again after `REVEAL_WAIT_MS` while the answer is
+ * ide_not_running, at most `REVEAL_TRIES_MAX` asks. Inputs: the ask, whether the asking view is
+ * still shown, and the wait. Output: the last answer, or null once the view is gone. */
+export async function revealWhenOpen(reveal: () => Promise<Result<void>>, live: () => boolean,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((done) => window.setTimeout(done, ms))): Promise<Result<void> | null> {
+  for (let tries = 1; ; tries += 1) {
+    const result = await reveal();
+    if (!live()) return null;
+    if (result.kind !== "error" || result.code !== "ide_not_running" || tries >= REVEAL_TRIES_MAX) return result;
+    await wait(REVEAL_WAIT_MS);
+    if (!live()) return null;
+  }
+}
+
 /** Says what the IDE tab shows for the engine's IDE state. Input: the state. Output: the
  * plain line, the one action offered (Download when missing, Retry when failed) and whether
  * the IDE can open; an unqualified platform offers nothing and never opens. */
