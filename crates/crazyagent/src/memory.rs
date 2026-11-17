@@ -16,7 +16,7 @@ mod text;
 
 use review::{nominations, owner, review};
 pub use text::visible_text;
-pub(crate) use text::{hidden_char, hidden_text};
+pub(crate) use text::{hidden_char, hidden_text, without_hidden};
 use text::{memory_text_valid, text_valid};
 
 /// The memory rows an owner review or source retraction may fill, above every configured
