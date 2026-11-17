@@ -3,29 +3,30 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, closedPort, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
+import { finishGolden, recordPath, step, waitUntil, writeRecord } from "./golden-run.mjs";
+import { INTERNALS, closedPort, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
-const WAIT_MS = 90000;
 const ONBOARD_MS = 120000;
 const GIT = "/usr/bin/git";
-const WAIT_MAX_MS = 300000;
-const STEPS_MAX = 64;
+export { finishGolden, step, waitUntil };
 export const POOL = "local-pool";
+export const LIMITED = "limited-connection";
+export const READY = "local-connection";
 
-/** Starts one golden flow as a first run leaves the app: a real engine on a private root with a
- * scratch HOME and one pool, the bridge, a saved profile and projects folder and the built app,
- * as the flow's first step. It fills the caller's empty run, so `stopGolden` ends what a failed
- * start left. Inputs: that run, the flow's name (lowercase words joined by "-") and, for a team
- * flow, the Codex stand-in's absolute path, pinned with a silent provider. Output: none. */
-export async function startGolden(run, flow, { codex = null } = {}) {
+/** Starts one golden flow as a first run leaves the app: a real engine on a private root, a
+ * scratch HOME, one pool, the bridge, a saved profile and projects folder and the built app, as
+ * the flow's first step; a failed start is left for `stopGolden`. Inputs: the empty run, the
+ * flow's name, and for a team flow the Codex stand-in's absolute path with a silent provider
+ * and whether the pool lists LIMITED first, on that provider at /limited/v1. Output: none. */
+export async function startGolden(run, flow, { codex = null, limitedFirst = false } = {}) {
   assert.match(flow, /^[a-z]+(-[a-z]+)*$/);
   assert.ok(codex === null || (isAbsolute(codex) && existsSync(codex)), `the Codex stand-in: ${codex}`);
+  assert.ok(typeof limitedFirst === "boolean" && (!limitedFirst || codex !== null), "a limited member needs the stand-in");
   assert.ok(flow.length <= 64);
   assert.deepEqual(Object.keys(run), [], "a golden run starts empty");
   Object.assign(run, { flow, steps: [], started: Date.now(), finished: false });
@@ -44,16 +45,19 @@ export async function startGolden(run, flow, { codex = null } = {}) {
   rmSync(recordPath(run), { force: true });
   run.provider = codex === null ? null : await silentProvider();
   const provider = run.provider === null ? await closedPort() : run.provider.port;
+  const limitedAccount = limitedFirst ? `"limited-account", ` : "";
+  const limitedConnection = limitedFirst ? `  { id = "${LIMITED}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "limited-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/limited/v1" }, model = { id = "golden-model", author = "openai-compatible" }, auth = { method = "none" } },\n` : "";
+  const limitedMember = limitedFirst ? `"${LIMITED}", ` : "";
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
 allowed_destinations = []
 
 [model_access]
-accounts = ["local-account"]
+accounts = [${limitedAccount}"local-account"]
 connections = [
-  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "golden-model", author = "openai-compatible" }, auth = { method = "none" } },
+${limitedConnection}  { id = "local-connection", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = { kind = "http", url = "http://127.0.0.1:${provider}/v1" }, model = { id = "golden-model", author = "openai-compatible" }, auth = { method = "none" } },
 ]
-pools = [{ id = "${POOL}", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
+pools = [{ id = "${POOL}", members = [${limitedMember}"local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
   const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8" };
   run.log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
@@ -71,27 +75,6 @@ pools = [{ id = "${POOL}", members = ["local-connection"], projects = [], roles 
   assert.ok(existsSync(join(dist, "index.html")), "the frontend built");
   run.site = await serveApp(dist, run.bridge, [], run.log);
   step(run, "start the engine and the app");
-}
-
-/** Ends one step of the flow, timed from the end of the one before.
- * Inputs: the run and the step's name, a fixed text that holds no path and no name the owner
- * typed. Output: none. */
-export function step(run, name) {
-  assert.ok(typeof name === "string" && name.length > 0 && !run.finished);
-  assert.ok(run.steps.length < STEPS_MAX, `a flow has at most ${STEPS_MAX} steps`);
-  const now = Date.now();
-  run.steps.push({ step: name, ms: now - run.mark });
-  run.mark = now;
-}
-
-/** Ends the flow as passed: writes its run record, then reads it back from disk.
- * Input: the run.
- * Output: the record as the evidence folder holds it, or null when it holds none. */
-export function finishGolden(run) {
-  assert.ok(!run.finished);
-  run.finished = true;
-  writeRecord(run, "passed");
-  return existsSync(recordPath(run)) ? JSON.parse(readFileSync(recordPath(run), "utf8")) : null;
 }
 
 /** Stops the app, the bridge, the engine, its provider and its agent terminals; an unfinished
@@ -192,34 +175,4 @@ export async function open(run, page, path) {
  * Output: the hash. */
 export function hashUntil(page, what, check) {
   return waitUntil(`the page to reach ${what}`, () => page.evaluate("location.hash"), check);
-}
-
-/** Reads until `done` accepts what `read` gave, every POLL_MS, for at most `ms`: the one place a
- * golden flow sleeps (Q2). Inputs: what is awaited, for the failure, the read, the check and
- * the limit (at most five minutes). Output: the value the check accepted. */
-export async function waitUntil(what, read, done, ms = WAIT_MS) {
-  assert.ok(ms > 0 && ms <= WAIT_MAX_MS, `${what}: ${ms} ms`);
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const found = await read();
-    if (done(found)) return found;
-    assert.ok(Date.now() < deadline, `${what} never came in ${ms} ms: ${JSON.stringify(found)}`);
-    await pause(POLL_MS);
-  }
-}
-
-/** Where a flow's run record goes in the evidence folder.
- * Input: the run.
- * Output: the path. */
-function recordPath(run) {
-  return join(run.evidence, `${run.flow}-desktop.json`);
-}
-
-/** Writes the run record: the flow, its outcome, its whole time and each step's time, with
- * no path and no name.
- * Inputs: the run and "passed" or "failed". Output: none. */
-function writeRecord(run, outcome) {
-  assert.ok(outcome === "passed" || outcome === "failed");
-  const record = { flow: run.flow, client: "desktop", outcome, total_ms: Date.now() - run.started, steps: run.steps };
-  writeFileSync(recordPath(run), JSON.stringify(record, null, 1), { mode: 0o600 });
 }

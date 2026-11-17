@@ -4,6 +4,9 @@ use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
+/// The `ProjectRemoved` event a removal appends to the state log, and its projection
+/// (v2.5 L14a).
+pub(crate) mod event;
 #[cfg(all(test, unix))]
 mod tests;
 

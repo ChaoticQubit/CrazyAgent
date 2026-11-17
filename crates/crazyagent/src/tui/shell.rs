@@ -17,6 +17,7 @@ use super::keys::{Global, Key, global};
 use super::screens::console::files_query;
 use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
+use super::screens::settings::restore;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::usage::extras::{ResetWatch, reset_notice};
@@ -60,12 +61,13 @@ pub struct Target {
 }
 
 /// What picking a Go to row does: `Open` opens its place; `Agent` opens its place, the
-/// project's Agents tab, and says to pick the agent its label names there; `File` stays on
-/// the page Go to opened on and asks the IDE to show that project's file its label names.
+/// project's Team screen, on the Messages list of the card whose graph node id it holds;
+/// `File` stays on the page Go to opened on and asks the IDE to show that project's file its
+/// label names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
     Open,
-    Agent,
+    Agent(String),
     File(ProjectId),
 }
 
@@ -166,8 +168,8 @@ pub fn rank(query: &str, label: &str) -> Option<u8> {
 /// The running sub-agents of a team graph, as Go to lists them: the role-sub agents the graph
 /// draws as harness leads and as sub-agents under a lead, not native teammates, while
 /// starting, idle or working, in graph order, as the desktop lists them. Input: the graph.
-/// Output: their names.
-fn go_to_agents(graph: &TeamGraph) -> Vec<String> {
+/// Output: each one's graph node id and name.
+fn go_to_agents(graph: &TeamGraph) -> Vec<(String, String)> {
     graph
         .nodes
         .iter()
@@ -175,7 +177,7 @@ fn go_to_agents(graph: &TeamGraph) -> Vec<String> {
             matches!(node.kind, NodeKind::Lead | NodeKind::Sub)
                 && node.status.is_some_and(AgentStatus::live)
         })
-        .map(|node| node.label.clone())
+        .map(|node| (node.id.clone(), node.label.clone()))
         .collect()
 }
 
@@ -209,7 +211,7 @@ struct Here {
     project: ProjectId,
     name: String,
     tab: ProjectTab,
-    agents: Vec<String>,
+    agents: Vec<(String, String)>,
     files: Option<(String, Vec<String>)>,
     asked: Option<String>,
 }
@@ -223,11 +225,14 @@ impl Here {
             name: self.name.clone(),
             tab,
         };
-        let agents = self.agents.iter().map(|label| Target {
+        let agents = self.agents.iter().map(|(node, label)| Target {
             label: label.clone(),
             kind: "Agent",
-            place: place(ProjectTab::Agents),
-            pick: Pick::Agent,
+            place: Place::Team {
+                id: self.project.clone(),
+                name: self.name.clone(),
+            },
+            pick: Pick::Agent(node.clone()),
         });
         let files = self
             .files
@@ -704,15 +709,12 @@ impl Shell {
     fn pick(&mut self, target: Target) {
         match target.pick {
             Pick::Open => self.go(target.place),
-            Pick::Agent => {
+            Pick::Agent(node) => {
+                let Place::Team { id, .. } = &target.place else {
+                    unreachable!("an agent row goes to its project's Team screen");
+                };
+                self.ctx.messages_for = Some((id.clone(), node));
                 self.go(target.place);
-                self.ctx.say(Message::success(
-                    "Opened Agents.",
-                    &format!(
-                        "Pick {} in the agents list, then press M for its messages.",
-                        target.label
-                    ),
-                ));
             }
             Pick::File(project) => self.ctx.request(Request::Reveal(Box::new(RevealQuery {
                 project,
@@ -866,23 +868,7 @@ impl Shell {
                 self.ctx.link = Link::Ready;
                 self.ctx.identity = identity.clone();
             }
-            Arrival::Disconnected(problem) => {
-                self.ctx.identity = None;
-                let started = self
-                    .stack
-                    .first()
-                    .and_then(|screen| screen.place())
-                    .is_some();
-                if started {
-                    self.ctx.link = Link::Reconnecting;
-                    self.ctx.say(Message::error(
-                        "Lost the connection to the engine.",
-                        "Retrying in 3 s. What you typed is kept.",
-                    ));
-                } else {
-                    self.ctx.link = Link::Down(problem.clone());
-                }
-            }
+            Arrival::Disconnected(problem) => self.lose_engine(problem),
             Arrival::Profile(result) => {
                 self.ctx.store.profile = match result {
                     Ok(profile) => Load::Ready(profile.clone()),
@@ -997,6 +983,43 @@ impl Shell {
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.show();
         }
+    }
+
+    /// Takes a lost or refused connection: before the first connect, or once a restore
+    /// brought the 2.4 data back, the engine-down screen shows it, with the restore's
+    /// sentence and `r` as the desktop's engine-down view (L5 F1); otherwise the TUI retries
+    /// every 3 s, saying a restore that still runs in its sentence. Input: the problem code.
+    /// Output: none.
+    fn lose_engine(&mut self, problem: &str) {
+        self.ctx.identity = None;
+        let started = self
+            .stack
+            .first()
+            .and_then(|screen| screen.place())
+            .is_some();
+        if started && problem == crate::restore::ENGINE_RESTORED {
+            self.overlay = None;
+            self.stack.clear();
+            self.stack.push(Box::new(Startup::new()));
+            if let Some(said) = self.ctx.message().cloned() {
+                self.ctx.unsay(&said);
+            }
+            assert_eq!(self.stack.len(), 1);
+        }
+        if !started || problem == crate::restore::ENGINE_RESTORED {
+            self.ctx.link = Link::Down(problem.to_owned());
+            return;
+        }
+        self.ctx.link = Link::Reconnecting;
+        if restore::holds(problem) {
+            self.ctx.say(Message::error(restore::plain(problem), ""));
+        } else {
+            self.ctx.say(Message::error(
+                "Lost the connection to the engine.",
+                "Retrying in 3 s. What you typed is kept.",
+            ));
+        }
+        assert!(self.ctx.message().is_some());
     }
 
     /// Keeps the learning read for Home, keeping the last good read over a failed one, and
@@ -1178,7 +1201,7 @@ impl Shell {
                             Pick::File(_) => {
                                 path_tail(&target.label, GO_TO_LABEL_CELLS, ctx.glyphs.ellipsis)
                             }
-                            Pick::Open | Pick::Agent => target.label.clone(),
+                            Pick::Open | Pick::Agent(_) => target.label.clone(),
                         }),
                         styled(target.kind, Role::Muted, theme),
                     ],

@@ -10,6 +10,7 @@ import { PackSettings } from "./pack";
 import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
 import { QuittingSettings } from "./quitting";
+import { RestoreSettings } from "./restore";
 import { ProcessSettings } from "../process";
 import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
@@ -32,7 +33,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "master", label: "Master" },
   ] },
   { title: "App", items: [
-    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" },
+    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "restore", label: "Restore 2.4" },
   ] },
 ];
 
@@ -88,6 +89,7 @@ export function Settings({ tab, action, account, skill }: { tab: ListedSettingsT
       : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "quit" ? <QuittingSettings />
       : tab === "master" ? <MasterSettings />
+      : tab === "restore" ? <RestoreSettings />
       : <TeamAlertsSettings />}
   </SettingsFrame>;
 }

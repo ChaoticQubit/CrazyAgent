@@ -1,5 +1,5 @@
 pub(crate) mod account_profile;
-
+mod model_access;
 pub(crate) mod native_auth;
 pub(crate) mod transport;
 
@@ -12,6 +12,7 @@ pub use account_profile::{
 pub use crate::engine::native_auth_host::claude_auth::types::ClaudeAuthChallenge;
 pub use transport::native_auth_channel::claude::ClaudeAuthInput;
 
+pub use model_access::{ModelAccessCollection, ModelAccessCursor, ModelAccessRecord};
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
@@ -94,7 +95,7 @@ impl OwnerClientKind {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Admission {
+pub struct Admission {
     pub(crate) db_instance: String,
     pub(crate) engine_epoch: String,
     pub(crate) owner_id: String,
@@ -102,7 +103,7 @@ pub(crate) struct Admission {
 }
 
 #[derive(Clone)]
-pub(crate) struct HostStamp {
+pub struct HostStamp {
     pub(crate) db_instance: String,
     pub(crate) engine_epoch: String,
 }
@@ -222,6 +223,7 @@ pub enum OwnerMutation {
     SetRefusedTool {
         choice: crate::setup::RefusedTool,
     },
+    RestorePinned,
     SetProjectsHome {
         path: String,
     },
@@ -509,6 +511,9 @@ impl OwnerMutation {
             },
             Self::SetRefusedTool { choice } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::SetRefusedTool { choice: *choice },
+            },
+            Self::RestorePinned => Command::OwnerSetup {
+                action: crate::setup::SetupAction::RestorePinned,
             },
             Self::RemovePackEntry { id, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Remove {
@@ -1487,52 +1492,6 @@ pub enum OwnerData {
         merge_execution: bool,
         settings_persistence: bool,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelAccessCollection {
-    Accounts,
-    Connections,
-    Pools,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ModelAccessRecord {
-    Account {
-        account_ref: CredentialRef,
-    },
-    Connection {
-        connection: crate::config::ModelConnection,
-    },
-    Pool {
-        pool: crate::config::AccountPool,
-    },
-}
-
-impl ModelAccessRecord {
-    pub fn id(&self) -> &CredentialRef {
-        match self {
-            Self::Account { account_ref } => account_ref,
-            Self::Connection { connection } => &connection.id,
-            Self::Pool { pool } => &pool.id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelAccessCursor {
-    pub db_instance: String,
-    pub owner_id: String,
-    pub engine_epoch: String,
-    pub owner_epoch: i64,
-    pub config_id: ConfigId,
-    pub at_revision: Cursor,
-    pub source_hash: String,
-    pub collection: ModelAccessCollection,
-    pub after_id: CredentialRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
