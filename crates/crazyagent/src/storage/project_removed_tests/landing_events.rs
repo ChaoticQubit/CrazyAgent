@@ -88,9 +88,10 @@ fn landing_events(db: &Connection, field: &str) -> Vec<(i64, String, Vec<u8>)> {
         .collect()
 }
 
-/// The agent worktrees the Delete row names: [`REMOVED`]'s own, [`OTHER`]'s own, and one
-/// both projects name.
+/// The agent worktrees the Delete row names: [`REMOVED`]'s own and its cleaned-up agent's,
+/// which only its agent row still names, [`OTHER`]'s own, and one both projects name.
 const GONE: &str = "/repo/.crazyagent/worktrees/agent-10";
+const RETIRED: &str = "/repo/.crazyagent/worktrees/agent-11";
 const STAYS: &str = "/repo/.crazyagent/worktrees/agent-20";
 const SHARED: &str = "/repo/.crazyagent/worktrees/agent-30";
 
@@ -101,8 +102,8 @@ const WORKTREE_TABLES: [&str; 3] = [
     "landing_owner_edits",
 ];
 
-/// rv-sec3 #415 F1: Delete everything forgets the agent worktrees only its project names:
-/// every landing event naming one is tombstoned and its agent branch, base and owner edit
+/// rv-sec3 #415 F1: Delete everything forgets the agent worktrees only its project names,
+/// a cleaned-up agent's included: every landing event naming one is tombstoned and its
 /// rows go in the delete's transaction, so no landing event names it and a landing rebuild
 /// equals the live tables; the other project's worktree, and a path both name, keep theirs.
 #[test]
@@ -123,8 +124,15 @@ fn a_deleted_projects_worktree_landing_events_are_tombstoned_and_a_rebuild_bring
         .unwrap();
         worktree_changes(&s.db, worktree, agent);
     }
+    s.db.execute(
+        "INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
+         VALUES (11,?1,'team','codex',1,?2,'stopped',0,0)",
+        params![REMOVED, RETIRED],
+    )
+    .unwrap();
+    worktree_changes(&s.db, RETIRED, 11);
     let before = landing_events(&s.db, "worktree");
-    assert_eq!(before.len(), 12, "three landing events per worktree row");
+    assert_eq!(before.len(), 15, "three landing events per worktree");
     let mutation = OwnerMutation::DeleteProject {
         project_id: ProjectId::new(REMOVED).unwrap(),
         name: REMOVED.into(),
@@ -140,7 +148,7 @@ fn a_deleted_projects_worktree_landing_events_are_tombstoned_and_a_rebuild_bring
     let after = logged(&s.db);
     for (seq, worktree, body) in &before {
         let (_, _, kind, _, now) = after.iter().find(|event| event.0 == *seq).unwrap();
-        if worktree == GONE {
+        if [GONE, RETIRED].contains(&worktree.as_str()) {
             assert_eq!(
                 now.as_slice(),
                 TOMBSTONE,
@@ -150,8 +158,13 @@ fn a_deleted_projects_worktree_landing_events_are_tombstoned_and_a_rebuild_bring
             assert_eq!(now, body, "{kind} of {worktree} stays");
         }
     }
-    let named = |body: &[u8]| body.windows(GONE.len()).any(|part| part == GONE.as_bytes());
-    assert!(after.iter().all(|(_, _, _, _, body)| !named(body)));
+    for gone in [GONE, RETIRED] {
+        let named = |body: &[u8]| body.windows(gone.len()).any(|part| part == gone.as_bytes());
+        assert!(
+            after.iter().all(|(_, _, _, _, body)| !named(body)),
+            "{gone}"
+        );
+    }
     worktree_rebuild_equals_live(&s);
 }
 
@@ -179,9 +192,9 @@ fn worktree_changes(db: &Connection, worktree: &str, agent: i64) {
     }
 }
 
-/// Checks that [`GONE`] holds no row in the worktree-keyed landing tables while the other
-/// two worktrees keep theirs, and that a landing rebuild of a copy of the store equals the
-/// live tables. Input: the store after the Delete. Output: none.
+/// Checks that [`GONE`] and [`RETIRED`] hold no row in the worktree-keyed landing tables
+/// while the other two worktrees keep theirs, and that a landing rebuild of a copy of the
+/// store equals the live tables. Input: the store after the Delete. Output: none.
 fn worktree_rebuild_equals_live(s: &Store) {
     let copy = s.root.path().join("worktree-rebuilt.db");
     s.db.execute("VACUUM INTO ?1", [copy.to_str().unwrap()])
@@ -194,7 +207,7 @@ fn worktree_rebuild_equals_live(s: &Store) {
             rows(&s.db, table).unwrap(),
             "{table} rebuilds equal"
         );
-        for (worktree, held) in [(GONE, 0), (STAYS, 1), (SHARED, 1)] {
+        for (worktree, held) in [(GONE, 0), (RETIRED, 0), (STAYS, 1), (SHARED, 1)] {
             let count: i64 =
                 s.db.query_row(
                     &format!("SELECT COUNT(*) FROM {table} WHERE worktree=?1"),
