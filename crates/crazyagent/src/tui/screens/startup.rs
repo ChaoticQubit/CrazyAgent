@@ -79,10 +79,11 @@ fn down_lines(ctx: &Ctx, width: u16) -> Vec<Line<'static>> {
             "  Projects, accounts and agents live in the engine.",
         )),
     }
-    lines.push(Line::raw(if ctx.starts_engine {
-        "  Press r to start it and try again."
-    } else {
-        "  Start it, then press r to try again."
+    let restored = ctx.link == Link::Down(crate::restore::ENGINE_RESTORED.into());
+    lines.push(Line::raw(match (ctx.starts_engine, restored) {
+        (true, true) => "  Press r to go back to 2.5 instead.",
+        (true, false) => "  Press r to start it and try again.",
+        (false, _) => "  Start it, then press r to try again.",
     }));
     lines.push(Line::default());
     lines.push(Line::from(vec![

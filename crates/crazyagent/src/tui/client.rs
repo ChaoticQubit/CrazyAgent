@@ -2512,8 +2512,10 @@ fn restore_held(
             Some((layout, service)),
         ) => {
             assert!(identity.is_none(), "a failed connect has no identity");
-            let running = crate::restore::service_running(service);
-            let problem = super::screens::settings::restore::held(problem, layout.root(), running);
+            let root = layout.root();
+            let running =
+                crate::restore::state(root).is_some() && crate::restore::service_running(service);
+            let problem = super::screens::settings::restore::held(problem, root, running);
             assert!(!problem.is_empty());
             OwnerEvent::Access {
                 ready: false,
