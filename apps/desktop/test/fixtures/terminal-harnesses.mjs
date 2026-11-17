@@ -13,6 +13,7 @@ let probe = null;
 let gpu = false;
 let identity = "";
 let failing = 0;
+let asked = 0;
 const contexts = [];
 const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [], resizes: [] };
 const canvasContext = HTMLCanvasElement.prototype.getContext;
@@ -43,6 +44,7 @@ export function failGpu(count) {
 
 HTMLCanvasElement.prototype.getContext = function getContext(kind, ...rest) {
   if (kind !== "webgl2") return canvasContext.call(this, kind, ...rest);
+  asked += 1;
   if (!gpu) return null;
   if (failing > 0) {
     failing -= 1;
@@ -58,6 +60,12 @@ WebGL2RenderingContext.prototype.getParameter = function getParameter(name) {
   if (name === UNMASKED_VENDOR) return "Google Inc.";
   return glParameter.call(this, name);
 };
+
+/** How many times the page asked a canvas for a WebGL2 context, a probe's scratch canvas
+ * included, whether or not one was given. Output: the count. */
+export function gpuAsked() {
+  return asked;
+}
 
 /** How many WebGL2 contexts the page holds that were not lost. Output: the count. */
 export function liveGpu() {

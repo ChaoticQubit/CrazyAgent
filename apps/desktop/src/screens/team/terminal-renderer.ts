@@ -34,13 +34,17 @@ export function rendererChoice(stored: string | null, platform?: string): Render
   return RENDERER_CHOICES.find((choice) => choice.value === stored)?.value ?? rendererDefault(platform);
 }
 
-/** Says whether a terminal draws on the GPU. Standard never does; no choice does without
- * WebGL2 or on a software or virtual machine renderer; Automatic also keeps DOM rows on Linux
- * under Wayland and once a start on the GPU failed. Inputs: the choice, the machine's probe
- * and whether an Automatic start failed since the choice last changed. Output: the answer. */
-export function gpuWanted(choice: RendererChoice, probe: GpuProbe, failed: boolean): boolean {
-  if (choice === "standard" || !probe.webgl2 || SOFTWARE_RENDERER.test(probe.identity)) return false;
-  return choice === "gpu" || (!probe.wayland && !failed);
+/** Says whether a terminal draws on the GPU. Standard never does, and answers without
+ * probing, so it never starts WebGL2; no choice does without WebGL2 or on a software or
+ * virtual machine renderer; Automatic also keeps DOM rows on Linux under Wayland and once a
+ * start on the GPU failed. Inputs: the choice, the machine's probe, called only past
+ * Standard, and whether an Automatic start failed since the choice last changed. Output:
+ * the answer. */
+export function gpuWanted(choice: RendererChoice, probe: () => GpuProbe, failed: boolean): boolean {
+  if (choice === "standard") return false;
+  const machine = probe();
+  if (!machine.webgl2 || SOFTWARE_RENDERER.test(machine.identity)) return false;
+  return choice === "gpu" || (!machine.wayland && !failed);
 }
 
 /** Reads once per page what the machine offers, on a scratch canvas whose context is lost

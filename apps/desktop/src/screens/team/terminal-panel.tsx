@@ -644,7 +644,7 @@ export class KeptView implements Held {
     const terminal = this.terminal;
     if (!terminal || this.dropped) return;
     const choice = readTerminalRenderer();
-    if (!this.shown || this.gpuLost || this.Webgl === null || !gpuWanted(choice, probeGpu(), autoStartFailed())) {
+    if (!this.shown || this.gpuLost || this.Webgl === null || !gpuWanted(choice, probeGpu, autoStartFailed())) {
       this.releaseGpu();
       return;
     }

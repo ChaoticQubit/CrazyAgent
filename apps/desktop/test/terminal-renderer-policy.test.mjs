@@ -40,9 +40,22 @@ test("#358 r2: which choice draws on the GPU on which machine", () => {
     ["auto", { ...HARDWARE, identity: "" }, false, true],
     ["standard", HARDWARE, false, false],
   ];
-  for (const [choice, probe, failed, drawn] of rows) assert.equal(gpuWanted(choice, probe, failed), drawn, JSON.stringify({ choice, probe, failed }));
+  for (const [choice, probe, failed, drawn] of rows) assert.equal(gpuWanted(choice, () => probe, failed), drawn, JSON.stringify({ choice, probe, failed }));
   for (const identity of software) {
-    for (const choice of ["gpu", "auto", "standard"]) assert.equal(gpuWanted(choice, { ...HARDWARE, identity }, false), false, `${choice} on ${identity}`);
+    for (const choice of ["gpu", "auto", "standard"]) assert.equal(gpuWanted(choice, () => ({ ...HARDWARE, identity }), false), false, `${choice} on ${identity}`);
   }
-  assert.equal(gpuWanted("gpu", { ...HARDWARE, identity: "NVIDIA GeForce RTX 4090 softpipeline" }, false), true, "a word that only starts with softpipe is no software renderer");
+  assert.equal(gpuWanted("gpu", () => ({ ...HARDWARE, identity: "NVIDIA GeForce RTX 4090 softpipeline" }), false), true, "a word that only starts with softpipe is no software renderer");
+});
+
+test("V243-RENDERER-R2-LOWS F1: Standard answers without probing the machine; GPU and Automatic probe it", () => {
+  let probes = 0;
+  const probe = () => {
+    probes += 1;
+    return HARDWARE;
+  };
+  assert.equal(gpuWanted("standard", probe, false), false);
+  assert.equal(probes, 0, "Standard never starts WebGL2 to look");
+  assert.equal(gpuWanted("gpu", probe, false), true);
+  assert.equal(gpuWanted("auto", probe, false), true);
+  assert.equal(probes, 2);
 });

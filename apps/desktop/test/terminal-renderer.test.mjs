@@ -68,9 +68,9 @@ for (const [platform, drawn] of [["MacIntel", "webgl"], ["Win32", "webgl"], ["Li
   test(`#358 r2 (NOTE-1215): with nothing chosen, a GPU machine on ${platform} draws with ${drawn}`, async () => {
     const seen = await withPage(async ({ evaluate }) => {
       await live(evaluate, true, { platform });
-      return { drawn: await drawnWith(evaluate, drawn), shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
+      return { drawn: await drawnWith(evaluate, drawn), shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()"), probed: (await evaluate("Fixture.gpuAsked()")) > 0 };
     });
-    assert.deepEqual(seen, { drawn: true, shown: true, renderer: drawn });
+    assert.deepEqual(seen, { drawn: true, shown: true, renderer: drawn, probed: drawn === "webgl" });
   });
 }
 
@@ -82,12 +82,12 @@ test("#358 r2: under GPU, a machine whose WebGL is a software renderer keeps DOM
   assert.deepEqual(seen, { shown: true, renderer: "dom" });
 });
 
-test("#358 r2: Standard keeps DOM rows on a machine with a GPU", async () => {
+test("#358 r2: Standard keeps DOM rows on a machine with a GPU and never asks for a WebGL2 context, not even to probe", async () => {
   const seen = await withPage(async ({ evaluate }) => {
     await live(evaluate, true, { choice: "standard" });
-    return { shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
+    return { shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()"), asked: await evaluate("Fixture.gpuAsked()") };
   });
-  assert.deepEqual(seen, { shown: true, renderer: "dom" });
+  assert.deepEqual(seen, { shown: true, renderer: "dom", asked: 0 });
 });
 
 test("#358 r2: Automatic keeps DOM rows on a software renderer and draws on a GPU", async () => {
