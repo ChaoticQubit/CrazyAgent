@@ -545,7 +545,7 @@ pub fn arguments(
         _ => Err(failure("launch_harness_unsupported")),
     };
     let filled = super::ordered(&argv, at, &[], &off)
-        .map(|argument| super::fill(argument, &value))
+        .map(|argument| super::fill(argument, value))
         .collect::<Result<Vec<String>, LaunchError>>()?;
     assert_eq!(filled.len(), argv.len() + off.len());
     Ok(filled)

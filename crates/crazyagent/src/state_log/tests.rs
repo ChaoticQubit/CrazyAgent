@@ -892,7 +892,7 @@ fn no_event_body_can_carry_a_secret() {
             .unwrap();
         for line in text.lines().map(str::trim) {
             if let Some(written) = line.strip_prefix("kind: ") {
-                assert!(own.iter().any(|kind| *kind == written), "{name}: {line}");
+                assert!(own.contains(&written), "{name}: {line}");
             }
         }
     }

@@ -368,7 +368,7 @@ struct QuitAsk {
 
 enum Overlay {
     Help,
-    GoTo(GoTo),
+    GoTo(Box<GoTo>),
     Quit(QuitAsk),
 }
 
@@ -765,7 +765,7 @@ impl Shell {
             Some(Global::Quit) => return self.ask_quit(),
             Some(Global::GoTo) if !modal && self.go_to_allowed() => {
                 let place = self.top().place();
-                self.overlay = Some(Overlay::GoTo(GoTo::new(place, &mut self.ctx)));
+                self.overlay = Some(Overlay::GoTo(Box::new(GoTo::new(place, &mut self.ctx))));
                 return;
             }
             Some(Global::Help) if !modal => {
