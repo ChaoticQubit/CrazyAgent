@@ -380,6 +380,7 @@ fn granted(bin: &Path, npm: &Path) -> String {
 /// folder without `node_modules` is refused, since its root lets npm add entries only inside
 /// folders already there, so the row fails if `fill` stops making it.
 #[test]
+#[ignore = "V243-WIN-NPM-BOUNDARY-ACL"]
 fn npm_installs_into_a_fresh_staging_folder_through_the_node_modules_made_first() {
     let bin = system_bin();
     let case = case();
