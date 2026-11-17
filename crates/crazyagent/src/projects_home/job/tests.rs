@@ -494,3 +494,85 @@ fn a_setup_cut_short_restores_failed_interrupted_with_no_subject_to_restart() {
     };
     assert_eq!(started.kind(), JobKind::Setup);
 }
+
+#[test]
+fn a_status_list_of_every_held_job_at_its_longest_fits_one_frame() {
+    let quotes = |bytes: usize| "\"".repeat(bytes);
+    let project = ProjectId::new("p".repeat(128)).unwrap();
+    let source = format!("/{}", quotes(1023));
+    let overrides = vec![
+        AddOverride::Worktrees,
+        AddOverride::LinkedCheckout,
+        AddOverride::TooLarge,
+    ];
+    let mut views = Vec::new();
+    for at in 0..22 {
+        let job = IntakeJob::new(
+            RequestId::new(format!("{at:0>128}")).unwrap(),
+            JobKind::MoveProject,
+            Some(project.clone()),
+            source.clone(),
+            AddMode::Copy,
+            overrides.clone(),
+        );
+        match at {
+            0..=7 => job.wait(&quotes(1024)),
+            8 => job.end(failure("home_copy_linked_checkout")),
+            _ => job.end(Err(EngineError(format!(
+                "home_copy_failed: {}",
+                quotes(4096)
+            )))),
+        }
+        views.push(job.view());
+    }
+    let reply = serde_json::json!({"kind": "jobs", "jobs": views});
+    let frame = crate::protocol::encode_frame(&reply).expect("every held job fits one frame");
+    let read: serde_json::Value = serde_json::from_slice(&frame[4..]).unwrap();
+    let listed: Vec<JobView> = serde_json::from_value(read["jobs"].clone()).unwrap();
+    assert_eq!(listed.len(), 22);
+    for (at, view) in listed.iter().enumerate() {
+        assert_eq!(view.id.as_str(), format!("{at:0>128}"));
+        assert_eq!(view.source, source, "a source is never cut");
+        let bytes = serde_json::to_vec(view).unwrap().len();
+        assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+    }
+    assert_eq!(
+        listed[8].state,
+        JobState::NeedsAnswer {
+            code: "home_copy_linked_checkout".into()
+        }
+    );
+    let JobState::Failed { code, .. } = &listed[9].state else {
+        panic!("a failed end: {:?}", listed[9].state);
+    };
+    assert!(code.starts_with("home_copy_failed: "), "{code}");
+}
+
+#[test]
+fn a_failure_code_of_control_characters_shows_within_twice_its_cut_bytes() {
+    let job = job();
+    job.end(Err(EngineError(format!(
+        "home_copy_failed: {}",
+        "\u{1}\n".repeat(2048)
+    ))));
+    let shown = serde_json::to_string(&job.view().state).unwrap();
+    assert!(shown.len() <= 2 * 128 + 64, "{} bytes", shown.len());
+    assert!(shown.contains("home_copy_failed: "), "{shown}");
+}
+
+#[test]
+fn a_delete_name_past_the_bound_shows_as_a_label_within_it() {
+    let job = IntakeJob::new(
+        RequestId::new("delete-long").unwrap(),
+        JobKind::Delete,
+        Some(ProjectId::new("old-notes").unwrap()),
+        format!("Old\u{1}notes {}", "\"".repeat(2048)),
+        AddMode::Move,
+        Vec::new(),
+    );
+    let view = job.view();
+    assert!(view.source.starts_with("Old notes "), "{}", view.source);
+    assert!(view.source.len() <= PATH_BYTES_MAX);
+    let bytes = serde_json::to_vec(&view).unwrap().len();
+    assert!(bytes <= JOB_VIEW_BYTES_MAX, "{bytes} bytes");
+}

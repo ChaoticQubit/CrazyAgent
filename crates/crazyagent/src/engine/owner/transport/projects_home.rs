@@ -21,9 +21,10 @@ static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 /// or a check of one still running answers `InProgress` instead of planning it again.
 pub(super) type RunningSet = Mutex<std::collections::HashSet<(String, RequestId)>>;
 
-/// The most owner changes running at once: one per deferred place and the one intake job,
-/// which holds no deferred place.
-const RUNNING_MAX: usize = DEFERRED_MAX + 1;
+/// The most owner changes running at once: one per deferred place and one per live intake
+/// job, running or waiting, which holds no deferred place.
+const RUNNING_MAX: usize =
+    DEFERRED_MAX + super::intake::JOBS_RUNNING_MAX + super::intake::JOBS_WAITING_MAX;
 
 /// One owner change's claim on its request id while this exchange or the intake job runs
 /// it. Dropping it, after the record and the reply, lets a later resend reach the recorded

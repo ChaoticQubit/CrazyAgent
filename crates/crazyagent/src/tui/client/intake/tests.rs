@@ -268,9 +268,10 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
         let event = native
             .intake(IntakeJob::Query(IntakeQuery::JobStatus))
             .await;
-        let Ok(IntakeView::Job(Some(job))) = event.result else {
+        let Ok(IntakeView::Jobs(jobs)) = event.result else {
             panic!("the job's status required: {:?}", event.result);
         };
+        let [job] = <[JobView; 1]>::try_from(jobs).expect("one job runs");
         if job.state == crate::projects_home::job::JobState::Done {
             done = Some(job);
             break;
@@ -293,7 +294,7 @@ async fn the_tui_starts_an_intake_job_reads_it_to_done_and_dismisses_it() {
     let event = native
         .intake(IntakeJob::Query(IntakeQuery::JobStatus))
         .await;
-    assert_eq!(event.result, Ok(IntakeView::Job(None)));
+    assert_eq!(event.result, Ok(IntakeView::Jobs(Vec::new())));
 
     service.shutdown().await.unwrap();
 }

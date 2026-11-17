@@ -133,23 +133,70 @@ fn an_intake_job_offers_stop_while_it_runs_retry_only_when_nothing_landed() {
     assert!(!running(&job(JobState::Done)));
 }
 
+/// DEC-197: each job's end is said once, when the read after shows a job that ran or waited
+/// before has ended, while the jobs beside it still run.
 #[test]
-fn a_jobs_end_is_said_once_when_the_read_after_a_running_one_shows_it_ended() {
+fn each_jobs_end_is_said_once_while_the_jobs_beside_it_still_run() {
     let running_job = job(copying(3, 0));
     let done = job(JobState::Done);
-    assert_eq!(
-        end_line(Some(&running_job), Some(&done)).as_deref(),
-        Some("shop is in your projects folder. Set it up from Home.")
-    );
-    assert_eq!(end_line(Some(&done), Some(&done)), None);
-    assert_eq!(end_line(None, Some(&done)), None);
-    assert_eq!(end_line(Some(&running_job), Some(&running_job)), None);
-    assert_eq!(end_line(Some(&running_job), None), None);
-    let other = JobView {
+    let garden = JobView {
         id: RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..job(copying(1, 0))
+    };
+    let said = |before: &[JobView], after: &[JobView]| {
+        ended(before, after)
+            .into_iter()
+            .map(line)
+            .collect::<Vec<_>>()
+    };
+    let shop_done = "shop is in your projects folder. Set it up from Home.";
+    assert_eq!(said(&[running_job.clone()], &[done.clone()]), [shop_done]);
+    assert_eq!(
+        said(
+            &[running_job.clone(), garden.clone()],
+            &[done.clone(), garden.clone()]
+        ),
+        [shop_done]
+    );
+    assert!(said(&[done.clone()], &[done.clone()]).is_empty());
+    assert!(said(&[], &[done.clone()]).is_empty());
+    assert!(said(&[running_job.clone()], &[running_job.clone()]).is_empty());
+    assert!(said(&[running_job.clone()], &[]).is_empty());
+    let other = JobView {
+        id: RequestId::new("add-9").unwrap(),
         ..done
     };
-    assert_eq!(end_line(Some(&running_job), Some(&other)), None);
+    assert!(said(&[running_job.clone()], &[other]).is_empty());
+    let waiting = job(JobState::Waiting {
+        behind: "garden".into(),
+    });
+    assert!(
+        said(&[waiting.clone()], &[running_job]).is_empty(),
+        "a waiting job let go is still at work"
+    );
+    let cancelled = job(JobState::Cancelled {
+        phase: Phase::Waiting,
+    });
+    assert_eq!(
+        said(&[waiting], &[cancelled]),
+        ["Adding shop stopped. Nothing was moved or copied."]
+    );
+}
+
+/// DEC-197: a job waiting its turn names the job it waits behind, offers Stop, and reads
+/// Waiting on its card and in the header.
+#[test]
+fn a_job_waiting_its_turn_names_the_job_it_waits_behind_and_offers_stop() {
+    let waiting = job(JobState::Waiting {
+        behind: "garden".into(),
+    });
+    assert_eq!(line(&waiting), "Waiting for garden to finish...");
+    assert_eq!(actions(&waiting), [JobAction::Stop]);
+    assert_eq!(badge(&waiting), (Status::Active, "Waiting"));
+    assert_eq!(next(&waiting), "Enter stops it.");
+    assert_eq!(brief(&waiting, "~"), "shop: waiting");
+    assert!(running(&waiting));
 }
 
 #[test]
@@ -271,26 +318,18 @@ fn moving(state: JobState) -> JobView {
     }
 }
 
-/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job that runs, as
-/// the client last read it; with no running job read, an ended one or none, it says another
-/// job runs.
+/// DEC-197: a start past the waiting list says several folders wait, and a start on a folder
+/// a live job holds points Home; neither names one running job, since several may run.
 #[test]
-fn a_busy_start_names_the_running_job_or_says_another_job_runs() {
+fn a_start_past_the_waiting_list_says_several_wait_and_the_same_folder_points_home() {
     assert_eq!(
-        busy(Some(&moving(JobState::Stopping { agents_left: 1 }))),
-        "Moving reading-list is running. Wait for it to finish on Home."
+        copy("job_busy"),
+        "Several folders are already waiting. Wait for one to finish on Home."
     );
     assert_eq!(
-        busy(Some(&job(copying(4, 0)))),
-        "Adding shop is running. Wait for it to finish on Home."
+        copy("job_same_folder"),
+        "This folder is already being moved or added. See it on Home."
     );
-    let fixed = "Another job is running. Wait for it to finish on Home.";
-    assert_eq!(busy(Some(&moving(JobState::Done))), fixed);
-    assert_eq!(
-        busy(Some(&job(failed("home_add_failed", Phase::Copying)))),
-        fixed
-    );
-    assert_eq!(busy(None), fixed);
 }
 
 /// DEC-177: a project move says it waits for the project's agents, moves, and ends in the
@@ -375,9 +414,13 @@ fn a_project_move_job_says_it_waits_for_its_agents_moves_and_ends_in_the_move_s_
         brief(&moving(copying(4, 0)), "..."),
         "Moving reading-list: 4 files"
     );
+    let moved = moving(JobState::Done);
     assert_eq!(
-        end_line(Some(&waiting), Some(&moving(JobState::Done))).as_deref(),
-        Some("reading-list is now in your projects folder. Start the team again from Team.")
+        ended(std::slice::from_ref(&waiting), std::slice::from_ref(&moved))
+            .into_iter()
+            .map(line)
+            .collect::<Vec<_>>(),
+        ["reading-list is now in your projects folder. Start the team again from Team."]
     );
 }
 
@@ -478,10 +521,6 @@ fn a_delete_job_says_it_moves_folders_to_the_trash_and_offers_finish_delete_once
 
     assert_eq!(brief(&trashing, "..."), "Deleting Notes/2026 plans: 1 of 2");
     assert_eq!(
-        busy(Some(&trashing)),
-        format!("Deleting {called} is running. Wait for it to finish on Home.")
-    );
-    assert_eq!(
         copy("delete_cannot_stop"),
         "It is moving its folders to the Trash, so it cannot stop now. Wait for it to finish on Home."
     );
@@ -537,7 +576,6 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
 /// not an invariant: its line is the plain fallback sentence, and the TUI keeps running.
 #[test]
 fn a_refused_job_request_with_an_empty_code_says_the_plain_fallback() {
-    let said = std::panic::catch_unwind(|| refusal("", None)).ok();
-    assert_eq!(said, Some(copy("")));
-    assert!(copy("").starts_with("Something went wrong. Try again."));
+    let said = std::panic::catch_unwind(|| copy("")).ok();
+    assert!(said.is_some_and(|line| line.starts_with("Something went wrong. Try again.")));
 }

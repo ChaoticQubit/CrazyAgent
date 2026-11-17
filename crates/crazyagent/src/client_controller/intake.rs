@@ -287,8 +287,9 @@ impl OwnerController {
         Ok(view)
     }
 
-    /// Reads the engine's job, running or last ended. Returns it, or None.
-    pub async fn job_status(&mut self) -> Result<Option<JobView>, EngineError> {
+    /// Reads the engine's jobs: running, waiting for their turn, or ended since the last
+    /// start. Returns their views in start order.
+    pub async fn job_status(&mut self) -> Result<Vec<JobView>, EngineError> {
         self.owner_client()?.job_status().await
     }
 

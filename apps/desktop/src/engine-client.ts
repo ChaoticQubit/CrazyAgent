@@ -1847,9 +1847,10 @@ export function icloudCancel(): Promise<boolean> {
 }
 
 /** The part of a job that was running when it ended. */
-export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing" | "building";
+export type IntakePhase = "waiting" | "downloading" | "stopping" | "copying" | "clearing" | "trashing" | "building";
 
-/** What the engine's job is doing, or how it ended. A project move or a delete waits for its
+/** What the engine's job is doing, or how it ended. A job waits its turn behind the job it names
+ * until that one ends (DEC-197). A project move or a delete waits for its
  * agents to stop first; copying counts the files copied, then the files checked; clearing
  * removes a moved folder's old place, or a deleted project's records, and never stops; a delete
  * moves its folders to the Trash in trashing, with no stop once the first one moves, and
@@ -1857,6 +1858,7 @@ export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | 
  * Trash; a New Project builds its folder in building, with how many of its documents it copied
  * once it counted them. */
 export type IntakeJobState =
+  | { state: "waiting"; behind: string }
   | { state: "downloading"; progress: IcloudProgress }
   | { state: "stopping"; agents_left: number }
   | { state: "copying"; copied: number; checked: number }
@@ -1874,7 +1876,7 @@ export type IntakeJobState =
  * name in place of the folder (add.2). */
 export type ProjectJobKind = "add" | "move_project" | "delete" | "setup";
 
-/** The engine's one job, which adds a folder or moves a project into the projects folder apart
+/** One of the engine's jobs, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the
  * soft refusals it goes past, whether a stop was asked and its state. */
 export interface IntakeJob {
@@ -1894,9 +1896,10 @@ export function intakeStart(path: string, mode: AddFolderMode, overrides: AddOve
   return invoke<IntakeJob>("desktop_intake_start", { path, mode, overrides });
 }
 
-/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
-export function intakeStatus(): Promise<IntakeJob | null> {
-  return invoke<IntakeJob | null>("desktop_intake_status");
+/** Reads every job the engine holds, running, waiting its turn or ended since the last start
+ * (DEC-197). Output: the jobs in start order. */
+export function intakeStatus(): Promise<IntakeJob[]> {
+  return invoke<IntakeJob[]>("desktop_intake_status");
 }
 
 /** Asks the running intake job to stop between files. Input: its id. Output: whether it ran. */

@@ -33,17 +33,17 @@ test("every DEC-078 intake, GitHub and setup name has a client function", () => 
 });
 
 test("the intake job has a client call for each command and its own sentences", async () => {
-  for (const name of ["startIntake", "loadIntakeJob", "stopIntake", "dismissIntake"]) assert.equal(typeof api[name], "function", name);
+  for (const name of ["startIntake", "loadIntakeJobs", "stopIntake", "dismissIntake"]) assert.equal(typeof api[name], "function", name);
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   assert.match(client, /return invoke<IntakeJob>\("desktop_intake_start", \{ path, mode, overrides \}\)/);
-  assert.match(client, /return invoke<IntakeJob \| null>\("desktop_intake_status"\)/);
+  assert.match(client, /return invoke<IntakeJob\[\]>\("desktop_intake_status"\)/);
   assert.match(client, /return invoke<boolean>\("desktop_intake_stop", \{ id \}\)/);
   assert.match(client, /return invoke<boolean>\("desktop_intake_dismiss", \{ id \}\)/);
-  assert.equal(api.intakeCopy("job_busy"), "Another job is running. Wait for it to finish on Home.");
+  assert.equal(api.intakeCopy("job_busy"), "Several folders are already waiting. Wait for one to finish on Home.");
   assert.equal(api.intakeCopy("home_add_in_progress"), "A folder is being added to your projects folder. Try again when it finishes.");
   assert.equal(api.intakeCopy("home_add_cancelled"), "Adding the folder stopped. Nothing was moved or copied.");
   assert.equal(api.intakeCopy("intake_failed"), "Adding the folder failed. Check your projects folder before trying again.");
-  assert.deepEqual(await api.loadIntakeJob(), failed("engine_unreachable", "CrazyAgent's engine isn't running."));
+  assert.deepEqual(await api.loadIntakeJobs(), failed("engine_unreachable", "CrazyAgent's engine isn't running."));
   assert.deepEqual(await api.startIntake("relative/site", "move", []), failed("engine_unreachable", "CrazyAgent's engine isn't running."), "the native bridge checks the path, not the window");
 });
 

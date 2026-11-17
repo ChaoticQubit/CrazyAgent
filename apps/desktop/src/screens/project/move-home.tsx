@@ -9,11 +9,13 @@ import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, Notice, Segmented } from "../../ui";
 import { displayText } from "../conversation";
 import { AnywayDialog } from "../intake/add-folder";
-import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, refusalLine, sizeLine, worktreesLine } from "../intake/intake";
+import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, sizeLine, worktreesLine } from "../intake/intake";
 import { folderLabel, projectFolder } from "./overview";
 import type { ProjectData } from "./shared";
 
 export { moveCopy };
+
+const NO_JOBS: readonly IntakeJob[] = [];
 
 const WAYS: { value: AddFolderMode; label: string; icon: "folder-input" | "copy" }[] = [
   { value: "move", label: "Move", icon: "folder-input" },
@@ -117,7 +119,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   const [problem, setProblem] = useState("");
   const [started, setStarted] = useState<string | null>(null);
   const seen = useRef(false);
-  const job = session?.intake ?? null;
+  const jobs = session?.intake ?? NO_JOBS;
   useEffect(() => {
     if (!open) return;
     let live = true;
@@ -127,13 +129,13 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   }, [open, folder]);
   useEffect(() => {
     if (started === null) return;
-    const ours = job !== null && job.id === started;
-    if (ours && jobRunning(job)) { seen.current = true; return; }
-    if (!ours && !seen.current) return;
+    const ours = jobs.find((job) => job.id === started) ?? null;
+    if (jobRunning(ours)) { seen.current = true; return; }
+    if (ours === null && !seen.current) return;
     seen.current = false;
     setStarted(null);
     data.reload();
-  }, [started, job]);
+  }, [started, jobs]);
   if (root === null || insideHome(folder, root)) return null;
   const name = data.name || folderName(folder);
 
@@ -155,7 +157,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     if (result.kind === "not_ready") { setProblem("Moving a project isn't in this build."); return; }
     if (result.kind === "error") {
       if (stopped && asksAgain(result.code, overrides)) { setRefused(result.code); setAsking(true); return; }
-      setProblem(`${await refusalLine(result.code, moveCopy(result))}${after}`);
+      setProblem(`${moveCopy(result)}${after}`);
       return;
     }
     close();

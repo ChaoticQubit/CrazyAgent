@@ -2520,12 +2520,12 @@ impl ProjectScreen {
     }
 
     /// Shows why the engine refused to start the job that moves this project into the projects
-    /// home or deletes it, as a plain line; a busy refusal names the job that runs, as last read.
-    /// Takes the refusal code and the job read. Returns nothing.
-    pub fn job_refused(&mut self, code: &str, held: Option<&crate::projects_home::job::JobView>) {
+    /// home or deletes it, as a plain line; the job refusals of DEC-197, a full waiting list or
+    /// a folder another job holds, say Home's words. Takes the refusal code. Returns nothing.
+    pub fn job_refused(&mut self, code: &str) {
         assert!(!code.is_empty());
         self.problem = Some(match code {
-            "job_busy" => super::intake_job::busy(held),
+            "job_busy" | "job_same_folder" => super::intake::copy(code),
             code => plain_problem(code),
         });
         assert!(self.problem.is_some());
