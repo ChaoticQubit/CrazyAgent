@@ -49,6 +49,18 @@ fn server(name: &str, spec: ServerSpec, status: ServerStatus) -> ServerView {
     }
 }
 
+/// A uvx path the server check accepts on this system: a drive path on Windows.
+#[cfg(unix)]
+const UVX: &str = "/opt/homebrew/bin/uvx";
+#[cfg(not(unix))]
+const UVX: &str = r"C:\Users\owner\.local\bin\uvx.exe";
+
+/// An npx path the server check accepts on this system: a drive path on Windows.
+#[cfg(unix)]
+const NPX: &str = "/opt/homebrew/bin/npx";
+#[cfg(not(unix))]
+const NPX: &str = r"C:\Program Files\nodejs\npx.cmd";
+
 fn stdio(command: &str, args: &[&str]) -> ServerSpec {
     ServerSpec::Stdio {
         command: command.into(),
@@ -752,10 +764,7 @@ fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
 
 #[test]
 fn a_command_line_reads_back_as_the_same_command() {
-    let spec = stdio(
-        "/opt/homebrew/bin/uvx",
-        &["mcp-server-postgres", "--name", "it's here", ""],
-    );
+    let spec = stdio(UVX, &["mcp-server-postgres", "--name", "it's here", ""]);
     assert_eq!(command_spec(&spec.runs()), Ok(spec));
     assert_eq!(
         words(r"a 'b c'd e\ f"),
@@ -768,16 +777,21 @@ fn a_command_line_reads_back_as_the_same_command() {
 
 #[test]
 fn an_unchanged_server_line_writes_nothing_and_an_added_word_keeps_the_rest_exact() {
+    #[cfg(unix)]
+    const SPACED: &str = "/opt/My Tools/uvx";
+    #[cfg(not(unix))]
+    const SPACED: &str = r"C:\My Tools\uvx.exe";
+    #[cfg(unix)]
+    const GREP: &str = "/usr/bin/grep";
+    #[cfg(not(unix))]
+    const GREP: &str = r"C:\Windows\System32\findstr.exe";
     let specs = [
-        stdio("/opt/My Tools/uvx", &["mcp-server-x"]),
+        stdio(SPACED, &["mcp-server-x"]),
         stdio(
-            "/usr/bin/grep",
+            GREP,
             &[r"--pattern=\d+", "it's", "a b", "", r"C:\path", "'", r"\"],
         ),
-        stdio(
-            "/opt/homebrew/bin/npx",
-            &["@modelcontextprotocol/server-github"],
-        ),
+        stdio(NPX, &["@modelcontextprotocol/server-github"]),
     ];
     for spec in specs {
         let line = spec.runs();
@@ -811,8 +825,14 @@ fn an_unchanged_server_line_writes_nothing_and_an_added_word_keeps_the_rest_exac
 
 #[test]
 fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
+    let github = || {
+        let mut github = github_with_token();
+        github.spec = stdio(NPX, &["@modelcontextprotocol/server-github"]);
+        github.runs = github.spec.runs();
+        github
+    };
     let mut ctx = plugin_ctx(80, 24);
-    let mut screen = EditServer::new(github_with_token());
+    let mut screen = EditServer::new(github());
     assert!(screen.typing(), "the page opens on the command");
     screen.key(&Key::Enter, &mut ctx);
     assert_eq!(ctx.queued(), 0);
@@ -822,10 +842,7 @@ fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
         screen.key(&Key::Char(character), &mut ctx);
     }
     screen.key(&Key::Enter, &mut ctx);
-    let wanted = stdio(
-        "/opt/homebrew/bin/npx",
-        &["@modelcontextprotocol/server-github", "--read-only"],
-    );
+    let wanted = stdio(NPX, &["@modelcontextprotocol/server-github", "--read-only"]);
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
             SettingsJob::Plugin(PluginChange::Update { id, spec, version }) => {
@@ -838,7 +855,7 @@ fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
         other => panic!("settings request expected, got {other:?}"),
     }
     assert!(screen.busy(&ctx));
-    let mut updated = github_with_token();
+    let mut updated = github();
     updated.runs = wanted.runs();
     updated.spec = wanted;
     updated.status = ServerStatus::WaitingForApproval;
