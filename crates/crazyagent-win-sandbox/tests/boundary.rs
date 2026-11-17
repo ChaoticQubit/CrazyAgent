@@ -34,6 +34,14 @@ fn system(program: &str) -> String {
 }
 
 fn case(container: &str) -> Case {
+    case_in(container, true)
+}
+
+/// The case tree under a root whose access list is auto-inherited, or, when `auto_inherited`
+/// is false, holds the same entries as explicit copies with no AI flag: the state of a root
+/// made under a parent whose list has none, which every folder made in it then shares.
+/// Inputs: the container name and the root's state. Output: the case.
+fn case_in(container: &str, auto_inherited: bool) -> Case {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
     let reset = Command::new(system("icacls.exe"))
@@ -44,6 +52,11 @@ fn case(container: &str) -> Case {
     assert!(reset.status.success(), "{}", ran(&reset));
     let reset_sddl = read_sddl(&root);
     assert!(reset_sddl.starts_with("D:AI("), "{reset_sddl}");
+    if !auto_inherited {
+        let copies = explicit_copies(&reset_sddl);
+        write_raw(&root, &copies);
+        assert_eq!(read_sddl(&root), copies);
+    }
     let project = root.join("project");
     let home = root.join("agent").join("home");
     let tmp = root.join("agent").join("tmp");
@@ -97,6 +110,58 @@ fn case(container: &str) -> Case {
         profile: profile_path,
         base: profile,
     }
+}
+
+/// The SDDL line of a list that holds `sddl`'s entries as explicit copies: no auto-inherited
+/// flag on the list and no inherited flag on any entry. Input: a D: line with the AI flag and
+/// no other. Output: the line.
+fn explicit_copies(sddl: &str) -> String {
+    let aces = sddl.strip_prefix("D:AI").expect(sddl);
+    assert!(aces.starts_with('(') && aces.ends_with(')'), "{sddl}");
+    let copies: String = aces
+        .split_inclusive(')')
+        .map(|ace| {
+            let mut fields: Vec<String> = ace.split(';').map(str::to_owned).collect();
+            assert!(fields.len() >= 6, "{sddl}");
+            fields[1] = fields[1].replace("ID", "");
+            fields.join(";")
+        })
+        .collect();
+    assert!(!copies.contains("ID;"), "{copies}");
+    format!("D:{copies}")
+}
+
+/// Writes `sddl` as the access list of `path` through SetFileSecurityW, which applies no
+/// inheritance, so the list holds exactly the line: its entries' flags and no AI flag the
+/// line does not carry. Relies on `sddl` being a D: line; the descriptor the conversion
+/// allocates is freed after the write. Inputs: the path and the line. Output: none.
+fn write_raw(path: &Path, sddl: &str) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
+    let line: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            line.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    assert_ne!(converted, 0, "{sddl}: {}", std::io::Error::last_os_error());
+    assert!(!descriptor.is_null());
+    let written =
+        unsafe { SetFileSecurityW(target.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+    let error = std::io::Error::last_os_error();
+    unsafe { LocalFree(descriptor) };
+    assert_ne!(written, 0, "{}: {error}", path.display());
 }
 
 fn install(case: &Case, profile: &BoundaryProfile) {
@@ -1187,5 +1252,52 @@ fn releasing_keeps_an_access_list_the_owner_changed_and_drops_only_the_agents_en
         entries(&config),
         config_before,
         "a guarded path the owner left alone is restored"
+    );
+}
+
+#[test]
+fn releasing_under_a_parent_without_auto_inheritance_keeps_each_exact_access_list() {
+    let case = case_in("crazyagent.test.explicit", false);
+    let context = case.project.join("context");
+    let watched = [
+        case.project.clone(),
+        case.project.join("readme.txt"),
+        context.clone(),
+        context.join("brief.md"),
+        case.home.clone(),
+        case.secret.parent().unwrap().to_path_buf(),
+        case.secret.clone(),
+    ];
+    let before = watched.each_ref().map(|path| read_sddl(path));
+    for line in &before {
+        assert!(
+            line.starts_with("D:(") && !line.contains("ID;"),
+            "a path made under the root holds explicit copies: {line}"
+        );
+    }
+    let readme = run(
+        &case,
+        &["/C", "type", &plain(&case.project.join("readme.txt"))],
+    );
+    assert!(readme.status.success(), "{}", ran(&readme));
+    let granted = watched.each_ref().map(|path| read_sddl(path));
+    assert_ne!(granted, before);
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.explicit").unwrap();
+    let after = watched.each_ref().map(|path| read_sddl(path));
+    let shown = |lines: &[String]| {
+        watched
+            .iter()
+            .zip(lines)
+            .map(|(path, line)| format!("{} => {line}", path.display()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        after,
+        before,
+        "each path keeps its exact list: explicit copies, no AI flag\nbefore:\n{}\ngranted:\n{}\nafter:\n{}",
+        shown(&before),
+        shown(&granted),
+        shown(&after)
     );
 }
