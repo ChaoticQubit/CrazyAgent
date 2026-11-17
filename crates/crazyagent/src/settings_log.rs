@@ -656,11 +656,11 @@ pub(crate) fn instruction_app(
     Ok(())
 }
 
-/// Saves when a project's roadmap status is refreshed, in its own transaction: applies and
-/// logs the save behind the store's engine host, then settles the project's status row the
-/// way the choice needs (`roadmap_status::settle`), a live effect replay does not repeat.
+/// Saves when a project the store still has refreshes its roadmap status, in one IMMEDIATE
+/// transaction that checks the project first: applies and logs the save behind the engine
+/// host, then settles the status row (`roadmap_status::settle`), an effect replay skips.
 /// Inputs: the engine connection outside any transaction, the project and the choice.
-/// Output: Ok, or `roadmap_status_unavailable` with nothing changed.
+/// Output: Ok, `roadmap_status_project_missing` or `roadmap_status_unavailable`; no change on Err.
 pub(crate) fn roadmap_refresh(
     db: &Connection,
     project: &ProjectId,
@@ -668,6 +668,16 @@ pub(crate) fn roadmap_refresh(
 ) -> Result<(), EngineError> {
     const CODE: &str = "roadmap_status_unavailable";
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(coded(CODE))?;
+    let known: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(coded(CODE))?;
+    if !known {
+        return Err(error("roadmap_status_project_missing"));
+    }
     let event = Event::Roadmap(ProjectSaved {
         project: project.clone(),
         settings: refresh,
