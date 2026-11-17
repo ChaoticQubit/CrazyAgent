@@ -114,3 +114,30 @@ test("the command line reads farm-junit-<part> folders for FARM_PARTS and the ne
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a one-part run, whose lone artifact download-artifact puts straight into the folder with no farm-junit-<part> folder, reads as that part; a loose JUnit any other way is unattributed and fails the run (V243-FARM-ONE-PART-REPORT)", () => {
+  const root = mkdtempSync(join(tmpdir(), "farm-junit-"));
+  try {
+    const pass = NEXTEST.replace(/<failure[^]*?<\/failure>/, "");
+    const green = JSON.stringify({ "rust-windows": { result: "success", outputs: {} } });
+    const run = (parts) => spawnSync(process.execPath, [SCRIPT, root], { env: { PATH: process.env.PATH, FARM_PARTS: parts, FARM_NEEDS: green }, encoding: "utf8" });
+    writeFileSync(join(root, "junit.xml"), pass);
+    const flat = run("windows-rust-1");
+    assert.equal(flat.status, 0, flat.stdout + flat.stderr);
+    assert.match(flat.stdout, /^\| windows-rust-1 \| 3 \| 0 \| 1 \| 813 \|$/m);
+    assert.doesNotMatch(flat.stdout, /missing|unattributed/);
+    const two = run("windows-rust-1 linux-rust-1");
+    assert.equal(two.status, 1);
+    assert.match(two.stdout, /^unattributed JUnit: 1 file\(s\) outside farm-junit-<part> folders$/m);
+    assert.match(two.stdout, /^\| windows-rust-1 \| missing \|/m);
+    assert.match(two.stdout, /^\| linux-rust-1 \| missing \|/m);
+    mkdirSync(join(root, "farm-junit-linux-rust-1"));
+    writeFileSync(join(root, "farm-junit-linux-rust-1", "junit.xml"), pass);
+    const mixed = run("linux-rust-1");
+    assert.equal(mixed.status, 1);
+    assert.match(mixed.stdout, /^\| linux-rust-1 \| 3 \| 0 \| 1 \| 813 \|$/m);
+    assert.match(mixed.stdout, /^unattributed JUnit: 1 file\(s\) outside farm-junit-<part> folders$/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
