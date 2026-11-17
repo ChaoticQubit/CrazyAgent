@@ -3,7 +3,7 @@ use super::{
     AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
 };
 use crate::engine::EngineError;
-use crate::landing_log::{self, AgentBranch, Change, Worktree};
+use crate::landing_log::{self, AgentBranch, Base, Change, Worktree};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -716,20 +716,20 @@ fn within<T>(
     }
 }
 
-/// Stores the commit the next change set of a worktree opens above. Inputs: the store,
-/// the worktree and the commit. Output: Ok once stored.
+/// Stores the commit the next change set of a worktree opens above, logged as `BaseSet`
+/// (v2.5 L9). Inputs: the store, the worktree and the commit. Output: Ok once stored, or the
+/// log's refusal with nothing stored.
 pub(super) fn set_base(
     db: &Connection,
     worktree: &std::path::Path,
     base: &str,
 ) -> Result<(), EngineError> {
     assert!(super::git::is_object_id(base));
-    db.execute(
-        "INSERT OR REPLACE INTO landing_bases(worktree,base) VALUES (?1,?2)",
-        params![path_text(worktree)?, base],
-    )
-    .map_err(storage)?;
-    Ok(())
+    let set = Base {
+        worktree: path_text(worktree)?.to_owned(),
+        base: base.to_owned(),
+    };
+    landing_log::write(db, &Change::BaseSet(set))
 }
 
 /// Reads the commit the next change set of a worktree opens above. Inputs: the store

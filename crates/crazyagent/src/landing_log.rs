@@ -33,6 +33,24 @@ pub struct AgentBranch {
     pub branch: String,
 }
 
+/// The commit a worktree's next change set opens above: an absolute worktree and a 40 or 64
+/// lowercase hex object id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Base {
+    pub worktree: String,
+    pub base: String,
+}
+
+/// Whether a text is a git object id: 40 or 64 lowercase hex digits. Input: the text.
+/// Output: the answer.
+fn object_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64)
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// A worktree an event is about, an absolute path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +63,7 @@ pub struct Worktree {
 pub enum Change {
     AgentBranchSet(AgentBranch),
     AgentBranchForgotten(Worktree),
+    BaseSet(Base),
 }
 
 impl Change {
@@ -58,6 +77,7 @@ impl Change {
                     && crate::agent_git::is_agent_branch(&set.branch)
             }
             Self::AgentBranchForgotten(gone) => absolute(&gone.worktree),
+            Self::BaseSet(set) => absolute(&set.worktree) && object_id(&set.base),
         }
     }
 
@@ -66,6 +86,7 @@ impl Change {
         let kind = match self {
             Self::AgentBranchSet(_) => AGENT_BRANCH_SET,
             Self::AgentBranchForgotten(_) => AGENT_BRANCH_FORGOTTEN,
+            Self::BaseSet(_) => BASE_SET,
         };
         assert!(KINDS.contains(&kind), "the landing kind {kind} is in KINDS");
         kind
@@ -80,6 +101,7 @@ impl Change {
         let body = match self {
             Self::AgentBranchSet(set) => serde_json::to_vec(set),
             Self::AgentBranchForgotten(gone) => serde_json::to_vec(gone),
+            Self::BaseSet(set) => serde_json::to_vec(set),
         };
         body.map_err(|_| failure("landing_log_body"))
     }
@@ -96,6 +118,7 @@ impl Change {
         let change = match event.kind.as_str() {
             AGENT_BRANCH_SET => serde_json::from_slice(body).map(Self::AgentBranchSet),
             AGENT_BRANCH_FORGOTTEN => serde_json::from_slice(body).map(Self::AgentBranchForgotten),
+            BASE_SET => serde_json::from_slice(body).map(Self::BaseSet),
             _ => return Err(refused()),
         };
         let change = change.map_err(|_| refused())?;
@@ -158,6 +181,10 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
             "DELETE FROM landing_agent_branches WHERE worktree=?1",
             [&gone.worktree],
         ),
+        Change::BaseSet(set) => db.execute(
+            "INSERT OR REPLACE INTO landing_bases(worktree,base) VALUES (?1,?2)",
+            params![set.worktree, set.base],
+        ),
     }
     .map_err(unavailable)?;
     assert!(changed <= 1, "a landing change touches one row");
@@ -167,7 +194,7 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
 /// Rebuilds the landing tables on the log from it: empties them, then replays every
 /// landing event. Input: the store. Output: the last seq read, or the refusal.
 pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
-    db.execute("DELETE FROM landing_agent_branches", [])
+    db.execute_batch("DELETE FROM landing_agent_branches; DELETE FROM landing_bases;")
         .map_err(|_| failure("changes_unavailable"))?;
     replay::replay(db, Aggregate::Landing, 0, |event| {
         apply(db, &Change::parse(event)?)
