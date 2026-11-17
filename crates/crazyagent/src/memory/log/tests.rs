@@ -421,3 +421,53 @@ fn a_change_body_is_closed() {
         assert!(serde_json::from_str::<Changed>(bad).is_err(), "{bad}");
     }
 }
+
+/// The holders of a kept text, sorted. Inputs: the store and the text. Output: the holder
+/// keys, none once no row holds it.
+fn holders(db: &Connection, text: &str) -> Vec<String> {
+    let mut statement = db
+        .prepare(
+            "SELECT holder FROM kept_text_refs JOIN kept_texts USING (digest)
+             WHERE kept_texts.text=CAST(?1 AS BLOB) ORDER BY holder",
+        )
+        .unwrap();
+    statement
+        .query_map([text], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// v2.5 L8 (farm 44152852556): a project research row and the global copy the owner promoted
+/// from it keep one text under two holders. Forgetting the project row releases only its own
+/// holder, so the text stays for the global copy; deleting the copy leaves no kept text.
+#[test]
+fn a_forgotten_row_releases_only_its_own_hold_on_a_text_a_global_copy_shares() {
+    let mut db = hosted();
+    request(
+        &mut db,
+        "INSERT INTO knowledge_entries VALUES ('e1',1,'p1','households plan meals');
+        INSERT INTO memory_library(id,project,origin,text)
+            VALUES ('g1',NULL,'{\"kind\":\"written\"}','households plan meals');",
+    );
+    assert_eq!(
+        holders(&db, "households plan meals"),
+        ["knowledge_entries/e1/1/body", "memory_library/g1/text"]
+    );
+    request(&mut db, "DELETE FROM knowledge_entries WHERE id='e1';");
+    assert_eq!(
+        holders(&db, "households plan meals"),
+        ["memory_library/g1/text"],
+        "the global copy alone holds the text"
+    );
+    request(&mut db, "DELETE FROM memory_library WHERE id='g1';");
+    let kept: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM kept_texts WHERE text=CAST('households plan meals' AS BLOB)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 0, "no row holds the text, so it is gone");
+    replays_to_live(&mut db);
+}

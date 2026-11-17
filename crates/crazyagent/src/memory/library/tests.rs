@@ -818,8 +818,8 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     );
     assert_eq!(
         tables_holding(&engine.database(), "households plan meals"),
-        ["memory_library"],
-        "only the global copy the owner promoted keeps the research text"
+        ["memory_library", "kept_texts"],
+        "only the global copy the owner promoted keeps the research text, logged under its key"
     );
     let forgotten = approved_direct(&engine, &meals);
     assert!(
