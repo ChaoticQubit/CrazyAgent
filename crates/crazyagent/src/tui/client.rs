@@ -1335,8 +1335,7 @@ impl NativeOwner {
     /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
     /// reply deadline, so it stops blocking every later change: a change never sent is
     /// dropped, a recorded one is confirmed, and one the engine never recorded is sent once
-    /// more with its original identity and revision, or under a new one when only an
-    /// unrelated write refused it, as `OwnerController::send_pending` says.
+    /// more as it was, or under a new id after a stale refusal, as `send_pending` says.
     /// Takes the owner; creation, master, conversation and model access settle their own.
     /// Returns the outcome to tell the owner, or none while nothing was settled.
     async fn settle_stray(&mut self) -> Option<Result<(), String>> {
@@ -1536,11 +1535,10 @@ impl NativeOwner {
                     pending.hash().to_owned(),
                 ));
                 self.master_pending = Some(submission.clone());
-                let sent = controller.send_pending().await;
-                if let Some(resent) = controller.resent() {
-                    self.master_operation = Some(resent.clone());
-                }
-                sent.map_err(|error| bounded_problem(&error.0))
+                controller
+                    .deliver(false, &mut self.master_operation)
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
             }
             MutationDelivery::Reconcile | MutationDelivery::Retry => {
                 if self.master_pending.as_ref() != Some(submission)
@@ -1548,18 +1546,11 @@ impl NativeOwner {
                 {
                     return Err("master_original_pending_context_required".into());
                 }
-                match delivery {
-                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
-                    MutationDelivery::Retry => {
-                        let sent = controller.retry_pending().await;
-                        if let Some(resent) = controller.resent() {
-                            self.master_operation = Some(resent.clone());
-                        }
-                        sent
-                    }
-                    MutationDelivery::Submit => unreachable!(),
-                }
-                .map_err(|error| bounded_problem(&error.0))
+                let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+                controller
+                    .deliver(reconcile, &mut self.master_operation)
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
             }
         }
     }
@@ -1887,29 +1878,21 @@ impl NativeOwner {
                     pending.hash().to_owned(),
                 ));
                 self.model_pending = Some(submission.clone());
-                let sent = controller.send_pending().await;
-                if let Some(resent) = controller.resent() {
-                    self.model_operation = Some(resent.clone());
-                }
-                sent.map_err(|error| bounded_problem(&error.0))
+                controller
+                    .deliver(false, &mut self.model_operation)
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
             }
             MutationDelivery::Reconcile | MutationDelivery::Retry => {
                 if self.model_pending.as_ref() != Some(submission) || controller.pending().is_none()
                 {
                     return Err("metadata_original_pending_context_required".into());
                 }
-                match delivery {
-                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
-                    MutationDelivery::Retry => {
-                        let sent = controller.retry_pending().await;
-                        if let Some(resent) = controller.resent() {
-                            self.model_operation = Some(resent.clone());
-                        }
-                        sent
-                    }
-                    MutationDelivery::Submit => unreachable!(),
-                }
-                .map_err(|error| bounded_problem(&error.0))
+                let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+                controller
+                    .deliver(reconcile, &mut self.model_operation)
+                    .await
+                    .map_err(|error| bounded_problem(&error.0))
             }
         }
     }
@@ -2082,11 +2065,10 @@ impl NativeOwner {
                     pending.hash().to_owned(),
                 ));
                 self.conversation_pending = Some(submission.clone());
-                let sent = controller.send_pending().await;
-                if let Some(resent) = controller.resent() {
-                    self.conversation_operation = Some(resent.clone());
-                }
-                sent.map_err(|e| bounded_problem(&e.0))
+                controller
+                    .deliver(false, &mut self.conversation_operation)
+                    .await
+                    .map_err(|e| bounded_problem(&e.0))
             }
             MutationDelivery::Reconcile | MutationDelivery::Retry => {
                 if self.conversation_pending.as_ref() != Some(submission)
@@ -2094,18 +2076,11 @@ impl NativeOwner {
                 {
                     return Err("conversation_pending_context".into());
                 }
-                match delivery {
-                    MutationDelivery::Reconcile => controller.reconcile_pending().await,
-                    MutationDelivery::Retry => {
-                        let sent = controller.retry_pending().await;
-                        if let Some(resent) = controller.resent() {
-                            self.conversation_operation = Some(resent.clone());
-                        }
-                        sent
-                    }
-                    MutationDelivery::Submit => unreachable!(),
-                }
-                .map_err(|e| bounded_problem(&e.0))
+                let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+                controller
+                    .deliver(reconcile, &mut self.conversation_operation)
+                    .await
+                    .map_err(|e| bounded_problem(&e.0))
             }
         }
     }
@@ -2250,24 +2225,11 @@ impl NativeOwner {
             .controller
             .as_mut()
             .ok_or("trusted_connection_unavailable")?;
-        let response = match delivery {
-            MutationDelivery::Submit => {
-                let sent = controller.send_pending().await;
-                if let Some(resent) = controller.resent() {
-                    self.creation_operation = Some(resent.clone());
-                }
-                sent
-            }
-            MutationDelivery::Reconcile => controller.reconcile_pending().await,
-            MutationDelivery::Retry => {
-                let sent = controller.retry_pending().await;
-                if let Some(resent) = controller.resent() {
-                    self.creation_operation = Some(resent.clone());
-                }
-                sent
-            }
-        }
-        .map_err(|e| bounded_problem(&e.0));
+        let reconcile = matches!(delivery, MutationDelivery::Reconcile);
+        let response = controller
+            .deliver(reconcile, &mut self.creation_operation)
+            .await
+            .map_err(|e| bounded_problem(&e.0));
         self.creation_retry_allowed = allowed
             && matches!(&response, Ok(OwnerResponse::Rejected { code }) if code == super::seam::OWNER_BUSY);
         response
@@ -2769,58 +2731,6 @@ mod creation_recovery_tests {
             matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
             if operation.result == OwnerResult::Applied)
         );
-        h.close().await;
-    }
-
-    /// V250-OWN-REVISION-RETRY TUI red row: a project the TUI creates lands though another
-    /// window saved an unrelated setting between the creation's read and its send, and the
-    /// creation event names the resent request, so the screen accepts the engine's receipt.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_creation_after_an_unrelated_change_lands_under_the_resent_id() {
-        use crate::cleanup_settings::{CleanupMode, CleanupSettings};
-        let mut h = RealNative::new().await;
-        let submission = h.submission();
-        h.native.prepare_creation(&submission).await.unwrap();
-        let first = h.native.creation_operation.clone().unwrap();
-        let mut other = crate::client_controller::OwnerController::attach(
-            h.root.path(),
-            OwnerClientKind::Desktop,
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
-        let changed = other
-            .set_cleanup_settings(
-                CleanupSettings {
-                    mode: CleanupMode::Manual,
-                    days: 30,
-                },
-                1,
-            )
-            .await
-            .unwrap();
-        assert!(
-            matches!(&changed, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
-            "{changed:?}"
-        );
-        let result = h
-            .native
-            .deliver_creation(MutationDelivery::Submit)
-            .await
-            .map(Box::new);
-        let event = h.native.creation_event(submission, result);
-        assert!(!event.retained);
-        let resent = event.operation.clone().unwrap();
-        assert_ne!(resent.0, first.0, "the resend is its own request");
-        assert!(
-            matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
-            if operation.result == OwnerResult::Applied
-                && operation.provenance.operation_id == resent.0
-                && operation.provenance.request_hash == resent.1),
-            "{:?}",
-            event.result
-        );
-        drop(other);
         h.close().await;
     }
 

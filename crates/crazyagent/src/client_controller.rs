@@ -610,6 +610,25 @@ impl OwnerController {
         self.resent.as_ref()
     }
 
+    /// Delivers the retained change for a client that kept its request id and hash to check
+    /// the engine's receipt: reconciles it, or sends it as `send_pending` does and, when the
+    /// change was sent again after a stale refusal, points `kept` at the resend.
+    /// Inputs: whether to reconcile, and the kept identity. Output: the engine's answer.
+    pub async fn deliver(
+        &mut self,
+        reconcile: bool,
+        kept: &mut Option<(RequestId, String)>,
+    ) -> Result<OwnerResponse, EngineError> {
+        if reconcile {
+            return self.reconcile_pending().await;
+        }
+        let answer = self.send_pending().await;
+        if let Some(resent) = &self.resent {
+            *kept = Some(resent.clone());
+        }
+        answer
+    }
+
     /// Sends the stored exact request once through the actual owner client and settles the
     /// answer, with no resend. Output: the actual typed owner response or transport error.
     async fn send_exact(&mut self) -> Result<OwnerResponse, EngineError> {
