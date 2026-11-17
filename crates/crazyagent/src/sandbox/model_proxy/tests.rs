@@ -752,6 +752,7 @@ fn a_cut_names_the_sysctl_that_lets_any_address_bind() {
     assert_eq!(reason([None, Some("1\n")]), named);
 }
 
+#[cfg(unix)]
 #[test]
 fn an_idle_proxy_waits_for_clients_without_waking_every_few_milliseconds() {
     let proxy = ModelProxy::bind_local(7, vec![host("localhost", 9)], None, &[]).unwrap();

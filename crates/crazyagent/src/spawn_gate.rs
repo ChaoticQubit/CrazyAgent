@@ -476,8 +476,8 @@ pub fn connect_tcp_std_timeout(
     guarded(|| std::net::TcpStream::connect_timeout(address, timeout))
 }
 
-/// Accepts one connection on a blocking or non-blocking TCP listener. A blocking
-/// listener is polled without the gate every few milliseconds and keeps its mode;
+/// Accepts one connection on a blocking or non-blocking TCP listener. A blocking listener
+/// waits for a client in poll(2) without the gate, then accepts under it, and keeps its mode;
 /// the accepted stream is blocking. Input: the listener. Output: the stream and peer.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
@@ -493,7 +493,13 @@ pub fn accept_tcp_std(
             Err(error) if waits && error.kind() == io::ErrorKind::WouldBlock => {
                 #[cfg(test)]
                 ACCEPT_WAITS.set(ACCEPT_WAITS.get() + 1);
-                std::thread::sleep(ACCEPT_POLL);
+                let mut fds = [rustix::event::PollFd::new(
+                    listener,
+                    rustix::event::PollFlags::IN,
+                )];
+                if crate::platform::fd_wait::ready(&mut fds, None).is_err() {
+                    std::thread::sleep(ACCEPT_POLL);
+                }
             }
             other => break other,
         }
