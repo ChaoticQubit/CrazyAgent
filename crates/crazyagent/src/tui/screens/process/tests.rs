@@ -2463,7 +2463,10 @@ fn an_app_page_lists_harness_instruction_files_on_ctrl_o_and_reads_the_picked_on
     let mut shell = opened(Scope::App, "Saved rule.");
     shell.key(Key::Ctrl('g'));
     assert_eq!(requests(&mut shell), vec![]);
-    assert!(screen(&mut shell).contains("Ctrl-O"), "the field names the harness list");
+    assert!(
+        screen(&mut shell).contains("Ctrl-O"),
+        "the field names the harness list"
+    );
 
     shell.key(Key::Ctrl('o'));
     assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
@@ -2510,7 +2513,10 @@ fn an_app_page_lists_harness_instruction_files_on_ctrl_o_and_reads_the_picked_on
     shell.key(Key::Ctrl('g'));
     shell.key(Key::Ctrl('o'));
     assert_eq!(requests(&mut shell), vec![ProcessQuery::Sources]);
-    shell.arrive(answered(ProcessQuery::Sources, Ok(ProcessReply::Sources(Vec::new()))));
+    shell.arrive(answered(
+        ProcessQuery::Sources,
+        Ok(ProcessReply::Sources(Vec::new())),
+    ));
     let none = screen(&mut shell);
     assert!(
         none.contains("No harness you use keeps an instructions file to import."),
@@ -2539,7 +2545,10 @@ fn a_project_page_offers_no_harness_file_and_a_failed_list_changes_nothing() {
         Err("process_request_invalid".into()),
     ));
     let shown = screen(&mut shell);
-    assert!(shown.contains("Import from file"), "the field stays open: {shown}");
+    assert!(
+        shown.contains("Import from file"),
+        "the field stays open: {shown}"
+    );
     assert!(
         shown.contains("No harness you use keeps an instructions file to import."),
         "{shown}"
@@ -2559,10 +2568,20 @@ fn a_typed_path_waits_for_the_harness_list_instead_of_vanishing() {
     typed(&mut shell, "/notes/rules.md");
     shell.key(Key::Enter);
 
-    assert_eq!(requests(&mut shell), vec![], "nothing is sent while the list is pending");
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "nothing is sent while the list is pending"
+    );
     let shown = screen(&mut shell);
-    assert!(shown.contains("Type the file's full path"), "the field stays open: {shown}");
-    assert!(shown.contains("/notes/rules.md"), "the typed path stays: {shown}");
+    assert!(
+        shown.contains("Type the file's full path"),
+        "the field stays open: {shown}"
+    );
+    assert!(
+        shown.contains("/notes/rules.md"),
+        "the typed path stays: {shown}"
+    );
 
     shell.arrive(answered(
         ProcessQuery::Sources,

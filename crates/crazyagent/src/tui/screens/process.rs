@@ -603,10 +603,13 @@ fn source_rows(
         return Vec::new();
     };
     if offered.is_empty() {
-        return wrap("No harness you use keeps an instructions file to import.", width)
-            .into_iter()
-            .map(|text| styled(text, Role::Muted, theme))
-            .collect();
+        return wrap(
+            "No harness you use keeps an instructions file to import.",
+            width,
+        )
+        .into_iter()
+        .map(|text| styled(text, Role::Muted, theme))
+        .collect();
     }
     assert!(*picked < offered.len());
     offered

@@ -4943,10 +4943,7 @@ mod tests {
 
         assert_eq!(
             shown(&connection, session),
-            [
-                "owner/live/record: continue",
-                "master/live/terminal: On it",
-            ]
+            ["owner/live/record: continue", "master/live/terminal: On it",]
         );
     }
 

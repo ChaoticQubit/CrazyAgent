@@ -537,7 +537,8 @@ impl OwnerClient {
         if harness.is_empty() || harness.len() > crate::harnesses::manifest::NAME_BYTES_MAX {
             return Err(failure("process_request_invalid"));
         }
-        self.process_text_reply(Action::ReadSource { harness }).await
+        self.process_text_reply(Action::ReadSource { harness })
+            .await
     }
 
     /// Lists the project's own instruction files (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md,

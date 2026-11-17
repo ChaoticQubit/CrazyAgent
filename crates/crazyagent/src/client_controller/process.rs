@@ -115,7 +115,9 @@ impl OwnerController {
     /// is saved. Input: the harness id. Output: the text, or a refusal such as
     /// `process_import_agents_can_write`.
     pub async fn read_instruction_source(&self, harness: String) -> Result<String, EngineError> {
-        self.process_client()?.read_instruction_source(harness).await
+        self.process_client()?
+            .read_instruction_source(harness)
+            .await
     }
 
     /// Lists the project's own instruction files an import would copy and move, changing

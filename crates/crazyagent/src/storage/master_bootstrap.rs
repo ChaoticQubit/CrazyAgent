@@ -332,7 +332,10 @@ fn receipt_proof_matches(receipt: &MasterBootstrapAuth, proof: &MasterBootstrapA
         ) | (
             MasterBootstrapAuth::RcliConfigured(_),
             MasterBootstrapAuth::RcliConfigured(_)
-        ) | (MasterBootstrapAuth::Listed(_), MasterBootstrapAuth::Listed(_))
+        ) | (
+            MasterBootstrapAuth::Listed(_),
+            MasterBootstrapAuth::Listed(_)
+        )
     )
 }
 

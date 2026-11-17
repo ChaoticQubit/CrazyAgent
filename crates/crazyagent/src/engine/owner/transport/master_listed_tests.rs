@@ -474,11 +474,9 @@ mod launch {
             places.push(value.into_bytes());
         }
         let needle = needle.as_bytes();
-        places.iter().any(|place| {
-            place
-                .windows(needle.len())
-                .any(|window| window == needle)
-        })
+        places
+            .iter()
+            .any(|place| place.windows(needle.len()).any(|window| window == needle))
     }
 
     /// One ACP session update line the stand-in prints. Input: the update. Output: the line.
@@ -575,7 +573,9 @@ mod launch {
         let base_url = relay.base_url();
         assert_eq!(env(&pairs, "OPENAI_BASE_URL"), Some(base_url.as_str()));
         assert_eq!(env(&pairs, "STANDIN_MODEL"), Some("m-1"));
-        let holding = pairs.iter().filter(|(_, value)| value.contains(relay.token()));
+        let holding = pairs
+            .iter()
+            .filter(|(_, value)| value.contains(relay.token()));
         let names: Vec<&str> = holding.map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["OPENAI_API_KEY"]);
         assert!(!args(&launch).iter().any(|arg| arg.contains(relay.token())));

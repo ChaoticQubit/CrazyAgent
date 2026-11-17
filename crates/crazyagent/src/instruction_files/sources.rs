@@ -32,7 +32,9 @@ pub fn sources(home: &Path, registry: &Registry) -> Vec<Source> {
         .filter_map(|harness| {
             let manifest = harness.manifest();
             let path = file_of(registry, &manifest.id)?;
-            let held = fs::metadata(home.join(path)).ok().filter(fs::Metadata::is_file)?;
+            let held = fs::metadata(home.join(path))
+                .ok()
+                .filter(fs::Metadata::is_file)?;
             Some(Source {
                 harness: manifest.id.clone(),
                 name: manifest.name.clone(),

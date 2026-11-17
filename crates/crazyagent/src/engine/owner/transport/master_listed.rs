@@ -173,8 +173,8 @@ pub(super) fn listed_launch(spec: &ListedSpec<'_>) -> Result<ListedLaunch, Engin
         .collect();
     let handed = crate::sandbox::Handed::new(&names, handover.token())
         .map_err(|_| failure("launch_environment_refused"))?;
-    let command = listed_command(request, &arguments, &environment, handed)
-        .map_err(engine_error)?;
+    let command =
+        listed_command(request, &arguments, &environment, handed).map_err(engine_error)?;
     assert!(written.iter().all(|path| path.starts_with(home)));
     assert_eq!(servers.len(), usize::from(request.tools));
     Ok(ListedLaunch {
@@ -544,8 +544,8 @@ fn open_listed(
     instructions: &str,
 ) -> Result<(crate::launch_context::Installed, Session, String), EngineError> {
     let home = request.account.home();
-    let lock = crate::launch_context::lock_only(home, &harness.manifest().id)
-        .map_err(engine_error)?;
+    let lock =
+        crate::launch_context::lock_only(home, &harness.manifest().id).map_err(engine_error)?;
     let launch = listed_launch(&ListedSpec {
         harness,
         request: &request,
@@ -586,7 +586,9 @@ fn run_listed(turn: ListedTurn, signals: Signals) -> ListedRun {
             };
         }
     };
-    let _ = signals.started.send(Ok((session.process_group(), artifact)));
+    let _ = signals
+        .started
+        .send(Ok((session.process_group(), artifact)));
     let driven = match signals.go.recv() {
         Ok(true) => {
             let stop = || signals.stop.load(Ordering::SeqCst);
@@ -708,8 +710,7 @@ impl OwnerRuntimeHandle {
         let root = super::changes::engine_root(&self.authority)?;
         let id = harness.manifest().id.as_str();
         let search = self.harness_search()?;
-        let (entry, installed) = listed_install(&self.engine, root.clone(), search, id)
-            .await;
+        let (entry, installed) = listed_install(&self.engine, root.clone(), search, id).await;
         let program = listed_program(harness, entry.as_deref(), installed.as_deref())?;
         let (custody, _hold) = self.acquire_master_profile(prepared, turn_id).await?;
         let current = self

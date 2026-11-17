@@ -2327,8 +2327,7 @@ fn current_auth(
                 .map(MasterBootstrapAuth::RcliConfigured);
         }
         MasterBackend::Listed(_) => {
-            return listed_auth(tx, config, host, session, member)
-                .map(MasterBootstrapAuth::Listed);
+            return listed_auth(tx, config, host, session, member).map(MasterBootstrapAuth::Listed);
         }
         MasterBackend::Codex | MasterBackend::Claude => {}
     }

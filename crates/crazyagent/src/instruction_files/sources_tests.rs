@@ -26,7 +26,10 @@ fn registry() -> &'static Registry {
                 "import:\n  instructions: \".pi/agent/AGENTS.md\"\n",
             ),
         ),
-        ("standin-plain", listed("standin-plain", "Stand-in plain", ".plain", "")),
+        (
+            "standin-plain",
+            listed("standin-plain", "Stand-in plain", ".plain", ""),
+        ),
         (
             "standin-skills",
             listed(
@@ -64,7 +67,10 @@ fn registry() -> &'static Registry {
             ),
         ),
     ];
-    let named: Vec<(&str, &str)> = files.iter().map(|(id, text)| (*id, text.as_str())).collect();
+    let named: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(id, text)| (*id, text.as_str()))
+        .collect();
     Box::leak(Box::new(Registry::build(&named).unwrap()))
 }
 
@@ -145,7 +151,11 @@ fn a_harness_home_instruction_file_is_offered_only_when_its_manifest_names_one_a
         })
         .collect();
     assert_eq!(offered, expected);
-    assert_eq!(listing(&home), before, "listing the sources changes nothing");
+    assert_eq!(
+        listing(&home),
+        before,
+        "listing the sources changes nothing"
+    );
 }
 
 /// H-import: a source is read like a file the owner picked, through a link to a file the
@@ -165,7 +175,9 @@ fn a_source_is_read_like_a_picked_file_and_never_written() {
         Some("PI-RULE\n")
     );
     assert_eq!(
-        read(&home, registry, &places, "standin-two").ok().as_deref(),
+        read(&home, registry, &places, "standin-two")
+            .ok()
+            .as_deref(),
         Some("LINKED-RULE\n")
     );
     for (harness, code) in [
@@ -208,11 +220,12 @@ fn a_source_that_leads_into_a_place_agents_can_write_is_refused() {
     write(&project.join("rules/RULES.md"), "AGENT-WRITTEN\n");
 
     fs::remove_file(home.join(".two/RULES.md")).unwrap();
-    std::os::unix::fs::symlink(project.join("rules/RULES.md"), home.join(".two/RULES.md"))
-        .unwrap();
+    std::os::unix::fs::symlink(project.join("rules/RULES.md"), home.join(".two/RULES.md")).unwrap();
 
     assert_eq!(
-        read(&home, registry, &places, "standin-two").err().map(|refused| refused.0),
+        read(&home, registry, &places, "standin-two")
+            .err()
+            .map(|refused| refused.0),
         Some("process_import_agents_can_write".to_owned())
     );
 
@@ -221,7 +234,9 @@ fn a_source_that_leads_into_a_place_agents_can_write_is_refused() {
     std::os::unix::fs::symlink(project.join("link.md"), home.join(".two/RULES.md")).unwrap();
 
     assert_eq!(
-        read(&home, registry, &places, "standin-two").err().map(|refused| refused.0),
+        read(&home, registry, &places, "standin-two")
+            .err()
+            .map(|refused| refused.0),
         Some("process_import_agents_can_write".to_owned()),
         "a link agents can swap on the way refuses a file outside their reach"
     );
@@ -231,7 +246,9 @@ fn a_source_that_leads_into_a_place_agents_can_write_is_refused() {
     std::os::unix::fs::symlink(project.join("agent"), home.join(".pi/agent")).unwrap();
 
     assert_eq!(
-        read(&home, registry, &places, "standin-pi").err().map(|refused| refused.0),
+        read(&home, registry, &places, "standin-pi")
+            .err()
+            .map(|refused| refused.0),
         Some("process_import_agents_can_write".to_owned())
     );
 }
