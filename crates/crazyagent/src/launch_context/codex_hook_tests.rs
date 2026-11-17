@@ -178,7 +178,7 @@ fn a_fifo_in_the_codex_hook_key_list_s_place_is_unreadable_without_waiting_for_a
     let asked = home.clone();
     std::thread::spawn(move || sender.send(codex_pinned_keys(&asked)));
     assert_eq!(
-        receiver.recv_timeout(Duration::from_secs(5)),
+        receiver.recv_timeout(std::time::Duration::from_secs(5)),
         Ok(Err(HookKeysUnread::Unreadable)),
         "a FIFO with no writer never holds the caller"
     );
