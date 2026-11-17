@@ -1546,9 +1546,10 @@ fn agent_work_inside(
 }
 
 /// Tells whether a table of agent work records holds one with a path inside the home, as
-/// recorded or as the path resolves now. A table the engine has not made yet holds none.
-/// Inputs: the transaction, the home, the table, the query whose every column is a path
-/// and that query's parameters. Output: the answer.
+/// recorded or as the path resolves now, each side in its one spelling, so a record and a
+/// home saved under the two names of a macOS data-volume folder still meet. A table the
+/// engine has not made yet holds none. Inputs: the transaction, the home, the table, the
+/// query whose every column is a path and that query's parameters. Output: the answer.
 fn held_inside(
     tx: &Transaction<'_>,
     home: &Path,
@@ -1568,10 +1569,12 @@ fn held_inside(
     if !present {
         return Ok(false);
     }
+    let home = crate::projects_home::one_spelling(home.to_path_buf());
     let inside = |text: &str| {
         let path = Path::new(text);
-        path.starts_with(home)
-            || std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(home))
+        path.starts_with(&home)
+            || std::fs::canonicalize(path)
+                .is_ok_and(|real| crate::projects_home::one_spelling(real).starts_with(&home))
     };
     let mut statement = tx.prepare(query).map_err(error)?;
     let columns = statement.column_count();
