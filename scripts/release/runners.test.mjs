@@ -33,7 +33,7 @@ function steps(workflowText, job) {
   return block(block(workflowText, 0, "jobs").join("\n"), 2, job).join("\n").split(/\n(?= {6}- )/).slice(1);
 }
 
-test("release builds both macOS targets on GitHub's macos-15, Linux on ubuntu-22.04, and Windows x64 on windows-2022 and ARM64 on windows-11-arm, with room for a cold build on three cores (DEC-195 Q8)", async () => {
+test("release builds both macOS targets on GitHub's macos-15, Linux on ubuntu-22.04 and Windows x64 on windows-2022, with room for a cold build on three cores (DEC-195 Q8)", async () => {
   const release = await workflow("release.yml");
   assert.deepEqual(block(release, 0, "on").filter((line) => /^ {2}\S/.test(line)), ["  push:"], "no pull request can start a release");
   const build = block(release, 2, "build");
@@ -44,7 +44,6 @@ test("release builds both macOS targets on GitHub's macos-15, Linux on ubuntu-22
     ["runner: macos-15", "target: x86_64-apple-darwin", "os: macos"],
     ["runner: ubuntu-22.04", "target: x86_64-unknown-linux-gnu", "os: linux"],
     ["runner: windows-2022", "target: x86_64-pc-windows-msvc", "os: windows"],
-    ["runner: windows-11-arm", "target: aarch64-pc-windows-msvc", "os: windows"],
   ]);
   assert(build.includes("    runs-on: ${{ matrix.runner }}"));
   assert(build.includes("    timeout-minutes: 300"));
@@ -113,7 +112,7 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
 
 test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
   const release = await workflow("release.yml");
-  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "BUN_LINUX_X64_SHA256", "BUN_WINDOWS_X64_SHA256", "BUN_WINDOWS_ARM64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
+  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "BUN_LINUX_X64_SHA256", "BUN_WINDOWS_X64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
     assert.match(release, new RegExp(`^ {2}${pin}: [0-9a-f]{64}$`, "m"), pin);
   }
   const all = steps(release, "build");
@@ -130,20 +129,12 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
   assert.match(linux, /\n\s+echo "\$BUN_LINUX_X64_SHA256  \$work\/bun\.zip" \| sha256sum -c -\n/, "a downloaded Linux bun that does not match its pin fails the job");
   assert.match(linux, /\n\s+install -m 0755 "\$work\/bun-linux-x64\/bun" "\$work\/bin\/bun"\n/);
   const windows = all[at(/id: bun-windows\n/)];
-  assert.match(windows, /^ {6}- id: bun-windows\n {8}name: Install pinned bun for Windows\n {8}if: matrix\.os == 'windows'\n/, "every Windows runner, x64 and ARM64, runs the pinned bun of its arch");
-  for (const [target, zip, arch] of [["x86_64-pc-windows-msvc", "bun-windows-x64", "x64"], ["aarch64-pc-windows-msvc", "bun-windows-aarch64", "arm64"]]) {
-    assert(windows.includes(`\n            ${target})\n              name=${zip}\n              arch=${arch}\n              ;;\n`), `${target} downloads ${zip}`);
-  }
-  assert(windows.includes('\n            *)\n              echo "::error::no Windows bun for $TARGET"\n              exit 1\n              ;;\n'), "any other target fails");
-  assert(windows.includes('/bun-v$BUN_VERSION/$name.zip"\n'), "the zip the case named");
-  assert(windows.includes([
-    '          if [ "$arch" = x64 ]; then',
-    '            echo "$BUN_WINDOWS_X64_SHA256  $work/bun.zip" | sha256sum -c -',
-    "          else",
-    '            echo "$BUN_WINDOWS_ARM64_SHA256  $work/bun.zip" | sha256sum -c -',
-    "          fi",
-  ].join("\n")), "a downloaded Windows bun that does not match the pin of its arch fails the job");
-  assert(windows.includes(`\n          test "$("$work/bin/bun.exe" -e 'console.log(process.arch)')" = "$arch"\n`), "the bun that runs is the arch the case named");
+  assert.match(windows, /^ {6}- id: bun-windows\n {8}name: Install pinned x64 bun for Windows\n {8}if: matrix\.os == 'windows'\n/, "every Windows runner runs the pinned x64 bun");
+  assert(windows.includes('\n          [ "$RUNNER_ARCH" = X64 ] || { echo "::error::the Windows release runner must be x64"; exit 1; }\n'), "an ARM64 runner, which would run the x64 bun emulated, is refused");
+  assert.match(windows, /\/bun-v\$BUN_VERSION\/bun-windows-x64\.zip"/);
+  assert.match(windows, /\n\s+echo "\$BUN_WINDOWS_X64_SHA256  \$work\/bun\.zip" \| sha256sum -c -\n/, "a downloaded Windows bun that does not match its pin fails the job");
+  assert.match(windows, /\n\s+install -m 0755 "\$work\/bun-windows-x64\/bun\.exe" "\$work\/bin\/bun\.exe"\n/);
+  assert(windows.includes(`\n          test "$("$work/bin/bun.exe" -e 'console.log(process.arch)')" = x64\n`), "the bun that runs is x64");
   const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
   assert(rust, "the release on the owner's runner installs its own Rust");
   assertPinnedRust(rust, "release");
