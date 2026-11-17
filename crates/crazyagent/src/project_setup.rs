@@ -2944,11 +2944,11 @@ fn finish_removed_agent_notices(
 
 /// Records a Delete everything once the owner transport finished its disk work: the
 /// project's records go as in Remove from dashboard when every folder reached the Trash,
-/// with its answer to the GitHub publish question and its GitHub publish job too, which
-/// Remove keeps (DEC-178 add.1), the caller recording the exact names and folder identities of its engine files in the
-/// same write, and otherwise the refusal is kept with nothing removed. Inputs: the
-/// transaction, the action, the transport's outcome and the revision. Output: the outcome
-/// to record.
+/// with its GitHub publish job too and, through its ProjectRemoved event, its publish answer,
+/// which Remove keeps (DEC-178 add.1, V250-L9), the caller recording its engine files' names
+/// and folder identities in the same write, and otherwise the refusal is kept with nothing
+/// removed. Inputs: the transaction, the action, the transport's outcome and the revision.
+/// Output: the outcome to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
