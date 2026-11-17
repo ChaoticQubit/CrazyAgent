@@ -370,11 +370,12 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
 }
 
 /// The read entry a server's check was granted on its program's folder is taken back when the
-/// server is removed, so no entry for its dead container stays on the owner's folder; without
-/// the boundary helper beside the engine nothing is granted and the check says why.
+/// server is removed, and its container is deleted with the folder Windows gave it, so nothing
+/// of the dead container stays; without the boundary helper beside the engine nothing is
+/// granted and the check says why.
 #[cfg(target_os = "windows")]
 #[tokio::test]
-async fn a_removed_servers_check_grants_are_taken_back_from_its_programs_folder() {
+async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     const ID: &str = "mcp-0123456789abcdef01234568";
     const CONTAINER_SID: &str = "S-1-15-2-";
     let directory = tempfile::tempdir().unwrap();
@@ -419,8 +420,44 @@ async fn a_removed_servers_check_grants_are_taken_back_from_its_programs_folder(
     assert_eq!(checked, "server_exited");
     assert!(containers().len() > before.len());
     let checks = root.join(CHECK_FOLDER);
-    remove_check_folder(&checks, ID);
-    assert_eq!(containers(), before);
-    assert!(!check_profile(&checks, ID).exists());
+    let profile = check_profile(&checks, ID);
+    let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
+        .unwrap()
+        .container;
+    let container = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("Packages")
+        .join(name);
+    assert!(container.is_dir());
+    let cleared = remove_check_folder(&checks, ID);
     assert!(!checks.join(ID).exists());
+    cleared.await.unwrap();
+    assert_eq!(containers(), before);
+    assert!(!profile.exists());
+    assert!(!container.exists());
+}
+
+/// A server removed while one of its checks runs keeps its check folder until that check
+/// ends, so the check cannot put back what the removal cleared; a server with no check
+/// running is cleared at once.
+#[tokio::test]
+async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends() {
+    const ID: &str = "mcp-0123456789abcdef01234569";
+    const IDLE: &str = "mcp-0123456789abcdef0123456a";
+    let directory = tempfile::tempdir().unwrap();
+    let checks = directory.path().join(CHECK_FOLDER);
+    for id in [ID, IDLE] {
+        std::fs::create_dir_all(checks.join(id).join("home")).unwrap();
+    }
+    let slot = CheckSlot::take().unwrap();
+    let counted = CheckOf::take(ID, checks.clone(), &slot);
+    removed_server_checks(&checks, IDLE);
+    assert!(!checks.join(IDLE).exists());
+    removed_server_checks(&checks, ID);
+    assert!(checks.join(ID).is_dir());
+    assert!(checking().removed.iter().any(|removed| removed == ID));
+    drop(counted);
+    assert!(!checks.join(ID).exists());
+    assert!(!checking().removed.iter().any(|removed| removed == ID));
+    assert!(!checking().running.iter().any(|running| running == ID));
+    drop(slot);
 }

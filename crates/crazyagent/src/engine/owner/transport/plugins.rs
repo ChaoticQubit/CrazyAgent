@@ -993,40 +993,131 @@ fn check_profile(checks: &Path, id: &str) -> PathBuf {
     checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
 }
 
-/// Clears a removed server's check folder, with whatever its checks wrote there while they
-/// held the server's secrets, and its check profile: the folder moves aside at once and is
-/// deleted on a blocking thread of its own that nothing waits for, so no check home size
-/// holds up the answer, and the start sweep deletes a moved folder a crash left. The
-/// profile goes once every access entry its checks were granted is taken back
-/// ([`grants_withdrawn`]). Inputs: the engine's check folder and the server id. A failure
-/// other than a missing entry is logged.
-fn remove_check_folder(checks: &Path, id: &str) {
-    let aside = crate::storage::plugins::move_check_folder_aside(checks, id);
-    let profile = check_profile(checks, id);
-    if grants_withdrawn(&profile) {
-        match std::fs::remove_file(&profile) {
-            Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
-            _ => {}
+/// The servers whose checks run now, one entry per running check, and the servers removed
+/// while one of their checks ran, whose check folder is cleared when their last check ends.
+/// Both stay within [`CHECKS_MAX`], since every entry holds a check slot.
+struct Checking {
+    running: Vec<String>,
+    removed: Vec<String>,
+}
+
+static CHECKING: std::sync::Mutex<Checking> = std::sync::Mutex::new(Checking {
+    running: Vec::new(),
+    removed: Vec::new(),
+});
+
+fn checking() -> std::sync::MutexGuard<'static, Checking> {
+    CHECKING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One check of one server, counted from before the engine reads the server until the check
+/// ended, so a removal in between leaves its check folder to the check's end
+/// ([`removed_server_checks`]).
+struct CheckOf {
+    id: String,
+    checks: PathBuf,
+}
+
+impl CheckOf {
+    /// Counts a check of `id` as running. Inputs: the server id and the engine's check
+    /// folder, with a check slot held. Output: the count, ended when dropped.
+    fn take(id: &str, checks: PathBuf, _slot: &CheckSlot) -> Self {
+        let mut checking = checking();
+        checking.running.push(id.to_owned());
+        assert!(checking.running.len() <= CHECKS_MAX);
+        Self {
+            id: id.to_owned(),
+            checks,
         }
-    }
-    match aside {
-        Ok(Some(aside)) => drop(tokio::task::spawn_blocking(move || {
-            if let Err(problem) = std::fs::remove_dir_all(aside) {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
-        })),
-        Ok(None) => {}
-        Err(problem) => eprintln!("plugin_check_folder_not_removed cause={}", problem.0),
     }
 }
 
+impl Drop for CheckOf {
+    /// Ends the count, and clears the server's check folder when the server was removed while
+    /// it ran and this was its last check.
+    fn drop(&mut self) {
+        let last_of_removed = {
+            let mut checking = checking();
+            let at = checking.running.iter().position(|id| *id == self.id);
+            assert!(at.is_some());
+            if let Some(at) = at {
+                checking.running.swap_remove(at);
+            }
+            let left = checking.running.contains(&self.id);
+            match checking.removed.iter().position(|id| *id == self.id) {
+                Some(at) if !left => {
+                    checking.removed.swap_remove(at);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if last_of_removed {
+            drop(remove_check_folder(&self.checks, &self.id));
+        }
+    }
+}
+
+/// Clears a removed server's check folder now, or when its last running check ends, so no
+/// check still running puts back the folder, the profile or a grant after the clearing.
+/// Inputs: the engine's check folder and the server id.
+fn removed_server_checks(checks: &Path, id: &str) {
+    let running = {
+        let mut checking = checking();
+        let running = checking.running.iter().any(|running| running == id);
+        if running && !checking.removed.iter().any(|removed| removed == id) {
+            checking.removed.push(id.to_owned());
+        }
+        assert!(checking.removed.len() <= CHECKS_MAX);
+        running
+    };
+    if !running {
+        drop(remove_check_folder(checks, id));
+    }
+}
+
+/// Clears a removed server's check folder, with whatever its checks wrote there while they
+/// held the server's secrets, and its check profile: the folder moves aside at once, then on
+/// a blocking thread of its own that nothing in the engine waits for, so neither a check home
+/// size nor the boundary's access lists hold up the answer, the profile goes once the grants
+/// its checks held are taken back ([`grants_withdrawn`]) and the moved folder is deleted. The
+/// start sweep deletes a moved folder a crash left. Inputs: the engine's check folder and the
+/// server id. Output: the blocking task, for a row to wait on. A failure other than a missing
+/// entry is logged.
+fn remove_check_folder(checks: &Path, id: &str) -> tokio::task::JoinHandle<()> {
+    let aside = match crate::storage::plugins::move_check_folder_aside(checks, id) {
+        Ok(aside) => aside,
+        Err(problem) => {
+            eprintln!("plugin_check_folder_not_removed cause={}", problem.0);
+            None
+        }
+    };
+    let profile = check_profile(checks, id);
+    tokio::task::spawn_blocking(move || {
+        if grants_withdrawn(&profile) {
+            match std::fs::remove_file(&profile) {
+                Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
+                    eprintln!("plugin_check_folder_not_removed cause={problem}");
+                }
+                _ => {}
+            }
+        }
+        if let Some(aside) = aside
+            && let Err(problem) = std::fs::remove_dir_all(aside)
+        {
+            eprintln!("plugin_check_folder_not_removed cause={problem}");
+        }
+    })
+}
+
 /// Takes back every access entry the boundary helper granted a removed server's check
-/// container, read entries on the owner's folders included, and drops its record. It runs
-/// after the check folder moved aside, so the entries on that folder, which is deleted
-/// whole, are not rewritten first. Input: the check profile. Output: whether nothing is
-/// left granted; false keeps the profile, so the record of what is left keeps its container.
+/// container, read entries on the owner's folders included, drops its record and deletes the
+/// container with the folder Windows gave it ([`crazyagent_win_sandbox::release`]). It runs
+/// after the check folder moved aside, so the entries on that folder, which is deleted whole,
+/// are not rewritten first. Input: the check profile. Output: whether nothing is left; false
+/// keeps the profile, so the record of what is left keeps its container.
 #[cfg(windows)]
 fn grants_withdrawn(profile: &Path) -> bool {
     match std::fs::symlink_metadata(profile) {
@@ -1281,7 +1372,7 @@ async fn handle(
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
                                 crate::storage::plugins::remove_secrets(&root, references);
-                            remove_check_folder(&checks, &server);
+                            removed_server_checks(&checks, &server);
                             secrets
                         }
                         _ => Ok(()),
@@ -1469,6 +1560,9 @@ async fn start_check(
     authority: &Authority,
     id: String,
 ) -> Result<Reply, EngineError> {
+    let slot = CheckSlot::take()?;
+    let root = engine_root(authority)?;
+    let counted = CheckOf::take(&id, root.join(CHECK_FOLDER), &slot);
     let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
@@ -1478,8 +1572,6 @@ async fn start_check(
     let ServerSpec::Stdio { command, args } = *spec else {
         return Err(failure("server_check_command_only"));
     };
-    let slot = CheckSlot::take()?;
-    let root = engine_root(authority)?;
     let mut values: Vec<(String, Vec<u8>)> = Vec::with_capacity(secrets.len());
     for secret in &secrets {
         match crate::storage::plugins::read_secret(&root, &secret.reference) {
@@ -1498,6 +1590,7 @@ async fn start_check(
     let engine = engine.clone();
     tokio::spawn(async move {
         let _slot = slot;
+        let _counted = counted;
         let folder = id.clone();
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
