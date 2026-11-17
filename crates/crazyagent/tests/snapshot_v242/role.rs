@@ -1,5 +1,7 @@
 use super::Scenario;
 use super::e2e_support::Owner;
+use super::launch::Team;
+use super::provider::as_owner;
 use super::workflow::{PROJECT, attached, engine, private_folder, recorded, reply, seeded};
 use crazyagent::agent_git::Layout;
 use crazyagent::coord::settings::{CoordSettings, RoleSkills, SkillRole};
@@ -7,7 +9,8 @@ use crazyagent::coord::tool_switches::BUILTIN_TOOLS;
 use crazyagent::launch_context::{self, team_tools_section};
 use crazyagent::plugins::Scope;
 use crazyagent::protocol::ProjectId;
-use crazyagent::team::TeamAction;
+use crazyagent::sandbox::policy::AgentAccess;
+use crazyagent::team::{AgentRole, DEPTH_DEFAULT, TeamAction};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::future::Future;
@@ -50,6 +53,12 @@ pub(super) fn scenarios() -> Vec<Scenario> {
         role("tools-section-tools-off", tools_section_tools_off),
         role("launch-all-approved", launch_all_approved),
         role("launch-chosen-per-role", launch_chosen_per_role),
+        role("policy-master-live", policy_master_live),
+        role(
+            "policy-sub-agent-default-depth",
+            policy_sub_agent_default_depth,
+        ),
+        role("policy-sub-agent-depth-1", policy_sub_agent_depth_1),
     ]
 }
 
@@ -474,4 +483,64 @@ fn skills_written(folder: &Path, depth: usize) -> Result<Vec<String>, String> {
 /// Splits a text into its lines for a readable golden. Input: the text. Output: the lines.
 fn lines(text: &str) -> Vec<&str> {
     text.lines().collect()
+}
+
+/// The task the sub-agent scenarios hand straight to a sub-agent.
+const DELEGATED: &str = "Write the release notes for the tide sensor.";
+
+/// The master's launch when the owner turns the live master on, on a Codex team at the
+/// Sandboxed level with tools off: its arguments, variable names, home files and the
+/// Seatbelt profile the engine installed, through the P2 launch helper. Input: the scratch
+/// folder. Output: the capture.
+fn policy_master_live(scratch: &Path) -> Result<Value, String> {
+    let team = Team::start(scratch, AgentAccess::Sandboxed, false)?;
+    let project = team.project.clone();
+    let version = as_owner(&team.engine, |mut owner| async move {
+        let status = owner.controller.team_status(project).await;
+        let version = status
+            .map(|status| status.settings_version)
+            .map_err(|error| error.0);
+        (owner, version)
+    })?;
+    team.act(TeamAction::LiveMaster {
+        project_id: team.project.clone(),
+        on: true,
+        version,
+    })?;
+    Ok(json!({ "launch": team.launched(AgentRole::Master)? }))
+}
+
+/// A sub-agent's launch for a task the owner hands it straight, under the default
+/// Sub-agent depth; a sub-agent whose own depth is below the setting launches as a lead,
+/// else as a worker (team/runtime.rs:10048). Input: the scratch folder.
+/// Output: the depth and the capture.
+fn policy_sub_agent_default_depth(scratch: &Path) -> Result<Value, String> {
+    let team = Team::start(scratch, AgentAccess::Sandboxed, false)?;
+    team.act(delegated(&team))?;
+    let launch = team.launched(AgentRole::Sub)?;
+    Ok(json!({ "sub_agent_depth": DEPTH_DEFAULT, "launch": launch }))
+}
+
+/// A sub-agent's launch for a task the owner hands it straight after the owner set
+/// Sub-agent depth to 1, where no sub-agent leads. Input: the scratch folder.
+/// Output: the depth and the capture.
+fn policy_sub_agent_depth_1(scratch: &Path) -> Result<Value, String> {
+    let team = Team::start(scratch, AgentAccess::Sandboxed, false)?;
+    team.act(TeamAction::SubAgentDepth {
+        project_id: team.project.clone(),
+        depth: 1,
+    })?;
+    team.act(delegated(&team))?;
+    let launch = team.launched(AgentRole::Sub)?;
+    Ok(json!({ "sub_agent_depth": 1, "launch": launch }))
+}
+
+/// The owner's Delegate action for [`DELEGATED`] on the team's own harness choice.
+/// Input: the team. Output: the action.
+fn delegated(team: &Team) -> TeamAction {
+    TeamAction::Delegate {
+        project_id: team.project.clone(),
+        harness: None,
+        prompt: DELEGATED.to_owned(),
+    }
 }
