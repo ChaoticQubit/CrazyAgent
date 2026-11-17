@@ -116,6 +116,15 @@ pub struct Numbered {
     pub number: u64,
 }
 
+/// An approved baseline made its project's current one: a project id and a baseline id,
+/// each one the protocol's identity accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approved {
+    pub project: String,
+    pub baseline: String,
+}
+
 /// A change set an event is about, its id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +151,7 @@ pub enum Change {
     OwnerEditsForgotten(ChangeSet),
     WorktreeOwnerEditsForgotten(Worktree),
     ChangeSetNumbered(Numbered),
+    BaselineApproved(Approved),
 }
 
 impl Change {
@@ -174,6 +184,10 @@ impl Change {
                     && set.number >= 1
                     && i64::try_from(set.number).is_ok()
             }
+            Self::BaselineApproved(approved) => {
+                crate::protocol::ProjectId::new(approved.project.as_str()).is_ok()
+                    && crate::protocol::BaselineId::new(approved.baseline.as_str()).is_ok()
+            }
         }
     }
 
@@ -199,7 +213,8 @@ impl Change {
             | Self::AgentBranchForgotten(_)
             | Self::BaseSet(_)
             | Self::OwnerEditKept(_)
-            | Self::ChangeSetNumbered(_) => Some(1),
+            | Self::ChangeSetNumbered(_)
+            | Self::BaselineApproved(_) => Some(1),
             Self::OwnerEditsSettled(_) | Self::OwnerEditsDropped(_) => Some(PATHS_PER_WORKTREE_MAX),
             Self::OwnerEditsForgotten(_) | Self::WorktreeOwnerEditsForgotten(_) => None,
         }
@@ -217,6 +232,7 @@ impl Change {
             Self::OwnerEditsForgotten(_) => OWNER_EDITS_FORGOTTEN,
             Self::WorktreeOwnerEditsForgotten(_) => WORKTREE_OWNER_EDITS_FORGOTTEN,
             Self::ChangeSetNumbered(_) => CHANGE_SET_NUMBERED,
+            Self::BaselineApproved(_) => BASELINE_APPROVED,
         };
         assert!(KINDS.contains(&kind), "the landing kind {kind} is in KINDS");
         kind
@@ -239,6 +255,7 @@ impl Change {
             }
             Self::OwnerEditsForgotten(gone) => serde_json::to_vec(gone),
             Self::ChangeSetNumbered(set) => serde_json::to_vec(set),
+            Self::BaselineApproved(approved) => serde_json::to_vec(approved),
         };
         body.map_err(|_| failure("landing_log_body"))
     }
@@ -264,6 +281,7 @@ impl Change {
                 serde_json::from_slice(body).map(Self::WorktreeOwnerEditsForgotten)
             }
             CHANGE_SET_NUMBERED => serde_json::from_slice(body).map(Self::ChangeSetNumbered),
+            BASELINE_APPROVED => serde_json::from_slice(body).map(Self::BaselineApproved),
             _ => return Err(refused()),
         };
         let change = change.map_err(|_| refused())?;
@@ -282,12 +300,56 @@ pub(crate) fn record(tx: &Transaction<'_>, change: &Change) -> Result<u64, Engin
     record_all(tx, std::slice::from_ref(change))
 }
 
-/// Logs one write group of landing changes in the caller's transaction at one revision:
-/// every body is checked first, then each change is appended and applied in order behind
-/// the store's engine host. The caller commits. Inputs: the transaction and the changes, at
-/// least one and at most `TRANSACTION_EVENTS_MAX`. Output: the last event's seq, or the
-/// first refusal, which the caller rolls back.
+/// Logs one write group of landing changes in the caller's transaction at one revision of
+/// its own behind the store's engine host. The caller commits. Inputs: the transaction and
+/// the changes, at least one and at most `TRANSACTION_EVENTS_MAX`. Output: the last event's
+/// seq, or the first refusal, which the caller rolls back.
 pub(crate) fn record_all(tx: &Transaction<'_>, changes: &[Change]) -> Result<u64, EngineError> {
+    let fence = crate::worktrees::log::store_fence(tx)?;
+    let mut appender = Appender::own(tx, fence)?;
+    let seq = append_all(&mut appender, changes)?;
+    assert!(appender.revision() > 0, "own moved the revision");
+    Ok(seq)
+}
+
+/// Logs one landing change inside an owner request whose next revision is already signed:
+/// moves `state` from one before it to it, then appends and applies the change there behind
+/// the store's engine host, so the request's own `events` row at next covers it (as L6
+/// `record_at`, DEC 250-L9-LANDING C4). Inputs: the request's transaction, its next revision
+/// and the change. Output: the event's seq, `state_log_revision_stale`, or the refusal.
+pub(crate) fn record_at(
+    tx: &Transaction<'_>,
+    next: u64,
+    change: &Change,
+) -> Result<u64, EngineError> {
+    let stale = || failure("state_log_revision_stale");
+    let before = next.checked_sub(1).ok_or_else(stale)?;
+    let next_signed = i64::try_from(next).map_err(|_| stale())?;
+    let moved = tx
+        .execute(
+            "UPDATE state SET revision=?1 WHERE id=1 AND revision=?2",
+            params![next_signed, i64::try_from(before).map_err(|_| stale())?],
+        )
+        .map_err(|_| failure("landing_log_unavailable"))?;
+    if moved != 1 {
+        return Err(stale());
+    }
+    let fence = crate::worktrees::log::store_fence(tx)?;
+    let mut appender = Appender::owner(tx, next, fence)?;
+    let seq = append_all(&mut appender, std::slice::from_ref(change))?;
+    assert_eq!(
+        appender.revision(),
+        next,
+        "the change is logged at the request's revision"
+    );
+    Ok(seq)
+}
+
+/// Appends and applies a write group in order: every body is checked first, then each
+/// change is appended and applied through the appender's projection. Inputs: the appender
+/// and the changes, at least one and at most `TRANSACTION_EVENTS_MAX`. Output: the last
+/// event's seq, or the first refusal.
+fn append_all(appender: &mut Appender<'_, '_>, changes: &[Change]) -> Result<u64, EngineError> {
     assert!(
         !changes.is_empty(),
         "a write group logs at least one change"
@@ -297,8 +359,6 @@ pub(crate) fn record_all(tx: &Transaction<'_>, changes: &[Change]) -> Result<u64
         .iter()
         .map(Change::body)
         .collect::<Result<Vec<_>, _>>()?;
-    let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut appender = Appender::own(tx, fence)?;
     let mut last = 0;
     for (change, body) in changes.iter().zip(&bodies) {
         last = appender.append(&Draft {
@@ -380,6 +440,18 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
             "INSERT INTO landing_change_set_numbers(change_set,project,number) VALUES (?1,?2,?3)",
             params![set.change_set, set.project, set.number],
         ),
+        Change::BaselineApproved(approved) => db
+            .execute(
+                "UPDATE verification_baselines SET approved=1 WHERE id=?1",
+                [&approved.baseline],
+            )
+            .and_then(|_| {
+                db.execute(
+                    "INSERT INTO verification_current VALUES (?1,?2) \
+                     ON CONFLICT(project) DO UPDATE SET baseline=excluded.baseline",
+                    params![approved.project, approved.baseline],
+                )
+            }),
     }
     .map_err(unavailable)?;
     let changed = i64::try_from(changed).map_err(|_| failure("changes_unavailable"))?;
@@ -391,14 +463,32 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Rebuilds the landing tables on the log from it: empties them, then replays every
-/// landing event. Input: the store. Output: the last seq read, or the refusal.
+/// The tables the landing log rebuilds, emptied before its replay.
+const TABLES: [&str; 5] = [
+    "landing_agent_branches",
+    "landing_bases",
+    "landing_owner_edits",
+    "landing_change_set_numbers",
+    "verification_current",
+];
+
+/// Rebuilds the tables on the landing log from it: empties each one the store has, then
+/// replays every landing event. Input: the store. Output: the last seq read, or the refusal.
 pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
-    let tables = "DELETE FROM landing_agent_branches; DELETE FROM landing_bases; \
-                  DELETE FROM landing_owner_edits; DELETE FROM landing_change_set_numbers;";
-    db.execute_batch(crate::landing::owner_edit::SCHEMA)
-        .and_then(|()| db.execute_batch(tables))
-        .map_err(|_| failure("changes_unavailable"))?;
+    let unavailable = |_| failure("changes_unavailable");
+    for table in TABLES {
+        let kept: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if kept {
+            db.execute(&format!("DELETE FROM {table}"), [])
+                .map_err(unavailable)?;
+        }
+    }
     replay::replay(db, Aggregate::Landing, 0, |event| {
         apply(db, &Change::parse(event)?)
     })

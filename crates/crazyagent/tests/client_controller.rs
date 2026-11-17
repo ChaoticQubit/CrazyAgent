@@ -1128,6 +1128,7 @@ async fn controller_preserves_actual_unavailable_verification_outcome() {
     let engine = crazyagent::engine::Engine::open(&root.path().join("engine.db"), config.clone())
         .await
         .unwrap();
+    engine.start_owner_runtime().await.unwrap();
     let seeded: Result<(), crazyagent::engine::EngineError> = async {
         let mut revision = Cursor::new(0);
         let baseline = draft();

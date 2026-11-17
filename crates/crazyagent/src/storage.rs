@@ -1881,7 +1881,7 @@ fn execute(
             crate::memory::library::execute(tx, config, action, revision)
         }
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
-            crate::verification::execute(tx, config, command)
+            crate::verification::execute(tx, config, command, revision)
         }
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),

@@ -440,12 +440,13 @@ pub(crate) fn is_mutation(command: &Command) -> bool {
 }
 
 /// Executes baseline drafting or trusted host authority commands.
-/// Takes an actor transaction, live config and command.
+/// Takes an actor transaction, live config, command and the store's revision before it.
 /// Returns an outcome without trusting deserialized execution claims.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     command: &Command,
+    revision: u64,
 ) -> Result<Outcome, EngineError> {
     match command {
         Command::ProposeBaseline { draft } => {
@@ -486,7 +487,7 @@ pub(crate) fn execute(
             .map_err(db_error)?;
             Ok(Outcome::Applied)
         }
-        Command::OwnerVerification { action } => owner(tx, config, action),
+        Command::OwnerVerification { action } => owner(tx, config, action, revision),
         _ => Err(db_error("unsupported_verification_command")),
     }
 }
@@ -555,15 +556,16 @@ fn capacity(tx: &Transaction<'_>, table: &str) -> Result<(), EngineError> {
 }
 
 /// Dispatches host-only baseline and candidate authority operations.
-/// Takes live actor state and a typed host action.
+/// Takes live actor state, a typed host action and the store's revision before it.
 /// Plan and merge approval are never changed here.
 fn owner(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &OwnerVerification,
+    revision: u64,
 ) -> Result<Outcome, EngineError> {
     match action {
-        OwnerVerification::Approve { baseline_id } => approve(tx, baseline_id),
+        OwnerVerification::Approve { baseline_id } => approve(tx, baseline_id, revision),
         OwnerVerification::Revoke { baseline_id } => {
             let changed = tx
                 .execute(
@@ -647,10 +649,11 @@ fn baseline(
     Ok((draft, approved, revoked))
 }
 
-/// Admits one exact draft through host-only human authority.
-/// Takes its content ID and atomically updates the current project contract.
+/// Admits one exact draft through host-only human authority, logged as `BaselineApproved`
+/// at the request's next revision (v2.5 L9). Takes its content ID and the store's revision
+/// before the request, and atomically updates the current project contract.
 /// Revoked versions cannot be silently readmitted.
-fn approve(tx: &Transaction<'_>, id: &BaselineId) -> Result<Outcome, EngineError> {
+fn approve(tx: &Transaction<'_>, id: &BaselineId, revision: u64) -> Result<Outcome, EngineError> {
     let exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM verification_baselines WHERE id=?1)",
@@ -675,13 +678,15 @@ fn approve(tx: &Transaction<'_>, id: &BaselineId) -> Result<Outcome, EngineError
     if !project {
         return rejected("project_missing");
     }
-    tx.execute(
-        "UPDATE verification_baselines SET approved=1 WHERE id=?1",
-        [id.as_str()],
-    )
-    .map_err(db_error)?;
-    tx.execute("INSERT INTO verification_current VALUES (?1,?2) ON CONFLICT(project) DO UPDATE SET baseline=excluded.baseline",
-        params![draft.project_id.as_str(), id.as_str()]).map_err(db_error)?;
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| db_error("revision_exhausted"))?;
+    let approved = crate::landing_log::Approved {
+        project: draft.project_id.as_str().to_owned(),
+        baseline: id.as_str().to_owned(),
+    };
+    let change = crate::landing_log::Change::BaselineApproved(approved);
+    crate::landing_log::record_at(tx, next, &change)?;
     assert!(baseline(tx, id)?.1);
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
