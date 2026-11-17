@@ -784,9 +784,20 @@ const GIT_VARIABLES: [&str; 11] = [
 ];
 
 /// Sets up a snapshot engine so git inside it reads only the fixture HOME, never a git
-/// variable of the shell the capture runs in. Input: the engine, not yet launched.
+/// variable of the shell the capture runs in: every name in [`GIT_VARIABLES`] and every
+/// other inherited `GIT_` variable is taken out of what the engine inherits. Input: the
+/// engine, not yet launched.
 fn hermetic(engine: &mut e2e_support::Engine) {
-    let _ = engine;
+    let inherited = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| name.starts_with("GIT_"));
+    let names: BTreeSet<String> = GIT_VARIABLES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .chain(inherited)
+        .collect();
+    assert!(names.len() >= GIT_VARIABLES.len());
+    engine.env_removed.extend(names);
 }
 
 /// The line a panic prints in place of its own text when that text holds private text.
