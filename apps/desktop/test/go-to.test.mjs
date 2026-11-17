@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const goTo = await import("../src/ui/go-to.tsx");
 const { supportDetails, AppView } = await import("../src/app.tsx");
 const { formatRoute } = await import("../src/ui/router.ts");
+const { TABS, IDE_TAB } = await import("../src/screens/project/index.tsx");
 
 const projects = [{ id: "harbor", name: "Harbor Notes" }, { id: "fieldnotes-mobile", name: "Fieldnotes Mobile" }];
 
@@ -19,9 +20,12 @@ test("Go to lists every project and its tabs, Home, every Settings section, then
     ["Harbor Notes / Changes", "Project tab", "#/projects/harbor/changes"],
     ["Harbor Notes / Questions", "Project tab", "#/projects/harbor/questions"],
     ["Harbor Notes / Context", "Project tab", "#/projects/harbor/context"],
+    ["Harbor Notes / Process", "Project tab", "#/projects/harbor/process"],
+    ["Harbor Notes / Metrics", "Project tab", "#/projects/harbor/metrics"],
     ["Harbor Notes / Settings", "Project tab", "#/projects/harbor/settings"],
+    ["Harbor Notes / IDE", "Project tab", "#/projects/harbor/ide"],
   ]);
-  assert.deepEqual(targets.slice(14).map((target) => [target.label, formatRoute(target.route)]), [
+  assert.deepEqual(targets.slice(20).map((target) => [target.label, formatRoute(target.route)]), [
     ["Home", "#/home"],
     ["Profile", "#/settings/profile"],
     ["Settings / Accounts", "#/settings/accounts"],
@@ -36,6 +40,13 @@ test("Go to lists every project and its tabs, Home, every Settings section, then
     ["New pool", "#/settings/pools?action=new"],
   ]);
   assert.equal(goTo.goToTargets([]).length, 12);
+});
+
+test("Go to lists a project's tabs from the project page's own list, every tab plus the IDE, so a new tab cannot be missed", () => {
+  const tabs = [...TABS, IDE_TAB];
+  const listed = goTo.goToTargets([{ id: "harbor", name: "Harbor Notes" }]).filter((target) => target.route.name === "project");
+  assert.deepEqual(listed.map((target) => target.route.tab), tabs.map((tab) => tab.id));
+  assert.deepEqual(listed.slice(1).map((target) => target.label), tabs.slice(1).map((tab) => `Harbor Notes / ${tab.label}`));
 });
 
 test("Go to ranks a prefix first, then a match inside, then letters in order, like the TUI", () => {
