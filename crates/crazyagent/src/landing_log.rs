@@ -31,6 +31,9 @@ pub const WORKTREE_OWNER_EDITS_FORGOTTEN: &str = "WorktreeOwnerEditsForgotten";
 pub const CHANGE_SET_NUMBERED: &str = "ChangeSetNumbered";
 /// An owner approval made a baseline its project's current one (`verification_current`).
 pub const BASELINE_APPROVED: &str = "BaselineApproved";
+/// A change set saved, its summary or its landing result stored (`landing_change_sets`,
+/// `landing_change_set_numbers`): the stored row is an owner text, the body its digest.
+pub const CHANGE_SET_SAVED: &str = "ChangeSetSaved";
 /// A Not now to a project's publish prompt, kept with the time it asks again
 /// (`github_publish_prompt`).
 pub const PUBLISH_PROMPT_SNOOZED: &str = "PublishPromptSnoozed";

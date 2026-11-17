@@ -1,8 +1,9 @@
 use super::*;
 use crate::landing_log::{
     AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_FORGOTTEN, BASE_SET, CHANGE_SET_NUMBERED,
-    OWNER_EDIT_KEPT, OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED,
-    PUBLISH_PROMPT_NEVER, PUBLISH_PROMPT_SNOOZED, WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
+    CHANGE_SET_SAVED, OWNER_EDIT_KEPT, OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN,
+    OWNER_EDITS_SETTLED, PUBLISH_PROMPT_NEVER, PUBLISH_PROMPT_SNOOZED,
+    WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
 };
 use crate::state_log::replay::rows;
 use serde_json::json;
@@ -433,4 +434,161 @@ fn the_first_run_writes_nothing_without_landing_rows() {
         .unwrap();
     assert!(!first_run(&stateless), "no state table");
     assert!(events(&stateless).is_empty());
+}
+
+/// A pending change set of `project-1` in a worktree under the root, with owner text in its
+/// prompt line, message and summary. Inputs: the root and the digit its id repeats. Output:
+/// the record.
+fn change_set(root: &std::path::Path, digit: char) -> Record {
+    Record {
+        id: ChangeSetId::new(digit.to_string().repeat(32)).unwrap(),
+        project: ProjectId::new("project-1").unwrap(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "7".into(),
+            label: "Agent 7".into(),
+        },
+        repository: root.join("repo"),
+        worktree: root.join(format!("repo/.wt/{digit}")),
+        git_dir: root.join(format!("repo/.git/worktrees/{digit}")),
+        base: "a".repeat(40),
+        head: "b".repeat(40),
+        state: ChangeState::Pending,
+        last_outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "the owner's secret prompt sk-ant-api03-key".into(),
+        files: 1,
+        added: 2,
+        removed: 0,
+        conflicts: Vec::new(),
+        created_ms: 1,
+        updated_ms: 2,
+        restorable_until_ms: None,
+        pruned: false,
+        landed: None,
+        intent: None,
+        message: "Add a secret page".into(),
+        waiting: false,
+        outside: false,
+        made: false,
+        undone: None,
+        landed_on: None,
+        restored: false,
+        regenerated_head: None,
+        regenerated_files: Vec::new(),
+        accepted_in: None,
+        summary: "Added the secret page".into(),
+        landing_result: LandingResult::None,
+    }
+}
+
+/// The digest a logged change set save names. Input: the event body. Output: the digest.
+fn row_digest(body: &serde_json::Value) -> crate::owner_texts::TextDigest {
+    serde_json::from_value(body["row"].clone()).unwrap()
+}
+
+/// Both change set tables as they stand. Input: the store. Output: their rows.
+fn change_set_rows(db: &Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    ["landing_change_sets", "landing_change_set_numbers"]
+        .iter()
+        .map(|table| rows(db, table).unwrap())
+        .collect()
+}
+
+/// V250-L9 (QUESTION-1056 A): a save, a re-save, a summary and a landing result each log
+/// one ChangeSetSaved whose body holds only the set's id, project, number and the digest of
+/// its stored row, and both change set tables rebuilt from the log equal the live rows.
+#[test]
+fn a_saved_change_set_logs_its_row_digest_and_rebuilds_to_the_live_row() {
+    let (root, db) = store();
+    let mut record = change_set(root.path(), 'c');
+    save(&db, &record).unwrap();
+    record.updated_ms = 3;
+    save(&db, &record).unwrap();
+    set_summary(&db, &record.id, "Summed up").unwrap();
+    set_landing_result(&db, &record.id, LandingResult::Refused).unwrap();
+    let logged = events(&db);
+    let kinds: Vec<&str> = logged.iter().map(|(kind, _)| kind.as_str()).collect();
+    assert_eq!(kinds, [CHANGE_SET_SAVED; 4]);
+    for (_, body) in &logged {
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["change_set", "number", "project", "row"]);
+        assert_eq!(body["number"], 1);
+        assert!(!body.to_string().contains("secret"), "{body}");
+    }
+    let live = change_set_rows(&db);
+    assert_eq!(live[0].len(), 1);
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), live);
+}
+
+/// V250-L9 (QUESTION-1056 A): a re-save releases the old row text, so replay skips the
+/// superseded save and the rebuilt row is the last one saved.
+#[test]
+fn a_resave_releases_the_old_row_text_and_replay_skips_the_superseded_save() {
+    let (root, db) = store();
+    let mut record = change_set(root.path(), 'c');
+    save(&db, &record).unwrap();
+    record.message = "Add a second page".into();
+    save(&db, &record).unwrap();
+    let logged = events(&db);
+    assert_eq!(logged.len(), 2);
+    let (first, last) = (row_digest(&logged[0].1), row_digest(&logged[1].1));
+    assert_ne!(first, last);
+    assert_eq!(
+        crate::owner_texts::text(&db, &first).unwrap(),
+        None,
+        "released"
+    );
+    assert!(crate::owner_texts::text(&db, &last).unwrap().is_some());
+    let live = change_set_rows(&db);
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), live);
+}
+
+/// Rewrites the kept row text a logged save names, as a store from another build or a
+/// damaged one could hold it. Inputs: the store, the digest and the cells to keep.
+fn plant_row(db: &Connection, digest: &crate::owner_texts::TextDigest, cells: &serde_json::Value) {
+    let changed = db
+        .execute(
+            "UPDATE kept_texts SET text=?2 WHERE digest=?1",
+            params![digest.as_str(), serde_json::to_vec(cells).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+/// V250-L9 (QUESTION-1056 A): a kept row with a cell the table has no column for fails the
+/// rebuild closed, and one without a cell takes that column's default.
+#[test]
+fn a_row_cell_the_table_lacks_fails_replay_and_a_missing_cell_takes_its_default() {
+    let (root, db) = store();
+    let record = change_set(root.path(), 'c');
+    save(&db, &record).unwrap();
+    let digest = row_digest(&events(&db)[0].1);
+    let kept = crate::owner_texts::text(&db, &digest).unwrap().unwrap();
+    let cells: serde_json::Value = serde_json::from_slice(&kept).unwrap();
+    assert_eq!(cells["summary"], "Added the secret page");
+
+    let mut widened = cells.clone();
+    widened["column_from_a_later_build"] = json!(1);
+    plant_row(&db, &digest, &widened);
+    assert_eq!(rebuild(&db).unwrap_err().0, "landing_log_row_cell");
+
+    let mut narrowed = cells.clone();
+    narrowed.as_object_mut().unwrap().remove("summary");
+    plant_row(&db, &digest, &narrowed);
+    rebuild(&db).unwrap();
+    let summary: String = db
+        .query_row("SELECT summary FROM landing_change_sets", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(summary, "", "the column default");
 }
