@@ -407,7 +407,7 @@ fn the_first_run_puts_landing_rows_from_before_the_log_on_it() {
     let kinds: Vec<String> = events(&db).into_iter().map(|(kind, _)| kind).collect();
     assert_eq!(
         kinds.len(),
-        8,
+        9,
         "a chunk per table and the closing event: {kinds:?}"
     );
     assert_eq!(landing_rows(&db), live, "the run changes no row");
@@ -611,7 +611,7 @@ fn the_first_run_carries_a_change_set_as_its_row_digest() {
     let live = change_set_rows(&db);
     assert!(first_run(&db));
     let logged = events(&db);
-    assert_eq!(logged.len(), 8, "a chunk per table and the closing event");
+    assert_eq!(logged.len(), 9, "a chunk per table and the closing event");
     assert!(
         logged
             .iter()

@@ -24,9 +24,11 @@ const WHY: &str = "Reviews keep merging with threads still open.";
 const REFUSAL: &str = "Resource not accessible by integration";
 
 /// One engine root with two set-up projects, alpha and beta, and the engine database with
-/// the team, setup and questions tables, as the proposal rows use.
+/// the team, setup and questions tables and a running engine host, so the proposal writes
+/// log (v2.5 L9), as the proposal rows use.
 struct Case {
     _tmp: tempfile::TempDir,
+    host: crate::engine::owner::HostStamp,
     root: PathBuf,
     folder: PathBuf,
     other: PathBuf,
@@ -53,8 +55,10 @@ impl Case {
         crate::team::initialize(&db).unwrap();
         crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
         crate::ide::workspace::tests::add_project(&db, OTHER, &other);
+        let host = crate::landing_log::seed(&db);
         Self {
             _tmp: tmp,
+            host,
             root,
             folder,
             other,
@@ -600,7 +604,7 @@ fn a_start_ends_an_approved_or_applying_proposal_refused_and_tells_it_without_se
         )
         .unwrap();
     let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
-    assert_eq!(start(&tx).unwrap(), 2);
+    assert_eq!(start(&tx).unwrap().0, 2);
     tx.commit().unwrap();
     assert_eq!(case.statuses(), ["refused", "refused"]);
     let mut calls = 0;
@@ -843,7 +847,7 @@ fn a_start_refuses_and_tells_a_pending_proposal_whose_question_is_gone() {
         .unwrap();
     assert_eq!(case.statuses(), ["pending", "pending", "pending"]);
     let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
-    assert_eq!(start(&tx).unwrap(), 2);
+    assert_eq!(start(&tx).unwrap().0, 2);
     tx.commit().unwrap();
     assert_eq!(case.statuses(), ["pending", "refused", "refused"]);
     let told = case.told();
@@ -862,7 +866,7 @@ fn a_start_refuses_and_tells_a_pending_proposal_whose_question_is_gone() {
     );
     case.asked(&Asker::Agent(5), GitHubRule::NoForcePush, true);
     let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
-    assert_eq!(start(&tx).unwrap(), 0);
+    assert_eq!(start(&tx).unwrap().0, 0);
     tx.commit().unwrap();
     assert_eq!(case.told().len(), 2);
 }

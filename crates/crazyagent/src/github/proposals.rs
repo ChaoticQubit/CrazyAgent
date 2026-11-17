@@ -187,6 +187,8 @@ pub fn request(
         )
         .map_err(|_| UNAVAILABLE)?;
     assert_eq!(kept, 1);
+    let logged = crate::landing_log::record_request(&tx, id).map_err(|problem| problem.0)?;
+    assert!(logged, "the request has its row");
     tx.commit().map_err(|_| UNAVAILABLE)?;
     crate::questions::refresh_page(db, project);
     Ok(question)
@@ -215,8 +217,14 @@ pub(crate) fn decide(
         )
         .map_err(|_| failure(UNAVAILABLE))?;
     assert!(changed <= 1);
+    if changed == 1 {
+        assert!(
+            crate::landing_log::record_request(tx, id)?,
+            "a decided request is logged"
+        );
+    }
     if changed == 1 && !approved {
-        tell_untold(tx)?;
+        record_told(tx, &tell_untold(tx)?)?;
     }
     Ok(())
 }
@@ -246,44 +254,71 @@ pub fn apply_approved(db: &Connection, set: &mut RuleSetter<'_>) -> Result<usize
     assert!(approved.len() as i64 <= PASS_MAX);
     let mut ended = 0;
     for row in approved {
-        let claimed = db
-            .execute(
-                "UPDATE github_rule_requests SET status='applying' WHERE id=?1 AND status='approved'",
-                [row.id],
-            )
-            .map_err(|_| failure(UNAVAILABLE))?;
-        if claimed == 0 {
+        let claim =
+            "UPDATE github_rule_requests SET status='applying' WHERE id=?1 AND status='approved'";
+        if logged_update(db, row.id, claim, params![row.id])? == 0 {
             continue;
         }
         let outcome = applied(&root, db, &row, set);
-        db.execute(
-            "UPDATE github_rule_requests SET status=?2 WHERE id=?1 AND status='applying'",
-            params![row.id, outcome.status()],
-        )
-        .map_err(|_| failure(UNAVAILABLE))?;
+        let end = "UPDATE github_rule_requests SET status=?2 WHERE id=?1 AND status='applying'";
+        logged_update(db, row.id, end, params![row.id, outcome.status()])?;
         ended += 1;
     }
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
-        .map_err(|_| failure(UNAVAILABLE))?;
-    tell_untold(&tx)?;
-    tx.commit().map_err(|_| failure(UNAVAILABLE))?;
+    crate::landing_log::within(db, |tx| record_told(tx, &tell_untold(tx)?))?;
     Ok(ended)
+}
+
+/// Runs one update of a rule request in a transaction of its own and logs the row it
+/// changed in it (QUESTION-1120 A). Inputs: the store, the request's id, the statement and
+/// its values. Output: how many rows changed, at most one, or the store or log's refusal.
+fn logged_update(
+    db: &Connection,
+    id: i64,
+    sql: &str,
+    values: impl Params,
+) -> Result<usize, EngineError> {
+    crate::landing_log::within(db, |tx| {
+        let changed = tx.execute(sql, values).map_err(|_| failure(UNAVAILABLE))?;
+        assert!(changed <= 1, "an id names one request");
+        if changed == 1 {
+            assert!(
+                crate::landing_log::record_request(tx, id)?,
+                "a changed request is logged"
+            );
+        }
+        Ok(changed)
+    })
+}
+
+/// Logs each rule request a told pass marked, in the pass's transaction. Inputs: the
+/// transaction and the requests' ids. Output: Ok, or the log's refusal.
+fn record_told(tx: &Transaction<'_>, told: &[i64]) -> Result<(), EngineError> {
+    assert!(
+        told.len() <= PASS_MAX as usize,
+        "a pass tells a bounded number"
+    );
+    for id in told {
+        assert!(
+            crate::landing_log::record_request(tx, *id)?,
+            "a told request is logged"
+        );
+    }
+    Ok(())
 }
 
 /// Ends every proposal an engine stop left approved or being applied as refused and tells
 /// its agent, as the engine starts. Nothing is sent: the owner may have changed that rule
 /// on the GitHub settings page since. A pending proposal whose question is no longer
 /// pending, or was never kept, ends refused too, so it holds no slot and never blocks its
-/// agent and rule (RV gh-s7 F1). Input: the start's transaction. Output: how many ended,
-/// or the store error.
-pub(crate) fn start(tx: &Transaction<'_>) -> Result<usize, EngineError> {
+/// agent and rule (RV gh-s7 F1). Input: the start's transaction. Output: how many ended and
+/// the ids of every request it changed, ended or told, for the open to log; or the store
+/// error.
+pub(crate) fn start(tx: &Transaction<'_>) -> Result<(usize, Vec<i64>), EngineError> {
     table(tx).map_err(|_| failure(UNAVAILABLE))?;
-    let stopped = tx
-        .execute(
-            "UPDATE github_rule_requests SET status='refused' WHERE status IN ('approved','applying')",
-            [],
-        )
-        .map_err(|_| failure(UNAVAILABLE))?;
+    let stopped = changed_ids(
+        tx,
+        "UPDATE github_rule_requests SET status='refused' WHERE status IN ('approved','applying')",
+    )?;
     let pending: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM github_rule_requests WHERE status='pending'",
@@ -292,27 +327,46 @@ pub(crate) fn start(tx: &Transaction<'_>) -> Result<usize, EngineError> {
         )
         .map_err(|_| failure(UNAVAILABLE))?;
     let orphaned = if pending == 0 {
-        0
+        Vec::new()
     } else {
-        tx.execute(
+        changed_ids(
+            tx,
             "UPDATE github_rule_requests SET status='refused' WHERE status='pending' AND (question IS NULL OR NOT EXISTS (SELECT 1 FROM questions_log WHERE questions_log.id=github_rule_requests.question AND questions_log.status='pending'))",
-            [],
-        )
-        .map_err(|_| failure(UNAVAILABLE))?
+        )?
     };
-    tell_untold(tx)?;
-    Ok(stopped + orphaned)
+    let ended = stopped.len() + orphaned.len();
+    let told = tell_untold(tx)?;
+    let changed: Vec<i64> = stopped.into_iter().chain(orphaned).chain(told).collect();
+    assert!(changed.len() >= ended);
+    Ok((ended, changed))
+}
+
+/// Runs one update of rule requests and gives the ids it changed. Inputs: the transaction
+/// and the update, without its RETURNING clause. Output: the ids, or the store error.
+fn changed_ids(tx: &Transaction<'_>, update: &str) -> Result<Vec<i64>, EngineError> {
+    assert!(update.starts_with("UPDATE github_rule_requests "));
+    let unavailable = |_| failure(UNAVAILABLE);
+    let ids = tx
+        .prepare(&format!("{update} RETURNING id"))
+        .map_err(unavailable)?
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(unavailable)?;
+    assert!(ids.iter().all(|id| *id > 0));
+    Ok(ids)
 }
 
 /// Runs [`start`] in its own transaction as the engine's store opens. Inputs: the store's
 /// connection and the open's proof. Output: how many proposals ended, or the store error.
 pub(crate) fn start_store(
     db: &Connection,
-    _opening: crate::storage::opening::Opening,
+    opening: crate::storage::opening::Opening,
 ) -> Result<usize, EngineError> {
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
         .map_err(|_| failure(UNAVAILABLE))?;
-    let ended = start(&tx)?;
+    let (ended, changed) = start(&tx)?;
+    crate::landing_log::record_requests_opening(&tx, opening, &changed)?;
     tx.commit().map_err(|_| failure(UNAVAILABLE))?;
     Ok(ended)
 }
@@ -320,9 +374,9 @@ pub(crate) fn start_store(
 /// Forgets a removed project's proposals inside the removal's transaction, so none is
 /// applied or told after it. Inputs: the transaction and the project. Output: done, or
 /// `github_rule_requests_unavailable`.
-pub(crate) fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
-    table(tx).map_err(|_| failure(UNAVAILABLE))?;
-    tx.execute(
+pub(crate) fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    table(db).map_err(|_| failure(UNAVAILABLE))?;
+    db.execute(
         "DELETE FROM github_rule_requests WHERE project=?1",
         [project.as_str()],
     )
@@ -395,24 +449,24 @@ fn applied(root: &Path, db: &Connection, row: &Row, set: &mut RuleSetter<'_>) ->
 /// Tells the agents of up to `PASS_MAX` ended proposals how each ended, oldest first,
 /// project by project (rv-code gh-s7 N4). A message a full conversation refuses stays
 /// untold for the next pass and ends only its own project's turn, so it holds no other
-/// project back.
-fn tell_untold(tx: &Transaction<'_>) -> Result<(), EngineError> {
+/// project back. Input: the transaction. Output: the ids it told, for the caller to log.
+fn tell_untold(tx: &Transaction<'_>) -> Result<Vec<i64>, EngineError> {
     let filter = format!("{ENDED} AND told=0 AND project=?1");
-    let mut sent = 0;
+    let mut told = Vec::new();
     for project in untold_projects(tx)? {
-        if sent == PASS_MAX {
+        if told.len() as i64 == PASS_MAX {
             break;
         }
         for row in rows(tx, &filter, [project.as_str()])? {
             assert_eq!(row.project.as_str(), project);
-            if sent == PASS_MAX || !tell_one(tx, &row)? {
+            if told.len() as i64 == PASS_MAX || !tell_one(tx, &row)? {
                 break;
             }
-            sent += 1;
+            told.push(row.id);
         }
     }
-    assert!(sent <= PASS_MAX);
-    Ok(())
+    assert!(told.len() as i64 <= PASS_MAX);
+    Ok(told)
 }
 
 /// Lists the projects with an ended proposal whose agent is not told yet, the one whose

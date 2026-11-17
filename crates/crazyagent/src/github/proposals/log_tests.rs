@@ -32,13 +32,6 @@ fn requests(db: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
         .unwrap()
 }
 
-/// A logged case: the proposals case with an engine host, so landing writes log.
-fn logged_case() -> Case {
-    let case = Case::new();
-    crate::landing_log::seed(&case.db);
-    case
-}
-
 /// Checks a logged rule request body is closed: the request id, its project and its row's
 /// part digests, no agent words. Input: the body. Output: none.
 fn closed(body: &serde_json::Value) {
@@ -58,7 +51,7 @@ fn closed(body: &serde_json::Value) {
 /// rebuild equals the live rows.
 #[test]
 fn every_rule_request_write_logs_its_row_and_a_rebuild_equals_the_live_rows() {
-    let case = logged_case();
+    let case = Case::new();
     case.done(REPO);
     let question = case.asked(&Asker::Agent(4), GitHubRule::PullRequest, true);
     assert_eq!(saved(&case.db).len(), 1, "the request");
@@ -83,12 +76,11 @@ fn every_rule_request_write_logs_its_row_and_a_rebuild_equals_the_live_rows() {
 #[test]
 fn the_opens_cut_short_is_logged_through_the_opening() {
     let case = Case::new();
-    let host = crate::landing_log::seed(&case.db);
     case.done(REPO);
     let question = case.asked(&Asker::Agent(4), GitHubRule::PullRequest, true);
     assert_eq!(case.answer(question, vec![0]), Settlement::Settled);
     let before = saved(&case.db).len();
-    crate::state_log::fence::host_stopped(&host);
+    crate::state_log::fence::host_stopped(&case.host);
     let opening = crate::storage::opening::Opening::for_test(7);
     assert_eq!(start_store(&case.db, opening).unwrap(), 1);
     assert_eq!(case.statuses(), ["refused"]);
@@ -131,7 +123,7 @@ fn remove(case: &Case, kept: bool) {
 #[test]
 fn a_logged_remove_or_delete_forgets_its_rule_requests_on_rebuild() {
     for kept in [true, false] {
-        let case = logged_case();
+        let case = Case::new();
         case.done(REPO);
         case.asked(&Asker::Agent(4), GitHubRule::PullRequest, true);
         assert_eq!(saved(&case.db).len(), 1);
