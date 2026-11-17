@@ -334,7 +334,7 @@ fn a_narrower_profile_takes_back_what_the_one_before_granted() {
 }
 
 #[test]
-fn releasing_a_profile_takes_back_every_grant_and_its_record() {
+fn releasing_a_profile_takes_back_every_grant_its_record_and_its_container() {
     let case = case("crazyagent.test.release");
     let context = case.project.join("context");
     let before = [&case.project, &context, &case.home].map(|path| icacls(path));
@@ -362,8 +362,23 @@ fn releasing_a_profile_takes_back_every_grant_and_its_record() {
     }
     let record = case.grants.join("container-crazyagent.test.release.grants");
     assert!(record.is_file());
+    let container = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("Packages")
+        .join("crazyagent.test.release");
+    assert!(container.is_dir());
     let granted_sddl = sddl(&watched);
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    assert!(matches!(
+        crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.other"),
+        Err(crazyagent_win_sandbox::BoundaryError::Refused(_))
+    ));
+    assert!(record.is_file());
+    assert!(container.is_dir());
+    assert_eq!(
+        sddl(&watched),
+        granted_sddl,
+        "a refused release changes nothing"
+    );
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.release").unwrap();
     assert_eq!(
         [&case.project, &context, &case.home].map(|path| icacls(path)),
         before,
@@ -371,5 +386,9 @@ fn releasing_a_profile_takes_back_every_grant_and_its_record() {
         sddl(&watched)
     );
     assert!(!record.exists());
-    crazyagent_win_sandbox::release(&case.profile).unwrap();
+    assert!(
+        !container.exists(),
+        "the container's own folder goes with it"
+    );
+    crazyagent_win_sandbox::release(&case.profile, "crazyagent.test.release").unwrap();
 }

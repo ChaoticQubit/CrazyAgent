@@ -50,9 +50,12 @@ fn ide_changes(s: &Store, project: &str, first: i64) {
     }
 }
 
+/// One ide event of the log: its seq, its kind, the project its body names and the body.
+type IdeEvent = (i64, String, String, Vec<u8>);
+
 /// The ide events of the log as seq, kind, the project their body names and the body, in
 /// seq order; every body must still be a change. Input: the store. Output: the events.
-fn ide_events(db: &Connection) -> Vec<(i64, String, String, Vec<u8>)> {
+fn ide_events(db: &Connection) -> Vec<IdeEvent> {
     logged(db)
         .into_iter()
         .filter(|(_, aggregate, ..)| aggregate.as_str() == Aggregate::Ide.name())
@@ -129,7 +132,7 @@ fn a_cleared_ids_ide_events_are_tombstoned_and_an_ide_rebuild_brings_none_back()
 /// A store with [`REMOVED`] (agents from 10) and [`OTHER`] (agents from 20), each with one
 /// logged change of every ide kind and one row in each ide table. Input: none. Output: the
 /// store and its ide events.
-fn two_projects_with_ide_events() -> (Store, Vec<(i64, String, String, Vec<u8>)>) {
+fn two_projects_with_ide_events() -> (Store, Vec<IdeEvent>) {
     let mut s = store();
     seed(&mut s.db, REMOVED, 10);
     seed(&mut s.db, OTHER, 20);

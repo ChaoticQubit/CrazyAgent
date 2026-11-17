@@ -21,7 +21,7 @@ const withTab = (overview, id, text) => ({ ...overview, tabs: overview.tabs.map(
 const job = (kind, status) => ({
   id: 1, project_id: "alpha", kind, kind_label: "Competitor research", status, status_label: "", report_path: `context/research/${kind}.md`,
   harness: "codex", tools: true, attempts: 0, claimer: null, error: null, cancel_requested: false, output_bytes: 0,
-  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null,
+  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, retryable: status === "failed" || status === "cancelled",
 });
 const stored = (research) => ({
   project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research, pool: null,

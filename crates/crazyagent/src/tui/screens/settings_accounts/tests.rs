@@ -1553,7 +1553,7 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
     ] {
         assert_eq!(
             sign_in_problem(native, &failed(code, device_code)),
-            sentence,
+            sentence.replace("this Mac", super::super::THIS_COMPUTER),
             "{code}"
         );
     }
@@ -1725,7 +1725,7 @@ fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_
     ] {
         assert_eq!(
             sign_in_problem(native, &finished(phase, code)),
-            sentence,
+            sentence.replace("this Mac", super::super::THIS_COMPUTER),
             "{phase:?} {code:?}"
         );
     }

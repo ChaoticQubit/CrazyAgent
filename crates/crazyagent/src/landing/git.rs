@@ -9,11 +9,57 @@ pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
+/// The oldest git all of landing runs on, the floor the test farm's git is held to: 2.40,
+/// the first with `merge-tree --merge-base` and `check-attr --source`, which a squash merge
+/// and the attribute checks around it run (W-GIT-FLOOR).
 const VERSION_MIN: (u32, u32) = (2, 40);
+/// The oldest git that opening a repository and every engine git call outside those two
+/// run on: 2.39, the Apple Git-154 of Xcode 16 and its Command Line Tools (W-GIT-FLOOR).
+const OPEN_VERSION_MIN: (u32, u32) = (2, 39);
+
+#[cfg(test)]
+thread_local! {
+    /// What `git version` prints for engine git on this thread in a row, in place of the real
+    /// git's answer, so a row can shape the git as an older one (W-GIT-FLOOR).
+    pub(super) static VERSION_PRINTED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 /// The longest the owner's ignore file is looked up for in a repository (RV-DS241-145).
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
 const CHECK_LINE_BYTES_MAX: usize = 80;
+
+/// Refuses a git version older than `needed`, logging the version found and the one needed
+/// once per process for each pair (W-GIT-FLOOR). Inputs: the numbers of the version, major
+/// first, and the oldest major and minor. Output: Ok, else `changes_git_old`, or
+/// `changes_git_unsupported` for fewer than two numbers.
+fn refuse_older(found: &[u32], needed: (u32, u32)) -> Result<(), EngineError> {
+    let (Some(&major), Some(&minor)) = (found.first(), found.get(1)) else {
+        return Err(failure("changes_git_unsupported"));
+    };
+    if (major, minor) >= needed {
+        return Ok(());
+    }
+    let shown: Vec<String> = found.iter().map(u32::to_string).collect();
+    super::log_once(&format!(
+        "changes_git_old found={} needed={}.{}",
+        shown.join("."),
+        needed.0,
+        needed.1
+    ));
+    Err(failure("changes_git_old"))
+}
+
+/// Whether git arguments use an option new in git 2.40.0, `merge-tree --merge-base` or
+/// `check-attr --source`, which [`Repo::check_merge_version`] holds back on an older git
+/// (W-GIT-FLOOR). Input: the arguments. Output: the answer.
+fn needs_merge_version(args: &[&str]) -> bool {
+    match args.first() {
+        Some(&"merge-tree") => args.contains(&"--merge-base"),
+        Some(&"check-attr") => args.contains(&"--source"),
+        _ => false,
+    }
+}
 
 /// The excludes setting a confined step's git takes in place of the owner's ignore file,
 /// which a step that writes an object or the work tree may not read (SA vid 2,
@@ -383,6 +429,9 @@ pub(super) struct Repo {
     /// repository that is not confined.
     #[cfg(target_os = "linux")]
     copies: bool,
+    /// The major and minor version of the git every call here runs, read once at
+    /// [`Self::open`]; None for a repository [`Self::fresh`] made (W-GIT-FLOOR).
+    version: Option<(u32, u32)>,
 }
 
 /// The Seatbelt profile of one engine git step on an agent's work tree (SECAUDIT
@@ -441,8 +490,11 @@ impl Repo {
             index_steps: Vec::new(),
             #[cfg(target_os = "linux")]
             copies: false,
+            version: None,
         };
-        repo.check_version()?;
+        let found = repo.found_version()?;
+        refuse_older(&found, OPEN_VERSION_MIN)?;
+        repo.version = found.first().copied().zip(found.get(1).copied());
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
@@ -503,6 +555,7 @@ impl Repo {
             index_steps: Vec::new(),
             #[cfg(target_os = "linux")]
             copies: false,
+            version: None,
         }
     }
 
@@ -570,10 +623,13 @@ impl Repo {
     /// This repository with its git calls run under [`WORK_TREE_PROFILE`], for a step on a
     /// linked agent worktree whose agent may still be changing it. Git reads a path with no
     /// check it can hold, so a link swapped in during the step is stopped here. A reading step
-    /// may run on the engine's private index ([`Self::places`]), which it alone writes.
+    /// may run on the engine's private index ([`Self::places`]), which it alone writes. The
+    /// step's git, the Command Line Tools one where installed, need not be the git
+    /// [`Self::open`] checked, so its own version is read under the profile and held to the
+    /// same floors, and kept for the merge check (V243-CONFINED-GIT-FLOOR).
     /// Input: what the step may write. Output: the repository, `changes_workspace_invalid` for
-    /// one that is not a linked worktree's, or `changes_git_unsupported` where no toolchain
-    /// git is found.
+    /// one that is not a linked worktree's, `changes_git_old` for a git older than 2.39, or
+    /// `changes_git_unsupported` where no toolchain git is found or it names no version.
     #[cfg(target_os = "macos")]
     pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
         use std::ffi::OsString;
@@ -626,10 +682,17 @@ impl Repo {
             OsString::from(WORK_TREE_PROFILE),
             git.into_os_string(),
         ]);
-        Ok(Self {
+        let step = Self {
             confinement,
             excludes: Some(setting),
+            version: None,
             ..self.clone()
+        };
+        let found = step.found_version()?;
+        refuse_older(&found, OPEN_VERSION_MIN)?;
+        Ok(Self {
+            version: found.first().copied().zip(found.get(1).copied()),
+            ..step
         })
     }
 
@@ -769,19 +832,44 @@ impl Repo {
         self.confined(Writes::Index)
     }
 
-    fn check_version(&self) -> Result<(), EngineError> {
+    /// Refuses a git older than 2.40, which has neither `merge-tree --merge-base` nor
+    /// `check-attr --source`, before [`Self::exec`] runs either, so listing, diffs and the
+    /// rest still work on the 2.39 of Xcode 16 and its Command Line Tools (W-GIT-FLOOR). It
+    /// reads the version kept at open, running no git, or asks git for a repository
+    /// [`Self::fresh`] made. Output: Ok, else `changes_git_old`, or `changes_git_unsupported`
+    /// when `git version` names no version.
+    pub(super) fn check_merge_version(&self) -> Result<(), EngineError> {
+        let found = match self.version {
+            Some((major, minor)) => vec![major, minor],
+            None => self.found_version()?,
+        };
+        refuse_older(&found, VERSION_MIN)
+    }
+
+    /// Whether the version kept at open is known to be older than 2.40, so that a squash
+    /// merge or an attribute check would be refused (W-GIT-FLOOR). Output: the answer, false
+    /// for a repository [`Self::fresh`] made.
+    pub(super) fn old_git(&self) -> bool {
+        self.version.is_some_and(|found| found < VERSION_MIN)
+    }
+
+    /// The numbers `git version` prints for this repository's git, or a row's shaped line.
+    /// Output: its first numbers, at most three, which [`refuse_older`] judges.
+    fn found_version(&self) -> Result<Vec<u32>, EngineError> {
         let printed = self.capture(&["version"], 256)?;
+        #[cfg(test)]
+        let printed = VERSION_PRINTED
+            .with_borrow(Clone::clone)
+            .map_or(printed, String::into_bytes);
         let text = String::from_utf8_lossy(&printed);
-        let mut numbers = text
+        Ok(text
             .trim()
             .strip_prefix("git version ")
             .unwrap_or_default()
             .split(|c: char| !c.is_ascii_digit())
-            .map(|part| part.parse::<u32>().ok());
-        match (numbers.next().flatten(), numbers.next().flatten()) {
-            (Some(major), Some(minor)) if (major, minor) >= VERSION_MIN => Ok(()),
-            _ => Err(failure("changes_git_unsupported")),
-        }
+            .map_while(|part| part.parse::<u32>().ok())
+            .take(3)
+            .collect())
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
@@ -832,7 +920,8 @@ impl Repo {
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
     /// `limit` bytes of its output; a confined Linux step on the worktree's own index runs on
     /// a copy of it ([`Self::swapped`]), and a two-tree `read-tree -u -m` there that may write
-    /// the work tree runs split ([`Self::moved`]). Inputs: the arguments, the input, extra
+    /// the work tree runs split ([`Self::moved`]). An option new in git 2.40 runs only on a
+    /// git that has it ([`Self::check_merge_version`]). Inputs: the arguments, the input, extra
     /// environment and the bound. Output: the exit code, the output and whether it ran over;
     /// an error when git cannot start, is stopped by a signal or runs past the time.
     pub(super) fn exec(
@@ -842,6 +931,9 @@ impl Repo {
         env: &[(&str, &str)],
         limit: usize,
     ) -> Result<Output, EngineError> {
+        if needs_merge_version(args) {
+            self.check_merge_version()?;
+        }
         #[cfg(target_os = "linux")]
         if self.copies {
             let fills = !self.index_steps.is_empty();
@@ -867,7 +959,11 @@ impl Repo {
     /// lock goes when the copy is not put back, so a git the step killed never leaves a lock there
     /// that no sweep removes, and the index is copied only from a plain file with one link, opened
     /// without following a link or waiting on a FIFO, and keeps the index's modified time, so an
-    /// entry racy against the index stays racy and git still reads its file (RV-DS241-147). Once
+    /// entry racy against the index stays racy and git still reads its file (RV-DS241-147). The
+    /// first copy stays open until the step's copy is judged, so no file written meanwhile takes
+    /// its inode number, which ext4 hands straight to the next file: a copy rewritten twice, as a
+    /// split move's `read-tree -m` and `update-index --refresh` do, or replaced by a link, never
+    /// reads as the first copy (FARM-LINUX R3). Once
     /// git exits 0 having rewritten the copy, the copy takes the index's place only when it too is
     /// a plain file with one link, so whatever a raced step leaves there is never taken, and a step
     /// that only reads leaves the index as it was; the step itself never writes the git folder
@@ -940,40 +1036,44 @@ impl Repo {
             });
         }
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
-        let fresh = || {
+        let fresh = || -> Option<Option<std::fs::File>> {
             let renewed = std::fs::remove_dir_all(folder)
                 .err()
                 .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
                 && std::fs::create_dir(folder).is_ok();
-            renewed
-                && match std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                    .open(&index)
-                {
-                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                    Ok(mut real) => match real.metadata() {
-                        Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
-                            .and_then(|mut written| {
-                                std::io::copy(&mut real, &mut written)?;
-                                let modified =
-                                    std::fs::FileTimes::new().set_modified(meta.modified()?);
-                                written.set_times(modified)
-                            })
-                            .is_ok(),
-                        _ => false,
-                    },
-                }
+            if !renewed {
+                return None;
+            }
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&index)
+            {
+                Err(error) => (error.kind() == std::io::ErrorKind::NotFound).then_some(None),
+                Ok(mut real) => match real.metadata() {
+                    Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
+                        .and_then(|mut written| {
+                            std::io::copy(&mut real, &mut written)?;
+                            let modified = std::fs::FileTimes::new().set_modified(meta.modified()?);
+                            written.set_times(modified)?;
+                            Ok(written)
+                        })
+                        .ok()
+                        .map(Some),
+                    _ => None,
+                },
+            }
         };
-        let copied = fresh();
+        let held = fresh();
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
-        let ran = if copied {
-            let before = std::fs::symlink_metadata(copy)
-                .ok()
-                .map(|meta| identity(&meta));
-            step().map(|output| (before, output))
-        } else {
-            Err(failed())
+        let ran = match &held {
+            Some(first) => first
+                .as_ref()
+                .map(|first| first.metadata().map(|meta| identity(&meta)))
+                .transpose()
+                .map_err(|_| failed())
+                .and_then(|before| step().map(|output| (before, output))),
+            None => Err(failed()),
         };
         let left = std::fs::symlink_metadata(copy).ok();
         let rewritten = matches!(&ran, Ok((before, output))
@@ -983,6 +1083,7 @@ impl Repo {
             && std::fs::symlink_metadata(copy).is_ok_and(|meta| plain(&meta))
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
+        drop(held);
         let _ = std::fs::remove_dir_all(folder);
         if !kept {
             let _ = std::fs::remove_file(&lock);

@@ -456,61 +456,6 @@ fn codex_line(
     (usage, reported.then_some(observation))
 }
 
-/// Names the tool call one Codex rollout line records, the way adoption counts it: a
-/// function or custom tool call by its name and parsed arguments, a local shell call by its
-/// command, and a skill it read by `skill:` and the skill's name too. Arguments longer than
-/// `ARGUMENTS_BYTES_MAX` count the call by its name alone. Input: the parsed line. Output:
-/// the counted names, at most two, none for any other line.
-fn codex_tools(value: &Value) -> Vec<String> {
-    let payload = &value["payload"];
-    if value["type"] != "response_item" {
-        return Vec::new();
-    }
-    let (name, input) = match payload["type"].as_str() {
-        Some("function_call") => (
-            payload["name"].as_str().unwrap_or_default(),
-            payload["arguments"]
-                .as_str()
-                .filter(|arguments| arguments.len() <= ARGUMENTS_BYTES_MAX)
-                .and_then(|arguments| serde_json::from_str(arguments).ok())
-                .unwrap_or(Value::Null),
-        ),
-        Some("custom_tool_call") => (payload["name"].as_str().unwrap_or_default(), Value::Null),
-        Some("local_shell_call") => ("local_shell_call", payload["action"].clone()),
-        _ => return Vec::new(),
-    };
-    let names: Vec<String> = crate::coord::adoption::tool_key(name, &input)
-        .into_iter()
-        .chain(crate::coord::adoption::skill_key(name, &input))
-        .collect();
-    assert!(names.len() <= 2);
-    names
-}
-
-/// Names the tool calls one Claude Code transcript line records, the way adoption counts
-/// them: each `tool_use` item of an assistant line by its name and input, and a skill it
-/// called or read by `skill:` and the skill's name too. Input: the parsed line. Output: the
-/// counted names, at most two a call, none for any other line.
-fn claude_tools(value: &Value) -> Vec<String> {
-    if value["type"] != "assistant" {
-        return Vec::new();
-    }
-    let mut names = Vec::new();
-    for item in value["message"]["content"].as_array().into_iter().flatten() {
-        if item["type"] != "tool_use" {
-            continue;
-        }
-        let name = item["name"].as_str().unwrap_or_default();
-        let called: Vec<String> = crate::coord::adoption::tool_key(name, &item["input"])
-            .into_iter()
-            .chain(crate::coord::adoption::skill_key(name, &item["input"]))
-            .collect();
-        assert!(called.len() <= 2);
-        names.extend(called);
-    }
-    names
-}
-
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first by [`changed_at`]: Claude Code's `projects/<folder>/<session>.jsonl` with its
 /// sub-agent records further down, also in the home a native lead's teammates run with
@@ -576,10 +521,14 @@ pub(crate) fn records(home: &Path, format: Format) -> (Vec<PathBuf>, Vec<LeftOut
                 let Ok(metadata) = entry.metadata() else {
                     continue;
                 };
+                let path = entry.path();
+                let identity = cfg!(unix)
+                    .then(|| file_identity(&path, &metadata))
+                    .flatten();
                 newest.push((
                     std::cmp::Reverse(changed_at(&metadata)),
-                    entry.path(),
-                    file_identity(&metadata),
+                    path,
+                    identity,
                     metadata.len(),
                 ));
                 if newest.len() > FILES_PER_SCAN_MAX
@@ -608,27 +557,46 @@ pub(crate) fn records(home: &Path, format: Format) -> (Vec<PathBuf>, Vec<LeftOut
     (paths, left, cut)
 }
 
-/// A record the walk saw but left out: its path, its file identity and its length then. One
-/// scan holds fewer than `ENTRIES_PER_SCAN_MAX` of them.
+/// A record the walk saw but left out: its path, its file identity where the walk's metadata
+/// holds one (unix; Windows needs an open handle, which the walk does not spend on every
+/// record) and its length then. One scan holds fewer than `ENTRIES_PER_SCAN_MAX` of them.
 pub(crate) struct LeftOut {
     pub(super) path: PathBuf,
-    identity: (u64, u64),
+    identity: Option<(u64, u64)>,
     length: u64,
 }
 
-/// The identity a record's progress is kept under: its device and inode on unix, none
-/// elsewhere, as [`open_record`] reads it. Input: the metadata. Output: the identity.
-#[cfg(unix)]
-pub(super) fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    (metadata.dev(), metadata.ino())
+/// The identity progress stored by builds that read none on Windows.
+const NO_IDENTITY: (u64, u64) = (0, 0);
+
+/// Whether a stored identity still names the live record, under the crate-wide volume
+/// renumber rule. A stored [`NO_IDENTITY`] names any record, as every stored identity did
+/// on Windows before, so the caller's other checks decide. Inputs: the stored and the live
+/// identity. Output: whether they name the same record.
+fn same_record(stored: (u64, u64), live: (u64, u64)) -> bool {
+    stored == NO_IDENTITY || crate::file_identity::same_files(&[stored], &[live])
 }
 
-/// The identity a record's progress is kept under: none on this platform, as
-/// [`open_record`] reads it. Input: the metadata. Output: the identity.
+/// The identity a record's progress is kept under: its device and inode, as
+/// [`open_record`] reads it. Inputs: the path and its metadata. Output: the identity.
+#[cfg(unix)]
+pub(super) fn file_identity(_: &Path, metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+/// The identity a record's progress is kept under: its volume serial number and file index,
+/// read from an open handle as [`open_record`] reads it, since `std` metadata holds neither.
+/// A path whose metadata is not a plain file, such as a link, has none, so a link is never
+/// listed under its target's identity. Inputs: the path and its metadata. Output: the
+/// identity, or none when it cannot be read.
 #[cfg(not(unix))]
-pub(super) fn file_identity(_: &std::fs::Metadata) -> (u64, u64) {
-    (0, 0)
+pub(super) fn file_identity(path: &Path, metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    if !metadata.is_file() {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    crazyagent_win_sandbox::file_id(&file).ok()
 }
 
 /// When a walked entry last changed, by a clock no agent can set: the inode change time,
@@ -711,15 +679,19 @@ fn mark_cut(
 }
 
 /// Whether a record the walk left out holds lines no scan counted: it is not empty and its
-/// stored progress is missing or belongs to another file, or the bytes past its stored
-/// offset hold a line a scan would count (CUT-L1). Inputs: the store, the record and the
-/// tail bytes this scan may still read. Output: the answer, or `usage_unavailable`.
+/// stored progress is missing or belongs to another file than the walk saw, or the bytes
+/// past its stored offset hold a line a scan would count (CUT-L1). Where the walk read no
+/// identity, [`countable_line`] checks it on the open record. Inputs: the store, the record
+/// and the tail bytes this scan may still read. Output: the answer, or `usage_unavailable`.
 fn uncounted(db: &Connection, record: &LeftOut, budget: &mut u64) -> Result<bool, EngineError> {
     if record.length == 0 {
         return Ok(false);
     }
     let progress = stored_progress(db, &record.path.to_string_lossy())?;
-    if progress.identity != record.identity {
+    if record
+        .identity
+        .is_some_and(|walked| progress.identity != walked)
+    {
         return Ok(true);
     }
     Ok(progress.offset < record.length && countable_line(record, &progress, budget))
@@ -729,7 +701,9 @@ fn uncounted(db: &Connection, record: &LeftOut, budget: &mut u64) -> Result<bool
 /// end a line a scan would count. A last line still being written or torn by a stopped agent
 /// ends none, and the first ending closes the rest of a line the reads are skipping. Spends
 /// the tail on `budget`; a tail past it, or a record replaced or unreadable since the walk,
-/// answers true. Inputs: the record, its progress and the budget. Output: the answer.
+/// answers true. Where the walk read no identity, the open record must still be the one its
+/// progress names ([`same_record`]). Inputs: the record, its progress and the budget.
+/// Output: the answer.
 fn countable_line(record: &LeftOut, progress: &Progress, budget: &mut u64) -> bool {
     let tail = record.length - progress.offset;
     if tail > *budget {
@@ -739,8 +713,12 @@ fn countable_line(record: &LeftOut, progress: &Progress, budget: &mut u64) -> bo
     let Some((mut file, identity, _)) = open_record(&record.path) else {
         return true;
     };
+    let same = record.identity.map_or_else(
+        || same_record(progress.identity, identity),
+        |walked| identity == walked,
+    );
     let mut bytes = Vec::new();
-    if identity != record.identity
+    if !same
         || file.seek(SeekFrom::Start(progress.offset)).is_err()
         || file.take(tail).read_to_end(&mut bytes).is_err()
         || bytes.len() as u64 != tail
@@ -777,7 +755,10 @@ pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     }
     let file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    metadata.is_file().then_some((file, (0, 0), metadata.len()))
+    let identity = crazyagent_win_sandbox::file_id(&file).ok()?;
+    metadata
+        .is_file()
+        .then_some((file, identity, metadata.len()))
 }
 
 pub(super) fn session_name(path: &Path) -> String {
@@ -800,7 +781,7 @@ pub(super) fn session_name(path: &Path) -> String {
 /// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
 /// its place. A line longer than the read is skipped.
 /// Inputs: the record, its progress and the time. Output: the records and the last limits.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 fn read_record(
     path: &Path,
     format: Format,
@@ -849,7 +830,7 @@ fn read_record_with(
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 fn read_opened(
     opened: (File, (u64, u64), u64),
     format: Format,
@@ -925,7 +906,9 @@ fn witness_head(file: &mut File, progress: &mut Progress) {
 /// wait for the next scan. The record is the one the progress pinned while its inode is
 /// the same, under the crate-wide volume renumber rule, and its first bytes still hash to
 /// what the progress holds; the pin then moves to the live device, so a reboot never counts
-/// a whole record again. Inputs: the open record with its
+/// a whole record again. Progress stored with [`NO_IDENTITY`] is pinned the same way on its
+/// first bytes alone, so the first scan after an upgrade counts no record twice. Inputs:
+/// the open record with its
 /// identity and length, its progress, the time and where to collect the tool calls read,
 /// at most `TOOLS_PER_READ_MAX`, if anywhere, the thread to use when no line named one and
 /// what the scan saw. Output: the records, the finished turns and the last limits.
@@ -942,8 +925,7 @@ fn read_opened_with(
     Vec<super::activity::Closed>,
     Option<Observation>,
 ) {
-    let pinned = crate::file_identity::same_files(&[progress.identity], &[identity])
-        && length >= progress.offset;
+    let pinned = same_record(progress.identity, identity) && length >= progress.offset;
     let held = if pinned && length > progress.offset {
         let Some(held) = head_holds(&mut file, progress) else {
             return (Vec::new(), Vec::new(), None);
@@ -1738,7 +1720,7 @@ pub fn count_turn(
         count_reported(db, attribution, reported, session, now_ms)?;
         reported
     };
-    let prefix = format!("{}/", home.to_string_lossy());
+    let prefix = format!("{}{}", home.to_string_lossy(), std::path::MAIN_SEPARATOR);
     db.execute(
         "DELETE FROM usage_files WHERE substr(path,1,length(?1))=?1",
         params![prefix],
@@ -1918,7 +1900,7 @@ fn forget_finished_runs(db: &Connection, now_ms: i64) -> Result<(), EngineError>
         }
         db.execute(
             "DELETE FROM usage_files WHERE substr(path,1,length(?1))=?1",
-            params![format!("{home}/")],
+            params![format!("{home}{}", std::path::MAIN_SEPARATOR)],
         )
         .map_err(storage)?;
         db.execute("DELETE FROM usage_cut WHERE home=?1", [&home])
@@ -1955,3 +1937,8 @@ mod migration_tests;
 
 #[cfg(test)]
 mod counting_tests;
+
+/// The tool call names one Codex or Claude Code record line holds, the way adoption counts
+/// them.
+mod tool_calls;
+use tool_calls::{claude_tools, codex_tools};

@@ -11,6 +11,18 @@ fn root() -> tempfile::TempDir {
     root
 }
 
+/// A private root beside the test binary, for a row whose check refuses a folder others can
+/// change (`service::changeable_by_others`): Linux's temp folder is the world-writable `/tmp`
+/// that check counts, the Mac's is per user. Output: the folder, 0700, nothing above it
+/// that others can change.
+fn owned_root() -> tempfile::TempDir {
+    let beside = std::env::current_exe().unwrap();
+    let root = tempfile::tempdir_in(beside.parent().unwrap()).unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(crate::service::changeable_by_others(root.path()), None);
+    root
+}
+
 fn script(path: &Path, line: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, format!("#!/bin/sh\necho \"{line}\"\n")).unwrap();
@@ -463,7 +475,7 @@ fn the_engine_npm_prefix_sits_in_the_setup_folder_the_resolver_and_harness_findi
 
 #[test]
 fn the_engine_npm_prefix_links_the_node_its_install_used_so_a_node_script_harness_finds_it() {
-    let root = root();
+    let root = owned_root();
     let prefix = crate::setup::harness_prefix(root.path());
     let first = root.path().join("tools/one/bin/node");
     script(&first, "one");
@@ -597,4 +609,36 @@ fn every_mac_and_linux_target_pins_the_official_node_lts_archive_and_no_other_ta
     }
     assert_eq!(NODE_VERSION, "26.13.1");
     assert!(crate::setup::known_reason("setup_archive_unsafe").is_some());
+}
+
+/// GNU tar starts `gzip` from its PATH to unpack a `.tar.gz`, so on Linux every pinned Node
+/// install failed (farm R4). The PATH the install gives its programs keeps `setup/bin` first
+/// and names a folder that holds an executable gzip.
+#[test]
+fn the_node_install_runs_its_programs_with_gzip_on_their_path() {
+    let root = root();
+    let env = installer(root.path()).env();
+    let path = env
+        .iter()
+        .find(|(name, _)| *name == "PATH")
+        .map(|(_, value)| value.clone())
+        .unwrap();
+    let folders: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    assert_eq!(
+        folders.first(),
+        Some(&root.path().join("setup").join("bin"))
+    );
+    let gzip = |folder: &PathBuf| {
+        std::fs::metadata(folder.join("gzip"))
+            .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+    };
+    assert!(folders.iter().any(gzip), "{path:?}");
+    let system: Vec<PathBuf> = crate::tools::SYSTEM_FOLDERS
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    assert!(
+        folders[1..].iter().all(|folder| system.contains(folder)),
+        "only system folders follow setup/bin: {path:?}"
+    );
 }

@@ -113,6 +113,10 @@ impl Screen {
         }
     }
 
+    /// The read or edit path to show: below the worktree, plain, and screened part by part on
+    /// either separator, so no empty, `.` or `..` part, secret-like name, `.git`, `.crazyagent`,
+    /// credential or hidden folder is named, nor a rooted or drive-relative path. Input: the
+    /// tool's input. Output: the path as written, relative to the worktree, or none.
     fn path(&self, input: &Value) -> Option<String> {
         if self.blind {
             return None;
@@ -123,6 +127,9 @@ impl Screen {
         let path = Path::new(raw);
         let relative = if path.is_absolute() {
             path.strip_prefix(&self.cwd).ok()?
+        } else if path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_)))
+        {
+            return None;
         } else {
             path
         };
@@ -134,7 +141,7 @@ impl Screen {
         {
             return None;
         }
-        let parts: Vec<&str> = text.split('/').collect();
+        let parts: Vec<&str> = text.split(['/', '\\']).collect();
         let refused = |part: &&str| {
             part.is_empty()
                 || *part == "."

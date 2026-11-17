@@ -80,6 +80,7 @@ fn inside(profile: &Path, project: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+#[ignore = "diagnostic probe: always fails to print its report; run with --ignored --nocapture"]
 fn lowbox_probe_reports_what_the_container_can_do() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

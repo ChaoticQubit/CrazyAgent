@@ -355,8 +355,7 @@ fn walk(
         let child =
             rustix::fs::openat(&parent, *name, FOLDER, Mode::empty()).map_err(|_| unsafe_home())?;
         let stat = rustix::fs::fstat(&child).map_err(|_| unsafe_home())?;
-        if step != Walk::Open && (stat.st_uid != owner || u32::from(stat.st_mode) & 0o7777 != 0o700)
-        {
+        if step != Walk::Open && (stat.st_uid != owner || stat.st_mode & 0o7777 != 0o700) {
             return Err(unsafe_home());
         }
         parent = child;

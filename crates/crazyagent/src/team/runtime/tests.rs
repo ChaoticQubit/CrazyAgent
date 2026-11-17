@@ -21351,6 +21351,68 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     );
 }
 
+/// V243-GIT-FLOOR-SWEEP door 5: on git 2.39 an idle linked lead's pass does not try to land a
+/// resting teammate's work, which an Accept on that git refuses `changes_git_old`: the set
+/// waits for the owner as it was, where each pass kept that refusal as its landing result and
+/// logged `teammate_landing_failed`. On 2.40 the same pass lands it.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_git_2_39_an_idle_lead_leaves_a_resting_teammate_s_work_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let waiting = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+    let kept = || {
+        let (_, set) = crate::landing::change_set(&db, &waiting.id)
+            .unwrap()
+            .expect("greet's change set is kept");
+        (set.state, set.landing_result)
+    };
+
+    crate::landing::shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "nothing lands on git 2.39"
+    );
+    assert_eq!(
+        kept(),
+        (waiting.state, waiting.landing_result),
+        "the set waits for the owner as it was, with no refusal kept"
+    );
+
+    crate::landing::shape_git(Some("git version 2.40.0"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_ne!(
+        linked.tip(&linked.branch),
+        start,
+        "greet's work lands on 2.40"
+    );
+    assert_eq!(kept().0, crate::landing::ChangeState::Accepted);
+    crate::landing::shape_git(None);
+}
+
 /// OP9B-C5: when the lead's change set cannot be recorded after its teammates' work landed
 /// on its task branch, the lead is not told to finish over work the owner cannot see yet, and
 /// the engine records it again at a later pass while the lead stays idle, instead of leaving
@@ -34482,51 +34544,8 @@ fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_net
     }
 }
 
-/// RV-DS241-137 code r2 F1: a native lead's teammates' home is reset as an agent home is at
-/// each launch, so a crate source a teammate planted in its cargo home where the owner has
-/// none, a package npx installed and a tool config no list names are gone, while the links
-/// to the lead's team and task folders and Claude Code's answered config stay.
-#[cfg(unix)]
-#[test]
-fn a_native_leads_teammates_home_is_reset_at_each_launch() {
-    use std::os::unix::fs::DirBuilderExt;
-    let tmp = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
-    let owner = root.join("owner");
-    std::fs::create_dir_all(&owner).unwrap();
-    let homes = ToolHomes::at(&owner);
-    let home = root.join("agent/home");
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&home)
-        .unwrap();
-    let project = root.join("project");
-    std::fs::create_dir_all(&project).unwrap();
-    let mates = prepare_mates_home(&home, &homes, &project).unwrap();
-    let planted = [
-        mates.join(".cargo/registry/src/index/x-1.0.0/build.rs"),
-        mates.join(".npm/_npx/0/node_modules/x/index.js"),
-        mates.join(".bunfig.toml"),
-    ];
-    for path in &planted {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "planted\n").unwrap();
-    }
-
-    let again = prepare_mates_home(&home, &homes, &project).unwrap();
-
-    assert_eq!(again, mates);
-    let left: Vec<&PathBuf> = planted
-        .iter()
-        .filter(|path| std::fs::symlink_metadata(path).is_ok())
-        .collect();
-    assert!(left.is_empty(), "the teammates' home kept {left:?}");
-    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
-        assert_eq!(
-            std::fs::read_link(mates.join(folder)).unwrap(),
-            home.join(folder)
-        );
-    }
-    assert!(mates.join(".claude.json").is_file());
-}
+/// The launch preparation rows: a native lead's teammates get a fresh HOME at each launch,
+/// and a Codex agent whose hook key list cannot be read is never taken as trusted and is
+/// told why. Inputs: the team runtime fixtures. Output: none; each row asserts.
+#[path = "launch_home_hooks_tests.rs"]
+mod launch_home_hooks_tests;

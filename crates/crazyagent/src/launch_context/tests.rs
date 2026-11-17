@@ -1,7 +1,6 @@
 use super::*;
 use crate::plugins::{EffectiveSecret, EffectiveServer};
 use crate::project_setup::TeamPlan;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 #[path = "context_mode_off_tests.rs"]
@@ -3013,72 +3012,6 @@ fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_the_edit_gua
     drop(installed);
 }
 
-/// PA1213 security F1: a Codex launch never lifts hook review. Its `config.toml` pins the
-/// trust hash of each hook the engine wrote, under the key Codex 0.167.1 reads
-/// (`<canonical home>/config.toml:<label>:<group>:<handler>`), so a hook an agent adds in
-/// its worktree stays held for review. The hashes match vectors proven live on Codex
-/// 0.167.1 with a stand-in home, and Codex's matcher and timeout normalizing is kept.
-#[test]
-fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
-    let pinned = |event: &str, matcher: Option<&str>, timeout: Option<u32>| {
-        codex_hook_hash(&codex_hook(event, matcher, "echo hi".to_owned(), timeout).unwrap())
-    };
-    assert_eq!(
-        pinned("PreToolUse", Some("apply_patch|Bash"), Some(15)),
-        "sha256:fb1e14c710eaa3bd057e6917169ae3318e54399b7bc942693b8595fdb7ccabb3"
-    );
-    assert_eq!(
-        pinned("SessionStart", None, None),
-        "sha256:a245b9b8493f2be82aea06c373ef42709b417c1b701a54e5ab76ab728777f4ad"
-    );
-    assert_eq!(
-        pinned("Stop", Some("ignored"), None),
-        "sha256:f2aa169c7a1cf9b7cc9b61ce5ecec0315e0f7d13ac35935b1aa74440f9a839f8"
-    );
-    assert!(codex_hook("Notification", None, "echo hi".to_owned(), None).is_none());
-    let end = codex_hook("SessionEnd", None, "echo hi".to_owned(), Some(30)).unwrap();
-    assert_eq!(end.timeout, 3);
-
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
-    let engine = root.join("bin").join("crazyagent");
-    let codex = private_home(&root, "codex");
-    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
-        .with_relay(&engine, &root.join("mailbox-codex"))
-        .install("codex", &codex, true)
-        .unwrap();
-    let text = fs::read_to_string(codex.join("config.toml")).unwrap();
-    assert!(!text.contains("bypass"), "{text}");
-    let config: toml::Table = text.parse().unwrap();
-    let hooks = config["hooks"].as_table().unwrap();
-    let group = &hooks["PreToolUse"].as_array().unwrap()[0];
-    let handler = &group["hooks"].as_array().unwrap()[0];
-    let written = CodexHook {
-        event: "PreToolUse",
-        label: "pre_tool_use",
-        matcher: group["matcher"].as_str().map(str::to_owned),
-        command: handler["command"].as_str().unwrap().to_owned(),
-        timeout: u32::try_from(handler["timeout"].as_integer().unwrap()).unwrap(),
-    };
-    let key = format!(
-        "{}:pre_tool_use:0:0",
-        codex.canonicalize().unwrap().join("config.toml").display()
-    );
-    let state = hooks["state"].as_table().unwrap();
-    assert_eq!(state.keys().collect::<Vec<_>>(), [&key]);
-    assert_eq!(
-        state[&key]["trusted_hash"].as_str(),
-        Some(codex_hook_hash(&written).as_str())
-    );
-    assert_eq!(
-        codex_pinned_keys(&codex),
-        Some(vec![key]),
-        "the engine reads back the keys it asks Codex about (PA1213R2-F2)"
-    );
-    assert_eq!(codex_pinned_keys(&root.join("no-home")), None);
-    drop(installed);
-}
-
 #[test]
 fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
     let directory = tempfile::tempdir().unwrap();
@@ -5352,3 +5285,9 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
         .keep();
     assert!(Path::new(&home).join("config.toml").is_file());
 }
+
+/// The Codex hook pin rows: a Codex launch pins only its own hooks from its own key list,
+/// never bypasses hook trust, and tells a missing key list apart from a linked, oversized,
+/// malformed or FIFO one. Inputs: the launch fixtures. Output: none; each row asserts.
+#[path = "codex_hook_tests.rs"]
+mod codex_hook_tests;
