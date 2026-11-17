@@ -62,8 +62,7 @@ fn accept_failures_a_later_accept_outlives_are_retried_and_lasting_ones_end_the_
 
 /// An exclusive listener binds on either loopback address, holds its port against a second
 /// exclusive bind, which fails with `AddrInUse`, and accepts a connection there (S4B-2W1,
-/// G1).
-#[cfg(unix)]
+/// G1). On Windows its own row in the listener table never counts against it (W10b).
 #[test]
 fn an_exclusive_listener_binds_each_loopback_keeps_its_port_and_accepts() {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -80,6 +79,33 @@ fn an_exclusive_listener_binds_each_loopback_keeps_its_port_and_accepts() {
         let _client = super::connect_tcp_std(bound).unwrap();
         let (_, peer) = super::accept_tcp_std(&listener).unwrap();
         assert_eq!(peer.ip(), loopback.ip());
+    }
+}
+
+/// W10b (row 230 on Windows): an exclusive bind on a loopback address fails with `AddrInUse`
+/// on a port this user's wildcard listener holds, in its own family or, for 127.0.0.1, the
+/// IPv6 wildcard, which may take both families, so it never sits beside that listener and
+/// takes its loopback connections. macOS skips the last case, where its own bind rules decide.
+/// Windows reads the listener table after its bind, so a wildcard listener bound after that
+/// read still sits beside it there; unix refuses that later bind itself.
+#[test]
+fn an_exclusive_bind_fails_beside_a_wildcard_listener_of_this_user() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let mut cases = vec![("0.0.0.0:0", v4), ("[::]:0", v6)];
+    if !cfg!(target_os = "macos") {
+        cases.push(("[::]:0", v4));
+    }
+    for (holder, loopback) in cases {
+        let held = super::bind_tcp_std(holder).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let refused = super::bind_tcp_std_exclusive(SocketAddr::new(loopback, port)).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::AddrInUse,
+            "{holder} {loopback}"
+        );
     }
 }
 

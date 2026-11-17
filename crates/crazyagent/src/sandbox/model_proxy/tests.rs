@@ -217,7 +217,8 @@ fn a_port_search_with_every_port_taken_refuses_plainly() {
 /// S4B-2W1 r1 (rv-code L1, rv-secreview L2): a port search skips a port this user holds on
 /// 127.0.0.1, ::1, 0.0.0.0 or ::, each bound as `std` binds, with `SO_REUSEADDR`, and takes
 /// the next one, so a proxy never sits beside an owner's wildcard listener and takes its
-/// loopback connections.
+/// loopback connections. On Windows the search sees only listeners bound before its own
+/// bind (W10b, `spawn_gate::bind_tcp_std_exclusive`).
 #[test]
 fn a_port_search_skips_a_port_held_on_any_address_of_this_user() {
     for holder in ["127.0.0.1:0", "[::1]:0", "0.0.0.0:0", "[::]:0"] {
