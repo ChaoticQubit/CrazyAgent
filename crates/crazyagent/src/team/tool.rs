@@ -18,6 +18,11 @@ pub const TOOL_NAME: &str = "delegate";
 /// The configured master's tool that wakes a finished sub-agent with its next task (L6,
 /// F16), recorded beside `delegate` and taken when the reply ends.
 pub const WAKE_TOOL: &str = "wake";
+/// What every hand-off's task asks for, in `spawn`, `delegate`, `wake` and the task block
+/// alike: the goal, the finding, the agent's part of the plan and its acceptance check; a
+/// probe that costs the owner is asked for once, never replaced by a guess
+/// (V243-MASTER-ANALYZE-FIRST, #388 F1, leader 16:33).
+pub(crate) const HAND_OFF_TASK: &str = "The goal, what you found (the cause with its evidence, or what is still unknown), this agent's part of your plan, and its acceptance check, in plain words. When confirming the cause needs paid calls, the owner's sign-in or other owner resources, ask the owner once for a small probe instead of handing out a guess; if the owner declines, state the cause as UNCONFIRMED and make reproducing it the agent's first step.";
 /// The fence line that opens the one machine block a master without team tools hands out
 /// work with (L6): a JSON object read through the same schema as a `delegate` or `wake`
 /// record, never free prose.
@@ -616,7 +621,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
+                        "task": {"type": "string", "description": HAND_OFF_TASK},
                         "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
                         "role": {"type": "string", "description": "Optional short name for this job in kebab case, such as onboarding-fix. The sub-agent is then addressed as @onboarding-fix."},
                     },
@@ -774,7 +779,7 @@ fn spec(name: &str) -> Value {
         SPAWN_TOOL => (
             "Start an agent for one task in its own worktree and branch: the master starts a lead, and a lead starts a sub-agent of its own within the owner's Sub-agent depth setting. The engine tells you when it ends.",
             json!({"type": "object", "properties": {
-                "task": {"type": "string", "description": "What the agent should do, in plain words."},
+                "task": {"type": "string", "description": HAND_OFF_TASK},
                 "harness": {"type": "string", "description": "Optional harness, such as codex or claude-code."},
                 "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
                 "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
@@ -2032,7 +2037,7 @@ fn wake_listing() -> Value {
             "type": "object",
             "properties": {
                 "agent": {"type": "string", "description": "The finished sub-agent's name, @role handle or Sub-agent number."},
-                "task": {"type": "string", "description": "What it should do next, in plain words."},
+                "task": {"type": "string", "description": HAND_OFF_TASK},
             },
             "required": ["agent", "task"],
             "additionalProperties": false,
