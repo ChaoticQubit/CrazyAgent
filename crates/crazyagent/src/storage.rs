@@ -2687,7 +2687,7 @@ fn owner_apply_with(
             let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
             let fence = crate::state_log::fence::Fence::Owner(a.clone());
             let project = removed.project.as_str();
-            redacted = crate::worktrees::log::forget_project(&tx, project, seq, &fence)?;
+            redacted = crate::worktrees::log::forget_project(&tx, project, Some(seq), &fence)?;
             redacted += crate::ide::log::forget_project(&tx, project, Some(seq), &fence)?;
         }
     }
