@@ -452,6 +452,39 @@ impl Engine {
         crate::ide::workspace::tests::add_project(&self.connection, self.project.as_str(), &folder);
     }
 
+    /// Removes the project from the dashboard as the owner's Remove does: its folder may bring
+    /// it back, and its working agents stay. No input. Output: none; a refused removal panics.
+    fn remove_from_dashboard(&mut self) {
+        let config = crate::config::resolve_config_bytes("", "").unwrap();
+        let tx = self.connection.transaction().unwrap();
+        let removed = crate::project_setup::execute(
+            &tx,
+            &config,
+            &crate::project_setup::SetupAction::Remove {
+                project_id: self.project.clone(),
+            },
+            2,
+        )
+        .unwrap();
+        assert_eq!(removed, Outcome::Applied);
+        tx.commit().unwrap();
+    }
+
+    /// Adds the removed project's own folder again, which brings the project back under its id
+    /// (DEC-178 addendum 1). No input. Output: none; a refused return panics.
+    fn add_folder_again(&mut self) {
+        let folder = self._dir.path().join("project");
+        let spec = crate::protocol::ProjectSpec {
+            name: self.project.as_str().into(),
+            repositories: vec![],
+        };
+        let tx = self.connection.transaction().unwrap();
+        let back =
+            crate::storage::create_project_at(&tx, &self.project, &spec, folder.to_str()).unwrap();
+        assert_eq!(back, Outcome::Applied);
+        tx.commit().unwrap();
+    }
+
     /// The project's logged questions linked to a team message: id, asker, question,
     /// context, status and closer, oldest first.
     fn linked(&self) -> Vec<crate::questions::Question> {
@@ -567,16 +600,20 @@ fn a_team_question_to_the_owner_is_logged_once_where_every_question_waits() {
     assert_eq!(engine.receipt(own), "sent");
 }
 
-/// F12, CM#1143: a team question that was already open and alerted before this engine
-/// (no project row then) is logged on a later tick.
+/// F12, CM#1143: a team question asked while its project has no project row is logged on a
+/// later tick, once the project row is back. Since S1 a removed id comes back only through
+/// its own folder (DEC-178 addendum 1), so the project is removed from the dashboard while
+/// its agent still works, the agent asks, and adding that folder again brings it back.
 #[test]
 fn an_open_team_question_from_before_is_logged_on_a_later_tick() {
     let mut engine = Engine::new();
+    engine.register();
     let asker = engine.agent("working");
+    engine.remove_from_dashboard();
     engine.ask(asker, Severity::High, "Old question?");
     engine.tick(NOW);
     assert!(engine.linked().is_empty());
-    engine.register();
+    engine.add_folder_again();
     engine.tick(NOW + 1);
     assert_eq!(engine.linked().len(), 1);
 }

@@ -33,6 +33,7 @@ use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
+#[cfg(unix)]
 const READ_BOUND: Duration = Duration::from_secs(10);
 const CLEANUP_BOUND: Duration = Duration::from_secs(2);
 /// The longest a logout's custody holds its slot: a `claude auth logout` and the status
@@ -874,7 +875,7 @@ impl OwnerRuntimeHandle {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn register_rcli_master_executable(
         &self,
         host: RegisteredNativeAuthHost,

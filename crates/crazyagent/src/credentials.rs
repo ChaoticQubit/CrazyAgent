@@ -272,6 +272,7 @@ pub fn parts(reference: &CredentialRef) -> Result<(&str, &str), StoreError> {
 /// Serializes a value as compact JSON into one buffer of exactly its size, measured by a
 /// first pass, so no growth frees a partial copy of a secret the value holds; the caller
 /// wipes the result after use. Input: the value. Output: the bytes, or serde_json's error.
+#[cfg(unix)]
 pub(crate) fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Vec<u8>> {
     let mut counted = Counted(0);
     serde_json::to_writer(&mut counted, value)?;
@@ -287,8 +288,10 @@ pub(crate) fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Ve
 }
 
 /// A writer that only counts the bytes written to it, for [`sized_json`]'s first pass.
+#[cfg(unix)]
 struct Counted(usize);
 
+#[cfg(unix)]
 impl std::io::Write for Counted {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0 += bytes.len();
