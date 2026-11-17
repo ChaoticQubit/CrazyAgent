@@ -4,6 +4,7 @@ use crate::projects_home::icloud;
 use crate::projects_home::job::{
     IntakeJob, JOB_VIEW_BYTES_MAX, JobKind, JobState, JobSubject, JobView,
 };
+use crate::projects_home::reinstall;
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
 /// How many times a job reads the current revision and plans its change again when another
@@ -806,7 +807,40 @@ async fn worked(
     }
     fetch(authority, job).await?;
     job.copying();
-    served(engine, authority, packet, a, job, subject).await
+    let result = served(engine, authority, packet, a, job, subject).await;
+    if result.is_ok() {
+        keep_offer(engine, job).await;
+    }
+    result
+}
+
+/// Keeps the reinstall offer of an add or a project move that ended done (DEC-198 slice 3):
+/// the folders its download left out, each with the command the files beside it name, at
+/// the folder it landed in, and drops the offer at a moved project's old folder. A failure
+/// is logged and never fails the job. Inputs: the engine and the job. Output: none.
+async fn keep_offer(engine: &Arc<Engine>, job: &Arc<IntakeJob>) {
+    let Some(landed) = job.tally().landed_at() else {
+        eprintln!("reinstall_offer_not_kept cause=no_landing");
+        return;
+    };
+    let old = (job.kind() == JobKind::MoveProject).then(|| PathBuf::from(job.source()));
+    let (download, folder) = (job.download(), landed.clone());
+    let look = tokio::task::spawn_blocking(move || {
+        let skipped = download.skipped();
+        reinstall::kept(&folder, &skipped, &|path: &Path| {
+            std::fs::symlink_metadata(path)
+        })
+    });
+    let Ok(kept) = look.await else {
+        eprintln!("reinstall_offer_not_kept cause=look_failed");
+        return;
+    };
+    let keep = engine.owner_job(|reply| Job::HomeReinstallKeep(landed, old, kept, reply));
+    match tokio::time::timeout(engine.timeout, keep).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("reinstall_offer_not_kept cause={}", e.0),
+        Err(_) => eprintln!("reinstall_offer_not_kept cause=timeout"),
+    }
 }
 
 /// Checks the job's add before its download, so a folder the add refuses is not downloaded

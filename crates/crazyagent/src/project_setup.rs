@@ -2885,6 +2885,9 @@ fn remove(
     }
     crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
+    if let Some(folder) = folder.as_deref() {
+        crate::storage::reinstall::forget(tx, folder)?;
+    }
     removed::record(
         tx,
         project_id,
