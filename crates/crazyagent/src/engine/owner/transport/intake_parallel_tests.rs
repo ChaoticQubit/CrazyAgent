@@ -12,7 +12,7 @@ const JOBS_WAITING: usize = 8;
 /// One engine with its projects home set, an owner client and a folder outside the home for
 /// the folders the owner picks, for the rows of several intake jobs at once (DEC-197).
 struct Jobs {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     home: tempfile::TempDir,
     outside: tempfile::TempDir,
     service: EngineService,
@@ -60,7 +60,7 @@ impl Jobs {
             "the projects home is set: {set:?}"
         );
         Self {
-            _root: root,
+            root,
             home,
             outside,
             service,
@@ -140,6 +140,49 @@ impl Jobs {
     async fn stop(mut self) {
         drop(self.owner);
         self.service.shutdown().await.unwrap();
+    }
+
+    /// Stops the engine, lets `cut` change its database as an engine stop left it, then starts
+    /// the engine again on the same folder and attaches the owner. Input: the change. Output:
+    /// the engine started again.
+    async fn restarted(self, cut: impl FnOnce(&rusqlite::Connection)) -> Self {
+        let Jobs {
+            root,
+            home,
+            outside,
+            mut service,
+            _stop: stop,
+            owner,
+        } = self;
+        drop(owner);
+        service.shutdown().await.unwrap();
+        let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+        cut(&db);
+        drop(db);
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stop.subscribe(),
+        )
+        .await
+        .unwrap();
+        let owner = OwnerController::attach(
+            root.path(),
+            crate::engine::owner::OwnerClientKind::Tui,
+            ENGINE_WAIT,
+        )
+        .await
+        .unwrap();
+        Self {
+            root,
+            home,
+            outside,
+            service,
+            _stop: stop,
+            owner,
+        }
     }
 }
 
@@ -315,5 +358,61 @@ async fn a_stop_of_one_job_leaves_the_other_running() {
         "a stopped move leaves its folder"
     );
     assert!(!jobs.home().join("stop").exists());
+    jobs.stop().await;
+}
+
+/// DEC-197: the adds an engine stop cut while they ran side by side all come back after the
+/// next engine start, each its own ended job in start order with nothing moved, and a dismiss
+/// of one leaves the other, past another start too.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_add_an_engine_stop_cut_comes_back_ended_after_the_next_start() {
+    let jobs = Jobs::start().await;
+    let shop = jobs.folder("shop", "shop\n");
+    let garden = jobs.folder("garden", "garden\n");
+    let home = jobs.home();
+    let mut jobs = jobs
+        .restarted(|db| {
+            for (request, source) in [("add-shop", &shop), ("add-garden", &garden)] {
+                let name = Path::new(source).file_name().unwrap();
+                db.execute(
+                    "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                     VALUES (?1, 'owner', ?2, ?3, 'move')",
+                    rusqlite::params![request, source, home.join(name).to_str().unwrap()],
+                )
+                .unwrap();
+            }
+        })
+        .await;
+    let listed = |status: &[JobView]| -> Vec<String> {
+        status
+            .iter()
+            .map(|job| job.id.as_str().to_owned())
+            .collect()
+    };
+    let status = jobs.owner.job_status().await.unwrap();
+    assert_eq!(listed(&status), ["add-shop", "add-garden"]);
+    let cut = JobState::Failed {
+        code: "home_add_interrupted".into(),
+        phase: crate::projects_home::job::Phase::Copying,
+    };
+    assert!(status.iter().all(|job| job.state == cut), "{status:?}");
+    assert_eq!(note(Path::new(&shop)), "shop\n");
+    assert_eq!(note(Path::new(&garden)), "garden\n");
+
+    let dismissed = jobs
+        .owner
+        .job_dismiss(RequestId::new("add-shop").unwrap())
+        .await
+        .unwrap();
+    assert!(dismissed);
+    let status = jobs.owner.job_status().await.unwrap();
+    assert_eq!(listed(&status), ["add-garden"]);
+    let mut jobs = jobs.restarted(|_| {}).await;
+    let status = jobs.owner.job_status().await.unwrap();
+    assert_eq!(
+        listed(&status),
+        ["add-garden"],
+        "the dismiss reached storage"
+    );
     jobs.stop().await;
 }
