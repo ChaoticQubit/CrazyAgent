@@ -153,8 +153,11 @@ fn cells(db: &rusqlite::Connection, table: &str) -> Vec<String> {
         .concat()
 }
 
+/// H4 (V250-H4-LOCAL-YAML): the three bundled HTTP embedding plugins list first, in screen
+/// order, and every one starts off, since no 2.5 code runs the local model that V3 shipped
+/// on by default.
 #[test]
-fn bundled_plugins_list_first_with_only_the_local_one_on() {
+fn bundled_plugins_list_first_and_all_start_off() {
     let case = case();
     let listing = list(&case.db, &case.root).unwrap();
     let names: Vec<&str> = listing
@@ -162,12 +165,13 @@ fn bundled_plugins_list_first_with_only_the_local_one_on() {
         .iter()
         .map(|plugin| plugin.name.as_str())
         .collect();
-    assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
+    assert_eq!(names, ["openai", "voyage", "ollama"]);
     assert!(!listing.more);
-    let local = plugin(&listing, "local");
-    assert_eq!(
-        (local.origin, &local.status, local.enabled),
-        (Origin::Bundled, &PluginStatus::Ready, true)
+    assert!(
+        listing
+            .plugins
+            .iter()
+            .all(|plugin| plugin.origin == Origin::Bundled && !plugin.enabled)
     );
     let openai = plugin(&listing, "openai");
     assert_eq!(
@@ -349,6 +353,11 @@ fn refused_and_unsafe_files_are_listed_with_their_problem_and_other_files_ignore
     drop_in(&case, "other.yaml", NEAR);
     drop_in(
         &case,
+        "ollama.yaml",
+        &NEAR.replace("name: near", "name: ollama"),
+    );
+    drop_in(
+        &case,
         "local.yaml",
         &NEAR.replace("name: near", "name: local"),
     );
@@ -370,17 +379,20 @@ fn refused_and_unsafe_files_are_listed_with_their_problem_and_other_files_ignore
         .filter(|plugin| plugin.origin == Origin::User)
         .map(|plugin| plugin.name.as_str())
         .collect();
-    assert_eq!(users, ["bad", "linked", "local", "other"]);
-    let user_local = listing
-        .plugins
-        .iter()
-        .find(|plugin| plugin.origin == Origin::User && plugin.name == "local")
-        .unwrap();
+    assert_eq!(users, ["bad", "linked", "local", "ollama", "other"]);
+    let user = |name: &str| {
+        listing
+            .plugins
+            .iter()
+            .find(|plugin| plugin.origin == Origin::User && plugin.name == name)
+            .unwrap()
+    };
     assert!(matches!(
-        &user_local.status,
+        &user("ollama").status,
         PluginStatus::Refused { problem } if problem.code == "app_plugin_name_taken"
     ));
-    assert!(user_local.runs.is_none());
+    assert!(user("ollama").runs.is_none());
+    assert_eq!(user("local").status, PluginStatus::NeedsReview);
     assert!(plugin(&listing, "bad").runs.is_none());
 }
 
@@ -448,13 +460,13 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     );
     let shadowed = drop_in(
         &case,
-        "local.yaml",
-        &NEAR.replace("name: near", "name: local"),
+        "ollama.yaml",
+        &NEAR.replace("name: near", "name: ollama"),
     );
-    remove(&case.db, &case.root, "local").unwrap();
+    remove(&case.db, &case.root, "ollama").unwrap();
     assert!(!shadowed.exists());
     assert_eq!(
-        code(remove(&case.db, &case.root, "local")),
+        code(remove(&case.db, &case.root, "ollama")),
         "app_plugin_bundled"
     );
     assert_eq!(
@@ -470,15 +482,20 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
 fn bundled_plugins_turn_on_and_off_and_unknown_names_are_refused() {
     let case = case();
     set_enabled(&case.db, &case.root, "ollama", true).unwrap();
-    set_enabled(&case.db, &case.root, "local", false).unwrap();
+    set_enabled(&case.db, &case.root, "voyage", false).unwrap();
     let listing = list(&case.db, &case.root).unwrap();
     assert!(plugin(&listing, "ollama").enabled);
-    assert!(!plugin(&listing, "local").enabled);
+    assert!(!plugin(&listing, "voyage").enabled);
+    set_enabled(&case.db, &case.root, "ollama", false).unwrap();
+    assert!(!plugin(&list(&case.db, &case.root).unwrap(), "ollama").enabled);
     assert_eq!(
         code(set_enabled(&case.db, &case.root, "nope", true)),
         "app_plugin_not_found"
     );
-    assert_eq!(code(ready(&case.db, &case.root, "local")), "app_plugin_off");
+    assert_eq!(
+        code(ready(&case.db, &case.root, "ollama")),
+        "app_plugin_off"
+    );
     assert_eq!(
         code(trust_file(
             &case.db,
@@ -668,12 +685,13 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
     let case = case();
     trusted(&case, NEAR);
     trusted(&case, ACME);
-    let local = ready(&case.db, &case.root, "local").unwrap();
+    set_enabled(&case.db, &case.root, "ollama", true).unwrap();
+    let ollama = ready(&case.db, &case.root, "ollama").unwrap();
     assert_eq!(
-        (local.manifest.name.as_str(), local.origin),
-        ("local", Origin::Bundled)
+        (ollama.manifest.name.as_str(), ollama.origin),
+        ("ollama", Origin::Bundled)
     );
-    assert!(local.bindings.is_empty());
+    assert!(ollama.bindings.is_empty());
     let near = ready(&case.db, &case.root, "near").unwrap();
     assert_eq!(
         (near.manifest.name.as_str(), near.origin),

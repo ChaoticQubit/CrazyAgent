@@ -37,29 +37,24 @@ fn with(old: &str, new: &str) -> String {
 
 /// H4: every bundled plugin file reads as a valid embedding manifest named as its entry, in
 /// screen order, and each one's trust screen shows how it runs, the hosts it reaches and the
-/// secrets it needs.
+/// secrets it needs. None names one platform, since the engine runs on Linux too, and the
+/// local model V3 shipped is not among them (V250-H4-LOCAL-YAML).
 #[test]
 fn every_bundled_manifest_is_valid_and_named_as_its_entry() {
     let bundled = super::super::store::bundled();
     let names: Vec<&str> = bundled.iter().map(|(name, _)| *name).collect();
-    assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
+    assert_eq!(names, ["openai", "voyage", "ollama"]);
     let read: Vec<Manifest> = bundled
         .iter()
         .map(|(name, text)| {
+            assert!(!text.contains("Mac"), "{name} names one platform");
             let manifest = parse(text).unwrap_or_else(|problem| panic!("{name}: {problem:?}"));
             assert_eq!(manifest.name, *name);
             assert_eq!(manifest.kind, PluginKind::Embedding, "{name}");
             manifest
         })
         .collect();
-    assert_eq!(
-        read[0].runs_view(),
-        RunsView::Local {
-            runtime: "static-retrieval-mrl-en-v1".into(),
-            download_bytes: 125_018_208 + 711_396,
-        }
-    );
-    assert!(read[0].secrets().is_empty());
+    assert_eq!(read[2].title, "Ollama on this computer");
     let http = |index: usize, host: &str, local: bool, size: u16| {
         let RunsView::Http {
             hosts,
@@ -77,12 +72,12 @@ fn every_bundled_manifest_is_valid_and_named_as_its_entry() {
             read[index].name
         );
     };
-    http(1, "api.openai.com", false, 256);
-    http(2, "api.voyageai.com", false, 256);
-    http(3, "127.0.0.1", true, 768);
+    http(0, "api.openai.com", false, 256);
+    http(1, "api.voyageai.com", false, 256);
+    http(2, "127.0.0.1", true, 768);
+    assert_eq!(read[0].secrets(), ["api_key"]);
     assert_eq!(read[1].secrets(), ["api_key"]);
-    assert_eq!(read[2].secrets(), ["api_key"]);
-    assert!(read[3].secrets().is_empty());
+    assert!(read[2].secrets().is_empty());
 }
 
 #[test]
