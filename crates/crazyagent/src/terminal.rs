@@ -162,14 +162,15 @@ fn run_end(window: &[u8], start: usize) -> usize {
 }
 
 /// Where the typed token that starts at `at` ends: one UTF-8 character, or one escape
-/// sequence (CSI, an X10 mouse report, SS3, OSC or DCS up to BEL or ESC \, or ESC and one
-/// character). A sequence the bytes stop inside runs to their end. Inputs: the bytes and a
-/// position in them. Output: the end, past `at`.
+/// sequence (CSI, an X10 mouse report, SS3 and one character, OSC or DCS up to BEL or ESC \,
+/// or ESC and one character). A sequence the bytes stop inside runs to their end. Inputs:
+/// the bytes and a position in them. Output: the end, past `at`.
 fn token_end(bytes: &[u8], at: usize) -> usize {
     assert!(at < bytes.len());
     let end = match (bytes[at], bytes.get(at + 1)) {
         (ESC, Some(b'[')) => csi_end(bytes, at + 2),
-        (ESC, Some(b'O')) => (at + 3).min(bytes.len()),
+        (ESC, Some(b'O')) if at + 2 < bytes.len() => character_end(bytes, at + 2),
+        (ESC, Some(b'O')) => at + 2,
         (ESC, Some(b']' | b'P')) => string_end(bytes, at + 2),
         (ESC, Some(&ESC) | None) => at + 1,
         (ESC, Some(_)) => character_end(bytes, at + 1),
@@ -181,8 +182,9 @@ fn token_end(bytes: &[u8], at: usize) -> usize {
 }
 
 /// The end of a CSI whose parameters start at `from`: past its final byte, three bytes on
-/// for an X10 mouse report (`ESC [ M` and three bytes), or before a byte no CSI holds.
-/// Inputs: the bytes and the position after `ESC [`. Output: the end.
+/// for an X10 mouse report (`ESC [ M` and three raw bytes, as xterm.js sends them, never
+/// UTF-8), or before a byte no CSI holds. Inputs: the bytes and the position after `ESC [`.
+/// Output: the end.
 fn csi_end(bytes: &[u8], from: usize) -> usize {
     let Some(tail) = bytes[from..]
         .iter()
