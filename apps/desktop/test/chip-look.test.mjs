@@ -45,6 +45,11 @@ for (const theme of ["light", "dark"]) {
     assert.deepEqual(seen.motion, { working: "badge-pulse", steady: "none" });
   });
 
+  test(`${theme}: the Not ready yet badge is a dot plus its words, with no icon of its own`, async () => {
+    const seen = await looks(theme);
+    assert.deepEqual(seen.notReady, { word: "Not ready yet", icons: 0, dot: "6px" });
+  });
+
   test(`${theme}: a team graph dot takes its state color, the info dot --running`, async () => {
     const seen = await looks(theme);
     assert.deepEqual(seen.dots, { info: seen.tokens.running, ok: seen.tokens.ok, warn: seen.tokens.warn, danger: seen.tokens.danger });

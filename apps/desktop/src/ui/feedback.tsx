@@ -100,7 +100,7 @@ export function EmptyState({ icon = "inbox", title, children, action, compact = 
  * It never shows sample data. Inputs: what is not ready, in plain words. */
 export function NotReady({ what, compact = false }: { what: string; compact?: boolean }) {
   return <section className={`empty-state not-ready${compact ? " compact" : ""}`} aria-label="Not ready yet">
-    <span className="badge"><Icon name="clock" size={12} />Not ready yet</span>
+    <span className="badge">Not ready yet</span>
     <h2>{what} isn't ready yet</h2>
     <p>This part of CrazyAgent's engine isn't in this build yet. Nothing here is saved or shown until it is.</p>
   </section>;
