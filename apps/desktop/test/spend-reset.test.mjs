@@ -251,3 +251,11 @@ test("spend one: each Free resets control sends only its own setting, and the br
   }
   assert.deepEqual(calls, [["desktop_usage_set_spend", { choice: { field: "resets_source", value: "off" } }]]);
 });
+
+test("a changed Claude free resets source reads the free resets again four times within 30 s, and an unchanged or first read schedules none (V243-RESETS-SETTING-REFRESH)", () => {
+  assert.deepEqual([...section.sourceRereads("off", "as_claude_code")], [6_000, 12_000, 20_000, 30_000]);
+  assert.deepEqual([...section.sourceRereads("as_claude_code", "through_claude_code")], [6_000, 12_000, 20_000, 30_000]);
+  assert.deepEqual([...section.sourceRereads("off", "off")], []);
+  assert.deepEqual([...section.sourceRereads(undefined, "as_claude_code")], [], "the first read is no change");
+  assert.deepEqual([...section.sourceRereads("off", undefined)], [], "a read without spend settings is no change");
+});

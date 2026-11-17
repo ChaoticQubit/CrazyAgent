@@ -1597,4 +1597,39 @@ mod tests {
             "a clock that went back asks again"
         );
     }
+
+    #[test]
+    fn a_seen_free_resets_source_change_asks_for_the_detail_rows_again_four_times_in_thirty_seconds()
+     {
+        let extras_asks = |ctx: &mut Ctx| {
+            let mut asks = 0;
+            while let Some(request) = ctx.next_request() {
+                if let Request::Settings(job) = request
+                    && matches!(*job, SettingsJob::Extras { detail: true })
+                {
+                    asks += 1;
+                }
+            }
+            asks
+        };
+        let seen = 1_793_000_000_000;
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.ask_detail(&mut ctx, seen);
+        assert_eq!(extras_asks(&mut ctx), 1);
+        screen.source_changed(seen);
+        let mut asked = Vec::new();
+        for at in (seen + 1_000..seen + DETAIL_ASK_EVERY_MS).step_by(1_000) {
+            screen.ask_detail(&mut ctx, at);
+            if extras_asks(&mut ctx) > 0 {
+                asked.push(at - seen);
+            }
+        }
+        assert_eq!(
+            asked,
+            SOURCE_REREAD_MS.to_vec(),
+            "the asks follow the change at once and stop after four"
+        );
+        assert_eq!(SOURCE_REREAD_MS.last(), Some(&30_000));
+    }
 }
