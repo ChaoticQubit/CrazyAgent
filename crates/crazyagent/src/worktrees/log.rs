@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::state_log::replay::{self, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use crate::storage::opening::Opening;
 use rusqlite::{Connection, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,11 +10,11 @@ use serde_json::Value;
 mod tests;
 
 /// The kind of the event a repository admission appends (v2.5 L6 Q5).
-pub(crate) const KIND_ADMITTED: &str = "RepositoryAdmitted";
+pub const KIND_ADMITTED: &str = "RepositoryAdmitted";
 /// The kind of the event a worktree reservation appends.
-pub(crate) const KIND_RESERVED: &str = "WorktreeReserved";
+pub const KIND_RESERVED: &str = "WorktreeReserved";
 /// The kind of the event a lease body save appends.
-pub(crate) const KIND_SAVED: &str = "LeaseSaved";
+pub const KIND_SAVED: &str = "LeaseSaved";
 /// The schema every worktrees event is written and read at.
 const SCHEMA: u16 = 1;
 /// The admissions table, first in a snapshot run, and its columns in key order.
@@ -29,35 +30,35 @@ const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 /// A repository admitted to a project: its `repository_admissions` row, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Admitted {
-    pub(crate) project: String,
-    pub(crate) repository: String,
-    pub(crate) body: String,
+pub struct Admitted {
+    pub project: String,
+    pub repository: String,
+    pub body: String,
 }
 
 /// A worktree reserved for a task: its new `worktree_leases` row, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Reserved {
-    pub(crate) task: String,
-    pub(crate) repository: String,
-    pub(crate) path: String,
-    pub(crate) body: String,
+pub struct Reserved {
+    pub task: String,
+    pub repository: String,
+    pub path: String,
+    pub body: String,
 }
 
 /// A lease's body saved: the key of its `worktree_leases` row and the new body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Saved {
-    pub(crate) task: String,
-    pub(crate) repository: String,
-    pub(crate) body: String,
+pub struct Saved {
+    pub task: String,
+    pub repository: String,
+    pub body: String,
 }
 
 /// One worktrees event. Each carries the stored column text of the row it writes, which
 /// holds ids, paths, a branch, a commit and file identities, never a secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Event {
+pub enum Event {
     Admitted(Admitted),
     Reserved(Reserved),
     Saved(Saved),
@@ -88,7 +89,7 @@ impl Event {
 /// then the log appends it, so an event is logged only when its statement applied. A
 /// refusal leaves the transaction for the caller to roll back. Inputs: the appender, the
 /// writer's clock and the event. Output: the event's `seq`, or the first refusal.
-pub(crate) fn record(
+pub fn record(
     appender: &mut Appender<'_, '_>,
     at_ms: u64,
     event: &Event,
@@ -114,7 +115,7 @@ pub(crate) fn record(
 /// needs its lease; an admission or a lease must be new. Inputs: the connection and the
 /// event. Output: Ok, or `worktrees_log_admission_exists`, `worktrees_log_lease_exists` or
 /// `worktrees_log_lease_missing`.
-pub(crate) fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
+pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
     let (count, refused) = match event {
         Event::Admitted(row) => (
             db.execute(
@@ -149,7 +150,7 @@ pub(crate) fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
 /// Reads one logged worktrees event: one of the three kinds at schema 1, its body exactly
 /// that kind's fields. Input: the logged event. Output: the event, or
 /// `worktrees_log_event_invalid`.
-pub(crate) fn decode(logged: &Logged) -> Result<Event, EngineError> {
+pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
     let invalid = || error("worktrees_log_event_invalid");
     if logged.aggregate != Aggregate::Worktrees || logged.schema != SCHEMA {
         return Err(invalid());
@@ -171,7 +172,7 @@ pub(crate) fn decode(logged: &Logged) -> Result<Event, EngineError> {
 /// again; a chunk opens a run unless it follows another chunk at the previous `seq`, since
 /// a run's chunks are appended back to back and its closing event follows them. Input: the
 /// transaction. Output: the last `seq` read, or the first refusal.
-pub(crate) fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
+pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     clear(tx)?;
     let mut chunk_seq = 0;
     let last = replay::replay(tx, Aggregate::Worktrees, 0, |logged| {
@@ -196,7 +197,7 @@ pub(crate) fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
 /// both. Inputs: the appender and the writer's clock. Output: the `seq` of the run's
 /// closing event, or `worktrees_log_snapshot_rows`, `worktrees_log_row_too_large` or the
 /// log's refusal.
-pub(crate) fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
     let mut chunks = Vec::new();
     for (table, columns) in [ADMISSIONS, LEASES] {
         let rows = appender.project(|tx| table_rows(tx, table, columns))?;
@@ -205,6 +206,76 @@ pub(crate) fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u6
     assert!(chunks.len() >= 2, "one chunk or more per table");
     assert_eq!(chunks[0].table, ADMISSIONS.0);
     appender.snapshot(Aggregate::Worktrees, at_ms, chunks)
+}
+
+/// The open-time sweep of both worktree tables in one transaction: every lease is settled
+/// (`reconcile`) and the admissions of removed projects are forgotten. When a row changed,
+/// one snapshot run of both tables follows through the open's proof, since the log has no
+/// delete kind and a lease a stop left Reserved may have no event (v2.5 L6 Q8). When
+/// nothing changed no appender is built, so a plain start moves no revision. Inputs: the
+/// connection, outside any transaction, and the open's proof. Output: whether a run was
+/// appended, or the first refusal, which rolls the whole sweep back.
+#[cfg(unix)]
+pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineError> {
+    assert!(db.is_autocommit(), "the sweep owns its transaction");
+    let tx =
+        Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate).map_err(error)?;
+    let before = live(&tx)?;
+    super::reconcile(&tx)?;
+    crate::project_setup::forget_removed(&tx, &[ADMISSIONS.0])?;
+    let changed = live(&tx)? != before;
+    if changed {
+        let at_ms = opening.at_ms();
+        let mut appender = Appender::opening(&tx, opening)?;
+        snapshot(&mut appender, at_ms)?;
+    }
+    tx.commit().map_err(error)?;
+    assert!(db.is_autocommit(), "the sweep committed");
+    Ok(changed)
+}
+
+/// The first snapshot run of both worktree tables, for the schema step that puts worktrees
+/// on the log (step 12): rows written before the log reach replay through it, through the
+/// open's proof. A store without the `state` table or the worktree tables has no log to
+/// write, and one with no worktree row needs no run, so it moves no revision. Inputs: the
+/// step's transaction and the open's proof. Output: whether a run was appended, or the
+/// log's refusal.
+pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
+    let present: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table'
+             AND name IN ('state','repository_admissions','worktree_leases')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if present < 3 {
+        return Ok(false);
+    }
+    let rows: i64 = tx
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM repository_admissions)
+             + (SELECT COUNT(*) FROM worktree_leases)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if rows == 0 {
+        return Ok(false);
+    }
+    let at_ms = opening.at_ms();
+    let mut appender = Appender::opening(tx, opening)?;
+    let done = snapshot(&mut appender, at_ms)?;
+    assert!(done > 0, "a run closes at a seq");
+    assert_eq!(present, 3);
+    Ok(true)
+}
+
+/// Both worktree tables as they stand, each ordered by all its columns. Input: the
+/// connection. Output: the admissions and the leases.
+#[cfg(unix)]
+fn live(db: &Connection) -> Result<[Vec<Vec<rusqlite::types::Value>>; 2], EngineError> {
+    Ok([replay::rows(db, ADMISSIONS.0)?, replay::rows(db, LEASES.0)?])
 }
 
 /// Every row of one worktree table in key order, each as a JSON array of its column text.

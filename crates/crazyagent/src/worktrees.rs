@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// The worktrees aggregate on the state log: its events, their projection, replay and
 /// snapshot run (v2.5 L6).
-pub(crate) mod log;
+pub mod log;
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
 /// The most entries of a repository's .git outside its object store that the metadata walk
@@ -2691,8 +2691,8 @@ fn renumbered(record: &LeaseRecord) -> bool {
 }
 
 /// Settles every stored lease when the engine starts, checking each through
-/// [`verify_record`]. Input: the connection, outside any transaction. Output: success, or
-/// `lease_capacity` or the storage failure.
+/// [`verify_record`]. Input: the open sweep's transaction (`log::sweep`), which logs the
+/// result. Output: success, or `lease_capacity` or the storage failure.
 #[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     reconcile_with(connection, verify_record)
@@ -2701,8 +2701,9 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
 /// Settles every stored lease at an engine start. A Ready or RecoveryRequired lease that
 /// verifies, or whose check ran out of time on a slow start, becomes RecoveryRequired and
 /// is checked again before any use; a Reserved lease, or one whose check failed otherwise,
-/// becomes Uncertain. Each failed check is logged. Inputs: the connection, outside any
-/// transaction, and the lease check. Output: success, `lease_capacity` or the storage error.
+/// becomes Uncertain. Each failed check is logged. Inputs: the connection or the open
+/// sweep's transaction, and the lease check. Output: success, `lease_capacity` or the
+/// storage error.
 #[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
@@ -2737,9 +2738,15 @@ fn reconcile_with(
             }
             None => LeaseState::Uncertain,
         };
+        assert!(
+            matches!(
+                record.lease.state,
+                LeaseState::RecoveryRequired | LeaseState::Uncertain
+            ),
+            "a start leaves no lease Reserved or Ready"
+        );
         save(connection, &record)?;
     }
-    assert!(connection.is_autocommit());
     Ok(())
 }
 
