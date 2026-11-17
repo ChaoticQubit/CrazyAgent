@@ -21,6 +21,8 @@ const _: () = assert!(SCROLLBACK_ROWS <= super::SCROLLBACK_LINES as usize);
 const ARGV_MAX: usize = 256;
 const ENV_MAX: usize = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
 const BASE_ENV: &[&str] = &[
     "SystemRoot",
     "SystemDrive",
@@ -45,10 +47,12 @@ pub struct ConptyHost {
 struct Pane {
     pane: String,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Writer,
     child: Box<dyn Child + Send + Sync>,
     view: Arc<Mutex<View>>,
 }
+
+type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
 
 struct View {
     parser: vt100::Parser,
@@ -136,7 +140,7 @@ impl Host for ConptyHost {
         drop(pair.slave);
         let streams = child.process_id().and_then(|pid| {
             let reader = pair.master.try_clone_reader().ok()?;
-            let writer = pair.master.take_writer().ok()?;
+            let writer: Writer = Arc::new(Mutex::new(pair.master.take_writer().ok()?));
             Some((pid, reader, writer))
         });
         let Some((pid, reader, writer)) = streams else {
@@ -150,10 +154,10 @@ impl Host for ConptyHost {
             rows: START_ROWS,
             viewers: Vec::new(),
         }));
-        let feed = Arc::clone(&view);
+        let (feed, answer) = (Arc::clone(&view), Arc::clone(&writer));
         let pumped = std::thread::Builder::new()
             .name(format!("conpty-{agent}"))
-            .spawn(move || pump(reader, &feed));
+            .spawn(move || pump(reader, &feed, Some(answer)));
         if pumped.is_err() {
             let _ = child.kill();
             let _ = child.wait();
@@ -209,9 +213,10 @@ impl Host for ConptyHost {
         }
         let mut panes = lock(&self.panes);
         let pane = live(&mut panes, agent)?;
-        pane.writer
+        let mut writer = lock(&pane.writer);
+        writer
             .write_all(bytes)
-            .and_then(|()| pane.writer.flush())
+            .and_then(|()| writer.flush())
             .map_err(|_| unavailable())
     }
 
@@ -278,7 +283,12 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-fn pump(mut reader: Box<dyn Read + Send>, view: &Mutex<View>) {
+/// Feeds a terminal's output to its screen and viewers until the pseudo console closes.
+/// ConPTY, made with `PSUEDOCONSOLE_INHERIT_CURSOR` by portable-pty, first asks for the
+/// cursor position (`ESC[6n`) and draws nothing until it is answered, so the first query
+/// is answered here with the top-left cell the empty screen starts at, and is kept from the
+/// screen and the viewers (W2). Inputs: the output, the view and the input to answer on.
+fn pump(mut reader: Box<dyn Read + Send>, view: &Mutex<View>, mut answer: Option<Writer>) {
     let mut buffer = vec![0u8; CHUNK_BYTES_MAX];
     loop {
         let read = match reader.read(&mut buffer) {
@@ -286,10 +296,28 @@ fn pump(mut reader: Box<dyn Read + Send>, view: &Mutex<View>) {
             Ok(read) => read,
         };
         assert!(read <= CHUNK_BYTES_MAX);
-        let chunk = &buffer[..read];
+        let mut chunk = std::borrow::Cow::Borrowed(&buffer[..read]);
+        let asked = answer.as_ref().and_then(|_| {
+            chunk
+                .windows(CURSOR_QUERY.len())
+                .position(|window| window == CURSOR_QUERY)
+        });
+        if let Some(at) = asked
+            && let Some(input) = answer.take()
+        {
+            let mut writer = lock(&input);
+            let _ = writer.write_all(CURSOR_REPLY).and_then(|()| writer.flush());
+            chunk =
+                std::borrow::Cow::Owned([&chunk[..at], &chunk[at + CURSOR_QUERY.len()..]].concat());
+            assert_eq!(chunk.len() + CURSOR_QUERY.len(), read);
+        }
+        assert!(answer.is_none() || asked.is_none());
+        if chunk.is_empty() {
+            continue;
+        }
         let mut view = lock(view);
-        view.parser.process(chunk);
-        view.viewers.retain(|viewer| viewer.push(chunk));
+        view.parser.process(&chunk);
+        view.viewers.retain(|viewer| viewer.push(&chunk));
     }
     lock(view).viewers.clear();
 }

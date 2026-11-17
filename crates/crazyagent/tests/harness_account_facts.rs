@@ -1,3 +1,5 @@
+mod path_support;
+
 use crazyagent::adapters::claude::{
     ClaudeProtocol, ProtocolError as ClaudeError, State as ClaudeState,
 };
@@ -11,6 +13,7 @@ use crazyagent::adapters::events::{
 };
 use crazyagent::adapters::{LINE_BYTES_MAX, NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
+use path_support::unit_path;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,7 +53,7 @@ fn codex_ready() -> CodexProtocol {
             &mut protocol,
             request_id(&initialize),
             json!({
-                "userAgent":"protocol-test-data", "codexHome":"/protocol-test-data",
+                "userAgent":"protocol-test-data", "codexHome":unit_path("/protocol-test-data"),
                 "platformFamily":"unix", "platformOs":"macos"
             }),
         ),
@@ -67,19 +70,21 @@ fn codex_idle() -> (CodexProtocol, CodexEventBridge) {
         CredentialRef::new("pinned-account").unwrap(),
     )
     .unwrap();
-    let request = protocol.start_thread(Path::new("/worktree")).unwrap();
+    let request = protocol
+        .start_thread(Path::new(&unit_path("/worktree")))
+        .unwrap();
     let events = codex_reply(
         &mut protocol,
         request_id(&request),
         json!({
             "thread":{
                 "id":"native-thread", "cliVersion":"0.163.0", "createdAt":1,
-                "updatedAt":1, "cwd":"/worktree", "ephemeral":false,
+                "updatedAt":1, "cwd":unit_path("/worktree"), "ephemeral":false,
                 "modelProvider":"protocol-test-data", "preview":"", "projectId":null,
                 "sessionId":"unprojected-session", "source":"appServer",
                 "status":{"type":"idle"}, "turns":[]
             },
-            "cwd":"/worktree", "model":"protocol-test-data",
+            "cwd":unit_path("/worktree"), "model":"protocol-test-data",
             "modelProvider":"protocol-test-data", "approvalPolicy":"on-request",
             "approvalsReviewer":"user", "sandbox":{"type":"readOnly","networkAccess":false}
         }),
@@ -187,7 +192,7 @@ fn codex_read_uses_correlated_passive_request_and_one_pending_slot() {
         Err(CodexError::InvalidState)
     );
     assert_eq!(
-        protocol.start_thread(Path::new("/worktree")),
+        protocol.start_thread(Path::new(&unit_path("/worktree"))),
         Err(CodexError::InvalidState)
     );
     assert_eq!(protocol.state(), CodexState::Ready);
@@ -197,7 +202,11 @@ fn codex_read_uses_correlated_passive_request_and_one_pending_slot() {
         json!({"rateLimits":{}}),
     );
     assert_eq!(events.len(), 1);
-    assert!(protocol.start_thread(Path::new("/worktree")).is_ok());
+    assert!(
+        protocol
+            .start_thread(Path::new(&unit_path("/worktree")))
+            .is_ok()
+    );
 }
 
 #[test]

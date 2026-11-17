@@ -1,0 +1,105 @@
+name: Rust test archive
+description: Builds the engine binaries and every workspace test of one OS and uploads the nextest archive its test farm shards run.
+inputs:
+  os:
+    description: The farm OS, linux, macos or windows.
+    required: true
+  node-version:
+    description: The pinned Node version.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      with:
+        node-version: ${{ inputs.node-version }}
+    - name: Install Rust toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+        echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+    - name: Set debug info for the platform's disk
+      shell: bash
+      run: |
+        set -euo pipefail
+        debug=0
+        if [ "$RUNNER_OS" = Linux ]; then debug=line-tables-only; fi
+        {
+          echo "CARGO_PROFILE_DEV_DEBUG=$debug"
+          echo "CARGO_PROFILE_TEST_DEBUG=$debug"
+        } >> "$GITHUB_ENV"
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      with:
+        prefix-key: farm
+        shared-key: ${{ inputs.os }}
+        add-job-id-key: false
+        add-rust-environment-hash-key: false
+        cache-bin: false
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+    - name: Install cargo-nextest
+      shell: bash
+      run: bash scripts/ci/install-nextest.sh
+    - name: Install desktop dependencies
+      working-directory: apps/desktop
+      shell: bash
+      run: npm ci --ignore-scripts --no-audit --no-fund
+    - name: Build desktop frontend
+      working-directory: apps/desktop
+      shell: bash
+      run: npm run build
+    - name: Fetch Rust dependencies
+      shell: bash
+      run: cargo fetch --locked
+    - name: Turn on the engine's owner trace where this tree defines it
+      shell: bash
+      run: |
+        set -euo pipefail
+        if grep -Eq '^owner-trace[[:space:]]*=' crates/crazyagent/Cargo.toml; then
+          echo "FARM_ENGINE_FEATURES=crazyagent/owner-trace" >> "$GITHUB_ENV"
+          echo "engine owner trace: on"
+        else
+          echo "engine owner trace: off, this tree's engine does not define it"
+        fi
+    - name: Build the engine binaries the tests run
+      shell: bash
+      run: |
+        set -euo pipefail
+        exe=""
+        if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+        cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline
+        mkdir -p target/debug/deps
+        cp "target/debug/crazyagent-landlock$exe" "target/debug/deps/crazyagent-landlock$exe"
+    - name: Build and archive every workspace test
+      shell: bash
+      run: |
+        set -euo pipefail
+        exclude=()
+        if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi
+        if [ "$RUNNER_OS" = macOS ]; then
+          export CARGO_BUILD_JOBS=2
+          (while sleep 300; do echo "memory $(date +%H:%M) $(sysctl -n vm.swapusage)"; done) &
+          sampler=$!
+          trap 'kill "$sampler" 2> /dev/null || true' EXIT
+        fi
+        cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"
+    - name: Show the free disk, the target and the archive size
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          macOS) echo "cpus $(sysctl -n hw.ncpu), memory $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB, $(sysctl -n vm.swapusage)" ;;
+          Linux) echo "cpus $(nproc)"; free -g ;;
+          *) echo "cpus $(nproc)" ;;
+        esac
+        df -h .
+        if [ -d target ]; then du -sh target; fi
+        if [ -f "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst" ]; then du -h "$RUNNER_TEMP/farm-${{ inputs.os }}.tar.zst"; fi
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: farm-archive-${{ inputs.os }}
+        path: ${{ runner.temp }}/farm-${{ inputs.os }}.tar.zst
+        if-no-files-found: error
+        retention-days: 1
+        compression-level: 0

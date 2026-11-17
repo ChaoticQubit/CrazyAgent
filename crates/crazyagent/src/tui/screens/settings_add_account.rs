@@ -1811,7 +1811,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     ),
     (
         "native_auth_claude_launch_failed",
-        "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again.",
+        "Claude Code couldn't start. Check that Claude Code is installed and opens on {computer}, then try again.",
     ),
     (
         "native_auth_claude_native_exit",
@@ -1855,15 +1855,15 @@ const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     ),
     (
         "native_auth_host_executable_changed",
-        "{harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.",
+        "{harness} changed on {computer} after CrazyAgent checked it, perhaps from an update. Try again.",
     ),
     (
         "native_auth_host_executable_unsafe",
-        "{harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall {harness}, then try again.",
+        "{harness} on {computer} isn't safe to start, so CrazyAgent didn't start it. Reinstall {harness}, then try again.",
     ),
     (
         "native_auth_host_unavailable",
-        "CrazyAgent didn't find a {harness} it can run on this Mac, so {name} sign-in isn't available. Install {harness}, then choose Check again, or choose its file.",
+        "CrazyAgent didn't find a {harness} it can run on {computer}, so {name} sign-in isn't available. Install {harness}, then choose Check again, or choose its file.",
     ),
     (
         "native_auth_interrupted",
@@ -1892,7 +1892,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     ),
     (
         "native_profile_custody_unsafe",
-        "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
+        "CrazyAgent couldn't safely use this account's sign-in folder on {computer}, so it stopped. Delete the account, then add it again.",
     ),
     (
         "native_profile_identity_changed",
@@ -1987,15 +1987,15 @@ pub(super) fn update_offer(
     }
 }
 
-/// The plain sentence for a sign-in failure code. Inputs: the code and the sign-in method,
-/// which names the harness. Output: the listed sentence, the TUI's own for a code the engine
-/// does not record, the config sentence, or the coded fallback.
+/// The plain sentence for a sign-in failure code, naming the computer per platform. Inputs:
+/// the code and the sign-in method, which names the harness. Output: the listed sentence, the
+/// TUI's own for a code the engine does not record, the config sentence, or the coded fallback.
 fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
     let (harness, name) = harness_words(native);
     if let Some((_, sentence)) = SIGN_IN_SENTENCES.iter().find(|(listed, _)| *listed == code) {
-        return sentence
-            .replace("{harness}", harness)
-            .replace("{name}", name);
+        let text = sentence.replace("{harness}", harness);
+        let text = text.replace("{name}", name);
+        return text.replace("{computer}", super::THIS_COMPUTER);
     }
     match code {
         "native_auth_claude_input_outcome_unknown" => {
@@ -2046,7 +2046,7 @@ pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInVie
         (_, _, Some(code)) => plain_sign_in(code, native),
         (NativeAuthPhase::Cancelled, _, None) => "The sign-in was cancelled.".into(),
         (NativeAuthPhase::Unavailable, _, None) => {
-            "This sign-in is not available on this Mac.".into()
+            format!("This sign-in is not available on {}.", super::THIS_COMPUTER)
         }
         (_, Some(NativeAuthMethod::CodexDeviceCode), None) if view.device_code.is_some() => {
             "The code expired or was not approved.".into()

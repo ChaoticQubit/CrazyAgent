@@ -80,9 +80,11 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
             script.clone().into_os_string()
         ]
     );
+    let sh = std::fs::canonicalize("/bin/sh").unwrap();
     assert_eq!(
         codex.grants(),
-        vec![script.clone(), node, PathBuf::from("/bin/sh")]
+        vec![script.clone(), node, sh],
+        "grants are real files, so /bin/sh is granted where it really sits"
     );
 
     let by_name = crate::spawn_gate::output(
@@ -280,10 +282,8 @@ fn shebang_flags_and_absolute_interpreters_are_kept() {
         ],
         "macOS runs no interpreter that is itself a script, so it is split out (N3)"
     );
-    assert_eq!(
-        resolved.grants(),
-        vec![absolute, node, PathBuf::from("/bin/sh")]
-    );
+    let sh = std::fs::canonicalize("/bin/sh").unwrap();
+    assert_eq!(resolved.grants(), vec![absolute, node, sh]);
     let native = program(&home.join(".local/bin/native"), "#!/bin/sh --native\n");
     let resolved = resolve("native", &home_only(&home)).unwrap();
     assert_eq!(

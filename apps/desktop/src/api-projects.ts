@@ -4,7 +4,7 @@ import {
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntakeJob, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, ResearchJob, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -75,26 +75,7 @@ export interface StoredSetup {
   revision: number;
 }
 
-export interface ResearchJob {
-  id: number;
-  project_id: string;
-  kind: JobKind;
-  kind_label: string;
-  status: ResearchStatus;
-  status_label: string;
-  report_path: string;
-  harness: string;
-  tools: boolean;
-  attempts: number;
-  claimer: string | null;
-  error: string | null;
-  cancel_requested: boolean;
-  output_bytes: number;
-  created_ms: number;
-  started_ms: number | null;
-  heartbeat_ms: number | null;
-  finished_ms: number | null;
-}
+export type { ResearchJob } from "./engine-client";
 
 export type ActivityKind =
   | "created"
@@ -300,6 +281,7 @@ const copy: Record<string, string> = {
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
+  research_unavailable_here: "Research does not run on this computer in this version, so it cannot run again.",
   planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
   roadmap_status_off: "Roadmap status is off in Project settings.",
   roadmap_status_unavailable: "The roadmap status could not be read or saved. Try again.",
@@ -720,7 +702,7 @@ export function saveReadPaths(id: string, paths: string[], version: number, gene
  * sends back. */
 /** The kinds of engine runs, not team agents, that hide a project's folders from their start (SA-VID14-R2-N2). */
 export type HiddenRunKind = "master" | "research" | "overview" | "roadmap" | "onboarding" | "code_graph" | "lockfiles";
-export type HiddenPaths = { paths: string[]; version: number; runs?: HiddenRunKind[] };
+export type HiddenPaths = { paths: string[]; version: number; runs?: HiddenRunKind[]; unavailable?: boolean };
 
 /** Reads the folders this project's agents are kept out of, read, write and run.
  * Input: project id. Output: the folders in saved order and their version. */

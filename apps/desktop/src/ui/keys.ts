@@ -11,6 +11,13 @@ export function isMac(platform: string = typeof navigator === "undefined" ? "" :
   return /^Mac/i.test(platform);
 }
 
+/** What a sentence calls the computer the app runs on, in the TUI's words: "this Mac" on macOS,
+ * "this computer" on Windows and Linux. Input: whether this is macOS, by default the window's.
+ * Output: the words. */
+export function thisComputer(mac: boolean = isMac()): string {
+  return mac ? "this Mac" : "this computer";
+}
+
 /** Whether this window runs on Windows, where the engine takes drive paths such as
  * `C:\Program Files\nodejs\npx.cmd`. Input: the platform name, by default the window's.
  * Output: true on Windows. */
