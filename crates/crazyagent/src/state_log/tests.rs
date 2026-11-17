@@ -520,7 +520,7 @@ fn lease_sample() -> serde_json::Value {
             "project_id": "app",
             "task_id": "t1",
             "repository": "/repo",
-            "path": "/repo/.wt/t1",
+            "path": format!("/repo/.wt/{}", "a".repeat(64)),
             "branch": format!("crazyagent/{}", "a".repeat(64)),
             "owner_session": "s1",
             "native_descendant": null,
