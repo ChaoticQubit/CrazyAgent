@@ -1,7 +1,7 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
-use crate::projects_home::CRAZYAGENT_DIRECTORY;
+use crate::projects_home::{CRAZYAGENT_DIRECTORY, one_spelling};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -355,20 +355,22 @@ fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str>
     if !metadata.file_type().is_dir() {
         return Err("onboarding_folder_missing");
     }
-    let repo = path
-        .canonicalize()
-        .map_err(|_| "onboarding_folder_missing")?;
+    let repo = one_spelling(
+        path.canonicalize()
+            .map_err(|_| "onboarding_folder_missing")?,
+    );
     if repo != path {
         return Err("onboarding_path_not_canonical");
     }
     let runtime = database
         .parent()
         .and_then(|parent| parent.canonicalize().ok())
+        .map(one_spelling)
         .ok_or("onboarding_folder_unsafe")?;
     if repo.starts_with(&runtime) || runtime.starts_with(&repo) {
         return Err("onboarding_folder_unsafe");
     }
-    if let Some(home) = owner_home()
+    if let Some(home) = owner_home().map(one_spelling)
         && (home.starts_with(&repo)
             || [".codex", ".claude"]
                 .iter()

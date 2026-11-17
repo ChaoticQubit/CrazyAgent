@@ -295,7 +295,7 @@ fn same_entry(left: &Path, right: &Path) -> bool {
 /// entry as the path without that prefix is given without it, the spelling `canonicalize`
 /// gives the short form, so both compare equal as text. Input: a canonical path. Output:
 /// the path in that spelling, unchanged elsewhere.
-fn one_spelling(real: PathBuf) -> PathBuf {
+pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {
         let short = Path::new("/").join(rest);
@@ -1361,9 +1361,10 @@ pub(crate) fn move_holds(
         )
         .optional()?;
     Ok(origin.is_some_and(|origin| {
-        let origin = Path::new(&origin);
-        folder.starts_with(origin)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+        let origin = one_spelling(PathBuf::from(origin));
+        folder.starts_with(&origin)
+            || std::fs::canonicalize(folder)
+                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
     }))
 }
 
