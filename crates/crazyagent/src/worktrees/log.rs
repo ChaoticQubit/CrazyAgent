@@ -660,18 +660,20 @@ pub(crate) fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Resul
     Ok(())
 }
 
-/// Tombstones, for a project removal, every logged admission of the removed project, so its
-/// repository paths leave the log's events; snapshot runs keep theirs until compaction (L1b)
-/// rewrites them. The caller checkpoints the WAL after its commit. Inputs: the removal's
-/// transaction, the project, the removal's own `seq` and its fence. Output: how many events
-/// were tombstoned, or the redaction's refusal.
+/// Tombstones every logged admission of a project, for a removal or Create demo's clear of
+/// an earlier id (rv-sec2 #345 N4), so its repository paths leave the log's events; snapshot
+/// runs keep theirs until compaction (L1b), and only a removal checkpoints the WAL after
+/// commit. Inputs: the transaction, the project, the removal's own `seq` (none for a clear,
+/// which logs none; seqs start at 1) and the fence. Output: the count, or the refusal.
 pub(crate) fn forget_project(
     tx: &Transaction<'_>,
     project: &str,
-    keep: u64,
+    keep: Option<u64>,
     fence: &Fence,
 ) -> Result<usize, EngineError> {
-    assert!(keep > 0, "the removal is logged before its redaction");
+    if let Some(seq) = keep {
+        assert!(seq > 0, "the removal is logged before its redaction");
+    }
     let kinds = [KIND_ADMITTED];
     let redacted = replay::redact_matching(
         tx,
@@ -679,7 +681,7 @@ pub(crate) fn forget_project(
         Some(&kinds),
         "project",
         project,
-        keep,
+        keep.unwrap_or(0),
         fence,
     )?;
     assert!(!tx.is_autocommit(), "the redaction is part of the removal");
