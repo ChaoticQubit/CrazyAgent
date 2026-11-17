@@ -1964,3 +1964,46 @@ fn each_git_link_a_move_breaks_is_told_apart() {
         assert_eq!(links, want != GitLink::None, "{}", folder.display());
     }
 }
+
+/// #408 F1: a projects home saved before the data-volume fix keeps its long spelling in the
+/// store, while every folder picked now resolves short. A folder inside that home or holding
+/// it is still refused, an add lands under the saved spelling, a folder in it can still be
+/// trashed and deleted, and the home cannot move into a folder of its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_saved_through_the_data_volume_keeps_its_refusals() {
+    let case = case();
+    let outer = case.root.join("outer");
+    let home = outer.join("home");
+    let inner = home.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    let saved = PathBuf::from(format!("/System/Volumes/Data{}", text(&home)));
+    assert!(saved.is_dir());
+    let source = case.sources.join("project");
+    fs::create_dir(&source).unwrap();
+    for mode in [AddMode::Move, AddMode::Copy] {
+        for (picked, code) in [
+            (&inner, "home_source_in_home"),
+            (&outer, "home_source_unsafe"),
+        ] {
+            assert_eq!(
+                plan_add(&saved, &case.engine, text(picked), mode, &[], &[])
+                    .unwrap_err()
+                    .0,
+                code,
+                "{picked:?} {mode:?}"
+            );
+        }
+    }
+    let plan = plan_add(&saved, &case.engine, text(&source), AddMode::Copy, &[], &[]).unwrap();
+    assert_eq!(plan.destination(), saved.join("project"));
+    assert_eq!(plan_trash(&saved, text(&inner), &[]).unwrap(), inner);
+    assert_eq!(
+        plan_delete(&saved, &[saved.join("inner")]).unwrap(),
+        [inner.clone()]
+    );
+    assert_eq!(
+        plan_move(&saved, &inner, &case.engine).unwrap_err().0,
+        "home_move_nested"
+    );
+}
