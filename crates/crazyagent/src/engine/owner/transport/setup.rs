@@ -686,6 +686,61 @@ mod install_tests {
         assert!(!progress::snapshot(&root).running);
     }
 
+    struct TooOld(&'static str);
+
+    impl Installer for TooOld {
+        fn find(&self, _dep: Dependency) -> Result<Option<Version>, InstallError> {
+            Ok(None)
+        }
+
+        fn lookup(&self, dep: Dependency) -> crate::setup::Lookup {
+            Ok(Err(crate::tools::Missing {
+                tool: dep.program().to_owned(),
+                reason: crate::tools::Reason::WrongVersion,
+                needs: Some("3.7".to_owned()),
+                found: Some("3.2a".to_owned()),
+                looked: vec![PathBuf::from("/usr/bin")],
+                refused: None,
+            }))
+        }
+
+        fn install(
+            &self,
+            _dep: Dependency,
+            _pin: &crate::setup::Pin,
+        ) -> Result<Version, InstallError> {
+            Err(InstallError(self.0))
+        }
+    }
+
+    /// V243-TMUX-APT-OLD: an install that leaves only a version too old to use, as Ubuntu
+    /// 22.04's apt leaves tmux 3.2a, shows the row the check shows for it, naming the version
+    /// found and the one needed, not that the program did not report its version. An install
+    /// that failed for another reason keeps its own line.
+    #[tokio::test]
+    async fn an_install_that_leaves_a_too_old_version_names_found_and_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let unreadable = Arc::new(TooOld("setup_version_unreadable"));
+        install_dependency(unreadable, &root, Dependency::Tmux).await;
+        assert_eq!(
+            progress::snapshot(&root).dependencies.get(&Dependency::Tmux),
+            Some(&DependencyState::Missing {
+                line: "tmux 3.2a is too old for CrazyAgent; it needs 3.7 or newer. Update it, then try again.".to_owned(),
+            })
+        );
+        let failed = Arc::new(TooOld("setup_install_failed"));
+        install_dependency(failed, &root, Dependency::Tmux).await;
+        assert_eq!(
+            progress::snapshot(&root)
+                .dependencies
+                .get(&Dependency::Tmux),
+            Some(&DependencyState::Failed {
+                reason: plain_reason("setup_install_failed").to_owned(),
+            })
+        );
+    }
+
     struct FixFake(Result<Report, &'static str>);
 
     impl Installer for FixFake {
