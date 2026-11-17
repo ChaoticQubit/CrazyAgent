@@ -461,7 +461,7 @@ async fn the_owner_brings_back_the_2_4_data_from_the_tui_after_the_first_2_5_sta
     )
     .await;
     let upgrade_ms = u64::try_from(started.elapsed().as_millis()).unwrap();
-    let grown = bytes(&root).checked_sub(seeded).unwrap_or_default();
+    let grown = bytes(&root).saturating_sub(seeded);
     record.measure("upgrade_start_ms", upgrade_ms);
     record.measure("disk_growth_bytes", grown);
     tui.home().await;

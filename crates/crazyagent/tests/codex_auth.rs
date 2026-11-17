@@ -1,3 +1,5 @@
+mod path_support;
+
 use crazyagent::adapters::LINE_BYTES_MAX;
 use crazyagent::adapters::codex::{
     AuthAccount, AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginCancelStatus,
@@ -7,6 +9,7 @@ use crazyagent::adapters::codex_events::{BridgeError, CodexEventBridge};
 use crazyagent::adapters::events::{Capability, EventKind, Support};
 use crazyagent::adapters::{NativeAction, NativeHarness};
 use crazyagent::protocol::{CredentialRef, RequestId, SessionId};
+use path_support::unit_path;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -56,7 +59,7 @@ fn ready() -> CodexProtocol {
             &mut protocol,
             1,
             json!({
-                "userAgent":"unit-wire-data", "codexHome":"/unit/codex",
+                "userAgent":"unit-wire-data", "codexHome":unit_path("/unit/codex"),
                 "platformFamily":"unix", "platformOs":"macos"
             })
         ),
@@ -74,12 +77,12 @@ fn thread_result() -> Value {
     json!({
         "thread":{
             "id":"thread-unit", "cliVersion":"0.163.0", "createdAt":1,
-            "updatedAt":1, "cwd":"/unit/worktree", "ephemeral":false,
+            "updatedAt":1, "cwd":unit_path("/unit/worktree"), "ephemeral":false,
             "modelProvider":"unit-provider-data", "preview":"", "projectId":null,
             "sessionId":"session-unit", "source":"appServer", "status":{"type":"idle"},
             "turns":[]
         },
-        "cwd":"/unit/worktree", "model":"unit-model-data",
+        "cwd":unit_path("/unit/worktree"), "model":"unit-model-data",
         "modelProvider":"unit-provider-data", "approvalPolicy":"on-request",
         "approvalsReviewer":"user", "sandbox":{"type":"readOnly","networkAccess":false}
     })
@@ -88,7 +91,11 @@ fn thread_result() -> Value {
 fn idle() -> CodexProtocol {
     let mut protocol = ready();
     assert_eq!(
-        request(&protocol.start_thread(Path::new("/unit/worktree")).unwrap())["id"],
+        request(
+            &protocol
+                .start_thread(Path::new(&unit_path("/unit/worktree")))
+                .unwrap()
+        )["id"],
         2
     );
     assert_eq!(
@@ -302,7 +309,11 @@ fn fragmented_challenge_and_coalesced_completion_preserve_wire_order() {
     );
     assert_eq!(protocol.state(), State::Ready);
     assert_eq!(
-        request(&protocol.start_thread(Path::new("/unit/worktree")).unwrap())["id"],
+        request(
+            &protocol
+                .start_thread(Path::new(&unit_path("/unit/worktree")))
+                .unwrap()
+        )["id"],
         3
     );
 }
@@ -325,7 +336,7 @@ fn missing_and_null_completion_ids_remain_uncorrelated_and_do_not_unlock_login()
             }
         );
         assert_eq!(
-            protocol.start_thread(Path::new("/unit/worktree")),
+            protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
             Err(ProtocolError::InvalidState)
         );
         assert_mutations_blocked(&mut protocol, State::Ready);
@@ -333,7 +344,11 @@ fn missing_and_null_completion_ids_remain_uncorrelated_and_do_not_unlock_login()
             auth(protocol.receive(&completion(json!({"loginId":"native-pending","success":false}))).unwrap()),
             AuthControl::LoginCompleted { login_id: Some(id), success: false, .. } if id == "native-pending"
         ));
-        assert!(protocol.start_thread(Path::new("/unit/worktree")).is_ok());
+        assert!(
+            protocol
+                .start_thread(Path::new(&unit_path("/unit/worktree")))
+                .is_ok()
+        );
     }
 }
 
@@ -509,11 +524,15 @@ fn cancel_uses_native_login_id_and_preserves_both_supported_statuses() {
         );
         if status == "notFound" {
             assert_eq!(
-                protocol.start_thread(Path::new("/unit/worktree")),
+                protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
                 Err(ProtocolError::InvalidState)
             );
         } else {
-            assert!(protocol.start_thread(Path::new("/unit/worktree")).is_ok());
+            assert!(
+                protocol
+                    .start_thread(Path::new(&unit_path("/unit/worktree")))
+                    .is_ok()
+            );
         }
     }
 }
@@ -538,7 +557,7 @@ fn cancel_unknown_id_does_not_invent_a_matching_active_flow() {
             }
         );
         assert_eq!(
-            protocol.start_thread(Path::new("/unit/worktree")),
+            protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
             Err(ProtocolError::InvalidState)
         );
     }
@@ -802,7 +821,11 @@ fn completion_before_start_response_keeps_native_correlation_and_terminal_fact()
         auth(reply(&mut protocol, 2, browser_result("native-early"))),
         AuthControl::LoginStarted { id: 2, challenge: LoginChallenge::Browser { login_id, .. } } if login_id == "native-early"
     ));
-    assert!(protocol.start_thread(Path::new("/unit/worktree")).is_ok());
+    assert!(
+        protocol
+            .start_thread(Path::new(&unit_path("/unit/worktree")))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -875,7 +898,11 @@ fn completion_cancel_races_preserve_both_observed_outcomes() {
             })
         );
         assert_eq!(protocol.state(), State::Ready);
-        assert!(protocol.start_thread(Path::new("/unit/worktree")).is_ok());
+        assert!(
+            protocol
+                .start_thread(Path::new(&unit_path("/unit/worktree")))
+                .is_ok()
+        );
     }
 }
 
@@ -891,7 +918,7 @@ fn late_completion_of_canceled_login_does_not_clear_another_live_login() {
         AuthControl::LoginCompleted { login_id: Some(id), success: true, .. } if id == "native-canceled-old"
     ));
     assert_eq!(
-        protocol.start_thread(Path::new("/unit/worktree")),
+        protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
         Err(ProtocolError::InvalidState)
     );
     assert_mutations_blocked(&mut protocol, State::Ready);
@@ -900,7 +927,11 @@ fn late_completion_of_canceled_login_does_not_clear_another_live_login() {
             json!({"loginId":"native-live-new","success":false}),
         ))
         .unwrap();
-    assert!(protocol.start_thread(Path::new("/unit/worktree")).is_ok());
+    assert!(
+        protocol
+            .start_thread(Path::new(&unit_path("/unit/worktree")))
+            .is_ok()
+    );
 }
 
 #[test]
@@ -952,14 +983,14 @@ fn authentication_mutations_cannot_change_credentials_under_thread_or_active_tur
         &mut initialized,
         1,
         json!({
-            "userAgent":"unit-wire-data","codexHome":"/unit/codex",
+            "userAgent":"unit-wire-data","codexHome":unit_path("/unit/codex"),
             "platformFamily":"unix","platformOs":"macos"
         }),
     );
     assert_mutations_blocked(&mut initialized, State::Initialized);
     let mut starting_thread = ready();
     starting_thread
-        .start_thread(Path::new("/unit/worktree"))
+        .start_thread(Path::new(&unit_path("/unit/worktree")))
         .unwrap();
     assert_mutations_blocked(&mut starting_thread, State::ThreadStarting);
     let mut idle = idle();
@@ -994,7 +1025,7 @@ fn cancel_and_read_do_not_bypass_uninitialized_or_pending_thread_phases() {
     );
     let mut starting_thread = ready();
     starting_thread
-        .start_thread(Path::new("/unit/worktree"))
+        .start_thread(Path::new(&unit_path("/unit/worktree")))
         .unwrap();
     assert_eq!(
         starting_thread.cancel_login("native-id"),
@@ -1065,13 +1096,13 @@ fn auth_requests_share_existing_single_pending_rpc_and_login_flow_guards() {
         Err(ProtocolError::InvalidState)
     );
     assert_eq!(
-        protocol.start_thread(Path::new("/unit/worktree")),
+        protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
         Err(ProtocolError::InvalidState)
     );
     reply(&mut protocol, 2, browser_result("native-pending"));
     assert_mutations_blocked(&mut protocol, State::Ready);
     assert_eq!(
-        protocol.start_thread(Path::new("/unit/worktree")),
+        protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
         Err(ProtocolError::InvalidState)
     );
     assert_eq!(request(&protocol.read_account(false).unwrap())["id"], 3);
@@ -1310,126 +1341,6 @@ fn transient_auth_types_do_not_implement_serialize_and_debug_redacts_all_sensiti
     }
 }
 
-#[test]
-fn every_production_auth_control_is_rejected_by_worker_bridge_without_state_changes() {
-    let mut protocol = ready();
-    let mut controls = vec![begin_browser(&mut protocol, "native-worker-denied")];
-    controls.push(auth(
-        protocol
-            .receive(&completion(json!({
-                "loginId":"native-worker-denied","success":false,"error":AUTH_ERROR
-            })))
-            .unwrap(),
-    ));
-    let outgoing = request(&protocol.start_device_code_login().unwrap());
-    controls.push(auth(reply(
-        &mut protocol,
-        outgoing["id"].as_i64().unwrap(),
-        device_result("native-device-denied"),
-    )));
-    let outgoing = request(&protocol.cancel_login("native-device-denied").unwrap());
-    controls.push(auth(reply(
-        &mut protocol,
-        outgoing["id"].as_i64().unwrap(),
-        json!({"status":"canceled"}),
-    )));
-    let outgoing = request(&protocol.read_account(false).unwrap());
-    controls.push(auth(reply(
-        &mut protocol,
-        outgoing["id"].as_i64().unwrap(),
-        json!({
-            "account":{"type":"chatgpt","email":EMAIL,"planType":"plus"},"requiresOpenaiAuth":false
-        }),
-    )));
-    let outgoing = request(&protocol.logout_account().unwrap());
-    controls.push(auth(reply(
-        &mut protocol,
-        outgoing["id"].as_i64().unwrap(),
-        json!({}),
-    )));
-    let outgoing = request(&protocol.read_account(false).unwrap());
-    controls.push(auth(
-        protocol
-            .receive(&wire(
-                json!({"id":outgoing["id"],"error":{"code":-1,"message":AUTH_ERROR}}),
-            ))
-            .unwrap(),
-    ));
-
-    let mut bridge = bridge();
-    for control in controls {
-        assert_eq!(
-            bridge.translate(Event::AuthControl(control), None),
-            Err(BridgeError::Unsupported)
-        );
-    }
-    let initialized = bridge.translate(Event::Initialized, None).unwrap();
-    assert_eq!(initialized.kind, EventKind::ProtocolInitialized);
-    assert_eq!(initialized.native_thread_id, None);
-    bridge
-        .translate(
-            Event::ThreadStarted {
-                thread_id: "native-coding-thread".into(),
-            },
-            None,
-        )
-        .unwrap();
-    let initialized = bridge.translate(Event::Initialized, None).unwrap();
-    assert_eq!(
-        initialized.native_thread_id.as_deref(),
-        Some("native-coding-thread")
-    );
-    assert_eq!(
-        bridge.support(Capability::NativeAdmission),
-        Support::Unavailable
-    );
-}
-
-#[test]
-fn worker_bridge_also_rejects_legacy_auth_errors_and_unsupported_auth_method_events() {
-    let mut bridge = bridge();
-    for method in [LOGIN, COMPLETED, READ, CANCEL, LOGOUT] {
-        assert_eq!(
-            bridge.translate(
-                Event::RequestFailed {
-                    id: 2,
-                    method,
-                    code: -1,
-                    message: AUTH_ERROR.into()
-                },
-                None
-            ),
-            Err(BridgeError::Unsupported)
-        );
-        assert_eq!(
-            bridge.translate(
-                Event::UnsupportedNotification {
-                    method: method.into()
-                },
-                None
-            ),
-            Err(BridgeError::Unsupported)
-        );
-        assert_eq!(
-            bridge.translate(
-                Event::UnsupportedRequest {
-                    id: WireId::Number(42),
-                    method: method.into()
-                },
-                None
-            ),
-            Err(BridgeError::Unsupported)
-        );
-    }
-    assert_eq!(
-        bridge
-            .translate(Event::Initialized, None)
-            .unwrap()
-            .native_thread_id,
-        None
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn a_sign_in_page_from_the_child_is_shown_only_on_the_openai_auth_origin() {
@@ -1473,3 +1384,8 @@ fn a_sign_in_page_from_the_child_is_shown_only_on_the_openai_auth_origin() {
         }
     }
 }
+
+/// The worker bridge rows: every production auth control, legacy auth error and unsupported
+/// auth method event is rejected by the worker bridge without a state change. Inputs: the
+/// Codex protocol fixtures. Output: none; each row asserts.
+mod codex_auth_worker_bridge;

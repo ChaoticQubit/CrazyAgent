@@ -32,7 +32,7 @@ impl Job {
 
 /// Creates an unnamed job object with default security. Relies on the returned handle being
 /// either null on failure or a new handle this caller owns alone.
-fn create_job() -> Result<OwnedHandle, u32> {
+pub(super) fn create_job() -> Result<OwnedHandle, u32> {
     let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if handle.is_null() {
         return Err(last_error());
@@ -65,7 +65,7 @@ fn limit_job(job: &OwnedHandle, active_processes: u32) -> Result<(), u32> {
 
 /// Assigns a process to the job. Relies on both handles being live for the call, the process
 /// handle carrying the rights `CreateProcessW` gives its caller.
-fn assign_job(job: &OwnedHandle, process: &OwnedHandle) -> Result<(), u32> {
+pub(super) fn assign_job(job: &OwnedHandle, process: &OwnedHandle) -> Result<(), u32> {
     let assigned =
         unsafe { AssignProcessToJobObject(job.as_raw_handle(), process.as_raw_handle()) };
     if assigned == 0 {

@@ -691,6 +691,7 @@ impl ProjectPage {
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     pub(super) fn ask_team(&mut self, ctx: &mut Ctx) {
         let hides = self.screen.tab == Tab::Settings
+            && self.screen.hidden_offered()
             && self
                 .screen
                 .hidden_paths
