@@ -28,10 +28,10 @@ function bridgeUntil(what, cmd, args, done) {
 }
 
 /** Reads the projects the golden pool serves from a pools page.
- * Input: the page.
+ * Input: that page.
  * Output: their ids, or null when the pool is not on it. */
-function served(page) {
-  const pool = page.items.find((record) => record.kind === "pool" && record.pool.id === POOL);
+function served(pools) {
+  const pool = pools.items.find((record) => record.kind === "pool" && record.pool.id === POOL);
   return pool ? pool.pool.projects : null;
 }
 
@@ -66,7 +66,7 @@ test("golden add a project: New project makes a project the engine lists, set up
     await me.waitFor("the Team step", (text) => text.includes("Team") && text.includes("Create project"));
     step(run, STEPS[5]);
     assert.equal(await page.evaluate(`document.querySelector('${OWN_BRANCH}')?.disabled ?? null`), false, "New project offers Own branch");
-    await me.follow(OWN_BRANCH);
+    await me.click("Own branch", "label.pj-radio-card strong");
     assert.equal(await page.evaluate(`document.querySelector('${OWN_BRANCH}')?.checked ?? null`), true, "Own branch is chosen");
     step(run, STEPS[6]);
     await me.click("Create project", "button");
@@ -75,15 +75,15 @@ test("golden add a project: New project makes a project the engine lists, set up
     await me.waitFor("the overview naming the project", (text) => text.includes(NAME));
     await me.capture("golden-add-project-overview");
     step(run, STEPS[7]);
+    await bridgeUntil("the pool to serve the project", "desktop_model_access_page", { collection: "pools", next: false }, (pools) => JSON.stringify(served(pools)) === JSON.stringify([id]));
+    await bridgeUntil("Own branch to be saved", "desktop_project_agent_policy", { id }, (view) => view.access === "own_branch");
+    assert.equal(await bridgeUntil("the job to be dismissed", "desktop_intake_status", {}, (job) => job === null), null);
   });
   const listed = (await value(run.bridge, "desktop_project_list")).items.map((item) => [item.id, item.name]);
   assert.deepEqual(listed, [[id, NAME]], "Home lists the new project");
   const setup = await value(run.bridge, "desktop_project_setup", { id });
   assert.deepEqual([setup.name, setup.about, setup.pool], [NAME, ABOUT, POOL], "the project's setup is recorded as filled in");
   assert.ok(setup.folder.startsWith(`${run.projects}/`), "the project's folder is made in the projects folder");
-  await bridgeUntil("the pool to serve the project", "desktop_model_access_page", { collection: "pools", next: false }, (page) => JSON.stringify(served(page)) === JSON.stringify([id]));
-  await bridgeUntil("Own branch to be saved", "desktop_project_agent_policy", { id }, (view) => view.access === "own_branch");
-  assert.equal(await bridgeUntil("the job to be dismissed", "desktop_intake_status", {}, (job) => job === null), null);
   assert.ok(run.log.calls.includes("desktop_setup_project_job"), "Create project starts the engine's job");
   step(run, STEPS[8]);
   const record = finishGolden(run);
