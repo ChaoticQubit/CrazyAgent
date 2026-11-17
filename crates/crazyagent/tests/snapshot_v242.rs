@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod e2e_support;
+mod keychain_support;
 
 #[path = "snapshot_v242/check.rs"]
 mod check;
@@ -222,6 +223,8 @@ const KEPT_WORDS: [&str; 12] = [
 struct Masks {
     temp_spellings: Vec<String>,
     temp_groups: Vec<String>,
+    parent_spellings: Vec<String>,
+    parent_marks: Vec<String>,
     homes: Vec<String>,
     ids: Vec<String>,
     paths: Vec<String>,
@@ -267,10 +270,16 @@ impl Masks {
                 .all(|(spelling, group)| absolute(spelling) && absolute(group))
         );
         assert!(homes.iter().all(absolute));
+        let real_temp = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let (parent_spellings, parent_marks) = temp_parents(&real_temp).into_iter().unzip();
         let (temp_spellings, temp_groups) = roots.into_iter().unzip();
         Masks {
             temp_spellings,
             temp_groups,
+            parent_spellings,
+            parent_marks,
             homes,
             ids: Vec::new(),
             paths: Vec::new(),
@@ -328,7 +337,13 @@ impl Masks {
             let entry = format!("{}/{}", groups[which], &tail[..entry_len]);
             (1 + entry_len, format!("<path-{}>", number(paths, &entry)))
         });
-        let homed = replace_folders(&pathed, &self.homes, |_, _| (0, "<owner-home>".to_owned()));
+        let marks = &self.parent_marks;
+        let parented = replace_folders(&pathed, &self.parent_spellings, |which, _| {
+            (0, marks[which].clone())
+        });
+        let homed = replace_folders(&parented, &self.homes, |_, _| {
+            (0, "<owner-home>".to_owned())
+        });
         let timed = replace_matches(&homed, |rest| {
             rfc3339_len(rest.as_bytes()).map(|len| (len, "<t>".to_owned()))
         });
@@ -345,6 +360,37 @@ impl Masks {
         let ported = replace_matches(&named, port_len);
         replace_matches(&ported, pane_len)
     }
+}
+
+/// The per-user folders above the temp folder that differ on every Mac and user: each parent
+/// of the canonical temp folder strictly below /private/var/folders, in that spelling and the
+/// /var/folders one, longest first, with the mark it reads as, `<temp>/..` one level up and
+/// `<temp>/../..` two. Input: the canonical temp folder. Output: the spellings and marks,
+/// none when the temp folder is not below /private/var/folders.
+fn temp_parents(real_temp: &Path) -> Vec<(String, String)> {
+    let base = Path::new("/private/var/folders");
+    let mut parents = Vec::new();
+    for (level, folder) in real_temp.ancestors().skip(1).enumerate() {
+        if folder == base || !folder.starts_with(base) {
+            break;
+        }
+        let mark = format!("<temp>{}", "/..".repeat(level + 1));
+        let text = folder.to_string_lossy().into_owned();
+        let short = text
+            .strip_prefix("/private")
+            .expect("below /private/var/folders")
+            .to_owned();
+        parents.push((text, mark.clone()));
+        parents.push((short, mark));
+    }
+    parents.sort_by_key(|(spelling, _)| std::cmp::Reverse(spelling.len()));
+    assert!(parents.len() <= 8);
+    assert!(parents.iter().all(|(spelling, mark)| {
+        spelling.starts_with("/")
+            && spelling.contains("/var/folders/")
+            && mark.starts_with("<temp>/..")
+    }));
+    parents
 }
 
 /// Replaces each folder spelling that starts and ends at a path boundary. Inputs: the string,
@@ -1077,6 +1123,43 @@ fn a_sandbox_rule_widened_to_its_parent_fails_after_normalisation() {
     let widened = normalise(&rule(whole)).unwrap();
     assert!(widened.contains("\"<temp>\""), "{widened}");
     assert!(compare(bare.as_bytes(), &widened).is_err(), "{widened}");
+}
+
+#[test]
+fn the_temp_folder_s_per_user_parents_read_as_steps_up_from_temp() {
+    let up = |mark: &str| mark.to_owned();
+    assert_eq!(
+        temp_parents(Path::new("/private/var/folders/ab/cd123/T")),
+        vec![
+            ("/private/var/folders/ab/cd123".to_owned(), up("<temp>/..")),
+            ("/private/var/folders/ab".to_owned(), up("<temp>/../..")),
+            ("/var/folders/ab/cd123".to_owned(), up("<temp>/..")),
+            ("/var/folders/ab".to_owned(), up("<temp>/../..")),
+        ]
+    );
+    assert!(temp_parents(Path::new("/private/tmp")).is_empty());
+    assert!(temp_parents(Path::new("/private/var/folders/ab")).is_empty());
+    let kept = normalise(&json!({"root": "/private", "folders": "/private/var/folders"})).unwrap();
+    assert!(
+        kept.contains("\"/private\"") && kept.contains("\"/private/var/folders\""),
+        "{kept}"
+    );
+    let real = std::env::temp_dir().canonicalize().unwrap();
+    if let Some((parent, _)) = temp_parents(&real)
+        .into_iter()
+        .find(|(_, mark)| mark == "<temp>/..")
+    {
+        let text = normalise(&json!({
+            "parent": parent,
+            "beside": format!("{parent}/C/cache"),
+            "temp": real.to_string_lossy(),
+        }))
+        .unwrap();
+        assert!(text.contains("\"<temp>/..\""), "{text}");
+        assert!(text.contains("\"<temp>/../C/cache\""), "{text}");
+        assert!(text.contains("\"<temp>\""), "{text}");
+        assert!(!text.contains("/var/folders/"), "{text}");
+    }
 }
 
 #[test]

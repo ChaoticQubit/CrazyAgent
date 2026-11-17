@@ -20,6 +20,12 @@ const PROJECT: &str = "snapshot-p4";
 /// The fixture owner's git identity, which a landed commit is authored with.
 const OWNER_GIT: &str = "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n";
 
+/// The name in [`OWNER_GIT`], which the engine gives its agents' commits.
+const OWNER_NAME: &str = "Owner Example";
+
+/// The email in [`OWNER_GIT`], which the engine gives its agents' commits.
+const OWNER_EMAIL: &str = "owner@example.invalid";
+
 /// The text the fixture repository starts with; the agent edits line two.
 const README: &str = "one\ntwo\nthree\n";
 
@@ -376,7 +382,7 @@ fn agent_change(
     fs::write(worktree.join("README"), "one\ntwo tides\nthree\n").map_err(text)?;
     fs::write(worktree.join("TIDES"), "high 06:10\nlow 12:25\n").map_err(text)?;
     e2e_support::git(&worktree, &["add", "-A"]);
-    e2e_support::git(&worktree, &["commit", "--quiet", "-m", "Agent: tide fix"]);
+    agent_commit(&worktree, "Agent: tide fix")?;
     let workspace = Workspace {
         project: project.clone(),
         agent: ChangeAgent {
@@ -396,6 +402,49 @@ fn agent_change(
     landing::record_turn_end(db, &workspace, &turn)
         .map_err(debug)?
         .ok_or_else(|| "the turn left no change set".to_owned())
+}
+
+/// Commits what is staged in an agent's clone the way the engine's agents commit, under the
+/// owner's identity the engine gives them, which Landing Merge requires of every carried
+/// commit, with the same git isolation as `e2e_support::git`. Inputs: the clone and the
+/// message. Output: nothing, or how git failed.
+fn agent_commit(worktree: &Path, message: &str) -> Result<(), String> {
+    assert!(OWNER_GIT.contains(OWNER_NAME) && OWNER_GIT.contains(OWNER_EMAIL));
+    let output = crazyagent::spawn_gate::output(
+        std::process::Command::new("git")
+            .args(["commit", "--quiet", "-m", message])
+            .current_dir(worktree)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_AUTHOR_NAME", OWNER_NAME)
+            .env("GIT_AUTHOR_EMAIL", OWNER_EMAIL)
+            .env("GIT_COMMITTER_NAME", OWNER_NAME)
+            .env("GIT_COMMITTER_EMAIL", OWNER_EMAIL)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .map_err(text)?;
+    match output.status.success() {
+        true => Ok(()),
+        false => Err(format!("the agent commit failed: {}", output.status)),
+    }
+}
+
+#[test]
+fn the_fixture_agent_commits_under_the_owner_identity_the_engine_reads() {
+    let checkout = e2e_support::scratch("ca-p4-identity-");
+    e2e_support::repository(checkout.path(), "README", README);
+    fs::write(checkout.path().join("README"), "one\ntwo tides\nthree\n").unwrap();
+    e2e_support::git(checkout.path(), &["add", "-A"]);
+    assert_eq!(agent_commit(checkout.path(), "Agent: tide fix"), Ok(()));
+    let shown = stdout(
+        checkout.path(),
+        &["log", "-1", "--format=%an <%ae>|%cn <%ce>"],
+    );
+    let owner = format!("{OWNER_NAME} <{OWNER_EMAIL}>");
+    assert_eq!(shown.trim_end(), format!("{owner}|{owner}"));
 }
 
 /// Records one agent change set on the stopped engine's store, closing the store before the
