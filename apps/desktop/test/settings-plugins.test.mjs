@@ -51,7 +51,7 @@ test("a context-mode check of an npx the engine's tool resolver does not find re
 });
 
 test("a check of a Windows batch command other than npm's npx.cmd says to point it at the tool's .exe or node.exe", () => {
-  assert.equal(api.plainError("server_batch_file"), "This command is a Windows batch file, which runs through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.");
+  assert.equal(api.plainError("server_batch_file"), "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.");
 });
 
 test("the skills list shows each skill from the engine with its folder, switch and remove action", () => {

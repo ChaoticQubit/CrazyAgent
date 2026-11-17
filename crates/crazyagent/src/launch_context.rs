@@ -1711,7 +1711,7 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
 }
 
 /// The tools-section line naming the MCP servers a launch left out because each one's
-/// command is a Windows batch file ([`crate::plugins::without_cmd_exe`]) and what to tell the
+/// command is not a Windows program ([`crate::plugins::without_cmd_exe`]) and what to tell the
 /// owner: at most [`BATCH_NAMES_SHOWN_MAX`] names, each clipped to a server name's bound, then
 /// how many more. Input: the names. Output: one line ending in a newline, none without names.
 fn batch_files_line(names: &[String]) -> Option<String> {
@@ -1728,7 +1728,7 @@ fn batch_files_line(names: &[String]) -> Option<String> {
         more => format!("{} and {more} more", shown.join(", ")),
     };
     let line = format!(
-        "- MCP servers off for this launch: {list}. Each one's command is a Windows batch file, which runs through cmd.exe, so CrazyAgent did not start it. Tell the owner in your report to set its command to the tool's .exe, or to node.exe with the tool's script as the first argument.\n"
+        "- MCP servers off for this launch: {list}. Each one's command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent did not start it. Tell the owner in your report to set its command to the tool's .exe, or to node.exe with the tool's script as the first argument.\n"
     );
     assert!(line.len() <= BATCH_LINE_BYTES_MAX);
     Some(line)
@@ -1738,9 +1738,9 @@ fn batch_files_line(names: &[String]) -> Option<String> {
 /// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
 /// all output that is not short and fixed, a graphify query before any source read and a
 /// check of the approved skills by the names the skills index uses. A launch that left the
-/// context-mode server or servers with a Windows batch command out is told why. Inputs:
+/// context-mode server or servers whose command is no Windows program out is told why. Inputs:
 /// whether the harness is Claude Code, the launch's servers, why context-mode was left out
-/// if it was, the servers left out as batch files, the tools switched off and the first
+/// if it was, the servers left out as no Windows program, the tools switched off and the first
 /// approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,

@@ -1480,7 +1480,7 @@ async fn start_check(
 /// ([`crate::context_mode::for_check`]). That spec never runs as npx here, nor does one only shaped
 /// like it whose npx the tool resolver does not find: while its install runs, after a recent
 /// failure, without npm beside npx, for a version the pack does not pin or for such an npx, or for
-/// a Windows batch command other than npm's npx.cmd ([`crate::plugins::without_cmd_exe`]), the
+/// a Windows command that is no program, npx.cmd mapped ([`crate::plugins::without_cmd_exe`]), the
 /// check is not run and says why. Its own project, home and temp folders under `mcp-checks/<id>` in
 /// the engine folder, reads of system paths, the command's folder and that shared install only,
 /// open network without binding the owner's ports, and only its own secrets, under the owner's call
@@ -1530,9 +1530,7 @@ fn boundary_check(
             return Err("server_cant_start".into());
         }
     };
-    let Some(launched) = crate::plugins::without_cmd_exe(root, launched) else {
-        return Err("server_batch_file".into());
-    };
+    let launched = crate::plugins::without_cmd_exe(root, launched).map_err(str::to_owned)?;
     let ServerSpec::Stdio { command, args } = &launched else {
         return Err("server_check_command_only".into());
     };

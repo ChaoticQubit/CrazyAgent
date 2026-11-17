@@ -487,39 +487,49 @@ pub(crate) fn context_mode_on<'a>(
     Err(ContextModeOff::NpxNotFound)
 }
 
-/// The spec a harness or a server check runs for one approved server, never a batch file
-/// through cmd.exe (V243-WIN-MCP-NPX): on Windows a `.cmd` or `.bat` command, as written or
-/// as its real file, runs only as npm's own `npx.cmd` mapped by its layout ([`npx_spec`]);
-/// any other batch file is left out. Every other spec is unchanged. Inputs: the engine root
-/// and the spec. Output: the spec to run, or none to leave the server out.
-pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Option<ServerSpec> {
+/// The spec a harness or a server check runs for one approved server, never through cmd.exe
+/// (V243-WIN-MCP-NPX, #341 sec F1): on Windows a stdio command runs only as a program, as
+/// written and as its real file ([`crate::tools::program_file`]), or as npm's own `npx.cmd`
+/// mapped by its layout ([`npx_spec`]). Every other spec is unchanged. Inputs: the engine
+/// root and the spec. Output: the spec to run, or the check code that leaves the server out.
+pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpec, &'static str> {
     #[cfg(windows)]
     if let ServerSpec::Stdio { command, args } = &spec {
         let command = Path::new(command);
+        let real = command.canonicalize().ok();
         let batch = crate::tools::batch_file(command)
-            || command
-                .canonicalize()
-                .is_ok_and(|real| crate::tools::batch_file(&real));
+            || real.as_deref().is_some_and(crate::tools::batch_file);
         if batch {
             let places = crate::tools::Places::from_environment(Some(root));
             return npx_spec(command, args, &places);
         }
+        let program = crate::tools::program_file(command)
+            && real.as_deref().is_none_or(crate::tools::program_file);
+        if !program {
+            return Err("server_batch_file");
+        }
     }
     #[cfg(not(windows))]
     let _ = root;
-    Some(spec)
+    Ok(spec)
 }
 
 /// npm's `npx.cmd` as the tool resolver runs it ([`crate::tools::resolve_entry`]), kept only
 /// when the resolver mapped it by npx's layout ([`crate::tools::npx_real`]): `node.exe` with
 /// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
-/// command, its arguments and the places. Output: the spec, none for any other batch file.
+/// command, its arguments and the places. Output: the spec, or `server_batch_file` for any
+/// other batch file.
 #[cfg(windows)]
-fn npx_spec(command: &Path, args: &[String], places: &crate::tools::Places) -> Option<ServerSpec> {
-    let tool = crate::tools::resolve_entry(command, places).ok()?;
-    let (node, cli) = crate::tools::npx_real(command)?;
+fn npx_spec(
+    command: &Path,
+    args: &[String],
+    places: &crate::tools::Places,
+) -> Result<ServerSpec, &'static str> {
+    let other = "server_batch_file";
+    let (node, cli) = crate::tools::npx_real(command).ok_or(other)?;
+    let tool = crate::tools::resolve_entry(command, places).map_err(|_| other)?;
     if tool.program != cli || tool.interpreter().map(|found| &found.program) != Some(&node) {
-        return None;
+        return Err(other);
     }
     let plain = |file: &Path| {
         crate::sandbox::canonical(file)
@@ -529,11 +539,11 @@ fn npx_spec(command: &Path, args: &[String], places: &crate::tools::Places) -> O
             .ok()
     };
     let mut words = Vec::with_capacity(args.len() + 1);
-    words.push(plain(&cli)?);
+    words.push(plain(&cli).ok_or(other)?);
     words.extend_from_slice(args);
     assert!(words.len() <= ARGS_MAX + 1);
-    Some(ServerSpec::Stdio {
-        command: plain(&node)?,
+    Ok(ServerSpec::Stdio {
+        command: plain(&node).ok_or(other)?,
         args: words,
     })
 }
@@ -575,7 +585,7 @@ pub(crate) fn exact_version(version: &str) -> bool {
 /// The effective set with each server's secret values already read, ready for a harness
 /// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
 /// the default pack's context-mode server was left out, `batch_files` names each server left
-/// out because its command is a Windows batch file ([`without_cmd_exe`]), and `left_out`
+/// out because its command is not a Windows program ([`without_cmd_exe`]), and `left_out`
 /// names every server left out, whose hooks the launch leaves out too.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
@@ -722,7 +732,7 @@ const PROBLEMS: &[(&str, &str)] = &[
     ("server_cant_start", "The server can't start."),
     (
         "server_batch_file",
-        "This command is a Windows batch file, which runs through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
+        "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
     ),
     (
         "server_stored_spec_invalid",
@@ -1090,11 +1100,11 @@ mod tests {
         }
     }
 
-    /// V243-WIN-MCP-NPX: a check of a Windows batch command other than npm's npx.cmd says
-    /// what to point the command at instead, and the code is known to every client.
+    /// V243-WIN-MCP-NPX: a check of a Windows command that is no program, npm's npx.cmd
+    /// aside, says what to point the command at instead, and the code is known to every client.
     #[test]
     fn a_check_of_a_batch_command_says_what_to_point_it_at() {
-        let words = "This command is a Windows batch file, which runs through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.";
+        let words = "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.";
         assert_eq!(check_problem("server_batch_file"), words);
         assert_eq!(known_code("server_batch_file"), Some("server_batch_file"));
     }
@@ -1216,9 +1226,10 @@ mod windows_tests {
         }
     }
 
-    /// V243-WIN-MCP-NPX: npm's `npx.cmd`, found by its layout, runs as the `node.exe` beside
-    /// it with `npx-cli.js` before the approved arguments, in plain drive spelling; a `.cmd` or
-    /// `.bat` by any other name or layout gives none, and a program's spec is unchanged.
+    /// V243-WIN-MCP-NPX and #341 sec F1: npm's `npx.cmd`, found by its layout, runs as the
+    /// `node.exe` beside it with `npx-cli.js` before the approved arguments, in plain drive
+    /// spelling; any other `.cmd` or `.bat`, and a name with no extension or a dotted one with a
+    /// `.cmd` beside it, there or not, is left out; a `.exe` spec is unchanged.
     #[test]
     fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
         let folder = tempfile::tempdir().unwrap();
@@ -1230,16 +1241,20 @@ mod windows_tests {
         let bin = real.join("node_modules").join("npm").join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
-        for name in ["npx.cmd", "other.cmd", "run.bat"] {
+        for name in ["npx.cmd", "other.cmd", "run.bat", "tool.cmd", "tool.v2.cmd"] {
             std::fs::write(real.join(name), "@ECHO off\r\n").unwrap();
         }
         let places = crate::tools::Places::new(vec![real.clone()], None);
         let args = vec!["-y".to_owned(), "@scope/server".to_owned()];
         let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+        let spec = |name: &str| ServerSpec::Stdio {
+            command: text(real.join(name)),
+            args: args.clone(),
+        };
         let mapped = npx_spec(&real.join("npx.cmd"), &args, &places);
         assert_eq!(
             mapped,
-            Some(ServerSpec::Stdio {
+            Ok(ServerSpec::Stdio {
                 command: text(real.join("node.exe")),
                 args: vec![
                     text(bin.join("npx-cli.js")),
@@ -1250,19 +1265,30 @@ mod windows_tests {
         );
         assert!(mapped.unwrap().validate().is_ok());
         for name in ["other.cmd", "run.bat"] {
-            assert_eq!(npx_spec(&real.join(name), &args, &places), None, "{name}");
-            let spec = ServerSpec::Stdio {
-                command: text(real.join(name)),
-                args: args.clone(),
-            };
-            assert_eq!(without_cmd_exe(&real, spec), None, "{name}");
+            let refused = npx_spec(&real.join(name), &args, &places);
+            assert_eq!(refused, Err("server_batch_file"), "{name}");
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
         }
+        for name in ["tool", "tool.v2", "gone", "gone.v2"] {
+            assert!(spec(name).validate().is_ok(), "{name}");
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        std::fs::copy(&shipped, real.join("tool")).unwrap();
+        std::fs::copy(&shipped, real.join("tool.v2")).unwrap();
+        for name in ["tool", "tool.v2"] {
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.exe")),
+            Ok(spec("gone.exe"))
+        );
         std::fs::remove_file(real.join("node.exe")).unwrap();
-        assert_eq!(npx_spec(&real.join("npx.cmd"), &args, &places), None);
+        let lone = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(lone, Err("server_batch_file"));
         let program = ServerSpec::Stdio {
             command: text(shipped),
-            args,
+            args: args.clone(),
         };
-        assert_eq!(without_cmd_exe(&real, program.clone()), Some(program));
+        assert_eq!(without_cmd_exe(&real, program.clone()), Ok(program));
     }
 }

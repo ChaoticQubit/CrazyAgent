@@ -120,6 +120,25 @@ fn batch_name(name: &str) -> bool {
     name.contains(':') || name.ends_with(".cmd") || name.ends_with(".bat")
 }
 
+/// Whether Windows starts a file directly as a program, never through cmd.exe
+/// ([`program_name`]). Input: the file. Output: the answer, false for a path with no file
+/// name.
+#[cfg(windows)]
+pub(crate) fn program_file(file: &Path) -> bool {
+    file.file_name()
+        .is_some_and(|name| program_name(&name.to_string_lossy()))
+}
+
+/// Whether a file name is one Windows starts directly as a program: `.exe` or `.com` in any
+/// case once the trailing dots and spaces Windows drops are gone, with no `:` stream part. A
+/// name with no extension or another one is not, since a launcher may complete it from
+/// `PATHEXT` with a `.cmd` beside it (#341 sec F1). Input: the name. Output: the answer.
+fn program_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.trim_end_matches(['.', ' ']);
+    !name.contains(':') && (name.ends_with(".exe") || name.ends_with(".com"))
+}
+
 /// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.
 /// Input: the shim's real file. Output: the target, none for any other file.
 #[cfg(windows)]
@@ -232,6 +251,38 @@ pub(super) mod tests {
         }
         for name in ["tool.exe", "cmd", "run.cmdx", "run.cmd.exe", "bat", ""] {
             assert!(!batch_name(name), "{name}");
+        }
+    }
+
+    /// #341 sec F1: only `.exe` or `.com` in any case, trailing dots and spaces dropped, is a
+    /// program Windows starts directly; a name with no extension, a dotted one such as
+    /// `tool.v2`, a batch file, a script or any stream part is not.
+    #[test]
+    fn a_program_name_is_read_as_windows_reads_it() {
+        for name in [
+            "node.exe",
+            "NODE.EXE",
+            "tool.Com",
+            "tool.exe.",
+            "tool.exe ",
+            "run.cmd.exe",
+        ] {
+            assert!(program_name(name), "{name}");
+        }
+        for name in [
+            "tool",
+            "tool.v2",
+            "npx",
+            "npx.cmd",
+            "run.bat",
+            "cli.js",
+            "tool.exe:stream",
+            "tool.exe::$DATA",
+            "tool.exex",
+            "exe",
+            "",
+        ] {
+            assert!(!program_name(name), "{name}");
         }
     }
 

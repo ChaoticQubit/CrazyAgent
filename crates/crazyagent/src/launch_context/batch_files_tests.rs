@@ -1,7 +1,7 @@
 use super::*;
 
-/// V243-WIN-MCP-NPX: a launch that left servers out because each one's command is a Windows
-/// batch file names them in its tools section, at most four then how many more, within the
+/// V243-WIN-MCP-NPX: a launch that left servers out because each one's command is not a
+/// Windows program names them in its tools section, at most four then how many more, within the
 /// line's bound, and says what to tell the owner; a launch with none says nothing of them.
 #[test]
 fn a_launch_that_left_batch_file_servers_out_names_them_in_its_tools_section() {
@@ -13,7 +13,7 @@ fn a_launch_that_left_batch_file_servers_out_names_them_in_its_tools_section() {
     };
     let one = batch_files_line(&names(1)).unwrap();
     assert!(
-        one.starts_with("- MCP servers off for this launch: `server-0`. Each one's command is a Windows batch file, which runs through cmd.exe"),
+        one.starts_with("- MCP servers off for this launch: `server-0`. Each one's command is not a Windows program (.exe or .com), which Windows may start through cmd.exe"),
         "{one}"
     );
     assert!(
