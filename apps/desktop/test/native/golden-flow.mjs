@@ -3,19 +3,17 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
 import { LIB, ROUTES, render } from "./bridge-routes.mjs";
-import { INTERNALS, POLL_MS, closedPort, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
+import { finishGolden, recordPath, step, waitUntil, writeRecord } from "./golden-run.mjs";
+import { INTERNALS, closedPort, endTerminals, owner, required, serveApp, silentProvider, start as launch, stop, terminalServers, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
-const WAIT_MS = 90000;
 const ONBOARD_MS = 120000;
 const GIT = "/usr/bin/git";
-const WAIT_MAX_MS = 300000;
-const STEPS_MAX = 64;
+export { finishGolden, step, waitUntil };
 export const POOL = "local-pool";
 export const LIMITED = "limited-connection";
 export const READY = "local-connection";
@@ -77,27 +75,6 @@ pools = [{ id = "${POOL}", members = [${limitedMember}"local-connection"], proje
   assert.ok(existsSync(join(dist, "index.html")), "the frontend built");
   run.site = await serveApp(dist, run.bridge, [], run.log);
   step(run, "start the engine and the app");
-}
-
-/** Ends one step of the flow, timed from the end of the one before.
- * Inputs: the run and the step's name, a fixed text that holds no path and no name the owner
- * typed. Output: none. */
-export function step(run, name) {
-  assert.ok(typeof name === "string" && name.length > 0 && !run.finished);
-  assert.ok(run.steps.length < STEPS_MAX, `a flow has at most ${STEPS_MAX} steps`);
-  const now = Date.now();
-  run.steps.push({ step: name, ms: now - run.mark });
-  run.mark = now;
-}
-
-/** Ends the flow as passed: writes its run record, then reads it back from disk.
- * Input: the run.
- * Output: the record as the evidence folder holds it, or null when it holds none. */
-export function finishGolden(run) {
-  assert.ok(!run.finished);
-  run.finished = true;
-  writeRecord(run, "passed");
-  return existsSync(recordPath(run)) ? JSON.parse(readFileSync(recordPath(run), "utf8")) : null;
 }
 
 /** Stops the app, the bridge, the engine, its provider and its agent terminals; an unfinished
@@ -198,34 +175,4 @@ export async function open(run, page, path) {
  * Output: the hash. */
 export function hashUntil(page, what, check) {
   return waitUntil(`the page to reach ${what}`, () => page.evaluate("location.hash"), check);
-}
-
-/** Reads until `done` accepts what `read` gave, every POLL_MS, for at most `ms`: the one place a
- * golden flow sleeps (Q2). Inputs: what is awaited, for the failure, the read, the check and
- * the limit (at most five minutes). Output: the value the check accepted. */
-export async function waitUntil(what, read, done, ms = WAIT_MS) {
-  assert.ok(ms > 0 && ms <= WAIT_MAX_MS, `${what}: ${ms} ms`);
-  const deadline = Date.now() + ms;
-  for (;;) {
-    const found = await read();
-    if (done(found)) return found;
-    assert.ok(Date.now() < deadline, `${what} never came in ${ms} ms: ${JSON.stringify(found)}`);
-    await pause(POLL_MS);
-  }
-}
-
-/** Where a flow's run record goes in the evidence folder.
- * Input: the run.
- * Output: the path. */
-function recordPath(run) {
-  return join(run.evidence, `${run.flow}-desktop.json`);
-}
-
-/** Writes the run record: the flow, its outcome, its whole time and each step's time, with
- * no path and no name.
- * Inputs: the run and "passed" or "failed". Output: none. */
-function writeRecord(run, outcome) {
-  assert.ok(outcome === "passed" || outcome === "failed");
-  const record = { flow: run.flow, client: "desktop", outcome, total_ms: Date.now() - run.started, steps: run.steps };
-  writeFileSync(recordPath(run), JSON.stringify(record, null, 1), { mode: 0o600 });
 }
