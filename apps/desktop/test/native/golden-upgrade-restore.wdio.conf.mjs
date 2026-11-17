@@ -52,10 +52,10 @@ export function service(action) {
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-/** The scratch login service's label and running pid. It refuses any label without the scratch
- * root's hash, a definition outside the scratch HOME or another data folder, so the owner's
- * dev.crazyagent.engine is never touched. Input: none. Output: { label, pid }, pid null while
- * nothing runs. */
+/** The scratch login service's label and whether launchd runs it. It refuses any label without
+ * the scratch root's hash, a definition outside the scratch HOME or another data folder, so the
+ * owner's dev.crazyagent.engine is never touched. Input: none. Output: { label, running, pid },
+ * pid null when launchd names none. */
 export function scratchService() {
   const status = service("status");
   const label = status.stdout.match(LABEL);
@@ -66,7 +66,17 @@ export function scratchService() {
     throw new SevereServiceError(`the run refuses a login service outside its scratch HOME and root: ${status.stdout}`);
   }
   const pid = status.stdout.match(/^running: yes \(pid (\d+)\)$/m);
-  return { label: label[1], pid: pid ? Number(pid[1]) : null };
+  return { label: label[1], running: /^running: yes\b/m.test(status.stdout), pid: pid ? Number(pid[1]) : null };
+}
+
+/** The pids of every engine serving the scratch engine root, started by launchd or detached,
+ * matched on their `engine --home <DATA>` arguments. Input: none.
+ * Output: the pids, empty while none runs. */
+export function enginePids() {
+  const pattern = `engine --home ${DATA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}( |$)`;
+  const found = spawnSync("/usr/bin/pgrep", ["-f", pattern], { encoding: "utf8", timeout: 10000 });
+  assert.ok(found.status === 0 || found.status === 1, `pgrep failed: ${found.status} ${found.stderr}`);
+  return (found.stdout ?? "").split("\n").filter((line) => line !== "").map(Number);
 }
 
 /** Whether launchd holds a job with this label in this user's GUI domain, read with
@@ -138,8 +148,10 @@ export const config = {
     clearWebStore(home);
     const copied = spawnSync("/usr/bin/ditto", [source, BUNDLE], { encoding: "utf8" });
     if (copied.status !== 0 || !existsSync(SIDECAR)) throw new SevereServiceError(`the bundle did not copy: ${copied.stderr}`);
-    const { label, pid } = scratchService();
-    if (pid !== null || launchd(label).loaded) throw new SevereServiceError(`the scratch login service already runs: ${label}`);
+    const { label, running, pid } = scratchService();
+    if (running || pid !== null || launchd(label).loaded || enginePids().length > 0) {
+      throw new SevereServiceError(`an engine already runs on the scratch root or label: ${label}`);
+    }
     const db = join(DATA, "engine.db");
     copyFileSync(FIXTURE, db);
     chmodSync(db, 0o600);
@@ -158,6 +170,13 @@ export const config = {
     const removed = service("uninstall");
     writeFileSync(join(evidence, "uninstall.txt"), `${removed.status}\n${removed.stdout}\n${removed.stderr}`);
     if (launchd(label).loaded) spawnSync("/bin/launchctl", ["bootout", `gui/${process.getuid()}/${label}`], { stdio: "ignore", timeout: 30000 });
+    for (const pid of enginePids()) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch (failure) {
+        if (failure.code !== "ESRCH") throw failure;
+      }
+    }
     if (launchd(label).loaded) throw new SevereServiceError(`the scratch login service is still loaded: ${label}`);
     if (!existsSync(STAGED)) return;
     const before = JSON.parse(readFileSync(STAGED, "utf8")).owner;

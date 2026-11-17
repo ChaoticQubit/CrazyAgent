@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { finishGolden, measure, startRecord, step, waitUntil, writeRecord } from "./golden-run.mjs";
-import { DATA, EVIDENCE, LAUNCHED, STAGED, bytes, launchd, ownerEngine, scratchService } from "./golden-upgrade-restore.wdio.conf.mjs";
+import { DATA, EVIDENCE, LAUNCHED, STAGED, bytes, enginePids, home, launchd, ownerEngine, scratchService } from "./golden-upgrade-restore.wdio.conf.mjs";
 
 const FLOW = "upgrade-restore";
 const BUTTON = "Bring back 2.4 data";
@@ -26,6 +26,14 @@ async function invoke(command, args = {}) {
   }, command, args);
   if (answer.failed !== undefined) throw new Error(`${command} failed: ${answer.failed}`);
   return answer.value;
+}
+
+/** What runs on the scratch engine root: launchd's view of the scratch service and every
+ * `engine --home` process on it, a detached one included.
+ * Input: none. Output: { running, pid, engines }. */
+function engineState() {
+  const service = scratchService();
+  return { running: service.running, pid: service.pid, engines: enginePids() };
 }
 
 /** Opens a hash route of the app and waits until the page reads it.
@@ -53,7 +61,10 @@ describe("golden upgrade and restore", () => {
     }, (ready) => ready, UPGRADE_MS);
     measure(run, "upgrade_start_ms", Date.now() - launched);
     measure(run, "disk_growth_bytes", Math.max(0, bytes(DATA) - staged.seeded));
-    assert.notEqual(scratchService().pid, null, "the scratch login service runs the engine");
+    const started = engineState();
+    assert.ok(started.pid !== null && started.engines.includes(started.pid), `the scratch login service runs the engine, and the stopped checks see it: ${JSON.stringify(started)}`);
+    const definition = readFileSync(join(home, "Library", "LaunchAgents", `${staged.label}.plist`), "utf8");
+    assert.ok(definition.includes(`<key>HOME</key>\n\t\t<string>${home}</string>`), "the scratch service gives its engine the scratch HOME, never the owner's");
     step(run, STEPS[0]);
 
     await go("#/settings/restore");
@@ -68,7 +79,7 @@ describe("golden upgrade and restore", () => {
     await (await dialog.$(`button=${BUTTON}`)).click();
     const last = await waitUntil("the restore to end", () => invoke("desktop_restore_status"), (view) => view.last !== null && view.last.kind !== "pending", RESTORE_MS);
     assert.equal(last.last.kind, "restored", `the restore brought the 2.4 data back: ${JSON.stringify(last)}`);
-    await waitUntil("the engine to stay stopped", () => scratchService().pid, (pid) => pid === null);
+    await waitUntil("the engine to stay stopped", engineState, (now) => !now.running && now.pid === null && now.engines.length === 0);
     step(run, STEPS[2]);
 
     await go("#/settings/sandbox");
@@ -79,7 +90,7 @@ describe("golden upgrade and restore", () => {
     const copy = last.last.copy;
     assert.match(copy, /^replaced-/);
     assert.equal(lstatSync(join(DATA, "backups", copy)).mode & 0o777, 0o700, "the dated copy of the 2.5 data is private");
-    assert.equal(scratchService().pid, null, "no start brought 2.5 back on the restored data");
+    assert.deepEqual(engineState(), { running: false, pid: null, engines: [] }, "no start, launchd or detached, brought 2.5 back on the restored data");
     assert.deepEqual(ownerEngine(), staged.owner, "the owner's engine is untouched");
     assert.equal(launchd(staged.label).pid, null, "launchd runs nothing under the scratch label");
     step(run, STEPS[3]);

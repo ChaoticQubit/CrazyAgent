@@ -468,8 +468,10 @@ async fn the_owner_brings_back_the_2_4_data_from_the_tui_after_the_first_2_5_sta
     record.step(STEPS[1]);
 
     tui.keys(&["s"]);
-    tui.until("Settings", |screen| screen.contains("Settings"))
-        .await;
+    tui.until("Settings on Accounts", |screen| {
+        screen.contains("Settings  /  Accounts")
+    })
+    .await;
     tui.bytes(&SHIFT_LEFT);
     tui.until("Restore 2.4 with its button", |screen| {
         screen.contains("You can bring back your 2.4 data until")
