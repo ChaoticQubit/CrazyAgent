@@ -283,12 +283,6 @@ pub fn target() -> Option<&'static str> {
         target_env = "msvc"
     )) {
         Some("x86_64-pc-windows-msvc")
-    } else if cfg!(all(
-        target_os = "windows",
-        target_arch = "aarch64",
-        target_env = "msvc"
-    )) {
-        Some("aarch64-pc-windows-msvc")
     } else {
         None
     }

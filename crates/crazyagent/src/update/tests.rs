@@ -234,8 +234,6 @@ fn manifests_parse_and_name_this_platform() {
     assert_eq!(target(), Some("x86_64-unknown-linux-gnu"));
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     assert_eq!(target(), Some("x86_64-pc-windows-msvc"));
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    assert_eq!(target(), Some("aarch64-pc-windows-msvc"));
 }
 
 #[test]
