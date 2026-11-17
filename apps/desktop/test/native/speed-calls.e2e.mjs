@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { withPage } from "../browser.mjs";
 import { INTERNALS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop } from "./e2e-harness.mjs";
-import { callBudgets, countFindings, cpuMs } from "./speed-budget.mjs";
+import { callBudgets, cpuMs } from "./speed-absolute.mjs";
+import { countFindings } from "./speed-budget.mjs";
 import { seedSide, speedSettings } from "./speed-seed.mjs";
 
 const SESSIONS_C1 = 3;

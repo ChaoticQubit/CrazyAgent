@@ -8,9 +8,10 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { endTerminals, start, stop } from "./e2e-harness.mjs";
 import {
-  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, budgetRows, compareExit, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder,
+  KEPT_MIN, REFUSED_EXIT, SPEED_STATE, compareExit, incomplete, joinSample, judge, noiseShares, prepareKeychain, privateFolder,
   quiet, readQuiet, runSchedule, sampleMetrics, stayedQuiet,
 } from "./speed-budget.mjs";
+import { budgetRows } from "./speed-absolute.mjs";
 import { PROJECT } from "./speed-seed.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
