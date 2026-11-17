@@ -305,7 +305,9 @@ pub fn runs_seeing(project: &str, saved: &[PathBuf]) -> Vec<RunKind> {
 
 /// Checks one folder the owner wants this project's agents kept out of: an absolute existing
 /// folder, taken in its canonical form, that sits strictly inside the project root. A folder
-/// outside the project, the project root itself, or a path that is not a folder is refused.
+/// outside the project, the project root itself, or a path that is not a folder is refused,
+/// as is text that is not plain: on Windows a drive path joined by backslashes
+/// ([`crate::sandbox::windows_clean_text`]), elsewhere one with no quote or backslash.
 /// Inputs: the typed path and the project root. Output: the canonical folder, or a plain
 /// refusal code.
 pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str> {
@@ -313,10 +315,13 @@ pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str>
     if text.len() > PATH_TEXT_MAX || !typed.is_absolute() {
         return Err("hidden_path_not_absolute");
     }
-    if text
+    #[cfg(unix)]
+    let plain = !text
         .chars()
-        .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
-    {
+        .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'');
+    #[cfg(not(unix))]
+    let plain = crate::sandbox::windows_clean_text(text);
+    if !plain {
         return Err("hidden_path_not_plain");
     }
     let real = canonical(typed).map_err(|_| "hidden_path_missing")?;
@@ -400,7 +405,7 @@ const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(unix)]
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's answer the check reads; a tracked folder shows in the first bytes.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
 /// Whether git tracks any file inside this folder, asked in the project's own checkout with
@@ -487,6 +492,11 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
     }
 }
 
+/// Whether this system offers no hidden folders, so neither app shows the setting (DEC-194):
+/// true where the tracked-files check runs no confined git and [`git_tracks`] refuses every
+/// folder (V243-WIN-HIDDEN-GIT). The engine's refusal on a save stays the guard.
+pub const UNAVAILABLE: bool = cfg!(not(unix));
+
 /// Refuses the tracked-files check where no confined git runs. Inputs unused. Output:
 /// `Err("hidden_path_unchecked")`, so the caller fails closed.
 #[cfg(not(unix))]
@@ -520,9 +530,13 @@ mod tests {
     use rusqlite::Connection;
 
     fn project() -> tempfile::TempDir {
+        #[cfg(unix)]
+        let parent = std::fs::canonicalize("/tmp").unwrap();
+        #[cfg(not(unix))]
+        let parent = canonical(&std::env::temp_dir()).unwrap();
         tempfile::Builder::new()
             .prefix("ca-hidden-")
-            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .tempdir_in(parent)
             .unwrap()
     }
 
@@ -532,7 +546,7 @@ mod tests {
         let inside = root.path().join("notes");
         std::fs::create_dir(&inside).unwrap();
         let got = checked(inside.to_str().unwrap(), root.path()).unwrap();
-        assert_eq!(got, std::fs::canonicalize(&inside).unwrap());
+        assert_eq!(got, canonical(&inside).unwrap());
 
         let outside = project();
         assert_eq!(
@@ -570,6 +584,47 @@ mod tests {
         );
     }
 
+    /// On Windows a hidden folder is typed as a drive path joined by backslashes, so one inside
+    /// the project is accepted; a quote, a forward slash or a UNC path is still refused.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_windows_drive_path_inside_the_project_is_accepted() {
+        let root = project();
+        let base = canonical(root.path()).unwrap();
+        let inside = base.join("notes");
+        std::fs::create_dir(&inside).unwrap();
+        let text = inside.to_str().unwrap();
+        assert!(text.contains('\\'), "{text}");
+        assert_eq!(checked(text, root.path()), Ok(inside.clone()));
+        for bad in [
+            format!("{text}\\a\"b"),
+            format!("{}/notes", base.display()),
+            r"\\server\share\notes".to_owned(),
+        ] {
+            assert_eq!(
+                checked(&bad, root.path()),
+                Err("hidden_path_not_plain"),
+                "{bad}"
+            );
+        }
+    }
+
+    /// The setting is unavailable exactly where the tracked-files check cannot answer for a
+    /// folder with no repository, and there a list holding any folder is still refused, so
+    /// an old saved setting or a forged save never gets through (DEC-194).
+    #[test]
+    fn hidden_folders_are_unavailable_exactly_where_the_git_check_cannot_answer() {
+        let root = project();
+        let base = canonical(root.path()).unwrap();
+        let folder = base.join("plain");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(UNAVAILABLE, git_tracks(&base, &folder).is_err());
+        if UNAVAILABLE {
+            assert_eq!(none_tracked(&base, &[folder]), Err("hidden_path_unchecked"));
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_folder_whose_name_holds_a_quote_or_backslash_is_refused() {
         let root = project();
@@ -578,6 +633,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_git_tracks_is_refused_and_an_untracked_one_is_accepted() {
         let root = project();
@@ -612,6 +668,7 @@ mod tests {
         assert_eq!(none_tracked(&path, &[untracked]), Ok(()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_with_no_repository_is_not_tracked() {
         let root = project();
@@ -622,6 +679,7 @@ mod tests {
         assert_eq!(none_tracked(&path, &[folder]), Ok(()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_hostile_fsmonitor_command_never_runs_during_the_check() {
         let root = project();
@@ -656,6 +714,7 @@ mod tests {
         assert!(!marker.exists(), "fsmonitor command ran: marker written");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_corrupt_index_fails_the_check_closed() {
         let root = project();
@@ -694,6 +753,7 @@ mod tests {
         assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_with_more_than_64_kib_of_tracked_names_is_still_tracked() {
         let root = project();

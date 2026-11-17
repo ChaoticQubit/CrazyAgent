@@ -33,6 +33,7 @@ fn words(command: &[&str]) -> Vec<String> {
     command.iter().map(|word| (*word).to_owned()).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
     let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -77,6 +78,7 @@ fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_escapes_markup_in_paths() {
     let mut odd = service(Platform::MacOs);
@@ -86,6 +88,7 @@ fn launchd_plist_escapes_markup_in_paths() {
     assert!(!text.contains("o&<"));
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_unit_quotes_paths_and_escapes_specifiers() {
     let mut linux = service(Platform::Linux);
@@ -118,6 +121,7 @@ WantedBy=default.target
 
 /// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
 /// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[cfg(unix)]
 #[test]
 fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
     let mut linux = service(Platform::Linux);
@@ -317,6 +321,7 @@ fn status_output_is_read_per_manager() {
 /// The service PATH keeps the shell's absolute folders in order, then adds the user's and the
 /// system folders once each, and leaves out any folder another user can change on this host
 /// (on a CI runner `/usr/local/bin` can be one).
+#[cfg(unix)]
 #[test]
 fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
     let kept = |folders: &[&str]| {
