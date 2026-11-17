@@ -358,10 +358,15 @@ fn the_engine_down_screen_asks_to_start_the_engine_and_names_no_command() {
 fn the_engine_down_screen_says_a_restore_holds_the_engine() {
     for (width, height) in [(120, 36), (80, 24)] {
         let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.starts_engine = true;
         shell.ctx.link = Link::Down(crate::restore::ENGINE_RESTORED.into());
         let text = render(&mut shell, width, height).join("\n");
         assert!(text.contains("  Your 2.4 data is back."), "{text}");
         assert!(text.contains("Install CrazyAgent 2.4.2"), "{text}");
+        assert!(
+            text.contains("Press r to go back to 2.5 instead."),
+            "{text}"
+        );
         shell.ctx.link = Link::Down(crate::restore::ENGINE_RESTORING.into());
         let text = render(&mut shell, width, height).join("\n");
         assert!(
@@ -369,6 +374,10 @@ fn the_engine_down_screen_says_a_restore_holds_the_engine() {
             "{text}"
         );
         assert!(!text.contains("Your 2.4 data is back."), "{text}");
+        assert!(
+            text.contains("Press r to start it and try again."),
+            "{text}"
+        );
     }
 }
 

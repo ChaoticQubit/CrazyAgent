@@ -401,3 +401,34 @@ async fn a_start_ask_without_the_default_engine_only_reconnects() {
     assert!(!ready && problem != "engine_start_failed", "{problem}");
     assert!(!layout.root().exists(), "nothing was prepared or started");
 }
+
+/// L5 F1: a plain reconnect of a TUI with its own engine names a restore that brought the
+/// 2.4 data back, as the desktop's connect does, so the TUI stops retrying and says so; the
+/// reconnect starts nothing.
+#[tokio::test]
+async fn a_plain_reconnect_names_a_restore_that_brought_the_data_back() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let root = private_folder("ca-tui-held-");
+    let mut record = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.path().join("restore-record"))
+        .unwrap();
+    std::io::Write::write_all(&mut record, b"restored replaced-20261117T020000Z").unwrap();
+    drop(record);
+    let layout = crate::paths::Layout::new(root.path().to_path_buf()).unwrap();
+    let login = idle_service(root.path(), &layout, PathBuf::from("/usr/bin/false"));
+    let client = Client::new(layout.socket(), Duration::from_secs(1)).unwrap();
+    let mut connection = Connection::connect_starting(client, Some((layout, login))).unwrap();
+    let first = next_owner_event(&mut connection).await;
+    assert!(matches!(first, OwnerEvent::Access { ready: false, .. }));
+    connection.reconnect().unwrap();
+    let again = next_owner_event(&mut connection).await;
+    drop(connection);
+    let OwnerEvent::Access { ready, problem, .. } = again else {
+        panic!("an access event");
+    };
+    assert!(!ready);
+    assert_eq!(problem, crate::restore::ENGINE_RESTORED);
+}
