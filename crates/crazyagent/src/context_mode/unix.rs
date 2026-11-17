@@ -56,6 +56,14 @@ pub(super) fn open_plain(path: &Path) -> Option<File> {
 /// waiting while another installer holds it. Input: the lock file. Output: the held lock, or
 /// `setup_store_unavailable`.
 pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
+    HeldLock::take(open_lock(path)?, FlockOperation::LockExclusive)
+        .map_err(|_| InstallError("setup_store_unavailable"))
+}
+
+/// Opens a lock file, created 0600 when missing, with no link followed, and keeps it only
+/// when it is a regular file. Input: the lock file. Output: the file, or
+/// `setup_store_unavailable`.
+fn open_lock(path: &Path) -> Result<File, InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
     let file = File::from(
         rustix::fs::open(
@@ -68,7 +76,25 @@ pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
         return Err(unavailable);
     }
-    HeldLock::take(file, FlockOperation::LockExclusive).map_err(|_| unavailable)
+    Ok(file)
+}
+
+/// Takes a shared lock on a lock file, waiting only while an exclusive holder has it. Input:
+/// the lock file. Output: the held lock, or `setup_store_unavailable`.
+pub(super) fn lock_shared(path: &Path) -> Result<Lock, InstallError> {
+    HeldLock::take(open_lock(path)?, FlockOperation::LockShared)
+        .map_err(|_| InstallError("setup_store_unavailable"))
+}
+
+/// Takes the exclusive lock on a lock file only when no other open file holds it, never
+/// waiting. Input: the lock file. Output: the held lock, none while another holds it, or
+/// `setup_store_unavailable`.
+pub(super) fn try_lock(path: &Path) -> Result<Option<Lock>, InstallError> {
+    match HeldLock::take(open_lock(path)?, FlockOperation::NonBlockingLockExclusive) {
+        Ok(held) => Ok(Some(held)),
+        Err(error) if error == rustix::io::Errno::WOULDBLOCK => Ok(None),
+        Err(_) => Err(InstallError("setup_store_unavailable")),
+    }
 }
 
 /// The owner's sandbox settings a context-mode step's boundary takes on Linux (DEC-185): the
