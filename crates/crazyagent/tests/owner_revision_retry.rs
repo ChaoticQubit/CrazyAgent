@@ -240,6 +240,7 @@ async fn a_save_on_its_earlier_read_lands_after_an_unrelated_change() {
     change_another_setting(&mut other, 30).await;
     let newer = form.read(OwnerRead::CleanupSettings).await.unwrap();
     assert!(newer.revision.value() > shown.revision.value());
+    let shown_at = shown.revision.clone();
     form.begin_mutation_on(
         OwnerMutation::SetQuitSettings { settings: MINE },
         1,
@@ -247,7 +248,7 @@ async fn a_save_on_its_earlier_read_lands_after_an_unrelated_change() {
     )
     .unwrap();
     let first = form.pending().unwrap().request().clone();
-    assert_eq!(first.expected_revision, newer.revision);
+    assert_eq!(first.expected_revision, shown_at);
     change_another_setting(&mut other, 31).await;
     let saved = form.send_pending().await.unwrap();
     let OwnerResponse::Applied { operation } = saved else {
@@ -260,6 +261,36 @@ async fn a_save_on_its_earlier_read_lands_after_an_unrelated_change() {
         Some(&operation.provenance.operation_id)
     );
     assert_eq!(other.controller.quit_settings().await.unwrap(), MINE);
+}
+
+/// V250-OWN-RETRY-SETTERS (rv-sec2 #332 N1) red row. The form reads its quit setting, the
+/// other window saves that setting, and the form then reads another query, which moves its
+/// view past that save. A save built on the form's first read with `begin_mutation_on` is
+/// refused `stale_revision` and not resent, so the other window's value stays: the change
+/// goes out at the revision of the read it was built from, not at the view's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_save_on_its_earlier_read_is_refused_when_its_own_setting_changed_since() {
+    let (_engine, mut form, mut other) = windows(OwnerClientKind::Desktop).await;
+    let shown = form.read(OwnerRead::QuitSettings).await.unwrap();
+    let generation = other.next();
+    let theirs = other
+        .controller
+        .set_quit_settings(THEIRS, generation)
+        .await
+        .unwrap();
+    assert_eq!(result(theirs), OwnerResult::Applied);
+    let newer = form.read(OwnerRead::CleanupSettings).await.unwrap();
+    assert!(newer.revision.value() > shown.revision.value());
+    form.begin_mutation_on(
+        OwnerMutation::SetQuitSettings { settings: MINE },
+        1,
+        (OwnerRead::QuitSettings, shown),
+    )
+    .unwrap();
+    let refused = form.send_pending().await.unwrap();
+    assert_stale_refusal(&refused, &form);
+    assert!(form.pending().is_none());
+    assert_eq!(other.controller.quit_settings().await.unwrap(), THEIRS);
 }
 
 /// Guard: a read newer than the form's fresh view, here the other window's, cannot be named
