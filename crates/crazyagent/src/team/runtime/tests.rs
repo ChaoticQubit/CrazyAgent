@@ -6,7 +6,7 @@ use crate::config::{
 
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 
-use crate::ledger;
+use crate::{landing_log::seeded, ledger};
 
 use crate::project_setup::{HarnessSlot, TeamPlan};
 
@@ -79,7 +79,7 @@ impl Fixture {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
         let tmux = installed(&base).expect("tmux must be installed on this machine");
-        let connection = Connection::open(base.join("engine.db")).unwrap();
+        let connection = seeded(Connection::open(base.join("engine.db")).unwrap());
         crate::storage::initialize_authority_schemas(&connection).unwrap();
         let owner = connection.unchecked_transaction().unwrap();
         crate::conversation::initialize(&owner).unwrap();

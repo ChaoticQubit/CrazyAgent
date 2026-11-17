@@ -72,7 +72,8 @@ fn every_rule_request_write_logs_its_row_and_a_rebuild_equals_the_live_rows() {
 
 /// V250-L9 (QUESTION-1120 A): the open's cut-short of an approved request and its told mark
 /// are logged through the open's proof, before any host of the store runs again, and the
-/// landing rebuild equals the live rows.
+/// landing rebuild equals the live rows. The store is moved to a host no process runs
+/// rather than stopping the shared test host, which rows running beside it still use.
 #[test]
 fn the_opens_cut_short_is_logged_through_the_opening() {
     let case = Case::new();
@@ -80,7 +81,22 @@ fn the_opens_cut_short_is_logged_through_the_opening() {
     let question = case.asked(&Asker::Agent(4), GitHubRule::PullRequest, true);
     assert_eq!(case.answer(question, vec![0]), Settlement::Settled);
     let before = saved(&case.db).len();
-    crate::state_log::fence::host_stopped(&case.host);
+    let running: String = case
+        .db
+        .query_row("SELECT db_instance FROM owner_meta", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        running, case.host.db_instance,
+        "the store runs the seeded host"
+    );
+    let moved = case
+        .db
+        .execute("UPDATE owner_meta SET db_instance=?1", ["e".repeat(64)])
+        .unwrap();
+    assert_eq!(
+        moved, 1,
+        "the store names a host no process runs, as at an open"
+    );
     let opening = crate::storage::opening::Opening::for_test(7);
     assert_eq!(start_store(&case.db, opening).unwrap(), 1);
     assert_eq!(case.statuses(), ["refused"]);
