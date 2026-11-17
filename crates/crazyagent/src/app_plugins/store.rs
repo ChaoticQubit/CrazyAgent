@@ -894,6 +894,19 @@ pub fn secret_value(
         .ok_or_else(|| error("app_plugin_needs_key"))
 }
 
+/// Deletes what a crash between a staged write and its rename left at the engine root: key
+/// copies staged in the key folders and plugin files staged in the plugins folder. The
+/// engine runs it at start, before any store call can stage a file. A leftover it cannot
+/// delete, or a folder that refuses it, stays for the next start and stops nothing. Input:
+/// the engine root. Output: none.
+#[cfg(unix)]
+pub(crate) fn sweep_staged(root: &Path) {
+    for key_folder in accounts::KEY_FOLDERS {
+        let _ = accounts::remove_staged_in(root, key_folder);
+    }
+    let _ = folder::remove_staged(root);
+}
+
 /// One user plugin file the folder listing returns: its file name and its bytes, or the
 /// refusal that kept it unread.
 type UserFile = (String, Result<Vec<u8>, Problem>);
@@ -908,6 +921,9 @@ mod folder {
     use std::path::Path;
 
     const SUFFIX: &str = ".yaml";
+
+    /// The name prefix of a plugin file a write stages before renaming it into place.
+    const STAGED: &str = ".add-";
 
     fn file_name(name: &str) -> String {
         format!("{name}{SUFFIX}")
@@ -1055,7 +1071,7 @@ mod folder {
     /// Output: Ok with the folder synced, or the folder's refusal with nothing staged.
     pub(super) fn write(root: &Path, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
         let directory = open(root, true)?.ok_or_else(unavailable)?;
-        let staged = format!(".add-{}", crate::engine::owner::random_id()?);
+        let staged = format!("{STAGED}{}", crate::engine::owner::random_id()?);
         let mut file = std::fs::File::from(
             rustix::fs::openat(
                 &directory,
@@ -1077,6 +1093,33 @@ mod folder {
         {
             let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
             return Err(unavailable());
+        }
+        directory.sync_all().map_err(|_| unavailable())
+    }
+
+    /// Deletes the staged plugin files a crash between a write and its rename left, at most
+    /// `USER_PLUGINS_MAX` a start. Input: the engine root. Output: Ok once those found are
+    /// gone or the folder is missing, or the folder's refusal.
+    pub(super) fn remove_staged(root: &Path) -> Result<(), EngineError> {
+        let Some(directory) = open(root, false)? else {
+            return Ok(());
+        };
+        let mut staged = Vec::new();
+        for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unavailable())? {
+            let entry = entry.map_err(|_| unavailable())?;
+            if entry.file_name().to_bytes().starts_with(STAGED.as_bytes()) {
+                staged.push(entry.file_name().to_owned());
+                if staged.len() == USER_PLUGINS_MAX {
+                    break;
+                }
+            }
+        }
+        assert!(staged.len() <= USER_PLUGINS_MAX);
+        for name in &staged {
+            match rustix::fs::unlinkat(&directory, name.as_c_str(), AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(_) => return Err(unavailable()),
+            }
         }
         directory.sync_all().map_err(|_| unavailable())
     }

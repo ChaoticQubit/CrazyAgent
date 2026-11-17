@@ -100,12 +100,20 @@ fn key_folder_in(
     folder: &str,
     name: &str,
 ) -> Result<Option<std::fs::File>, EngineError> {
-    use rustix::fs::{Mode, OFlags};
-    use std::os::unix::fs::MetadataExt;
-    assert!(KEY_FOLDERS.contains(&folder), "a known key folder");
     if CredentialRef::new(name).is_err() || name.starts_with('.') {
         return Err(error("account_key_reference_invalid"));
     }
+    open_key_folder(root, folder)
+}
+
+/// Opens one of the engine root's key folders. Inputs: the engine root and a folder from
+/// [`KEY_FOLDERS`]. Output: the folder, none when it does not exist, or
+/// `account_key_store_unsafe` for a folder that is not this user's 0700 directory.
+#[cfg(unix)]
+fn open_key_folder(root: &Path, folder: &str) -> Result<Option<std::fs::File>, EngineError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    assert!(KEY_FOLDERS.contains(&folder), "a known key folder");
     let directory = match rustix::fs::open(
         root.join(folder),
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -253,7 +261,7 @@ fn replace_staged(
     }
     let directory = key_folder_in(root, folder, credential.as_str())?
         .ok_or_else(|| error("account_key_store_unavailable"))?;
-    let staged = format!(".replace-{}", crate::engine::owner::random_id()?);
+    let staged = format!("{STAGED_KEY}{}", crate::engine::owner::random_id()?);
     let mut file = std::fs::File::from(
         rustix::fs::openat(
             &directory,
@@ -270,6 +278,54 @@ fn replace_staged(
     {
         let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
         return Err(error("account_key_store_unavailable"));
+    }
+    directory
+        .sync_all()
+        .map_err(|_| error("account_key_store_unavailable"))
+}
+
+/// The name prefix of a key copy a replace stages before renaming it over its key; the
+/// account key writer stages under the same prefix.
+#[cfg(unix)]
+const STAGED_KEY: &str = ".replace-";
+
+/// The most staged key copies one engine start deletes from one key folder; any more wait
+/// for the next start.
+#[cfg(unix)]
+const STAGED_SWEEP_MAX: usize = 64;
+
+/// Deletes the staged key copies a crash between a replace's write and its rename left in
+/// one of the engine root's owner-only key folders, at most [`STAGED_SWEEP_MAX`]. The engine
+/// runs it at start, before any replace can stage one. Inputs: the engine root and a folder
+/// from [`KEY_FOLDERS`]. Output: Ok once those found are gone or the folder is missing, the
+/// folder's refusal, or `account_key_store_unavailable`.
+#[cfg(unix)]
+pub(crate) fn remove_staged_in(root: &Path, folder: &str) -> Result<(), EngineError> {
+    let Some(directory) = open_key_folder(root, folder)? else {
+        return Ok(());
+    };
+    let mut staged = Vec::new();
+    for entry in rustix::fs::Dir::read_from(&directory)
+        .map_err(|_| error("account_key_store_unavailable"))?
+    {
+        let entry = entry.map_err(|_| error("account_key_store_unavailable"))?;
+        if entry
+            .file_name()
+            .to_bytes()
+            .starts_with(STAGED_KEY.as_bytes())
+        {
+            staged.push(entry.file_name().to_owned());
+            if staged.len() == STAGED_SWEEP_MAX {
+                break;
+            }
+        }
+    }
+    assert!(staged.len() <= STAGED_SWEEP_MAX);
+    for name in &staged {
+        match rustix::fs::unlinkat(&directory, name.as_c_str(), rustix::fs::AtFlags::empty()) {
+            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(error("account_key_store_unavailable")),
+        }
     }
     directory
         .sync_all()
