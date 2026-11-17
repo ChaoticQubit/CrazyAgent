@@ -1,0 +1,8 @@
+{
+  "harness-outside-catalog": "launch_harness_unsupported",
+  "key-without-key-file": "launch_key_file_invalid",
+  "plain-model-without-flag": "launch_model_unsupported",
+  "plain-tools-off": "launch_tools_off_unsupported",
+  "plain-url-account": "launch_account_unsupported",
+  "resume-id-not-uuid": "launch_session_id_invalid"
+}

@@ -1,0 +1,49 @@
+{
+  "decision": {
+    "landed": {
+      "branch": "main",
+      "commit": "<id-1>"
+    }
+  },
+  "landing": "squash",
+  "owner": {
+    "branch": "main",
+    "commits": [
+      {
+        "author": "Owner Example <owner@example.invalid>",
+        "body": [],
+        "parents": [
+          "<id-2>"
+        ],
+        "subject": "Agent: tide fix"
+      },
+      {
+        "author": "E2E Owner <e2e@example.invalid>",
+        "body": [],
+        "parents": [],
+        "subject": "first"
+      }
+    ],
+    "files": [
+      {
+        "path": "README",
+        "text": [
+          "one",
+          "two tides",
+          "three"
+        ]
+      },
+      {
+        "path": "TIDES",
+        "text": [
+          "high 06:10",
+          "low 12:25"
+        ]
+      }
+    ]
+  },
+  "owner_status": [],
+  "proposed_message": [
+    "Agent: tide fix"
+  ]
+}

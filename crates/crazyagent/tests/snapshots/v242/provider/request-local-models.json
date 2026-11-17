@@ -1,0 +1,18 @@
+{
+  "answer": {
+    "models": [
+      "snapshot-model"
+    ]
+  },
+  "requests": [
+    {
+      "authorization": null,
+      "headers": [
+        "host",
+        "accept",
+        "connection"
+      ],
+      "line": "GET /api/tags HTTP/1.1"
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "access": "sandboxed",
+  "apply_changes": "when_idle",
+  "apply_choices": [
+    {
+      "apply": "when_idle",
+      "label": "When the agent is idle"
+    },
+    {
+      "apply": "next_start",
+      "label": "At its next start"
+    }
+  ],
+  "grant_log": [],
+  "grants": [],
+  "home_cache_choices": [
+    {
+      "choice": "keep",
+      "label": "Keep"
+    },
+    {
+      "choice": "clear_when_raised",
+      "label": "Clear when access is raised"
+    },
+    {
+      "choice": "clear_every_launch",
+      "label": "Clear every launch"
+    }
+  ],
+  "home_caches": "clear_when_raised",
+  "ide_agent_files": "allow_all",
+  "ide_git_hooks": false,
+  "levels": [
+    {
+      "access": "sandboxed",
+      "gaps": [],
+      "label": "Sandboxed",
+      "unavailable": null
+    },
+    {
+      "access": "own_branch",
+      "gaps": [],
+      "label": "Own branch",
+      "unavailable": null
+    },
+    {
+      "access": "full",
+      "gaps": [],
+      "label": "Full access",
+      "unavailable": null
+    }
+  ],
+  "local_folders": [],
+  "network": "open",
+  "networks": [
+    {
+      "gap": null,
+      "label": "Open",
+      "network": "open"
+    },
+    {
+      "gap": null,
+      "label": "Port 443 only",
+      "network": "https"
+    },
+    {
+      "gap": null,
+      "label": "None",
+      "network": "none"
+    }
+  ],
+  "shared_folders": {
+    "access": "read_only",
+    "chosen": [],
+    "scope": "all",
+    "secrets": []
+  },
+  "temp_folder": {
+    "path": "<temp>",
+    "unavailable": null
+  },
+  "temp_folder_is_the_owners": true,
+  "tool_cache": "shared",
+  "tool_caches": [
+    {
+      "label": "Shared by agents with the same access",
+      "scope": "shared"
+    },
+    {
+      "label": "One per agent",
+      "scope": "per_agent"
+    }
+  ],
+  "toolchains": [
+    {
+      "allowed": true,
+      "installed_as_this_mac_has_it": true,
+      "label": "Rust",
+      "toolchain": "rust",
+      "used": false
+    },
+    {
+      "allowed": false,
+      "installed_as_this_mac_has_it": true,
+      "label": "Node.js",
+      "toolchain": "node",
+      "used": false
+    },
+    {
+      "allowed": true,
+      "installed_as_this_mac_has_it": true,
+      "label": "Python",
+      "toolchain": "python",
+      "used": false
+    }
+  ],
+  "version": 1
+}

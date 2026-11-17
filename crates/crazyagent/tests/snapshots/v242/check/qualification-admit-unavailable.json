@@ -1,0 +1,18 @@
+{
+  "arguments": [
+    "admit",
+    "--report",
+    "<path-1>/report.json",
+    "--source-revision",
+    "<id-1>",
+    "--profile-id",
+    "snapshot-profile",
+    "--evidence-dir",
+    "<path-1>/evidence",
+    "--require",
+    "confinement"
+  ],
+  "status": 1,
+  "stderr": "required capabilities not proven: confinement\n",
+  "stdout": ""
+}
