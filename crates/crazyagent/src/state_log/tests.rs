@@ -484,14 +484,16 @@ const KINDS: [&str; 5] = [
     crate::master_session::SESSION_DELETED,
 ];
 
-/// The source files outside tests that name the log's appender, as paths under `src`.
-const WRITERS: [&str; 2] = [
-    "project_setup/removed/event.rs",
-    "storage/master_session/delete.rs",
+/// The source files outside tests that name the log's appender, as paths under `src` in
+/// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
+const WRITERS: [(&str, &[&str]); 3] = [
+    ("project_setup/removed/event.rs", &["KIND,"]),
+    ("state_log.rs", &["SNAPSHOT_CHUNK,", "SNAPSHOT_DONE,"]),
+    (
+        "storage/master_session/delete.rs",
+        &["SESSION_DELETED,", "SESSION_DELETED.into(),"],
+    ),
 ];
-
-/// What a writer in [`WRITERS`] may put after `kind: `: the constants of its own kinds.
-const WRITTEN_KINDS: [&str; 3] = ["KIND,", "SESSION_DELETED,", "SESSION_DELETED.into(),"];
 
 /// Text no event body may hold: prose with a key in it, longer than any identity.
 /// Output: the text.
@@ -559,7 +561,7 @@ fn writer_sources() -> Vec<(String, String)> {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();
-            if text.contains("Appender::") {
+            if text.contains("Appender") {
                 let parts: Vec<String> = path
                     .strip_prefix(&src)
                     .unwrap()
@@ -584,14 +586,16 @@ fn no_event_body_can_carry_a_secret() {
     let writers = writer_sources();
     let mut names: Vec<&str> = writers.iter().map(|(name, _)| name.as_str()).collect();
     names.sort_unstable();
-    assert_eq!(names, WRITERS, "a new log writer needs its kinds in KINDS");
+    let listed: Vec<&str> = WRITERS.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, listed, "a new log writer needs its kinds in KINDS");
     for (name, text) in &writers {
+        let (_, own) = WRITERS
+            .iter()
+            .find(|(path, _)| *path == name.as_str())
+            .unwrap();
         for line in text.lines().map(str::trim) {
             if let Some(written) = line.strip_prefix("kind: ") {
-                assert!(
-                    WRITTEN_KINDS.iter().any(|kind| *kind == written),
-                    "{name}: {line}"
-                );
+                assert!(own.iter().any(|kind| *kind == written), "{name}: {line}");
             }
         }
     }
@@ -599,7 +603,10 @@ fn no_event_body_can_carry_a_secret() {
         match kind {
             SNAPSHOT_CHUNK => {
                 for (name, text) in &writers {
-                    assert!(!text.contains(".snapshot("), "{name} takes a snapshot");
+                    assert!(
+                        name.as_str() == "state_log.rs" || !text.contains(".snapshot("),
+                        "{name} takes a snapshot"
+                    );
                 }
             }
             SNAPSHOT_DONE => {
@@ -607,8 +614,9 @@ fn no_event_body_can_carry_a_secret() {
                 let tx = db.transaction().unwrap();
                 let mut log = Appender::own(&tx, fence::engine()).unwrap();
                 let done = log.snapshot(Aggregate::Worktrees, 9, chunks()).unwrap();
+                let seq = i64::try_from(done).expect("a log seq fits in i64");
                 let body: Vec<u8> = tx
-                    .query_row("SELECT body FROM state_log WHERE seq=?1", [done], |row| {
+                    .query_row("SELECT body FROM state_log WHERE seq=?1", [seq], |row| {
                         row.get(0)
                     })
                     .unwrap();
