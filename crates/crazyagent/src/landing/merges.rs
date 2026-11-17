@@ -91,10 +91,10 @@ pub(super) fn refuse_outside_merges(
 /// Tells whether a master's set holds nothing but fixes of real conflicts with the other
 /// open sets its head holds, so it may land with no Accept (MASTER-LAND-SPLIT). Every own
 /// commit must be such a fix, and every one of those sets must come in through one. Any
-/// doubt is false and the set waits for the owner. The caller holds the repository hold
-/// and has verified the objects. Inputs: the owner repository, the master's set, the sets
-/// its head holds, the Land on tip and the commit its squash measures from. Output: the
-/// answer.
+/// doubt is false and the set waits for the owner, as on a git older than 2.40, which
+/// cannot merge again ([`holds_changes_since`]). The caller holds the repository hold and
+/// has verified the objects. Inputs: the owner repository, the master's set, the sets its
+/// head holds, the Land on tip and the commit its squash measures from. Output: the answer.
 pub(super) fn only_conflict_fixes(
     owner: &Repo,
     master: &Record,
@@ -104,6 +104,9 @@ pub(super) fn only_conflict_fixes(
 ) -> Result<bool, EngineError> {
     assert!(!covered.is_empty());
     assert!(is_object_id(&master.head) && is_object_id(from) && is_object_id(tip));
+    if owner.old_git() {
+        return Ok(false);
+    }
     let Some(merges) = own_merges(owner, master, covered, tip, from)? else {
         return Ok(false);
     };
