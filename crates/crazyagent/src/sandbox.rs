@@ -3604,7 +3604,7 @@ impl ProjectSandbox {
         assert!(
             text.matches("(regex #\"^/").count()
                 == working.len()
-                    + other.len()
+                    + 2 * other.len()
                     + usize::from(self.adds_worktrees)
                     + usize::from(self.clone.is_some())
                     + usize::from(self.setup.is_some())
@@ -4939,24 +4939,32 @@ fn agent_config_denies(home: &Path) -> String {
         assert!(CONFIG_PARENTS.contains(&parent));
     }
     let home = seatbelt_pattern(home);
-    let spelled = |names: &[&str], tail: &str| {
+    let spelled = |names: &[&str], below: bool| {
         names
             .iter()
-            .map(|name| format!("\n  (regex #\"^{home}/{}{tail}\")", any_case(name)))
+            .map(|name| {
+                let pattern = format!("{home}/{}", any_case(name));
+                if below {
+                    format!("\n  {}", at_or_below(&pattern))
+                } else {
+                    format!("\n  (regex #\"^{pattern}$\")")
+                }
+            })
             .collect::<String>()
     };
     let kept = crate::agent_home::kept_entries();
     let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
     let text = format!(
         "(deny file-write*{})\n(deny file-write-create{})\n(deny file-write-flags file-write-acl{})\n",
-        spelled(&AGENT_CONFIG, "(/.*)?$"),
-        spelled(&CONFIG_PARENTS, "$"),
-        spelled(&kept, "(/.*)?$")
+        spelled(&AGENT_CONFIG, true),
+        spelled(&CONFIG_PARENTS, false),
+        spelled(&kept, true)
     );
     assert_eq!(
         text.matches("(regex #\"^/").count(),
-        AGENT_CONFIG.len() + CONFIG_PARENTS.len() + kept.len()
+        2 * AGENT_CONFIG.len() + CONFIG_PARENTS.len() + 2 * kept.len()
     );
+    assert!(!text.contains("(/.*)?$"));
     text
 }
 
@@ -5021,15 +5029,24 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in every
+/// The Seatbelt filters for a path and everything below it: `^X$` and `^X/` in place of one
+/// `^X(/.*)?$`, whose optional tail libsandbox fails to compile again in lower case once an
+/// escaped character comes before it (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL).
+/// Input: the pattern after `^`, an absolute path first. Output: both filters on one line.
+fn at_or_below(pattern: &str) -> String {
+    assert!(pattern.starts_with('/'));
+    format!("(regex #\"^{pattern}$\") (regex #\"^{pattern}/\")")
+}
+
+/// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
 /// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
-/// working tree (SM1-R). Input: the root. Output: the regex filter.
+/// working tree (SM1-R), as [`at_or_below`] spells it. Input: the root. Output: the filters.
 fn any_depth_git(root: &Path) -> String {
-    format!(
-        "(regex #\"^{}/(.+/)?{}(/.*)?$\")",
+    at_or_below(&format!(
+        "{}/(.+/)?{}",
         seatbelt_pattern(root),
         any_case(".git")
-    )
+    ))
 }
 
 /// The base write denies a profile gives again after it grants writes once more to the agent
@@ -5045,8 +5062,8 @@ fn any_depth_git(root: &Path) -> String {
 pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     let mut text = launch_denies(home);
     text.push_str(&format!(
-        "(deny file-write-flags file-write-acl (regex #\"^{}(/.*)?$\"))\n",
-        seatbelt_pattern(home)
+        "(deny file-write-flags file-write-acl {})\n",
+        at_or_below(&seatbelt_pattern(home))
     ));
     let mut nested = String::new();
     for root in std::iter::once(home).chain(folders.iter().copied()) {
