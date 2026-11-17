@@ -379,8 +379,8 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
 /// The guard of rv-sec2 S3a F1: a watch parked past its first owner check when the owner is
 /// revoked is answered only the refusal of its second check, never what woke it. The row
 /// holds the owner barrier across the revoke, so no reply can be written before the second
-/// check; a reply a background commit got out before the barrier is read and the watch parks
-/// again.
+/// check; a reply a background commit got out before the barrier, even one sent before the
+/// watch parked, is read and the watch parks again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refusal() {
     let owner = super::super::usage_tests::Usage::start().await;
@@ -413,12 +413,12 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
             super::serve(&mut server, &engine, &authority, &packet, &admission, &body).await
         });
         let parked = Clock::now() + Duration::from_secs(5);
-        while waiting() == 0 {
+        while waiting() == 0 && !serving.is_finished() {
             assert!(
                 Clock::now() < parked,
-                "the watch parks past its first check"
+                "the watch parks past its first check or answers"
             );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
         let barrier = runtime.engine.owner_egress.write().await;
         let early = tokio::time::timeout(Duration::from_millis(50), read_frame(&mut client)).await;
