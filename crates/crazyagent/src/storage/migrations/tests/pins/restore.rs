@@ -219,6 +219,42 @@ fn a_later_upgrades_rotation_leaves_the_restore_copy() {
 }
 
 #[test]
+fn a_second_restore_brings_back_the_2_4_data_written_after_the_first() {
+    let start = SystemTime::now();
+    let (root, _) = upgraded(start);
+    restored(&root, start + HOUR).unwrap();
+    let mut db = root.connection();
+    let removed = db
+        .execute(
+            "DELETE FROM projects WHERE rowid = (SELECT MIN(rowid) FROM projects)",
+            [],
+        )
+        .unwrap();
+    assert_eq!(removed, 1, "the P5 fixture holds its project");
+    let used = rows(&db);
+    let sources = sources(&root);
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        &steps(&[probe]),
+        start + HOUR * 2,
+        check_copy,
+    )
+    .unwrap();
+    drop(db);
+    assert_eq!(names(&root).len(), 2);
+
+    restored(&root, start + HOUR * 3).unwrap();
+
+    let db = root.connection();
+    assert_eq!(version(&db).unwrap(), V24_VERSION_MAX);
+    assert!(!probed(&db));
+    assert_eq!(rows(&db), used);
+    assert_eq!(replaced(&root).len(), 2);
+}
+
+#[test]
 fn a_failed_restore_changes_nothing_and_keeps_no_copy() {
     let start = SystemTime::now();
     let (root, _) = upgraded(start);
