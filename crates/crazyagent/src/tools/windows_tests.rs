@@ -149,6 +149,38 @@ fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
     }
 }
 
+/// #333 r1 N6: a shim in npm's layout whose target is itself a batch file pins nothing, so
+/// the harness search never takes a batch file for a program, while the same shim naming a
+/// script pins that script.
+#[test]
+fn a_shim_whose_target_is_a_batch_file_pins_nothing() {
+    let folder = tempfile::tempdir().unwrap();
+    let real = folder.path().canonicalize().unwrap();
+    let package = real.join("node_modules").join("x");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("run.cmd"), "@ECHO off\r\n").unwrap();
+    std::fs::write(package.join("run.js"), "#!/usr/bin/env node\n").unwrap();
+    let codex = r"node_modules\@openai\codex\bin\codex.js";
+    let to_batch = real.join("batch.cmd");
+    std::fs::write(
+        &to_batch,
+        batch::tests::CODEX.replace(codex, r"node_modules\x\run.cmd"),
+    )
+    .unwrap();
+    let to_script = real.join("script.cmd");
+    std::fs::write(
+        &to_script,
+        batch::tests::CODEX.replace(codex, r"node_modules\x\run.js"),
+    )
+    .unwrap();
+    assert_eq!(cmd_shim_real(&to_batch.canonicalize().unwrap()), None);
+    assert_eq!(crate::paths::executable_file(&to_batch), None);
+    assert_eq!(
+        crate::paths::executable_file(&to_script),
+        Some(package.join("run.js").canonicalize().unwrap())
+    );
+}
+
 /// Writes the `.cmd` npm makes for Codex and the script it names into a folder. Input: the
 /// folder. Output: the shim and the script's real file.
 fn codex_shim(folder: &Path) -> (PathBuf, PathBuf) {
