@@ -2304,20 +2304,38 @@ fn the_master_diagnoses_and_plans_before_it_hands_out_work() {
     }
 }
 
+/// The phrases a master's hand-off text holds on every path without team tools, as the
+/// tools' task fields do: the finding, the agent's part and its acceptance check, a costly
+/// probe asked of the owner once, else an UNCONFIRMED cause with the owner's refusal and a
+/// first step that reproduces it without what was declined (#388 F1, V243-MASTER-*).
+const HAND_OFF_PHRASES: [&str; 7] = [
+    "what you found",
+    "this agent's part of your plan",
+    "its acceptance check",
+    "ask the owner once for a small probe",
+    "UNCONFIRMED",
+    "say what the owner declined",
+    "reproducing it without those resources the agent's first step",
+];
+
 /// A master without team tools hands out work in task blocks, so the block text asks for
 /// the same finding, part of the plan and acceptance check as the tools' task fields, and
 /// for a costly probe asked of the owner once, else an UNCONFIRMED cause (#388 F1).
 #[test]
 fn a_task_block_carries_the_finding_and_the_acceptance_check() {
     let text = block_text();
-    for part in [
-        "what you found",
-        "this agent's part of your plan",
-        "its acceptance check",
-        "ask the owner once for a small probe",
-        "UNCONFIRMED",
-        "reproducing it the agent's first step",
-    ] {
+    for part in HAND_OFF_PHRASES {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A master without team tools wakes a finished sub-agent mid-session with the wake block
+/// alone, so that block carries the same hand-off text as a new task
+/// (V243-MASTER-WAKE-TEXT-HANDOFF).
+#[test]
+fn a_tools_off_wake_block_carries_the_finding_and_the_acceptance_check() {
+    let text = wake_text(&["- Ada (@docs), finished".into()], false);
+    for part in HAND_OFF_PHRASES {
         assert!(text.contains(part), "{part}: {text}");
     }
 }
