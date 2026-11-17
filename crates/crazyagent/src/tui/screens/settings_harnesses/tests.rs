@@ -225,6 +225,28 @@ fn words_follow_the_engine_catalog() {
     assert_eq!(works_with(&[AccountKind::Local]), "Local model");
 }
 
+#[test]
+fn codex_and_claude_code_name_api_keys_only_where_the_key_relay_starts() {
+    let entries = catalog(&Search::new(Vec::new(), None, Vec::new()));
+    let line = |id: &str| {
+        works_with(
+            &entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap()
+                .account_kinds,
+        )
+    };
+    if crate::model_gateway::relay::available() {
+        assert_eq!(line("codex"), "Any account");
+        assert_eq!(line("claude-code"), "Subscription, API key");
+    } else {
+        assert_eq!(line("codex"), "Subscription, URL, Local model");
+        assert_eq!(line("claude-code"), "Subscription");
+    }
+    assert_eq!(line("rcli"), "Any API key or URL");
+}
+
 const BREW_LINE: &str = "/opt/homebrew/bin/brew upgrade --cask claude-code@latest";
 
 #[derive(Debug, PartialEq)]
