@@ -255,8 +255,9 @@ impl<'a, 'c> Appender<'a, 'c> {
 
 /// Checks the snapshot run a closing event ends: the sha256 of the bodies of the events
 /// before it, as many as it counts, must match, and each must be a chunk of its aggregate
-/// in order from 0. A missing, changed or reordered chunk fails the hash. Inputs: the
-/// connection and the closing event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
+/// in order from 0. A missing, changed or reordered chunk fails the hash, and a count no
+/// run can hold is refused before any row is read. Inputs: the connection and the closing
+/// event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
 /// `state_log_snapshot_invalid`, `state_log_snapshot_hash` or `state_log_snapshot_chunks`.
 pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
     let missing = || error("state_log_snapshot_missing");
@@ -272,8 +273,10 @@ pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
     let Some((_, body)) = closing.filter(|(kind, _)| kind == SNAPSHOT_DONE) else {
         return Err(missing());
     };
-    let closed: SnapshotDone =
-        serde_json::from_slice(&body).map_err(|_| error("state_log_snapshot_invalid"))?;
+    let closed = serde_json::from_slice::<SnapshotDone>(&body)
+        .ok()
+        .filter(|closed| (closed.chunks as usize) < TRANSACTION_EVENTS_MAX)
+        .ok_or_else(|| error("state_log_snapshot_invalid"))?;
     let mut statement = db
         .prepare("SELECT kind, body FROM state_log WHERE seq>=?1 AND seq<?2 ORDER BY seq")
         .map_err(error)?;
