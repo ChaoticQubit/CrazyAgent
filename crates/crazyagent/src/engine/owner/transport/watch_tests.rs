@@ -295,6 +295,10 @@ async fn past_its_bound_a_watch_is_refused_busy_until_one_ends() {
     );
 }
 
+/// A revoked owner gets no reply. A watch woken before the revoke is refused at its second
+/// check, `owner_grant_stale_or_revoked`; a re-watch after it is refused at admission, which
+/// answers nothing, so the client reads `watch_outcome_unknown`, or `watch_unavailable` when
+/// the engine closed first. A fresh watch after the revoke ends the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     let owner = super::super::usage_tests::Usage::start().await;
@@ -314,7 +318,7 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     .unwrap();
     let watch = tokio::spawn(async move {
         let (mut cursor, mut mark) = (cursor, mark);
-        loop {
+        let reply = loop {
             match client.watch(cursor.clone(), Some(mark), 10_000).await {
                 Ok(
                     WatchReply::Changed {
@@ -331,9 +335,10 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
                         mark: moved,
                     },
                 ) => (cursor, mark) = (next, moved),
-                other => return other,
+                other => break other,
             }
-        }
+        };
+        (reply, client)
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!watch.is_finished(), "an admitted owner keeps watching");
@@ -347,15 +352,21 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
         })
         .await
         .unwrap();
-    let reply = tokio::time::timeout(Duration::from_secs(5), watch)
+    let (reply, client) = tokio::time::timeout(Duration::from_secs(5), watch)
         .await
         .unwrap()
         .unwrap();
+    let ended = [
+        "owner_grant_stale_or_revoked",
+        "watch_outcome_unknown",
+        "watch_unavailable",
+    ];
     let refused = reply.expect_err("a revoked owner gets no reply");
-    assert!(
-        refused == failure("owner_grant_stale_or_revoked")
-            || refused == failure("owner_authentication_failed"),
-        "{refused:?}"
-    );
+    assert!(ended.contains(&refused.0.as_str()), "{refused:?}");
+    let again = client
+        .watch(Cursor::new(0), None, 1_000)
+        .await
+        .expect_err("a revoked owner is not admitted again");
+    assert!(ended[1..].contains(&again.0.as_str()), "{again:?}");
     owner.stop().await;
 }
