@@ -1219,3 +1219,5 @@ fn a_backup_failure_record_counts_only_as_the_engine_writes_it() {
     std::os::unix::fs::symlink(&target, &record).unwrap();
     assert_eq!(backup_failure(root.path()), None);
 }
+
+mod pins;
