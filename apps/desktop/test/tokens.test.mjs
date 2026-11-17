@@ -247,10 +247,13 @@ test("the agent terminal keeps one dark palette in every theme, with its own foc
   assert.deepEqual(Object.keys(block(DARK_RULE)).filter((name) => name.startsWith("terminal-")), []);
 });
 
-test("the console's focus border and focus rings use --terminal-focus, since the light --focus is 1.06 on the terminal", () => {
+test("the console's and embedded terminals' focus border and rings use --terminal-focus, since the light --focus is 1.06 on the terminal", () => {
   const consoleCss = read("../src/screens/project/console.css");
   assert.match(consoleCss, /\.cs:focus-within \{\s*border-color: var\(--terminal-focus\);\s*\}/);
   assert.match(consoleCss, /section\.cs :focus-visible \{\s*outline-color: var\(--terminal-focus\);\s*\}/);
+  const graphCss = read("../src/screens/team/team-graph.css");
+  assert.match(graphCss, /\.tg-terminal\.embedded :focus-visible \{\s*outline-color: var\(--terminal-focus\);\s*\}/,
+    "the terminal a console or a Terminals wall tile embeds rings its composer on --terminal-focus");
   assert.ok(ratio(paint(LIGHT, "focus"), paint(LIGHT, "terminal-bg")) < CONTROL, "the light page focus would vanish on the terminal");
 });
 

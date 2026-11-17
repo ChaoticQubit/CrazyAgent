@@ -640,6 +640,10 @@
   min-height: 0;
 }
 
+.tg-terminal.embedded :focus-visible {
+  outline-color: var(--terminal-focus);
+}
+
 .tg-terminal.embedded .tg-terminal-screen {
   padding: var(--space-3) var(--space-2) var(--space-2) var(--space-5);
 }
