@@ -6920,3 +6920,295 @@ fn a_live_master_s_github_rule_proposal_is_checked_at_once() {
             .is_empty()
     );
 }
+
+/// Farm probe for 2.4.3 R1 on test-farm/r1-probe only, never merged. Starts the live
+/// master's app as the bracketed paste rows do and prints, raw and with an `R1` prefix,
+/// what tmux and the pane's processes hold for it: the tmux used, the paste flag over
+/// time, the attach's located line and capture, and the engine's own reads.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "R1 farm probe, run by the r1-probe job only"]
+fn r1_probe_prints_what_tmux_holds_for_a_live_master_pane() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let tmux = fixture.tmux.clone().unwrap();
+    let socket = fixture.base.join(FOLDER).join(SOCKET);
+    let master = AgentId::team(MASTER).unwrap();
+    let target = format!("{SESSION}:={master}");
+    let typed = fixture.base.join("typed");
+    let started = Instant::now();
+    let shown = |label: &str, bytes: &[u8]| {
+        println!(
+            "R1 {:>6}ms {label}: {:?}",
+            started.elapsed().as_millis(),
+            String::from_utf8_lossy(bytes)
+        );
+    };
+    let cli = |args: &[&str]| {
+        let mut command = Command::new(&tmux);
+        command
+            .args(["-u", "-f", "/dev/null", "-N", "-S"])
+            .arg(&socket)
+            .args(args)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match crate::spawn_gate::output(&mut command) {
+            Ok(out) => format!(
+                "status={} stdout={:?} stderr={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+            Err(error) => format!("spawn error {error}"),
+        }
+    };
+    let ps = |label: &str| {
+        let mut command = Command::new("/bin/ps");
+        command
+            .args(["-eo", "stat,pid,ppid,pgid,sid,tpgid,tty,args"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let out = crate::spawn_gate::output(&mut command).unwrap();
+        let mine = std::process::id().to_string();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if line.contains("tmux")
+                || line.contains("/bin/cat")
+                || line.contains("stty")
+                || line.contains(&mine)
+            {
+                println!("R1 ps {label}: {line}");
+            }
+        }
+    };
+
+    println!("R1 tmux path: {}", tmux.display());
+    let mut version = Command::new(&tmux);
+    version
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let version = crate::spawn_gate::output(&mut version).unwrap();
+    shown("tmux -V", version.stdout.as_slice());
+    let exe = std::env::current_exe().unwrap();
+    println!("R1 test exe: {}", exe.display());
+    for name in ["tmux", "crazyagent-tmux"] {
+        let beside = exe.parent().unwrap().join(name);
+        println!("R1 beside exe {name}: {}", beside.exists());
+    }
+    for name in [
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "TMUX",
+        "TMUX_TMPDIR",
+        "HOME",
+        "PATH",
+        "SHELL",
+        "NEXTEST",
+        "NEXTEST_RUN_ID",
+        "NEXTEST_EXECUTION_MODE",
+        "NEXTEST_PROFILE",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "CI",
+    ] {
+        println!("R1 env {name}={:?}", std::env::var_os(name));
+    }
+    println!("R1 socket: {}", socket.display());
+    for fd in 0..3 {
+        println!(
+            "R1 test fd {fd}: {:?}",
+            std::fs::read_link(format!("/proc/self/fd/{fd}"))
+        );
+    }
+    ps("before spawn");
+
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let spawned = host.spawn(&master, &command);
+    println!(
+        "R1 {:>6}ms spawn: {spawned:?}",
+        started.elapsed().as_millis()
+    );
+    fixture.live(Some(MASTER));
+
+    let flag = format!("#{{bracket_paste_flag}}{}", " end");
+    for wait in [250u64, 750, 1000, 2000] {
+        std::thread::sleep(Duration::from_millis(wait));
+        println!(
+            "R1 {:>6}ms cli flag: {}",
+            started.elapsed().as_millis(),
+            cli(&[
+                "display-message",
+                "-p",
+                "-t",
+                target.as_str(),
+                flag.as_str()
+            ])
+        );
+        let at = Instant::now();
+        let live = host.input_live(&master);
+        println!(
+            "R1 {:>6}ms engine input_live: {live:?} in {}ms",
+            started.elapsed().as_millis(),
+            at.elapsed().as_millis()
+        );
+    }
+    let pane_format = "#{pane_height} #{history_size} #{pane_id} #{pane_pid} #{pane_dead} #{pane_dead_status} #{alternate_on} #{pane_tty} #{pane_current_command} #{pane_in_mode} #{pane_active} #{window_active} #{session_attached} #{client_utf8} end";
+    println!(
+        "R1 {:>6}ms cli pane: {}",
+        started.elapsed().as_millis(),
+        cli(&["display-message", "-p", "-t", target.as_str(), pane_format])
+    );
+    println!(
+        "R1 {:>6}ms cli list-panes -a: {}",
+        started.elapsed().as_millis(),
+        cli(&[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}:#{window_name} #{pane_id} #{pane_active} #{pane_pid} #{bracket_paste_flag} #{pane_height}x#{pane_width} end"
+        ])
+    );
+    println!(
+        "R1 {:>6}ms cli server options: {}",
+        started.elapsed().as_millis(),
+        cli(&["show-options", "-s"])
+    );
+    println!(
+        "R1 {:>6}ms cli global options: {}",
+        started.elapsed().as_millis(),
+        cli(&["show-options", "-g"])
+    );
+    for flags in [&["-p", "-e"][..], &["-p", "-e", "-N", "-T"][..]] {
+        let mut args = vec!["capture-pane"];
+        args.extend_from_slice(flags);
+        args.extend_from_slice(&["-S", "0", "-t", target.as_str()]);
+        println!(
+            "R1 {:>6}ms cli {}: {}",
+            started.elapsed().as_millis(),
+            args.join(" "),
+            cli(args.as_slice())
+        );
+    }
+    if let Ok(pane) = &spawned {
+        let pid = pane.pid.to_string();
+        let mut stty = Command::new("/bin/sh");
+        stty.args([
+            "-c",
+            "tty=$(readlink /proc/$1/fd/0); echo \"fd0=$tty\"; /bin/stty -a -F \"$tty\" 2>&1; cat /proc/$1/stat 2>&1; ls -l /proc/$1/fd 2>&1",
+            "probe",
+            pid.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let out = crate::spawn_gate::output(&mut stty).unwrap();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            println!("R1 pane pid {}: {line}", pane.pid);
+        }
+    }
+    ps("after 4 s");
+
+    let at = Instant::now();
+    match host.attach(&master) {
+        Ok(stream) => {
+            println!(
+                "R1 {:>6}ms engine attach ok in {}ms: cols={} rows={} history={}B",
+                started.elapsed().as_millis(),
+                at.elapsed().as_millis(),
+                stream.cols,
+                stream.rows,
+                stream.history.len()
+            );
+            shown("engine attach screen", stream.screen.as_slice());
+        }
+        Err(error) => println!(
+            "R1 {:>6}ms engine attach error in {}ms: {error:?}",
+            started.elapsed().as_millis(),
+            at.elapsed().as_millis()
+        ),
+    }
+    let asked = format!(
+        "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}} end' ; capture-pane -p -e -S 0 -t {target} ; display-message -p 'r1-marker' ; display-message -p -t {target} '{flag}'\n"
+    );
+    let mut control = Command::new(&tmux);
+    control
+        .args(["-u", "-f", "/dev/null", "-N", "-S"])
+        .arg(&socket)
+        .args(["-C", "attach-session", "-t", SESSION])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    match crate::spawn_gate::spawn(&mut control) {
+        Ok(mut child) => {
+            let mut stdout = child.stdout.take().unwrap();
+            let reader = std::thread::spawn(move || {
+                let mut all = Vec::new();
+                let _ = std::io::Read::read_to_end(&mut stdout, &mut all);
+                all
+            });
+            let mut stdin = child.stdin.take().unwrap();
+            let wrote = std::io::Write::write_all(&mut stdin, asked.as_bytes());
+            println!(
+                "R1 {:>6}ms control wrote: {wrote:?}",
+                started.elapsed().as_millis()
+            );
+            std::thread::sleep(Duration::from_secs(3));
+            drop(stdin);
+            let until = Instant::now() + Duration::from_secs(5);
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break format!("{status}"),
+                    Ok(None) if Instant::now() < until => {
+                        std::thread::sleep(Duration::from_millis(50))
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        break format!("killed after 5 s: {:?}", child.wait());
+                    }
+                    Err(error) => break format!("wait error {error}"),
+                }
+            };
+            println!(
+                "R1 {:>6}ms control exit: {status}",
+                started.elapsed().as_millis()
+            );
+            let all = reader.join().unwrap();
+            for line in all.split(|byte| *byte == b'\n') {
+                shown("control line", line);
+            }
+            let mut stderr = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut child.stderr.take().unwrap(), &mut stderr);
+            shown("control stderr", stderr.as_slice());
+        }
+        Err(error) => println!("R1 control spawn error {error}"),
+    }
+
+    let at = Instant::now();
+    let live = host.input_live(&master);
+    println!(
+        "R1 {:>6}ms engine input_live after the control client: {live:?} in {}ms",
+        started.elapsed().as_millis(),
+        at.elapsed().as_millis()
+    );
+    ps("end");
+}

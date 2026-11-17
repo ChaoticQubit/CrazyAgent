@@ -6,6 +6,7 @@ on:
       - "chore/v242-batch*"
       - "chore/v25*"
       - "test-farm/**"
+      - "!test-farm/r1-probe"
   workflow_dispatch:
 
 permissions:
