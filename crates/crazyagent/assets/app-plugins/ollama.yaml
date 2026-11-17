@@ -1,0 +1,15 @@
+schema: 1
+kind: embedding
+name: ollama
+title: Ollama on this Mac
+version: 1.0.0
+description: nomic-embed-text through a local Ollama server at 127.0.0.1 port 11434, local and not encrypted. Run ollama pull nomic-embed-text first.
+http:
+  url: http://127.0.0.1:11434/api/embed
+  hosts: [127.0.0.1]
+  body:
+    model: nomic-embed-text
+    input: "{{inputs}}"
+  vectors: embeddings.*
+  dimensions: 768
+  batch: 32

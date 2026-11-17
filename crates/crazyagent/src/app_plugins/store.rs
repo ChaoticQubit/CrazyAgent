@@ -37,7 +37,21 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)
 }
 
-const BUNDLED: [(&str, &str); 0] = [];
+const BUNDLED: [(&str, &str); 4] = [
+    ("local", include_str!("../../assets/app-plugins/local.yaml")),
+    (
+        "openai",
+        include_str!("../../assets/app-plugins/openai.yaml"),
+    ),
+    (
+        "voyage",
+        include_str!("../../assets/app-plugins/voyage.yaml"),
+    ),
+    (
+        "ollama",
+        include_str!("../../assets/app-plugins/ollama.yaml"),
+    ),
+];
 
 /// The most plugins that exist at once: the bundled ones and the listed files of the
 /// owner's folder.
