@@ -616,6 +616,13 @@ fn a_job_on_another_harness_starts_while_one_runs_and_its_row_says_what_it_waits
         &mut shell,
         HarnessVersions {
             running: true,
+            ..newer()
+        },
+    );
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
             waiting: Some("claude-code".into()),
             ..missing("aider", Some(AIDER_LINE), AIDER_GUIDE)
         },

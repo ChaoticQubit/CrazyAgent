@@ -1,10 +1,11 @@
 use super::run::{run_raw, version_raw};
+use super::turn::{Turns, folders};
 use super::{
     BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
     InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
-    START_FAILED, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide,
-    install_command, installed_version, latest, latest_from_pointer, lookup, method, pointer, run,
-    shown, update_command,
+    START_FAILED, UNKNOWN_INSTALL, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME,
+    check_command, guide, install_command, installed_version, latest, latest_from_pointer, lookup,
+    method, pointer, run, shown, update_command,
 };
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
@@ -201,6 +202,14 @@ fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
 #[cfg(not(unix))]
 fn ready_prefix(_fixed: &Fixed, _roots: &Roots) -> Result<(), &'static str> {
     Ok(())
+}
+
+/// The longest a job waits for its turn on its folders: the job of every catalog harness
+/// ahead of it running its whole update, both version reads and the look that follows.
+/// Output: the wait.
+fn turn_wait() -> Duration {
+    let ahead = u32::try_from(harnesses::specs().len()).unwrap_or(u32::MAX);
+    (UPDATE_TIME + VERSION_TIME * 2 + CHECK_TIME).saturating_mul(ahead)
 }
 
 fn now_ms() -> i64 {
@@ -493,21 +502,23 @@ type Reader = Box<dyn Fn(&Pointer) -> Result<Vec<u8>, &'static str> + Send + Syn
 
 #[derive(Default)]
 struct State {
-    running: Option<&'static str>,
+    running: Vec<&'static str>,
     queued: Vec<&'static str>,
     last: HashMap<&'static str, LastUpdate>,
     latest: HashMap<&'static str, Latest>,
 }
 
-/// The engine's harness update state: the one update or install that may run at a time, how
-/// the last one of each harness ended, and the last check result of each harness. Keys are
-/// catalog ids only, so each map holds at most one entry per catalog harness.
+/// The engine's harness update state: the harnesses whose update or install runs, one job
+/// each, the folders those jobs hold ([`Turns`]), how the last job of each harness ended,
+/// and the last check result of each harness. Keys are catalog ids only, so each list and
+/// map holds at most one entry per catalog harness.
 pub struct Updates {
     state: Mutex<State>,
+    turns: Turns,
     reader: Reader,
 }
 
-/// The one running job's hold on the job slot; dropping it frees the slot on every path.
+/// A running job's hold on its harness; dropping it frees the harness on every path.
 struct Running {
     updates: Arc<Updates>,
     id: &'static str,
@@ -515,10 +526,10 @@ struct Running {
 
 impl Running {
     /// Stores how the job ended and forgets the harness's last check result, then frees the
-    /// slot. Input: the record. Output: none.
+    /// harness. Input: the record. Output: none.
     fn finish(self, last: LastUpdate) {
         let mut state = self.updates.state();
-        assert!(state.running == Some(self.id));
+        assert!(state.running.contains(&self.id));
         state.last.insert(self.id, last);
         state.latest.remove(self.id);
         assert!(state.last.len() <= harnesses::specs().len());
@@ -528,10 +539,8 @@ impl Running {
 impl Drop for Running {
     fn drop(&mut self) {
         let mut state = self.updates.state();
-        if state.running == Some(self.id) {
-            state.running = None;
-        }
-        assert!(state.running != Some(self.id));
+        state.running.retain(|running| *running != self.id);
+        assert!(!state.running.contains(&self.id));
     }
 }
 
@@ -541,6 +550,7 @@ impl Updates {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
+            turns: Turns::default(),
             reader: Box::new(lookup),
         })
     }
@@ -551,6 +561,7 @@ impl Updates {
     pub(super) fn with_reader(reader: Reader) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::default(),
+            turns: Turns::default(),
             reader,
         })
     }
@@ -559,39 +570,51 @@ impl Updates {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Reports whether no update or install is running. Output: true when the slot is free.
+    /// Reports whether no update or install is running. Output: true when no job runs.
     pub fn idle(&self) -> bool {
-        self.state().running.is_none()
+        self.state().running.is_empty()
     }
 
-    /// Takes the one job slot for a harness. Input: its catalog id.
-    /// Output: the hold, or `harness_update_busy` while any update or install runs.
+    /// Takes a harness for its one job; jobs of other harnesses may run beside it.
+    /// Input: its catalog id. Output: the hold, or `harness_update_busy` while an update or
+    /// install of the same harness runs.
     fn begin(self: &Arc<Self>, id: &'static str) -> Result<Running, &'static str> {
         let mut state = self.state();
-        if state.running.is_some() {
+        if state.running.contains(&id) {
             return Err(BUSY);
         }
-        state.running = Some(id);
-        assert!(state.running == Some(id));
+        state.running.push(id);
+        assert!(state.running.len() <= harnesses::specs().len());
         Ok(Running {
             updates: self.clone(),
             id,
         })
     }
 
-    /// Starts the job thread: it does the work, stores the record, frees the slot, then
-    /// runs the follow-up with whether the work ended well. Inputs: the hold, the work and
-    /// the follow-up. Output: Ok once the thread runs; a thread that cannot start frees
-    /// the slot.
+    /// Starts the job thread: it waits for its turn on the folders its command changes
+    /// ([`Turns::take`]), does the work, frees the folders, stores the record, frees the
+    /// harness, then runs the follow-up with whether the work ended well. A turn that never
+    /// comes within [`turn_wait`] is recorded as `harness_update_start_failed`. Inputs: the
+    /// hold, the folders, the work and the follow-up. Output: Ok once the thread runs; a
+    /// thread that cannot start frees the harness.
     fn spawn(
         running: Running,
+        held: Vec<PathBuf>,
         work: impl FnOnce() -> LastUpdate + Send + 'static,
         then: impl FnOnce(bool) + Send + 'static,
     ) -> Result<(), &'static str> {
         std::thread::Builder::new()
             .name(JOB_THREAD.into())
             .spawn(move || {
-                let last = work();
+                let updates = running.updates.clone();
+                let last = match updates.turns.take(running.id, held, turn_wait()) {
+                    Some(turn) => {
+                        let last = work();
+                        drop(turn);
+                        last
+                    }
+                    None => outcome(Err(START_FAILED), START_FAILED, None, None),
+                };
                 let ok = last.ok;
                 assert!(ok == last.code.is_none());
                 running.finish(last);
@@ -748,16 +771,20 @@ impl Updates {
         assert!(versions.needs.is_none() || versions.installed.is_none());
         assert!(versions.needs.is_none() || entry.executable.is_some());
         let state = self.state();
-        versions.running = state.running == Some(spec.id);
+        versions.running = state.running.contains(&spec.id);
         versions.last = state.last.get(spec.id).cloned();
+        drop(state);
+        versions.waiting = self.turns.behind(spec.id).map(str::to_owned);
         versions.sign_in_min = harnesses::sign_in_min(spec.id).map(str::to_owned);
         versions
     }
 
-    /// Starts the one update of an installed harness in the background, with the harness's
-    /// own documented updater. Inputs: the engine database, the catalog entry, the roots and
-    /// what to do once the update ended, told whether it ended well. Output: Ok once it
-    /// runs, or the refusal code.
+    /// Starts the update of an installed harness in the background, with the harness's own
+    /// documented updater, beside jobs of other harnesses. Its command is built and checked
+    /// now and again once its turn on the folders it changes comes; a command that changed
+    /// in between is recorded as an unknown install, a refusal by its code. Inputs: the engine
+    /// database, the catalog entry, the roots and what to do once the update ended, told
+    /// whether it ended well. Output: Ok once it runs, or the refusal code.
     pub fn start(
         self: &Arc<Self>,
         db: &Connection,
@@ -780,17 +807,27 @@ impl Updates {
         let running = self.begin(id)?;
         let real = crate::sandbox::canonical(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
-        let home = roots.home.clone();
-        let places = roots.places.clone();
+        let held = folders(&fixed, roots);
+        let roots = roots.clone();
         Self::spawn(
             running,
-            move || updated(&fixed, &executable, &home, &places),
+            held,
+            move || match update_command(id, &executable, &real, &roots) {
+                Ok(again) if again == fixed => {
+                    updated(&fixed, &executable, &roots.home, &roots.places)
+                }
+                Ok(_) => outcome(Err(UNKNOWN_INSTALL), UPDATE_FAILED, None, None),
+                Err(code) => outcome(Err(code), UPDATE_FAILED, None, None),
+            },
             after,
         )
     }
 
-    /// Starts the one install of a harness that is not installed, in the background, with
-    /// Homebrew or npm and the table's package. Inputs: the engine database, the catalog
+    /// Starts the install of a harness that is not installed, in the background, with
+    /// Homebrew or npm and the table's package, beside jobs of other harnesses. Its command is
+    /// built and checked, and npm's engine prefix made private, now and again once its turn on
+    /// the folders it changes comes; a command that changed in between is recorded as an
+    /// unknown install, a refusal by its code. Inputs: the engine database, the catalog
     /// entry, the roots and the search that finds the harness after the install.
     /// Output: Ok once it runs, or the refusal code.
     pub fn install(
@@ -810,11 +847,24 @@ impl Updates {
         let running = self.begin(id)?;
         let fixed = install_command(id, roots)?;
         ready_prefix(&fixed, roots)?;
-        let home = roots.home.clone();
-        let places = roots.places.clone();
+        let held = folders(&fixed, roots);
+        let roots = roots.clone();
         Self::spawn(
             running,
-            move || installed_now(&fixed, &home, &places, after),
+            held,
+            move || {
+                let again = install_command(id, &roots).and_then(|again| {
+                    if again == fixed {
+                        ready_prefix(&again, &roots)
+                    } else {
+                        Err(UNKNOWN_INSTALL)
+                    }
+                });
+                match again {
+                    Ok(()) => installed_now(&fixed, &roots.home, &roots.places, after),
+                    Err(code) => outcome(Err(code), INSTALL_FAILED, None, None),
+                }
+            },
             |_| {},
         )
     }
@@ -860,10 +910,10 @@ impl Updates {
     }
 
     /// Installs the queued harnesses one after another: each starts only once no update or
-    /// install runs, a refusal or a wait past `wait_max` becomes that harness's last record,
-    /// and the rest still install. It drains only the list queued when it began, so a list
-    /// queued after that belongs to its own drain. Inputs: what starts one install, the pause
-    /// between looks and the longest wait for the job slot. Output: none.
+    /// install of any harness runs, a refusal or a wait past `wait_max` becomes that
+    /// harness's last record, and the rest still install. It drains only the list queued when
+    /// it began, so a list queued after that belongs to its own drain. Inputs: what starts one
+    /// install, the pause between looks and the longest wait for no job to run. Output: none.
     pub fn drain(
         self: &Arc<Self>,
         mut start: impl FnMut(&'static str) -> Result<(), &'static str>,
