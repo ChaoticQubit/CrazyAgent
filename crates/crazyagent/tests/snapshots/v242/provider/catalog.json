@@ -1,0 +1,119 @@
+{
+  "entries": [
+    {
+      "methods": [
+        {
+          "key": "hidden",
+          "label": "Sign in with ChatGPT",
+          "method": "subscription",
+          "model": "hidden",
+          "url": "hidden",
+          "url_preset": null
+        },
+        {
+          "key": "required",
+          "label": "Use an API key",
+          "method": "api_key",
+          "model": "required",
+          "url": "hidden",
+          "url_preset": "https://api.openai.com/v1"
+        }
+      ],
+      "name": "ChatGPT / Codex",
+      "provider": "chatgpt"
+    },
+    {
+      "methods": [
+        {
+          "key": "hidden",
+          "label": "Sign in with your Claude subscription",
+          "method": "subscription",
+          "model": "hidden",
+          "url": "hidden",
+          "url_preset": null
+        },
+        {
+          "key": "required",
+          "label": "Use an API key",
+          "method": "api_key",
+          "model": "required",
+          "url": "hidden",
+          "url_preset": "https://api.anthropic.com/v1"
+        }
+      ],
+      "name": "Claude",
+      "provider": "claude"
+    },
+    {
+      "methods": [
+        {
+          "key": "required",
+          "label": "Use an API key",
+          "method": "api_key",
+          "model": "required",
+          "url": "hidden",
+          "url_preset": "https://openrouter.ai/api/v1"
+        }
+      ],
+      "name": "OpenRouter",
+      "provider": "openrouter"
+    },
+    {
+      "methods": [
+        {
+          "key": "required",
+          "label": "Use an API key",
+          "method": "api_key",
+          "model": "required",
+          "url": "hidden",
+          "url_preset": "https://api.openai.com/v1"
+        }
+      ],
+      "name": "OpenAI API",
+      "provider": "openai_api"
+    },
+    {
+      "methods": [
+        {
+          "key": "required",
+          "label": "Use an API key",
+          "method": "api_key",
+          "model": "required",
+          "url": "hidden",
+          "url_preset": "https://api.anthropic.com/v1"
+        }
+      ],
+      "name": "Anthropic API",
+      "provider": "anthropic_api"
+    },
+    {
+      "methods": [
+        {
+          "key": "optional",
+          "label": "Connect a URL",
+          "method": "url",
+          "model": "required",
+          "url": "required",
+          "url_preset": null
+        }
+      ],
+      "name": "Any OpenAI-compatible URL",
+      "provider": "openai_compatible"
+    },
+    {
+      "methods": [
+        {
+          "key": "hidden",
+          "label": "Connect a URL",
+          "method": "url",
+          "model": "required",
+          "url": "required",
+          "url_preset": "http://127.0.0.1:<port>/v1"
+        }
+      ],
+      "name": "Local models (Ollama)",
+      "provider": "local"
+    }
+  ],
+  "local_preset_is_ollama_default": true
+}

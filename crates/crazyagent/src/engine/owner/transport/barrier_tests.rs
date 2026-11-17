@@ -1,11 +1,10 @@
-use super::usage_tests::{IN_FLIGHT, Usage};
+use super::usage_tests::{IN_FLIGHT, Usage, hold_storage};
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::plugins::{Scope, ServerSpec};
 use crate::projects_home::AddMode;
 use crate::protocol::ProjectId;
 
-const SWEPT_FILES: usize = 40_000;
 const PATIENT_WAIT_MS: u64 = 30_000;
 const SWEEP_TIME_MAX: Duration = Duration::from_secs(60);
 const LAPSE_WAIT_MS: u64 = 250;
@@ -106,49 +105,6 @@ fn pending_change_set(owner: &Usage) -> (crate::landing::ChangeSetId, String) {
         .head
         .clone();
     (id, head)
-}
-
-/// Keeps the storage actor busy with a real sweep of many removed skill files.
-/// Input: the engine. Output: the swept folder and the sweep's answer.
-fn occupy_storage(owner: &Usage) -> (PathBuf, oneshot::Receiver<Result<(), EngineError>>) {
-    let swept = owner
-        .engine_root
-        .join(crate::storage::plugins::STORE)
-        .join("skills")
-        .join("global")
-        .join(".removed-busy-storage");
-    std::fs::create_dir_all(&swept).unwrap();
-    for index in 0..SWEPT_FILES {
-        std::fs::write(swept.join(index.to_string()), b"x").unwrap();
-    }
-    let (send, sweep) = oneshot::channel();
-    owner
-        .runtime()
-        .engine
-        .storage
-        .sender
-        .try_send(crate::storage::Job::Setup(
-            crate::storage::setup::Command::Sweep,
-            send,
-        ))
-        .unwrap();
-    (swept, sweep)
-}
-
-/// Holds the storage actor until the returned sender sends or drops, so every storage job
-/// sent after this call outlasts any owner wait, however fast the disk and the machine are.
-/// Input: the engine. Output: the sender that lets storage go on.
-fn hold_storage(owner: &Usage) -> oneshot::Sender<()> {
-    let (release, held) = oneshot::channel();
-    owner
-        .runtime()
-        .engine
-        .storage
-        .sender
-        .try_send(crate::storage::Job::Hold(held))
-        .unwrap();
-    assert!(!release.is_closed(), "storage took the hold");
-    release
 }
 
 /// Waits until storage has answered every job queued before this call, so a change it ran
@@ -389,7 +345,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
     let _disk = super::usage_tests::busy_storage().await;
     let owner = Usage::start_waiting(PATIENT_WAIT_MS).await;
     let runtime = owner.runtime();
-    let (swept, sweep) = occupy_storage(&owner);
+    let release = hold_storage(&runtime.engine.storage.sender);
     let mut added = Box::pin(owner.client.add_mcp_server(
         Scope::Global,
         "held-server".into(),
@@ -413,14 +369,9 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
         "a revocation waits for the change already in flight"
     );
+    release.send(()).unwrap();
     let answered = tokio::time::timeout(SWEEP_TIME_MAX, added).await.unwrap();
     let revoked = tokio::time::timeout(SWEEP_TIME_MAX, revoke).await.unwrap();
-    tokio::time::timeout(SWEEP_TIME_MAX, sweep)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(!swept.exists());
     let stored = stored_servers(&owner, "held-server").await;
     let id = match answered {
         Ok(server) => {
@@ -627,7 +578,7 @@ async fn a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once() 
         "the client starts admitted"
     );
     let epoch = runtime.epoch(OwnerClientKind::Tui).unwrap();
-    let (swept, sweep) = occupy_storage(&owner);
+    let release = hold_storage(&runtime.engine.storage.sender);
     let lapsed = runtime
         .control(revocation(runtime, OwnerClientKind::Tui, "revoke-lapsed"))
         .await;
@@ -641,12 +592,7 @@ async fn a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once() 
         "the revoked client is refused right after the outcome-unknown answer"
     );
 
-    tokio::time::timeout(SWEEP_TIME_MAX, sweep)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(!swept.exists());
+    release.send(()).unwrap();
     storage_settled(&owner).await;
     assert!(
         published(runtime, epoch + 1).await,
@@ -666,7 +612,7 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
     let revoked = revoke_settled(&owner, "revoke-first").await;
     assert!(!revoked.active);
     assert!(!admitted(runtime, &owner.client));
-    let (swept, sweep) = occupy_storage(&owner);
+    let release = hold_storage(&runtime.engine.storage.sender);
     let lapsed = runtime
         .control(reactivation("reactivate-lapsed", revoked.owner_epoch))
         .await;
@@ -676,12 +622,7 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
         "the reactivation outlasts the owner wait"
     );
 
-    tokio::time::timeout(SWEEP_TIME_MAX, sweep)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(!swept.exists());
+    release.send(()).unwrap();
     storage_settled(&owner).await;
     assert!(
         published(runtime, revoked.owner_epoch + 1).await,
@@ -742,7 +683,7 @@ async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot()
     let runtime = owner.runtime();
     let revoked = revoke_settled(&owner, "revoke-before-both").await;
     assert!(!revoked.active);
-    let release = hold_storage(&owner);
+    let release = hold_storage(&owner.runtime().engine.storage.sender);
     let reactivated = runtime
         .control(reactivation(
             "reactivate-before-revoke",

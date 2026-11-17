@@ -1,0 +1,399 @@
+[
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "codex"
+    ],
+    "headless": "codex app-server: JSON-RPC over stdio",
+    "id": "codex",
+    "launch": null,
+    "locations": [],
+    "model_selection": true,
+    "name": "Codex",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key"
+    ],
+    "binaries": [
+      "claude"
+    ],
+    "headless": "claude --print with stream-json input and output",
+    "id": "claude-code",
+    "launch": null,
+    "locations": [
+      ".claude/local"
+    ],
+    "model_selection": true,
+    "name": "Claude Code",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "opencode"
+    ],
+    "headless": "opencode run --format json, or opencode serve over HTTP",
+    "id": "opencode",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [
+      ".opencode/bin"
+    ],
+    "model_selection": true,
+    "name": "OpenCode",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key"
+    ],
+    "binaries": [
+      "gemini"
+    ],
+    "headless": "gemini --prompt with --output-format stream-json",
+    "id": "gemini-cli",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Gemini CLI",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key"
+    ],
+    "binaries": [
+      "cursor-agent"
+    ],
+    "headless": "cursor-agent --print with --output-format stream-json",
+    "id": "cursor-agent",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [
+      ".cursor/bin"
+    ],
+    "model_selection": true,
+    "name": "Cursor CLI",
+    "tools_limited": "tools are allowed or denied only through Cursor's permission file"
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "fx"
+    ],
+    "headless": "fx ask --json: one request, JSON result on stdout",
+    "id": "fx",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [
+      ".fx/bin"
+    ],
+    "model_selection": true,
+    "name": "fx by Vercel",
+    "tools_limited": "no documented switch to turn tools off"
+  },
+  {
+    "account_kinds": [
+      "subscription"
+    ],
+    "binaries": [
+      "agy",
+      "antigravity"
+    ],
+    "headless": "agy --print: one prompt, plain text reply",
+    "id": "antigravity",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Antigravity",
+    "tools_limited": "tools cannot be switched off, only approved automatically"
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "local"
+    ],
+    "binaries": [
+      "openclaw"
+    ],
+    "headless": "openclaw agent --message through its gateway",
+    "id": "openclaw",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "OpenClaw",
+    "tools_limited": "tools are set in OpenClaw's own configuration"
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "pi"
+    ],
+    "headless": "pi --mode json or --mode rpc over stdio",
+    "id": "pi",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Pi",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "crazyagent-rcli"
+    ],
+    "headless": "CrazyAgent's bundled RCLI host",
+    "id": "rcli",
+    "launch": "runs only as a CrazyAgent master",
+    "locations": [],
+    "model_selection": true,
+    "name": "RCLI",
+    "tools_limited": "runs without tools"
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key"
+    ],
+    "binaries": [
+      "amp"
+    ],
+    "headless": "amp --execute with --stream-json",
+    "id": "amp",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [
+      ".amp/bin"
+    ],
+    "model_selection": false,
+    "name": "Amp",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "goose"
+    ],
+    "headless": "goose run --text with --output-format stream-json",
+    "id": "goose",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Goose",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "aider"
+    ],
+    "headless": "aider --message: one prompt, plain text reply",
+    "id": "aider",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Aider",
+    "tools_limited": "file edits cannot be switched off apart from a dry run"
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "qwen"
+    ],
+    "headless": "qwen --prompt with --output-format stream-json",
+    "id": "qwen-code",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Qwen Code",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "crush"
+    ],
+    "headless": "crush run: one prompt, plain text reply",
+    "id": "crush",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Crush",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "open_ai_compatible_url"
+    ],
+    "binaries": [
+      "droid"
+    ],
+    "headless": "droid exec with --output-format stream-json",
+    "id": "droid",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [
+      ".factory/bin"
+    ],
+    "model_selection": true,
+    "name": "Factory Droid",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription"
+    ],
+    "binaries": [
+      "kiro-cli",
+      "kiro"
+    ],
+    "headless": "kiro-cli chat --no-interactive",
+    "id": "kiro",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Kiro CLI",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription"
+    ],
+    "binaries": [
+      "copilot"
+    ],
+    "headless": "copilot --prompt: one prompt, plain text reply",
+    "id": "copilot",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "GitHub Copilot CLI",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "cline"
+    ],
+    "headless": "cline with --json output",
+    "id": "cline",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Cline CLI",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "cn"
+    ],
+    "headless": "cn --print: one prompt, plain text reply",
+    "id": "continue",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Continue CLI",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "api_key",
+      "open_ai_compatible_url",
+      "local"
+    ],
+    "binaries": [
+      "openhands"
+    ],
+    "headless": "openhands --headless with a task",
+    "id": "openhands",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "OpenHands CLI",
+    "tools_limited": "headless mode always runs its tools"
+  },
+  {
+    "account_kinds": [
+      "subscription"
+    ],
+    "binaries": [
+      "auggie"
+    ],
+    "headless": "auggie --print: one prompt, plain text reply",
+    "id": "auggie",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Auggie",
+    "tools_limited": null
+  },
+  {
+    "account_kinds": [
+      "subscription",
+      "api_key"
+    ],
+    "binaries": [
+      "kimi"
+    ],
+    "headless": "kimi --print with stream-json output",
+    "id": "kimi",
+    "launch": "installed, but CrazyAgent cannot start it yet",
+    "locations": [],
+    "model_selection": true,
+    "name": "Kimi CLI",
+    "tools_limited": null
+  }
+]

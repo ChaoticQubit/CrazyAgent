@@ -1,0 +1,19 @@
+{
+  "read": {
+    "ok": {
+      "outside": false,
+      "text": "Use the sensor fixtures in tests/data.\nNever call the live API.\n",
+      "version": 1
+    }
+  },
+  "saved": {
+    "ok": {
+      "kind": "saved",
+      "size": {
+        "bytes": 121,
+        "claude_bytes_max": 21142
+      },
+      "version": 1
+    }
+  }
+}

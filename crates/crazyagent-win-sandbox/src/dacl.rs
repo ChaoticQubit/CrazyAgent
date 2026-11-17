@@ -287,6 +287,75 @@ pub fn other_writer<'a>(
     Ok(None)
 }
 
+/// Whether only the trusted accounts may change an object: one of them owns it
+/// ([`trusted_owner`]) and its access list gives no other SID any of `rights`
+/// ([`other_writer`]). Inputs: the owner, the list (None when it has none), the user's SID
+/// and the rights. Output: Ok, or the reason another account can change it.
+pub fn held_only_by(
+    owner: &[u8],
+    list: Option<&[u8]>,
+    user: &[u8],
+    rights: u32,
+) -> Result<(), &'static str> {
+    if !trusted_owner(owner, user) {
+        return Err("another account owns the program or a folder above it");
+    }
+    let Some(list) = list else {
+        return Err(
+            "the program or a folder above it has no access list, so everyone can change it",
+        );
+    };
+    match other_writer(list, user, rights)? {
+        None => Ok(()),
+        Some(_) => Err("another account can change the program or a folder above it"),
+    }
+}
+
+/// One part of a path as [`first_changeable_part`] reads it: missing, unreadable, or its
+/// owner SID, its access list (None when it has none) and whether it is a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    Missing,
+    Unreadable,
+    Found {
+        owner: Vec<u8>,
+        list: Option<Vec<u8>>,
+        folder: bool,
+    },
+}
+
+/// The first part, the entry first, that someone other than the trusted accounts can change
+/// ([`held_only_by`]): a file entry with [`FILE_CHANGES`], a folder entry, a file's own folder
+/// and a folder above a missing part with [`OWN_FOLDER_CHANGES`], any other folder with
+/// [`ANCESTOR_CHANGES`]. A missing part is never named, an unreadable one always. Inputs: the
+/// parts from the entry up and the user's SID. Output: the part's index, or none.
+pub fn first_changeable_part(parts: &[Part], user: &[u8]) -> Option<usize> {
+    let folder_entry = matches!(parts.first(), Some(Part::Found { folder: true, .. }));
+    let mut below_exists = false;
+    for (depth, part) in parts.iter().enumerate() {
+        let rights = match depth {
+            0 if folder_entry => OWN_FOLDER_CHANGES,
+            0 => FILE_CHANGES,
+            1 if !folder_entry => OWN_FOLDER_CHANGES,
+            _ if !below_exists => OWN_FOLDER_CHANGES,
+            _ => ANCESTOR_CHANGES,
+        };
+        let changeable = match part {
+            Part::Missing => false,
+            Part::Unreadable => true,
+            Part::Found { owner, list, .. } => {
+                held_only_by(owner, list.as_deref(), user, rights).is_err()
+            }
+        };
+        if changeable {
+            assert!(*part != Part::Missing);
+            return Some(depth);
+        }
+        below_exists = *part != Part::Missing;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,6 +651,50 @@ mod tests {
             other_writer(&root, &OWNER, OWN_FOLDER_CHANGES),
             Ok(Some(&AUTHENTICATED_USERS[..]))
         );
+    }
+
+    /// V243-WIN-CHANGEABLE-BY-OTHERS: a file's own folder is judged as `owner_only` judges
+    /// it, a folder entry's parent only for swapping it, a folder above a missing part for
+    /// adding one; a missing part is never named, and an unreadable part, another owner or
+    /// no access list always is.
+    #[test]
+    fn the_first_changeable_part_reads_each_depth_with_its_own_rights() {
+        let own = acl(&[ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER)]);
+        let adds = acl(&[
+            ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, 0, ADD_SUBDIRECTORY, &AUTHENTICATED_USERS),
+        ]);
+        let found = |list: &[u8], folder: bool| Part::Found {
+            owner: OWNER.to_vec(),
+            list: Some(list.to_vec()),
+            folder,
+        };
+        let (file, folder, open) = (found(&own, false), found(&own, true), found(&adds, true));
+        let first = |parts: &[&Part]| {
+            let parts: Vec<Part> = parts.iter().map(|part| (*part).clone()).collect();
+            first_changeable_part(&parts, &OWNER)
+        };
+        assert_eq!(first(&[&file, &folder, &folder]), None);
+        assert_eq!(first(&[&file, &open, &folder]), Some(1));
+        assert_eq!(first(&[&file, &folder, &open]), None);
+        assert_eq!(first(&[&folder, &open]), None);
+        assert_eq!(first(&[&open, &folder]), Some(0));
+        assert_eq!(first(&[&Part::Missing, &Part::Missing, &open]), Some(2));
+        assert_eq!(first(&[&Part::Missing, &folder, &open]), None);
+        assert_eq!(first(&[&file, &Part::Unreadable]), Some(1));
+        let foreign = Part::Found {
+            owner: OTHER_ACCOUNT.to_vec(),
+            list: Some(own.clone()),
+            folder: true,
+        };
+        assert_eq!(first(&[&file, &folder, &foreign]), Some(2));
+        let bare = Part::Found {
+            owner: OWNER.to_vec(),
+            list: None,
+            folder: true,
+        };
+        assert_eq!(first(&[&file, &folder, &bare]), Some(2));
+        assert_eq!(first(&[]), None);
     }
 
     /// #306 sec F1: an inherit-only entry, which passes down without applying, and a deny

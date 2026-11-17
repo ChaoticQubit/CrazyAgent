@@ -8,12 +8,15 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod memory_step;
+mod settings_step;
 #[cfg(test)]
 mod tests;
 
 /// The folder beside engine.db that holds one folder per upgrade backup, each with a full
-/// engine.db copy and the settings texts kept with it. The sandbox names it among the engine
-/// secrets, so no granted root may hold or sit inside it.
+/// engine.db copy and the settings texts kept with it, and the dated copies a restore keeps
+/// ([`keep_replaced`]). The sandbox names it among the engine secrets, so no granted root may
+/// hold or sit inside it.
 pub(crate) const BACKUPS: &str = "backups";
 
 /// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
@@ -107,10 +110,11 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 14,
-        run: |tx| {
-            let at_ms = crate::state_log::replay::Clock::System.now_ms();
-            crate::memory::log::first_run(tx, super::opening::Opening::new(at_ms)).map(drop)
-        },
+        run: settings_step::settings_on_the_log,
+    },
+    Step {
+        to: 15,
+        run: memory_step::memory_on_the_log,
     },
 ];
 

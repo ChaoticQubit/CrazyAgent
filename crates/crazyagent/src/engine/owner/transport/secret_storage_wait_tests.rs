@@ -1,3 +1,4 @@
+use super::usage_tests::hold_storage;
 use super::*;
 use crate::accounts::{AccountDraft, Provider, SignInMethod};
 use crate::engine::bootstrap::EngineService;
@@ -5,8 +6,6 @@ use crate::engine::owner::{AccountSecret, OwnerClient, OwnerClientKind};
 use crate::plugins::{Scope, ServerSpec};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-const SWEPT_FILES: usize = 40_000;
 
 struct Busy {
     root: tempfile::TempDir,
@@ -75,34 +74,31 @@ impl Busy {
             .unwrap()
     }
 
-    /// Queues a real storage sweep of `SWEPT_FILES` files ahead of every later storage
-    /// job, in a removed skill folder of the private plugin store made as the engine makes
-    /// it. Output: the swept folder and the sweep.
-    fn occupy_storage(&self) -> (PathBuf, Sweep) {
-        let swept =
-            crate::storage::plugins::store_folder(&self.engine_root(), &["skills", "global"])
-                .unwrap()
-                .join(".removed-busy-storage");
-        std::fs::create_dir(&swept).unwrap();
-        for index in 0..SWEPT_FILES {
-            std::fs::write(swept.join(index.to_string()), b"x").unwrap();
-        }
-        let storage = self
-            .service
-            .owner_runtime()
-            .unwrap()
-            .engine
-            .storage
-            .sender
-            .clone();
-        let (send, answer) = oneshot::channel();
-        storage
-            .try_send(crate::storage::Job::Setup(
+    /// The engine's storage queue, which [`hold_storage`] holds. Output: a sender on it.
+    fn storage(&self) -> tokio::sync::mpsc::Sender<crate::storage::Job> {
+        let handle = self.service.owner_runtime().unwrap();
+        handle.engine.storage.sender.clone()
+    }
+
+    /// Lets held storage go on, then waits until it has run everything queued behind the
+    /// hold: storage answers its jobs one at a time in order, so one more job answers only
+    /// after the request that outlasted the owner wait has committed, and the reads that
+    /// follow do not race it. Input: the hold's sender.
+    async fn settled(&self, release: oneshot::Sender<()>) {
+        release.send(()).unwrap();
+        let (send, barrier) = oneshot::channel();
+        self.storage()
+            .send(crate::storage::Job::Setup(
                 crate::storage::setup::Command::Sweep,
                 send,
             ))
+            .await
             .unwrap();
-        (swept, Sweep { answer, storage })
+        tokio::time::timeout(Duration::from_secs(60), barrier)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     async fn stop(mut self) {
@@ -113,40 +109,6 @@ impl Busy {
             .unwrap();
         drop(self.root);
     }
-}
-
-/// The real sweep that holds storage, and the storage queue it sits in. Fields: the
-/// sweep's answer, and the storage sender [`settled`] queues its barrier on.
-struct Sweep {
-    answer: oneshot::Receiver<Result<(), EngineError>>,
-    storage: tokio::sync::mpsc::Sender<crate::storage::Job>,
-}
-
-/// Waits until storage has run everything queued behind the real sweep: the sweep's own
-/// answer, then the answer to one more sweep queued after it. Storage answers its jobs one
-/// at a time in order, so the request that outlasted the owner wait has run by then and
-/// the reads that follow do not race its commit. Inputs: the swept folder and the sweep.
-async fn settled(swept: &Path, sweep: Sweep) {
-    tokio::time::timeout(Duration::from_secs(60), sweep.answer)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(!swept.exists());
-    let (send, barrier) = oneshot::channel();
-    sweep
-        .storage
-        .send(crate::storage::Job::Setup(
-            crate::storage::setup::Command::Sweep,
-            send,
-        ))
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(60), barrier)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
 }
 
 fn holders(root: &Path, secret: &[u8]) -> usize {
@@ -196,7 +158,7 @@ fn outlasted_the_owner_wait(result: Result<impl std::fmt::Debug, EngineError>, c
     assert_eq!(
         result.err().map(|error| error.0).as_deref(),
         Some(code),
-        "the request must outlast the owner wait behind the real sweep"
+        "the request must outlast the owner wait behind the held storage"
     );
 }
 
@@ -209,7 +171,7 @@ async fn an_account_added_while_storage_is_busy_keeps_the_key_its_record_refers_
         listener.local_addr().unwrap().port()
     );
     let secret = format!("sk-busy-{}", std::process::id());
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let added = busy
         .client
         .add_account(
@@ -224,7 +186,7 @@ async fn an_account_added_while_storage_is_busy_keeps_the_key_its_record_refers_
         )
         .await;
     outlasted_the_owner_wait(added, "native_auth_outcome_unknown_read_same_operation");
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     let accounts = busy.client.list_accounts(None, 10).await.unwrap().accounts;
     assert_eq!(
@@ -279,7 +241,7 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
         .unwrap();
     assert_eq!(holders(&busy.engine_root(), first.as_bytes()), 1);
 
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let replaced = busy
         .client
         .set_mcp_secret(
@@ -289,7 +251,7 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
         )
         .await;
     outlasted_the_owner_wait(replaced, "plugins_outcome_unknown");
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     let after = busy.client.plugin_server(server.id.clone()).await.unwrap();
     assert_eq!(after.secrets.len(), 1, "storage committed the new secret");
@@ -319,7 +281,7 @@ async fn a_server_added_with_secrets_while_storage_is_busy_is_kept_with_every_on
     let first = format!("first-added-secret-{}", std::process::id());
     let second = format!("second-added-secret-{}", std::process::id());
 
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let added = controller
         .add_mcp_server(
             Scope::Global,
@@ -343,9 +305,9 @@ async fn a_server_added_with_secrets_while_storage_is_busy_is_kept_with_every_on
     let code = added.err().map(|error| error.0).unwrap_or_default();
     assert!(
         code.ends_with("outcome_unknown") || code.contains("outcome_unknown_"),
-        "the add must outlast the owner wait behind the real sweep: {code}"
+        "the add must outlast the owner wait behind the held storage: {code}"
     );
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     let servers = controller.plugin_servers(None).await.unwrap();
     assert_eq!(servers.len(), 1, "storage committed the add");
@@ -456,14 +418,14 @@ async fn an_account_removed_while_storage_is_busy_leaves_no_key_on_disk() {
         .unwrap();
     assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 1);
 
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let removed = busy.client.remove_account(added.id.clone()).await;
     let code = removed.err().map(|error| error.0).unwrap_or_default();
     assert!(
         code.contains("outcome_unknown"),
-        "the request must outlast the owner wait behind the real sweep: {code}"
+        "the request must outlast the owner wait behind the held storage: {code}"
     );
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     assert!(
         busy.client
@@ -497,10 +459,10 @@ async fn a_server_removed_while_storage_is_busy_leaves_none_of_its_secrets_on_di
     .await;
 
     let version = busy.client.plugin_server(id.clone()).await.unwrap().version;
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let removed = busy.client.remove_mcp_server(id.clone(), version).await;
     outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     assert!(
         busy.client.plugin_server(id).await.is_err(),
@@ -521,13 +483,13 @@ async fn a_server_secret_removed_while_storage_is_busy_leaves_no_file_on_disk() 
     let value = format!("detached-busy-secret-{}", std::process::id());
     let id = server_with_secrets(&busy, "busy-detached", &[("API_TOKEN", value.as_str())]).await;
 
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let removed = busy
         .client
         .remove_mcp_secret(id.clone(), "API_TOKEN".into())
         .await;
     outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     assert!(
         busy.client
@@ -615,10 +577,10 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
     std::fs::write(&profile, "(version 1)\n").unwrap();
 
     let version = busy.client.plugin_server(id.clone()).await.unwrap().version;
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let removed = busy.client.remove_mcp_server(id.clone(), version).await;
     outlasted_the_owner_wait(removed, "plugins_outcome_unknown");
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     assert!(
         busy.client.plugin_server(id).await.is_err(),
@@ -699,7 +661,7 @@ async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
         "a replace that read the account before the Remove recreates its key file"
     );
 
-    let (swept, sweep) = busy.occupy_storage();
+    let release = hold_storage(&busy.storage());
     let replaced =
         super::accounts::key_replaced(&handle.engine, &admission, added.id.clone(), credential_ref)
             .await;
@@ -707,7 +669,7 @@ async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
         replaced.map(|_| ()),
         "native_auth_outcome_unknown_read_same_operation",
     );
-    settled(&swept, sweep).await;
+    busy.settled(release).await;
 
     assert!(
         none_hold(&busy.engine_root(), second.as_bytes()).await,

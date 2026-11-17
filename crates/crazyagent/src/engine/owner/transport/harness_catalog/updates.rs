@@ -432,7 +432,7 @@ async fn answer(
                 install,
             };
             blocking(move || {
-                update::set_settings(&open(&root)?, settings)?;
+                crate::settings_log::harness_update(&open(&root)?, settings)?;
                 Ok(settings_reply(settings))
             })
             .await

@@ -9,10 +9,12 @@ pub use run::{
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
 };
 pub(crate) use state::needs;
+#[cfg(test)]
+pub use state::set_settings;
 pub use state::{
     BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_LIST_INVALID,
     INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
-    UPDATE_FAILED, UPDATE_OFF, Updates, initialize, set_settings, settings,
+    UPDATE_FAILED, UPDATE_OFF, Updates, initialize, settings,
 };
 
 use crate::harnesses;
