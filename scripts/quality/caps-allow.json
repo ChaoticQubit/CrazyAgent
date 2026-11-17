@@ -118,7 +118,7 @@
   "crates/crazyagent/src/terminal/tmux.rs": 2482,
   "crates/crazyagent/src/terminal/tmux/tests.rs": 2757,
   "crates/crazyagent/src/tools/tests.rs": 1834,
-  "crates/crazyagent/src/tui/client.rs": 3378,
+  "crates/crazyagent/src/tui/client.rs": 3332,
   "crates/crazyagent/src/tui/client/project_setup.rs": 1693,
   "crates/crazyagent/src/tui/client/settings.rs": 2587,
   "crates/crazyagent/src/tui/master_session.rs": 3705,

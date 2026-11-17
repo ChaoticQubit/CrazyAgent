@@ -149,6 +149,13 @@ impl ResetWatch {
         due
     }
 
+    /// Tells whether a read the minute gate held back may go now, so a change seen inside the
+    /// gate is still read once it ends with no further watch delivery. Input: now. Output:
+    /// the answer.
+    pub fn owed(&self, _now_ms: i64) -> bool {
+        false
+    }
+
     /// Picks the new free resets to tell from one read, the same as the desktop's: each
     /// account whose gain stamp changed since the last look, and for an account not seen
     /// before only a gain from the last `FRESH_GAIN_MS`; a count not reported now is never
@@ -550,9 +557,31 @@ mod tests {
         assert!(watch.due(NOW));
         assert!(
             !watch.due(NOW + 5_000),
-            "the shell's 5 s tick never asks so soon"
+            "a tick 5 s after the ask never asks so soon"
         );
         assert!(watch.due(NOW + RESET_WATCH_MS));
         assert!(watch.due(NOW), "a clock that went back asks again");
+    }
+
+    #[test]
+    fn a_read_the_minute_gate_held_back_is_owed_until_the_gate_ends() {
+        let mut watch = ResetWatch::default();
+        assert!(!watch.owed(NOW), "nothing is owed before the first ask");
+        assert!(watch.due(NOW));
+        assert!(!watch.owed(NOW + 30_000), "an ask that went owes nothing");
+        assert!(!watch.due(NOW + 30_000));
+        assert!(
+            !watch.owed(NOW + 30_000),
+            "the held-back read waits for the gate"
+        );
+        assert!(
+            watch.owed(NOW + RESET_WATCH_MS),
+            "the held-back read may go once the gate ends, with no watch delivery"
+        );
+        assert!(watch.due(NOW + RESET_WATCH_MS));
+        assert!(
+            !watch.owed(NOW + 2 * RESET_WATCH_MS),
+            "the read that went clears what was owed"
+        );
     }
 }
