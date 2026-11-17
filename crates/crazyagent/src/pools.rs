@@ -51,6 +51,18 @@ impl MemberKind {
         }
     }
 
+    /// Names the kind for a count of members in a pool summary: API keys, URLs and local
+    /// models counted more than once read in the plural; provider names stay as they are
+    /// (V243-POOL-SUMMARY-PLURAL). Input: the count. Output: the name.
+    fn counted(self, count: usize) -> &'static str {
+        match (self, count) {
+            (Self::ApiKey, 2..) => "API keys",
+            (Self::Url, 2..) => "URLs",
+            (Self::Local, 2..) => "Local models",
+            _ => self.label(),
+        }
+    }
+
     fn subscription(self) -> bool {
         matches!(self, Self::Chatgpt | Self::Claude)
     }
@@ -135,7 +147,7 @@ pub fn summarize(
             let mut parts: Vec<String> = Vec::new();
             for kind in kinds.iter().copied() {
                 let count = kinds.iter().filter(|k| **k == kind).count();
-                let part = format!("{count} {}", kind.label());
+                let part = format!("{count} {}", kind.counted(count));
                 if !parts.contains(&part) {
                     parts.push(part);
                 }
