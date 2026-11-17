@@ -223,13 +223,24 @@ fn one_transaction_holds_at_most_its_bound_of_events() {
     let mut db = db();
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx).unwrap();
-    for index in 0..TRANSACTION_EVENTS_MAX {
-        assert_eq!(log.append(&draft(b"")).unwrap(), index as u64 + 1);
+    let last = TRANSACTION_EVENTS_MAX as u64;
+    for seq in 1..last {
+        assert_eq!(log.append(&draft(b"")).unwrap(), seq);
     }
+    let one: Vec<Chunk> = chunks().into_iter().take(1).collect();
+    assert_eq!(
+        code(log.snapshot(Aggregate::Worktrees, 9, one)),
+        Some("state_log_transaction_full".into()),
+        "a one-chunk run needs two places and one is left"
+    );
+    assert_eq!(logged(&tx).len(), TRANSACTION_EVENTS_MAX - 1);
+    assert_eq!(log.snapshot(Aggregate::Ide, 9, Vec::new()).unwrap(), last);
     assert_eq!(
         code(log.append(&draft(b""))),
         Some("state_log_transaction_full".into())
     );
+    drop(log);
+    assert_eq!(logged(&tx).len(), TRANSACTION_EVENTS_MAX);
 }
 
 #[test]
@@ -340,4 +351,94 @@ fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
     );
     drop(log);
     assert_eq!(logged(&tx).len(), 0);
+}
+
+/// Plants one row in the log outside the appender, as a damaged or forged store holds it.
+/// Inputs: the connection, the seq, the kind and the body. Output: none.
+fn plant(db: &Connection, seq: i64, kind: &str, body: &[u8]) {
+    db.execute(
+        "INSERT INTO state_log VALUES (?1,1,'worktrees',?2,1,0,?3)",
+        params![seq, kind, body],
+    )
+    .unwrap();
+}
+
+/// The body of a worktrees closing event counting `chunks` and hashing the given chunk
+/// bodies in order. Inputs: the count and the bodies. Output: the body.
+fn closing(chunks: u32, bodies: &[&[u8]]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    for body in bodies {
+        digest.update(body);
+    }
+    let sha256 = format!("{:x}", digest.finalize());
+    serde_json::to_vec(&json!({ "aggregate": "worktrees", "chunks": chunks, "sha256": sha256 }))
+        .unwrap()
+}
+
+#[test]
+fn a_closing_event_with_a_bad_body_or_a_count_no_run_can_hold_is_invalid() {
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    drop(Appender::own(&tx).unwrap());
+    let impossible = u32::try_from(TRANSACTION_EVENTS_MAX).unwrap();
+    plant(&tx, 1, SNAPSHOT_DONE, b"not json");
+    plant(&tx, 2, SNAPSHOT_DONE, &closing(impossible, &[]));
+    plant(&tx, 3, SNAPSHOT_DONE, &closing(impossible - 1, &[]));
+    for (done, expected) in [
+        (1, "state_log_snapshot_invalid"),
+        (2, "state_log_snapshot_invalid"),
+        (3, "state_log_snapshot_hash"),
+    ] {
+        assert_eq!(
+            code(verify_snapshot(&tx, done)),
+            Some(expected.into()),
+            "closing event {done}"
+        );
+    }
+}
+
+#[test]
+fn a_run_short_of_its_count_or_with_chunks_out_of_order_or_of_another_aggregate_fails() {
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    drop(Appender::own(&tx).unwrap());
+    plant(&tx, 1, SNAPSHOT_DONE, &closing(1, &[]));
+    assert_eq!(
+        code(verify_snapshot(&tx, 1)),
+        Some("state_log_snapshot_chunks".into()),
+        "a run counting one chunk with none before it"
+    );
+    let chunk = |aggregate: Aggregate, seq: u32| {
+        serde_json::to_vec(&SnapshotChunk {
+            aggregate,
+            table: "worktrees".into(),
+            seq,
+            rows: Vec::new(),
+        })
+        .unwrap()
+    };
+    let swapped = [
+        chunk(Aggregate::Worktrees, 1),
+        chunk(Aggregate::Worktrees, 0),
+    ];
+    let foreign = [chunk(Aggregate::Worktrees, 0), chunk(Aggregate::Ide, 1)];
+    let mut seq: i64 = 1;
+    for run in [&swapped, &foreign] {
+        for body in run {
+            seq += 1;
+            plant(&tx, seq, SNAPSHOT_CHUNK, body);
+        }
+        seq += 1;
+        plant(
+            &tx,
+            seq,
+            SNAPSHOT_DONE,
+            &closing(2, &[run[0].as_slice(), run[1].as_slice()]),
+        );
+        assert_eq!(
+            code(verify_snapshot(&tx, seq as u64)),
+            Some("state_log_snapshot_chunks".into()),
+            "run closed at {seq}"
+        );
+    }
 }
