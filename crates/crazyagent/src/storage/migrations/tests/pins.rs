@@ -509,3 +509,106 @@ fn a_backup_stamp_reads_back_as_its_time() {
         assert_eq!(stamp_time(time), None, "{time}");
     }
 }
+
+/// Writes one worktree row of each table into a 2.4 database, as 2.4.2 wrote them, before
+/// any log existed. Input: the connection. Output: none.
+fn worktree_rows(db: &Connection) {
+    db.execute_batch(
+        "INSERT INTO repository_admissions VALUES ('p5','/p5/repo','{}');
+        INSERT INTO worktree_leases VALUES ('t5','/p5/repo','/p5/repo/.wt/t5','{}');",
+    )
+    .unwrap();
+}
+
+/// The `state` revision, the `events` rows and both worktree tables of a database.
+type Standing = (
+    i64,
+    i64,
+    Vec<Vec<rusqlite::types::Value>>,
+    Vec<Vec<rusqlite::types::Value>>,
+);
+
+/// Reads a database's [`Standing`]. Input: the connection. Output: the standing.
+fn standing_of(db: &Connection) -> Standing {
+    let count = |sql: &str| db.query_row(sql, [], |row| row.get(0)).unwrap();
+    (
+        count("SELECT revision FROM state WHERE id=1"),
+        count("SELECT COUNT(*) FROM events"),
+        crate::state_log::replay::rows(db, "repository_admissions").unwrap(),
+        crate::state_log::replay::rows(db, "worktree_leases").unwrap(),
+    )
+}
+
+/// v2.5 L6 P5-upgrade row: an upgrade of the 2.4.2 fixture with a worktree row of each table
+/// runs step 12 once: one verified snapshot run at one revision with its `events` row, no
+/// row changed, and replay of the log equals the live tables.
+#[test]
+fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
+    let (root, _) = fixture();
+    let sources = sources(&root);
+    let mut db = root.connection();
+    worktree_rows(&db);
+    let before = standing_of(&db);
+
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        STEPS,
+        SystemTime::now(),
+        check_copy,
+    )
+    .unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let after = standing_of(&db);
+    assert_eq!((after.0, after.1), (before.0 + 1, before.1 + 1));
+    assert_eq!((&after.2, &after.3), (&before.2, &before.3));
+    let done: Vec<i64> = db
+        .prepare("SELECT seq FROM state_log WHERE kind=?1")
+        .unwrap()
+        .query_map([crate::state_log::SNAPSHOT_DONE], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(done.len(), 1, "one snapshot run");
+    crate::state_log::verify_snapshot(&db, done[0] as u64).unwrap();
+    let tx = db.transaction().unwrap();
+    crate::worktrees::log::rebuild(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(standing_of(&db), after, "replay equals the live tables");
+}
+
+/// v2.5 L6 injected-failure row: a step that fails after step 12 ran rolls the whole upgrade
+/// back, so step 12 leaves no log, no revision move, no `events` row and no changed row.
+#[test]
+fn a_failure_after_step_12_leaves_no_event_and_no_change() {
+    let (root, _) = fixture();
+    let sources = sources(&root);
+    let mut db = root.connection();
+    worktree_rows(&db);
+    let before = standing_of(&db);
+
+    let failed = upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        &steps(&[broken]),
+        SystemTime::now(),
+        check_copy,
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(failed.contains("the database is unchanged"), "{failed}");
+    assert_eq!(version(&db).unwrap(), V24_VERSION_MAX);
+    let logged: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!logged, "step 12's run rolled back with the upgrade");
+    assert_eq!(standing_of(&db), before);
+}
