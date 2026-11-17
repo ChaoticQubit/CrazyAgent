@@ -389,10 +389,10 @@ fn suffixed(base: &ProjectId, n: u32) -> Result<ProjectId, EngineError> {
 }
 
 /// Moves this id's token counts to Removed projects, forgets its ide rows and tombstones its
-/// ide events and repository admissions as a removal does (rv-sec2 L7 r2 N1, #345 N4), then
-/// deletes every other row of it in every table keyed by project, its removal record
-/// included, so a demo made again inherits nothing of an earlier one. Inputs: the
-/// transaction, the id and the owner's fence. Output: Ok, or a store or fence refusal.
+/// ide events, repository admissions (rv-sec2 L7 r2 N1, #345 N4) and landing events (L9
+/// QUESTION-1046), then deletes every other row of it in every table keyed by project, its
+/// removal record included, so a demo made again inherits nothing of an earlier one. Inputs:
+/// the transaction, the id and the owner's fence. Output: Ok, or a store or fence refusal.
 pub(crate) fn clear(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -403,6 +403,7 @@ pub(crate) fn clear(
     crate::ide::log::forget_rows(tx, project)?;
     crate::ide::log::forget_project(tx, project.as_str(), None, fence)?;
     crate::worktrees::log::forget_project(tx, project.as_str(), None, fence)?;
+    crate::landing_log::forget_project(tx, project.as_str(), fence)?;
     for table in keyed_tables(tx)? {
         tx.execute(
             &format!("DELETE FROM \"{table}\" WHERE project=?1"),

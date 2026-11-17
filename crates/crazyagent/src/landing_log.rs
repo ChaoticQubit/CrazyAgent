@@ -761,6 +761,38 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// The landing kinds whose body names a project by the key `project`.
+const PROJECT_KINDS: [&str; 4] = [
+    CHANGE_SET_NUMBERED,
+    BASELINE_APPROVED,
+    PUBLISH_PROMPT_SNOOZED,
+    PUBLISH_PROMPT_NEVER,
+];
+
+/// Tombstones every logged landing event of a project, for Create demo's clear of an earlier
+/// id, which deletes its landing rows in the same transaction (QUESTION-1046 A, as L7 ide and
+/// #348 admissions); snapshot runs keep theirs until compaction (L1b). Inputs: the demo
+/// transaction, the project and the owner fence. Output: how many were tombstoned, or the
+/// refusal.
+pub(crate) fn forget_project(
+    tx: &Transaction<'_>,
+    project: &str,
+    fence: &crate::state_log::fence::Fence,
+) -> Result<usize, EngineError> {
+    assert!(!tx.is_autocommit(), "the redaction is part of the clear");
+    let redacted = replay::redact_matching(
+        tx,
+        &[Aggregate::Landing],
+        Some(PROJECT_KINDS.as_slice()),
+        "project",
+        project,
+        0,
+        fence,
+    )?;
+    assert!(PROJECT_KINDS.iter().all(|kind| KINDS.contains(kind)));
+    Ok(redacted)
+}
+
 /// The most project removals a rebuild reads, as L6's bound.
 const REMOVALS_MAX: usize = 65_536;
 
