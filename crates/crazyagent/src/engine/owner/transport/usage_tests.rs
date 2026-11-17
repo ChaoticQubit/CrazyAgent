@@ -10,11 +10,24 @@ pub(super) const IN_FLIGHT: Duration = Duration::from_millis(300);
 const AT_MS: i64 = 1_800_000_000_000;
 static BUSY_STORAGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Lets one test at a time write and sweep tens of thousands of real files. Run together,
-/// those tests share one disk, and each sweep then outlasts the owner waits its test was
-/// measured against. Output: the guard the test holds until it ends.
+/// Lets one test at a time measure owner waits: a removal of tens of thousands of real files
+/// loads the disk, and a test holding storage counts on its other jobs finishing inside
+/// their waits. Output: the guard the test holds until it ends.
 pub(super) async fn busy_storage() -> tokio::sync::MutexGuard<'static, ()> {
     BUSY_STORAGE.lock().await
+}
+
+/// Holds the storage actor until the returned sender sends or drops, so every storage job
+/// queued after this call waits on the test, however fast the disk and the machine are
+/// (BL-BUSY-WINDOW). Input: the engine's storage queue. Output: the sender that lets
+/// storage go on.
+pub(super) fn hold_storage(
+    storage: &tokio::sync::mpsc::Sender<crate::storage::Job>,
+) -> oneshot::Sender<()> {
+    let (release, held) = oneshot::channel();
+    storage.try_send(crate::storage::Job::Hold(held)).unwrap();
+    assert!(!release.is_closed(), "storage took the hold");
+    release
 }
 
 /// A real engine with an owner client and the folder of its usage store.
