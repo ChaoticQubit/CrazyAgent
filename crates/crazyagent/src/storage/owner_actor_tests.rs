@@ -842,3 +842,61 @@ fn owner_ledger_abort_rolls_back_domain_effect_and_pages_bound_corrupt_body() {
         2
     );
 }
+
+/// v2.5 L6 (leader 03:14, fix11 L7 Q6): an engine-own write moves the revision and writes
+/// one `events` row at it, so a client catching up from `events` sees the change and its
+/// next save applies instead of failing `stale_revision`. The write goes through
+/// `Appender::opening`, which is `Appender::own` behind the open's proof.
+#[test]
+fn a_client_save_after_an_own_write_applies() {
+    let (_root, path, cfg) = fixture();
+    let (mut db, _lock) = open_database(&path, false).unwrap();
+    let request = |id: &str, revision: u64, command: Command| WireRequest {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: ClientId::new("tui-a").unwrap(),
+        request_id: RequestId::new(id).unwrap(),
+        expected_revision: Cursor::new(revision),
+        command,
+    };
+    let create = |id: &str| Command::CreateProject {
+        project_id: ProjectId::new(id).unwrap(),
+        spec: ProjectSpec {
+            name: "Project".into(),
+            repositories: vec![],
+        },
+    };
+    let created = apply(&mut db, &cfg, &path, request("create-p", 0, create("p"))).unwrap();
+    assert_eq!(created.outcome, Outcome::Applied);
+
+    let tx = db.transaction().unwrap();
+    let opening = super::opening::Opening::new(7);
+    let appender = crate::state_log::Appender::opening(&tx, opening).unwrap();
+    assert_eq!(appender.revision(), 2);
+    drop(appender);
+    tx.commit().unwrap();
+
+    let after = Command::Events {
+        after: Cursor::new(1),
+    };
+    let caught = apply(&mut db, &cfg, &path, request("events-1", 1, after)).unwrap();
+    let Outcome::Events { events } = caught.outcome else {
+        panic!("a catch-up reads events: {:?}", caught.outcome);
+    };
+    assert_eq!(events.len(), 1, "the own write is one event");
+    assert_eq!(events[0].cursor.value(), 2);
+    assert_eq!(events[0].client_id.as_str(), "owner:engine");
+    let stale = apply(&mut db, &cfg, &path, request("create-q", 1, create("q"))).unwrap();
+    assert_eq!(
+        stale.outcome,
+        Outcome::Rejected {
+            code: "stale_revision".into()
+        }
+    );
+    let seen = events[0].cursor.value();
+    let saved = apply(&mut db, &cfg, &path, request("create-r", seen, create("r"))).unwrap();
+    assert_eq!(
+        saved.outcome,
+        Outcome::Applied,
+        "a save at the caught-up revision"
+    );
+}
