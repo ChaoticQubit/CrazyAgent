@@ -627,46 +627,80 @@ fn restore_pinned_at(
     Ok(kept)
 }
 
-/// Moves the owner's secrets the restored 2.4 rows no longer name into the same folders of
-/// the dated copy of the replaced 2.5 data (DEC-192), where they stay with the data that
-/// names them: each plugin key no restored app plugin binding holds, so every one for a 2.4
-/// copy, and each account key (V250-L5-N5), generated SDK home and native profile slot a
-/// saved account of the copy names (V250-L5-N5B), that neither a restored account nor the
-/// live settings name, as the start sweep judges ([`super::trash::referenced`]). A home or
-/// slot only the copy's trash still notes is deleted instead. No settings, or settings that
-/// cannot be read, keep every account's files in place. A failure is logged by what it swept
-/// and its code and never fails the checked restore. Inputs: the restored connection, still
-/// held alone, the engine root, the settings sources and the dated copy's folder.
+/// Settles the owner's secrets the restored 2.4 rows no longer name (V250-L5-N5, N5B): each
+/// plugin key no restored app plugin binding holds, so every one for a 2.4 copy, and each
+/// account key, generated SDK home and native profile slot neither a restored account nor
+/// the live settings name, as the start sweep judges ([`super::trash::referenced`]). One a
+/// row of the dated copy of the replaced 2.5 data names moves into the same folder of that
+/// copy (DEC-192), where it stays with the data that names it; one no row of it names, left
+/// by a removal, is deleted as removals delete it. No settings, settings that cannot be read,
+/// or a copy that cannot be opened keep every account's files in place. A failure is logged
+/// by what it swept and its code and never fails the checked restore. Inputs: the restored
+/// connection, still held alone, the engine root, the settings sources and the copy's folder.
 fn sweep_unbound_keys(
     db: &Connection,
     root: &Path,
     settings: Option<&SettingsSources>,
     copy: &Path,
 ) {
-    use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, move_unkept_in};
+    use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, settle_unkept_in};
+    use super::trash::{ACCOUNT_KEY, referenced};
+    let replaced = match replaced_database(copy) {
+        Ok(replaced) => replaced,
+        Err(cause) => return sweep_failed(REPLACED_DATABASE, &cause),
+    };
     let mut swept = vec![(
         PLUGIN_KEYS,
-        move_unkept_in(root, PLUGIN_KEYS, copy, |name| plugin_key_bound(db, name)),
+        settle_unkept_in(
+            root,
+            PLUGIN_KEYS,
+            copy,
+            |name| plugin_key_bound(db, name),
+            |name| plugin_key_bound(&replaced, name),
+        ),
     )];
     match settings.map(SettingsSources::config) {
         Some(Ok(config)) => {
             let catalog = config.settings.model_access.as_ref();
-            let named = |kind: &str, name: &str| super::trash::referenced(db, catalog, kind, name);
-            let keys = move_unkept_in(root, ACCOUNT_KEYS, copy, |name| {
-                named(super::trash::ACCOUNT_KEY, name)
-            });
+            let named = |kind: &str, name: &str| referenced(db, catalog, kind, name);
+            let keys = settle_unkept_in(
+                root,
+                ACCOUNT_KEYS,
+                copy,
+                |name| named(ACCOUNT_KEY, name),
+                |name| referenced(&replaced, None, ACCOUNT_KEY, name),
+            );
             swept.push((ACCOUNT_KEYS, keys));
-            swept.push((PROFILES, sweep_replaced_profiles(root, copy, &named)));
+            let profiles = sweep_replaced_profiles(root, copy, &replaced, &named);
+            swept.push((PROFILES, profiles));
         }
         Some(Err(cause)) => swept.push((ACCOUNT_KEYS, Err(cause))),
         None => {}
     }
     for (folder, result) in swept {
         if let Err(cause) = result {
-            let code = cause.0.split(':').next().unwrap_or_default();
-            eprintln!("restore_key_sweep_failed folder={folder} cause={code}");
+            sweep_failed(folder, &cause);
         }
     }
+}
+
+/// Logs one failed part of a restore's sweep by name and by the code before its first `:`,
+/// never a key name or a path. Inputs: what was swept and the failure.
+fn sweep_failed(folder: &str, cause: &EngineError) {
+    let code = cause.0.split(':').next().unwrap_or_default();
+    eprintln!("restore_key_sweep_failed folder={folder} cause={code}");
+}
+
+/// What a restore's sweep calls the replaced copy's database in its log.
+const REPLACED_DATABASE: &str = "replaced-database";
+
+/// Opens the database of the dated copy of the replaced 2.5 data read-only, without
+/// following a link. Input: the copy's folder. Output: the connection, or the failure.
+fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    Connection::open_with_flags(copy.join(DATABASE), flags).map_err(error)
 }
 
 /// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.
@@ -678,15 +712,16 @@ const PROFILES: &str = "account-profiles";
 /// trash still notes, of an account the owner removed in 2.5, is deleted through the start
 /// sweep's own removal ([`super::trash::delete`]). Every keep test runs before the first
 /// change, and a failed one keeps that one in place and does not stop the others. Inputs: the
-/// engine root, the copy's folder and the keep test by kind and name. Output: how many were
-/// settled, or the copy's or keep test's failure, or the first failed move or removal.
+/// engine root, the copy's folder and database, and the keep test by kind and name. Output:
+/// how many were settled, or the copy's or keep test's failure, or the first failed change.
 fn sweep_replaced_profiles(
     root: &Path,
     copy: &Path,
+    replaced: &Connection,
     named: impl Fn(&str, &str) -> Result<bool, EngineError>,
 ) -> Result<usize, EngineError> {
     let mut unkept = Vec::new();
-    for (kind, name, saved) in replaced_profiles(copy)? {
+    for (kind, name, saved) in replaced_profiles(replaced)? {
         if !named(kind, name.as_str())? {
             unkept.push((kind, name, saved));
         }
@@ -717,19 +752,15 @@ fn sweep_replaced_profiles(
 
 /// The generated SDK homes and native profile slots the replaced 2.5 copy names, once each:
 /// those of its saved accounts ([`super::accounts::profile_files`]), marked saved, then those
-/// only its trash still notes. Input: the copy's folder. Output: each kind with its name and
-/// whether a saved account names it, or the copy's failure.
-fn replaced_profiles(replaced: &Path) -> Result<Vec<(&'static str, String, bool)>, EngineError> {
+/// only its trash still notes. Input: the copy's database. Output: each kind with its name
+/// and whether a saved account names it, or the copy's failure.
+fn replaced_profiles(copy: &Connection) -> Result<Vec<(&'static str, String, bool)>, EngineError> {
     use super::trash::{GENERATED_HOME, NATIVE_SIGN_IN};
     use std::collections::BTreeSet;
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    let copy = Connection::open_with_flags(replaced.join(DATABASE), flags).map_err(error)?;
     let saved: BTreeSet<(&'static str, String)> =
-        super::accounts::profile_files(&copy)?.into_iter().collect();
+        super::accounts::profile_files(copy)?.into_iter().collect();
     let mut noted = BTreeSet::new();
-    if has_table(&copy, "file_trash")? {
+    if has_table(copy, "file_trash")? {
         let rows = copy
             .prepare("SELECT kind, name FROM file_trash WHERE kind IN (?1, ?2) LIMIT ?3")
             .map_err(error)?
