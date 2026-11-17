@@ -727,12 +727,27 @@ fn withheld(line: &str, home: Option<&str>, user: Option<&str>) -> String {
     }
 }
 
-/// Runs one scenario in a fresh scratch folder and normalises what it captures.
+/// Runs one scenario in a fresh scratch folder and normalises what it captures. A driver
+/// that panics fails only its own capture, so the scenarios after it still run.
 /// Input: the scenario. Output: the golden text, or why the capture failed.
 fn capture_text(scenario: &Scenario) -> Result<String, String> {
     let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let raw = (scenario.capture)(scratch.path())?;
+    let captured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (scenario.capture)(scratch.path())
+    }));
+    let raw = captured.map_err(|payload| panicked(payload.as_ref()))??;
     normalise(&raw)
+}
+
+/// The failure text of a driver that panicked. Input: the panic payload.
+/// Output: the payload's message when it is text, else a fixed line.
+fn panicked(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a payload that is not text".to_owned());
+    format!("the driver panicked: {text}")
 }
 
 /// Lists golden files no scenario names, so a dropped driver cannot drop its capture silently.
@@ -812,6 +827,28 @@ fn every_scenario_matches_its_2_4_2_capture() {
         .map(|line| withheld(line, home.as_deref(), user.as_deref()))
         .collect();
     assert!(printed.is_empty(), "{}", printed.join("\n"));
+}
+
+#[test]
+fn a_panicking_driver_fails_only_its_own_capture() {
+    let first = scenarios()[0];
+    let fixed = Scenario {
+        capture: |_| panic!("driver stopped"),
+        ..first
+    };
+    let formatted = Scenario {
+        capture: |_| panic!("driver stopped at step {}", 2),
+        ..first
+    };
+    assert_eq!(
+        capture_text(&fixed),
+        Err("the driver panicked: driver stopped".to_owned())
+    );
+    assert_eq!(
+        capture_text(&formatted),
+        Err("the driver panicked: driver stopped at step 2".to_owned())
+    );
+    assert!(capture_text(&first).is_ok());
 }
 
 #[test]
