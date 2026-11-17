@@ -53,8 +53,15 @@ struct Record {
 
 /// The folder beside the engine database that holds account keys, one 0600 file per key
 /// named by its credential reference.
-#[cfg(unix)]
 pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
+
+/// The folder beside the engine database that holds the keys the owner entered for app
+/// plugins, one 0600 file per key named by its reference.
+pub(crate) const PLUGIN_KEYS: &str = "plugin-keys";
+
+/// The owner-only key folders beside the engine database, which no agent sandbox may read:
+/// account keys and app plugin keys.
+pub(crate) const KEY_FOLDERS: [&str; 2] = [ACCOUNT_KEYS, PLUGIN_KEYS];
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
 /// sweep of keys a committed removal left behind. Inputs: the engine root and the key's
@@ -63,8 +70,17 @@ pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 /// directory.
 #[cfg(unix)]
 pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
+    remove_key_in(root, ACCOUNT_KEYS, name)
+}
+
+/// Deletes one key file from one of the engine root's owner-only key folders. Inputs: the
+/// engine root, a folder from [`KEY_FOLDERS`] and the key name. Output: Ok when the file is
+/// gone, including when it or the folder was already missing; `account_key_store_unsafe`
+/// for a folder that is not this user's 0700 directory.
+#[cfg(unix)]
+pub(crate) fn remove_key_in(root: &Path, folder: &str, name: &str) -> Result<(), EngineError> {
     use rustix::fs::AtFlags;
-    let Some(directory) = key_folder(root, name)? else {
+    let Some(directory) = key_folder_in(root, folder, name)? else {
         return Ok(());
     };
     match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
@@ -73,19 +89,25 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
     }
 }
 
-/// Opens the engine root's key folder for one key name, refusing a name that is not a plain
-/// credential reference. Inputs: the engine root and the key name. Output: the folder, none
-/// when it does not exist, `account_key_reference_invalid`, or `account_key_store_unsafe`
-/// for a folder that is not this user's 0700 directory.
+/// Opens one of the engine root's key folders for one key name, refusing a name that is not
+/// a plain credential reference. Inputs: the engine root, a folder from [`KEY_FOLDERS`] and
+/// the key name. Output: the folder, none when it does not exist,
+/// `account_key_reference_invalid`, or `account_key_store_unsafe` for a folder that is not
+/// this user's 0700 directory.
 #[cfg(unix)]
-fn key_folder(root: &Path, name: &str) -> Result<Option<std::fs::File>, EngineError> {
+fn key_folder_in(
+    root: &Path,
+    folder: &str,
+    name: &str,
+) -> Result<Option<std::fs::File>, EngineError> {
     use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
+    assert!(KEY_FOLDERS.contains(&folder), "a known key folder");
     if CredentialRef::new(name).is_err() || name.starts_with('.') {
         return Err(error("account_key_reference_invalid"));
     }
     let directory = match rustix::fs::open(
-        root.join(ACCOUNT_KEYS),
+        root.join(folder),
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
@@ -116,10 +138,23 @@ pub(crate) fn read_key_file(
     root: &Path,
     credential: &CredentialRef,
 ) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    read_key_in(root, ACCOUNT_KEYS, credential)
+}
+
+/// Reads one saved key from one of the engine root's owner-only key folders into engine
+/// memory only. Inputs: the engine root, a folder from [`KEY_FOLDERS`] and the key's
+/// reference. Output: the key, none when it was never saved, or the refusals of
+/// [`read_key_file`].
+#[cfg(unix)]
+pub(crate) fn read_key_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
-    let Some(directory) = key_folder(root, credential.as_str())? else {
+    let Some(directory) = key_folder_in(root, folder, credential.as_str())? else {
         return Ok(None);
     };
     let file = match rustix::fs::openat(
@@ -152,6 +187,95 @@ pub(crate) fn read_key_file(
         .map_err(|_| error("account_key_store_unsafe"))
 }
 
+/// Whether a key is saved in one of the engine root's owner-only key folders, without
+/// reading it. Inputs: the engine root, a folder from [`KEY_FOLDERS`] and the key's
+/// reference. Output: true for a regular file, false when it or the folder is missing, or
+/// the folder's refusal.
+#[cfg(unix)]
+pub(crate) fn key_saved_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+) -> Result<bool, EngineError> {
+    let Some(directory) = key_folder_in(root, folder, credential.as_str())? else {
+        return Ok(false);
+    };
+    match rustix::fs::statat(
+        &directory,
+        credential.as_str(),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(stat) => {
+            Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile)
+        }
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
+
+/// Saves or replaces one key in one of the engine root's owner-only key folders, creating
+/// the 0700 folder when missing. The key goes to a staged 0600 file renamed over the old
+/// one, so no file ever holds a partial key. Inputs: the engine root, a folder from
+/// [`KEY_FOLDERS`], the key's reference and the key bytes, which are wiped. Output: Ok with
+/// the folder synced; on failure the old key stays and nothing is staged.
+#[cfg(unix)]
+pub(crate) fn replace_key_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+    mut key: Vec<u8>,
+) -> Result<(), EngineError> {
+    let saved = replace_staged(root, folder, credential, &key);
+    crate::credentials::wipe(&mut key);
+    saved
+}
+
+/// The disk work of [`replace_key_in`]: checks the key's length, makes the folder, writes
+/// and syncs a staged file and renames it over the key. Inputs: as there, with the key
+/// borrowed. Output: Ok once the folder is synced; a failed write or rename removes the
+/// staged file and is `account_key_store_unavailable`.
+#[cfg(unix)]
+fn replace_staged(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+    key: &[u8],
+) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    if key.is_empty() || key.len() as u64 > KEY_BYTES_MAX {
+        return Err(error("account_key_store_unavailable"));
+    }
+    assert!(KEY_FOLDERS.contains(&folder), "a known key folder");
+    match rustix::fs::mkdir(root.join(folder), Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    }
+    let directory = key_folder_in(root, folder, credential.as_str())?
+        .ok_or_else(|| error("account_key_store_unavailable"))?;
+    let staged = format!(".replace-{}", crate::engine::owner::random_id()?);
+    let mut file = std::fs::File::from(
+        rustix::fs::openat(
+            &directory,
+            staged.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| error("account_key_store_unavailable"))?,
+    );
+    let written = std::io::Write::write_all(&mut file, key).and_then(|()| file.sync_all());
+    if written.is_err()
+        || rustix::fs::renameat(&directory, staged.as_str(), &directory, credential.as_str())
+            .is_err()
+    {
+        let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
+        return Err(error("account_key_store_unavailable"));
+    }
+    directory
+        .sync_all()
+        .map_err(|_| error("account_key_store_unavailable"))
+}
+
 /// Refuses to read an account key where the Unix owner-only key folder does not exist.
 /// Inputs: the engine root and credential, both unused. Output: `account_key_store_unavailable`.
 #[cfg(not(unix))]
@@ -160,6 +284,66 @@ pub(crate) fn read_key_file(
     _credential: &CredentialRef,
 ) -> Result<Option<crate::credentials::SecretString>, EngineError> {
     Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to read a key where the Unix owner-only key folders do not exist. Inputs: the
+/// engine root, folder and reference, all unused. Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn read_key_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to check for a key where the Unix owner-only key folders do not exist. Inputs:
+/// the engine root, folder and reference, all unused. Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn key_saved_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+) -> Result<bool, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to save a key where the Unix owner-only key folders do not exist; the key is
+/// wiped. Inputs: the engine root, folder and reference, unused, and the key. Output:
+/// `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn replace_key_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+    mut key: Vec<u8>,
+) -> Result<(), EngineError> {
+    crate::credentials::wipe(&mut key);
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to delete a key where the Unix owner-only key folders do not exist. Inputs: the
+/// engine root, folder and key name, all unused. Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn remove_key_in(_root: &Path, _folder: &str, _name: &str) -> Result<(), EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// The display name and API-key reference of one saved account, for an app plugin secret
+/// bound to that account's key. Inputs: the engine connection and the account id. Output:
+/// none for an unknown account; the key reference is none for an account that does not
+/// sign in with an API key.
+pub(crate) fn api_key_account(
+    db: &Connection,
+    id: &CredentialRef,
+) -> Result<Option<(String, Option<CredentialRef>)>, EngineError> {
+    Ok(registered(db, id)?.map(|(_, record)| {
+        let key = match record.connection.auth {
+            ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref),
+            _ => None,
+        };
+        (record.details.name, key)
+    }))
 }
 
 #[cfg(all(test, unix))]
