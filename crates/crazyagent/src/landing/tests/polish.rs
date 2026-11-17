@@ -594,3 +594,59 @@ fn a_confined_step_on_a_mac_checks_the_version_of_the_git_it_runs() {
     assert!(!agent.reading().unwrap().old_git());
     shape_git(None);
 }
+
+/// #274 (W-GIT-FLOOR r2): on git 2.39 a lead's worker set whose head its lead's branch has is
+/// judged landed there, but the work cannot be checked by merging again, so the set waits for
+/// the owner: reading it against the lead's tip answers Ok and keeps it pending, where it
+/// refused with `changes_git_old` on every poll. On 2.40 the same read closes it as Accepted.
+#[test]
+fn on_git_2_39_a_worker_set_its_lead_s_branch_holds_waits_for_the_owner() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 1);
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    git_in(&case.home, &lead, &["merge", "-q", "--ff-only", &head]);
+    assert_eq!(
+        git_in(&case.home, &lead, &["rev-parse", "HEAD"]).trim(),
+        head
+    );
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let read = owner::observe_for_diff(&case.db, &id).map(drop);
+    assert!(read.is_ok(), "{:?}", read.err().map(|error| error.0));
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    shape_git(Some("git version 2.40.0"));
+    owner::observe_for_diff(&case.db, &id).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+    shape_git(None);
+}
+
+/// #274 (W-GIT-FLOOR r2): on git 2.39 a lead in its own clone that holds a worker's head
+/// settles at its turn end without checking the work by merging again: the settle answers
+/// Ok and the worker's set waits for the owner, where it failed with `changes_git_old` at
+/// every turn end. On 2.40 the same settle closes the set as Accepted.
+#[test]
+fn on_git_2_39_a_clone_lead_s_settle_leaves_a_worker_set_it_holds_for_the_owner() {
+    let mut case = Case::new();
+    let (lead, lead_tip) = lead_35(&case, 1, true);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(&case, &case.workspace, &lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    git_in(&case.home, &lead, &["merge", "-q", "--ff-only", &head]);
+    assert_eq!(
+        git_in(&case.home, &lead, &["rev-parse", "HEAD"]).trim(),
+        head
+    );
+    let project = case.workspace.project.clone();
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let settled = crate::landing::settle_sub_agents(&case.db, &project, 35);
+    assert!(settled.is_ok(), "{:?}", settled.err().map(|error| error.0));
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    shape_git(Some("git version 2.40.0"));
+    crate::landing::settle_sub_agents(&case.db, &project, 35).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+    shape_git(None);
+}
