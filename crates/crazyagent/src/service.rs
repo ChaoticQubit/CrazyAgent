@@ -1679,7 +1679,8 @@ pub enum Started {
 /// else as a detached `<executable> engine --home <root>` with output in the engine log.
 /// Inputs: the layout, the service, the executable, the PATH a detached engine gets and
 /// the wait bound, which a service start outlasts while it runs ([`wait_started`]).
-/// Output: how the engine runs once it answers, or an error naming the log.
+/// Output: how the engine runs once it answers, or an error naming the log; while a restore
+/// still copies in the service's process, `engine_restoring`, with nothing stopped (L5).
 pub async fn ensure_running(
     layout: &Layout,
     service: &Service,
@@ -1689,6 +1690,9 @@ pub async fn ensure_running(
 ) -> Result<Started, ServiceError> {
     if answering(&layout.socket()) {
         return Ok(Started::AlreadyRunning);
+    }
+    if crate::restore::holds_restart(layout.root(), crate::restore::service_running(service)) {
+        return Err(failure(crate::restore::ENGINE_RESTORING));
     }
     layout.prepare()?;
     let since = log_length(layout);

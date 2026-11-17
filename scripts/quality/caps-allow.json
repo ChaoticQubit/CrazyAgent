@@ -90,7 +90,7 @@
   "crates/crazyagent/src/sandbox/linux.rs": 4999,
   "crates/crazyagent/src/sandbox/policy.rs": 2087,
   "crates/crazyagent/src/scheduling/tests.rs": 1970,
-  "crates/crazyagent/src/service.rs": 2064,
+  "crates/crazyagent/src/service.rs": 1994,
   "crates/crazyagent/src/service/tests.rs": 2597,
   "crates/crazyagent/src/storage.rs": 4924,
   "crates/crazyagent/src/storage/master_session.rs": 8324,
