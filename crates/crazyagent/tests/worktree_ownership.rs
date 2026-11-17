@@ -871,35 +871,40 @@ async fn wired(client: &crazyagent::engine::Client, id: &str, at: u64, command: 
     reply.revision.value()
 }
 
-/// v2.5 L6 with V250-OWN-REVISION-RETRY (leader 03:53): the quit form reads its settings,
-/// the engine then saves a lease through its own writes (an allocation's WorktreeReserved
-/// and LeaseSaved), and the form's save is Applied after one resend under a new request id,
-/// since the form's read holds no lease and reads the same again.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_form_save_after_an_engine_lease_save_lands_after_one_resend() {
-    use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
-    use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-    let mine = QuitSettings {
-        on_quit: OnQuit::Stop,
-        left_running: LeftRunning::Never,
-        hours: 12,
-    };
-    let temporary = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(temporary.path()).unwrap();
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let repo = repository(&root, "repo");
-    let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
-    let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let mut service =
-        crazyagent::engine::bootstrap::EngineService::start(&root, "e.sock", &config, &stopped)
+/// A served engine a row drives: the service and its stop sender, its wire and owner
+/// clients, the quit form, and the revision after the setup's writes.
+struct Served {
+    service: crazyagent::engine::bootstrap::EngineService,
+    stop: tokio::sync::watch::Sender<bool>,
+    client: crazyagent::engine::Client,
+    owner: crazyagent::engine::owner::OwnerClient,
+    form: crazyagent::client_controller::OwnerController,
+    at: u64,
+}
+
+/// Starts a service on the root and attaches the quit form before any write, then creates
+/// the project, pins its task and admits the repository over the wire. Inputs: the root,
+/// the repository and the configuration. Output: the served engine.
+async fn served(root: &Path, repo: &Path, config: &crazyagent::config::EffectiveConfig) -> Served {
+    use crazyagent::engine::owner::OwnerClientKind;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let service =
+        crazyagent::engine::bootstrap::EngineService::start(root, "e.sock", config, &stopped)
             .await
             .unwrap();
-    let timeout = std::time::Duration::from_secs(2);
-    let (client, _owner, _) = crazyagent::engine::Client::new(root.join("e.sock"), timeout)
+    let timeout = std::time::Duration::from_secs(10);
+    let (client, owner, _) = crazyagent::engine::Client::new(root.join("e.sock"), timeout)
         .unwrap()
         .with_owner(OwnerClientKind::Tui)
         .await
         .unwrap();
+    let form = crazyagent::client_controller::OwnerController::attach(
+        root,
+        OwnerClientKind::Desktop,
+        timeout,
+    )
+    .await
+    .unwrap();
     let project = ProjectId::new("project").unwrap();
     let spec = ProjectSpec {
         name: "Product".into(),
@@ -925,20 +930,49 @@ async fn a_form_save_after_an_engine_lease_save_lands_after_one_resend() {
         repository: repo.to_str().unwrap().into(),
     };
     let at = wired(&client, "admit", at, admission).await;
-    let mut form = crazyagent::client_controller::OwnerController::attach(
-        &root,
-        OwnerClientKind::Desktop,
-        timeout,
-    )
-    .await
-    .unwrap();
+    Served {
+        service,
+        stop,
+        client,
+        owner,
+        form,
+        at,
+    }
+}
+
+/// v2.5 L6 with V250-OWN-REVISION-RETRY (leader 03:53): the quit form reads its settings,
+/// the engine then saves a lease through its own writes (an allocation's WorktreeReserved
+/// and LeaseSaved), and the form's save is Applied after one resend under a new request id,
+/// since the form's read holds no lease and reads the same again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_form_save_after_an_engine_lease_save_lands_after_one_resend() {
+    use crazyagent::engine::owner::{OwnerMutation, OwnerResponse, OwnerResult};
+    use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+    const MINE: QuitSettings = QuitSettings {
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::Never,
+        hours: 12,
+    };
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let repo = repository(&root, "repo");
+    let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
+    let Served {
+        mut service,
+        stop,
+        client,
+        owner,
+        mut form,
+        at,
+    } = served(&root, &repo, &config).await;
     assert_ne!(
         form.quit_settings().await.unwrap(),
-        mine,
+        MINE,
         "the form starts from the defaults"
     );
     wired(&client, "allocate", at, allocate(&repo, "owner", None)).await;
-    form.begin_mutation(OwnerMutation::SetQuitSettings { settings: mine }, 1)
+    form.begin_mutation(OwnerMutation::SetQuitSettings { settings: MINE }, 1)
         .unwrap();
     let first = form.pending().unwrap().request().request_id.clone();
     let saved = form.send_pending().await.unwrap();
@@ -950,10 +984,12 @@ async fn a_form_save_after_an_engine_lease_save_lands_after_one_resend() {
         operation.provenance.operation_id, first,
         "the resend is its own request"
     );
-    assert_eq!(form.quit_settings().await.unwrap(), mine);
+    assert_eq!(form.quit_settings().await.unwrap(), MINE);
     drop(form);
+    drop(owner);
     drop(client);
     service.shutdown().await.unwrap();
+    assert!(!*stop.borrow(), "the row stops the service itself");
 }
 
 /// The revision and kind of each logged worktrees event other than a snapshot run, in log
