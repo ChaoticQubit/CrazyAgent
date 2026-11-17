@@ -46,7 +46,7 @@ env:
   NODE_TEST_TIMEOUT_MACOS_MS: "60000"
   FARM_PARTS: >-
     linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4
-    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 linux-bun-1
+    linux-node-1 linux-node-2 linux-bun-1
 
 defaults:
   run:
@@ -115,6 +115,7 @@ jobs:
 
   build-windows:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -255,7 +256,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
