@@ -1,6 +1,7 @@
 use crate::credentials::Piece::{Escaped, Plain};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use crate::platform::fd_wait::{self, Wake};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 
 pub const TOKEN_PREFIX: &str = "crazyagent-relay-";
@@ -29,6 +30,7 @@ const CLIENT_TIME: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_SECS: &str = "15";
 const UPSTREAM_TIME_SECS: &str = "1800";
 const POLL: Duration = Duration::from_millis(50);
+const WAIT_MAX: Duration = Duration::from_millis(250);
 const REQUEST_DROPPED: [&str; 14] = [
     "host",
     "connection",
@@ -288,6 +290,7 @@ pub struct Relay {
     port: u16,
     shared: Arc<Shared>,
     accept: Option<JoinHandle<()>>,
+    wake: Wake,
 }
 
 impl Relay {
@@ -318,15 +321,17 @@ impl Relay {
             accept_passes: AtomicUsize::new(0),
         });
         let accepting = Arc::clone(&shared);
+        let (wake, woken) = fd_wait::wake_pair().map_err(|_| failure("model_relay_unavailable"))?;
         let accept = std::thread::Builder::new()
             .name("model-relay".into())
-            .spawn(move || accept_loop(&listener, &accepting))
+            .spawn(move || accept_loop(&listener, &accepting, &woken))
             .map_err(|_| failure("model_relay_unavailable"))?;
         assert_ne!(port, 0);
         Ok(Self {
             port,
             shared,
             accept: Some(accept),
+            wake,
         })
     }
 
@@ -353,6 +358,7 @@ impl Relay {
 impl Drop for Relay {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
+        self.wake.rouse();
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
@@ -384,13 +390,23 @@ impl Drop for Slot<'_> {
     }
 }
 
-fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>) {
+/// Accepts the harness's connections until the relay stops and hands each to a request
+/// thread. While none is waiting it waits for one or the wake, for at most `WAIT_MAX`; after
+/// a failed accept it sleeps `POLL`, since a listener whose client cannot be accepted stays
+/// ready. Inputs: the non-blocking listener, what the relay's threads share and the wake end.
+/// Output: none.
+fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, woken: &Wake) {
     let mut numbered: u64 = 0;
     while !shared.stop.load(Ordering::Acquire) {
         #[cfg(test)]
         shared.accept_passes.fetch_add(1, Ordering::SeqCst);
         let (stream, peer) = match crate::spawn_gate::accept_tcp_std(listener) {
             Ok(accepted) => accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let until = Instant::now() + WAIT_MAX;
+                fd_wait::wait_for_clients(&[listener], woken, until, POLL);
+                continue;
+            }
             Err(_) => {
                 std::thread::sleep(POLL);
                 continue;
