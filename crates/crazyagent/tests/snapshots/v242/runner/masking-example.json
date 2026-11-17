@@ -1,0 +1,20 @@
+{
+  "agent": "<id-1>",
+  "apple": false,
+  "elapsed_ms": "<t>",
+  "lead": "<id-1>",
+  "log": "<t> agent <id-1> started on 127.0.0.1:<port>\n",
+  "pid": "<pid>",
+  "relay_port": "<port>",
+  "sandbox": {
+    "read": [
+      "<path-1>"
+    ],
+    "write": [
+      "<path-1>/projects/app"
+    ]
+  },
+  "session": "<id-2>",
+  "started_at": "<t>",
+  "zebra": true
+}
