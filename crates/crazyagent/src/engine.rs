@@ -667,6 +667,30 @@ impl Engine {
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
+    /// Starts this engine's owner runtime: the storage actor's owner start, which also marks
+    /// the engine host started for the lease writers it fences (v2.5 L6 Q9). `serve` already
+    /// starts it this way at boot, so only a caller that runs the engine without `serve`, such
+    /// as a test, calls this; a second start on a running owner is refused
+    /// `owner_runtime_unavailable_or_busy`. Output: Ok, or the refusal.
+    #[cfg(unix)]
+    pub async fn start_owner_runtime(&self) -> Result<(), EngineError> {
+        let _barrier = tokio::time::timeout(self.timeout, self.owner_egress.write())
+            .await
+            .map_err(|_| EngineError("owner_start_not_submitted".into()))?;
+        let started = self.owner_job(Job::OwnerStart).await?;
+        assert_eq!(
+            started.host.db_instance.len(),
+            64,
+            "a started host names its store"
+        );
+        assert_eq!(
+            started.host.engine_epoch.len(),
+            64,
+            "a started host has its epoch"
+        );
+        Ok(())
+    }
+
     pub async fn update_config(&self, config: EffectiveConfig) -> Result<(), EngineError> {
         let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
             .await

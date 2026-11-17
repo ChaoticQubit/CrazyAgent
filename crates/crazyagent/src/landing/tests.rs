@@ -7794,6 +7794,7 @@ fn master_project(case: &Case) {
         return;
     }
     crate::storage::initialize_authority_schemas(&case.db).unwrap();
+    crate::state_log::fence::seed(&case.db);
     let repository = case.repo.to_str().unwrap();
     let spec = ProjectSpec {
         name: "Project one".into(),

@@ -1757,6 +1757,12 @@ fn apply(
     } else {
         (transaction, outcome)
     };
+    let revision = match &request.command {
+        Command::AdmitRepository { .. } | Command::AllocateWorktree { .. } => {
+            owner_revision(&transaction)?
+        }
+        _ => revision,
+    };
     let changed = mutation && outcome == Outcome::Applied;
     let next = if changed {
         revision
@@ -2666,6 +2672,7 @@ fn owner_apply_with(
     } else {
         revision
     };
+    let mut redacted = 0;
     if changed {
         let wire = WireRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -2678,7 +2685,10 @@ fn owner_apply_with(
         if let Some(removed) =
             crate::project_setup::removed::event::removal(&wire.command, deleting)
         {
-            crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+            let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+            let fence = crate::state_log::fence::Fence::Owner(a.clone());
+            let project = removed.project.as_str();
+            redacted = crate::worktrees::log::forget_project(&tx, project, seq, &fence)?;
         }
     }
     let provenance = OwnerProvenance {
@@ -2701,6 +2711,12 @@ fn owner_apply_with(
     )?;
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
+    assert!(redacted == 0 || changed, "only an applied removal redacts");
+    if redacted > 0
+        && let Err(failure) = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+    {
+        eprintln!("state_log_redact_checkpoint_deferred cause={failure}");
+    }
     if changed
         && let OwnerOperation::Apply {
             mutation: OwnerMutation::CreateDemo { project_id, .. },

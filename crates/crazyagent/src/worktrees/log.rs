@@ -1,8 +1,11 @@
 use crate::engine::EngineError;
-use crate::state_log::replay::{self, Logged};
+use crate::engine::owner::HostStamp;
+use crate::project_setup::removed::event as removed;
+use crate::state_log::fence::Fence;
+use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use crate::storage::opening::Opening;
-use rusqlite::{Connection, Transaction, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,6 +29,8 @@ const LEASES: (&str, &str) = ("worktree_leases", "task,repository,path,body");
 const SNAPSHOT_ROWS_MAX: usize = 65_536;
 /// The bytes of a chunk body kept for its envelope (aggregate, table, index) around rows.
 const CHUNK_ENVELOPE_BYTES: usize = 1_024;
+/// The most project removals one worktrees replay applies.
+const REMOVALS_MAX: usize = 65_536;
 
 /// A repository admitted to a project: its `repository_admissions` row, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,12 +175,18 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
 /// Rebuilds both worktree tables from the log: clears them, then replays every worktrees
 /// event in order. A snapshot run holds every row of both, so its first chunk clears them
 /// again; a chunk opens a run unless it follows another chunk at the previous `seq`, since
-/// a run's chunks are appended back to back and its closing event follows them. Input: the
-/// transaction. Output: the last `seq` read, or the first refusal.
+/// a run's chunks are appended back to back and its closing event follows them. A project
+/// removal (v2.5 L14a) deletes its project's admissions at its place in the log, since a
+/// snapshot run before it can still hold them (v2.5 L6 Q10). Input: the transaction.
+/// Output: the last worktrees `seq` read, or the first refusal.
 pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
+    let mut removals = removals(tx)?.into_iter().peekable();
     clear(tx)?;
     let mut chunk_seq = 0;
     let last = replay::replay(tx, Aggregate::Worktrees, 0, |logged| {
+        while let Some((_, project)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
+            forget_admissions(tx, &project)?;
+        }
         if logged.kind != SNAPSHOT_CHUNK {
             return apply(tx, &decode(logged)?);
         }
@@ -185,6 +196,9 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
         chunk_seq = logged.seq;
         restore(tx, &replay::chunk(logged)?)
     })?;
+    for (_, project) in removals {
+        forget_admissions(tx, &project)?;
+    }
     assert!(
         last >= chunk_seq,
         "replay reads past every chunk it applied"
@@ -235,7 +249,7 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
 }
 
 /// The first snapshot run of both worktree tables, for the schema step that puts worktrees
-/// on the log (step 12): rows written before the log reach replay through it, through the
+/// on the log (step 13): rows written before the log reach replay through it, through the
 /// open's proof. A store without the `state` table or the worktree tables has no log to
 /// write, and one with no worktree row needs no run, so it moves no revision. Inputs: the
 /// step's transaction and the open's proof. Output: whether a run was appended, or the
@@ -393,4 +407,139 @@ fn clear(db: &Connection) -> Result<(), EngineError> {
 /// An engine error from any failure. Input: the failure. Output: the error.
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
+}
+
+/// Each logged project removal as its `seq` and project, in log order. Input: the
+/// connection. Output: the removals, or `worktrees_log_removals` past [`REMOVALS_MAX`] or
+/// `worktrees_log_event_invalid` for a removal body that is not one.
+fn removals(db: &Connection) -> Result<Vec<(u64, String)>, EngineError> {
+    let mut found = Vec::new();
+    replay::replay(db, Aggregate::Projects, 0, |logged| {
+        if logged.kind != removed::KIND {
+            return Ok(());
+        }
+        if found.len() == REMOVALS_MAX {
+            return Err(error("worktrees_log_removals"));
+        }
+        let removal: removed::ProjectRemoved = serde_json::from_slice(&logged.body)
+            .map_err(|_| error("worktrees_log_event_invalid"))?;
+        found.push((logged.seq, removal.project.as_str().to_owned()));
+        Ok(())
+    })?;
+    assert!(found.len() <= REMOVALS_MAX);
+    assert!(found.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    Ok(found)
+}
+
+/// Deletes one project's admissions, as its removal's projection does. Inputs: the
+/// connection and the project. Output: Ok or the store's refusal.
+fn forget_admissions(db: &Connection, project: &str) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM repository_admissions WHERE project=?1",
+        [project],
+    )
+    .map(drop)
+    .map_err(error)
+}
+
+/// The engine fence of the store's own host: its active `owner_meta` row, which the owner
+/// start writes, so a lease write runs only while that host's runtime is up (v2.5 L6 Q3,
+/// Q9). Input: the transaction. Output: the fence, or `owner_runtime_stale` for a store
+/// whose owner runtime never started or is not active.
+pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
+    let owned: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_meta')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !owned {
+        return Err(error("owner_runtime_stale"));
+    }
+    let host = tx
+        .query_row(
+            "SELECT db_instance, engine_epoch FROM owner_meta
+             WHERE singleton=1 AND runtime_state='active'",
+            [],
+            |row| {
+                Ok(HostStamp {
+                    db_instance: row.get(0)?,
+                    engine_epoch: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(error)?
+        .ok_or_else(|| error("owner_runtime_stale"))?;
+    assert_eq!(host.db_instance.len(), 64, "owner_meta checks its instance");
+    assert_eq!(host.engine_epoch.len(), 64, "owner_meta checks its epoch");
+    Ok(Fence::Engine(host))
+}
+
+/// Writes one worktrees event for an engine writer in its own transaction: `own` moves the
+/// `state` revision once behind the store's engine host and writes its `events` row, then
+/// the event is applied and logged at it. The appender is built only here, after the
+/// writer's checks passed. Inputs: the transaction and the event. Output: the revision it
+/// moved to, or the first refusal, which the caller rolls back.
+pub(crate) fn record_own(tx: &Transaction<'_>, event: &Event) -> Result<u64, EngineError> {
+    let mut appender = Appender::own(tx, store_fence(tx)?)?;
+    let seq = record(&mut appender, Clock::System.now_ms(), event)?;
+    let revision = appender.revision();
+    assert!(seq > 0, "a recorded event has a seq");
+    assert!(revision > 0, "own moved the revision");
+    Ok(revision)
+}
+
+/// Writes one worktrees event inside an owner request whose next revision is already signed:
+/// moves `state` from one before it to it, then applies and logs the event there through
+/// `owner`, so the request's own `events` row at next covers the change (v2.5 L6 Q8 item 4).
+/// Inputs: the request's transaction, its next revision and the event. Output: Ok,
+/// `state_log_revision_stale` when `state` is not one before next, or the first refusal.
+pub(crate) fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Result<(), EngineError> {
+    let stale = || error("state_log_revision_stale");
+    let before = next.checked_sub(1).ok_or_else(stale)?;
+    let moved = tx
+        .execute(
+            "UPDATE state SET revision=?1 WHERE id=1 AND revision=?2",
+            params![
+                i64::try_from(next).map_err(error)?,
+                i64::try_from(before).map_err(error)?
+            ],
+        )
+        .map_err(error)?;
+    if moved != 1 {
+        return Err(stale());
+    }
+    let mut appender = Appender::owner(tx, next, store_fence(tx)?)?;
+    let seq = record(&mut appender, Clock::System.now_ms(), event)?;
+    assert!(seq > 0, "a recorded event has a seq");
+    assert_eq!(appender.revision(), next);
+    Ok(())
+}
+
+/// Tombstones, for a project removal, every logged admission of the removed project, so its
+/// repository paths leave the log's events; snapshot runs keep theirs until compaction (L1b)
+/// rewrites them. The caller checkpoints the WAL after its commit. Inputs: the removal's
+/// transaction, the project, the removal's own `seq` and its fence. Output: how many events
+/// were tombstoned, or the redaction's refusal.
+pub(crate) fn forget_project(
+    tx: &Transaction<'_>,
+    project: &str,
+    keep: u64,
+    fence: &Fence,
+) -> Result<usize, EngineError> {
+    assert!(keep > 0, "the removal is logged before its redaction");
+    let kinds = [KIND_ADMITTED];
+    let redacted = replay::redact_matching(
+        tx,
+        &[Aggregate::Worktrees],
+        Some(&kinds),
+        "project",
+        project,
+        keep,
+        fence,
+    )?;
+    assert!(!tx.is_autocommit(), "the redaction is part of the removal");
+    Ok(redacted)
 }

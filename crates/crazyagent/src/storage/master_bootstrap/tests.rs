@@ -107,9 +107,29 @@ fn selection() -> MasterSelection {
     }
 }
 
+/// The engine host of a case's owner runtime, started in this process for the lease writers
+/// it fences and stopped when the case ends or restarts, as the storage actor does.
+struct Hosted(crate::engine::owner::HostStamp);
+
+impl Hosted {
+    /// Starts the host. Input: the started runtime. Output: the guard.
+    fn start(started: &Started) -> Self {
+        crate::state_log::fence::host_started(&started.host);
+        Self(started.host.clone())
+    }
+}
+
+impl Drop for Hosted {
+    /// Stops the host, so no later store of this process takes its writes.
+    fn drop(&mut self) {
+        crate::state_log::fence::host_stopped(&self.0);
+    }
+}
+
 struct Case {
     db: Connection,
     _lock: storage::EngineLock,
+    _hosted: Hosted,
     custody: Result<crate::engine::bootstrap::NativeProfileCustody, crate::engine::EngineError>,
     sources: settings::SettingsSources,
     config: EffectiveConfig,
@@ -140,6 +160,7 @@ impl Case {
             mut custody,
         } = storage::open_actor_database(&path, false, None).unwrap();
         let started = storage::owner_start(&mut connection).unwrap();
+        let hosted = Hosted::start(&started);
         let session = open(
             &mut connection,
             &config,
@@ -154,6 +175,7 @@ impl Case {
         Self {
             db: connection,
             _lock: lock,
+            _hosted: hosted,
             custody,
             sources,
             config,
@@ -195,6 +217,7 @@ impl Case {
         let Case {
             db,
             _lock,
+            _hosted,
             custody,
             sources,
             config,
@@ -206,6 +229,7 @@ impl Case {
         drop(custody);
         drop(db);
         drop(_lock);
+        drop(_hosted);
         let OpenedDatabase {
             mut connection,
             lock,
@@ -216,6 +240,7 @@ impl Case {
         Self {
             db: connection,
             _lock: lock,
+            _hosted: Hosted::start(&restarted),
             custody,
             sources,
             config,

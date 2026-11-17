@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::protocol::{Command, Outcome, StoredProject};
 use crate::protocol::{ProjectId, SessionId, TaskId};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
@@ -1199,8 +1199,12 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
         .map_err(error)
 }
 
+/// Admits a repository to a project after inspecting it, logging the admission through
+/// `own` behind the store's engine host (v2.5 L6), so it is refused before the owner
+/// runtime starts. Inputs: the transaction, the project and the repository. Output: Applied,
+/// a plain rejection before anything is written, or the log's refusal.
 pub(crate) fn admit(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     project: &ProjectId,
     repository: &str,
 ) -> Result<Outcome, EngineError> {
@@ -1223,26 +1227,28 @@ pub(crate) fn admit(
         Ok(admission) => admission,
         Err(e) => return Ok(rejected(&e.0)),
     };
-    let count = connection
-        .execute(
-            "INSERT OR IGNORE INTO repository_admissions VALUES (?1,?2,?3)",
-            params![
-                project.as_str(),
-                repository,
-                serde_json::to_string(&admission).map_err(error)?
-            ],
+    let admitted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM repository_admissions WHERE project=?1 AND repository=?2)",
+            params![project.as_str(), repository],
+            |row| row.get(0),
         )
         .map_err(error)?;
-    if count == 0 {
+    if admitted {
         return Ok(rejected("repository_already_admitted"));
     }
-    assert_eq!(count, 1);
+    let event = log::Event::Admitted(log::Admitted {
+        project: project.as_str().into(),
+        repository: repository.into(),
+        body: serde_json::to_string(&admission).map_err(error)?,
+    });
+    log::record_own(connection, &event)?;
     assert!(!connection.is_autocommit());
     Ok(Outcome::Applied)
 }
 
 pub(crate) fn reserve(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     runtime: &Path,
     command: &Command,
 ) -> Result<Outcome, EngineError> {
@@ -1297,7 +1303,7 @@ pub(crate) fn reserve(
 }
 
 pub(crate) fn reserve_master_bootstrap(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     runtime: &Path,
     project: &ProjectId,
     task: &TaskId,
@@ -1339,8 +1345,11 @@ pub(crate) fn reserve_master_bootstrap(
     persist_reservation(connection, &record)
 }
 
+/// Stores a new reserved lease through the log (`own`, v2.5 L6), in the reservation's
+/// transaction, and reads the task's leases back. Inputs: the transaction and the record.
+/// Output: Applied, `lease_capacity`, or the log's refusal.
 fn persist_reservation(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     record: &LeaseRecord,
 ) -> Result<Outcome, EngineError> {
     assert_record_consistent(record);
@@ -1350,17 +1359,13 @@ fn persist_reservation(
     if count >= 128 {
         return Ok(rejected("lease_capacity"));
     }
-    connection
-        .execute(
-            "INSERT INTO worktree_leases VALUES (?1,?2,?3,?4)",
-            params![
-                record.lease.task_id.as_str(),
-                record.lease.repository,
-                record.lease.path,
-                serde_json::to_string(&record).map_err(error)?
-            ],
-        )
-        .map_err(error)?;
+    let event = log::Event::Reserved(log::Reserved {
+        task: record.lease.task_id.as_str().into(),
+        repository: record.lease.repository.clone(),
+        path: record.lease.path.clone(),
+        body: serde_json::to_string(&record).map_err(error)?,
+    });
+    log::record_own(connection, &event)?;
     leases(connection, &record.lease.task_id)?;
     assert!(!connection.is_autocommit());
     assert_eq!(record.lease.state, LeaseState::Reserved);
@@ -1775,10 +1780,11 @@ impl Provisioning {
     }
 }
 
-/// Stores a checkout: the lease becomes Ready, or Uncertain when the checkout failed, but
-/// only while the database still holds it reserved as it was taken out. Inputs: the
-/// connection, outside any transaction, and the checkout. Output: the checkout's result,
-/// or `lease_changed_during_checkout`.
+/// Stores a checkout in its own transaction: the lease becomes Ready, or Uncertain when the
+/// checkout failed, but only while the database still holds it reserved as it was taken
+/// out; the save is logged through `own` (v2.5 L6 Q8 item 2). Inputs: the connection,
+/// outside any transaction, and the checkout. Output: the checkout's result,
+/// `lease_changed_during_checkout`, or the log's refusal.
 pub(crate) fn finish_provision(
     connection: &Connection,
     provisioned: Provisioned,
@@ -1786,7 +1792,9 @@ pub(crate) fn finish_provision(
     let Provisioned { mut record, result } = provisioned;
     assert_eq!(record.lease.state, LeaseState::Reserved);
     assert!(connection.is_autocommit());
-    let stored = load(connection, &record.lease.task_id, &record.lease.repository)?;
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    let stored = load(&tx, &record.lease.task_id, &record.lease.repository)?;
     if stored.map(|stored| stored.lease).as_ref() != Some(&record.lease) {
         return Err(error("lease_changed_during_checkout"));
     }
@@ -1795,25 +1803,42 @@ pub(crate) fn finish_provision(
     } else {
         LeaseState::Uncertain
     };
-    save(connection, &record)?;
+    log::record_own(&tx, &saved(&record)?)?;
+    tx.commit().map_err(error)?;
+    assert!(connection.is_autocommit());
     result
+}
+
+/// The log event of a lease body save. Input: the record as it will be stored. Output: the
+/// event, or the encoding failure.
+fn saved(record: &LeaseRecord) -> Result<log::Event, EngineError> {
+    assert_record_consistent(record);
+    assert!(!record.lease.path.is_empty(), "a lease has its path");
+    Ok(log::Event::Saved(log::Saved {
+        task: record.lease.task_id.as_str().into(),
+        repository: record.lease.repository.clone(),
+        body: serde_json::to_string(record).map_err(error)?,
+    }))
 }
 
 /// Returns a lease an engine restart left RecoveryRequired to Ready when its worktree still
 /// verifies. The caller has already proved that no writer from an earlier run can still
-/// run in it. Inputs: the connection, task and repository. Output: true when the lease is
-/// Ready now; any other state, or a worktree that no longer verifies, is left unchanged.
+/// run in it. The save is logged at the owner request's signed next revision, moving
+/// `state` there (v2.5 L6 Q8 item 4). Inputs: the request's transaction, task, repository
+/// and next revision. Output: true when the lease is Ready now; any other state, or a
+/// worktree that no longer verifies, is left unchanged with `state` unmoved.
 pub(crate) fn requalify(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     task: &TaskId,
     repository: &str,
+    next: u64,
 ) -> Result<bool, EngineError> {
     let mut record = load(connection, task, repository)?.ok_or_else(|| error("lease_missing"))?;
     if record.lease.state != LeaseState::RecoveryRequired || verify_record(&record).is_err() {
         return Ok(false);
     }
     record.lease.state = LeaseState::Ready;
-    save(connection, &record)?;
+    log::record_at(connection, next, &saved(&record)?)?;
     assert_eq!(
         load(connection, task, repository)?.map(|stored| stored.lease.state),
         Some(LeaseState::Ready)

@@ -5392,7 +5392,7 @@ fn execute(
                     Some(turn)
                 }
             };
-            if moved && !super::master_bootstrap::requalify(tx, &session)? {
+            if moved && !super::master_bootstrap::requalify(tx, &session, next)? {
                 return Ok(reject("master_source_conflict"));
             }
             let Some(ordinal) = next_ordinal(tx, id)? else {
@@ -5556,9 +5556,21 @@ pub(super) fn apply(
                 }
                 OwnerResult::Applied
             }
-            Outcome::Rejected { code } => {
+            Outcome::Rejected { code } if owner_revision(&tx)? == revision => {
                 provenance.revision_after = Cursor::new(revision);
                 provenance.event_cursor = None;
+                OwnerResult::Rejected { code }
+            }
+            Outcome::Rejected { code } => {
+                let moved = provenance.revision_after.value();
+                assert_eq!(
+                    owner_revision(&tx)?,
+                    moved,
+                    "only a log write at next moves it"
+                );
+                let client = ClientId::new(format!("owner:{}", admission.owner_id));
+                let client = client.map_err(error)?;
+                persist_event_ids(&tx, config, &request.request_id, &client, moved)?;
                 OwnerResult::Rejected { code }
             }
             _ => return Err(error("master_mutation_result")),
