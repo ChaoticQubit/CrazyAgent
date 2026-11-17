@@ -90,10 +90,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .checkbox { display: inline-flex; align-items: center; gap: var(--space-2); cursor: pointer; }
 .checkbox input { width: 16px; height: 16px; margin: 0; accent-color: var(--primary); }
 
-.segmented { display: inline-flex; justify-self: start; align-self: flex-start; max-width: 100%; flex-wrap: wrap; border: 1px solid var(--border-input); border-radius: var(--radius-control); padding: 2px; background: var(--surface); gap: 2px; }
-.segmented button { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 12px; border: 0; border-radius: var(--radius-segment); background: transparent; cursor: pointer; color: var(--text-2); }
+.segmented { display: inline-flex; justify-self: start; align-self: flex-start; max-width: 100%; flex-wrap: wrap; border: 1px solid var(--border); border-radius: var(--radius-control); padding: 2px; background: var(--surface); gap: 2px; }
+.segmented button { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 12px; border: 0; border-radius: var(--radius-segment); background: transparent; cursor: pointer; color: var(--text-2); font-weight: var(--weight-ui); }
 .segmented button:hover { color: var(--text); }
-.segmented button[aria-checked="true"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
+.segmented button[aria-checked="true"] { background: var(--surface-3); color: var(--text); }
 
 .radio-cards { display: grid; gap: var(--space-2); }
 .radio-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); cursor: pointer; }
@@ -155,9 +155,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .page-header .actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 
 .tabs { display: flex; flex-wrap: wrap; gap: var(--space-1); border-bottom: 1px solid var(--border); margin-bottom: var(--space-5); }
-.tab { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px; border: 0; border-bottom: 2px solid transparent; background: none; cursor: pointer; color: var(--text-2); white-space: nowrap; margin-bottom: -1px; text-decoration: none; }
+.tab { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px; border: 0; border-bottom: 2px solid transparent; background: none; cursor: pointer; color: var(--text-2); font-weight: var(--weight-ui); white-space: nowrap; margin-bottom: -1px; text-decoration: none; }
 .tab:hover { color: var(--text); }
-.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--primary); }
 
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); min-width: 0; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
