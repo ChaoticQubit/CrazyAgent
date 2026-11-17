@@ -273,3 +273,246 @@ fn the_windows_install_steps_take_strict_off_whatever_is_stored() {
         (LinuxSupervisor::On, LinuxStrict::Off)
     );
 }
+
+/// The runner's own Node folder: the first folder on PATH holding `node.exe` and npm's own
+/// `npm-cli.js`, canonical as the resolver hands it. Output: the folder; the row fails with
+/// UNAVAILABLE when PATH has none.
+fn system_bin() -> PathBuf {
+    let found = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .find(|folder| folder.join(NODE).is_file() && npm_cli(folder).is_file())
+    });
+    let Some(bin) = found else {
+        panic!("UNAVAILABLE: node.exe and npm's npm-cli.js on PATH");
+    };
+    let bin = crate::sandbox::canonical(&bin).unwrap();
+    assert!(bin.join(NODE).is_file());
+    bin
+}
+
+/// Packs a package named context-mode at the pinned version, its `package.json` and an empty
+/// program, with Windows' own `tar.exe`. Input: the folder to pack in. Output: the tarball.
+fn local_tarball(folder: &Path) -> PathBuf {
+    let package = folder.join("package");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        format!("{{\"name\":\"{PACKAGE}\",\"version\":\"{VERSION}\"}}"),
+    )
+    .unwrap();
+    fs::write(package.join(PROGRAM), "").unwrap();
+    let tarball = folder.join(format!("{PACKAGE}-{VERSION}.tgz"));
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let packed = crate::spawn_gate::status(
+        std::process::Command::new(system.join("tar.exe"))
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(folder)
+            .arg("package"),
+    )
+    .unwrap();
+    assert!(packed.success());
+    assert!(tarball.is_file());
+    tarball
+}
+
+/// The install step `fill` runs, with its arguments, for a staging folder the caller
+/// prepared, with npm's output kept so a refusal shows npm's own reason. Inputs: the case,
+/// the staging and work folders, npm's folder and the tarball. Output: npm's exit and output.
+fn install_output(
+    case: &Case,
+    staged: &Path,
+    work: &Path,
+    bin: &Path,
+    tarball: &Path,
+) -> std::process::Output {
+    let mut command = npm_command(&case.root, staged, work, bin, VERSION).unwrap();
+    command
+        .arg("install")
+        .arg("--prefix")
+        .arg(staged)
+        .args([
+            "--no-audit",
+            "--no-fund",
+            "--no-update-notifier",
+            "--loglevel=error",
+            "--ignore-scripts",
+            "--no-save",
+        ])
+        .arg(tarball);
+    crate::spawn_gate::collected(&mut command).unwrap()
+}
+
+/// npm's exit and the first 4 KiB of each of its streams, for a failed assertion. Input:
+/// the output. Output: the text.
+fn shown(output: &std::process::Output) -> String {
+    let text = |bytes: &[u8]| String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).into_owned();
+    format!(
+        "{:?}\nstdout: {}\nstderr: {}",
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr)
+    )
+}
+
+/// What the boundary was asked to grant, for a failed assertion: npm's folder with its access
+/// list as `icacls` prints it, and the boundary profile npm's step wrote beside the staging
+/// folders. Inputs: npm's folder and the staging folders' parent. Output: the text.
+fn granted(bin: &Path, npm: &Path) -> String {
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let listed = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe")).arg(bin),
+    )
+    .unwrap();
+    let profile =
+        fs::read_to_string(npm.join(format!("{PACKAGE}@{VERSION}.sb"))).unwrap_or_default();
+    format!(
+        "bin {}\nicacls: {}\nprofile: {profile}",
+        bin.display(),
+        String::from_utf8_lossy(&listed.stdout)
+    )
+}
+
+/// WIN-1 (DEC-193): npm's staging folder is a job folder, so the boundary profile npm's
+/// command writes holds no project guard and still hides the engine's secrets; the row fails
+/// if `npm_command` stops marking the folder.
+#[test]
+fn the_npm_staging_folder_holds_no_project_guards() {
+    use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard};
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    assert_eq!(staged.parent(), Some(npm.as_path()));
+    npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
+    let loaded = BoundaryProfile::load(&npm.join(format!("{prefix}.sb"))).unwrap();
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .all(|item| item.guard != Guard::ReadOnly),
+        "{:?}",
+        loaded.guarded
+    );
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .any(|item| item.guard == Guard::Hidden)
+    );
+}
+
+/// WIN-1 (DEC-193): inside its AppContainer boundary the runner's own npm installs a local
+/// package into a fresh staging folder, a job folder with no project guards, so npm adds
+/// `node_modules` at its top and only the pin refuses the unpinned tarball, by hand and
+/// through `fill`. A failed hand install shows npm's output and the Node folder's grants.
+#[test]
+#[ignore = "V243-WIN-NPM-BOUNDARY-ACL"]
+fn npm_installs_into_a_fresh_staging_folder() {
+    let bin = system_bin();
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let packing = work.join("tmp");
+    private_folder(&packing).unwrap();
+    let tarball = local_tarball(&packing);
+    let bare = staging_folder(&npm, &prefix).unwrap();
+    assert!(!bare.join(MODULES).exists());
+    let installed = install_output(&case, &bare, &work, &bin, &tarball);
+    assert!(
+        installed.status.success(),
+        "{}\n{}",
+        shown(&installed),
+        granted(&bin, &npm)
+    );
+    assert!(bare.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
+    assert_eq!(
+        checked(&bare, VERSION),
+        Err("context_mode_integrity_mismatch")
+    );
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    assert!(!staged.join(MODULES).exists());
+    assert_eq!(
+        fill(
+            &case.root,
+            &staged,
+            &work,
+            &bin,
+            VERSION,
+            tarball.as_os_str()
+        ),
+        Err(InstallError("context_mode_integrity_mismatch")),
+        "npm installs; only the pin refuses the tarball"
+    );
+    assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
+}
+
+/// What a boundary job could leave behind, for a before and after comparison: the containers'
+/// grants records in the engine's grants folder, the containers' AppContainer folders under
+/// `%LOCALAPPDATA%\Packages`, and the access list of one folder the job read, without the
+/// inherited mark a rewritten list may change. Input: that folder. Output: the three.
+fn leftovers(read: &Path) -> (Vec<String>, Vec<String>, String) {
+    let grants = crate::paths::Layout::current()
+        .unwrap()
+        .root()
+        .join(crate::sandbox::windows::GRANTS_FOLDER);
+    let packages = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Packages");
+    let names = |folder: &Path, prefix: &str, suffix: &str| {
+        let mut names: Vec<String> = fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.starts_with(prefix) && name.ends_with(suffix))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let listed = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe")).arg(read),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let list = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
+    assert!(list.contains("(OI)(CI)"), "{list}");
+    (
+        names(&grants, "container-crazyagent.", ".grants"),
+        names(&packages, "crazyagent.", ""),
+        list,
+    )
+}
+
+/// V243-WIN-CONTAINER-RELEASE: the node probe releases the container it ran `node.exe` in once
+/// the probe ends, so it leaves no grants record, AppContainer profile or access entry on
+/// npx's folder behind; here `node.exe` is empty, so the probe names no version.
+#[test]
+fn the_node_probe_leaves_no_container_behind() {
+    let case = case();
+    let before = leftovers(&case.bin);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(leftovers(&case.bin), before);
+}
+
+/// V243-WIN-CONTAINER-RELEASE: an npm install releases its container before its staging
+/// folder is published or removed, so a failed install, here with an empty `node.exe`, leaves
+/// no grants record, AppContainer profile, access entry on npx's folder or boundary profile.
+#[test]
+fn a_failed_npm_install_leaves_no_container_behind() {
+    let case = case();
+    let folder = install_folder(&case.root, VERSION);
+    let before = leftovers(&case.bin);
+    assert_eq!(
+        replace(&case.root, &folder, &case.bin, VERSION),
+        Err(InstallError("context_mode_install_failed"))
+    );
+    assert_eq!(leftovers(&case.bin), before);
+    let parent = folder.parent().unwrap();
+    assert!(!parent.join(format!("{PACKAGE}@{VERSION}.sb")).exists());
+    assert!(!folder.exists());
+}

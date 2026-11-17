@@ -21,7 +21,7 @@ const job = (id, kind, status, extra = {}) => ({
   id, project_id: "p1", kind, kind_label: kind === "roadmap_planning" ? "Roadmap and release process" : "Market research", status, status_label: "",
   report_path: kind === "roadmap_planning" ? "context/roadmap.md" : "context/research/market_research.md", harness: "codex", tools: true,
   attempts: 1, claimer: null, error: null, cancel_requested: false, output_bytes: 0, created_ms: 1_000, started_ms: 2_000, heartbeat_ms: null,
-  finished_ms: null, ...extra,
+  finished_ms: null, retryable: status === "failed" || status === "cancelled", ...extra,
 });
 const team = { master: "claude", master_tools: true, sub_harnesses: [], min_agents: 1, max_agents: 1 };
 const stored = (extra = {}) => ({

@@ -4,7 +4,7 @@ import { harnessVersions, installHarnesses, queuedHarnesses, updateCopy, UPDATE_
 import { installDependency, loadSetupStatus } from "../../api-intake";
 import { openLink } from "../../api-projects";
 import { Button, StatusBadge } from "../../ui";
-import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, nodeReadsAgain, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
+import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, nodeReadsAgain, nodeRow, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
 import "../intake/intake.css";
 
 type Rows = Readonly<Record<string, HarnessRow>>;
@@ -84,9 +84,8 @@ async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: Nod
       : { kind: "refused", reason: failure(read), guide: null };
   });
   const problem = catalog.kind !== "ok" ? failure(catalog) : queued.kind !== "ok" ? failure(queued) : "";
-  const found = setup.kind === "ok" ? setup.value.dependencies.find((item) => item.name === "node") : undefined;
   const needed = nodeNeeded(reads.map((read) => read.kind === "ok" ? read.value : null));
-  const state = found?.state ?? null;
+  const state = nodeRow(setup.kind === "ok" ? setup.value : null);
   const running = setup.kind === "ok" && setup.value.running;
   return { rows, node: nodeOffer(needed, state, running), waits: nodeReadsAgain(needed, state, running), problem };
 }

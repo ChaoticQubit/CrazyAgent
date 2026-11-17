@@ -335,10 +335,10 @@ impl MasterSessionView {
     }
 }
 
-/// The part of the settings an open master runs on (DEC-092): every setting except the
-/// pools, connections, accounts and account approvals outside the session's own pool, the
-/// other projects its pool serves, and, when the route pins its target, destinations that
-/// are neither the master's targets, its pool's targets nor knowledge processing destinations.
+/// The part of the settings an open master runs on (DEC-092): every setting except other
+/// pools, its pool's other projects and members, and connections, accounts and approvals
+/// other than its own connection's (the pool member of its account or target); when the
+/// route pins its target, only its targets, its connection's and knowledge destinations.
 /// Input: a config, the session's project and its selection. Output: the settings to compare.
 pub(crate) fn master_scope(
     config: &EffectiveConfig,
@@ -346,28 +346,48 @@ pub(crate) fn master_scope(
     selection: &MasterSelection,
 ) -> Settings {
     let mut settings = config.settings.clone();
-    let mut destinations: Vec<CredentialRef> = [
+    let targets: Vec<&CredentialRef> = [
         Some(&selection.target_profile_ref),
         selection.route.preferred_target.as_ref(),
         selection.route.required_target.as_ref(),
     ]
     .into_iter()
     .flatten()
-    .chain(&settings.knowledge.processing_destinations)
-    .cloned()
     .collect();
+    let mut destinations: Vec<CredentialRef> = targets
+        .iter()
+        .copied()
+        .chain(&settings.knowledge.processing_destinations)
+        .cloned()
+        .collect();
     if let Some(access) = settings.model_access.as_mut() {
+        let own = |connection: &ModelConnection| {
+            connection.account_ref == selection.route.account_ref
+                || connection_destination(connection)
+                    .is_some_and(|target| targets.contains(&&target))
+        };
         access.pools.retain(|pool| pool.id == selection.pool_ref);
+        let members: Vec<CredentialRef> = access
+            .connections
+            .iter()
+            .filter(|connection| {
+                own(connection)
+                    && access
+                        .pools
+                        .iter()
+                        .any(|pool| pool.members.contains(&connection.id))
+            })
+            .map(|connection| connection.id.clone())
+            .collect();
         for pool in &mut access.pools {
             pool.projects
                 .retain(|held| held.as_str() == project.as_str());
+            pool.members.retain(|member| members.contains(member));
         }
-        access.connections.retain(|connection| {
-            access
-                .pools
-                .iter()
-                .any(|pool| pool.members.contains(&connection.id))
-        });
+        access
+            .connections
+            .retain(|connection| members.contains(&connection.id));
+        assert!(access.connections.iter().all(own));
         let accounts: Vec<&CredentialRef> = access
             .connections
             .iter()

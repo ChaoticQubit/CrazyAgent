@@ -569,6 +569,7 @@ async fn handle(
                             pool: None,
                             prompt,
                             agent: DRAFT_AGENT,
+                            holds_seat: false,
                         })
                     }),
                 }

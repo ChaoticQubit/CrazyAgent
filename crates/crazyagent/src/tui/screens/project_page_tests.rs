@@ -159,6 +159,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 Request::Intake(job) => {
                     sent.push(match job.query() {
                         IntakeQuery::JobStart { .. } => "job start",
+                        IntakeQuery::FolderSize { .. } => "folder size",
                         IntakeQuery::JobStatus => "job status",
                         IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
@@ -911,7 +912,12 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
     pump(&mut shell, &mut connection).await;
     shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
-    shell.key(Key::Char('m'));
+    shell.key(Key::Char('M'));
+    let read = pump(&mut shell, &mut connection).await;
+    assert!(
+        read.contains(&"folder size"),
+        "the ask reads the folder: {read:?}"
+    );
     let shown = render(&mut shell, 120, 30);
     assert!(
         shown.contains("Move Notes CLI into your CrazyAgent folder?"),
@@ -928,14 +934,22 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
             "Follow it on Home; you can keep working."
         )
     );
-    assert!(shell.ctx.store.intake.is_some(), "the started job is kept");
+    assert!(
+        !shell.ctx.store.intake.is_empty(),
+        "the started job is kept"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = Vec::new();
     let ended = loop {
-        let ended = shell.ctx.store.intake.clone();
-        if let Some(job) = ended.filter(|job| !super::intake_job::running(job)) {
-            break job;
+        let ended = shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .find(|job| !super::intake_job::running(job));
+        if let Some(job) = ended {
+            break job.clone();
         }
         assert!(
             Instant::now() < deadline,
@@ -1021,8 +1035,8 @@ async fn job_until(
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last = Vec::new();
     loop {
-        if let Some(job) = shell.ctx.store.intake.clone().filter(&check) {
-            return (job, last);
+        if let Some(job) = shell.ctx.store.intake.iter().find(|job| check(job)) {
+            return (job.clone(), last);
         }
         assert!(
             Instant::now() < deadline,
@@ -1035,7 +1049,7 @@ async fn job_until(
     }
 }
 
-/// Opens a project's page on Settings and asks its move twice, as m opens the question and m
+/// Opens a project's page on Settings and asks its move twice, as M opens the question and m
 /// moves. Inputs: the shell, its connection, the project and its name. Output: the requests sent
 /// after the second m.
 async fn move_from_settings(
@@ -1046,7 +1060,12 @@ async fn move_from_settings(
     pump(shell, connection).await;
     shell.key(Key::ShiftLeft);
     pump(shell, connection).await;
-    shell.key(Key::Char('m'));
+    shell.key(Key::Char('M'));
+    let read = pump(shell, connection).await;
+    assert!(
+        read.contains(&"folder size"),
+        "the ask reads the folder: {read:?}"
+    );
     let shown = render(shell, 120, 30);
     assert!(
         shown.contains(&format!("Move {name} into your CrazyAgent folder?")),
@@ -1091,6 +1110,7 @@ async fn home_shell(connection: &mut Connection) -> Shell {
 /// card. Once its checks land, Home moves the focus to Get set up, since setup is never done
 /// here (see `home_shell`), and its key bar then starts with that panel's Enter; Tab moves it
 /// back. No reply arrives before the next key, so the focus holds. Input: the shell on Home.
+#[cfg(target_os = "macos")]
 fn list_focus(shell: &mut Shell) {
     let setup_keys = |shell: &mut Shell| {
         render(shell, 120, 30)
@@ -1145,15 +1165,24 @@ async fn a_project_move_whose_name_is_taken_fails_with_the_reason_and_d_on_home_
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
     assert_eq!(
-        shell.ctx.store.intake.as_ref().map(|job| &job.id),
-        Some(&ended.id),
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        [&ended.id],
         "a terminal started again shows the ended move"
     );
     shell.key(Key::Home);
     shell.key(Key::Char('d'));
     pump(&mut shell, &mut connection).await;
     pump(&mut shell, &mut connection).await;
-    assert_eq!(shell.ctx.store.intake, None, "d forgets the ended move");
+    assert!(
+        shell.ctx.store.intake.is_empty(),
+        "d forgets the ended move"
+    );
 }
 
 /// DEC-177: a project move waits for the project's agents to stop, says how many are left in
@@ -1173,7 +1202,7 @@ async fn a_project_move_waits_for_its_agents_says_how_many_are_left_and_moves_on
         &format!(
             "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
              INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES (43,'notes-cli','team','codex',1,'{}','working',0,0);",
+             VALUES (43,'notes-cli','sub','codex',1,'{}','working',0,0);",
             copy.to_str().unwrap()
         ),
     );
@@ -1274,7 +1303,13 @@ async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_ter
 
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the running move");
+    let shown = shell
+        .ctx
+        .store
+        .intake
+        .first()
+        .cloned()
+        .expect("the running move");
     assert_eq!(
         shown.id, running.id,
         "a terminal started again shows the running move"
@@ -1390,7 +1425,7 @@ fn working(engine: &Engine, project: &str, agent: u32) {
         engine,
         &format!(
             "INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES ({agent},'{project}','team','codex',1,'{}','working',0,0);",
+             VALUES ({agent},'{project}','sub','codex',1,'{}','working',0,0);",
             worktree.to_str().unwrap()
         ),
     );
@@ -1491,7 +1526,13 @@ async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_ther
 
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the running delete");
+    let shown = shell
+        .ctx
+        .store
+        .intake
+        .first()
+        .cloned()
+        .expect("the running delete");
     assert_eq!(
         shown.id, waiting.id,
         "a terminal started again shows the running delete"
@@ -1742,7 +1783,8 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
         .ctx
         .store
         .intake
-        .clone()
+        .first()
+        .cloned()
         .expect("the delete cut short");
     assert_eq!(cut.kind, JobKind::Delete);
     assert_eq!(
@@ -1784,15 +1826,21 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
     assert_eq!(
-        shell.ctx.store.intake.as_ref().map(|job| &job.id),
-        Some(&cut.id)
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        [&cut.id]
     );
     shell.key(Key::Home);
     shell.key(Key::Char('d'));
     pump(&mut shell, &mut connection).await;
     pump(&mut shell, &mut connection).await;
-    assert_eq!(
-        shell.ctx.store.intake, None,
+    assert!(
+        shell.ctx.store.intake.is_empty(),
         "d keeps the project and forgets the job"
     );
     assert_eq!(
@@ -1806,11 +1854,12 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
 }
 
-/// DEC-177 step 3c: while another project's move waits for its agents, Create on New project
-/// starts the engine's New Project job, which the held move refuses; the wizard keeps the
-/// draft and says another job runs, nothing is made and the move still waits.
+/// DEC-197: while another project's move waits for its agents, Create on New project starts
+/// the engine's New Project job, which waits its turn behind the move and names it while the
+/// wizard follows it; once the move is stopped the New Project is made, and the move moved
+/// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
+async fn create_while_a_move_holds_the_job_waits_its_turn_and_is_made_once_the_move_stops() {
     let mut engine = Engine::start().await;
     let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
     let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
@@ -1821,7 +1870,7 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
         &format!(
             "INSERT OR IGNORE INTO team_paused_projects(project,since_ms) VALUES ('notes-cli',1);
              INSERT INTO team_agents(id,project,role,harness,tools,worktree,status,created_ms,heartbeat_ms)
-             VALUES (47,'notes-cli','team','codex',1,'{}','working',0,0);",
+             VALUES (47,'notes-cli','sub','codex',1,'{}','working',0,0);",
             copy.to_str().unwrap()
         ),
     );
@@ -1855,39 +1904,46 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
     assert_eq!(
         sent.iter().filter(|sent| **sent == "job start").count(),
         1,
-        "one start, never sent again after the refusal: {sent:?}"
+        "one start: {sent:?}"
+    );
+    let moving = origin
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("the moved folder's name")
+        .to_owned();
+    let (waiting, _) = job_until(&mut shell, &mut connection, |job| {
+        job.kind == JobKind::Setup
+    })
+    .await;
+    assert_eq!(
+        waiting.state,
+        JobState::Waiting { behind: moving },
+        "{waiting:?}"
     );
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
-    assert!(shown.contains("Could not create the project."), "{shown}");
-    assert!(shown.contains("Another job is running."), "{shown}");
-    assert!(!home.join("tidepool").exists(), "nothing was made");
-    assert!(origin.is_dir(), "the move still waits: {origin:?}");
-    go_to(&mut shell, "home");
-    assert_eq!(
-        kept_draft().as_deref(),
-        Some("Tidepool"),
-        "leaving the refused wizard keeps its draft"
-    );
-    drop(shell);
-    drop(connection);
-
-    let mut connection = engine.connect();
-    let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the held move");
-    assert_eq!(shown.id, held.id, "the held move is still the engine's job");
-    assert!(super::intake_job::running(&shown), "{shown:?}");
-    shell.key(Key::Home);
-    shell.key(Key::Enter);
-    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
-        !super::intake_job::running(job)
-    })
-    .await;
+    assert!(!shown.contains("Could not create the project."), "{shown}");
     assert!(
-        matches!(ended.state, JobState::Cancelled { .. }),
-        "the held move still stops: {ended:?}"
+        !home.join("tidepool").exists(),
+        "nothing is made while it waits"
     );
-    assert!(origin.is_dir(), "nothing was moved: {origin:?}");
+
+    assert!(engine.controller.job_stop(held.id.clone()).await.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !home.join("tidepool").is_dir() {
+        assert!(
+            Instant::now() < deadline,
+            "the New Project was never made: {:?}",
+            shell.ctx.store.intake
+        );
+        super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
+        pump(&mut shell, &mut connection).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        origin.is_dir(),
+        "the stopped move moved nothing: {origin:?}"
+    );
 }
 
 /// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start
@@ -1928,7 +1984,8 @@ async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it(
         .ctx
         .store
         .intake
-        .clone()
+        .first()
+        .cloned()
         .expect("the New Project cut short");
     assert_eq!(cut.kind, JobKind::Setup);
     assert_eq!(cut.source, "Cut Short");
@@ -1958,14 +2015,20 @@ async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it(
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
     assert_eq!(
-        shell.ctx.store.intake.as_ref().map(|job| &job.id),
-        Some(&cut.id)
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        [&cut.id]
     );
     shell.key(Key::Home);
     shell.key(Key::Char('d'));
     pump(&mut shell, &mut connection).await;
     pump(&mut shell, &mut connection).await;
-    assert_eq!(shell.ctx.store.intake, None, "d forgets the job");
+    assert!(shell.ctx.store.intake.is_empty(), "d forgets the job");
     assert_eq!(
         engine_count(
             &engine,
@@ -3633,6 +3696,8 @@ fn setup_start(sent: &[Request]) -> Option<(RequestId, ProjectId, IntakeQuery)> 
 /// and its state. Returns the view.
 fn tidepool_job(id: &RequestId, project: &ProjectId, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: id.clone(),
         kind: JobKind::Setup,
         project_id: Some(project.clone()),
@@ -3655,11 +3720,11 @@ fn intake_reply(
     )))
 }
 
-/// A status read that finds this job. Takes the job, or none for no job. Returns the arrival.
-fn job_status(job: Option<JobView>) -> Arrival {
+/// A status read that finds these jobs. Takes the jobs, none for no job. Returns the arrival.
+fn job_status(jobs: Vec<JobView>) -> Arrival {
     intake_reply(
         IntakeQuery::JobStatus,
-        Ok(crate::tui::client::intake::IntakeView::Job(job)),
+        Ok(crate::tui::client::intake::IntakeView::Jobs(jobs)),
     )
 }
 
@@ -3762,11 +3827,11 @@ fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_proje
         "a running job is kept"
     );
 
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(assigns_main(&sent, &project), "{sent:?}");
     assert!(
@@ -3785,7 +3850,7 @@ fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_proje
         IntakeQuery::JobDismiss { id: id.clone() },
         Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
     ));
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     let sent = drain(&mut shell);
     assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
     assert_eq!(shell.place(), Some(Place::NewProject));
@@ -3834,11 +3899,11 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(
         assigns_main(&sent, &project),
@@ -3850,7 +3915,7 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
         IntakeQuery::JobDismiss { id: id.clone() },
         Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
     ));
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     shell.arrive(Arrival::PoolEdited(Ok(())));
     let sent = drain(&mut shell);
     assert!(
@@ -3893,11 +3958,11 @@ fn a_new_project_run_in_the_background_says_its_github_publish_refusal() {
         start,
         Ok(IntakeView::Job(Some(building(&id, &project)))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     drain(&mut shell);
     shell.arrive(Arrival::PoolEdited(Ok(())));
     let publish: Vec<IntakeQuery> = intake_asks(&drain(&mut shell))
@@ -3938,17 +4003,17 @@ fn made_in_background() -> (Shell, ProjectId, Vec<Request>) {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     drain(&mut shell);
     shell.arrive(intake_reply(
         IntakeQuery::JobDismiss { id: id.clone() },
         Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
     ));
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     shell.arrive(Arrival::PoolEdited(Ok(())));
     let sent = drain(&mut shell);
     (shell, project, sent)
@@ -4091,14 +4156,14 @@ fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Failed {
             code: "home_new_project_failed".into(),
             phase: crate::projects_home::job::Phase::Building,
         },
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
     assert!(!assigns_main(&sent, &project), "{sent:?}");
@@ -4121,13 +4186,13 @@ fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Cancelled {
             phase: crate::projects_home::job::Phase::Building,
         },
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
     assert!(!assigns_main(&sent, &project), "{sent:?}");
@@ -4166,14 +4231,14 @@ fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_sta
     assert!(!shown.contains("Could not create"), "{shown}");
     assert_eq!(shell.place(), Some(Place::NewProject));
 
-    shell.arrive(job_status(Some(building(&id, &project))));
+    shell.arrive(job_status(vec![building(&id, &project)]));
     let shown = render(&mut shell, 80, 24);
     assert!(!shown.contains("Could not create"), "{shown}");
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(assigns_main(&sent, &project), "{sent:?}");
     assert!(setup_start(&sent).is_none(), "{sent:?}");
@@ -4182,7 +4247,7 @@ fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_sta
     let (id, _, start) = setup_start(&sent).expect("Create starts the New Project job");
     shell.arrive(intake_reply(start, Err("project_exists".into())));
     drain(&mut shell);
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     let sent = drain(&mut shell);
     assert!(setup_start(&sent).is_none(), "{sent:?}");
     assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
@@ -4226,11 +4291,11 @@ fn every_new_project_left_running_reads_each_job_status() {
     shell.arrive(intake_reply(harbor, Err("job_busy".into())));
     drain(&mut shell);
 
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(assigns_main(&sent, &project), "{sent:?}");
     let said = shell.ctx.message().expect("Harbor's refusal is said");
@@ -8568,5 +8633,166 @@ fn a_start_whose_reply_was_lost_reads_the_publish_again_until_it_shows() {
     assert!(
         shown.contains("Drafting the .gitignore lines..."),
         "{shown}"
+    );
+}
+
+/// #177 F1: on the real project page's Settings tab, with its jobs loaded so the planning
+/// keys are live, R reaches Restart them past the plugins section and the planning keys and
+/// sends it for the project, and r still asks the roadmap status check and restarts nothing.
+/// The engine's reads are answered here in the order the page makes them, Setup first.
+#[test]
+fn settings_with_jobs_loaded_sends_restart_them_on_capital_r_and_r_still_refreshes() {
+    use crate::project_setup::{HiddenPaths, StoredSetup};
+    use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
+    use crate::tui::client::SetupEvent;
+    use crate::tui::client::roadmap::{RoadmapEvent, RoadmapQuery};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let stored = || StoredSetup {
+        project_id: project.clone(),
+        name: "Notes CLI".into(),
+        about: "Terminal-first notes.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Cli],
+        research: vec![ResearchKind::CompetitorResearch],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/private/tmp/ca-notes-cli".into(),
+        created_ms: 1_793_000_000_000,
+        revision: 4,
+    };
+    let seer = |id: &str, kind, label: &str| GraphNode {
+        id: id.into(),
+        kind,
+        parent: None,
+        label: label.into(),
+        harness: "codex".into(),
+        status: None,
+        status_label: None,
+        account: None,
+        branch: None,
+        terminal: None,
+        questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        waits_for: None,
+        owner_questions: 0,
+        no_worktree: false,
+        hookless: false,
+        message_note: None,
+        started_ms: None,
+        sees_hidden: true,
+    };
+    let graph = || TeamGraph {
+        project_id: project.clone(),
+        nodes: vec![
+            seer("master", NodeKind::Master, "Master"),
+            seer("team-1", NodeKind::Lead, "Ada"),
+        ],
+        edges: vec![],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
+        relations: Vec::new(),
+        master_live_terminal: true,
+    };
+    let mut ctx = ctx(120, 40);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut read = (false, false, false);
+    for _ in 0..64 {
+        let requests: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+        if requests.is_empty() {
+            break;
+        }
+        for request in requests {
+            match request {
+                Request::Setup(query) => {
+                    let result = match &query {
+                        SetupQuery::Setup { .. } => Ok(SetupView::Setup(Some(Box::new(stored())))),
+                        SetupQuery::Jobs { .. } => {
+                            read.0 = true;
+                            Ok(SetupView::Jobs(Vec::new()))
+                        }
+                        SetupQuery::HiddenPaths { .. } => {
+                            read.1 = true;
+                            Ok(SetupView::HiddenPaths(HiddenPaths {
+                                paths: vec!["/Users/owner/secret".into()],
+                                version: 1,
+                                runs: Vec::new(),
+                                unavailable: false,
+                            }))
+                        }
+                        _ => Err("row_skips_this_read".to_owned()),
+                    };
+                    shell.arrive(owner_arrival(OwnerEvent::Setup(Box::new(SetupEvent {
+                        query,
+                        result,
+                    }))));
+                }
+                Request::TeamGraph { project } => {
+                    read.2 = true;
+                    shell.arrive(Arrival::TeamGraph {
+                        project,
+                        result: Ok(Box::new(graph())),
+                    });
+                }
+                Request::Roadmap(query) => {
+                    shell.arrive(owner_arrival(OwnerEvent::Roadmap(Box::new(RoadmapEvent {
+                        query: *query,
+                        result: Err("row_skips_this_read".to_owned()),
+                    }))));
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        read,
+        (true, true, true),
+        "the page read its jobs, its hidden folders and its team"
+    );
+    shell.key(Key::Char('R'));
+    let restart: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        restart.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::RestartHiddenSeers { project_id },
+                ..
+            }) if *project_id == project
+        )),
+        "R restarts the agents that can still open a hidden folder: {restart:?}"
+    );
+
+    shell.key(Key::Char('r'));
+    let refresh: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        refresh.iter().any(|request| matches!(
+            request,
+            Request::Roadmap(query) if **query == RoadmapQuery::Refresh { project: project.clone() }
+        )),
+        "r still asks the roadmap status check: {refresh:?}"
+    );
+    assert!(
+        !refresh
+            .iter()
+            .any(|request| matches!(request, Request::Setup(SetupQuery::TeamChange { .. }))),
+        "r restarts nothing: {refresh:?}"
     );
 }

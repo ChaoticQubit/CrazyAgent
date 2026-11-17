@@ -872,6 +872,19 @@ pub fn known_code(code: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    const UVX: &str = "/opt/homebrew/bin/uvx";
+    #[cfg(not(unix))]
+    const UVX: &str = r"C:\Users\owner\.local\bin\uvx.exe";
+    #[cfg(unix)]
+    const PROGRAM: &str = "/bin/x";
+    #[cfg(not(unix))]
+    const PROGRAM: &str = r"C:\bin\x.exe";
+    #[cfg(unix)]
+    const NPX: &str = "/usr/local/bin/npx";
+    #[cfg(not(unix))]
+    const NPX: &str = r"C:\Program Files\nodejs\npx.cmd";
+
     fn stdio(command: &str, args: &[&str]) -> ServerSpec {
         ServerSpec::Stdio {
             command: command.into(),
@@ -885,9 +898,7 @@ mod tests {
 
     #[test]
     fn server_specs_are_bounded_and_urls_are_https_or_this_mac() {
-        stdio("/opt/homebrew/bin/uvx", &["mcp-server-postgres"])
-            .validate()
-            .unwrap();
+        stdio(UVX, &["mcp-server-postgres"]).validate().unwrap();
         http("https://mcp.figma.com/mcp").validate().unwrap();
         http("http://127.0.0.1:8931/mcp").validate().unwrap();
         http("http://localhost:3000/mcp").validate().unwrap();
@@ -897,27 +908,33 @@ mod tests {
             (stdio("uvx", &[]), "server_command_invalid"),
             (stdio("", &[]), "server_command_invalid"),
             (
-                stdio(&format!("/{}", "c".repeat(COMMAND_BYTES_MAX)), &[]),
+                stdio(&format!("{PROGRAM}{}", "c".repeat(COMMAND_BYTES_MAX)), &[]),
                 "server_command_invalid",
             ),
-            (stdio("/bin/x\n", &[]), "server_command_invalid"),
+            (
+                stdio(&format!("{PROGRAM}\n"), &[]),
+                "server_command_invalid",
+            ),
             (
                 ServerSpec::Stdio {
-                    command: "/bin/x".into(),
+                    command: PROGRAM.into(),
                     args: many,
                 },
                 "server_args_invalid",
             ),
-            (stdio("/bin/x", &["a\u{0}b"]), "server_args_invalid"),
-            (stdio("/bin/x", &["a\u{200b}b"]), "server_args_invalid"),
+            (stdio(PROGRAM, &["a\u{0}b"]), "server_args_invalid"),
+            (stdio(PROGRAM, &["a\u{200b}b"]), "server_args_invalid"),
             (
-                stdio("/bin/x", &["--path=\u{202e}txt.exe"]),
+                stdio(PROGRAM, &["--path=\u{202e}txt.exe"]),
                 "server_args_invalid",
             ),
-            (stdio("/bin/x\u{feff}", &[]), "server_command_invalid"),
+            (
+                stdio(&format!("{PROGRAM}\u{feff}"), &[]),
+                "server_command_invalid",
+            ),
             (http("https://e.com/\u{2060}mcp"), "server_url_invalid"),
             (
-                stdio("/bin/x", &[&"a".repeat(ARG_BYTES_MAX + 1)]),
+                stdio(PROGRAM, &[&"a".repeat(ARG_BYTES_MAX + 1)]),
                 "server_args_invalid",
             ),
             (http("http://example.com/mcp"), "server_url_invalid"),
@@ -1079,16 +1096,16 @@ mod tests {
         );
     }
 
-    /// RV-DS241-153: the pinned context-mode launch is read from the rooted npx path that
-    /// `validate` accepts on every platform, so on Windows, which counts a path with no drive
-    /// as relative, it is still the pinned launch and is never run through npx as approved.
+    /// RV-DS241-153: the pinned context-mode launch is read from the full npx path that
+    /// `validate` accepts on this system, a drive path on Windows since WIN-PACK-SEED, so it is
+    /// the pinned launch there too and is never run through npx as approved.
     #[test]
     fn the_pinned_context_mode_launch_is_read_from_the_rooted_npx_validate_accepts() {
-        let spec = stdio("/usr/local/bin/npx", &["-y", "context-mode@1.0.169"]);
+        let spec = stdio(NPX, &["-y", "context-mode@1.0.169"]);
         assert!(spec.validate().is_ok());
         assert_eq!(
             pinned_context_mode(&spec),
-            Some((Path::new("/usr/local/bin"), "1.0.169"))
+            Some((Path::new(NPX).parent().unwrap(), "1.0.169"))
         );
     }
 }

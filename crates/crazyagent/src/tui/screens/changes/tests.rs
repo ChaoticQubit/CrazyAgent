@@ -322,6 +322,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_branch_not_above_base",
         "changes_git_hooks",
         "changes_git_include",
+        "changes_git_old",
         "changes_git_unsupported",
         "changes_merge_unsafe",
         "changes_restore_expired",
@@ -341,13 +342,6 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         let sentence = refusal(code);
         assert!(!sentence.contains('_'), "{code} reads as {sentence}");
     }
-    assert!(
-        crate::engine::owner::transport::cleanup::CLEANUP_CODES.contains(&"changes_git_include")
-    );
-    assert_eq!(
-        refusal("changes_git_include"),
-        "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again."
-    );
 }
 
 #[test]

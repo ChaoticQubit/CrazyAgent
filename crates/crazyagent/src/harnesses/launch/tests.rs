@@ -510,14 +510,15 @@ fn codex_driver_in_a_turn() -> Driver {
 }
 
 fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
-    let working_dir = std::env::temp_dir();
+    let working_dir: PathBuf = std::env::temp_dir().components().collect();
     let cwd = working_dir.to_str().unwrap().to_owned();
+    let home = working_dir.join("launch-test-home");
     let request = LaunchRequest {
         harness: "codex".into(),
         executable: PathBuf::from("/usr/bin/true"),
         working_dir,
         account: AccountBinding::Url {
-            home: std::env::temp_dir().join("launch-test-home"),
+            home: home.clone(),
             base_url: "http://127.0.0.1:11434".into(),
             key: None,
         },
@@ -541,7 +542,7 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
     assert!(driver.send("Reply with OK.").unwrap().is_none());
     let (_, writes) = driver
         .receive(&line(json!({"id":1,"result":{
-            "userAgent":"unit-agent", "codexHome":"/unit/codex",
+            "userAgent":"unit-agent", "codexHome":home.to_str().unwrap(),
             "platformFamily":"unix", "platformOs":"macos"
         }})))
         .unwrap();

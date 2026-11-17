@@ -91,11 +91,11 @@ fn a_dependency_in_the_app_data_folder_is_found_with_its_version() {
     );
     assert_eq!(installer.find(Dependency::Tmux).unwrap(), None);
     let system = root.path().join("system");
-    script(&system.join("tmux"), "tmux 3.5a");
+    script(&system.join("tmux"), "tmux 3.7a");
     let installer = MacInstaller::with_paths(root.path(), vec![system.clone()], vec![]);
     assert_eq!(
         installer.locate(Dependency::Tmux),
-        Some((system.join("tmux"), Version::parse("3.5a").unwrap()))
+        Some((system.join("tmux"), Version::parse("3.7a").unwrap()))
     );
 }
 

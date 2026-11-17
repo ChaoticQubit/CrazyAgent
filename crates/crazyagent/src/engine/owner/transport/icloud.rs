@@ -1,5 +1,4 @@
 use super::*;
-use crate::projects_home::icloud::{self, DOWNLOAD_TIME_MAX, Progress};
 use crate::projects_home::job::{JobKind, JobSubject, JobView};
 use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::encode_frame;
@@ -9,17 +8,11 @@ use serde::{Deserialize, Serialize};
 /// change, since a New Project job carries every answer the wizard gives (DEC-177 addendum 2).
 const REQUEST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX;
 const ACTION_TIME: Duration = Duration::from_secs(10);
-pub(super) const ICLOUD_TIMEOUT: Duration = Duration::from_secs(DOWNLOAD_TIME_MAX.as_secs() + 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(clippy::large_enum_variant)]
 enum Action {
-    Download {
-        path: String,
-    },
-    Progress,
-    Cancel,
     Start {
         request_id: RequestId,
         subject: JobSubject,
@@ -45,10 +38,8 @@ struct Envelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Downloaded { files: u64 },
-    Progress { progress: Option<Progress> },
-    Cancelled { running: bool },
     Job { job: Option<JobView> },
+    Jobs { jobs: Vec<JobView> },
     Stopped { running: bool },
     Dismissed { forgotten: bool },
     Rejected { code: String },
@@ -59,35 +50,6 @@ fn unknown() -> EngineError {
 }
 
 impl OwnerClient {
-    /// Downloads every file of a folder that is only in iCloud and waits until all are on
-    /// this Mac; the folder is never moved or changed. Input: the absolute folder.
-    /// Output: how many placeholders were downloaded, or the refusal code, such as
-    /// `home_icloud_not_downloaded` after a cancel, a stall or the time limit.
-    pub async fn icloud_download(&self, path: String) -> Result<u64, EngineError> {
-        match self.icloud_exchange(Action::Download { path }).await? {
-            Reply::Downloaded { files } => Ok(files),
-            _ => Err(unknown()),
-        }
-    }
-
-    /// Reads how far the running iCloud download has come. Output: the counts, or None
-    /// when no download runs.
-    pub async fn icloud_progress(&self) -> Result<Option<Progress>, EngineError> {
-        match self.icloud_exchange(Action::Progress).await? {
-            Reply::Progress { progress } => Ok(progress),
-            _ => Err(unknown()),
-        }
-    }
-
-    /// Stops the running iCloud download at its next check. Output: whether one was
-    /// running; its own request then answers `home_icloud_not_downloaded`.
-    pub async fn icloud_cancel(&self) -> Result<bool, EngineError> {
-        match self.icloud_exchange(Action::Cancel).await? {
-            Reply::Cancelled { running } => Ok(running),
-            _ => Err(unknown()),
-        }
-    }
-
     /// Starts the engine's one job apart from this client: an add of a folder or a move of a
     /// project into the projects home. It downloads what is only in iCloud, then moves or
     /// copies the folder. A start for the subject of the running job, or with its id,
@@ -112,10 +74,11 @@ impl OwnerClient {
         }
     }
 
-    /// Reads the job, running or last ended. Output: its view, or None.
-    pub async fn job_status(&self) -> Result<Option<JobView>, EngineError> {
+    /// Reads every job: running, waiting for its turn, or ended and kept for the clients.
+    /// Output: their views in start order.
+    pub async fn job_status(&self) -> Result<Vec<JobView>, EngineError> {
         match self.icloud_exchange(Action::Status).await? {
-            Reply::Job { job } => Ok(job),
+            Reply::Jobs { jobs } => Ok(jobs),
             _ => Err(unknown()),
         }
     }
@@ -140,11 +103,7 @@ impl OwnerClient {
     }
 
     async fn icloud_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        let time = match action {
-            Action::Download { .. } => ICLOUD_TIMEOUT,
-            _ => ACTION_TIME,
-        };
-        tokio::time::timeout(self.timeout.max(time), async {
+        tokio::time::timeout(self.timeout.max(ACTION_TIME), async {
             let frame = encode_frame(&Envelope { icloud: action })
                 .map_err(|_| failure("icloud_request_bounds"))?;
             self.root.verify()?;
@@ -181,29 +140,16 @@ impl OwnerClient {
     }
 }
 
-/// Whether a request body is a download, which waits for iCloud and so is served past the
-/// owner exchange; progress, cancel and the intake job's actions are answered at once.
-/// Input: the body. Output: the answer, false for a body that does not parse.
-pub(super) fn deferred(bytes: &[u8]) -> bool {
-    matches!(
-        serde_json::from_slice::<Envelope>(bytes),
-        Ok(Envelope {
-            icloud: Action::Download { .. }
-        })
-    )
-}
-
 /// Encodes this protocol's refusal of a request the engine did not run.
 /// Input: the refusal code. Output: the reply frame.
 pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
-/// Serves one admitted iCloud request and writes its reply. A download holds the engine's
-/// one download slot while it runs; when this request ends for any reason, its timeout, the
-/// client hanging up or the engine stopping included, the slot is freed and the download
-/// cancelled. Inputs: the stream, the engine, the server authority, the handshake packet,
-/// its admission and the request body. Output: Ok once the reply is written.
+/// Serves one admitted intake job request and writes its reply, answered at once; the job
+/// downloads, moves or copies apart from the request. Inputs: the stream, the engine, the
+/// server authority, the handshake packet, its admission and the request body. Output: Ok
+/// once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -253,23 +199,6 @@ async fn handle(
         }
     }
     match action {
-        Action::Download { path } => {
-            let claim = authority.icloud.claim()?;
-            let download = claim.download();
-            let bounds = crate::projects_home::COPY_BOUNDS;
-            let files =
-                tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
-                    .await
-                    .map_err(|_| failure("home_icloud_not_downloaded"))??;
-            drop(claim);
-            Ok(Reply::Downloaded { files })
-        }
-        Action::Progress => Ok(Reply::Progress {
-            progress: authority.icloud.progress(),
-        }),
-        Action::Cancel => Ok(Reply::Cancelled {
-            running: authority.icloud.cancel(),
-        }),
         Action::Start {
             request_id,
             subject,
@@ -286,8 +215,8 @@ async fn handle(
                 .await
                 .map(|job| Reply::Job { job: Some(job) })
         }
-        Action::Status => Ok(Reply::Job {
-            job: authority.intake.status(),
+        Action::Status => Ok(Reply::Jobs {
+            jobs: authority.intake.status(),
         }),
         Action::Stop { request_id } => authority
             .intake

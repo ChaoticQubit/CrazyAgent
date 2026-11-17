@@ -168,3 +168,36 @@ pub(super) fn npm_wrap(
     let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict).map_err(refused)?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)
 }
+
+/// Takes back what the boundary granted a finished job's container and deletes the container
+/// ([`crazyagent_win_sandbox::release`]), named from the job's folder and home as its launch
+/// named it ([`crate::sandbox::windows::container_for`]), then deletes the profile. A profile
+/// never written means nothing was granted. Inputs: the job's profile, folder and home.
+/// Output: whether nothing is left; a refused release keeps the profile and is logged with its
+/// cause.
+pub(super) fn release(profile: &Path, folder: &Path, home: &Path) -> bool {
+    match std::fs::symlink_metadata(profile) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return true,
+        _ => {}
+    }
+    let named = crate::sandbox::canonical(folder)
+        .and_then(|folder| Ok((folder, crate::sandbox::canonical(home)?)))
+        .map(|(folder, home)| crate::sandbox::windows::container_for(&folder, &home));
+    let released = named
+        .map_err(|problem| problem.to_string())
+        .and_then(|container| {
+            assert!(container.starts_with("crazyagent."));
+            crazyagent_win_sandbox::release(profile, &container).map_err(|cause| cause.to_string())
+        });
+    match released {
+        Ok(()) => {
+            let _ = std::fs::remove_file(profile);
+            true
+        }
+        Err(cause) => {
+            eprintln!("context_mode_container_not_released cause={cause}");
+            assert!(profile.exists());
+            false
+        }
+    }
+}
