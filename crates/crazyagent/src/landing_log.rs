@@ -1146,7 +1146,7 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
 }
 
 /// The landing kinds whose body names a project by the key `project`.
-const PROJECT_KINDS: [&str; 7] = [
+pub(crate) const PROJECT_KINDS: [&str; 7] = [
     CHANGE_SET_NUMBERED,
     BASELINE_APPROVED,
     PUBLISH_PROMPT_SNOOZED,
@@ -1179,6 +1179,19 @@ pub(crate) fn forget_project(
     assert!(PROJECT_KINDS.iter().all(|kind| KINDS.contains(kind)));
     Ok(redacted)
 }
+
+/// The landing kinds whose body names an agent worktree by the key `worktree`, the ones a
+/// Delete everything forgets by worktree (rv-sec3 #415 F1).
+pub(crate) const WORKTREE_KINDS: [&str; 8] = [
+    AGENT_BRANCH_SET,
+    AGENT_BRANCH_FORGOTTEN,
+    BASE_SET,
+    BASE_FORGOTTEN,
+    OWNER_EDIT_KEPT,
+    OWNER_EDITS_SETTLED,
+    OWNER_EDITS_DROPPED,
+    WORKTREE_OWNER_EDITS_FORGOTTEN,
+];
 
 /// The most project removals a rebuild reads, as L6's bound.
 const REMOVALS_MAX: usize = 65_536;
