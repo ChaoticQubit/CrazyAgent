@@ -4,7 +4,7 @@ use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
-use crazyagent::harnesses::leftovers::{UNCHECKED, Unstopped};
+use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use crazyagent::protocol::CredentialRef;
@@ -1041,18 +1041,21 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
+/// How many headless stops the residual row below runs before it reads every catch as the
+/// residual closed.
+const ORPHAN_ATTEMPTS: usize = 5;
+
 /// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
 /// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle process
 /// setsids, forks and exits within microseconds, between two tables the follower takes,
-/// leaves a grandchild running a program whose environment macOS hides. No table showed the
-/// middle, so neither the grandchild's parent nor the unique id it was forked from links it to
-/// the agent: the stop reports clean, or unchecked under load, naming nothing, while it keeps
-/// running. Pins today's result; a later fix that catches it turns this row red on purpose.
+/// leaves a grandchild running a program whose environment macOS hides; the stop reports
+/// clean, or unchecked under load, naming nothing. A follower whose table lands on the middle
+/// names the orphan as left instead, so each attempt that does so starts another, up to
+/// ORPHAN_ATTEMPTS; the row pins the residual at the first miss and turns red when every
+/// attempt catches it.
 #[test]
 fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     let root = private_dir("crazyagent-fast-orphan-");
-    let project = private_folder(root.path(), "project");
-    let home = private_folder(root.path(), "home");
     let bin = private_folder(root.path(), "bin");
     let harness = bin.join("claude");
     std::fs::write(&harness, FAST_ORPHANING_AGENT).unwrap();
@@ -1067,48 +1070,71 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     )
     .unwrap();
     assert_eq!(first.code(), Some(3));
-    let session = Session::start(LaunchRequest {
-        harness: "claude-code".into(),
-        executable: harness,
-        working_dir: project.clone(),
-        account: AccountBinding::Subscription { home },
-        model: None,
-        tools: false,
-        sandbox_profile: None,
-        unconfined: true,
-        git_identity: None,
-        limits: LaunchLimits::default(),
-    })
-    .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let (leader, orphan) = loop {
-        if let (Some(leader), Some(orphan)) = (
-            written_pid(&project, "leader.pid"),
-            written_pid(&project, "orphan.pid"),
-        ) && parent_of(orphan) == Some(1)
-        {
-            break (leader, orphan);
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the stand-in agent left no orphan"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    let leftover = Leftover(vec![orphan]);
-    assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
+    let mut caught = Vec::new();
+    for attempt in 1..=ORPHAN_ATTEMPTS {
+        let project = private_folder(root.path(), &format!("project-{attempt}"));
+        let home = private_folder(root.path(), &format!("home-{attempt}"));
+        let session = Session::start(LaunchRequest {
+            harness: "claude-code".into(),
+            executable: harness.clone(),
+            working_dir: project.clone(),
+            account: AccountBinding::Subscription { home },
+            model: None,
+            tools: false,
+            sandbox_profile: None,
+            unconfined: true,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let (leader, orphan) = loop {
+            if let (Some(leader), Some(orphan)) = (
+                written_pid(&project, "leader.pid"),
+                written_pid(&project, "orphan.pid"),
+            ) && parent_of(orphan) == Some(1)
+            {
+                break (leader, orphan);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attempt {attempt}: the stand-in agent left no orphan"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let leftover = Leftover(vec![orphan]);
+        assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
 
-    match session.stop() {
-        Ok(_) => {}
-        Err(Unstopped::Left(left)) => assert_eq!(left.code(), UNCHECKED, "{}", left.plain()),
-        Err(other) => panic!("the stop of a Full access agent was reported {other:?}"),
+        match session.stop() {
+            Ok(_) => {}
+            Err(Unstopped::Left(left)) if left.code() == UNCHECKED => {}
+            Err(Unstopped::Left(left)) => {
+                let report = left.plain();
+                assert_eq!(left.code(), LEFT, "attempt {attempt}: {report}");
+                assert_eq!(
+                    named_in(&report).get(&orphan.as_raw_nonzero().get()),
+                    Some(&"perl".to_owned()),
+                    "attempt {attempt}: a stop that catches the middle names the orphan: {report}"
+                );
+                caught.push(report);
+                drop(leftover);
+                continue;
+            }
+            Err(other) => {
+                panic!("attempt {attempt}: the stop of a Full access agent was reported {other:?}")
+            }
+        }
+        assert_eq!(
+            rustix::process::test_kill_process(orphan),
+            Ok(()),
+            "attempt {attempt}: the orphan {orphan:?} ended with the stop, so the row no longer shows the residual"
+        );
+        drop(leftover);
+        return;
     }
-    assert_eq!(
-        rustix::process::test_kill_process(orphan),
-        Ok(()),
-        "the orphan {orphan:?} ended with the stop, so the row no longer shows the residual"
+    panic!(
+        "all {ORPHAN_ATTEMPTS} stops named the orphan as left, so the residual looks closed; turn this row into one that expects it caught: {caught:?}"
     );
-    drop(leftover);
 }
 
 #[test]
