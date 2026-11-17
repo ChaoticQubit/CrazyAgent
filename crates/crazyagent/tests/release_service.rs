@@ -588,14 +588,38 @@ fn tui_auto_start_runs_a_detached_engine_where_the_service_manager_is_missing() 
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Lays out a release folder holding copies of the built engine, runner and Landlock helper.
+/// Copies, never hard links: a link moves the change time of the built file every other
+/// row's engine pins at start, and an engine starting meanwhile exits
+/// `native_auth_host_executable_changed`. Input: the new folder. Output: none.
 fn release_folder(folder: &Path) {
     std::fs::create_dir(folder).unwrap();
     let built = Path::new(BIN).parent().unwrap();
     for name in ["crazyagent", "crazyagent-runner", "crazyagent-landlock"] {
         if built.join(name).is_file() {
-            std::fs::hard_link(built.join(name), folder.join(name)).unwrap();
+            std::fs::copy(built.join(name), folder.join(name)).unwrap();
         }
     }
+}
+
+#[test]
+fn a_release_folder_leaves_the_built_binaries_other_rows_run_unchanged() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let built = Path::new(BIN).parent().unwrap();
+    let names = ["crazyagent", "crazyagent-runner", "crazyagent-landlock"];
+    let identity = || {
+        names
+            .iter()
+            .filter_map(|name| std::fs::metadata(built.join(name)).ok())
+            .map(|seen| (seen.ino(), seen.nlink(), seen.ctime(), seen.ctime_nsec()))
+            .collect::<Vec<_>>()
+    };
+    let before = identity();
+    assert!(!before.is_empty());
+    release_folder(&temp.path().join("install"));
+    assert!(temp.path().join("install/crazyagent").is_file());
+    drop(temp);
+    assert_eq!(identity(), before);
 }
 
 fn exited(pid: u32) -> bool {
