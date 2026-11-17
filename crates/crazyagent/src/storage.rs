@@ -2666,6 +2666,7 @@ fn owner_apply_with(
     } else {
         revision
     };
+    let mut redacted = 0;
     if changed {
         let wire = WireRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -2675,11 +2676,7 @@ fn owner_apply_with(
             command,
         };
         persist_event(&tx, config, &wire, next)?;
-        if let Some(removed) =
-            crate::project_setup::removed::event::removal(&wire.command, deleting)
-        {
-            crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
-        }
+        redacted = crate::project_setup::removed::event::record(&tx, &wire, deleting, next, a)?;
     }
     let provenance = OwnerProvenance {
         origin: "native_owner".into(),
@@ -2701,6 +2698,8 @@ fn owner_apply_with(
     )?;
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
+    assert!(changed || redacted == 0, "only an applied removal redacts");
+    crate::state_log::replay::checkpoint(db, redacted);
     if changed
         && let OwnerOperation::Apply {
             mutation: OwnerMutation::CreateDemo { project_id, .. },

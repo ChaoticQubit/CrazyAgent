@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
+use crate::protocol::ProjectId;
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
@@ -284,12 +285,15 @@ pub fn snapshot(db: &Connection) -> Result<Vec<Chunk>, EngineError> {
 }
 
 /// One ide table as the projection and the snapshot see it: its name, its schema, the
-/// columns a snapshot row holds and the statement that puts one back.
+/// columns a snapshot row holds, the statement that puts one back, the statement that
+/// forgets a removed project's rows, and whether a project holds at most one row there.
 struct Table {
     name: &'static str,
     schema: &'static str,
     columns: &'static [&'static str],
     insert: &'static str,
+    forget: &'static str,
+    one_row: bool,
 }
 
 static TABLES: [Table; 4] = [
@@ -299,26 +303,56 @@ static TABLES: [Table; 4] = [
         columns: &["project", "entry", "version", "decision", "asked_ms"],
         insert: "INSERT INTO ide_asks(project,entry,version,decision,asked_ms)
             VALUES (?1,?2,?3,?4,?5)",
+        forget: "DELETE FROM ide_asks WHERE project=?1",
+        one_row: false,
     },
     Table {
         name: "ide_run_settings",
         schema: super::bridge::run_command::SCHEMA,
         columns: &["project", "mode"],
         insert: "INSERT INTO ide_run_settings(project,mode) VALUES (?1,?2)",
+        forget: "DELETE FROM ide_run_settings WHERE project=?1",
+        one_row: true,
     },
     Table {
         name: "ide_unlocked",
         schema: super::readonly::SCHEMA,
         columns: &["agent", "path", "turns"],
         insert: "INSERT INTO ide_unlocked(agent,path,turns) VALUES (?1,?2,?3)",
+        forget: "DELETE FROM ide_unlocked
+            WHERE agent IN (SELECT id FROM team_agents WHERE project=?1)",
+        one_row: false,
     },
     Table {
         name: "ide_workspaces",
         schema: super::workspace::SCHEMA,
         columns: &["project", "show_all"],
         insert: "INSERT INTO ide_workspaces(project,show_all,body) VALUES (?1,?2,'')",
+        forget: "DELETE FROM ide_workspaces WHERE project=?1",
+        one_row: true,
     },
 ];
+
+/// Forgets a removed project's ide rows in the removal's projection, live and in replay
+/// (rv-sec2 #309 N1, code F3): its asks, Run setting and workspace, and the files unlocked
+/// for its agents, so it runs before the projection deletes those agents. The removal
+/// redacts the project's ide events, so the tables stay equal to a replay of the ide log.
+/// Inputs: the transaction and the project. Output: Ok, or `ide_log_unavailable`.
+pub(crate) fn forget_project(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    assert!(!project.as_str().is_empty(), "a removal names its project");
+    for table in &TABLES {
+        db.execute_batch(table.schema).map_err(unavailable)?;
+        let removed = db
+            .execute(table.forget, [project.as_str()])
+            .map_err(unavailable)?;
+        assert!(
+            !table.one_row || removed <= 1,
+            "a project holds at most one {} row",
+            table.name
+        );
+    }
+    Ok(())
+}
 
 impl Table {
     /// The ide table of a snapshot chunk.

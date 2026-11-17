@@ -186,6 +186,23 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
     updated.map(|_| ())
 }
 
+/// Moves the WAL into the database file and empties it once a committed owner delete (a
+/// session Delete, a project removal) redacted earlier events, so no old body stays in the
+/// WAL, as [`redact`] asks of its caller; with none redacted it does nothing. A busy
+/// checkpoint is logged, not returned: the delete is already committed. Inputs: the
+/// connection and how many events were redacted. Output: none.
+pub fn checkpoint(db: &Connection, redacted: usize) {
+    if redacted == 0 {
+        return;
+    }
+    let busy = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    if !matches!(busy, Ok(0)) {
+        eprintln!("state_log_redact_checkpoint_busy");
+    }
+}
+
 /// Redacts, for an owner delete, every event of the given aggregates, and of the given kinds
 /// when a list is given, whose body is a JSON object holding the top-level `field` as the
 /// string `value`, except the delete's own event `keep`, each through [`redact`]. Events are

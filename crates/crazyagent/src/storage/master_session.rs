@@ -5460,9 +5460,7 @@ pub(super) fn apply(
     };
     let current_revision = provenance.revision_after.clone();
     tx.commit().map_err(error)?;
-    if redacted > 0 {
-        delete::checkpoint(db);
-    }
+    crate::state_log::replay::checkpoint(db, redacted);
     assert_eq!(
         current_revision.value() > revision,
         result == OwnerResult::Applied
