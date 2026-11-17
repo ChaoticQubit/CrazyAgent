@@ -234,7 +234,7 @@ fn utf8(text: &std::ffi::OsStr) -> Result<String, String> {
 /// Lists every file and folder below an account home, relative and sorted, folders with a
 /// trailing `/`, so a capture shows what the launch wrote there and never what it holds.
 /// Input: the home. Output: the names, or why the listing stopped.
-fn home_files(home: &Path) -> Result<Vec<String>, String> {
+pub(super) fn home_files(home: &Path) -> Result<Vec<String>, String> {
     let mut found = Vec::new();
     let mut pending = vec![(home.to_path_buf(), 0_usize)];
     while let Some((folder, depth)) = pending.pop() {
@@ -765,7 +765,7 @@ fn at_level(view: &PolicyView, access: AgentAccess) -> AgentPolicy {
 
 /// The result an owner change was recorded with. Input: the engine's response. Output: the
 /// result, or the response when it was not recorded.
-fn recorded(response: OwnerResponse) -> Result<OwnerResult, String> {
+pub(super) fn recorded(response: OwnerResponse) -> Result<OwnerResult, String> {
     match response {
         OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
             Ok(operation.result)
@@ -787,6 +787,37 @@ async fn policy_view(
         .map_err(|error| error.0)
 }
 
+/// Saves one project's agent policy at an access level, keeping every other choice the
+/// owner's screen shows and no toolchain, as the owner's policy screen saves it; a project
+/// already at that level is left as it is. Inputs: the owner, the project and the level.
+/// Output: nothing, or why the save was not applied.
+pub(super) async fn set_level(
+    owner: &mut super::e2e_support::Owner,
+    project: &ProjectId,
+    access: AgentAccess,
+) -> Result<(), String> {
+    let before = policy_view(owner, project).await?;
+    if before.access == access {
+        return Ok(());
+    }
+    let generation = owner.next();
+    let saved = owner
+        .controller
+        .set_project_agent_policy(
+            project.clone(),
+            before.version,
+            at_level(&before, access),
+            generation,
+        )
+        .await
+        .map_err(|error| error.0)?;
+    let result = recorded(saved)?;
+    if result != OwnerResult::Applied {
+        return Err(format!("set_project_agent_policy: {result:?}"));
+    }
+    Ok(())
+}
+
 /// Captures the agent policy a new project's agents get at one access level, as the owner's
 /// policy screen reads it: the level, network, the choices offered, the grants and their
 /// log, apply timing, shared and local folders and the temp folder a grant would hand over,
@@ -798,7 +829,7 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
         .map_err(|error| error.to_string())?
         .join("projects");
     std::fs::create_dir(&projects).map_err(|error| error.to_string())?;
-    let engine = super::provider::engine(scratch)?;
+    let engine = super::provider::engine(scratch, None)?;
     let view = super::provider::with_owner(&engine, |mut owner| async move {
         let steps = async {
             let home = owner.set_home(&projects).await;
@@ -812,24 +843,7 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
                 return Err(format!("create_project: {created:?}"));
             }
             let project = ProjectId::new(POLICY_PROJECT).map_err(|error| error.to_string())?;
-            let before = policy_view(&mut owner, &project).await?;
-            if before.access != access {
-                let generation = owner.next();
-                let saved = owner
-                    .controller
-                    .set_project_agent_policy(
-                        project.clone(),
-                        before.version,
-                        at_level(&before, access),
-                        generation,
-                    )
-                    .await
-                    .map_err(|error| error.0)?;
-                let result = recorded(saved)?;
-                if result != OwnerResult::Applied {
-                    return Err(format!("set_project_agent_policy: {result:?}"));
-                }
-            }
+            set_level(&mut owner, &project, access).await?;
             policy_view(&mut owner, &project).await
         };
         let view = steps.await;

@@ -5,7 +5,7 @@ use crazyagent::engine::owner::{AccountSecret, OwnerResult};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -265,8 +265,8 @@ const HEAD_WAIT: Duration = Duration::from_secs(10);
 /// and `*/models` with one model and records each request's line, its header names in the
 /// order sent and, for an Authorization header, its scheme word and whether its token is the
 /// dummy key, never the token. Dropping it leaves its thread blocked on a port no one dials.
-struct Recorder {
-    port: u16,
+pub(super) struct Recorder {
+    pub(super) port: u16,
     heard: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -328,7 +328,7 @@ fn read_head(stream: &mut std::net::TcpStream) -> String {
 impl Recorder {
     /// Starts the recorder on a free loopback port. Input: whether `/api/tags` answers.
     /// Output: the recorder, or why its port could not be opened.
-    fn start(tags: bool) -> Result<Self, String> {
+    pub(super) fn start(tags: bool) -> Result<Self, String> {
         let listener =
             std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
         let port = listener
@@ -364,10 +364,13 @@ impl Recorder {
     }
 }
 
-/// Starts a real engine whose HOME is a private folder below the scratch folder and saves
-/// the owner profile. Input: the scratch folder. Output: the running engine, or why its HOME
-/// could not be made.
-pub(super) fn engine(scratch: &Path) -> Result<Engine, String> {
+/// Starts a real engine whose HOME is a private folder below the scratch folder, with a
+/// pinned harness when one is given. Inputs: the scratch folder and the harness flag with
+/// its executable. Output: the running engine, or why its HOME could not be made.
+pub(super) fn engine(
+    scratch: &Path,
+    harness: Option<(&'static str, PathBuf)>,
+) -> Result<Engine, String> {
     let home = scratch
         .canonicalize()
         .map_err(|error| error.to_string())?
@@ -377,14 +380,36 @@ pub(super) fn engine(scratch: &Path) -> Result<Engine, String> {
         .map_err(|error| error.to_string())?;
     let mut engine = Engine::new("ca-snap-p2-");
     engine.home = Some(home);
+    engine.harness = harness;
     engine.launch();
     Ok(engine)
 }
 
-/// Runs owner steps against the engine as the TUI client on a runtime of its own, then
-/// detaches. Inputs: the engine and the steps, which hand the owner back with their result.
-/// Output: the steps' result.
+/// Saves the owner profile, then runs owner steps against the engine as the TUI client on
+/// a runtime of its own, then detaches. Inputs: the engine and the steps, which hand the
+/// owner back with their result. Output: the steps' result.
 pub(super) fn with_owner<T, F, Fut>(engine: &Engine, steps: F) -> Result<T, String>
+where
+    F: FnOnce(Owner) -> Fut,
+    Fut: std::future::Future<Output = (Owner, Result<T, String>)>,
+{
+    owner_run(engine, true, steps)
+}
+
+/// Runs owner steps as [`with_owner`] does on an engine whose profile is already saved.
+/// Inputs: the engine and the steps. Output: the steps' result.
+pub(super) fn as_owner<T, F, Fut>(engine: &Engine, steps: F) -> Result<T, String>
+where
+    F: FnOnce(Owner) -> Fut,
+    Fut: std::future::Future<Output = (Owner, Result<T, String>)>,
+{
+    owner_run(engine, false, steps)
+}
+
+/// Attaches as the TUI client on a runtime of its own, saves the owner profile when asked,
+/// runs the steps and detaches. Inputs: the engine, whether to save the profile and the
+/// steps. Output: the steps' result.
+fn owner_run<T, F, Fut>(engine: &Engine, first: bool, steps: F) -> Result<T, String>
 where
     F: FnOnce(Owner) -> Fut,
     Fut: std::future::Future<Output = (Owner, Result<T, String>)>,
@@ -395,7 +420,9 @@ where
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
         let mut owner = Owner::attach(engine).await;
-        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        if first {
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        }
         let (mut owner, result) = steps(owner).await;
         owner.controller.detach();
         result
@@ -407,7 +434,7 @@ where
 /// second request shape shows. Output: the answer and the requests heard.
 fn local_models(scratch: &Path, tags: bool) -> Result<Value, String> {
     let recorder = Recorder::start(tags)?;
-    let engine = engine(scratch)?;
+    let engine = engine(scratch, None)?;
     let url = format!("http://127.0.0.1:{}", recorder.port);
     let answer = with_owner(&engine, |owner| async move {
         let answer = match owner.controller.local_models(url).await {
@@ -432,7 +459,7 @@ fn request_local_models_fallback(scratch: &Path) -> Result<Value, String> {
 /// key. Input: the scratch folder. Output: the added account, the check and the requests.
 fn request_check_compatible_key(scratch: &Path) -> Result<Value, String> {
     let recorder = Recorder::start(false)?;
-    let engine = engine(scratch)?;
+    let engine = engine(scratch, None)?;
     let draft = AccountDraft {
         provider: Provider::OpenaiCompatible,
         method: SignInMethod::Url,

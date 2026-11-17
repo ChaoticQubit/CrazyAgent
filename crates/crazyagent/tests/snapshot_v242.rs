@@ -9,6 +9,8 @@ mod e2e_support;
 
 #[path = "snapshot_v242/harness.rs"]
 mod harness;
+#[path = "snapshot_v242/launch.rs"]
+mod launch;
 #[path = "snapshot_v242/provider.rs"]
 mod provider;
 
