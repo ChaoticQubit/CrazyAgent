@@ -9,6 +9,8 @@ mod e2e_support;
 
 #[path = "snapshot_v242/check.rs"]
 mod check;
+#[path = "snapshot_v242/role.rs"]
+mod role;
 #[path = "snapshot_v242/workflow.rs"]
 mod workflow;
 
@@ -51,6 +53,7 @@ fn scenarios() -> Vec<Scenario> {
         capture: masking_example,
     }];
     all.extend(check::scenarios());
+    all.extend(role::scenarios());
     all.extend(workflow::scenarios());
     all
 }
