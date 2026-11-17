@@ -13,6 +13,8 @@ pub const AGENT_BRANCH_SET: &str = "AgentBranchSet";
 pub const AGENT_BRANCH_FORGOTTEN: &str = "AgentBranchForgotten";
 /// The commit a worktree's next change set opens above stored (`landing_bases`).
 pub const BASE_SET: &str = "BaseSet";
+/// The base of a gone worktree forgotten (`landing_bases`).
+pub const BASE_FORGOTTEN: &str = "BaseForgotten";
 /// An owner edit kept waiting in an agent worktree for its next turn end
 /// (`landing_owner_edits`).
 pub const OWNER_EDIT_KEPT: &str = "OwnerEditKept";

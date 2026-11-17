@@ -1,8 +1,8 @@
 use super::*;
 use crate::landing_log::{
-    AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, CHANGE_SET_NUMBERED, OWNER_EDIT_KEPT,
-    OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED, PUBLISH_PROMPT_NEVER,
-    PUBLISH_PROMPT_SNOOZED, WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
+    AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_FORGOTTEN, BASE_SET, CHANGE_SET_NUMBERED,
+    OWNER_EDIT_KEPT, OWNER_EDITS_DROPPED, OWNER_EDITS_FORGOTTEN, OWNER_EDITS_SETTLED,
+    PUBLISH_PROMPT_NEVER, PUBLISH_PROMPT_SNOOZED, WORKTREE_OWNER_EDITS_FORGOTTEN, rebuild, seed,
 };
 use crate::state_log::replay::rows;
 use serde_json::json;
@@ -116,6 +116,26 @@ fn a_base_set_again_is_logged_and_rebuilds_to_the_last_base() {
     assert_eq!(live.len(), 1);
     rebuild(&db).unwrap();
     assert_eq!(rows(&db, "landing_bases").unwrap(), live);
+}
+
+/// V250-L9: retire's forget of a gone worktree's base is logged with a closed body (the
+/// worktree), and the table rebuilt from the log holds no base for it.
+#[test]
+fn a_forgotten_base_is_logged_and_rebuilds_to_no_row() {
+    let (root, db) = store();
+    let worktree = root.path().join("repo/.wt/one");
+    let path = worktree.to_str().unwrap();
+    set_base(&db, &worktree, &"a".repeat(40)).unwrap();
+    forget_base(&db, path).unwrap();
+    let logged = events(&db);
+    assert_eq!(logged.len(), 2, "one event per base write");
+    assert_eq!(
+        logged[1],
+        (BASE_FORGOTTEN.to_owned(), json!({"worktree": path}))
+    );
+    assert!(rows(&db, "landing_bases").unwrap().is_empty());
+    rebuild(&db).unwrap();
+    assert!(rows(&db, "landing_bases").unwrap().is_empty());
 }
 
 /// V250-L9: each owner-edit write appends one event with a closed body (kept, settled on a
