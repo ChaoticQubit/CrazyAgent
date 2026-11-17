@@ -716,13 +716,12 @@ enum Layout {
     FolderOnlyFiles,
 }
 
-/// Builds a `.git` tree in a folder the container may modify, sets one candidate layout on it,
-/// then runs git's write steps as cmd builtins, the guarded-path refusals, the config rename
-/// the owner's git makes (finding F1), and the staged instructions move, and panics with the
-/// report. Anchor: `.git` keeps modify for its children; FolderOnly: option (d), explicit
-/// grants only on git's write places; FolderOnlyFiles: (d) plus modify inherited by new files.
-fn git_layout(container: &str, layout: Layout) -> ! {
-    let mut lab = lab(container);
+/// Builds a `.git` tree with hooks, objects, refs, logs, config, index and HEAD, and a
+/// `.crazyagent\context` folder, in a lab folder the container may modify, and sets one
+/// candidate layout on it. Anchor: `.git` keeps modify for its children; FolderOnly: option
+/// (d), explicit grants only on git's write places; FolderOnlyFiles: (d) plus modify inherited
+/// by new files. Inputs: the lab and the layout. Output: the work folder holding `.git`.
+fn git_tree(lab: &mut Lab, layout: Layout) -> PathBuf {
     let work = lab.lab.join("work");
     let git = work.join(".git");
     let hooks = git.join("hooks");
@@ -785,6 +784,29 @@ fn git_layout(container: &str, layout: Layout) -> ! {
             &work, &git, &hooks, &sample, &config, &index, &head, &objects, &refs, &main, &context
         ])
     ));
+    work
+}
+
+/// Builds the `.git` tree in one candidate layout, then runs git's write steps as cmd
+/// builtins, the guarded-path refusals, the config rename the owner's git makes (finding F1),
+/// and the staged instructions move, and panics with the report. Inputs: the container name and
+/// the layout.
+fn git_layout(container: &str, layout: Layout) -> ! {
+    let mut lab = lab(container);
+    let work = git_tree(&mut lab, layout);
+    let git = work.join(".git");
+    let hooks = git.join("hooks");
+    let objects = git.join("objects");
+    let refs = git.join("refs");
+    let logs = git.join("logs");
+    let crazyagent = work.join(".crazyagent");
+    let context = crazyagent.join("context");
+    let config = git.join("config");
+    let index = git.join("index");
+    let head = git.join("HEAD");
+    let main = refs.join("heads").join("main");
+    let log = logs.join("HEAD");
+    let sample = hooks.join("pre-commit.sample");
     let index_lock = git.join("index.lock");
     let head_lock = git.join("HEAD.lock");
     let main_lock = refs.join("heads").join("main.lock");
@@ -1228,4 +1250,478 @@ fn lowbox_probe_b2_whether_the_container_opens_nul_and_git_starts() {
         );
     }
     lab.finish("lowbox probe step 0b B2: NUL and git start in the container")
+}
+
+const CHILD_STEPS: &str = "CRAZYAGENT_PROBE_STEPS";
+
+/// Step 0c: the probe binary launched inside the container runs only this test, with one file
+/// call per line of CRAZYAGENT_PROBE_STEPS (`label|call|path|path`), and prints each call's raw
+/// result on a STEP line. In a normal test run the variable is unset and the test does nothing.
+#[test]
+fn lowbox_probe_child() {
+    let Ok(steps) = std::env::var(CHILD_STEPS) else {
+        return;
+    };
+    for line in steps.lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        assert!(parts.len() >= 3, "{line}");
+        println!("STEP {} => {}", parts.join(" "), call(&parts[1..]));
+    }
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain([0]).collect()
+}
+
+fn last_error() -> String {
+    format!("error {}", unsafe {
+        windows_sys::Win32::Foundation::GetLastError()
+    })
+}
+
+/// Makes one file call the way git and other tools do and returns its raw result. Input: the
+/// call name and its paths. Output: "ok", the Win32 error, or std's raw OS error.
+fn call(parts: &[&str]) -> String {
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, DeleteFileW, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FILE_READ_ATTRIBUTES, FileDispositionInfo,
+        FileDispositionInfoEx, MOVEFILE_REPLACE_EXISTING, MoveFileExW, RemoveDirectoryW,
+        SYNCHRONIZE,
+    };
+    let done = |ok: bool| if ok { "ok".to_owned() } else { last_error() };
+    match parts {
+        ["delete", path] => done(unsafe { DeleteFileW(wide(path).as_ptr()) } != 0),
+        ["move", from, to] => done(
+            unsafe {
+                MoveFileExW(
+                    wide(from).as_ptr(),
+                    wide(to).as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING,
+                )
+            } != 0,
+        ),
+        ["rmdir", path] => done(unsafe { RemoveDirectoryW(wide(path).as_ptr()) } != 0),
+        ["std-remove", path] => {
+            format!("{:?}", fs::remove_file(path).map_err(|e| e.raw_os_error()))
+        }
+        ["std-rename", from, to] => {
+            format!("{:?}", fs::rename(from, to).map_err(|e| e.raw_os_error()))
+        }
+        ["std-open", path] => format!(
+            "{:?}",
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .map(drop)
+                .map_err(|e| e.raw_os_error())
+        ),
+        ["open-delete", path] => {
+            opened(path, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES, |_| true)
+        }
+        ["open-read", path] => opened(path, GENERIC_READ, |_| true),
+        ["open-rw", path] => opened(path, GENERIC_READ | GENERIC_WRITE, |_| true),
+        ["dispose", path] => opened(path, DELETE | SYNCHRONIZE, |handle| {
+            set(
+                handle,
+                FileDispositionInfo,
+                &FILE_DISPOSITION_INFO { DeleteFile: true },
+            )
+        }),
+        ["dispose-posix", path] => opened(path, DELETE | SYNCHRONIZE, |handle| {
+            let flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+            set(
+                handle,
+                FileDispositionInfoEx,
+                &FILE_DISPOSITION_INFO_EX { Flags: flags },
+            )
+        }),
+        _ => format!("unknown call {parts:?}"),
+    }
+}
+
+fn set<T>(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    class: windows_sys::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,
+    info: &T,
+) -> bool {
+    let size = u32::try_from(size_of::<T>()).unwrap();
+    unsafe {
+        windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
+            handle,
+            class,
+            (info as *const T).cast(),
+            size,
+        ) != 0
+    }
+}
+
+/// Opens a path with the given rights, as a folder too, without following a link, runs one call
+/// on the handle and closes it. Inputs: the path, the rights and the call. Output: "ok", or the
+/// open or call error.
+fn opened(
+    path: &str,
+    access: u32,
+    then: impl FnOnce(windows_sys::Win32::Foundation::HANDLE) -> bool,
+) -> String {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let handle = unsafe {
+        CreateFileW(
+            wide(path).as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return format!("open {}", last_error());
+    }
+    let result = if then(handle) {
+        "ok".to_owned()
+    } else {
+        format!("call {}", last_error())
+    };
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+/// Reads a device's owner, access list and label as SDDL through a handle opened for reading
+/// its security only, on the owner's side. Input: the device path. Output: the SDDL text or
+/// the failing call and its error.
+fn device_sddl(path: &str) -> String {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+        SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL,
+    };
+    let handle = unsafe {
+        CreateFileW(
+            wide(path).as_ptr(),
+            READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return format!("open {}", last_error());
+    }
+    let wanted =
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION;
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            wanted,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    unsafe { CloseHandle(handle) };
+    if status != 0 {
+        return format!("GetSecurityInfo error {status}");
+    }
+    let mut text: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let mut length = 0u32;
+    let converted = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            wanted,
+            &mut text,
+            &mut length,
+        )
+    };
+    let sddl = if converted == 0 {
+        format!("convert {}", last_error())
+    } else {
+        let units = unsafe { std::slice::from_raw_parts(text, length as usize) };
+        String::from_utf16_lossy(units)
+            .trim_end_matches('\0')
+            .to_owned()
+    };
+    unsafe {
+        LocalFree(text.cast());
+        LocalFree(descriptor);
+    }
+    sddl
+}
+
+fn step(label: &str, call: &str, paths: &[&str]) -> String {
+    [label, call]
+        .into_iter()
+        .chain(paths.iter().copied())
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Launches the probe binary inside the lab's container in `cwd` to run the given steps, and
+/// adds its STEP lines to the report. Inputs: the lab, the probe copy the container may run,
+/// the working folder, a title and the steps.
+fn child(lab: &mut Lab, exe: &Path, cwd: &Path, title: &str, steps: &[String]) {
+    let mut env = lab.env.clone();
+    env.push((CHILD_STEPS.to_owned(), steps.join("\n")));
+    let output = launch(
+        &lab.profile,
+        cwd,
+        &plain(exe),
+        &[
+            "lowbox_probe_child",
+            "--exact",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ],
+        &env,
+        Stdio::null(),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let found: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("STEP "))
+        .collect();
+    lab.report.push(format!(
+        "## {title}\n  cwd {}\n  exit {:?} stderr {:?}\n  {}",
+        cwd.display(),
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        found.join("\n  ")
+    ));
+    if found.len() != steps.len() {
+        lab.report.push(format!(
+            "  the child printed {} of {} steps; stdout {stdout:?}",
+            found.len(),
+            steps.len()
+        ));
+    }
+}
+
+/// Step 0c, B1 and B2 below cmd: the container runs a copy of this test binary that makes the
+/// file calls git and other tools use, by absolute and by relative path, in a plain folder and
+/// in the anchor `.git` layout, and opens the NUL device. The owner side reads the NUL
+/// device's security and the container's token groups.
+#[test]
+fn lowbox_probe_c1_file_calls_inside_the_container() {
+    let mut lab = lab("crazyagent.test.c1");
+    lab.report.push(format!(
+        "NUL device, owner side: {}",
+        device_sddl(r"\\.\NUL")
+    ));
+    let project = lab.project.clone();
+    let exe = project.join("probe-child.exe");
+    fs::copy(std::env::current_exe().unwrap(), &exe).unwrap();
+    lab.cmd("whoami /all in the container", &["whoami", "/all"], &[]);
+    let nul = [
+        step(
+            "open NUL for read and write, expect allowed",
+            "open-rw",
+            &["NUL"],
+        ),
+        step(
+            "open the NUL device path for read and write, expect allowed",
+            "open-rw",
+            &[r"\\.\NUL"],
+        ),
+        step("open NUL for read, expect allowed", "open-read", &["NUL"]),
+        step(
+            "std open NUL for read and write, expect allowed",
+            "std-open",
+            &["NUL"],
+        ),
+    ];
+    child(
+        &mut lab,
+        &exe,
+        &project,
+        "NUL from inside the container",
+        &nul,
+    );
+    let calls = project.join("calls");
+    fs::create_dir_all(&calls).unwrap();
+    for form in ["relative", "absolute"] {
+        let prefix = if form == "absolute" {
+            format!("{}\\", plain(&calls))
+        } else {
+            String::new()
+        };
+        let name = |file: &str| format!("{prefix}{form}-{file}");
+        for file in [
+            "del", "remove", "open", "dispose", "posix", "move", "over", "target", "ltarget",
+            "rename", "rover", "rtarget",
+        ] {
+            fs::write(calls.join(format!("{form}-{file}")), "owner\r\n").unwrap();
+        }
+        fs::create_dir_all(calls.join(format!("{form}-dir"))).unwrap();
+        let lock = calls.join(format!("{form}-lock"));
+        lab.cmd(
+            &format!("{form}: the container makes a lock"),
+            &["echo", "lock>", &plain(&lock)],
+            &[],
+        );
+        let steps = [
+            step(
+                "DeleteFileW an owner file, expect allowed",
+                "delete",
+                &[&name("del")],
+            ),
+            step(
+                "std remove_file, expect allowed",
+                "std-remove",
+                &[&name("remove")],
+            ),
+            step(
+                "open with DELETE, expect allowed",
+                "open-delete",
+                &[&name("open")],
+            ),
+            step(
+                "delete by handle, expect allowed",
+                "dispose",
+                &[&name("dispose")],
+            ),
+            step(
+                "POSIX delete by handle, expect allowed",
+                "dispose-posix",
+                &[&name("posix")],
+            ),
+            step(
+                "MoveFileExW to a new name, expect allowed",
+                "move",
+                &[&name("move"), &name("moved")],
+            ),
+            step(
+                "MoveFileExW over an owner file, expect allowed",
+                "move",
+                &[&name("over"), &name("target")],
+            ),
+            step(
+                "MoveFileExW the container's lock over an owner file, expect allowed",
+                "move",
+                &[&name("lock"), &name("ltarget")],
+            ),
+            step(
+                "std rename to a new name, expect allowed",
+                "std-rename",
+                &[&name("rename"), &name("renamed")],
+            ),
+            step(
+                "std rename over an owner file, expect allowed",
+                "std-rename",
+                &[&name("rover"), &name("rtarget")],
+            ),
+            step(
+                "RemoveDirectoryW an empty owner folder, expect allowed",
+                "rmdir",
+                &[&name("dir")],
+            ),
+        ];
+        child(
+            &mut lab,
+            &exe,
+            &calls,
+            &format!("plain folder, {form} paths"),
+            &steps,
+        );
+    }
+    let work = git_tree(&mut lab, Layout::Anchor);
+    let git = work.join(".git");
+    for form in ["relative", "absolute"] {
+        let prefix = if form == "absolute" {
+            format!("{}\\", plain(&work))
+        } else {
+            String::new()
+        };
+        let at = |file: &str| format!("{prefix}.git\\{file}");
+        for lock in ["index.lock", r"refs\heads\main.lock", "config.lock"] {
+            lab.cmd(
+                &format!("{form}: the container makes .git\\{lock}"),
+                &["echo", "lock>", &plain(&git.join(lock))],
+                &[],
+            );
+        }
+        let rebase = git.join("rebase-merge");
+        lab.cmd(
+            &format!("{form}: the container makes .git\\rebase-merge"),
+            &["mkdir", &plain(&rebase)],
+            &[],
+        );
+        lab.cmd(
+            &format!("{form}: the container writes .git\\rebase-merge\\done"),
+            &["echo", "step>", &plain(&rebase.join("done"))],
+            &[],
+        );
+        let steps = [
+            step(
+                "move index.lock over index, expect allowed",
+                "move",
+                &[&at("index.lock"), &at("index")],
+            ),
+            step(
+                "move refs\\heads\\main.lock over main, expect allowed",
+                "move",
+                &[&at(r"refs\heads\main.lock"), &at(r"refs\heads\main")],
+            ),
+            step(
+                "delete rebase-merge\\done, expect allowed",
+                "delete",
+                &[&at(r"rebase-merge\done")],
+            ),
+            step(
+                "remove rebase-merge, expect allowed",
+                "rmdir",
+                &[&at("rebase-merge")],
+            ),
+            step(
+                "D6: move config.lock over config, expect refused",
+                "move",
+                &[&at("config.lock"), &at("config")],
+            ),
+            step("delete config, expect refused", "delete", &[&at("config")]),
+            step(
+                "delete a hook, expect refused",
+                "delete",
+                &[&at(r"hooks\pre-commit.sample")],
+            ),
+            step(
+                "move .git\\hooks, expect refused",
+                "move",
+                &[&at("hooks"), &at("hooks-moved")],
+            ),
+            step(
+                "move .git, expect refused",
+                "move",
+                &[&format!("{prefix}.git"), &format!("{prefix}git-moved")],
+            ),
+        ];
+        child(
+            &mut lab,
+            &exe,
+            &work,
+            &format!("anchor .git layout, {form} paths"),
+            &steps,
+        );
+        let _ = fs::remove_file(git.join("config.lock"));
+    }
+    lab.finish("lowbox probe step 0c: file calls and NUL inside the container")
 }
