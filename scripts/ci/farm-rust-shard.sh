@@ -12,9 +12,14 @@ workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}
 exe=""
 [ "${RUNNER_OS:-}" != Windows ] || exe=.exe
 filter=$(node scripts/ci/nextest-filter.mjs)
+no_tests=warn
+if [ -n "${FARM_SCOPE:-}" ]; then
+  filter="($FARM_SCOPE) & ($filter)"
+  no_tests=fail
+fi
 echo "filter: $filter"
 export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$workspace/target/debug/crazyagent$exe"
-run=(cargo nextest run --archive-file "$archive" --workspace-remap "$workspace" --extract-to "$workspace" --extract-overwrite --partition "slice:$part/$parts" --no-tests=warn -E "$filter")
+run=(cargo nextest run --archive-file "$archive" --workspace-remap "$workspace" --extract-to "$workspace" --extract-overwrite --partition "slice:$part/$parts" --no-tests="$no_tests" -E "$filter")
 if [ "${RUNNER_OS:-}" = Linux ]; then
   dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec "$@"' farm "${run[@]}"
 else
