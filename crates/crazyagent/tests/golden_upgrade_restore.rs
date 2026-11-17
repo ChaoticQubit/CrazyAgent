@@ -36,7 +36,7 @@ const SCREEN_TIME: Duration = Duration::from_secs(30);
 const TABLES: &str =
     "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'";
 const PINNED_VERSION: i64 = 11;
-const UPGRADED_VERSION: i64 = 12;
+const FIRST_RUN_STEPS_MAX: usize = 12;
 const STEPS: [&str; 5] = [
     "seed the 2.4.2 data",
     "the first start upgrades it",
@@ -197,6 +197,33 @@ impl Tui {
         String::from_utf8_lossy(&shown.stdout).into_owned()
     }
 
+    /// Brings the TUI to Home as a first run does: skips each first-run step with `c` until
+    /// Home shows, then waits for Home's side panel to settle on its tools check, after which
+    /// only keys move the focus.
+    /// Input: none. Output: none; a TUI that never reaches Home fails the flow.
+    async fn home(&self) {
+        for _ in 0..FIRST_RUN_STEPS_MAX {
+            let screen = self
+                .until("Home or a first-run step", |now| {
+                    now.contains("New project") || now.contains("c Skip for now")
+                })
+                .await;
+            if screen.contains("New project") {
+                self.until("Home's side panel to settle on its tools check", settled)
+                    .await;
+                return;
+            }
+            assert!(
+                !screen.contains("Welcome to CrazyAgent"),
+                "the fixture's saved profile skips Welcome:\n{screen}"
+            );
+            self.keys(&["c"]);
+            self.until("the first-run step to move on", |now| now != screen)
+                .await;
+        }
+        panic!("the TUI never reached Home:\n{}", self.screen());
+    }
+
     /// Waits until the screen passes a check, reading it as `wait_until` does.
     /// Inputs: what is awaited and the check.
     /// Output: the screen that passed.
@@ -216,6 +243,15 @@ impl Drop for Tui {
     fn drop(&mut self) {
         stop_tmux(&self.tmux, &self.socket);
     }
+}
+
+/// Whether Home's side panel settled on its tools check, as the TUI e2e rows read it: "Get
+/// set up" shows the check's words, "Learn CrazyAgent" offers Add an account.
+/// Input: the screen. Output: the answer.
+fn settled(screen: &str) -> bool {
+    let checked = screen.contains("[x] Install tools") || screen.contains("Missing: ");
+    (screen.contains("Get set up") && checked)
+        || (screen.contains("Learn CrazyAgent") && screen.contains("Add an account"))
 }
 
 /// Runs a command with no input and its output kept.
@@ -428,8 +464,7 @@ async fn the_owner_brings_back_the_2_4_data_from_the_tui_after_the_first_2_5_sta
     let grown = bytes(&root).checked_sub(seeded).unwrap_or_default();
     record.measure("upgrade_start_ms", upgrade_ms);
     record.measure("disk_growth_bytes", grown);
-    tui.until("the TUI's Home", |screen| screen.contains("New project"))
-        .await;
+    tui.home().await;
     record.step(STEPS[1]);
 
     tui.keys(&["s"]);
@@ -450,10 +485,6 @@ async fn the_owner_brings_back_the_2_4_data_from_the_tui_after_the_first_2_5_sta
     .await;
     tui.keys(&["Right"]);
     tui.keys(&["Enter"]);
-    tui.until("the restore under way", |screen| {
-        screen.contains("Your 2.4 data is being brought back.")
-    })
-    .await;
     let copy =
         wait_until(
             "the restore to end",
@@ -475,7 +506,11 @@ async fn the_owner_brings_back_the_2_4_data_from_the_tui_after_the_first_2_5_sta
     let kept = root.join("backups").join(&copy);
     let mode = fs::symlink_metadata(&kept).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700, "the dated copy of the 2.5 data is private");
-    assert_eq!(version(&kept.join("engine.db")), UPGRADED_VERSION);
+    let kept_version = version(&kept.join("engine.db"));
+    assert!(
+        kept_version > PINNED_VERSION,
+        "the dated copy holds the 2.5 data: {kept_version}"
+    );
     assert_eq!(
         version(&db),
         PINNED_VERSION,

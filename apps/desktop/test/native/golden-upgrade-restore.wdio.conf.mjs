@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SevereServiceError } from "webdriverio";
 import { chooseHome, clearWebStore, lockHome } from "./run-layout.mjs";
 
 process.umask(0o077);
-const app = process.env.WD_APP;
+const source = process.env.GU_BUNDLE;
 const root = process.env.GU_ROOT;
 const evidence = process.env.GU_EVIDENCE;
 const port = Number(process.env.WD_PORT);
-for (const [name, path] of [["WD_APP", app], ["GU_ROOT", root], ["GU_EVIDENCE", evidence]]) {
+for (const [name, path] of [["GU_BUNDLE", source], ["GU_ROOT", root], ["GU_EVIDENCE", evidence]]) {
   assert(path && isAbsolute(path), `${name} must be an absolute path`);
 }
 assert(Number.isInteger(port) && port > 1024 && port < 65536, "WD_PORT must be a free local port");
@@ -20,9 +20,10 @@ assert(!process.env.CRAZYAGENT_DESKTOP_SOCKET, "the app must run its default eng
 for (const temporary of ["/tmp/", "/private/tmp/", "/private/var/folders/", "/var/folders/", `${tmpdir()}/`]) {
   assert(!`${root}/`.startsWith(temporary), "GU_ROOT must sit outside temporary folders, where a login service is never installed");
 }
-assert.equal(basename(app), "crazyagent-desktop", "WD_APP is the built app's crazyagent-desktop inside its bundle");
-const SOURCE = resolve(dirname(app), "..", "..");
-assert(SOURCE.endsWith(".app"), `WD_APP sits in an app bundle: ${SOURCE}`);
+assert(source.endsWith(".app"), "GU_BUNDLE is this build's CrazyAgent.app, as the app's bundle step makes it");
+for (const binary of ["crazyagent-desktop", "crazyagent"]) {
+  assert(existsSync(join(source, "Contents", "MacOS", binary)), `GU_BUNDLE holds ${binary}, the app and the engine sidecar beside it`);
+}
 
 export const FIXTURE = fileURLToPath(new URL("../../../../crates/crazyagent/tests/fixtures/v242-engine.db", import.meta.url));
 export const BUNDLE = join(root, "Applications", "CrazyAgent.app");
@@ -135,7 +136,7 @@ export const config = {
       throw new SevereServiceError(String(failure.message));
     }
     clearWebStore(home);
-    const copied = spawnSync("/usr/bin/ditto", [SOURCE, BUNDLE], { encoding: "utf8" });
+    const copied = spawnSync("/usr/bin/ditto", [source, BUNDLE], { encoding: "utf8" });
     if (copied.status !== 0 || !existsSync(SIDECAR)) throw new SevereServiceError(`the bundle did not copy: ${copied.stderr}`);
     const { label, pid } = scratchService();
     if (pid !== null || launchd(label).loaded) throw new SevereServiceError(`the scratch login service already runs: ${label}`);
