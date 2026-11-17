@@ -1840,7 +1840,8 @@ pub(super) fn undo(
 }
 
 /// Records a finished undo: sets accepted with no commit of their own whose work the revert
-/// removed, as [`reverted_work`] says, are marked undone with it, the set keeps the commit
+/// removed, as [`reverted_work`] says, are marked undone with it (where it cannot tell, a set
+/// closed at the undone commit itself counts as reverted), the set keeps the commit
 /// and drops its intent, its merge rows show Undone and one Undone row names those sets. The
 /// reads every set shares run first, so a failed one stops the step for a retry. Inputs: the
 /// store, the undone set, the reverting commit and who undid it. Output: Ok once saved.
@@ -1860,14 +1861,17 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
         let Some(at) = other.landed.clone().filter(|at| above.contains(at)) else {
             continue;
         };
-        let reverted =
-            reverted_work(&owner, [&before, commit], &changed, &other).unwrap_or_else(|error| {
+        let reverted = match reverted_work(&owner, [&before, commit], &changed, &other) {
+            Ok(Some(reverted)) => reverted,
+            Ok(None) => at == landed,
+            Err(error) => {
                 eprintln!(
                     "landing_undo_closed_set_unread cause={}",
                     crate::protocol::plain_code(&error.0)
                 );
                 at == landed
-            });
+            }
+        };
         if !reverted {
             continue;
         }
@@ -1899,21 +1903,25 @@ fn commits_from(owner: &Repo, landed: &str, commit: &str) -> Result<BTreeSet<Str
 /// Tells whether a revert removed a set's work: the reverted commit changed one of the set's
 /// files, the branch held the set's work just before the revert and does not at the
 /// reverting commit. Inputs: the owner repository, the commits before and after the revert,
-/// the paths it changed and the set. Output: the answer, or a read failure of this set.
+/// the paths it changed and the set. Output: the answer, None on a git older than 2.40,
+/// which cannot merge again to tell, or a read failure of this set.
 fn reverted_work(
     owner: &Repo,
     [before, after]: [&str; 2],
     changed: &[String],
     set: &Record,
-) -> Result<bool, EngineError> {
+) -> Result<Option<bool>, EngineError> {
     let own = diff::changed_paths(owner, &set.base, &set.head)?;
     if !own.iter().any(|path| changed.contains(path)) {
-        return Ok(false);
+        return Ok(Some(false));
     }
-    Ok(
+    if owner.old_git() {
+        return Ok(None);
+    }
+    Ok(Some(
         super::merges::holds_set_work(owner, before, &set.base, &set.head)?
             && !super::merges::holds_set_work(owner, after, &set.base, &set.head)?,
-    )
+    ))
 }
 
 /// Moves an owner ref an Accept or an undo left in flight: by compare and swap when the
