@@ -45,7 +45,7 @@
   "crates/crazyagent/src/engine/bootstrap.rs": 1945,
   "crates/crazyagent/src/engine/claude_host/tests.rs": 2534,
   "crates/crazyagent/src/engine/owner.rs": 1613,
-  "crates/crazyagent/src/engine/owner/transport.rs": 4231,
+  "crates/crazyagent/src/engine/owner/transport.rs": 4232,
   "crates/crazyagent/src/engine/owner/transport/master_host_launch.rs": 3168,
   "crates/crazyagent/src/engine/owner/transport/master_runtime.rs": 2252,
   "crates/crazyagent/src/engine/owner/transport/master_runtime/routing_tests.rs": 4802,

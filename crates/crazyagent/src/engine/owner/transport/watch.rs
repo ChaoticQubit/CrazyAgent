@@ -1,7 +1,12 @@
 use super::*;
-use crate::protocol::{WatchReply, encode_frame};
+use crate::protocol::{Topic, WatchReply, encode_frame};
+use crate::storage::{Changes, changes};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::BTreeSet;
+use std::sync::PoisonError;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The longest a watch waits for a commit, in ms (v2.5 plan section 6, held connections).
 const WAIT_MS_MAX: u32 = 25_000;
@@ -15,6 +20,11 @@ const WATCHES_MAX: usize = 4;
 const REQUEST_BYTES_MAX: usize = 256;
 /// The engine store's file in the engine root.
 const DATABASE: &str = "engine.db";
+/// How often the sampler reads the store's `data_version`, so a commit wakes a watch within
+/// a second (v2.5 plan row S3a).
+const SAMPLE_EVERY: Duration = Duration::from_millis(250);
+/// A sampler's first mark is below this, so a JavaScript client reads every mark exactly.
+const MARK_SEED_MAX: u64 = 1 << 52;
 const _: () = assert!(WATCH_TIMEOUT.as_millis() > WAIT_MS_MAX as u128);
 const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
 
@@ -38,18 +48,115 @@ struct Request {
     wait_ms: u32,
 }
 
-/// The owner server's watches: how many wait now, at most [`WATCHES_MAX`].
+/// The owner server's watches: how many wait now, at most [`WATCHES_MAX`], and the sampler
+/// of the engine store they wait on, started by the first watch.
 pub(super) struct Watches {
     waiting: AtomicUsize,
+    sampler: Mutex<Option<Sampler>>,
 }
 
 impl Watches {
-    /// No watch waiting. Output: the watches.
+    /// No watch waiting and no sampler. Output: the watches.
     pub(super) fn new() -> Self {
         Self {
             waiting: AtomicUsize::new(0),
+            sampler: Mutex::new(None),
         }
     }
+
+    /// The mark's receiver. The first watch starts the sampler, and a watch after it stopped
+    /// on a read error starts a new one from a new seed, so every older mark differs. Input:
+    /// the store's path. Output: the receiver, or `watch_unavailable`.
+    fn subscribe(&self, database: &Path) -> Result<tokio::sync::watch::Receiver<u64>, EngineError> {
+        let mut sampler = self.sampler.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(running) = sampler.as_ref().filter(|it| !it.thread.is_finished()) {
+            return Ok(running.mark.subscribe());
+        }
+        let started = Sampler::start(database)?;
+        let marks = started.mark.subscribe();
+        *sampler = Some(started);
+        Ok(marks)
+    }
+}
+
+/// A thread reading the engine store's `PRAGMA data_version` on a read-only connection of
+/// its own every [`SAMPLE_EVERY`]. The value changes once any other connection or process
+/// commits, the storage actor's owner requests included, and each change moves the mark by
+/// one. It stops when dropped or on a read error.
+struct Sampler {
+    mark: Arc<tokio::sync::watch::Sender<u64>>,
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Sampler {
+    /// Opens the store and starts sampling it, the mark seeded from the clock. Input: the
+    /// store's path. Output: the sampler, or `watch_unavailable`.
+    fn start(database: &Path) -> Result<Self, EngineError> {
+        let db = open(database)?;
+        let first = data_version(&db).map_err(|_| unavailable())?;
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64)
+            % MARK_SEED_MAX;
+        let mark = Arc::new(tokio::sync::watch::channel(seed).0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (moves, stops) = (Arc::clone(&mark), Arc::clone(&stop));
+        let thread = std::thread::Builder::new()
+            .name("owner-watch".into())
+            .spawn(move || sample(&db, first, &moves, &stops))
+            .map_err(|_| unavailable())?;
+        Ok(Self { mark, stop, thread })
+    }
+}
+
+impl Drop for Sampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The sampler's loop: moves the mark on each change of `data_version`, and once more on a
+/// read error before it stops, so no waiting watch misses a commit. Inputs: the connection,
+/// the value first read, the mark and the stop flag. Output: none.
+fn sample(
+    db: &Connection,
+    mut last: i64,
+    mark: &tokio::sync::watch::Sender<u64>,
+    stop: &AtomicBool,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        std::thread::sleep(SAMPLE_EVERY);
+        let now = data_version(db);
+        if now.as_ref().ok() != Some(&last) {
+            mark.send_modify(|mark| *mark = mark.wrapping_add(1));
+        }
+        match now {
+            Ok(now) => last = now,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Opens the engine store read-only, waiting at most one sample behind a writer. Input: the
+/// path. Output: the connection, or `watch_unavailable`.
+fn open(database: &Path) -> Result<Connection, EngineError> {
+    let db = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| unavailable())?;
+    db.busy_timeout(SAMPLE_EVERY).map_err(|_| unavailable())?;
+    Ok(db)
+}
+
+/// The connection's `PRAGMA data_version`. Input: the connection. Output: the value.
+fn data_version(db: &Connection) -> rusqlite::Result<i64> {
+    db.query_row("PRAGMA data_version", [], |row| row.get(0))
+}
+
+fn unavailable() -> EngineError {
+    failure("watch_unavailable")
 }
 
 /// A watch counted while it waits; dropping it gives its place back.
@@ -210,16 +317,45 @@ fn parse(bytes: &[u8]) -> Result<Request, EngineError> {
 }
 
 /// Waits for a commit to the engine store after the request's cursor or mark, at most its
-/// wait. Inputs: the watches, the store's path and the request. Output: the reply, or
-/// `watch_busy` past [`WATCHES_MAX`] or `watch_unavailable`.
+/// wait. It answers at once with `Refresh` for a pruned or ahead cursor, with the topics of
+/// the events after the cursor, and with `Unknown` among them when the mark moved, since any
+/// commit may have changed what the client shows. Inputs: the watches, the store's path and
+/// the request. Output: the reply, or `watch_busy` past [`WATCHES_MAX`] or
+/// `watch_unavailable`.
 async fn wait(
     watches: &Watches,
-    _database: &Path,
+    database: &Path,
     request: Request,
 ) -> Result<WatchReply, EngineError> {
-    let _waiting = Waiting::take(&watches.waiting);
-    Ok(WatchReply::Quiet {
-        cursor: request.after,
-        mark: 0,
-    })
+    let _waiting = Waiting::take(&watches.waiting).ok_or_else(|| failure("watch_busy"))?;
+    let mut marks = watches.subscribe(database)?;
+    let deadline = Instant::now() + Duration::from_millis(u64::from(request.wait_ms));
+    loop {
+        let mark = *marks.borrow_and_update();
+        let (path, after) = (database.to_path_buf(), request.after.clone());
+        let read = tokio::task::spawn_blocking(move || changes(&mut open(&path)?, &after))
+            .await
+            .map_err(|_| unavailable())??;
+        let (cursor, logged) = match read {
+            Changes::Refresh { cursor } => return Ok(WatchReply::Refresh { cursor, mark }),
+            Changes::Logged { cursor, topics } => (cursor, topics),
+        };
+        let mut topics: BTreeSet<Topic> = logged.into_iter().collect();
+        if request.mark != Some(mark) {
+            topics.insert(Topic::Unknown);
+        }
+        if !topics.is_empty() {
+            let topics = topics.into_iter().collect();
+            return Ok(WatchReply::Changed {
+                cursor,
+                mark,
+                topics,
+            });
+        }
+        match tokio::time::timeout_at(deadline, marks.changed()).await {
+            Err(_) => return Ok(WatchReply::Quiet { cursor, mark }),
+            Ok(Err(_)) => return Err(unavailable()),
+            Ok(Ok(())) => {}
+        }
+    }
 }

@@ -2298,6 +2298,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide", Protocol::Ide),
         ("ide_tab", Protocol::IdeTab),
         ("icloud", Protocol::Icloud),
+        ("watch", Protocol::Watch),
     ];
     Ok(named
         .into_iter()

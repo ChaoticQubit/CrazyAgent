@@ -455,7 +455,45 @@ impl Command {
     /// names its topic where it is added. Reads commit nothing; theirs is never logged.
     /// Output: the topic.
     pub fn topic(&self) -> Topic {
-        Topic::Unknown
+        match self {
+            Self::OwnerModelAccess { .. }
+            | Self::OwnerProfile { .. }
+            | Self::OwnerSandbox { .. }
+            | Self::OwnerAgentCleanup { .. }
+            | Self::OwnerAgentQuit { .. }
+            | Self::OwnerProviderRetry { .. }
+            | Self::OwnerMasterSteps { .. }
+            | Self::OwnerMasterTime { .. }
+            | Self::OwnerMasterFrames { .. }
+            | Self::OwnerLearningMark { .. }
+            | Self::OwnerSetup { .. }
+            | Self::Onboarding { .. } => Topic::Settings,
+            Self::OwnerConversation { .. } => Topic::Sessions,
+            Self::OwnerMemory { .. } | Self::Knowledge { .. } => Topic::Memory,
+            Self::ProposeBaseline { .. }
+            | Self::OwnerVerification { .. }
+            | Self::Assets { .. }
+            | Self::ProjectSetup { .. }
+            | Self::ProjectsHome { .. }
+            | Self::CreateProject { .. } => Topic::Projects,
+            Self::Team { .. }
+            | Self::ProposePlan { .. }
+            | Self::CoordinationState { .. }
+            | Self::TaskPlan { .. }
+            | Self::OwnerCoordination { .. }
+            | Self::RouteWorkItem { .. }
+            | Self::Mailbox { .. }
+            | Self::PinTask { .. }
+            | Self::MigrateTask { .. }
+            | Self::TaskContext { .. }
+            | Self::TaskConfig { .. } => Topic::Team,
+            Self::AccountSchedule { .. } => Topic::Accounts,
+            Self::AdmitRepository { .. }
+            | Self::AllocateWorktree { .. }
+            | Self::WorktreeLeases { .. }
+            | Self::ReleaseWorktree { .. } => Topic::Worktrees,
+            Self::Snapshot | Self::Events { .. } => Topic::Unknown,
+        }
     }
 }
 
