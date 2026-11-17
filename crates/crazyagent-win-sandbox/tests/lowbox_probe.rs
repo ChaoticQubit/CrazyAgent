@@ -97,6 +97,7 @@ fn launch(
     program: &str,
     args: &[&str],
     env: &[(String, String)],
+    stdin: Stdio,
 ) -> Output {
     Command::new(HELPER)
         .arg("--profile")
@@ -106,7 +107,7 @@ fn launch(
         .args(args)
         .envs(env.iter().map(|(key, value)| (key, value)))
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -114,7 +115,14 @@ fn launch(
 }
 
 fn inside(profile: &Path, project: &Path, args: &[&str]) -> Output {
-    launch(profile, project, &system("cmd.exe"), args, &[])
+    launch(
+        profile,
+        project,
+        &system("cmd.exe"),
+        args,
+        &[],
+        Stdio::null(),
+    )
 }
 
 #[test]
@@ -432,8 +440,22 @@ impl Lab {
     }
 
     fn exe(&mut self, label: &str, program: &str, args: &[&str], watched: &[&Path]) {
+        let project = self.project.clone();
+        self.run(label, &project, false, program, args, watched);
+    }
+
+    fn run(
+        &mut self,
+        label: &str,
+        cwd: &Path,
+        piped: bool,
+        program: &str,
+        args: &[&str],
+        watched: &[&Path],
+    ) {
         let before = sddls(watched);
-        let output = launch(&self.profile, &self.project, program, args, &self.env);
+        let stdin = if piped { Stdio::piped() } else { Stdio::null() };
+        let output = launch(&self.profile, cwd, program, args, &self.env, stdin);
         let after = sddls(watched);
         let now = watched
             .iter()
@@ -442,15 +464,34 @@ impl Lab {
             .collect::<Vec<_>>()
             .join("; ");
         self.report.push(format!(
-            "## {label}\n  args {args:?}\n  {}\n  before: {before}\n  after: {after}\n  now: {now}",
+            "## {label}\n  args {args:?} cwd {} piped stdin {piped}\n  {}\n  before: {before}\n  after: {after}\n  now: {now}",
+            cwd.display(),
             ran(&output)
         ));
     }
 
     fn cmd(&mut self, label: &str, args: &[&str], watched: &[&Path]) {
+        let project = self.project.clone();
+        self.cmd_in(label, &project, args, watched);
+    }
+
+    fn cmd_in(&mut self, label: &str, cwd: &Path, args: &[&str], watched: &[&Path]) {
         let mut line = vec!["/C"];
         line.extend_from_slice(args);
-        self.exe(label, &system("cmd.exe"), &line, watched);
+        self.run(label, cwd, false, &system("cmd.exe"), &line, watched);
+    }
+
+    fn git(&mut self) -> Option<String> {
+        let exec = Command::new("git").arg("--exec-path").output().unwrap();
+        self.report
+            .push(format!("owner git --exec-path: {}", ran(&exec)));
+        let git = PathBuf::from(
+            String::from_utf8_lossy(&exec.stdout)
+                .trim()
+                .replace('/', "\\"),
+        )
+        .join("git.exe");
+        git.is_file().then(|| plain(&git))
     }
 
     fn finish(self, title: &str) -> ! {
@@ -918,19 +959,9 @@ fn lowbox_probe_git_layout_folder_only_files() {
 #[test]
 fn lowbox_probe_real_git_in_a_container() {
     let mut lab = lab("crazyagent.test.realgit");
-    let exec = Command::new("git").arg("--exec-path").output().unwrap();
-    lab.report
-        .push(format!("owner git --exec-path: {}", ran(&exec)));
-    let git = PathBuf::from(
-        String::from_utf8_lossy(&exec.stdout)
-            .trim()
-            .replace('/', "\\"),
-    )
-    .join("git.exe");
-    if !git.is_file() {
-        lab.finish(&format!("no git.exe at {}", git.display()));
-    }
-    let git = plain(&git);
+    let Some(git) = lab.git() else {
+        lab.finish("no git.exe beside the owner's git exec path");
+    };
     let home = lab.lab.join("home");
     let control = lab.lab.join("control");
     let guarded = lab.lab.join("guarded");
@@ -976,20 +1007,7 @@ fn lowbox_probe_real_git_in_a_container() {
     lab.grant(&dot.join("hooks"), "(OI)(CI)(RX)");
     lab.cut(&dot.join("config"));
     lab.grant(&dot.join("config"), "(RX)");
-    lab.env = [
-        ("HOME", plain(&home)),
-        ("GIT_CONFIG_NOSYSTEM", "1".to_owned()),
-        ("GIT_CONFIG_COUNT", "1".to_owned()),
-        ("GIT_CONFIG_KEY_0", "safe.directory".to_owned()),
-        ("GIT_CONFIG_VALUE_0", "*".to_owned()),
-        ("GIT_AUTHOR_NAME", "probe".to_owned()),
-        ("GIT_AUTHOR_EMAIL", "probe@example.invalid".to_owned()),
-        ("GIT_COMMITTER_NAME", "probe".to_owned()),
-        ("GIT_COMMITTER_EMAIL", "probe@example.invalid".to_owned()),
-        ("GIT_TERMINAL_PROMPT", "0".to_owned()),
-    ]
-    .map(|(key, value)| (key.to_owned(), value))
-    .to_vec();
+    lab.env = git_env(&home);
     for (name, repo) in [("control", &control), ("anchor layout", &guarded)] {
         let path = plain(repo);
         let work = repo.join("w.txt");
@@ -1020,4 +1038,194 @@ fn lowbox_probe_real_git_in_a_container() {
         }
     }
     lab.finish("lowbox probe: real git in a container, report only")
+}
+
+fn git_env(home: &Path) -> Vec<(String, String)> {
+    [
+        ("HOME", plain(home)),
+        ("GIT_CONFIG_NOSYSTEM", "1".to_owned()),
+        ("GIT_CONFIG_COUNT", "1".to_owned()),
+        ("GIT_CONFIG_KEY_0", "safe.directory".to_owned()),
+        ("GIT_CONFIG_VALUE_0", "*".to_owned()),
+        ("GIT_AUTHOR_NAME", "probe".to_owned()),
+        ("GIT_AUTHOR_EMAIL", "probe@example.invalid".to_owned()),
+        ("GIT_COMMITTER_NAME", "probe".to_owned()),
+        ("GIT_COMMITTER_EMAIL", "probe@example.invalid".to_owned()),
+        ("GIT_TERMINAL_PROMPT", "0".to_owned()),
+    ]
+    .map(|(key, value)| (key.to_owned(), value))
+    .to_vec()
+}
+
+/// Step 0b, B1: which parent folder lets the container delete or rename. Five parents, each
+/// holding owner-made and container-made files and a container-made sub folder: one the owner
+/// made, one the container made, one the owner made with a Low label, one the owner made that
+/// grants the container DELETE_CHILD, and the root the helper grants. Every operation runs by
+/// absolute path, then the owner-made parent and the root again by relative path from inside.
+#[test]
+fn lowbox_probe_b1_what_lets_the_container_delete_or_rename() {
+    let mut lab = lab("crazyagent.test.b1");
+    let parent = lab.lab.join("pd");
+    fs::create_dir_all(&parent).unwrap();
+    lab.grant(&parent, "(OI)(CI)(M)");
+    let made = parent.join("made");
+    lab.cmd(
+        "the container makes a folder",
+        &["mkdir", &plain(&made)],
+        &[&made],
+    );
+    let owner_made = parent.join("owner");
+    let low = parent.join("low");
+    let child = parent.join("child");
+    for folder in [&owner_made, &low, &child] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    lab.owner(&[&plain(&low), "/setintegritylevel", "(OI)(CI)L"]);
+    lab.grant(&child, "(DC)");
+    let project = lab.project.clone();
+    let cases = [
+        ("owner-made parent", &owner_made),
+        ("container-made parent", &made),
+        ("owner-made parent with a Low label", &low),
+        ("owner-made parent granting DELETE_CHILD", &child),
+        ("the helper-granted root", &project),
+    ];
+    for (name, folder) in cases {
+        for file in [
+            "o_del.txt",
+            "o_ren.txt",
+            "o_over.txt",
+            "r_del.txt",
+            "r_ren.txt",
+        ] {
+            fs::write(folder.join(file), "owner\r\n").unwrap();
+        }
+        for file in ["c_del.txt", "c_ren.txt", "c_lock.txt", "r_lock.txt"] {
+            lab.cmd(
+                &format!("{name}: the container makes {file}"),
+                &["echo", "made>", &plain(&folder.join(file))],
+                &[],
+            );
+        }
+        lab.cmd(
+            &format!("{name}: the container makes a sub folder"),
+            &["mkdir", &plain(&folder.join("c_sub"))],
+            &[],
+        );
+        lab.owner(&[&plain(folder)]);
+        lab.owner(&[&plain(&folder.join("o_del.txt"))]);
+        lab.owner(&[&plain(&folder.join("c_del.txt"))]);
+    }
+    lab.report.push(format!(
+        "after setup:\n{}",
+        sddls(&[&parent, &owner_made, &made, &low, &child, &project])
+    ));
+    for (name, folder) in cases {
+        let at = |file: &str| folder.join(file);
+        lab.cmd(
+            &format!("{name}: delete an owner file by absolute path"),
+            &["del", "/Q", &plain(&at("o_del.txt"))],
+            &[&at("o_del.txt")],
+        );
+        lab.cmd(
+            &format!("{name}: delete a container file by absolute path"),
+            &["del", "/Q", &plain(&at("c_del.txt"))],
+            &[&at("c_del.txt")],
+        );
+        lab.cmd(
+            &format!("{name}: rename an owner file by absolute path"),
+            &["ren", &plain(&at("o_ren.txt")), "o_moved.txt"],
+            &[&at("o_ren.txt")],
+        );
+        lab.cmd(
+            &format!("{name}: rename a container file by absolute path"),
+            &["ren", &plain(&at("c_ren.txt")), "c_moved.txt"],
+            &[&at("c_ren.txt")],
+        );
+        lab.cmd(
+            &format!("{name}: rename a container lock over an owner file by absolute path"),
+            &[
+                "move",
+                "/Y",
+                &plain(&at("c_lock.txt")),
+                &plain(&at("o_over.txt")),
+            ],
+            &[&at("c_lock.txt"), &at("o_over.txt")],
+        );
+        lab.cmd(
+            &format!("{name}: rename a container sub folder by absolute path"),
+            &["ren", &plain(&at("c_sub")), "c_sub_moved"],
+            &[&at("c_sub")],
+        );
+    }
+    for (name, folder) in [cases[0], cases[4]] {
+        let at = |file: &str| folder.join(file);
+        lab.cmd_in(
+            &format!("{name}: delete an owner file by relative path"),
+            folder,
+            &["del", "/Q", "r_del.txt"],
+            &[&at("r_del.txt")],
+        );
+        lab.cmd_in(
+            &format!("{name}: rename an owner file by relative path"),
+            folder,
+            &["ren", "r_ren.txt", "r_moved.txt"],
+            &[&at("r_ren.txt")],
+        );
+        lab.cmd_in(
+            &format!("{name}: rename a container lock over a file by relative path"),
+            folder,
+            &["move", "/Y", "r_lock.txt", "r_moved.txt"],
+            &[&at("r_lock.txt"), &at("r_moved.txt")],
+        );
+    }
+    lab.finish("lowbox probe step 0b B1: what lets the container delete or rename")
+}
+
+/// Step 0b, B2: whether the container opens the NUL device, and whether git starts in it with a
+/// null stdin and with a real stdin pipe.
+#[test]
+fn lowbox_probe_b2_whether_the_container_opens_nul_and_git_starts() {
+    let mut lab = lab("crazyagent.test.b2");
+    let copy = lab.project.join("from-nul.txt");
+    lab.cmd("read NUL, expect allowed", &["type", "nul"], &[]);
+    lab.cmd("write NUL, expect allowed", &["echo", "x>nul"], &[]);
+    lab.cmd(
+        "copy NUL to a file, expect allowed",
+        &["copy", "/Y", "nul", &plain(&copy)],
+        &[&copy],
+    );
+    lab.cmd(
+        "read the NUL device path, expect allowed",
+        &["type", r"\\.\NUL"],
+        &[],
+    );
+    let Some(git) = lab.git() else {
+        lab.finish("no git.exe beside the owner's git exec path");
+    };
+    let home = lab.project.join("home");
+    fs::create_dir_all(&home).unwrap();
+    lab.env = git_env(&home);
+    let project = lab.project.clone();
+    let repo = plain(&project.join("repo"));
+    for piped in [false, true] {
+        let stdin = if piped { "piped" } else { "null" };
+        lab.run(
+            &format!("git --version, {stdin} stdin"),
+            &project,
+            piped,
+            &git,
+            &["--version"],
+            &[],
+        );
+        lab.run(
+            &format!("git init, {stdin} stdin"),
+            &project,
+            piped,
+            &git,
+            &["init", "-q", &repo],
+            &[],
+        );
+    }
+    lab.finish("lowbox probe step 0b B2: NUL and git start in the container")
 }
