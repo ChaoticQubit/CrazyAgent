@@ -241,6 +241,7 @@ pub(super) struct Connection {
     client_id: ClientId,
     sequence: u64,
     engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+    watch: watch::Watch,
 }
 
 impl Connection {
@@ -279,6 +280,8 @@ impl Connection {
         let (owner_replies, owner_receiver) = sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stop = stopped.clone();
+        let slot = watch::Slot::default();
+        let watch = watch::Watch::start(slot.clone()).map_err(|e| e.to_string())?;
         let client_id = ClientId::new(format!(
             "tui-{}-{}",
             std::process::id(),
@@ -296,6 +299,7 @@ impl Connection {
                     WorkerMode::Ordinary(client) => (*client, None),
                     WorkerMode::Paired { socket, timeout } => {
                         let mut native = NativeOwner::new(socket, timeout);
+                        native.watch = slot;
                         let (client, event) = runtime.block_on(native.attach());
                         if owner_replies
                             .send(OwnerReply {
@@ -1032,6 +1036,7 @@ impl Connection {
             client_id,
             sequence: 0,
             engine: None,
+            watch,
         })
     }
 
@@ -1258,6 +1263,7 @@ struct NativeOwner {
     model_pending: Option<model_access::Submission>,
     model_operation: Option<(RequestId, String)>,
     rule_lane: Option<std::thread::JoinHandle<()>>,
+    watch: watch::Slot,
 }
 
 impl NativeOwner {
@@ -1278,6 +1284,7 @@ impl NativeOwner {
             model_pending: None,
             model_operation: None,
             rule_lane: None,
+            watch: watch::Slot::default(),
         }
     }
 

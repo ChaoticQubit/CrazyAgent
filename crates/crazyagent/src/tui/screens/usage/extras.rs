@@ -127,33 +127,40 @@ pub const FRESH_GAIN_MS: i64 = 15 * 60_000;
 /// The most new free resets one look tells, so a burst never floods the message line.
 pub const NOTICES_PER_LOOK_MAX: usize = 3;
 
-/// The shell's watch for new free resets: when it last asked for the stored extras, and each
-/// account's last gain stamp seen, none before the first look.
+/// The shell's watch for new free resets: when it last asked for the stored extras, whether
+/// the minute gate held a read back since, and each account's last gain stamp seen, none
+/// before the first look.
 #[derive(Debug, Default)]
 pub struct ResetWatch {
     asked_ms: Option<i64>,
+    owed: bool,
     known: Option<HashMap<String, i64>>,
 }
 
 impl ResetWatch {
     /// Tells whether the shell asks for the stored extras now: never asked, `RESET_WATCH_MS`
-    /// since the last ask, or a clock that went back; a yes marks the ask. Input: now.
-    /// Output: the answer.
+    /// since the last ask, or a clock that went back; a yes marks the ask, a no owes the read.
+    /// Input: now. Output: the answer.
     pub fn due(&mut self, now_ms: i64) -> bool {
-        let due = self
-            .asked_ms
-            .is_none_or(|at| at > now_ms || now_ms - at >= RESET_WATCH_MS);
+        let due = self.open(now_ms);
         if due {
             self.asked_ms = Some(now_ms);
         }
+        self.owed = !due;
         due
     }
 
     /// Tells whether a read the minute gate held back may go now, so a change seen inside the
     /// gate is still read once it ends with no further watch delivery. Input: now. Output:
     /// the answer.
-    pub fn owed(&self, _now_ms: i64) -> bool {
-        false
+    pub fn owed(&self, now_ms: i64) -> bool {
+        self.owed && self.open(now_ms)
+    }
+
+    /// Tells whether the minute gate lets an ask through now. Input: now. Output: the answer.
+    fn open(&self, now_ms: i64) -> bool {
+        self.asked_ms
+            .is_none_or(|at| at > now_ms || now_ms - at >= RESET_WATCH_MS)
     }
 
     /// Picks the new free resets to tell from one read, the same as the desktop's: each
