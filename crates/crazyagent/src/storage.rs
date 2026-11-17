@@ -20,7 +20,7 @@ pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
-mod migrations;
+pub(crate) mod migrations;
 #[cfg(all(test, unix))]
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
@@ -44,6 +44,7 @@ pub(crate) mod setup;
 pub(crate) mod trash;
 #[cfg(unix)]
 pub(crate) use native_auth::CUSTODIAN_CODES;
+pub mod opening;
 pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
@@ -1146,9 +1147,9 @@ impl Storage {
                             let _ = reply.send(result);
                         }
                         Job::Close(reply) => {
-                            if let Some(stamp) = &owner_runtime {
-                                let _ = owner_stop(&mut connection, stamp);
-                                crate::state_log::fence::host_stopped(stamp);
+                            if let Some(stamp) = owner_runtime.take() {
+                                let _ = owner_stop(&mut connection, &stamp);
+                                crate::state_log::fence::host_stopped(&stamp);
                             }
                             drop(connection);
                             drop(custody.take());
@@ -1166,6 +1167,9 @@ impl Storage {
                             let _ = reply.send(connection.busy_handler(Some(handler)).map_err(error));
                         }
                     }
+                }
+                if let Some(stamp) = &owner_runtime {
+                    crate::state_log::fence::host_stopped(stamp);
                 }
             })
             .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
@@ -1321,9 +1325,9 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
-    crate::worktrees::reconcile(connection)?;
     crate::project_setup::removed::initialize(connection)?;
-    crate::project_setup::forget_removed(connection, &["repository_admissions"])?;
+    let opened_ms = crate::state_log::replay::Clock::System.now_ms();
+    crate::worktrees::log::sweep(connection, opening::Opening::new(opened_ms))?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -1755,6 +1759,12 @@ fn apply(
         (transaction, outcome)
     } else {
         (transaction, outcome)
+    };
+    let revision = match &request.command {
+        Command::AdmitRepository { .. } | Command::AllocateWorktree { .. } => {
+            owner_revision(&transaction)?
+        }
+        _ => revision,
     };
     let changed = mutation && outcome == Outcome::Applied;
     let next = if changed {
@@ -2665,6 +2675,7 @@ fn owner_apply_with(
     } else {
         revision
     };
+    let mut redacted = 0;
     if changed {
         let wire = WireRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -2677,7 +2688,10 @@ fn owner_apply_with(
         if let Some(removed) =
             crate::project_setup::removed::event::removal(&wire.command, deleting)
         {
-            crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+            let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+            let fence = crate::state_log::fence::Fence::Owner(a.clone());
+            let project = removed.project.as_str();
+            redacted = crate::worktrees::log::forget_project(&tx, project, seq, &fence)?;
         }
     }
     let provenance = OwnerProvenance {
@@ -2700,6 +2714,10 @@ fn owner_apply_with(
     )?;
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
+    assert!(redacted == 0 || changed, "only an applied removal redacts");
+    if redacted > 0 && !crate::state_log::replay::checkpoint(db) {
+        eprintln!("state_log_redact_checkpoint_busy");
+    }
     if changed
         && let OwnerOperation::Apply {
             mutation: OwnerMutation::CreateDemo { project_id, .. },

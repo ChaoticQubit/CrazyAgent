@@ -295,6 +295,11 @@ async fn past_its_bound_a_watch_is_refused_busy_until_one_ends() {
     );
 }
 
+/// A revoked owner gets no reply. A watch waiting at the revoke is refused at its second
+/// check with the handshake's code, `owner_authentication_failed`, or
+/// `owner_grant_stale_or_revoked`; a re-watch after it is refused at admission, which answers
+/// nothing, so the client reads `watch_outcome_unknown`, or `watch_unavailable` when the
+/// engine closed first. A fresh watch after the revoke ends at admission too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     let owner = super::super::usage_tests::Usage::start().await;
@@ -314,7 +319,7 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
     .unwrap();
     let watch = tokio::spawn(async move {
         let (mut cursor, mut mark) = (cursor, mark);
-        loop {
+        let reply = loop {
             match client.watch(cursor.clone(), Some(mark), 10_000).await {
                 Ok(
                     WatchReply::Changed {
@@ -331,9 +336,10 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
                         mark: moved,
                     },
                 ) => (cursor, mark) = (next, moved),
-                other => return other,
+                other => break other,
             }
-        }
+        };
+        (reply, client)
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!watch.is_finished(), "an admitted owner keeps watching");
@@ -347,15 +353,250 @@ async fn an_owner_revoked_while_it_watches_is_refused_and_its_watching_ends() {
         })
         .await
         .unwrap();
-    let reply = tokio::time::timeout(Duration::from_secs(5), watch)
+    let (reply, client) = tokio::time::timeout(Duration::from_secs(5), watch)
         .await
         .unwrap()
         .unwrap();
+    let unanswered = ["watch_outcome_unknown", "watch_unavailable"];
     let refused = reply.expect_err("a revoked owner gets no reply");
     assert!(
-        refused == failure("owner_grant_stale_or_revoked")
-            || refused == failure("owner_authentication_failed"),
+        refused == failure("owner_authentication_failed")
+            || refused == failure("owner_grant_stale_or_revoked")
+            || unanswered.contains(&refused.0.as_str()),
         "{refused:?}"
     );
+    let again = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.watch(Cursor::new(0), None, 1_000),
+    )
+    .await
+    .expect("a revoked handshake is refused at once, not after the client's timeout")
+    .expect_err("a revoked owner is not admitted again");
+    assert!(unanswered.contains(&again.0.as_str()), "{again:?}");
+    owner.stop().await;
+}
+
+/// The guard of rv-sec2 S3a F1: a watch parked past its first owner check when the owner is
+/// revoked is answered only the refusal of its second check, never what woke it. The row
+/// holds the owner barrier across the revoke, so no reply can be written before the second
+/// check; a reply a background commit got out before the barrier, even one sent before the
+/// watch parked, is read and the watch parks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refusal() {
+    let owner = super::super::usage_tests::Usage::start().await;
+    let runtime = owner.runtime();
+    let packet = owner.packet();
+    let admission = runtime.authority.authenticate(&packet).unwrap();
+    let first = owner
+        .client
+        .watch(Cursor::new(0), None, 1_000)
+        .await
+        .unwrap();
+    let WatchReply::Changed {
+        mut cursor,
+        mut mark,
+        ..
+    } = first
+    else {
+        panic!("a first watch returns at once, got {first:?}");
+    };
+    let waiting = || runtime.authority.watches.waiting.load(Ordering::SeqCst);
+    for _ in 0..8 {
+        let body = serde_json::to_vec(&json!({
+            "watch": { "after": cursor, "mark": mark, "wait_ms": 10_000 }
+        }))
+        .unwrap();
+        let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+        for end in [&server, &client] {
+            end.set_nonblocking(true).unwrap();
+        }
+        let mut server = UnixStream::from_std(server).unwrap();
+        let mut client = UnixStream::from_std(client).unwrap();
+        let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
+        let admission = admission.clone();
+        let serving = tokio::spawn(async move {
+            super::serve(&mut server, &engine, &authority, &packet, &admission, &body).await
+        });
+        let parked = Clock::now() + Duration::from_secs(5);
+        while waiting() == 0 && !serving.is_finished() {
+            assert!(
+                Clock::now() < parked,
+                "the watch parks past its first check or answers"
+            );
+            tokio::task::yield_now().await;
+        }
+        let barrier = runtime.engine.owner_egress.write().await;
+        let early = tokio::time::timeout(Duration::from_millis(50), read_frame(&mut client)).await;
+        if let Ok(frame) = early {
+            let reply: WatchReply = serde_json::from_slice(&frame.unwrap()[4..]).unwrap();
+            let (WatchReply::Changed {
+                cursor: next,
+                mark: moved,
+                ..
+            }
+            | WatchReply::Refresh {
+                cursor: next,
+                mark: moved,
+            }
+            | WatchReply::Quiet {
+                cursor: next,
+                mark: moved,
+            }) = reply
+            else {
+                panic!("an owner not yet revoked is answered, got {reply:?}");
+            };
+            (cursor, mark) = (next, moved);
+            drop(barrier);
+            serving.await.unwrap().unwrap();
+            continue;
+        }
+        let control = OwnerControl {
+            operation_id: RequestId::new("revoke-parked-watch").unwrap(),
+            target: OwnerClientKind::Tui,
+            expected_epoch: runtime.epoch(OwnerClientKind::Tui).unwrap(),
+            decision: OwnerDecision::Revoke,
+        };
+        let (revoked, registration) = runtime
+            .engine
+            .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
+            .await
+            .unwrap();
+        runtime
+            .authority
+            .publish(registration, runtime.authority.next_control())
+            .unwrap();
+        assert!(!revoked.active);
+        drop(barrier);
+        let frame = tokio::time::timeout(Duration::from_secs(15), read_frame(&mut client))
+            .await
+            .expect("the parked watch is answered once the barrier drops")
+            .unwrap();
+        let reply: WatchReply = serde_json::from_slice(&frame[4..]).unwrap();
+        assert_eq!(
+            reply,
+            WatchReply::Rejected {
+                code: "owner_authentication_failed".into()
+            }
+        );
+        serving.await.unwrap().unwrap();
+        owner.stop().await;
+        return;
+    }
+    panic!("background commits woke the watch before every revoke");
+}
+
+/// Creates one project through the engine's owner client, at the revision a capabilities
+/// read gives, so the commit names the projects topic. Inputs: the engine and the project's
+/// id. Output: none; it panics unless the change applied.
+async fn create_project(owner: &super::super::usage_tests::Usage, id: &str) {
+    let read = OwnerRequest {
+        protocol_version: crate::protocol::PROTOCOL_VERSION,
+        request_id: RequestId::new(format!("{id}-read")).unwrap(),
+        expected_revision: Cursor::new(0),
+        operation: OwnerOperation::Read {
+            query: OwnerRead::Capabilities,
+        },
+    };
+    let OwnerResponse::Read { state } = owner.client.request(read).await.unwrap().response else {
+        panic!("the capabilities read failed");
+    };
+    let created = owner
+        .client
+        .request(OwnerRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            request_id: RequestId::new(id).unwrap(),
+            expected_revision: state.revision,
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::CreateProject {
+                    project_id: ProjectId::new(id).unwrap(),
+                    spec: ProjectSpec {
+                        name: id.into(),
+                        repositories: vec![],
+                    },
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let OwnerResponse::Applied { operation } = &created.response else {
+        panic!("not applied: {created:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied, "{created:?}");
+}
+
+/// Reads the turns a follow hands on until one names `topic`, for at most ten seconds, two
+/// poll periods. Inputs: the receiver and the topic. Output: that turn's topics.
+async fn handed(
+    received: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<Topic>>,
+    topic: Topic,
+) -> Vec<Topic> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let topics = tokio::time::timeout_at(deadline, received.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no turn named {topic:?} in time"))
+            .expect("the follow still runs");
+        if topics.contains(&topic) {
+            return topics;
+        }
+    }
+}
+
+/// The bridge's follow on a live engine (v2.5 S3b): an owner change reaches its receiver
+/// with its topic, and a change made while the follow has no connection arrives once it has
+/// one again, from the cursor it kept, after which nothing is handed on a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_followed_watch_hands_on_each_change_and_one_made_while_it_had_no_connection() {
+    let owner = super::super::usage_tests::Usage::start().await;
+    let watcher = Arc::new(
+        OwnerClient::attach(
+            &owner.client.root.path,
+            OwnerClientKind::Tui,
+            Duration::from_secs(20),
+        )
+        .unwrap(),
+    );
+    let connected = Arc::new(AtomicBool::new(true));
+    let (missed, mut missing) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel::<Vec<Topic>>();
+    let link = Arc::clone(&connected);
+    let following = tokio::spawn(crate::watch_feed::follow(
+        move || {
+            let client = link.load(Ordering::SeqCst).then(|| Arc::clone(&watcher));
+            if client.is_none() {
+                let _ = missed.send(());
+            }
+            std::future::ready(client)
+        },
+        move |topics: &[Topic]| sent.send(topics.to_vec()).is_ok(),
+    ));
+    let first = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .expect("a first watch has no mark, so it is answered at once")
+        .unwrap();
+    assert_eq!(first.last(), Some(&Topic::Unknown), "{first:?}");
+    create_project(&owner, "followed-1").await;
+    let applied = Clock::now();
+    handed(&mut received, Topic::Projects).await;
+    assert!(applied.elapsed() < WAKE, "{:?}", applied.elapsed());
+    connected.store(false, Ordering::SeqCst);
+    create_project(&owner, "followed-2").await;
+    tokio::time::timeout(Duration::from_secs(5), missing.recv())
+        .await
+        .expect("a watch in flight ends with the change, and the next turn has no connection")
+        .unwrap();
+    create_project(&owner, "followed-3").await;
+    while received.try_recv().is_ok() {}
+    connected.store(true, Ordering::SeqCst);
+    handed(&mut received, Topic::Projects).await;
+    let deadline = tokio::time::Instant::now() + WAKE;
+    while let Ok(topics) = tokio::time::timeout_at(deadline, received.recv()).await {
+        let topics = topics.expect("the follow still runs");
+        assert!(
+            !topics.contains(&Topic::Projects),
+            "handed on twice: {topics:?}"
+        );
+    }
+    following.abort();
     owner.stop().await;
 }

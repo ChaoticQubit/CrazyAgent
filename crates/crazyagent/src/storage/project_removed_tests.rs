@@ -14,7 +14,8 @@ const REMOVED: &str = "removed";
 const OTHER: &str = "other";
 
 /// The second part of the removal's projection (v2.5 L14b): activity, coordination, GitHub
-/// rule proposals, the IDE Run setting, the schedule and usage, on this module's store.
+/// rule proposals, the IDE Run setting, the schedule and usage, on this module's store,
+/// rebuilt from the log equal to the live store, and the engine's open writes off the log.
 mod areas;
 
 /// Each area the removal's projection clears, with the rows [`seed`] gives one project
@@ -463,4 +464,52 @@ fn a_removal_without_its_engine_host_here_is_refused_and_changes_nothing() {
         )
         .unwrap();
     assert!(present, "the refused removal keeps the project");
+}
+
+/// v2.5 L6 Q10: a removal tombstones the removed project's `RepositoryAdmitted` events,
+/// keeping the other project's and its own `ProjectRemoved`, and the worktrees replay brings
+/// back no admission of the removed project, even from a snapshot run taken before the
+/// removal that still holds it, since replay applies the removal's admissions delete at its
+/// place in the log. The other project's admission replays as it stands.
+#[test]
+fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_back() {
+    use crate::worktrees::log;
+    let mut s = store();
+    let engine = || fence::Fence::Engine(s.started.host.clone());
+    let tx = s.db.transaction().unwrap();
+    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    for project in [REMOVED, OTHER] {
+        let project_id = ProjectId::new(project).unwrap();
+        let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));
+        log::record(&mut appender, 1, &admitted).unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = s.db.transaction().unwrap();
+    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    log::snapshot(&mut appender, 2).unwrap();
+    tx.commit().unwrap();
+
+    let request = remove_request(&mut s.db);
+    let admission = &s.started.owners[0].admission;
+    let applied = owner_apply(&mut s.db, &s.config, &s.path, admission, &request).unwrap();
+    assert_eq!(applied.result, OwnerResult::Applied);
+
+    let events = logged(&s.db);
+    let admitted: Vec<&Vec<u8>> = events
+        .iter()
+        .filter(|(_, _, kind, _, _)| kind == log::KIND_ADMITTED)
+        .map(|(_, _, _, _, body)| body)
+        .collect();
+    assert_eq!(admitted.len(), 2);
+    assert_eq!(admitted[0].as_slice(), crate::state_log::TOMBSTONE);
+    assert!(String::from_utf8_lossy(admitted[1]).contains("/repo/other"));
+    let (_, _, kind, _, body) = events.last().unwrap();
+    assert_eq!(kind, event::KIND, "the removal keeps its own event");
+    assert_ne!(body.as_slice(), crate::state_log::TOMBSTONE);
+
+    let live = rows(&s.db, "repository_admissions").unwrap();
+    assert_eq!(live.len(), 1, "only the other project's admission stands");
+    let tx = s.db.transaction().unwrap();
+    log::rebuild(&tx).unwrap();
+    assert_eq!(rows(&tx, "repository_admissions").unwrap(), live);
 }

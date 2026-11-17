@@ -174,7 +174,7 @@ impl JsonlRpc {
             config.tools_off.as_deref().unwrap_or_default()
         };
         let argv = super::ordered(&config.argv, config.positional, resumed, off)
-            .map(|argument| super::fill(argument, &value))
+            .map(|argument| super::fill(argument, value))
             .collect::<Result<Vec<String>, LaunchError>>()?;
         assert_eq!(argv.len(), config.argv.len() + resumed.len() + off.len());
         let conversation = Self {

@@ -131,7 +131,8 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 
     /// Starts appending in a transaction of a writer on its own connection, moving the
-    /// `state` revision once for it after its fence is checked. Inputs: the transaction and
+    /// `state` revision once for it after its fence is checked, and writing that revision's
+    /// `events` row so clients see the change (`publish`). Inputs: the transaction and
     /// the fence. Output: the appender, a fence refusal, or `state_log_revision_exhausted`
     /// when the revision is at its largest value.
     pub fn own(tx: &'a Transaction<'c>, fence: Fence) -> Result<Self, EngineError> {
@@ -145,7 +146,22 @@ impl<'a, 'c> Appender<'a, 'c> {
         if moved != 1 {
             return Err(error("state_log_revision_exhausted"));
         }
-        Self::begin(tx, state_revision(tx)?, fence)
+        let appender = Self::begin(tx, state_revision(tx)?, fence)?;
+        publish(tx, appender.revision())?;
+        Ok(appender)
+    }
+
+    /// Starts appending in a transaction of the storage open or one of its schema steps,
+    /// which write before any engine host of the store starts, so they bring the open's
+    /// proof in place of a host or owner fence (v2.5 L6). It moves the `state` revision
+    /// once, as [`Self::own`]. Inputs: the transaction and the proof. Output: the appender,
+    /// `state_log_opening_host_running` or `state_log_revision_exhausted`.
+    #[cfg(any(unix, test))]
+    pub(crate) fn opening(
+        tx: &'a Transaction<'c>,
+        opening: crate::storage::opening::Opening,
+    ) -> Result<Self, EngineError> {
+        Self::own(tx, Fence::Opening(opening))
     }
 
     /// Runs one projection apply in the appender's transaction after checking the fence
@@ -385,6 +401,42 @@ fn state_revision(db: &Connection) -> Result<u64, EngineError> {
         })
         .map_err(error)?;
     u64::try_from(revision).map_err(error)
+}
+
+/// The client an engine-own revision's `events` row names. The wire refuses every `owner:`
+/// client and an owner's own is `owner:` and 64 hex digits, so no client takes the row for
+/// its own request.
+const ENGINE_CLIENT: &str = "owner:engine";
+
+/// The most `events` rows an engine-own write keeps: the top of the `events_retained`
+/// setting (1 to 256), so it never trims a row a client's setting keeps; the next owner
+/// request trims to the setting.
+const EVENTS_KEPT_MAX: i64 = 256;
+
+/// Writes the `events` row of a revision an engine-own write moved, in its transaction, so
+/// a client catching up from `events` moves to it and its next save is not
+/// `stale_revision` (v2.5 L6, fix11 L7 Q6). Every store with a `state` table has `events`:
+/// both come from the same schema batch. Inputs: the transaction and the revision. Output:
+/// Ok or the store's refusal.
+fn publish(tx: &Transaction<'_>, revision: u64) -> Result<(), EngineError> {
+    use crate::protocol::{ClientId, Cursor, Event, RequestId};
+    assert!(revision > 0, "an own write moved the revision");
+    let event = Event {
+        cursor: Cursor::new(revision),
+        request_id: RequestId::new(format!("engine-{revision}")).map_err(error)?,
+        client_id: ClientId::new(ENGINE_CLIENT).map_err(error)?,
+    };
+    let cursor = i64::try_from(revision).map_err(error)?;
+    let body = serde_json::to_string(&event).map_err(error)?;
+    tx.execute("INSERT INTO events VALUES (?1,?2)", params![cursor, body])
+        .map_err(error)?;
+    tx.execute(
+        "DELETE FROM events WHERE cursor<=?1",
+        [cursor.saturating_sub(EVENTS_KEPT_MAX)],
+    )
+    .map_err(error)?;
+    assert_eq!(event.cursor.value(), revision);
+    Ok(())
 }
 
 /// Creates the log table inside the caller's transaction when it is absent, so it

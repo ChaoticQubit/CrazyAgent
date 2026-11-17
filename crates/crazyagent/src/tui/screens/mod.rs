@@ -385,6 +385,13 @@ pub trait Screen {
         false
     }
 
+    /// True while the screen follows engine work that can move with no engine.db commit, such
+    /// as a sign-in, an install or a creation, so the shell reads again every few seconds and
+    /// not only on a watch delivery. Input: the context. Output: whether it follows.
+    fn follows(&self, ctx: &Ctx) -> bool {
+        self.busy(ctx)
+    }
+
     /// True while leaving would lose typed work, so Quit asks first.
     fn draft(&self) -> bool {
         false

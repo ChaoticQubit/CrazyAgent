@@ -329,7 +329,7 @@ impl ResearchAccount {
             Self::AnthropicEndpoint { .. } | Self::ManagedClaude { .. } => {
                 ResearchHarness::ClaudeCode
             }
-            Self::Listed { harness, .. } => ResearchHarness::Listed(*harness),
+            Self::Listed { harness, .. } => ResearchHarness::Listed(harness),
         }
     }
 }

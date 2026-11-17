@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 mod tests;
 
-/// The folder beside engine.db that holds one folder per upgrade backup.
+/// The folder beside engine.db that holds one folder per upgrade backup, each with a full
+/// engine.db copy and the settings texts kept with it. The sandbox names it among the engine
+/// secrets, so no granted root may hold or sit inside it.
 pub(crate) const BACKUPS: &str = "backups";
 
 /// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
@@ -99,7 +101,26 @@ pub(crate) const STEPS: &[Step] = &[
         to: 12,
         run: app_plugin_store,
     },
+    Step {
+        to: 13,
+        run: worktrees_on_the_log,
+    },
 ];
+
+/// Step 13 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written
+/// before the log reach replay through one snapshot run, appended through the open's proof
+/// since no engine host runs during an upgrade; a store with no worktree row gets none.
+/// Input: the open upgrade transaction. Output: Ok or the log's refusal.
+fn worktrees_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let at_ms = crate::state_log::replay::Clock::System.now_ms();
+    let opening = super::opening::Opening::new(at_ms);
+    crate::worktrees::log::first_run(tx, opening)?;
+    assert!(
+        !tx.is_autocommit(),
+        "a step leaves the upgrade transaction open"
+    );
+    Ok(())
+}
 
 /// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step
 /// shipped: a wider record needs a step of its own, which the check below demands at build
@@ -149,10 +170,10 @@ fn usage_counts_by_model(tx: &Transaction<'_>) -> Result<(), EngineError> {
     crate::usage::capture::migrate_counts(tx)
 }
 
-/// Says whether a table of that name exists. Inputs: the open transaction and the name.
-/// Output: true when `sqlite_schema` holds a table row for it.
-fn has_table(tx: &Transaction<'_>, name: &str) -> Result<bool, EngineError> {
-    tx.query_row(
+/// Says whether a table of that name exists. Inputs: the connection or open transaction and
+/// the name. Output: true when `sqlite_schema` holds a table row for it.
+fn has_table(db: &Connection, name: &str) -> Result<bool, EngineError> {
+    db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
         [name],
         |row| row.get(0),
@@ -620,8 +641,189 @@ fn restore_pinned_at(
     if let Err(cause) = restored {
         return Err(drop_unneeded(&db, &kept, cause));
     }
+    sweep_unbound_keys(&db, root, settings, &kept);
     assert!(kept.starts_with(&folder));
     Ok(kept)
+}
+
+/// Settles the owner's secrets the restored 2.4 rows no longer name (V250-L5-N5, N5B): each
+/// plugin key no restored app plugin binding holds, so every one for a 2.4 copy, and each
+/// account key, generated SDK home and native profile slot neither a restored account nor
+/// the live settings name, as the start sweep judges ([`super::trash::referenced`]). One a
+/// row of the dated copy of the replaced 2.5 data names moves into the same folder of that
+/// copy (DEC-192), where it stays with the data that names it; one no row of it names, left
+/// by a removal, is deleted as removals delete it. No settings, settings that cannot be read,
+/// or a copy that cannot be opened keep every account's files in place. A failure is logged
+/// by what it swept and its code and never fails the checked restore. Inputs: the restored
+/// connection, still held alone, the engine root, the settings sources and the copy's folder.
+fn sweep_unbound_keys(
+    db: &Connection,
+    root: &Path,
+    settings: Option<&SettingsSources>,
+    copy: &Path,
+) {
+    use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, settle_unkept_in};
+    use super::trash::{ACCOUNT_KEY, referenced};
+    let replaced = match replaced_database(copy) {
+        Ok(replaced) => replaced,
+        Err(cause) => return sweep_failed(REPLACED_DATABASE, &cause),
+    };
+    let mut swept = vec![(
+        PLUGIN_KEYS,
+        settle_unkept_in(
+            root,
+            PLUGIN_KEYS,
+            copy,
+            |name| plugin_key_bound(db, name),
+            |name| plugin_key_bound(&replaced, name),
+        ),
+    )];
+    match settings.map(SettingsSources::config) {
+        Some(Ok(config)) => {
+            let catalog = config.settings.model_access.as_ref();
+            let named = |kind: &str, name: &str| referenced(db, catalog, kind, name);
+            let keys = settle_unkept_in(
+                root,
+                ACCOUNT_KEYS,
+                copy,
+                |name| named(ACCOUNT_KEY, name),
+                |name| referenced(&replaced, None, ACCOUNT_KEY, name),
+            );
+            swept.push((ACCOUNT_KEYS, keys));
+            let profiles = sweep_replaced_profiles(root, copy, &replaced, named);
+            swept.push((PROFILES, profiles));
+        }
+        Some(Err(cause)) => swept.push((ACCOUNT_KEYS, Err(cause))),
+        None => {}
+    }
+    for (folder, result) in swept {
+        if let Err(cause) = result {
+            sweep_failed(folder, &cause);
+        }
+    }
+}
+
+/// Logs one failed part of a restore's sweep by name and by the code before its first `:`,
+/// never a key name or a path. Inputs: what was swept and the failure.
+fn sweep_failed(folder: &str, cause: &EngineError) {
+    let code = cause.0.split(':').next().unwrap_or_default();
+    eprintln!("restore_key_sweep_failed folder={folder} cause={code}");
+}
+
+/// What a restore's sweep calls the replaced copy's database in its log.
+const REPLACED_DATABASE: &str = "replaced-database";
+
+/// Opens the database of the dated copy of the replaced 2.5 data read-only, without
+/// following a link. Input: the copy's folder. Output: the connection, or the failure.
+fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    Connection::open_with_flags(copy.join(DATABASE), flags).map_err(error)
+}
+
+/// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.
+const PROFILES: &str = "account-profiles";
+
+/// Settles each generated SDK home and native profile slot the replaced 2.5 copy names that
+/// `named` does not keep: one a saved account of the copy names moves into the same folder
+/// of that dated copy ([`crate::engine::bootstrap::move_aside`]), and one only the copy's
+/// trash still notes, of an account the owner removed in 2.5, is deleted through the start
+/// sweep's own removal ([`super::trash::delete`]). Every keep test runs before the first
+/// change, and a failed one keeps that one in place and does not stop the others. Inputs: the
+/// engine root, the copy's folder and database, and the keep test by kind and name. Output:
+/// how many were settled, or the copy's or keep test's failure, or the first failed change.
+fn sweep_replaced_profiles(
+    root: &Path,
+    copy: &Path,
+    replaced: &Connection,
+    named: impl Fn(&str, &str) -> Result<bool, EngineError>,
+) -> Result<usize, EngineError> {
+    let mut unkept = Vec::new();
+    for (kind, name, saved) in replaced_profiles(replaced)? {
+        if !named(kind, name.as_str())? {
+            unkept.push((kind, name, saved));
+        }
+    }
+    let mut failed = None;
+    let mut settled = 0;
+    for (kind, name, saved) in &unkept {
+        let gone = if *saved {
+            let home = *kind == super::trash::GENERATED_HOME;
+            crate::protocol::CredentialRef::new(name.as_str())
+                .map_err(|_| error("account_key_reference_invalid"))
+                .and_then(|reference| {
+                    crate::engine::bootstrap::move_aside(root, copy, &reference, home)
+                })
+        } else {
+            super::trash::delete(root, kind, name)
+        };
+        match gone {
+            Ok(()) => settled += 1,
+            Err(cause) => {
+                failed.get_or_insert(cause);
+            }
+        }
+    }
+    assert!(settled <= unkept.len());
+    failed.map_or(Ok(settled), Err)
+}
+
+/// The generated SDK homes and native profile slots the replaced 2.5 copy names, once each:
+/// those of its saved accounts ([`super::accounts::profile_files`]), marked saved, then those
+/// only its trash still notes. Input: the copy's database. Output: each kind with its name
+/// and whether a saved account names it, or the copy's failure.
+fn replaced_profiles(copy: &Connection) -> Result<Vec<(&'static str, String, bool)>, EngineError> {
+    use super::trash::{GENERATED_HOME, NATIVE_SIGN_IN};
+    use std::collections::BTreeSet;
+    let saved: BTreeSet<(&'static str, String)> =
+        super::accounts::profile_files(copy)?.into_iter().collect();
+    let mut noted = BTreeSet::new();
+    if has_table(copy, "file_trash")? {
+        let rows = copy
+            .prepare("SELECT kind, name FROM file_trash WHERE kind IN (?1, ?2) LIMIT ?3")
+            .map_err(error)?
+            .query_map(
+                rusqlite::params![GENERATED_HOME, NATIVE_SIGN_IN, SWEEP_NOTES_MAX],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        for (kind, name) in rows {
+            let kind = if kind == GENERATED_HOME {
+                GENERATED_HOME
+            } else {
+                NATIVE_SIGN_IN
+            };
+            if !saved.contains(&(kind, name.clone())) {
+                noted.insert((kind, name));
+            }
+        }
+    }
+    Ok(saved
+        .into_iter()
+        .map(|(kind, name)| (kind, name, true))
+        .chain(noted.into_iter().map(|(kind, name)| (kind, name, false)))
+        .collect())
+}
+
+/// The most trash notes a restore's sweep reads from the replaced copy.
+const SWEEP_NOTES_MAX: i64 = 10_000;
+
+/// Whether a restored app plugin binding holds a plugin key by its file name; a database
+/// with no binding table, as every 2.4 copy, holds none. Inputs: the restored connection
+/// and the name. Output: the answer, or any SQLite failure.
+fn plugin_key_bound(db: &Connection, name: &str) -> Result<bool, EngineError> {
+    if !has_table(db, "app_plugin_secrets")? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM app_plugin_secrets WHERE source='key' AND reference=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(error)
 }
 
 /// Settles the copy a failed restore kept: it is removed when the live database still holds

@@ -5,7 +5,7 @@ use crazyagent::conversation::{
 };
 use crazyagent::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerOperation, OwnerPageCursor, OwnerRead,
-    OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
+    OwnerReadReply, OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
 };
 use crazyagent::engine::{Client, EngineError};
 use crazyagent::protocol::{BaselineId, ProjectId, ProjectSpec};
@@ -55,6 +55,7 @@ pub mod terminal;
 #[cfg(all(unix, feature = "native-webdriver"))]
 pub mod trial_pick;
 mod usage;
+pub mod watch;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -220,6 +221,7 @@ struct BaselineSelection {
     generation: u64,
     approved: bool,
     revoked: bool,
+    basis: (OwnerRead, OwnerReadReply),
 }
 
 #[derive(Debug, Serialize)]
@@ -520,13 +522,15 @@ impl NativeBridge {
             .generation
             .checked_add(1)
             .ok_or_else(|| failure("selection_limit"))?;
+        let query = OwnerRead::Baseline {
+            baseline_id: baseline_id.clone(),
+        };
         let state = self
             .controller()?
-            .read(OwnerRead::Baseline {
-                baseline_id: baseline_id.clone(),
-            })
+            .read(query.clone())
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))?;
+        let basis = (query, state.clone());
         let OwnerData::Baseline {
             draft,
             approved,
@@ -542,6 +546,7 @@ impl NativeBridge {
             generation: self.generation,
             approved,
             revoked,
+            basis,
         });
         assert_eq!(detail.id, id);
         assert!(detail.fresh);
@@ -581,8 +586,9 @@ impl NativeBridge {
             }
         };
         let generation = selected.generation;
+        let basis = selected.basis.clone();
         self.controller()?
-            .begin_mutation(mutation, generation)
+            .begin_mutation_on(mutation, generation, basis)
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.selected = None;
         self.next = None;
@@ -879,6 +885,13 @@ impl NativeBridge {
             self.controller()?.reconcile_pending().await
         } else {
             let sent = self.controller()?.retry_pending().await;
+            if let Some(resent) = self
+                .controller()?
+                .resent()
+                .map(|(id, _)| id.as_str().to_owned())
+            {
+                intent.operation_id = resent;
+            }
             self.checked_once(sent).await?
         };
         let mut rejection = None;

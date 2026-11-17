@@ -1337,3 +1337,29 @@ fn go_to_keeps_its_selection_on_a_row_when_a_read_shrinks_the_list() {
     };
     assert_eq!(go.selected, 0);
 }
+
+#[test]
+fn with_no_watch_delivery_the_shell_reads_again_only_while_the_top_screen_follows_engine_work() {
+    let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
+    assert!(
+        shell.reads_due(true),
+        "a profile still loading follows engine work, so the poll period reads again"
+    );
+    assert!(
+        !shell.reads_due(false),
+        "nothing reads again before the poll period ends"
+    );
+
+    shell.arrive(Arrival::Profile(Ok(Some(OwnerProfile {
+        name: "Mira".into(),
+        role: String::new(),
+        bio: String::new(),
+        preferred_stack: Vec::new(),
+        working_style: Default::default(),
+    }))));
+    assert!(!shell.busy());
+    assert!(
+        !shell.reads_due(true),
+        "a screen that follows nothing waits for the watch, whatever the period"
+    );
+}

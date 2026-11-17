@@ -179,8 +179,12 @@ fn in_catalog(catalog: Option<&ModelAccess>, name: &str) -> bool {
     })
 }
 
+/// Whether a live record or a catalog connection still names a file of a kind, so neither
+/// the start sweep nor a restore's key sweep deletes it. Inputs: the engine connection, the
+/// catalog, the kind and the name. Output: the answer, `file_trash_kind_unknown`, or any
+/// SQLite failure, a missing table included.
 #[cfg(unix)]
-fn referenced(
+pub(super) fn referenced(
     connection: &Connection,
     catalog: Option<&ModelAccess>,
     kind: &str,
@@ -227,8 +231,11 @@ fn reference(name: &str) -> Result<crate::protocol::CredentialRef, EngineError> 
     crate::protocol::CredentialRef::new(name).map_err(|_| error("account_key_reference_invalid"))
 }
 
+/// Deletes one file of a kind under the engine root through its own removal, for the start
+/// sweep and a restore's sweep of what only the replaced data's trash still noted. Inputs: the
+/// engine root, the kind and the name. Output: Ok once it is gone, or the removal's refusal.
 #[cfg(unix)]
-fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
+pub(super) fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
     match kind {
         ACCOUNT_KEY => super::accounts::remove_key_file(root, name),
         MCP_SECRET => super::plugins::remove_secret(root, name),

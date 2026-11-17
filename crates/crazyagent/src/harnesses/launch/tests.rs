@@ -1788,15 +1788,15 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
     };
     let mut session = super::Session::start(launch.request).unwrap();
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let started = loop {
+    let mut started = None;
+    let began = crate::poll_support::poll_until(until, || {
         let text = std::fs::read_to_string(&pid).unwrap_or_default();
         let read = text.trim().parse::<i32>().ok();
-        if let Some(started) = read.and_then(rustix::process::Pid::from_raw) {
-            break started;
-        }
-        assert!(std::time::Instant::now() < until, "the harness starts");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
+        started = read.and_then(rustix::process::Pid::from_raw);
+        started.is_some()
+    });
+    assert!(began, "the harness starts");
+    let started = started.unwrap();
     assert!(session.child.try_wait().unwrap().is_none());
     assert!(
         session.lifeline.is_some(),
@@ -1806,15 +1806,14 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
         lifeline.sever();
     }
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while session.child.try_wait().unwrap().is_none()
-        || rustix::process::test_kill_process(started).is_ok()
-    {
-        assert!(
-            std::time::Instant::now() < until,
-            "the keyed harness outlived the engine that held its relay"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    let ended = crate::poll_support::poll_until(until, || {
+        session.child.try_wait().unwrap().is_some()
+            && rustix::process::test_kill_process(started).is_err()
+    });
+    assert!(
+        ended,
+        "the keyed harness outlived the engine that held its relay"
+    );
 }
 
 /// T20 code r1 F2: a listed harness on pipes that reaches its model through the relay its
@@ -1869,11 +1868,10 @@ fn a_write_to_a_harness_that_is_gone_fails_once_and_its_exit_is_still_reported()
     let mut session = super::Session::start(launch.request).unwrap();
     let group = Pid::from_raw(i32::try_from(session.process_group()).unwrap()).unwrap();
     kill_process_group(group, Signal::KILL).unwrap();
-    let until = Instant::now() + Duration::from_secs(10);
-    while session.child.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < until, "the harness never ended");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    assert!(
+        !session.child.wait().unwrap().success(),
+        "the harness was killed"
+    );
 
     let sent = session.send("Are you there?");
 

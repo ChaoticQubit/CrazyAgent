@@ -1786,7 +1786,7 @@ impl Engine {
         Ok(binding.clone())
     }
 
-    async fn owner_job<T>(
+    pub(in crate::engine) async fn owner_job<T>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {

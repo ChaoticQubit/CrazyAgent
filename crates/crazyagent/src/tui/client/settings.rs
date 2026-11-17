@@ -1905,13 +1905,14 @@ mod tests {
         screen.shown(&mut ctx);
         assert_eq!(pump(&mut screen, &mut ctx, &mut native).await, 0);
         let rows = text(&screen, &ctx);
-        assert_eq!(rows.len(), 3 + 5 + 2, "five entries: {rows:#?}");
-        for (row, (name, line)) in rows[3..8].iter().zip([
+        assert_eq!(rows.len(), 3 + 6 + 2, "six entries: {rows:#?}");
+        for (row, (name, line)) in rows[3..9].iter().zip([
             ("OpenAI", "Sign in with ChatGPT or use an OpenAI API key"),
             (
                 "Anthropic",
                 "Sign in with Claude or use an Anthropic API key",
             ),
+            ("Gemini API", "Pay-as-you-go Google Gemini API key"),
             ("OpenRouter", "One API key for models from many companies"),
             (
                 "OpenAI-compatible URL",
@@ -1928,8 +1929,7 @@ mod tests {
             );
         }
         assert!(
-            rows.iter()
-                .all(|row| !row.contains("ChatGPT / Codex") && !row.contains("Pay-as-you-go")),
+            rows.iter().all(|row| !row.contains("ChatGPT / Codex")),
             "{rows:#?}"
         );
 

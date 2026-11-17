@@ -1,8 +1,9 @@
 use super::error;
 use crate::engine::EngineError;
 use crate::engine::owner::{Admission, HostStamp};
+use crate::storage::opening::Opening;
 use crate::storage::{check_owner_admission, check_owner_host};
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -16,12 +17,14 @@ pub(crate) const HOSTS_MAX: usize = 256;
 static HOSTS: Mutex<Hosts> = Mutex::new(Hosts::new());
 
 /// The proof a writer brings to append to the log, one per writer class (v2.5 plan section
-/// 3.2): an owner request's admission, or the engine host stamp of a writer inside the
-/// engine process.
+/// 3.2): an owner request's admission, the engine host stamp of a writer inside the engine
+/// process, or the storage open's proof for the open and its schema steps, which write
+/// before any host starts (v2.5 L6).
 #[derive(Clone)]
 pub enum Fence {
     Owner(Admission),
     Engine(HostStamp),
+    Opening(Opening),
 }
 
 /// The engine hosts started in this process and not stopped, oldest first, at most
@@ -63,6 +66,14 @@ impl Hosts {
             .iter()
             .any(|(instance, epoch)| instance == db_instance && epoch == engine_epoch)
     }
+
+    /// Whether any host of a store is started, whatever its epoch. Input: the store's
+    /// `db_instance`. Output: true when one is.
+    pub(crate) fn runs(&self, db_instance: &str) -> bool {
+        self.hosts
+            .iter()
+            .any(|(instance, _)| instance == db_instance)
+    }
 }
 
 /// Records that this process runs the engine host, so the writers it fences can append.
@@ -86,13 +97,15 @@ pub fn hosted(host: &HostStamp) -> bool {
 /// Checks a writer's fence inside its transaction. The host must run in this process, so a
 /// writer outside the engine process is refused; then the store must agree: an owner
 /// request's admission through `check_owner_admission`, an engine writer's stamp through
-/// `check_owner_host`, each refusing a stale `engine_epoch`. Inputs: the transaction and
-/// the fence. Output: Ok, or `state_log_fence_out_of_process`, `owner_runtime_stale` or
-/// `owner_grant_stale_or_revoked`.
+/// `check_owner_host`, each refusing a stale `engine_epoch`. An opening writer is the
+/// reverse: no host of its store may run. Inputs: the transaction and the fence. Output:
+/// Ok, or `state_log_fence_out_of_process`, `owner_runtime_stale`,
+/// `owner_grant_stale_or_revoked` or `state_log_opening_host_running`.
 pub fn check(tx: &Transaction<'_>, fence: &Fence) -> Result<(), EngineError> {
     let (db_instance, engine_epoch) = match fence {
         Fence::Owner(admission) => (&admission.db_instance, &admission.engine_epoch),
         Fence::Engine(host) => (&host.db_instance, &host.engine_epoch),
+        Fence::Opening(_) => return check_opening(tx),
     };
     if !hosts().holds(db_instance, engine_epoch) {
         return Err(error("state_log_fence_out_of_process"));
@@ -100,7 +113,44 @@ pub fn check(tx: &Transaction<'_>, fence: &Fence) -> Result<(), EngineError> {
     match fence {
         Fence::Owner(admission) => check_owner_admission(tx, admission),
         Fence::Engine(host) => check_owner_host(tx, host),
+        Fence::Opening(_) => unreachable!("an opening writer is checked above"),
     }
+}
+
+/// Checks an opening writer: once a host of its store runs in this process, every writer
+/// must bring that host's fence, so the opening class is refused. A store with no owner
+/// tables yet has had no host. The check is per store, not per process, since a test
+/// process runs many stores. Input: the transaction. Output: Ok, or
+/// `state_log_opening_host_running`.
+fn check_opening(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let owned: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='owner_meta')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !owned {
+        return Ok(());
+    }
+    let instance: Option<String> = tx
+        .query_row(
+            "SELECT db_instance FROM owner_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    assert!(
+        instance
+            .as_ref()
+            .is_none_or(|instance| instance.len() == 64),
+        "owner_meta keeps a 64-character instance"
+    );
+    if instance.is_some_and(|instance| hosts().runs(&instance)) {
+        return Err(error("state_log_opening_host_running"));
+    }
+    Ok(())
 }
 
 /// The process's started hosts, taken over from a thread that panicked while holding them,

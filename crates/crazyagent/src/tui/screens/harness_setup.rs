@@ -808,6 +808,10 @@ impl Screen for HarnessSetup {
         self.sending.is_some() || self.sending_node
     }
 
+    fn follows(&self, ctx: &Ctx) -> bool {
+        self.busy(ctx) || self.pending()
+    }
+
     fn place(&self) -> Option<Place> {
         Some(Place::HarnessSetup)
     }

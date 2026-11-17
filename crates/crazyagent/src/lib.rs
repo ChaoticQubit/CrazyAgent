@@ -94,5 +94,12 @@ pub mod update;
 pub mod usage;
 pub mod verification;
 pub mod version;
+/// A client's side of the engine watch (v2.5 S3b, S3d): where it resumes, which topics go
+/// out at once and how often a reload for changes of unknown subject may follow.
+pub mod watch_feed;
 pub mod worker_dispatch;
 pub mod worktrees;
+
+#[cfg(all(test, unix))]
+#[path = "../tests/poll_support/mod.rs"]
+mod poll_support;
