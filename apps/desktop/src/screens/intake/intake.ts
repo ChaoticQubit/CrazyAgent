@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { failureCopy, receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
   AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt,
-  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, ToolFix,
+  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, SkippedFolder, SkippedMore, ToolFix,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
@@ -127,61 +127,65 @@ export function worktreesLine(count: number): string {
   return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
 }
 
-/** How often Add folder reads the running iCloud download's progress. */
-export const ICLOUD_PROGRESS_MS = 1000;
-
-/** What Add folder says once the owner stopped an iCloud download. */
-export const ICLOUD_STOPPED = "The download stopped. Nothing was moved or copied.";
-
-/** How a watched iCloud download ended: on its own, after Stop download, or after the owner left Add folder. */
-export type IcloudEnding = "go" | "stopped" | "left";
-
-/** One running iCloud download as Add folder watches it. Each tick reads its progress and, once the
- * owner stopped it or left the page, asks the engine to stop again, since a stop sent before the
- * engine took the download is not seen. Inputs: the stop and progress calls and the tick in ms.
- * Output: `stop`, `leave`, and `end`, which ends the ticks and says how the download ended. */
-export function icloudRun(cancel: () => void, read: () => void, everyMs: number) {
-  if (!Number.isSafeInteger(everyMs) || everyMs < 1) throw new Error(`iCloud tick must be a whole number of ms, got ${everyMs}`);
-  let ending: IcloudEnding = "go";
-  let ended = false;
-  const timer = setInterval(() => {
-    if (ending !== "go") cancel();
-    if (ending !== "left") read();
-  }, everyMs);
-  const halt = (why: IcloudEnding) => {
-    if (ended || ending === "left") return;
-    ending = why;
-    cancel();
-  };
-  return {
-    stop: () => halt("stopped"),
-    leave: () => halt("left"),
-    end: (): IcloudEnding => {
-      if (ended) throw new Error("an iCloud download ends once");
-      ended = true;
-      clearInterval(timer);
-      return ending;
-    },
-  };
-}
-
-/** What Add folder does once an iCloud download returns: the add goes on only when the download
- * finished and the owner neither stopped it nor left the page. Inputs: how it ended and the
- * download's result. Output: add, nothing (the page is gone), or the sentence to show. */
-export function icloudOutcome(ending: IcloudEnding, result: Result<number>): { next: "add" } | { next: "none" } | { next: "say"; text: string } {
-  if (ending === "left") return { next: "none" };
-  if (result.kind === "not_ready") return { next: "say", text: "Downloading from iCloud isn't in this build." };
-  if (ending === "go") return result.kind === "ok" ? { next: "add" } : { next: "say", text: result.message };
-  const ended = result.kind === "ok" || result.code === "home_icloud_not_downloaded";
-  return { next: "say", text: ended ? ICLOUD_STOPPED : result.message };
-}
-
 /** How many of a folder's files the size read found only in iCloud. Input: the read, if any.
  * Output: the count, 0 while it is not read or could not be measured. */
 export function icloudPlaceholders(size: Loaded<FolderSize> | null): number {
   const count = size?.kind === "ok" ? size.value.placeholders ?? 0 : 0;
   if (!Number.isSafeInteger(count) || count < 0) throw new Error(`iCloud placeholder count must be a whole number, got ${count}`);
   return count;
+}
+
+/** The rebuildable folders an add of the folder leaves in iCloud. Input: the read, if any.
+ * Output: the folders, none while it is not read or could not be measured. */
+export function icloudSkipped(size: Loaded<FolderSize> | null): SkippedFolder[] {
+  return size?.kind === "ok" ? size.value.skipped ?? [] : [];
+}
+
+/** The rebuildable folders the folder-size read counted past the ones it named. Input: the read,
+ * if any. Output: their count and files, null when it named them all. */
+export function icloudSkippedMore(size: Loaded<FolderSize> | null): SkippedMore | null {
+  return size?.kind === "ok" ? size.value.skipped_more ?? null : null;
+}
+
+/** Whether an add of the folder asks about iCloud first: some of its files must be downloaded,
+ * or it holds rebuildable folders the add leaves in iCloud. Input: the read. Output: the answer. */
+export function icloudAsks(size: Loaded<FolderSize> | null): boolean {
+  return icloudPlaceholders(size) > 0 || icloudSkipped(size).length > 0;
+}
+
+/** How many files the download asks macOS for. Inputs: the files only in iCloud outside the
+ * left folders (null when only the engine's refusal said some are), the left folders, whether
+ * the owner chose Download everything and the left folders the engine only counted. Output: the
+ * count, null when one count is unknown. */
+export function icloudWanted(placeholders: number | null, skipped: SkippedFolder[], everything: boolean, more: SkippedMore | null = null): number | null {
+  if (!everything) return placeholders;
+  if (placeholders === null || skipped.some((folder) => folder.files === null) || more?.files === null) return null;
+  return skipped.reduce((sum, folder) => sum + (folder.files ?? 0), placeholders + (more?.files ?? 0));
+}
+
+/** One left folder as the iCloud question lists it. Input: the folder. Output: its path and
+ * file count. */
+export function icloudSkippedLine(folder: SkippedFolder): string {
+  return `${displayText(folder.path)} (${filesLabel(folder.files)})`;
+}
+
+/** The left folders the engine only counted, as the iCloud question lists them last. Input: their
+ * count and files. Output: the line. */
+export function icloudSkippedMoreLine(more: SkippedMore): string {
+  return `and ${more.folders} more ${more.folders === 1 ? "folder" : "folders"} (${filesLabel(more.files)})`;
+}
+
+/** A count of files as the iCloud question shows it. Input: the count, null when not counted.
+ * Output: "1 file", "N files" or "files not counted". */
+function filesLabel(files: number | null): string {
+  return files === null ? "files not counted" : files === 1 ? "1 file" : `${files} files`;
+}
+
+/** The overrides an add sends, with Download everything when the owner chose it. Inputs: the
+ * overrides and the choice. Output: the overrides, Download everything last and once. */
+export function withEverything(overrides: AddOverride[], everything: boolean): AddOverride[] {
+  if (!everything || overrides.includes("download_everything")) return overrides;
+  return [...overrides, "download_everything"];
 }
 
 /** Says how many of a folder's files are only in iCloud and that CrazyAgent downloads them first.
@@ -204,12 +208,30 @@ export function icloudMoveLine(source: string): string {
   return `Moving takes the folder out of ${place} on your other Macs too.`;
 }
 
-/** The running iCloud download's status line. Input: the last progress read, or null before the
- * first. Output: one sentence, with the counts once the engine has them. */
-export function icloudProgressLine(progress: IcloudProgress | null): string {
-  if (progress === null || progress.total === 0) return "Downloading from iCloud...";
-  if (progress.done > progress.total) throw new Error(`iCloud progress done ${progress.done} is past total ${progress.total}`);
-  return `Downloading from iCloud: ${progress.done} of ${progress.total} files`;
+/** The files landed of the total, and their bytes when the engine sent them within their total.
+ * Input: the progress, its files within their total. Output: for example "3 of 8 files (1 MB of
+ * 4 MB)". */
+function landedCounts(progress: IcloudProgress): string {
+  const files = `${progress.done} of ${progress.total} files`;
+  const { bytes_done: done = 0, bytes_total: total = 0 } = progress;
+  return total > 0 && done <= total ? `${files} (${formatBytes(done)} of ${formatBytes(total)})` : files;
+}
+
+const LEFT_SHOWN = 3;
+
+/** What a done add says about the rebuildable folders it left in iCloud: where they stayed after
+ * a Move, that a Copy left them out, and to reinstall them. Input: the job. Output: the sentence
+ * with a leading space, empty when it left none. */
+function leftLine(job: IntakeJob): string {
+  const left = (job.left ?? []).map((folder) => displayText(folder.path));
+  const count = left.length + (job.left_more?.folders ?? 0);
+  if (count === 0) return "";
+  const shown = left.slice(0, LEFT_SHOWN);
+  const names = count > shown.length ? `${shown.join(", ")} and ${count - shown.length} more`
+    : shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown[shown.length - 1]}`;
+  const one = count === 1;
+  const where = job.mode === "move" ? `stayed in ${displayText(job.source)}` : `${one ? "was" : "were"} not copied`;
+  return ` ${names} ${where}; reinstall ${one ? "it" : "them"} in the project.`;
 }
 
 /** How often the app reads the engine's intake job while one runs. */
@@ -289,7 +311,7 @@ export function jobLine(job: IntakeJob): string {
     case "downloading": {
       const { done, total } = now.progress;
       if (done > total) throw new Error(`intake download done ${done} is past total ${total}`);
-      return total === 0 ? `Downloading ${name} from iCloud...` : `Downloading ${name} from iCloud: ${done} of ${total} files`;
+      return total === 0 ? `Downloading ${name} from iCloud...` : `macOS is downloading ${name}: ${landedCounts(now.progress)}`;
     }
     case "stopping":
       return `Waiting for ${agentCount(now.agents_left)} of ${name} to stop...`;
@@ -301,9 +323,9 @@ export function jobLine(job: IntakeJob): string {
     case "clearing":
       return `Removing ${name} from its old place...`;
     case "done":
-      return moving
+      return (moving
         ? `${name} is now in your projects folder. Start the team again from Team.`
-        : `${name} is in your projects folder. Set it up from Home.`;
+        : `${name} is in your projects folder. Set it up from Home.`) + leftLine(job);
     case "cancelled":
       return `${moving ? "Moving" : "Adding"} ${name} stopped. Nothing was moved or copied.`;
     case "failed":
@@ -527,7 +549,7 @@ const ANSWER_ISSUES: Record<string, AnywayIssue> = {
   home_copy_too_large: "too_many",
 };
 
-const OVERRIDE_ORDER: AddOverride[] = ["worktrees", "linked_checkout", "too_large"];
+const OVERRIDE_ORDER: AddOverride[] = ["worktrees", "linked_checkout", "too_large", "download_everything"];
 
 /** The question Home asks for a job waiting on a soft refusal: what a fresh read of its folder
  * finds for its way plus the issue the engine refused, naming the git link a refused move has,

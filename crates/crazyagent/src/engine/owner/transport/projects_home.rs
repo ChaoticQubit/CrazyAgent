@@ -896,6 +896,8 @@ async fn finish(
             state.data = OwnerData::FolderSize {
                 bytes: measured.bytes,
                 placeholders: measured.placeholders,
+                skipped: measured.skipped.listed,
+                skipped_more: measured.skipped.more,
             };
             OwnerResponse::Read { state }
         }

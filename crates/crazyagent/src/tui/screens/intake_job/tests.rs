@@ -5,6 +5,8 @@ use crate::protocol::RequestId;
 
 fn job(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-1").unwrap(),
         kind: crate::projects_home::job::JobKind::Add,
         project_id: None,
@@ -30,7 +32,11 @@ fn failed(code: &str, phase: Phase) -> JobState {
 #[test]
 fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
     let downloading = |done, total| JobState::Downloading {
-        progress: Progress { total, done },
+        progress: Progress {
+            total,
+            done,
+            ..Default::default()
+        },
     };
     assert_eq!(
         line(&job(downloading(0, 0))),
@@ -38,7 +44,7 @@ fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
     );
     assert_eq!(
         line(&job(downloading(12, 3000))),
-        "Downloading shop from iCloud: 12 of 3000 files"
+        "macOS is downloading shop: 12 of 3000 files"
     );
     assert_eq!(line(&job(copying(0, 0))), "Moving shop...");
     let copy_job = |state| JobView {
@@ -202,7 +208,11 @@ fn a_job_waiting_its_turn_names_the_job_it_waits_behind_and_offers_stop() {
 #[test]
 fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys_do() {
     let downloading = JobState::Downloading {
-        progress: Progress { total: 3, done: 1 },
+        progress: Progress {
+            total: 3,
+            done: 1,
+            ..Default::default()
+        },
     };
     let rows = [
         (
@@ -273,7 +283,11 @@ fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys
 #[test]
 fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name() {
     let downloading = |done, total| JobState::Downloading {
-        progress: Progress { total, done },
+        progress: Progress {
+            total,
+            done,
+            ..Default::default()
+        },
     };
     let briefs = [
         (job(downloading(0, 0)), "Downloading shop..."),
@@ -307,6 +321,8 @@ fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name
 
 fn moving(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("move-1").unwrap(),
         kind: JobKind::MoveProject,
         project_id: Some(crate::protocol::ProjectId::new("reading").unwrap()),
@@ -427,6 +443,8 @@ fn a_project_move_job_says_it_waits_for_its_agents_moves_and_ends_in_the_move_s_
 /// A delete job of the project "notes", whose name labels it whole.
 fn deleting(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: crate::protocol::RequestId::new("delete-1").unwrap(),
         kind: JobKind::Delete,
         project_id: Some(crate::protocol::ProjectId::new("notes").unwrap()),
@@ -539,7 +557,11 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
     let cases = [
         (
             job(JobState::Downloading {
-                progress: Progress { total: 3, done: 7 },
+                progress: Progress {
+                    total: 3,
+                    done: 7,
+                    ..Default::default()
+                },
             }),
             "Downloading shop from iCloud...",
             "Downloading shop...",
@@ -578,4 +600,130 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
 fn a_refused_job_request_with_an_empty_code_says_the_plain_fallback() {
     let said = std::panic::catch_unwind(|| copy("")).ok();
     assert!(said.is_some_and(|line| line.starts_with("Something went wrong. Try again.")));
+}
+
+#[test]
+fn the_download_line_says_macos_downloads_with_the_files_and_bytes_landed() {
+    let landing = |done, total, bytes_done, bytes_total| JobState::Downloading {
+        progress: Progress {
+            total,
+            done,
+            bytes_total,
+            bytes_done,
+        },
+    };
+    assert_eq!(
+        line(&job(landing(556, 127_940, 31 << 20, 2 << 30))),
+        "macOS is downloading shop: 556 of 127940 files (31 MB of 2 GB)"
+    );
+    assert_eq!(
+        line(&job(landing(1, 2, 0, 0))),
+        "macOS is downloading shop: 1 of 2 files"
+    );
+    assert_eq!(
+        line(&job(landing(1, 2, 9, 4))),
+        "macOS is downloading shop: 1 of 2 files",
+        "bytes past their total are left out"
+    );
+}
+
+/// #383 code F1 (DEC-198): a done project move says after its start-the-team line which
+/// rebuildable folders stayed in the old folder, nested ones by their path below it, and
+/// that the owner reinstalls them.
+#[test]
+fn a_done_project_move_says_which_rebuildable_folders_stayed_in_the_old_folder() {
+    let moved = JobView {
+        kind: crate::projects_home::job::JobKind::MoveProject,
+        left: vec![crate::projects_home::icloud::Skipped {
+            path: "packages/web/node_modules".into(),
+            files: Some(57_108),
+        }],
+        mode: AddMode::Move,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&moved).ends_with(
+            "is now in your projects folder. Start the team again from Team. \
+             packages/web/node_modules stayed in \
+             /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; \
+             reinstall it in the project."
+        ),
+        "{}",
+        line(&moved)
+    );
+}
+
+#[test]
+fn a_done_add_counts_the_left_folders_it_does_not_name() {
+    let folder = |path: &str| crate::projects_home::icloud::Skipped {
+        path: path.into(),
+        files: Some(1),
+    };
+    let capped = JobView {
+        left: vec![
+            folder("a/node_modules"),
+            folder("b/node_modules"),
+            folder("c/node_modules"),
+        ],
+        left_more: Some(crate::projects_home::icloud::SkippedMore {
+            folders: 1997,
+            files: None,
+        }),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&capped).contains(
+            " a/node_modules, b/node_modules, c/node_modules and 1997 more were not copied; \
+             reinstall them"
+        ),
+        "{}",
+        line(&capped)
+    );
+}
+
+#[test]
+fn a_done_add_says_which_rebuildable_folders_it_left_in_icloud_and_where() {
+    let folder = |path: &str, files| crate::projects_home::icloud::Skipped {
+        path: path.into(),
+        files,
+    };
+    let left = vec![folder("node_modules", Some(57_108)), folder(".venv", None)];
+    let moved = JobView {
+        left: left.clone(),
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&moved),
+        "shop is in your projects folder. Set it up from Home. node_modules and .venv stayed in \
+         /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; reinstall them in the project."
+    );
+    let copied = JobView {
+        left: left[..1].to_vec(),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&copied),
+        "shop is in your projects folder. Set it up from Home. node_modules was not copied; \
+         reinstall it in the project."
+    );
+    let many = JobView {
+        left: ["a", "b", "c", "d", "e"]
+            .map(|name| folder(&format!("{name}/node_modules"), Some(1)))
+            .to_vec(),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&many).contains(
+            " a/node_modules, b/node_modules, c/node_modules and 2 more were not copied;"
+        ),
+        "{}",
+        line(&many)
+    );
+    assert_eq!(
+        line(&job(JobState::Done)),
+        "shop is in your projects folder. Set it up from Home."
+    );
 }

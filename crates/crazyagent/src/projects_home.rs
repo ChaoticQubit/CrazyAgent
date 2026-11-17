@@ -132,17 +132,19 @@ pub enum AddMode {
 
 /// A soft refusal of one add that the owner was shown and chose to go past for
 /// that add only: a Move that breaks linked git worktrees, a Copy of a folder
-/// that is itself a linked checkout, or a copy past the usual entry and level
-/// bounds. Every other refusal stays; an add without one keeps its refusal.
+/// that is itself a linked checkout, a copy past the usual entry and level
+/// bounds, or downloading the rebuildable folders an iCloud add leaves out
+/// (DEC-198). Every other refusal stays; an add without one keeps its refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddOverride {
     Worktrees,
     LinkedCheckout,
     TooLarge,
+    DownloadEverything,
 }
 
-pub const ADD_OVERRIDES_MAX: usize = 3;
+pub const ADD_OVERRIDES_MAX: usize = 4;
 
 /// Checks the overrides of one add: at most one of each, `worktrees` only with a Move
 /// and `linked_checkout` only with a Copy. Inputs: the mode and the overrides.
@@ -155,7 +157,7 @@ fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), Engin
     let wrong_mode = overrides.iter().any(|item| match item {
         AddOverride::Worktrees => mode != AddMode::Move,
         AddOverride::LinkedCheckout => mode != AddMode::Copy,
-        AddOverride::TooLarge => false,
+        AddOverride::TooLarge | AddOverride::DownloadEverything => false,
     });
     if overrides.len() > ADD_OVERRIDES_MAX || repeated || wrong_mode {
         return Err(refused("home_override_invalid"));
@@ -579,13 +581,18 @@ fn copy_linked(folder: &Path, mode: AddMode, overrides: &[AddOverride]) -> bool 
 }
 
 /// The bounds an add's download listing and copy work within: [`FORCED_COPY_BOUNDS`] once
-/// the owner went past `too_large`, else [`COPY_BOUNDS`]. Input: the add's overrides.
-/// Output: the bounds.
+/// the owner went past `too_large`, else [`COPY_BOUNDS`], leaving out rebuildable folders
+/// still in iCloud unless the owner chose `download_everything`. Input: the add's
+/// overrides. Output: the bounds.
 pub fn add_bounds(overrides: &[AddOverride]) -> CopyBounds {
-    let bounds = if overrides.contains(&AddOverride::TooLarge) {
+    let limits = if overrides.contains(&AddOverride::TooLarge) {
         FORCED_COPY_BOUNDS
     } else {
         COPY_BOUNDS
+    };
+    let bounds = CopyBounds {
+        skip_rebuildable: !overrides.contains(&AddOverride::DownloadEverything),
+        ..limits
     };
     assert!(bounds.entries >= COPY_BOUNDS.entries);
     assert!(bounds.depth >= COPY_BOUNDS.depth);
@@ -1420,7 +1427,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_permission_denied" => {
             "macOS did not let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed."
         }
-        "icloud_download_busy" => "Another iCloud download is running. Wait for it to finish.",
+        "icloud_download_busy" => {
+            "Too many iCloud downloads are running at once. Wait for one to finish."
+        }
         "icloud_folder_missing" => "That folder isn't there anymore.",
         "icloud_folder_unsafe" => "That folder can't be downloaded.",
         "icloud_folder_unreadable" => "Some files in this folder can't be read.",

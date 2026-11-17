@@ -16,6 +16,32 @@ fn failure(code: &str) -> Result<(), EngineError> {
 }
 
 #[test]
+fn a_job_names_three_left_folders_and_counts_the_rest_so_its_view_stays_small() {
+    let job = job();
+    let mut left = crate::projects_home::icloud::SkippedFolders::default();
+    for at in 0..2000 {
+        left.push(Skipped {
+            path: format!("pkg{at:04}/{}", "x".repeat(200)),
+            files: Some(1),
+        });
+    }
+    job.download().leave(left, true);
+    let view = job.view();
+    assert_eq!(view.left.len(), JOB_SKIPPED_LISTED_MAX);
+    let rest = SkippedMore {
+        folders: 1997,
+        files: Some(1997),
+    };
+    assert_eq!(view.left_more, Some(rest));
+    let encoded = serde_json::to_vec(&view).unwrap();
+    assert!(
+        encoded.len() <= crate::protocol::FRAME_BYTES_MAX / 8,
+        "{} bytes",
+        encoded.len()
+    );
+}
+
+#[test]
 fn a_job_reads_downloading_then_copying_with_its_counts() {
     let job = job();
     let view = job.view();
@@ -24,7 +50,11 @@ fn a_job_reads_downloading_then_copying_with_its_counts() {
     assert_eq!(
         view.state,
         JobState::Downloading {
-            progress: Progress { total: 0, done: 0 }
+            progress: Progress {
+                total: 0,
+                done: 0,
+                ..Default::default()
+            }
         }
     );
     job.copying();

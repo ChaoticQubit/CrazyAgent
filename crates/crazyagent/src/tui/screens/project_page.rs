@@ -26,8 +26,8 @@ use crate::github::{GitHubPublishPlan, GitHubPublishStep};
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
-use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobKind, JobSubject};
+use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
@@ -261,6 +261,7 @@ pub(in crate::tui) struct ProjectPage {
     uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
     job_sent: Option<IntakeQuery>,
+    move_read_sent: Option<IntakeQuery>,
     publish_sent: Option<IntakeQuery>,
     publish_pane: Option<PublishPane>,
     publish_asked: Option<IntakeQuery>,
@@ -371,6 +372,7 @@ impl ProjectPage {
             uncommitted_branch: None,
             uncommitted_asked: false,
             job_sent: None,
+            move_read_sent: None,
             publish_sent: None,
             publish_pane: None,
             publish_asked: None,
@@ -1401,7 +1403,14 @@ impl ProjectPage {
     /// with the exact name typed (DEC-177 add.1); Home follows it and the reply says it started
     /// or why not. Takes the subject, the way and the context. Returns nothing; the reply
     /// arrives later.
-    fn start_job(&mut self, subject: JobSubject, mode: AddMode, ctx: &mut Ctx) {
+    fn start_job(
+        &mut self,
+        subject: JobSubject,
+        mode: AddMode,
+        overrides: Vec<AddOverride>,
+        ctx: &mut Ctx,
+    ) {
+        assert!(overrides.len() <= crate::projects_home::ADD_OVERRIDES_MAX);
         let id = match start_id() {
             Ok(id) => id,
             Err(code) => {
@@ -1413,7 +1422,7 @@ impl ProjectPage {
             id,
             subject,
             mode,
-            overrides: Vec::new(),
+            overrides,
         };
         self.job_sent = Some(query.clone());
         super::intake::ask(ctx, query);
@@ -1451,6 +1460,16 @@ impl ProjectPage {
             }
             if !started {
                 self.ask_publish(ctx);
+            }
+            return true;
+        }
+        if self.move_read_sent.as_ref() == Some(&event.query) {
+            self.move_read_sent = None;
+            match &event.result {
+                Ok(IntakeView::FolderSize(measured)) => {
+                    self.screen.move_read(measured.skipped.clone())
+                }
+                _ => self.screen.move_read_failed(),
             }
             return true;
         }
@@ -1975,15 +1994,33 @@ impl ProjectPage {
                 self.set_order(strategy, ctx);
                 Flow::Handled
             }
-            ProjectReply::MoveHome(mode) => {
+            ProjectReply::MoveRead => {
+                let folder = self
+                    .screen
+                    .setup
+                    .as_ref()
+                    .expect("the move ask opens only once the project folder is known")
+                    .project_folder();
+                let query = IntakeQuery::FolderSize {
+                    path: folder.to_string_lossy().into_owned(),
+                };
+                self.move_read_sent = Some(query.clone());
+                super::intake::ask(ctx, query);
+                Flow::Handled
+            }
+            ProjectReply::MoveHome(mode, everything) => {
                 let project_id = self.screen.project.clone();
-                self.start_job(JobSubject::MoveProject { project_id }, mode, ctx);
+                let overrides = match everything {
+                    true => vec![AddOverride::DownloadEverything],
+                    false => Vec::new(),
+                };
+                self.start_job(JobSubject::MoveProject { project_id }, mode, overrides, ctx);
                 Flow::Handled
             }
             ProjectReply::DeleteEverything(name) => {
                 let project_id = self.screen.project.clone();
                 let subject = JobSubject::Delete { project_id, name };
-                self.start_job(subject, AddMode::Move, ctx);
+                self.start_job(subject, AddMode::Move, Vec::new(), ctx);
                 Flow::Handled
             }
         };

@@ -2386,7 +2386,6 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
-            Protocol::Icloud if icloud::deferred(body) => return Ok(Some(Deferred::Icloud(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2593,10 +2592,6 @@ async fn serve_admitted(
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
-        Deferred::Icloud(a) => {
-            let served = icloud::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
-        }
     }
 }
 
@@ -2650,8 +2645,7 @@ struct Tasks {
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
 /// Usage requests, which read and write the usage store, harness version, update and
 /// install requests, which wait for a harness, Homebrew, npm or a vendor's release
-/// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
-/// and Process proposals, which wait for an Edit with AI model run. Each carries the
+/// pointer, and Process proposals, which wait for an Edit with AI model run. Each carries the
 /// admission, and the projects home its validated request; the others read the request
 /// frame.
 enum Deferred {
@@ -2672,7 +2666,6 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
-    Icloud(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply

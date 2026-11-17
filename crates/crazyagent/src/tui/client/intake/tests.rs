@@ -171,7 +171,8 @@ async fn the_tui_sets_the_projects_home_and_reads_its_folders_from_a_real_engine
         event.result,
         Ok(IntakeView::FolderSize(crate::projects_home::Measured {
             bytes: 5,
-            placeholders: 0
+            placeholders: 0,
+            skipped: crate::projects_home::icloud::SkippedFolders::default(),
         }))
     );
 

@@ -5,12 +5,12 @@ import { githubPublishPrompt, githubPublishPromptSet } from "./engine-client";
 import type { GitHubPromptAnswer } from "./engine-client";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubOwners, githubPublishApprove, githubPublishContinue, githubPublishDiscard, githubPublishExclude, githubPublishRecheck, githubPublishStart, githubPublishStatus, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, icloudCancel, icloudDownload, icloudProgress, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
+  githubUseCli, intakeDismiss, intakeStart, intakeStatus, intakeStop, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, installDependency as startInstall, setPackEntry as switchEntry,
   fixToolPermissions as startFix, setRefusedTool as saveRefusedTool,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IcloudProgress, IntakeJob,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan, GitHubRepoPage, GitHubStatus, IntakeJob,
   IntentReceipt, OnboardingView,
   DependencyName, ProjectsHome, RefusedTool, SetupStatus,
 } from "./engine-client";
@@ -75,7 +75,7 @@ const COPY: Record<string, string> = {
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
   home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
   home_permission_denied: "macOS didn't let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed.",
-  icloud_download_busy: "Another iCloud download is running. Wait for it to finish.",
+  icloud_download_busy: "Too many iCloud downloads are running at once. Wait for one to finish.",
   icloud_folder_missing: "That folder isn't there anymore. Choose it again.",
   icloud_folder_unsafe: "That folder can't be downloaded.",
   icloud_folder_unreadable: "Some files in that folder can't be read.",
@@ -345,24 +345,6 @@ export async function loadFoundProjects(): Promise<Result<FoundProject[]>> {
  * Input: an absolute folder path. Output: its size in bytes and the GitHub owner/name, if any. */
 export function loadFolderSize(path: string): Promise<Result<FolderSize>> {
   return wrap(() => folderSize(path));
-}
-
-/** Downloads every file of a folder that is only in iCloud, so it can then be moved or copied.
- * Input: the absolute folder. Output: how many files it downloaded, or home_icloud_not_downloaded
- * after a stop, a stall or the time limit. */
-export function downloadFromIcloud(path: string): Promise<Result<number>> {
-  return wrap(() => icloudDownload(path));
-}
-
-/** Reads how far the running iCloud download has come. Output: the counts, or null when none runs. */
-export function loadIcloudProgress(): Promise<Result<IcloudProgress | null>> {
-  return wrap(icloudProgress);
-}
-
-/** Stops the running iCloud download; its download call then ends with home_icloud_not_downloaded.
- * Output: whether one was running. */
-export function cancelIcloudDownload(): Promise<Result<boolean>> {
-  return wrap(icloudCancel);
 }
 
 /** Starts the engine's intake job, which downloads what is only in iCloud and then moves or

@@ -1,3 +1,4 @@
+use super::add_folder::left_texts;
 use super::console;
 use super::new_project::{any_harness_total, display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
@@ -25,6 +26,7 @@ use crate::project_overview::{
 use crate::project_setup::{
     ContextItem, ContextKind, Platform, ResearchJob, ResearchKind, ResearchStatus,
 };
+use crate::projects_home::icloud::SkippedFolders;
 use crate::roadmap_status::Refresh;
 use ratatui::style::Style;
 
@@ -429,7 +431,7 @@ pub(in crate::tui) fn project_screen(
     }
     if screen.confirm_move {
         let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
-        let body = move_ask(screen, box_width - 4, look);
+        let (body, keys) = move_ask(screen, box_width - 4, body_height.saturating_sub(4), look);
         rows = modal(
             &rows,
             width,
@@ -439,12 +441,7 @@ pub(in crate::tui) fn project_screen(
             2,
             look,
         );
-        help = vec![
-            ("m", "Move"),
-            ("c", "Copy"),
-            ("n", "Keep it here"),
-            ("Esc", "Keep it here"),
-        ];
+        help = keys;
     }
     if let Some(path) = &screen.confirm_delete {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -593,11 +590,17 @@ pub(in crate::tui) const MOVE_ASK_TEAM: &str = "Stop the team first (Stop all on
 /// What the move ask says about its two ways.
 pub(in crate::tui) const MOVE_ASK_WAYS: &str = "Move takes the folder into your CrazyAgent folder. Copy leaves the old folder where it is and the project uses the copy.";
 
-/// Draws the move ask: that the team must be stopped and its work follows, then Move, Copy
-/// or keeping the project where it is. Inputs: the screen, the box's inner width and the
-/// look. Output: the box rows.
-fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
+/// What the move ask says when its folder read failed, so the move downloads everything.
+pub(in crate::tui) const MOVE_ASK_UNREAD: &str = "CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.";
+
+/// Draws the move ask: that the team must be stopped and its work follows; once the folder
+/// read lands, the rebuildable folders a move leaves in iCloud, as many named as fit the
+/// rows, with the Download everything switch; then Move, Copy or keeping the project where
+/// it is. Inputs: the screen, the box's inner width and rows, and the look. Output: the box
+/// rows and the help keys.
+fn move_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) -> (Vec<Row>, Help) {
     assert!(inner >= REMOVE_BOX_MIN - 4);
+    assert!(screen.confirm_move);
     let mut body = vec![
         Row::of(
             format!("Move {} into your CrazyAgent folder?", screen.name),
@@ -613,6 +616,44 @@ fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
         );
         body.push(Row::default());
     }
+    let keep = [("n", "Keep it here"), ("Esc", "Keep it here")];
+    let Some(left) = screen.move_left.as_ref() else {
+        body.push(Row::of("Reading the folder...", look.muted));
+        return (body, keep.to_vec());
+    };
+    let mut help = vec![("m", "Move"), ("c", "Copy")];
+    if screen.move_unread {
+        body.extend(
+            wrap_words(MOVE_ASK_UNREAD, inner)
+                .iter()
+                .map(|line| Row::of(line.as_str(), look.muted)),
+        );
+        body.push(Row::default());
+    }
+    if !left.is_empty() {
+        let fixed = body.len() + 2;
+        let place = folder(screen);
+        let mut cap = left.listed.len();
+        let lines = loop {
+            let (listed, more) = left.cut(cap);
+            let shown = SkippedFolders { listed, more };
+            let lines: Vec<String> = left_texts(&shown, screen.move_everything, &place, "move")
+                .iter()
+                .flat_map(|text| wrap_words(text, inner))
+                .collect();
+            if fixed + lines.len() <= room || cap == 0 {
+                break lines;
+            }
+            cap -= 1;
+        };
+        let tight = fixed + lines.len() > room;
+        body.extend(lines.iter().map(|line| Row::of(line.as_str(), look.muted)));
+        if !tight {
+            body.push(Row::default());
+        }
+        help.push(("Space", "Download everything"));
+    }
+    help.extend(keep);
     body.push(
         Row::of("[ m Move ]", look.fg)
             .push("   ", Style::new())
@@ -620,7 +661,7 @@ fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
             .push("   ", Style::new())
             .push("[> Keep it here ]", look.selection),
     );
-    body
+    (body, help)
 }
 
 /// Draws the remove ask in at most `room` rows: with Remove from dashboard chosen, both choices

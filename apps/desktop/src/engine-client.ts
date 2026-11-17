@@ -1410,15 +1410,33 @@ export interface FoundProject {
   project_id?: string | null;
 }
 
+/** A rebuildable folder (node_modules, .venv, __pycache__, or dist or build a .gitignore names)
+ * that still needs downloading from iCloud, so an add leaves it out: its path below the added
+ * folder and how many files it holds, null when the folder itself is only in iCloud. */
+export interface SkippedFolder {
+  path: string;
+  files: number | null;
+}
+
+/** The rebuildable folders past the ones a reply names: how many, and the files they hold, null
+ * when one of them is only in iCloud itself and cannot be counted. */
+export interface SkippedMore {
+  folders: number;
+  files: number | null;
+}
+
 /** What the native bridge read about a picked folder: its bytes, or null with the size code when
- * it could not be measured, how many of its files are only in iCloud, its GitHub repository, its linked worktrees and their folders, whether
- * the engine lets it move and be copied without an override and which git link a Move breaks,
- * whether it has git, and whether it shares a disk with the projects folder (null when that is
- * unknown). */
+ * it could not be measured, how many of its files are only in iCloud outside the rebuildable
+ * folders an add leaves out, those folders, its GitHub repository, its linked worktrees and their
+ * folders, whether the engine lets it move and be copied without an override and which git link
+ * a Move breaks, whether it has git, and whether it shares a disk with the projects folder (null
+ * when that is unknown). */
 export interface FolderSize {
   bytes: number | null;
   size_problem?: string | null;
   placeholders?: number;
+  skipped?: SkippedFolder[];
+  skipped_more?: SkippedMore;
   github?: string | null;
   worktrees?: number;
   worktree_paths?: string[];
@@ -1434,8 +1452,9 @@ export type GitLink = "none" | "worktrees" | "linked_worktree" | "submodule" | "
 
 export type AddFolderMode = "move" | "copy";
 
-/** A soft refusal of one add that the owner was shown and chose to go past for that add only. */
-export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
+/** A soft refusal of one add that the owner was shown and chose to go past for that add only, or
+ * Download everything, which downloads the rebuildable folders an add otherwise leaves in iCloud. */
+export type AddOverride = "worktrees" | "linked_checkout" | "too_large" | "download_everything";
 
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
@@ -1825,27 +1844,13 @@ export function foundProjects(): Promise<FoundProject[]> {
   return invoke<FoundProject[]>("desktop_found_projects");
 }
 
-/** How far the running iCloud download has come: the files only in iCloud it found so far and how
- * many of them are on this Mac now. */
+/** How far an intake job's iCloud download has come: the files only in iCloud it found so far and
+ * how many of them are on this Mac now, and their bytes (absent from an older engine). */
 export interface IcloudProgress {
   total: number;
   done: number;
-}
-
-/** Downloads every file of a folder that is only in iCloud and waits until all are on this Mac;
- * the folder itself is not moved. Input: an absolute folder path. Output: how many it downloaded. */
-export function icloudDownload(path: string): Promise<number> {
-  return invoke<number>("desktop_icloud_download", { path });
-}
-
-/** Reads the running iCloud download's progress. Output: the counts, or null when none runs. */
-export function icloudProgress(): Promise<IcloudProgress | null> {
-  return invoke<IcloudProgress | null>("desktop_icloud_progress");
-}
-
-/** Stops the running iCloud download. Output: whether one was running. */
-export function icloudCancel(): Promise<boolean> {
-  return invoke<boolean>("desktop_icloud_cancel");
+  bytes_total?: number;
+  bytes_done?: number;
 }
 
 /** The part of a job that was running when it ended. */
@@ -1880,7 +1885,8 @@ export type ProjectJobKind = "add" | "move_project" | "delete" | "setup";
 
 /** One of the engine's jobs, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the
- * soft refusals it goes past, whether a stop was asked and its state. */
+ * soft refusals it goes past, whether a stop was asked, its state and the rebuildable folders its
+ * download left in iCloud, which the add left out. */
 export interface IntakeJob {
   id: string;
   kind: ProjectJobKind;
@@ -1890,6 +1896,8 @@ export interface IntakeJob {
   overrides: AddOverride[];
   stopping: boolean;
   state: IntakeJobState;
+  left?: SkippedFolder[];
+  left_more?: SkippedMore;
 }
 
 /** Starts the engine's intake job for a folder, or attaches to the one adding it already.

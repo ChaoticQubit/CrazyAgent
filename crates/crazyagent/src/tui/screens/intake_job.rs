@@ -1,10 +1,13 @@
 use super::intake::copy;
+use super::new_project::size_label;
 use crate::projects_home::AddMode;
+use crate::projects_home::icloud::Progress;
 use crate::projects_home::job::{JobKind, JobState, JobView, Phase};
 use crate::tui::glyphs::Status;
 use crate::tui::text::cut;
 
 const BRIEF_NAME_CELLS_MAX: usize = 16;
+const LEFT_SHOWN: usize = 3;
 
 #[cfg(test)]
 mod tests;
@@ -92,8 +95,7 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
             if progress.total == 0 || progress.done > progress.total {
                 format!("Downloading {name} from iCloud...")
             } else {
-                let (done, total) = (progress.done, progress.total);
-                format!("Downloading {name} from iCloud: {done} of {total} files")
+                format!("macOS is downloading {name}: {}", landed(progress))
             }
         }
         JobState::Stopping { agents_left } => {
@@ -107,10 +109,14 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
         }
         JobState::Copying { .. } => format!("{verb} {name}..."),
         JobState::Clearing => format!("Removing {name} from its old place..."),
-        JobState::Done if job.kind == JobKind::MoveProject => {
-            format!("{name} is now in your projects folder. Start the team again from Team.")
-        }
-        JobState::Done => format!("{name} is in your projects folder. Set it up from Home."),
+        JobState::Done if job.kind == JobKind::MoveProject => format!(
+            "{name} is now in your projects folder. Start the team again from Team.{}",
+            left_line(job)
+        ),
+        JobState::Done => format!(
+            "{name} is in your projects folder. Set it up from Home.{}",
+            left_line(job)
+        ),
         JobState::Cancelled { .. } if job.kind == JobKind::MoveProject => {
             format!("Moving {name} stopped. Nothing was moved or copied.")
         }
@@ -130,6 +136,54 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
 /// that job's name. Returns one sentence.
 fn waiting(behind: &str) -> String {
     format!("Waiting for {behind} to finish...")
+}
+
+/// The files landed of the total, and their bytes when the engine sent them within their
+/// total. Takes progress whose files are within their total. Returns for example "3 of 8
+/// files (1 MB of 4 MB)".
+fn landed(progress: &Progress) -> String {
+    assert!(progress.done <= progress.total);
+    let files = format!("{} of {} files", progress.done, progress.total);
+    if progress.bytes_total == 0 || progress.bytes_done > progress.bytes_total {
+        return files;
+    }
+    let (done, total) = (
+        size_label(progress.bytes_done),
+        size_label(progress.bytes_total),
+    );
+    format!("{files} ({done} of {total})")
+}
+
+/// What a done add says about the rebuildable folders it left in iCloud: where they stayed
+/// after a Move, that a Copy left them out, and to reinstall them; the ones the engine only
+/// counted join the "more". Takes the job. Returns the sentence with a leading space, empty
+/// when it left none.
+fn left_line(job: &JobView) -> String {
+    let unnamed = job.left_more.map_or(0, |more| more.folders);
+    let count = (job.left.len() as u64).saturating_add(unnamed);
+    if count == 0 {
+        return String::new();
+    }
+    let paths: Vec<&str> = job
+        .left
+        .iter()
+        .take(LEFT_SHOWN)
+        .map(|folder| folder.path.as_str())
+        .collect();
+    let shown = paths.len() as u64;
+    let names = match paths.split_last() {
+        _ if count > shown => format!("{} and {} more", paths.join(", "), count - shown),
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => paths.concat(),
+    };
+    let one = count == 1;
+    let place = match job.mode {
+        AddMode::Move => format!("stayed in {}", job.source),
+        AddMode::Copy if one => "was not copied".to_owned(),
+        AddMode::Copy => "were not copied".to_owned(),
+    };
+    let it = if one { "it" } else { "them" };
+    format!(" {names} {place}; reinstall {it} in the project.")
 }
 
 /// What a New Project does now or how it ended, with the project's name and how many of its
