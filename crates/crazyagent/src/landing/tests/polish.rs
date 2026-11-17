@@ -706,3 +706,65 @@ fn on_git_2_39_a_clone_lead_s_settle_leaves_a_worker_set_it_holds_for_the_owner(
     assert_eq!(case.view(&id).state, ChangeState::Accepted);
     shape_git(None);
 }
+
+/// V243-GIT-FLOOR-SIBLING-DOORS (#298 N2): on git 2.39 a master set the owner landed outside
+/// closes, and the master close leaves the conflicted set its fix covers open: whether the
+/// land holds that set's work cannot be checked by merging again, so the check answers no,
+/// where it refused with `changes_git_old` and the master close logged it. On 2.40 the same
+/// check answers yes.
+#[test]
+fn on_git_2_39_a_master_land_read_from_outside_leaves_the_set_it_covers_for_the_owner() {
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    let landed = case.view(&fix).head;
+    case.owner(&["merge", "-q", "--ff-only", &landed]);
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let read = owner::observe_for_diff(&case.db, &fix).map(drop);
+    assert!(read.is_ok(), "{:?}", read.err().map(|error| error.0));
+    assert_eq!(case.view(&fix).state, ChangeState::Accepted);
+    assert_eq!(case.view(&sub).state, ChangeState::Conflict);
+    let set = store::load(&case.db, &sub).unwrap();
+    assert_eq!(set.landed, None);
+    let held = || {
+        let owner = git::Repo::open(&case.repo, &case.repo.join(".git"), None).unwrap();
+        merges::holds_set_work(&owner, &landed, &set.base, &set.head).map_err(|error| error.0)
+    };
+    assert_eq!(held(), Ok(false));
+    shape_git(Some("git version 2.40.0"));
+    assert_eq!(held(), Ok(true));
+    shape_git(None);
+}
+
+/// V243-GIT-FLOOR-SIBLING-DOORS (#298 N2, leader 04:05 A): an undo of a master's merge that
+/// an engine stop cut short after the branch moved is finished on git 2.39, which cannot tell
+/// by merging again whether the revert took a closed set's work, so a set the merge closed
+/// counts as reverted, as when its work cannot be read, and is marked undone with it.
+#[test]
+fn on_git_2_39_a_cut_short_undo_of_a_master_merge_marks_the_set_it_closed_undone() {
+    let case = Case::new();
+    let (sub, fix, _) = master_fixing_a_conflict(&case);
+    assert!(matches!(
+        land_master_set(&case.db, &case.home, &fix).unwrap(),
+        Some(AcceptOutcome::Landed { .. })
+    ));
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    let stopped = owner::undo(&case.db, &case.home, &fix, &|at| {
+        at == owner::Step::BranchMoved
+    });
+    assert_eq!(refused(stopped), "changes_git_failed");
+    let revert = case.tip();
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let settled = owner::settled(&case.db, &fix).map(drop);
+    assert!(settled.is_ok(), "{:?}", settled.err().map(|error| error.0));
+    assert_eq!(
+        store::load(&case.db, &fix).unwrap().undone.as_deref(),
+        Some(revert.as_str())
+    );
+    assert_eq!(
+        store::load(&case.db, &sub).unwrap().undone.as_deref(),
+        Some(revert.as_str()),
+        "the set the merge closed is marked undone with it"
+    );
+    shape_git(None);
+}

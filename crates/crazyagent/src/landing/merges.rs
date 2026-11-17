@@ -194,14 +194,18 @@ fn fixes_conflict(
 /// Tells whether a landed commit holds a change set's work: merging the set's head into it
 /// again would change nothing but conflicted paths, and at each of those the landed tree
 /// shows the set's work ([`holds_work_at`]). Doubt stays open: a reworded resolution waits
-/// for the owner. Inputs: the owner repository, the commit the land left the branch at and
-/// the set's base and head. Output: the answer.
+/// for the owner, and so does every set on a git older than 2.40, which cannot merge again,
+/// as in [`holds_changes_since`]. Inputs: the owner repository, the commit the land left the
+/// branch at and the set's base and head. Output: the answer.
 pub(super) fn holds_set_work(
     owner: &Repo,
     landed: &str,
     base: &str,
     head: &str,
 ) -> Result<bool, EngineError> {
+    if owner.old_git() {
+        return Ok(false);
+    }
     let Some(conflicts) = kept_clean_changes(owner, landed, landed, head)? else {
         return Ok(false);
     };
