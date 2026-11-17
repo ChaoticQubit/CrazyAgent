@@ -1067,13 +1067,14 @@ fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, EngineError> {
     Ok(found)
 }
 
-/// The backup the rotation leaves alone: the oldest checked one a 2.5 upgrade took from a 2.4
-/// database, while its stamp is under PINNED_DAYS old. A stamp ahead of the clock counts as
-/// young. Inputs: the backups folder, its backups oldest first and the time now.
-/// Output: that backup's index, or None.
+/// The backup the rotation leaves alone and a restore brings back: the newest checked one a
+/// 2.5 upgrade took from a 2.4 database, while its stamp is under PINNED_DAYS old, so 2.4
+/// work done between a restore and the next upgrade is never lost to an older one. A stamp
+/// ahead of the clock counts as young. Inputs: the backups folder, its backups oldest first
+/// and the time now. Output: that backup's index, or None.
 fn pinned(folder: &Path, found: &[(String, String)], now: SystemTime) -> Option<usize> {
     let kept_for = Duration::from_secs(86_400) * PINNED_DAYS;
-    found.iter().position(|(time, name)| {
+    found.iter().rposition(|(time, name)| {
         let from_v24 = backup_versions(name)
             .is_some_and(|(from, to)| from <= V24_VERSION_MAX && to > V24_VERSION_MAX);
         let young = stamp_time(time)
