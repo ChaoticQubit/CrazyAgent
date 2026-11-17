@@ -1178,6 +1178,7 @@ async fn every_master_backend_maps_the_master_step_limit_to_one_stop() {
                 assert_eq!(ended.0, cause);
             }
             MasterBackend::Rcli => {}
+            MasterBackend::Listed(id) => unreachable!("{id} is not a native backend"),
         }
     }
     assert_eq!(steps_of_cause(&cause), Some(50));

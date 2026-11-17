@@ -1649,7 +1649,7 @@ fn settings_show_no_master_step_limit_by_default_with_the_four_options() {
         "{shown}"
     );
     assert!(
-        shown.contains("an rcli master, which has no tools, answers each turn in one step"),
+        shown.contains("an RCLI master, which has no tools, answers each turn in one step"),
         "{shown}"
     );
     assert!(!shown.contains("counts no steps"), "{shown}");
@@ -1762,7 +1762,7 @@ fn settings_show_no_master_time_limit_by_default_with_the_four_options() {
     }
     let shown = flat(&rows);
     assert!(shown.contains("The limit covers every master:"), "{shown}");
-    assert!(shown.contains("Claude, Codex and rcli."), "{shown}");
+    assert!(shown.contains("Claude, Codex and RCLI."), "{shown}");
     assert!(!shown.contains("still stops after"), "{shown}");
     assert!(bar(&rows).contains("Enter Save"));
     shell.key(Key::Enter);
@@ -1995,7 +1995,7 @@ fn the_master_time_limit_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
     for (width, height) in ASK_SIZES {
         let mut shell = settings(width, height);
         shell.key(Key::Char('t'));
-        let (first, last) = ("Master time limit:", "Codex and rcli.");
+        let (first, last) = ("Master time limit:", "Codex and RCLI.");
         ask_in_body(&mut shell, width, height, first, last);
     }
 }
@@ -2050,7 +2050,7 @@ fn settings_show_a_64_kib_master_frame_by_default_with_the_three_options() {
         shown.contains("The limit covers Claude and Codex masters;"),
         "{shown}"
     );
-    assert!(shown.contains("rcli keeps 64 KiB."), "{shown}");
+    assert!(shown.contains("RCLI keeps 64 KiB."), "{shown}");
     assert!(bar(&rows).contains("Enter Save"));
     shell.key(Key::Enter);
     assert!(
@@ -2131,7 +2131,7 @@ fn the_master_frame_size_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
     for (width, height) in ASK_SIZES {
         let mut shell = settings(width, height);
         shell.key(Key::Char('z'));
-        let (first, last) = ("Master frame size limit:", "rcli keeps 64 KiB.");
+        let (first, last) = ("Master frame size limit:", "RCLI keeps 64 KiB.");
         ask_in_body(&mut shell, width, height, first, last);
     }
 }

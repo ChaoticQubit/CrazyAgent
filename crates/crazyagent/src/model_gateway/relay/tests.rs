@@ -267,6 +267,92 @@ fn both_headers_from_a_key_helper_forward_only_the_real_x_api_key() {
     assert_eq!(header(&seen[0], "authorization"), None);
 }
 
+/// Task 17 (DEC-180 addendum 2, answer 3): a harness on a Gemini API key account presents
+/// the placeholder in `x-goog-api-key`, as Google's SDK does; the provider gets the real
+/// key in that same header, once, beside no other key header, and a wrong token there is
+/// refused before the provider is reached.
+#[test]
+fn a_gemini_placeholder_in_x_goog_api_key_is_replaced_by_the_real_key_in_the_same_header() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    let target = "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse";
+    let request = format!(
+        "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nx-goog-api-key: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",
+        relay.token()
+    );
+    let (status, _, _) = send(relay.port(), request.as_bytes());
+    assert_eq!(status, 200);
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].target, target);
+    let keys: Vec<&str> = seen[0]
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "x-goog-api-key")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(keys, [KEY]);
+    assert_eq!(header(&seen[0], "x-api-key"), None);
+    assert_eq!(header(&seen[0], "authorization"), None);
+    assert!(
+        seen[0]
+            .headers
+            .iter()
+            .all(|(_, value)| !value.contains(relay.token()))
+    );
+    let other = format!("{TOKEN_PREFIX}{}", "0".repeat(64));
+    for wrong in [other.as_str(), KEY] {
+        let request = format!(
+            "GET /v1beta/models HTTP/1.1\r\nHost: 127.0.0.1\r\nx-goog-api-key: {wrong}\r\n\r\n"
+        );
+        assert_eq!(send(relay.port(), request.as_bytes()).0, 401, "{wrong}");
+    }
+    assert_eq!(provider.seen().len(), 1);
+}
+
+/// Task 17: when a harness sends the placeholder in `x-goog-api-key` beside the header the
+/// relay keys the request by, the placeholder in `x-goog-api-key` is dropped, never
+/// forwarded to the provider next to the real key; `x-api-key` and Bearer keep their order.
+#[test]
+fn a_placeholder_in_x_goog_api_key_beside_another_key_header_is_never_forwarded() {
+    let provider = Provider::json();
+    let relay = Relay::start(&provider.origin(), key()).unwrap();
+    for (auth, kept, value) in [
+        (
+            format!(
+                "X-Api-Key: {token}\r\nx-goog-api-key: {token}",
+                token = relay.token()
+            ),
+            "x-api-key",
+            KEY.to_owned(),
+        ),
+        (
+            format!(
+                "Authorization: Bearer {token}\r\nx-goog-api-key: {token}",
+                token = relay.token()
+            ),
+            "authorization",
+            format!("Bearer {KEY}"),
+        ),
+    ] {
+        assert_eq!(
+            send(relay.port(), &post("/v1/messages", &auth, "{}")).0,
+            200,
+            "{auth}"
+        );
+        let seen = provider.seen();
+        let last = seen.last().unwrap();
+        assert_eq!(header(last, kept), Some(value.as_str()), "{auth}");
+        assert_eq!(header(last, "x-goog-api-key"), None, "{auth}");
+        assert!(
+            last.headers
+                .iter()
+                .all(|(_, value)| !value.contains(relay.token()))
+        );
+    }
+    assert_eq!(provider.seen().len(), 2);
+}
+
 #[test]
 fn wrong_or_missing_token_is_refused_without_reaching_the_provider() {
     let provider = Provider::json();
@@ -816,6 +902,379 @@ fn a_body_longer_than_a_curl_config_line_reaches_the_provider_whole() {
         seen[0].body.len(),
         body.len()
     );
+}
+
+const ACCESS: &str = "chatgpt-access-0123456789abcdef";
+const FRESH: &str = "chatgpt-fresh-0123456789abcdef";
+const ACCOUNT: &str = "acct-0123456789";
+const CODEX_PATH: &str = "/backend-api/codex";
+
+fn sign_in(access: &str, account_id: Option<&str>, expires: Duration) -> chatgpt::ChatGptTokens {
+    chatgpt::ChatGptTokens {
+        access: SecretString::bearer(access.as_bytes().to_vec()).unwrap(),
+        account_id: account_id.map(str::to_owned),
+        expires,
+    }
+}
+
+fn epoch_now() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+}
+
+/// A ChatGPT source for the relay rows whose renewal counts its calls and answers with what
+/// `answer` makes. Inputs: the held sign-in and the answer. Output: the call count and the
+/// source.
+fn counted_source(
+    held: chatgpt::ChatGptTokens,
+    answer: impl Fn() -> Result<chatgpt::ChatGptTokens, EngineError> + Send + Sync + 'static,
+) -> (Arc<AtomicUsize>, Arc<chatgpt::ChatGptSource>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&calls);
+    let renew: chatgpt::Renew = Box::new(move |_: Duration, _: &dyn Fn() -> bool| {
+        counting.fetch_add(1, Ordering::SeqCst);
+        answer()
+    });
+    (
+        calls,
+        Arc::new(chatgpt::ChatGptSource::new(
+            crate::protocol::CredentialRef::new("row-profile").unwrap(),
+            held,
+            renew,
+        )),
+    )
+}
+
+fn lasting() -> Duration {
+    epoch_now() + Duration::from_secs(3600)
+}
+
+fn chatgpt_relay(provider: &Provider, source: Arc<chatgpt::ChatGptSource>) -> Relay {
+    Relay::start_chatgpt_at(&format!("{}{CODEX_PATH}", provider.origin()), source).unwrap()
+}
+
+fn responses(auth: &str, extra: &str, body: &str) -> Vec<u8> {
+    format!(
+        "POST {CODEX_PATH}/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\n{extra}Accept: text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+fn named<'a>(incoming: &'a Incoming, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    incoming
+        .headers
+        .iter()
+        .filter(move |(found, _)| found == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// T22 R1: a ChatGPT relay forwards a Responses request with the sign-in's access token as
+/// `Authorization: Bearer` and its account id as `chatgpt-account-id`, whichever header
+/// carried the placeholder; the account id, cookies, organization, project and every
+/// `chatgpt-` or `x-openai-` header the harness sent never reach the backend, while its
+/// other headers and the body pass unchanged.
+#[test]
+fn a_chatgpt_relay_forwards_with_the_sign_in_token_and_account_id_in_place_of_the_placeholder() {
+    let provider = Provider::json();
+    let (_, source) = counted_source(sign_in(ACCESS, Some(ACCOUNT), lasting()), || {
+        Err(EngineError("no renewal expected".into()))
+    });
+    let relay = chatgpt_relay(&provider, source);
+    assert!(relay.is_chatgpt());
+    assert_eq!(
+        relay.base_url(),
+        format!("http://127.0.0.1:{}{CODEX_PATH}", relay.port())
+    );
+    let body = r#"{"model":"gpt-5","stream":true,"store":false,"input":[]}"#;
+    let extra = concat!(
+        "chatgpt-account-id: acct-harness\r\n",
+        "Cookie: session=harness\r\n",
+        "OpenAI-Organization: org-harness\r\n",
+        "OpenAI-Project: proj-harness\r\n",
+        "x-openai-account-routing-override: other-workspace\r\n",
+        "X-OpenAI-Fedramp: true\r\n",
+        "chatgpt-other: harness\r\n",
+        "originator: row-harness\r\n",
+    );
+    for auth in [
+        format!("Authorization: Bearer {}", relay.token()),
+        format!("x-api-key: {}", relay.token()),
+    ] {
+        let (status, _, reply) = send(relay.port(), &responses(&auth, extra, body));
+        assert_eq!(status, 200, "{auth}");
+        assert_eq!(reply, br#"{"ok":true}"#);
+    }
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 2);
+    for request in seen.iter() {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, format!("{CODEX_PATH}/responses"));
+        assert_eq!(
+            named(request, "authorization").collect::<Vec<_>>(),
+            [format!("Bearer {ACCESS}").as_str()]
+        );
+        assert_eq!(
+            named(request, "chatgpt-account-id").collect::<Vec<_>>(),
+            [ACCOUNT]
+        );
+        for dropped in [
+            "x-api-key",
+            "cookie",
+            "openai-organization",
+            "openai-project",
+            "x-openai-account-routing-override",
+            "x-openai-fedramp",
+            "chatgpt-other",
+        ] {
+            assert_eq!(header(request, dropped), None, "{dropped}");
+        }
+        assert_eq!(header(request, "originator"), Some("row-harness"));
+        assert_eq!(header(request, "accept"), Some("text/event-stream"));
+        assert_eq!(request.body, body.as_bytes());
+        assert!(
+            request
+                .headers
+                .iter()
+                .all(|(_, value)| !value.contains(relay.token()))
+        );
+    }
+}
+
+/// T22 R1: a sign-in whose record has no account id sends no `chatgpt-account-id`, and the
+/// one the harness sent is still dropped.
+#[test]
+fn a_chatgpt_sign_in_without_an_account_id_sends_no_account_id_header() {
+    let provider = Provider::json();
+    let (_, source) = counted_source(sign_in(ACCESS, None, lasting()), || {
+        Err(EngineError("no renewal expected".into()))
+    });
+    let relay = chatgpt_relay(&provider, source);
+    let auth = format!("Authorization: Bearer {}", relay.token());
+    let (status, _, _) = send(
+        relay.port(),
+        &responses(&auth, "chatgpt-account-id: acct-harness\r\n", "{}"),
+    );
+    assert_eq!(status, 200);
+    let seen = provider.seen();
+    assert_eq!(header(&seen[0], "chatgpt-account-id"), None);
+    assert_eq!(
+        header(&seen[0], "authorization"),
+        Some(format!("Bearer {ACCESS}").as_str())
+    );
+}
+
+/// T22 R2 and R3: the access token opens the whole ChatGPT account, so a ChatGPT relay
+/// forwards only `POST <base>/responses`, with no query. Every other path or method under
+/// the backend, as written or percent-encoded, and a wrong token are refused before any
+/// renewal and reach no upstream; the allowed request renews the lapsing token once and
+/// goes up with the fresh one.
+#[test]
+fn a_chatgpt_relay_forwards_only_post_responses_and_renews_for_no_refused_request() {
+    let provider = Provider::json();
+    let (calls, source) = counted_source(
+        sign_in(
+            ACCESS,
+            Some(ACCOUNT),
+            epoch_now() + Duration::from_secs(100),
+        ),
+        || Ok(sign_in(FRESH, Some(ACCOUNT), lasting())),
+    );
+    let relay = chatgpt_relay(&provider, source);
+    let auth = format!("Authorization: Bearer {}", relay.token());
+    for target in [
+        "/backend-api/codex/models",
+        "/backend-api/codex/models?client_version=1",
+        "/backend-api/codex",
+        "/backend-api/codex/",
+        "/backend-api/codex/responses/",
+        "/backend-api/codex/responses/compact",
+        "/backend-api/codex/responses?stream=true",
+        "/backend-api/codex//responses",
+        "/backend-api/codex/Responses",
+        "/backend-api/codex/./responses",
+        "/backend-api/codex/x/../responses",
+        "/backend-api/codex/%2e%2e/conversations",
+        "/backend-api/codex/responses/%2e%2e/%2e%2e/wham/usage",
+        "/backend-api/conversations",
+        "/backend-api/wham/usage",
+        "/backend-api/me",
+        "/v1/responses",
+        "/",
+    ] {
+        let (status, _, _) = send(relay.port(), &post(target, &auth, "{}"));
+        assert_eq!(status, 404, "{target}");
+    }
+    let get = format!("GET {CODEX_PATH}/responses HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\n\r\n");
+    assert_eq!(send(relay.port(), get.as_bytes()).0, 404);
+    let wrong = format!("Authorization: Bearer {TOKEN_PREFIX}{}", "0".repeat(64));
+    assert_eq!(send(relay.port(), &responses(&wrong, "", "{}")).0, 401);
+    assert!(provider.seen().is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let (status, _, _) = send(relay.port(), &responses(&auth, "", "{}"));
+    assert_eq!(status, 200);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let seen = provider.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        header(&seen[0], "authorization"),
+        Some(format!("Bearer {FRESH}").as_str())
+    );
+}
+
+/// T22 R4: once a renewal leaves the sign-in lapsed, the relay answers the harness 401 with
+/// an OpenAI error body carrying `chatgpt_sign_in_expired` and its plain sentence, reaches
+/// no upstream, and reports the code the run ends with.
+#[test]
+fn a_chatgpt_relay_answers_a_lapsed_sign_in_with_an_openai_error_and_reports_it() {
+    let provider = Provider::json();
+    let lapsed = epoch_now() - Duration::from_secs(10);
+    let (calls, source) = counted_source(sign_in(ACCESS, Some(ACCOUNT), lapsed), move || {
+        Ok(sign_in(ACCESS, Some(ACCOUNT), lapsed))
+    });
+    let relay = chatgpt_relay(&provider, source);
+    assert_eq!(relay.failure(), None);
+    let auth = format!("Authorization: Bearer {}", relay.token());
+    let (status, head, body) = send(relay.port(), &responses(&auth, "", "{}"));
+    assert_eq!(status, 401);
+    assert!(head.contains("Content-Type: application/json"), "{head}");
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["error"]["code"], chatgpt::SIGN_IN_EXPIRED);
+    assert_eq!(error["error"]["type"], "invalid_request_error");
+    assert_eq!(
+        error["error"]["message"],
+        crate::config::plain_problem(chatgpt::SIGN_IN_EXPIRED).unwrap_or("missing")
+    );
+    assert!(provider.seen().is_empty());
+    assert_eq!(relay.failure(), Some(chatgpt::SIGN_IN_EXPIRED));
+    assert_eq!(send(relay.port(), &responses(&auth, "", "{}")).0, 401);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// T22 R5: the access token and account id go only into the curl config on stdin, in the
+/// `Authorization` and `chatgpt-account-id` lines the engine writes; the harness's own
+/// account id and cookies are not in it, and curl's arguments and environment hold neither
+/// value.
+#[test]
+fn a_chatgpt_curl_config_alone_holds_the_token_and_account_id() {
+    let target = upstream(CHATGPT_CODEX_BASE_URL).unwrap();
+    let token = format!("{TOKEN_PREFIX}{}", "c".repeat(64));
+    let incoming = Incoming {
+        method: "POST".into(),
+        target: format!("{CODEX_PATH}/responses"),
+        headers: vec![
+            ("host".into(), "127.0.0.1:9".into()),
+            ("authorization".into(), format!("Bearer {token}")),
+            ("chatgpt-account-id".into(), "acct-harness".into()),
+            ("cookie".into(), "session=harness".into()),
+            ("accept".into(), "text/event-stream".into()),
+        ],
+        body: b"{}".to_vec(),
+    };
+    let access = SecretString::bearer(ACCESS.as_bytes().to_vec()).unwrap();
+    let config = chatgpt_config(
+        &target,
+        &incoming,
+        &access,
+        Some(ACCOUNT),
+        Some(Path::new("/dev/fd/7")),
+    )
+    .unwrap();
+    let config = String::from_utf8(config).unwrap();
+    assert!(config.contains("url = \"https://chatgpt.com/backend-api/codex/responses\"\n"));
+    assert!(config.contains(&format!("header = \"Authorization: Bearer {ACCESS}\"\n")));
+    assert!(config.contains(&format!("header = \"chatgpt-account-id: {ACCOUNT}\"\n")));
+    assert!(config.contains("header = \"accept: text/event-stream\"\n"));
+    assert_eq!(config.matches(ACCESS).count(), 1);
+    assert_eq!(config.matches(ACCOUNT).count(), 1);
+    assert!(!config.contains(&token));
+    assert!(!config.contains("acct-harness"));
+    assert!(!config.contains("session=harness"));
+    let command = upstream_command(&target);
+    for argument in command.get_args() {
+        let argument = argument.to_string_lossy();
+        assert!(!argument.contains(ACCESS) && !argument.contains(ACCOUNT));
+        assert!(!argument.contains("chatgpt.com"));
+    }
+    for (name, value) in command.get_envs() {
+        let pair = format!("{name:?}={value:?}");
+        assert!(!pair.contains(ACCESS) && !pair.contains(ACCOUNT), "{pair}");
+    }
+}
+
+/// T22: the public ChatGPT relay forwards only to the ChatGPT backend Codex uses; no caller
+/// can point a ChatGPT sign-in's token at another host.
+#[test]
+fn the_public_chatgpt_relay_forwards_only_to_the_chatgpt_backend() {
+    assert_eq!(
+        chatgpt::CHATGPT_CODEX_BASE_URL,
+        "https://chatgpt.com/backend-api/codex"
+    );
+    let (_, source) = counted_source(sign_in(ACCESS, Some(ACCOUNT), lasting()), || {
+        Err(EngineError("no renewal expected".into()))
+    });
+    let relay = Relay::start_chatgpt(source).unwrap();
+    assert!(relay.is_chatgpt());
+    assert_eq!(
+        relay.shared.upstream,
+        upstream(chatgpt::CHATGPT_CODEX_BASE_URL).unwrap()
+    );
+    assert_eq!(relay.shared.upstream.origin, "https://chatgpt.com");
+    assert_eq!(
+        relay.base_url(),
+        format!("http://127.0.0.1:{}{CODEX_PATH}", relay.port())
+    );
+}
+
+/// T22: a request waiting on a renewal does not hold the relay open: dropping the relay
+/// tells the renewal to stop, so the drop returns promptly and nothing reaches upstream.
+#[test]
+fn dropping_a_chatgpt_relay_during_a_renewal_returns_promptly() {
+    let provider = Provider::json();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&calls);
+    let renew: chatgpt::Renew = Box::new(move |_: Duration, halted: &dyn Fn() -> bool| {
+        counting.fetch_add(1, Ordering::SeqCst);
+        let waited = Instant::now();
+        while !halted() && waited.elapsed() < WAIT {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err(EngineError("native_profile_renewal_stopped".into()))
+    });
+    let source = Arc::new(chatgpt::ChatGptSource::new(
+        crate::protocol::CredentialRef::new("row-profile").unwrap(),
+        sign_in(ACCESS, None, epoch_now() + Duration::from_secs(10)),
+        renew,
+    ));
+    let relay = chatgpt_relay(&provider, source);
+    let request = responses(
+        &format!("Authorization: Bearer {}", relay.token()),
+        "",
+        "{}",
+    );
+    let port = relay.port();
+    let client = std::thread::spawn(move || {
+        let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        stream.write_all(&request).unwrap();
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply);
+    });
+    let started = Instant::now();
+    while calls.load(Ordering::SeqCst) == 0 && started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let dropping = Instant::now();
+    drop(relay);
+    assert!(
+        dropping.elapsed() < Duration::from_secs(5),
+        "the drop took {:?}",
+        dropping.elapsed()
+    );
+    let _ = client.join();
+    assert!(provider.seen().is_empty());
 }
 
 /// SECRET-FORMAT-COPIES: the forwarded request's curl config keeps the same bytes in both

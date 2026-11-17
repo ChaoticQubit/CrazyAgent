@@ -855,7 +855,8 @@ pub fn platform_pin(dep: Dependency) -> Option<Pin> {
 
 /// One owner change to setup, as the owner mutations carry it: start setup with the
 /// ticked entries, switch or remove an installed entry at the pack version the screen
-/// showed, or install one missing dependency alone.
+/// showed, install one missing dependency alone, or ask the engine to stop and bring back
+/// the pinned 2.4 backup (L5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetupAction {
@@ -882,6 +883,7 @@ pub enum SetupAction {
     SetRefusedTool {
         choice: RefusedTool,
     },
+    RestorePinned,
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;
@@ -909,9 +911,10 @@ impl SetupAction {
                         .all(|(index, id)| !pack[..index].contains(id))
             }
             Self::Set { id, .. } | Self::Remove { id, .. } => valid_pack_id(id),
-            Self::Install { .. } | Self::FixPermissions { .. } | Self::SetRefusedTool { .. } => {
-                true
-            }
+            Self::Install { .. }
+            | Self::FixPermissions { .. }
+            | Self::SetRefusedTool { .. }
+            | Self::RestorePinned => true,
         };
         if !valid {
             return Err(InstallError("pack_unknown"));
@@ -1217,6 +1220,22 @@ mod tests {
                 }
             }
         ));
+        let restore = crate::engine::owner::OwnerMutation::RestorePinned;
+        assert_eq!(
+            serde_json::to_value(&restore).unwrap(),
+            serde_json::json!({"kind": "RestorePinned"})
+        );
+        assert!(matches!(
+            restore.command().unwrap(),
+            crate::protocol::Command::OwnerSetup {
+                action: SetupAction::RestorePinned
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(SetupAction::RestorePinned).unwrap(),
+            serde_json::json!({"kind": "restore_pinned"})
+        );
+        assert!(SetupAction::RestorePinned.validate().is_ok());
     }
 
     /// DEC-141, ds-setup r4: every code setup names a sentence for reaches the desktop by

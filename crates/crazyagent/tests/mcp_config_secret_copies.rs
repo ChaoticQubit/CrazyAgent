@@ -36,6 +36,7 @@ static ALLOCATOR: FreeScan = FreeScan;
 fn server(name: &str, spec: ServerSpec, secret: &str) -> LaunchServer {
     LaunchServer {
         name: name.into(),
+        engine: false,
         spec,
         secrets: vec![LaunchSecret {
             name: secret.into(),

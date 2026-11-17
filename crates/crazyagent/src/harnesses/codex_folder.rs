@@ -150,11 +150,5 @@ fn numbered(text: &str) -> bool {
         })
 }
 
-/// Tells whether a launch failure is one of the folder access step's, which no later look
-/// can mend. Input: the failure. Output: whether it is.
-pub(crate) fn ended_the_launch(problem: &LaunchError) -> bool {
-    problem.0 == SCREEN_MISSING || problem.0 == BOX_MISSING
-}
-
 #[cfg(test)]
 mod tests;

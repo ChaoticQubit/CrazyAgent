@@ -10,6 +10,7 @@ mod master_dispatch;
 #[cfg(all(test, unix))]
 mod master_dispatch_tests;
 mod master_host_launch;
+mod master_listed;
 mod master_rcli;
 mod master_rcli_launch;
 #[cfg(all(test, unix))]
@@ -26,6 +27,7 @@ use crate::storage::worker_dispatch::{
     DispatchJob, DispatchRecord, DispatchResult, DispatchSnapshot,
 };
 use crate::worker_dispatch::*;
+use deferral::Deferral;
 #[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use std::fs::File;
@@ -45,6 +47,7 @@ pub(crate) mod accounts;
 pub(crate) mod agents;
 pub(crate) mod changes;
 pub(crate) mod cleanup;
+mod deferral;
 mod github;
 mod harness_catalog;
 mod icloud;
@@ -64,6 +67,7 @@ pub(crate) mod roadmap;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
+mod watch;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
@@ -505,6 +509,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    watches: watch::Watches,
     running: projects_home::RunningSet,
     controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
@@ -1369,6 +1374,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                watches: watch::Watches::new(),
                 running: Mutex::new(std::collections::HashSet::new()),
                 controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
@@ -2257,6 +2263,7 @@ enum Protocol {
     Ide,
     IdeTab,
     Icloud,
+    Watch,
     Owner,
     #[cfg(test)]
     TestPanic,
@@ -2292,6 +2299,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide", Protocol::Ide),
         ("ide_tab", Protocol::IdeTab),
         ("icloud", Protocol::Icloud),
+        ("watch", Protocol::Watch),
     ];
     Ok(named
         .into_iter()
@@ -2389,6 +2397,7 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Watch => return Ok(Some(Deferred::Watch(a))),
             Protocol::Owner => {}
             #[cfg(test)]
             Protocol::TestPanic => panic!("owner_test_panic"),
@@ -2517,6 +2526,11 @@ async fn serve_admitted(
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
+    if let Deferred::Watch(a) = &deferred {
+        let served = watch::serve(stream, engine, authority, auth, a, body);
+        let _ = tokio::time::timeout(watch::WATCH_TIMEOUT, served).await;
+        return;
+    }
     let Some(_deferral) = Deferral::take(&authority.deferred) else {
         let refused = refuse(stream, auth, frame, "owner_busy");
         let _ = tokio::time::timeout(engine.timeout, refused).await;
@@ -2594,32 +2608,7 @@ async fn serve_admitted(
             let served = icloud::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
         }
-    }
-}
-
-/// One owner request served past its exchange. While it runs it is counted apart from
-/// the client slots, so a long clone or check never refuses other clients, and at most
-/// `DEFERRED_MAX` run at once. Input: the server authority's count. Output: the guard, or
-/// none when `DEFERRED_MAX` already run; dropping the guard gives its place back.
-struct Deferral<'a>(&'a std::sync::atomic::AtomicUsize);
-
-impl<'a> Deferral<'a> {
-    fn take(count: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
-        use std::sync::atomic::Ordering;
-        let before = count
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
-                (running < DEFERRED_MAX).then_some(running + 1)
-            })
-            .ok()?;
-        assert!(before < DEFERRED_MAX);
-        Some(Self(count))
-    }
-}
-
-impl Drop for Deferral<'_> {
-    fn drop(&mut self) {
-        let before = self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        assert!(before > 0 && before <= DEFERRED_MAX);
+        Deferred::Watch(_) => {}
     }
 }
 
@@ -2670,6 +2659,7 @@ enum Deferred {
     Usage(Admission),
     HarnessUpdates(Admission),
     Icloud(Admission),
+    Watch(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2718,6 +2708,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Ide => ide::refusal(code)?,
         Protocol::IdeTab => ide_tab::refusal(code)?,
         Protocol::Icloud => icloud::refusal(code)?,
+        Protocol::Watch => watch::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
         Protocol::Owner => {

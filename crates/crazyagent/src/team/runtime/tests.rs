@@ -29,6 +29,10 @@ mod lead_takeover_tests;
 mod keyed_relay_tests;
 
 #[cfg(target_os = "macos")]
+#[path = "listed_agent_tests.rs"]
+mod listed_agent_tests;
+
+#[cfg(target_os = "macos")]
 #[path = "live_terminal_probe_tests.rs"]
 mod live_terminal_probe_tests;
 
@@ -18203,8 +18207,55 @@ fn unreached_lists_idle_tools_off_codex_sub_agents_in_kept_sessions_under_native
                 assert!(!woken);
                 assert_eq!(crate::team::launch_harness(kind.as_str()), None);
             }
+            HarnessKind::Listed(id) => unreachable!("{id} is not a native kind"),
         }
         team.workers.remove(&walked);
+    }
+    team.workers.clear();
+}
+
+/// Leader 18:48 (T19 Q2), by the owner's 2026-11-05 rule for an agent with no channel: a
+/// listed harness has no channel of its own, so under Native only the engine wakes an idle
+/// listed sub-agent in a kept session for its messages, tools on or off; a teammate, the
+/// master, a per-turn agent, a busy or stopping one and the Auto or Typing only setting are
+/// left out. The tools-on one trips `unreached`'s check of what it lists while that check
+/// names tools-off agents only.
+#[test]
+fn unreached_lists_idle_listed_sub_agents_in_kept_sessions_under_native_only_tools_on_or_off() {
+    use crate::coord::settings::{self, Delivery, HarnessKind};
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let listed = |role, tools| {
+        let mut worker = between_turns(&project, role, false, false);
+        worker.harness = "standin-screen".into();
+        worker.tools = tools;
+        worker
+    };
+    let (tools_off, tools_on) = (401, 402);
+    team.workers
+        .insert(tools_off, listed(AgentRole::Sub, false));
+    team.workers.insert(tools_on, listed(AgentRole::Sub, true));
+    team.workers.insert(403, listed(AgentRole::Teammate, true));
+    team.workers.insert(404, listed(AgentRole::Master, true));
+    let mut per_turn = listed(AgentRole::Sub, true);
+    per_turn.managed = true;
+    team.workers.insert(405, per_turn);
+    let mut busy = listed(AgentRole::Sub, true);
+    busy.busy = Some(Busy::Task(9));
+    team.workers.insert(406, busy);
+    let mut stopping = listed(AgentRole::Sub, true);
+    stopping.stopping = true;
+    team.workers.insert(407, stopping);
+    let kind = HarnessKind::from_harness("standin-screen").unwrap();
+    assert_eq!(kind, HarnessKind::Listed("standin-screen"));
+    for (delivery, expected) in [
+        (Delivery::Auto, BTreeSet::new()),
+        (Delivery::NativeOnly, BTreeSet::from([tools_off, tools_on])),
+        (Delivery::TypingOnly, BTreeSet::new()),
+    ] {
+        settings::set_delivery(&team.connection, &project, kind, delivery).unwrap();
+        assert_eq!(team.unreached(&project).unwrap(), expected, "{delivery:?}");
     }
     team.workers.clear();
 }
@@ -18938,6 +18989,72 @@ fn a_dropped_live_master_turn_counts_once_in_the_sessions_list() {
         2,
         "a start with no drop before it counts"
     );
+    team.workers.clear();
+}
+
+/// DEC-180 T20 M8: a live master on a listed harness whose pane reports a turn has the
+/// words its record shows as typed stored as the owner's message, read by its manifest's
+/// `turn_started` rule, then its reply, as a native terminal master's turn is stored.
+#[test]
+fn a_listed_live_master_turn_stores_the_words_its_record_shows_then_the_reply() {
+    use super::super::master::{SessionConversation, keep_conversation};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let (harness, session) = ("standin-jsonl-append", "s-listed");
+    let agent = fixture.agent(AgentRole::Master, harness, AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Master, true, true);
+    worker.harness = harness.into();
+    worker.live = true;
+    worker.session = Some(session.into());
+    team.workers.insert(agent, worker);
+    crate::master_sessions::initialize(&fixture.connection).unwrap();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    super::super::master::pane_ready(&fixture.connection, &project, agent).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let record = folder.path().join("standin-1.jsonl");
+    let lines = [
+        serde_json::json!({"type": "started", "prompt": "continue"}),
+        serde_json::json!({"type": "text", "delta": "On it"}),
+        serde_json::json!({"type": "done", "ok": true}),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(&record, text).unwrap();
+    let kept = SessionConversation {
+        agent,
+        harness: harness.into(),
+        connection: ENDPOINT.into(),
+        resume: Resume {
+            id: "standin-1".into(),
+            record,
+        },
+    };
+    keep_conversation(&fixture.connection, &project, session, &kept).unwrap();
+    let started = Report::Turn {
+        end: None,
+        text: String::new(),
+    };
+    let ended = Report::Turn {
+        end: Some(TurnEnd::Success),
+        text: "On it".into(),
+    };
+
+    team.apply(agent, started).unwrap();
+    team.apply(agent, ended).unwrap();
+
+    let mut statement = fixture
+        .connection
+        .prepare(
+            "SELECT speaker || ': ' || IFNULL(text, '') FROM session_messages
+             WHERE session=?1 AND speaker IN ('owner','master') ORDER BY seq",
+        )
+        .unwrap();
+    let stored: Vec<String> = statement
+        .query_map([session], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(stored, ["owner: continue", "master: On it"]);
     team.workers.clear();
 }
 
@@ -24930,10 +25047,7 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
     let plan = Plan {
         native: true,
         tmux: Some(fixture.tmux.clone()),
-        pane: Some((
-            crate::terminal::own_server(host.clone(), false),
-            agent.clone(),
-        )),
+        pane: Some((crate::terminal::own_server(host.clone()), agent.clone())),
         ..hooks_plan("claude-code", false)
     };
     let home = fixture.base.join("lead-home");
@@ -29751,7 +29865,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         ],
         transcript: Transcript::ClaudeSession { file: session },
     };
-    let placed = host.spawn_own_server(&lead, &command, false).unwrap();
+    let placed = host.spawn_own_server(&lead, &command).unwrap();
     assert!(crate::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");
@@ -34309,6 +34423,62 @@ fn the_team_runtime_refuses_a_store_that_keeps_a_rollback_journal() {
     match opened {
         Err(EngineError(code)) => assert_eq!(code, "database_wal_refused: delete"),
         Ok(_) => panic!("the team runtime opened a store that keeps a rollback journal"),
+    }
+}
+
+/// DEC-180 Phase 1: under the None network a signed-in agent reaches its harness's own model
+/// hosts. Codex and Claude Code have a list, by their exact launch ids; RCLI and each of the
+/// 15 other catalog harnesses is refused with today's sentence.
+#[test]
+fn only_codex_and_claude_code_name_model_hosts_for_a_signed_in_agent_with_no_network() {
+    let managed = TeamReach::Managed {
+        profile_ref: reference("managed-profile"),
+        model: None,
+    };
+    let listed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
+        hosts
+            .iter()
+            .filter_map(|(name, port)| ModelHost::new(name, *port))
+            .collect()
+    };
+    assert!(!listed(CODEX_MODEL_HOSTS).is_empty() && !listed(CLAUDE_MODEL_HOSTS).is_empty());
+    assert_eq!(
+        model_hosts("codex", &managed),
+        Ok(listed(CODEX_MODEL_HOSTS))
+    );
+    assert_eq!(
+        model_hosts("claude-code", &managed),
+        Ok(listed(CLAUDE_MODEL_HOSTS))
+    );
+    let refused = with_code(
+        "this harness has no model hosts for the no network setting",
+        Some("network_none_harness_unlisted"),
+    );
+    for launch in [
+        "claude",
+        "rcli",
+        "opencode",
+        "gemini-cli",
+        "fx",
+        "openclaw",
+        "pi",
+        "goose",
+        "aider",
+        "qwen-code",
+        "crush",
+        "droid",
+        "copilot",
+        "cline",
+        "continue",
+        "openhands",
+        "kimi",
+        "no-such-harness",
+    ] {
+        assert_eq!(
+            model_hosts(launch, &managed),
+            Err(refused.clone()),
+            "{launch}"
+        );
     }
 }
 

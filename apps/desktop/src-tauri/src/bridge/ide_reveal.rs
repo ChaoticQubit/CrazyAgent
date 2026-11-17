@@ -1,7 +1,8 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{IDE_CODES, OwnerClient};
-use crazyagent::ide::bridge::reveal::RevealFocus;
+use crazyagent::ide::bridge::reveal::{RevealFocus, RevealTarget};
+use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
 pub(super) fn ide_error(error: EngineError) -> BridgeError {
@@ -37,6 +38,27 @@ impl NativeBridge {
         let client = self.reveal_client()?;
         Ok(Box::pin(async move {
             client.ide_focus().await.map_err(ide_error)
+        }))
+    }
+
+    /// Shows one file of a project in that project's open IDE, as the TUI's open in IDE does,
+    /// run without the bridge lock. The path goes to the engine as given: the engine alone
+    /// checks that it names a file inside the project's folder. Inputs: the project id and
+    /// the path relative to the project. Output: done once the IDE showed it, or the refusal.
+    pub fn ide_reveal(
+        &self,
+        project_id: String,
+        path: String,
+    ) -> Result<Unlocked<()>, BridgeError> {
+        let project = ProjectId::new(project_id).map_err(|_| failure("ide_request_invalid"))?;
+        let client = self.reveal_client()?;
+        Ok(Box::pin(async move {
+            let request = client
+                .ide_reveal(project, RevealTarget::Project { path })
+                .await
+                .map_err(ide_error)?;
+            assert!(request.as_str().starts_with("reveal-"));
+            Ok(())
         }))
     }
 }

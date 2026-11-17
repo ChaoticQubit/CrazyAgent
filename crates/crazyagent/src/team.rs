@@ -364,13 +364,15 @@ impl DelegationPath {
     }
 }
 
-/// Maps a team plan harness identifier to the launch adapter that runs it.
-/// Takes the opaque harness identifier stored in the team plan.
+/// Maps a team plan harness identifier to the launch adapter that runs it, by the harness
+/// registry: a harness whose manifest names the agent role.
+/// Takes the opaque harness identifier stored in the team plan, an id or an alias.
 /// Returns the launch adapter identifier, or none when no adapter exists.
 pub fn launch_harness(harness: &str) -> Option<&'static str> {
-    crate::harnesses::spec(harness)
-        .map(|spec| spec.id)
-        .filter(|id| matches!(*id, "codex" | "claude-code"))
+    crate::harnesses::registry::registry()
+        .get(harness)
+        .filter(|listed| listed.runnable())
+        .map(|listed| listed.id())
 }
 
 /// Names the accounts that run a launch adapter, in the words of the Add account tiles
@@ -378,23 +380,39 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
 /// words the team start line and the default team status say.
 /// Takes the launch adapter `launch_harness` gives. Returns the two provider names.
 pub(crate) fn account_providers(launch: &str) -> (&'static str, &'static str) {
+    use crate::coord::settings::HarnessKind;
     assert!(launch_harness(launch) == Some(launch));
-    match launch {
-        "codex" => ("ChatGPT", "OpenAI"),
-        "claude-code" => ("Claude", "Anthropic"),
-        other => unreachable!("{other} is not a launch adapter"),
+    match HarnessKind::parse(launch) {
+        Some(HarnessKind::Codex) => ("ChatGPT", "OpenAI"),
+        Some(HarnessKind::ClaudeCode) => ("Claude", "Anthropic"),
+        Some(HarnessKind::Rcli | HarnessKind::Listed(_)) | None => {
+            unreachable!("{launch} names no account providers")
+        }
     }
 }
 
 /// The line a team start shows when no account of the project's pool can run its harness,
-/// naming the account kind to add in the words of the Add account tiles (DEC-161).
+/// naming the account kind to add in the words of the Add account tiles (DEC-161): for
+/// Codex and Claude Code their sign-in and API key, for a listed harness the engine's
+/// sentence from its manifest (`harnesses::accounts::no_account_line`).
 /// Takes the harness as the plan names it and the launch adapter `launch_harness` gave it.
 /// Returns the plain line.
 pub(crate) fn no_account_line(harness: &str, launch: &str) -> String {
-    let (sign_in, key) = account_providers(launch);
-    format!(
-        "No account in this project's pool can run {harness}. Add a {sign_in} sign-in or an {key} API key to the pool"
-    )
+    use crate::coord::settings::HarnessKind;
+    match HarnessKind::parse(launch) {
+        Some(HarnessKind::Codex | HarnessKind::ClaudeCode) => {
+            let (sign_in, key) = account_providers(launch);
+            format!(
+                "No account in this project's pool can run {harness}. Add a {sign_in} sign-in or an {key} API key to the pool"
+            )
+        }
+        _ => crate::harnesses::registry::registry()
+            .get(launch)
+            .map_or_else(
+                || format!("No account in this project's pool can run {harness}"),
+                crate::harnesses::accounts::no_account_line,
+            ),
+    }
 }
 
 /// What the Coordination rows of a harness kind no sub-agent runs on say instead of a live
@@ -412,17 +430,15 @@ pub fn sub_agents_unavailable(kind: crate::coord::settings::HarnessKind) -> Opti
     }
 }
 
-/// Maps a team plan master harness to the backend that runs the project's master on it.
+/// Maps a team plan master harness to the backend that runs the project's master on it, by
+/// the harness registry: a harness whose manifest names the master role.
 /// Takes the harness identifier or a connection name for it. Returns Codex, Claude or
-/// RCLI, the only harnesses a master runs on, or none for any other harness.
+/// RCLI for the harnesses the engine hosts itself, a listed backend for any other harness
+/// with the master role, or none for a harness without it.
 pub fn master_backend(harness: &str) -> Option<crate::master_session::MasterBackend> {
-    use crate::master_session::MasterBackend;
-    match crate::harnesses::spec(harness)?.id {
-        "codex" => Some(MasterBackend::Codex),
-        "claude-code" => Some(MasterBackend::Claude),
-        "rcli" => Some(MasterBackend::Rcli),
-        _ => None,
-    }
+    crate::harnesses::registry::registry()
+        .get(harness)
+        .and_then(crate::master_session::MasterBackend::of)
 }
 
 /// Records how a master on this harness asks for sub-agents.
@@ -1276,26 +1292,42 @@ pub enum TeamReach {
     },
 }
 
+/// Tells how an agent of the launch harness reaches its model through one connection, as
+/// [`reach_in`] does for the bundled registry. Takes the connection and the launch harness
+/// identifier. Returns the reach, or none.
+fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
+    reach_in(crate::harnesses::registry::registry(), connection, harness)
+}
+
 /// Tells how an agent of the launch harness reaches its model through one connection, by
 /// the one account rule every harness shares (DEC-141 PA-4): an endpoint whose wire format
 /// the harness speaks, with its key reference when it has one, or a native managed profile
-/// of that harness. Takes the connection and the launch harness identifier. Returns the
-/// reach, or none when the harness runs no team agents or cannot run on that connection.
-fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
-    let harness = launch_harness(harness)?;
-    if !crate::harnesses::account_fits(harness, connection) {
+/// of that harness. A ChatGPT sign-in that fits a listed harness only through the ChatGPT
+/// relay is no managed reach, since a managed launch hands the agent the sign-in's own
+/// credential copy (T22). Takes the registry the harness is found in, the connection and
+/// the launch harness identifier. Returns the reach, or none when the harness runs no team
+/// agents or cannot run on that connection.
+fn reach_in(
+    registry: &crate::harnesses::registry::Registry,
+    connection: &crate::config::ModelConnection,
+    harness: &str,
+) -> Option<TeamReach> {
+    let own = registry.get(harness).filter(|listed| listed.runnable())?;
+    if !own.account_fits(connection) {
         return None;
     }
     match (&connection.endpoint, &connection.auth) {
         (ModelEndpoint::Http { url }, auth) => Some(TeamReach::Endpoint {
-            base_url: crate::harnesses::endpoint_base_url(harness, url).to_owned(),
+            base_url: crate::harnesses::endpoint_base_url(&own.manifest().id, url).to_owned(),
             model: connection.model.id.clone(),
             key: match auth {
                 ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref.clone()),
                 _ => None,
             },
         }),
-        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref }) => {
+        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref })
+            if own.signs_in_natively(connection) =>
+        {
             Some(TeamReach::Managed {
                 profile_ref: profile_ref.clone(),
                 model: (connection.model.id != NATIVE_DEFAULT_MODEL)
@@ -5820,3 +5852,6 @@ fn teammates(
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod reach_tests;

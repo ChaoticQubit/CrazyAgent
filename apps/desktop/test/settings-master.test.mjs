@@ -33,7 +33,7 @@ test("Settings lists Master in the Agents group after Quitting with the four ste
   assert.match(shown, /No limit A turn runs until the master replies or its time is up\./);
   for (const steps of [50, 100, 200]) assert.ok(shown.includes(`${steps} steps A turn stops after ${steps} steps.`), `${steps} steps is listed`);
   assert.match(shown, /Stopped after N steps; reply with 'continue' to go on\./);
-  assert.match(shown, /The limit covers Claude and Codex masters with tools on\. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it\./);
+  assert.match(shown, /The limit covers Claude and Codex masters with tools on\. A master with tools off, and an RCLI master, which has no tools, answers each turn in one step, so the limit never stops it\./);
   assert.doesNotMatch(shown, /counts no steps/);
   assert.doesNotMatch(shown, /cut off/);
   assert.deepEqual(settings.STEP_LIMIT_CHOICES.map((option) => option.choice), LIMITS);
@@ -86,7 +86,7 @@ test("Settings, Master lists the master time limit with its four options, what a
   assert.match(shown, /No limit A turn runs until the master replies or you stop it\./);
   for (const minutes of [10, 30, 60]) assert.ok(shown.includes(`${minutes} min A turn stops after ${minutes} minutes.`), `${minutes} min is listed`);
   assert.match(shown, /Stopped after N minutes; reply with 'continue' to go on\./);
-  assert.match(shown, /The limit covers every master: Claude, Codex and rcli\./);
+  assert.match(shown, /The limit covers every master: Claude, Codex and RCLI\./);
   assert.doesNotMatch(shown, /still stops after/, "no master keeps a clock of its own (OB-5d)");
   assert.doesNotMatch(shown, /ran out of time|cut off/);
   assert.match(markup, /<form[^>]*aria-label="Master time limit"/);
@@ -141,7 +141,7 @@ test("Settings, Master lists the master frame size limit with its three options,
   assert.match(shown, /256 KiB Room for long instructions and large pasted text\./);
   assert.match(shown, /1 MiB The largest; for a turn that still stops at 256 KiB\./);
   assert.match(shown, /One message was larger than the master frame size limit\. Raise it here, or at 1 MiB shorten the message or the instructions, then send again\./);
-  assert.match(shown, /The limit covers Claude and Codex masters; rcli keeps 64 KiB\./);
+  assert.match(shown, /The limit covers Claude and Codex masters; RCLI keeps 64 KiB\./);
   assert.match(markup, /<form[^>]*aria-label="Master frame size limit"/);
   assert.doesNotMatch(markup, /<h2>Master<\/h2>/, "the tab has one title, above the step limit");
   assert.deepEqual(settings.FRAME_LIMIT_CHOICES.map((option) => option.choice), FRAMES);

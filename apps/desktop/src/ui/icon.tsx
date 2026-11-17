@@ -82,9 +82,7 @@ import iconX from "../assets/icons/x.svg?raw";
 import iconZap from "../assets/icons/zap.svg?raw";
 import logoAnthropic from "../assets/logos/anthropic.svg?raw";
 import logoClaude from "../assets/logos/claude.svg?raw";
-import logoCursor from "../assets/logos/cursor.svg?raw";
 import logoGithubcopilot from "../assets/logos/githubcopilot.svg?raw";
-import logoGoogle from "../assets/logos/google.svg?raw";
 import logoGooglegemini from "../assets/logos/googlegemini.svg?raw";
 import logoOllama from "../assets/logos/ollama.svg?raw";
 import logoOpencode from "../assets/logos/opencode.svg?raw";
@@ -179,9 +177,7 @@ const ICON_SOURCES = {
 const LOGO_SOURCES: Record<string, string> = {
   "anthropic": logoAnthropic,
   "claude": logoClaude,
-  "cursor": logoCursor,
   "githubcopilot": logoGithubcopilot,
-  "google": logoGoogle,
   "googlegemini": logoGooglegemini,
   "ollama": logoOllama,
   "opencode": logoOpencode,
@@ -197,13 +193,12 @@ const SVG_ATTRIBUTES = new Set(["xmlns", "width", "height", "viewBox", "fill", "
 const LOGO_FOR: Record<string, string> = {
   claude: "claude",
   anthropic_api: "anthropic",
+  gemini: "googlegemini",
   openrouter: "openrouter",
   "claude-code": "claude",
   opencode: "opencode",
   "gemini-cli": "googlegemini",
-  "cursor-agent": "cursor",
   fx: "vercel",
-  antigravity: "google",
   "qwen-code": "qwen",
   copilot: "githubcopilot",
   ollama: "ollama",

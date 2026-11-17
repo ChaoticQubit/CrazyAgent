@@ -87,12 +87,12 @@ const LEFT_RUNNING_NOTE: &str = "An agent still running when the time is up ends
 const LEFT_CHOICES: [LeftRunning; 2] = [LeftRunning::AfterHours, LeftRunning::Never];
 const HOURS_TEXT: &str = "Enter a whole number of hours from 1 to 168.";
 const STEPS_TEXT: &str = "Master step limit: the most steps a project's master takes in one turn.";
-const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers Claude and Codex masters with tools on. A master with tools off, and an rcli master, which has no tools, answers each turn in one step, so the limit never stops it.";
+const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers Claude and Codex masters with tools on. A master with tools off, and an RCLI master, which has no tools, answers each turn in one step, so the limit never stops it.";
 const TIME_TEXT: &str = "Master time limit: the longest a project's master works on one turn.";
-const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
+const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and RCLI.";
 const FRAMES_TEXT: &str =
     "Master frame size limit: the largest one message the engine sends a project's master.";
-const FRAMES_NOTE: &str = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, or at 1 MiB shorten the message or the instructions, then send again. The limit covers Claude and Codex masters; rcli keeps 64 KiB.";
+const FRAMES_NOTE: &str = "A turn whose message to the master is larger than the limit stops and says: One message was larger than the master frame size limit. Raise it here, or at 1 MiB shorten the message or the instructions, then send again. The limit covers Claude and Codex masters; RCLI keeps 64 KiB.";
 const HOURS_DIGITS_MAX: usize = 3;
 
 /// The title of one finished agents option, the same words as the desktop Settings.
@@ -2889,7 +2889,7 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
-            AppSetupEvent::Installed(_) => {}
+            AppSetupEvent::Installed(_) | AppSetupEvent::Restored(_) => {}
             AppSetupEvent::SandboxSet(result) => self.changed(result, sandbox_plain, ctx),
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)

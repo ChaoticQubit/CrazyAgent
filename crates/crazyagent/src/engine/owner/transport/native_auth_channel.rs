@@ -859,15 +859,16 @@ impl OwnerRuntimeHandle {
 
     /// Hands the team runtime, usage upkeep, research and onboarding the engine's answer for
     /// a harness they were not given at engine start: the entry of the Codex or Claude Code
-    /// host pinned now, so a harness the engine refused or never pinned is never launched.
-    /// Input: none. Output: the lookup.
+    /// host pinned now, so a native harness the engine refused or never pinned is never
+    /// launched, or a listed harness's entry as a listed master turn checks it
+    /// ([`Self::listed_entry`]). Input: none. Output: the lookup.
     pub fn harness_lookup(&self) -> crate::paths::HarnessLookup {
         let owner = self.clone();
         Arc::new(move |harness: &str| {
             let host = match harness {
                 "codex" => owner.registered_codex_executable(),
                 "claude-code" => owner.registered_claude_executable(),
-                _ => return None,
+                _ => return owner.listed_entry(harness),
             };
             let entry = host.ok()?.entry()?.to_path_buf();
             assert!(entry.is_absolute());

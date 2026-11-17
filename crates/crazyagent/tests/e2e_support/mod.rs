@@ -15,6 +15,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+pub mod harness_standin;
+
 pub const ENGINE: &str = env!("CARGO_BIN_EXE_crazyagent");
 pub const GIT: &str = "UNAVAILABLE: git is not on PATH; install git";
 pub const TMUX: &str = "UNAVAILABLE: tmux is not installed; install tmux 3.x";

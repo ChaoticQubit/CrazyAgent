@@ -197,6 +197,21 @@ impl PendingMutation {
     pub fn unrecorded(&self) -> bool {
         self.unrecorded
     }
+
+    /// Whether this is a restore of the pinned 2.4 backup that was sent before. A restore
+    /// stops the engine and replaces the journal that would confirm it, so a check after a
+    /// restart reads it as never recorded; sending it again would restore twice without a
+    /// confirm. Output: true for a restore sent at least once.
+    fn restore_sent(&self) -> bool {
+        assert!(!(self.uncertain && self.unrecorded));
+        let restore = matches!(
+            &self.request.operation,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::RestorePinned
+            }
+        );
+        restore && (self.uncertain || self.unrecorded)
+    }
 }
 
 impl OwnerController {
@@ -474,8 +489,17 @@ impl OwnerController {
     /// Sends the prepared mutation through the actual owner client.
     /// Takes exclusive access and uses the stored exact request.
     /// Returns the actual typed owner response or transport error.
-    /// A refusal before sending, such as no connected client, changes no state.
+    /// A refusal before sending, such as no connected client, changes no state, except a
+    /// restore sent once already: it is dropped and refused `controller_restore_not_resent`.
     pub async fn send_pending(&mut self) -> Result<OwnerResponse, EngineError> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(PendingMutation::restore_sent)
+        {
+            self.pending = None;
+            return Err(EngineError("controller_restore_not_resent".into()));
+        }
         let pending = self
             .pending
             .as_mut()

@@ -189,7 +189,7 @@ impl Case {
 
     async fn basis_for(&self, backend: MasterBackend) -> (ConfigId, String, Box<MasterSelection>) {
         let (pool, account) = match backend {
-            MasterBackend::Rcli => ("session-pool", "session-account"),
+            MasterBackend::Rcli | MasterBackend::Listed(_) => ("session-pool", "session-account"),
             MasterBackend::Codex | MasterBackend::Claude => ("native-pool", "native-account"),
         };
         let basis = self
@@ -989,6 +989,99 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
         );
         assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
     }
+    case.close().await;
+}
+
+/// DEC-180 Task 20: a master on a listed harness whose manifest names the master role opens
+/// on the pool's keyless endpoint account, which that harness fits whatever harness stored
+/// it, and its turns run under that member's own connection.
+#[tokio::test]
+async fn a_master_on_a_listed_master_harness_opens_on_a_fitting_account_and_runs_under_it() {
+    let case = Case::new().await;
+    let listed = MasterBackend::Listed("standin-acp");
+    let (expected_config_id, expected_source_hash, selection) = case.basis_for(listed).await;
+    let opened = case
+        .master(
+            "open-standin",
+            MasterOwnerAction::Open {
+                project_id: case.project.clone(),
+                expected_config_id,
+                expected_source_hash,
+                selection,
+            },
+        )
+        .await;
+    assert_eq!(opened, OwnerResult::Applied);
+    let shown = case.shown().await;
+    assert_eq!(shown.selection.backend, listed);
+    let member: ModelConnection = serde_json::from_value(serde_json::json!({
+        "id": "session-connection",
+        "provider": "local-provider",
+        "harness": "rcli",
+        "protocol": "openai-chat",
+        "account_ref": "session-account",
+        "endpoint": {"kind": "http", "url": "http://127.0.0.1:11434/v1"},
+        "model": {"id": "local-model", "author": "local-author"},
+        "auth": {"method": "none"},
+    }))
+    .unwrap();
+    assert_eq!(master_target(&shown, &member), Some(member.id.clone()));
+    case.close().await;
+}
+
+/// DEC-180 Phase 1: a master on a listed harness is refused with `launch_harness_unsupported`
+/// when the owner opens it or asks for a new session on it, and nothing is stored for it,
+/// while the same choice on Claude is taken.
+#[tokio::test]
+async fn a_master_on_a_listed_harness_is_refused_and_no_session_is_stored_for_it() {
+    let case = Case::new().await;
+    let listed = MasterBackend::Listed("opencode");
+    let (expected_config_id, expected_source_hash, selection) = case.basis_for(listed).await;
+    assert_eq!(selection.backend, listed);
+    let opened = case
+        .master(
+            "open-listed",
+            MasterOwnerAction::Open {
+                project_id: case.project.clone(),
+                expected_config_id,
+                expected_source_hash,
+                selection,
+            },
+        )
+        .await;
+    assert_eq!(
+        opened,
+        OwnerResult::Rejected {
+            code: "launch_harness_unsupported".into()
+        }
+    );
+    assert!(
+        snapshot(&case).is_empty(),
+        "a refused Open stores no session"
+    );
+
+    assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
+    let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
+    let before = snapshot(&case);
+    assert_eq!(
+        case.renew_with("renew-listed", false, listed).await,
+        OwnerResult::Rejected {
+            code: "launch_harness_unsupported".into()
+        }
+    );
+    assert_eq!(
+        snapshot(&case),
+        before,
+        "a refused New session changes nothing"
+    );
+    assert_eq!(case.shown().await.session_id, rcli.session_id);
+    assert_eq!(
+        case.renew_with("renew-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied,
+        "the same pool and account on Claude are taken"
+    );
     case.close().await;
 }
 
@@ -2001,7 +2094,7 @@ fn a_transcript_removal_never_deletes_through_a_home_folder_swapped_for_a_link()
         std::fs::write(&record, "outside\n").unwrap();
         std::fs::create_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::write(&folder, "outside\n").unwrap();
-        let _ = remove_transcript(&home, &kept);
+        let _ = delete::remove_transcript(&home, &kept);
         if !record.is_file() || !folder.is_file() {
             reached.push(attempt);
         }
@@ -2015,49 +2108,4 @@ fn a_transcript_removal_never_deletes_through_a_home_folder_swapped_for_a_link()
     );
 }
 
-#[tokio::test]
-async fn deleting_a_session_keeps_the_learning_tick_its_owner_messages_gave() {
-    let case = Case::new().await;
-    assert_eq!(case.open("open-first").await, OwnerResult::Applied);
-    let first = case.shown().await;
-    assert_eq!(
-        case.submit("first-line", &first.session_id, "Write the import guide")
-            .await,
-        OwnerResult::Applied
-    );
-    assert_eq!(case.renew("renew-first", true).await, OwnerResult::Applied);
-    let master_done = |case: &Case| {
-        let mut db = case.db();
-        let tx = db.transaction().unwrap();
-        crate::learning::progress(&tx)
-            .unwrap()
-            .steps
-            .iter()
-            .any(|step| step.id == crate::learning::StepId::Master && step.done())
-    };
-    assert!(master_done(&case));
-    assert_eq!(
-        case.delete("delete-first", &first.session_id).await,
-        OwnerResult::Applied
-    );
-    let messages: i64 = case
-        .db()
-        .query_row(
-            "SELECT COUNT(*) FROM conversation_entries WHERE kind='message'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(messages, 0, "the deleted session's messages are gone");
-    assert!(master_done(&case), "the tick outlives the messages");
-    let kept: i64 = case
-        .db()
-        .query_row(
-            "SELECT COUNT(*) FROM learning_marks WHERE step='master'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(kept, 1, "the delete kept the master step as a mark");
-    case.close().await;
-}
+mod deleted;

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listAccounts, loadTeamGraph, nextGeneration, setLiveMaster, setTeamStopped } from "../../api";
-import type { Result } from "../../api";
+import type { HarnessEntry, Result } from "../../api";
 import { useLoad } from "../../state";
 import { failureCopy, openMasterProject, readMaster, receiptState, startMaster } from "../../api-projects";
 import type { GraphNode, IntentReceipt, MasterState, TeamStatus } from "../../engine-client";
@@ -19,13 +19,29 @@ import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
-const LIVE_HARNESSES = ["codex", "claude-code"];
 const POLL_MS = 2000;
 
-/** Whether a master harness runs as its own app in a live terminal. Input: the team plan's
- * master harness id. Output: true for Codex and Claude Code, whose apps the engine reads. */
-export function runsLive(harness: string | undefined): boolean {
-  return harness !== undefined && LIVE_HARNESSES.includes(harness);
+/** Whether a master harness runs as its own app in a live terminal. Input: the catalog
+ * entry of the team plan's master, or undefined when the catalog has none or could not be
+ * read. Output: true when the engine reads that harness's replies back from a terminal and
+ * the harness can run a master, which today is Codex and Claude Code; false without an entry. */
+export function runsLive(harness: HarnessEntry | undefined): boolean {
+  return harness !== undefined && harness.terminal && harness.master;
+}
+
+/** Why Live terminal is unavailable for a master the catalog says cannot run live. */
+export const NO_LIVE_TERMINAL = "This master has no live terminal: its conversation is the console.";
+
+/** Why Live terminal is unavailable while the harness catalog cannot be read. */
+export const CATALOG_UNREAD = "The harness catalog couldn't be read, so the master's conversation is the console until it can be.";
+
+/** Says why the master cannot run in a live terminal. Inputs: the team plan's master id, or
+ * undefined when none is known, and the catalog read. Output: the reason, or undefined when
+ * the master runs live or none is known yet. */
+export function noLiveReason(master: string | undefined, catalog: Result<HarnessEntry[]>): string | undefined {
+  if (master === undefined) return undefined;
+  if (catalog.kind !== "ok") return CATALOG_UNREAD;
+  return runsLive(entry(catalog.value, master)) ? undefined : NO_LIVE_TERMINAL;
 }
 
 /** Finds the master's node in a team graph. Input: the graph nodes. Output: the master node,
@@ -260,17 +276,19 @@ export function liveStaleNote(name: string): string {
  * The plan's master is read through the harness catalog, so an alias such as "claude" is the
  * same Claude Code master (OP-28), and nothing is shown before the plan and catalog are read.
  * A saved switch to another harness opens the area afresh, as a tab change does (DEC-161).
+ * Which master is live is what the catalog says its harness can do, never a list of ids here.
  * Input: the project data. Output: the area;
- * any other master, a project with Live terminal off, a project without a team plan and a plan
- * that couldn't be read keep the engine-driven conversation. */
+ * any other master, a project with Live terminal off, a project without a team plan, a plan
+ * that couldn't be read and a catalog that couldn't be read keep the engine-driven conversation. */
 export function MasterArea({ data }: { data: ProjectData }) {
   if (data.setup === undefined || data.harnesses === undefined) return <p className="pj-small pj-muted" role="status">Loading the master...</p>;
   const stored = valueOf(data.setup)?.team.master;
-  const harness = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored)?.id ?? stored;
-  const area = harness === undefined || !runsLive(harness) || liveTerminalOff(data.team.result, data.id)
+  const listed = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored);
+  const harness = stored === undefined ? undefined : listed?.id ?? stored;
+  const area = harness === undefined || !runsLive(listed) || liveTerminalOff(data.team.result, data.id)
     ? <ConversationTab data={data} />
     : <LiveMaster key={`${data.id}:${harness}`} data={data} harness={harness} />;
-  return <MasterSettingsDrawer data={data} liveHarness={harness === undefined || runsLive(harness)}>{area}</MasterSettingsDrawer>;
+  return <MasterSettingsDrawer data={data} noLive={noLiveReason(stored, data.harnesses)}>{area}</MasterSettingsDrawer>;
 }
 
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {

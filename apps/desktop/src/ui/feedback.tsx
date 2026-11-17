@@ -35,13 +35,19 @@ export function statusIcon(word: string): IconName | undefined {
   return STATUSES.find(([pattern]) => pattern.test(word))?.[1];
 }
 
-/** A status badge: always the word, with the design icon and tone color when the word is in
- * the table, text only otherwise. Inputs: the status word and an optional tone override. */
+const WORKING = /^(Running|Signing in\.\.\.|Starting|Thinking\.\.\.|Writing|Working|Installing|Reading|Downloading|Adding|Checking|Finishing|Deleting|Agent is updating|Agent is fixing conflicts with main)$/;
+
+/** Whether a status word names work in progress, whose badge dot pulses; steady states, info
+ * ones included, do not. Input: the status word. Output: true for a working word. */
+export function statusWorking(word: string): boolean {
+  return WORKING.test(word);
+}
+
+/** A status badge: always the word, toned when the word is in the table and marked working
+ * for work in progress; the stylesheet draws its dot in the tone color and pulses a working
+ * one. Inputs: the status word and an optional tone override. */
 export function StatusBadge({ word, tone = statusTone(word) }: { word: string; tone?: Tone }) {
-  const icon = statusIcon(word);
-  return <span className={`badge${tone === "neutral" ? "" : ` tone-${tone}`}`}>
-    {icon && <Icon name={icon} size={12} spin={icon === "loader-circle"} />}{word}
-  </span>;
+  return <span className={`badge${tone === "neutral" ? "" : ` tone-${tone}`}`} data-working={statusWorking(word) || undefined}>{word}</span>;
 }
 
 /** An inline notice with an icon. Inputs: tone, optional icon, content, alert role. */
@@ -94,7 +100,7 @@ export function EmptyState({ icon = "inbox", title, children, action, compact = 
  * It never shows sample data. Inputs: what is not ready, in plain words. */
 export function NotReady({ what, compact = false }: { what: string; compact?: boolean }) {
   return <section className={`empty-state not-ready${compact ? " compact" : ""}`} aria-label="Not ready yet">
-    <span className="badge"><Icon name="clock" size={12} />Not ready yet</span>
+    <span className="badge">Not ready yet</span>
     <h2>{what} isn't ready yet</h2>
     <p>This part of CrazyAgent's engine isn't in this build yet. Nothing here is saved or shown until it is.</p>
   </section>;

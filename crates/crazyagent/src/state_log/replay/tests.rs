@@ -201,6 +201,31 @@ fn holds(path: &Path, marker: &[u8]) -> bool {
         .any(|window| window == marker)
 }
 
+/// The body logged at one seq. Inputs: the store and the seq. Output: the body.
+fn body_at(db: &Connection, seq: u64) -> Vec<u8> {
+    db.query_row(
+        "SELECT body FROM state_log WHERE seq=?1",
+        [seq as i64],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// A projection that applies nothing, for events a row only needs in the log. Inputs: the
+/// store and the event. Output: Ok.
+fn logged_only(_: &Connection, _: &Logged) -> Result<(), EngineError> {
+    Ok(())
+}
+
+/// Records each event with no projection. Inputs: the store and the aggregate, kind and body
+/// of each event. Output: their seqs, in order.
+fn note(db: &mut Connection, events: &[(Aggregate, &str, serde_json::Value)]) -> Vec<u64> {
+    events
+        .iter()
+        .map(|(aggregate, kind, body)| record(db, *aggregate, kind, body.clone(), 1, logged_only))
+        .collect()
+}
+
 #[test]
 fn a_replay_rebuilds_the_live_table_and_a_projection_that_skips_an_event_differs() {
     let mut live = store();
@@ -702,6 +727,35 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
 }
 
 #[test]
+fn redact_puts_back_the_secure_delete_mode_it_found_fast_included() {
+    for (mode, expected) in [("OFF", 0), ("ON", 1), ("FAST", 2)] {
+        let mut db = store();
+        db.execute_batch(&format!("PRAGMA secure_delete={mode};"))
+            .unwrap();
+        let tx = db.transaction().unwrap();
+        let seq = Appender::own(&tx, fence::engine())
+            .unwrap()
+            .append(&Draft {
+                aggregate: Aggregate::Worktrees,
+                kind: "Secret",
+                schema: 1,
+                at_ms: 1,
+                body: b"{}",
+            })
+            .unwrap();
+        let before: i64 = tx
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, expected, "{mode} before");
+        redact(&tx, seq, &fence::engine()).unwrap();
+        let after: i64 = tx
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, expected, "{mode} after");
+    }
+}
+
+#[test]
 fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("engine.db");
@@ -717,6 +771,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     )
     .unwrap();
     fence::seed(&db);
+    db.execute_batch("PRAGMA secure_delete=OFF;").unwrap();
     let pragma = |name: &str| -> i64 {
         db.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
             .unwrap()
@@ -742,6 +797,10 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let tx = db.transaction().unwrap();
     redact(&tx, seq, &fence::engine()).unwrap();
     tx.commit().unwrap();
+    let secure: i64 = db
+        .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(secure, 0, "redact puts secure_delete back");
     checkpoint(&db);
     assert!(!holds(&path, marker), "the redacted body is zeroed");
     let wal = path.with_extension("db-wal");
@@ -749,4 +808,296 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
         !wal.exists() || !holds(&wal, marker),
         "the WAL keeps no copy"
     );
+}
+
+#[test]
+fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_one() {
+    let mut db = store();
+    let (sessions, team) = (Aggregate::Sessions, Aggregate::Team);
+    let tx = db.transaction().unwrap();
+    let run = vec![Chunk {
+        table: "sessions".into(),
+        rows: vec![json!({ "session": "s-1" })],
+    }];
+    let done = Appender::own(&tx, fence::engine())
+        .unwrap()
+        .snapshot(sessions, 1, run)
+        .unwrap();
+    tx.commit().unwrap();
+    let seqs = note(
+        &mut db,
+        &[
+            (
+                sessions,
+                "Noted",
+                json!({ "project": "p-1", "session": "s-1", "text": "secret" }),
+            ),
+            (team, "Noted", json!({ "session": "s-1", "turn": 3 })),
+            (sessions, "Noted", json!({ "session": "s-2" })),
+            (sessions, "Noted", json!({ "session": "s-10" })),
+            (sessions, "Noted", json!({ "turn": { "session": "s-1" } })),
+            (sessions, "Noted", json!(["s-1"])),
+            (team, "Noted", json!({ "session": 1, "note": "s-1" })),
+            (Aggregate::Worktrees, "Noted", json!({ "session": "s-1" })),
+            (
+                sessions,
+                "SessionDeleted",
+                json!({ "project": "p-1", "session": "s-1" }),
+            ),
+        ],
+    );
+    let keep = seqs[8];
+    let chunk = body_at(&db, done - 1);
+    let bodies: Vec<Vec<u8>> = seqs.iter().map(|seq| body_at(&db, *seq)).collect();
+    let before = logged_rows(&db);
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        redact_matching(
+            &tx,
+            &[sessions, team],
+            None,
+            "session",
+            "s-1",
+            keep,
+            &fence::engine()
+        ),
+        Ok(2)
+    );
+    tx.commit().unwrap();
+    for (index, seq) in seqs.iter().enumerate() {
+        let expected = if index < 2 {
+            TOMBSTONE.to_vec()
+        } else {
+            bodies[index].clone()
+        };
+        assert_eq!(body_at(&db, *seq), expected, "event {index}");
+    }
+    assert_eq!(
+        body_at(&db, done - 1),
+        chunk,
+        "a snapshot chunk's nested rows are not matched (L1b)"
+    );
+    assert_eq!(
+        logged_rows(&db),
+        before,
+        "seq, revision, aggregate and kind stay"
+    );
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        redact_matching(
+            &tx,
+            &[sessions, team],
+            None,
+            "session",
+            "s-1",
+            keep,
+            &fence::engine()
+        ),
+        Ok(0),
+        "a second delete finds nothing left"
+    );
+    drop(tx);
+    let mut read = Vec::new();
+    replay(&db, sessions, 0, |event| {
+        read.push(event.seq);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        read,
+        [done - 1, seqs[2], seqs[3], seqs[4], seqs[5], seqs[8]]
+    );
+}
+
+#[test]
+fn redact_matching_by_project_takes_the_exact_top_level_project_of_the_named_aggregates_and_kinds()
+{
+    let mut db = store();
+    let (projects, worktrees) = (Aggregate::Projects, Aggregate::Worktrees);
+    let seqs = note(
+        &mut db,
+        &[
+            (
+                projects,
+                "ProjectNamed",
+                json!({ "project": "p-1", "name": "secret" }),
+            ),
+            (
+                worktrees,
+                "LeaseSaved",
+                json!({ "project": "p-1", "task": "t-1" }),
+            ),
+            (
+                worktrees,
+                "WorktreeReserved",
+                json!({ "project": "p-1", "task": "t-2" }),
+            ),
+            (worktrees, "LeaseSaved", json!({ "project": "p-12" })),
+            (worktrees, "LeaseSaved", json!({ "project": "P-1" })),
+            (worktrees, "LeaseSaved", json!({ "repository": "p-1" })),
+            (
+                Aggregate::Sessions,
+                "LeaseSaved",
+                json!({ "project": "p-1", "session": "s-1" }),
+            ),
+            (projects, "ProjectRemoved", json!({ "project": "p-1" })),
+        ],
+    );
+    let keep = seqs[7];
+    let bodies: Vec<Vec<u8>> = seqs.iter().map(|seq| body_at(&db, *seq)).collect();
+    let tx = db.transaction().unwrap();
+    let owner = Fence::Owner(fence::test_owner());
+    let aggregates = [projects, worktrees];
+    let redacted = |gone: usize| {
+        for (index, seq) in seqs.iter().enumerate() {
+            let expected = if index < gone {
+                TOMBSTONE.to_vec()
+            } else {
+                bodies[index].clone()
+            };
+            assert_eq!(body_at(&tx, *seq), expected, "event {index}");
+        }
+    };
+    let kinds = ["ProjectNamed", "LeaseSaved"];
+    assert_eq!(
+        redact_matching(
+            &tx,
+            &aggregates,
+            Some(&kinds[..]),
+            "project",
+            "p-1",
+            keep,
+            &owner
+        ),
+        Ok(2),
+        "filtered: only the listed kinds"
+    );
+    redacted(2);
+    assert_eq!(
+        redact_matching(&tx, &aggregates, None, "project", "p-1", keep, &owner),
+        Ok(1),
+        "unfiltered: every kind"
+    );
+    redacted(3);
+}
+
+#[test]
+fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
+    let mut empty = store();
+    let tx = empty.transaction().unwrap();
+    assert_eq!(
+        redact_matching(
+            &tx,
+            &[Aggregate::Sessions],
+            None,
+            "session",
+            "s-1",
+            0,
+            &fence::engine()
+        ),
+        Ok(0),
+        "a store with no log"
+    );
+    assert!(!logged(&tx).unwrap(), "finding nothing creates no log");
+    drop(tx);
+    let mut db = store();
+    let sessions = [Aggregate::Sessions];
+    let seq = note(
+        &mut db,
+        &[(sessions[0], "Noted", json!({ "session": "s-1" }))],
+    )[0];
+    let body = body_at(&db, seq);
+    let tx = db.transaction().unwrap();
+    let refused = Some("state_log_redact_match".to_string());
+    let noted = ["Noted"];
+    for (aggregates, kinds, field, value) in [
+        (&sessions[..], None, "", "s-1"),
+        (&sessions[..], None, "session", ""),
+        (&sessions[..], None, "session", "s\"1"),
+        (&sessions[..], None, "session", "s\\1"),
+        (&sessions[..], None, "session", "s\n1"),
+        (&[][..], None, "session", "s-1"),
+        (&sessions[..], Some(&noted[..0]), "session", "s-1"),
+    ] {
+        assert_eq!(
+            code(redact_matching(
+                &tx,
+                aggregates,
+                kinds,
+                field,
+                value,
+                0,
+                &fence::engine()
+            )),
+            refused,
+            "{kinds:?} {field:?} {value:?}"
+        );
+    }
+    let outside = Fence::Engine(crate::engine::owner::HostStamp {
+        db_instance: "a".repeat(64),
+        engine_epoch: "9".repeat(64),
+    });
+    assert_eq!(
+        code(redact_matching(
+            &tx, &sessions, None, "session", "s-1", 0, &outside
+        )),
+        Some("state_log_fence_out_of_process".into())
+    );
+    let revoked = Fence::Owner(crate::engine::owner::Admission {
+        owner_epoch: 2,
+        ..fence::test_owner()
+    });
+    assert_eq!(
+        code(redact_matching(
+            &tx, &sessions, None, "session", "s-1", 0, &revoked
+        )),
+        Some("owner_grant_stale_or_revoked".into())
+    );
+    assert_eq!(body_at(&tx, seq), body, "a refusal redacts nothing");
+    assert_eq!(
+        redact_matching(
+            &tx,
+            &sessions,
+            Some(&noted[..]),
+            "session",
+            "s-1",
+            0,
+            &fence::engine()
+        ),
+        Ok(1)
+    );
+}
+
+#[test]
+fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let body = br#"{"session":"s-1"}"#;
+    let draft = |aggregate| Draft {
+        aggregate,
+        kind: "Noted",
+        schema: 1,
+        at_ms: 1,
+        body,
+    };
+    for _ in 0..REPLAY_BATCH_MAX {
+        log.append(&draft(Aggregate::Worktrees)).unwrap();
+    }
+    let last = log.append(&draft(Aggregate::Sessions)).unwrap();
+    assert_eq!(last, REPLAY_BATCH_MAX as u64 + 1);
+    assert_eq!(
+        redact_matching(
+            &tx,
+            &[Aggregate::Sessions],
+            None,
+            "session",
+            "s-1",
+            0,
+            &fence::engine()
+        ),
+        Ok(1)
+    );
+    assert_eq!(body_at(&tx, last), TOMBSTONE);
+    assert_eq!(body_at(&tx, 1), body);
 }

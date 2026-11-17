@@ -14,7 +14,7 @@ const DRAWER = '<dialog class="drawer" open><div class="dialog-body pj" id="moun
 const SAVE_MS = 60;
 const RECEIPT = { outcome: "applied", pending: false, rejection: null };
 const entryOf = (id, name, extra = {}) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" }, model_selection: false, account_kinds: [], team: { kind: "available" }, aliases: [], ...extra });
-const HARNESSES = [entryOf("claude", "Claude Code", { aliases: ["claude-code"] }), entryOf("codex", "Codex")];
+const HARNESSES = [entryOf("claude", "Claude Code", { aliases: ["claude-code"] }), entryOf("codex", "Codex"), entryOf("rcli", "RCLI", { team: { kind: "master_only" } })];
 const POOLS = [{ pool: { id: "pool-a", name: "Pool A", members: [] }, members: [] }, { pool: { id: "pool-b", name: "Pool B", members: [] }, members: [] }];
 const SETUP = {
   project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research: [], pool: "pool-a", revision: 4,
@@ -171,9 +171,9 @@ export async function mount(css, view, status, section) {
   };
   const views = {
     page: [team.TeamControls, { projectId: "alpha", status, reload() {}, navigate() {}, data }],
-    drawer: [conversation.MasterSettings, { data, liveHarness: true }],
+    drawer: [conversation.MasterSettings, { data }],
     agents: [agents.AgentsTab, { data, section: section ?? undefined }],
-    button: [conversation.MasterSettingsDrawer, { data, liveHarness: true, children: createElement(conversation.MasterSettingsButton) }],
+    button: [conversation.MasterSettingsDrawer, { data, children: createElement(conversation.MasterSettingsButton) }],
   };
   const [component, props] = views[view];
   if (typeof component !== "function") return false;

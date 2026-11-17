@@ -30,6 +30,10 @@ pub(in crate::tui) enum ProcessQuery {
     ReadFile {
         path: std::path::PathBuf,
     },
+    Sources,
+    ReadSource {
+        harness: String,
+    },
     Default,
     Agent {
         project: ProjectId,
@@ -78,6 +82,7 @@ pub(in crate::tui) enum ProcessQuery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
+    Sources(Vec<crate::engine::owner::InstructionSource>),
     Current(ProcessText),
     Saved(SavedText),
     Agent(Box<crate::engine::owner::AgentInstructions>),
@@ -174,6 +179,14 @@ impl NativeOwner {
                 .map(ProcessReply::Saved),
             ProcessQuery::ReadFile { path } => controller
                 .read_instruction_file(path)
+                .await
+                .map(ProcessReply::Text),
+            ProcessQuery::Sources => controller
+                .instruction_sources()
+                .await
+                .map(ProcessReply::Sources),
+            ProcessQuery::ReadSource { harness } => controller
+                .read_instruction_source(harness)
                 .await
                 .map(ProcessReply::Text),
             ProcessQuery::Default => controller.default_process().await.map(ProcessReply::Text),

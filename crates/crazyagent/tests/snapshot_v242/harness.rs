@@ -478,8 +478,10 @@ fn headless_refusals(scratch: &Path) -> Result<Value, String> {
 
 /// The pane spec of one built interactive command: argv, working folder, variable names in
 /// the order the pane gets them without `SDKROOT` and whether it came as the engine gives it, where the harness records its session (by kind, as a place
-/// below the account home) and the files below the home. Inputs: the command and the home.
-/// Output: the surface as JSON.
+/// below the account home) and the files below the home. A manifest harness's record, which
+/// no 2.4.2 harness has, reads as its own kind with its harness and record kind, so a 2.5
+/// harness that gets one shows as a golden difference, not a failed capture. Inputs: the
+/// command and the home. Output: the surface as JSON.
 fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
     let mut env_names: Vec<String> = built.env.iter().map(|(name, _)| name.clone()).collect();
     let sdkroot = super::launch::sdkroot_fact(&mut env_names, true)?;
@@ -497,6 +499,11 @@ fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
                     == &home.join("projects").join(folder).join(format!("{SESSION}.jsonl")),
             })
         }
+        Transcript::Records(records) => json!({
+            "kind": "records",
+            "harness": records.harness,
+            "record_kind": format!("{:?}", records.kind),
+        }),
         Transcript::Unavailable => json!({"kind": "unavailable"}),
     };
     Ok(json!({
@@ -989,4 +996,25 @@ fn toolchain_rows_read_the_same_on_a_mac_with_and_without_the_toolchains() {
     );
     let misread = toolchain_rows(&there, |_| true);
     assert_eq!(misread[0]["installed_as_this_mac_has_it"], json!(false));
+}
+
+#[test]
+fn a_manifest_record_transcript_reads_as_its_own_kind_no_2_4_2_harness_has() {
+    let home = super::e2e_support::scratch("ca-snap-records-");
+    let text = include_str!("../fixtures/harness/standin-jsonl-append.yaml");
+    let manifest = crazyagent::harnesses::manifest::parse(text.as_bytes()).unwrap();
+    let settings = interactive::settings::TerminalSettings::read(&manifest).unwrap();
+    let harness = settings.harness().to_owned();
+    let records = settings.records(home.path(), "snapshot-session").unwrap();
+    let built = InteractiveCommand {
+        argv: vec!["standin".to_owned()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Records(records),
+    };
+    let spec = pane_spec(&built, home.path()).unwrap();
+    assert_eq!(
+        spec["transcript"],
+        json!({"kind": "records", "harness": harness, "record_kind": "JsonlAppend"})
+    );
 }

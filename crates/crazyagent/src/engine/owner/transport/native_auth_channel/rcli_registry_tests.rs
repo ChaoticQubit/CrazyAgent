@@ -739,6 +739,125 @@ async fn look_again_searches_only_where_engine_start_said_and_an_engine_without_
     .await;
 }
 
+/// T19b 19b-4 (rv-code4 F1): the engine's lookup answers a listed harness by its exact id
+/// with the entry its catalog search finds under the search set at engine start, as a
+/// listed master turn finds it, so a listed research job or team agent finds its program.
+/// It never answers through an alias or for a kind the engine pins itself, never before a
+/// search is set, and never for a file that is gone.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn the_engine_lookup_answers_a_listed_harness_by_its_id_from_the_search_set_at_start() {
+    registry_case(|host, root| async move {
+        let bin = root.join("listed");
+        std::fs::create_dir(&bin).unwrap();
+        let program = physical_file(&bin, "standin-acp", b"#!/bin/sh\nexit 0\n");
+        physical_file(&bin, "claude", b"#!/bin/sh\nexit 0\n");
+        let lookup = host.harness_lookup();
+        assert_eq!(lookup("standin-acp"), None);
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        host.set_harness_search(on(&path)).unwrap();
+        assert_eq!(lookup("standin-acp"), Some(program.clone()));
+        assert_eq!(lookup("claude"), None);
+        assert_eq!(lookup("claude-code"), None);
+        assert_eq!(lookup("no-such-harness"), None);
+        std::fs::remove_file(&program).unwrap();
+        assert_eq!(lookup("standin-acp"), None);
+    })
+    .await;
+}
+
+/// T19B-4-R2 (rv-secreview F1): a listed harness's file the search finds in a folder agents
+/// can write, here the engine folder, is neither answered by the engine's lookup nor taken
+/// for a listed master turn, as a native's file there is refused; the same harness in an
+/// owner folder is still taken.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_listed_harness_in_a_folder_agents_can_write_is_not_answered_or_taken() {
+    use crate::engine::owner::transport::harness_catalog::listed_install;
+    registry_case(|host, tools| async move {
+        let engine = host.authority.root.path.parent().unwrap().to_path_buf();
+        let agent = engine.join("agent-listed");
+        let owner = tools.join("owner-listed");
+        std::fs::create_dir(&agent).unwrap();
+        std::fs::create_dir(&owner).unwrap();
+        let planted = physical_file(&agent, "gemini", b"#!/bin/sh\nexit 0\n");
+        let kept = physical_file(&owner, "gemini", b"#!/bin/sh\nexit 0\n");
+        let in_agent = on(&std::env::join_paths([agent.clone()]).unwrap());
+        let in_owner = on(&std::env::join_paths([owner.clone()]).unwrap());
+        let harness = crate::harnesses::registry::registry()
+            .get("gemini-cli")
+            .unwrap();
+        let found = crate::harnesses::entry(harness, &in_agent).executable;
+        let root = crate::engine::owner::transport::changes::engine_root(&host.authority).unwrap();
+        let taken =
+            listed_install(&host.engine, root.clone(), in_agent.clone(), "gemini-cli").await;
+        let owned = listed_install(&host.engine, root, in_owner, "gemini-cli").await;
+        host.set_harness_search(in_agent).unwrap();
+        let answered = host.harness_lookup()("gemini-cli");
+
+        assert_eq!(found, Some(planted), "the search finds the planted file");
+        assert_eq!(
+            answered, None,
+            "the lookup never answers a file in agent space"
+        );
+        assert_eq!(taken.0, None, "a listed master turn never takes it");
+        assert_eq!(
+            owned.0,
+            Some(kept),
+            "the same harness in an owner folder is taken"
+        );
+    })
+    .await;
+}
+
+/// T19B-SPACE-F1 (rv-sec2 FINDINGS 04:08 F1): a listed harness's file the search finds in a
+/// folder other users can change is neither answered by the engine's lookup nor taken for a
+/// listed master turn, as a native's file there is refused (`harness_path_changeable`); the
+/// same harness in an owner folder is still taken.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_listed_harness_in_a_folder_other_users_can_change_is_not_answered_or_taken() {
+    use crate::engine::owner::transport::harness_catalog::listed_install;
+    registry_case(|host, tools| async move {
+        let shared = tools.join("shared-listed");
+        let owner = tools.join("owner-listed");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::create_dir(&owner).unwrap();
+        let open = physical_file(&shared, "gemini", b"#!/bin/sh\nexit 0\n");
+        let kept = physical_file(&owner, "gemini", b"#!/bin/sh\nexit 0\n");
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let in_shared = on(&std::env::join_paths([shared.clone()]).unwrap());
+        let in_owner = on(&std::env::join_paths([owner.clone()]).unwrap());
+        let harness = crate::harnesses::registry::registry()
+            .get("gemini-cli")
+            .unwrap();
+        let found = crate::harnesses::entry(harness, &in_shared).executable;
+        let root = crate::engine::owner::transport::changes::engine_root(&host.authority).unwrap();
+        let taken =
+            listed_install(&host.engine, root.clone(), in_shared.clone(), "gemini-cli").await;
+        let owned = listed_install(&host.engine, root, in_owner, "gemini-cli").await;
+        host.set_harness_search(in_shared).unwrap();
+        let answered = host.harness_lookup()("gemini-cli");
+
+        assert_eq!(
+            found,
+            Some(open),
+            "the search finds the file in the open folder"
+        );
+        assert_eq!(
+            answered, None,
+            "the lookup never answers a file other users can change"
+        );
+        assert_eq!(taken.0, None, "a listed master turn never takes it");
+        assert_eq!(
+            owned.0,
+            Some(kept),
+            "the same harness in an owner folder is taken"
+        );
+    })
+    .await;
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn check_again_replaces_a_pin_whose_file_is_gone_but_never_one_that_changed_or_is_unsafe() {

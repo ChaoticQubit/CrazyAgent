@@ -39,6 +39,33 @@ export function routeSection(hash: string): string | undefined {
   return new URLSearchParams(hash.split("?")[1] ?? "").get("section") ?? undefined;
 }
 
+const FILE_SECTION = "file:";
+const AGENT_SECTION = "agent:";
+
+/** The section that asks the IDE tab to show one project file. Input: the path relative to the
+ * project. Output: the section, such as "file:src/cart.ts". */
+export function fileSection(path: string): string {
+  return FILE_SECTION + path;
+}
+
+/** The section that asks the Team view to open one agent's Messages row. Input: the row key.
+ * Output: the section, such as "agent:agent-7". */
+export function agentSection(key: string): string {
+  return AGENT_SECTION + key;
+}
+
+/** The file a route's section asks the IDE tab to show. Input: the section. Output: the path,
+ * or null when the section names no file. */
+export function sectionFile(section: string | undefined): string | null {
+  return section?.startsWith(FILE_SECTION) && section.length > FILE_SECTION.length ? section.slice(FILE_SECTION.length) : null;
+}
+
+/** The agent whose Messages row a route's section asks the Team view to open. Input: the
+ * section. Output: the row key, or null when the section names no agent. */
+export function sectionAgent(section: string | undefined): string | null {
+  return section?.startsWith(AGENT_SECTION) && section.length > AGENT_SECTION.length ? section.slice(AGENT_SECTION.length) : null;
+}
+
 /** Shows the plain "Not ready yet" state for an engine part that isn't in this build.
  * Input: what is not ready. Output: the notice. */
 export function NotReady({ what }: { what: string }) {

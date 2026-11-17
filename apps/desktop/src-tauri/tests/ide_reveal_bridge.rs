@@ -10,15 +10,20 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 1] = ["desktop_ide_focus"];
+const COMMANDS: [(&str, &str); 2] = [
+    (
+        "desktop_ide_focus",
+        include_str!("../../src/engine-client.ts"),
+    ),
+    ("desktop_ide_reveal", include_str!("../../src/api-ide.ts")),
+];
 
 #[test]
-fn ide_focus_command_is_registered_in_all_four_places() {
+fn ide_focus_and_reveal_commands_are_registered_in_all_four_places() {
     let build = include_str!("../build.rs");
     let bindings = include_str!("../src/lib.rs");
     let capability = include_str!("../capabilities/main-window.json");
-    let client = include_str!("../../src/engine-client.ts");
-    for command in COMMANDS {
+    for (command, client) in COMMANDS {
         assert_eq!(
             build.matches(&format!("\"{command}\"")).count(),
             1,
@@ -55,6 +60,20 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         bridge.ide_focus().err().map(|error| error.code),
         Some("not_connected")
+    );
+    assert_eq!(
+        bridge
+            .ide_reveal("alpha".into(), "src/cart.ts".into())
+            .err()
+            .map(|error| error.code),
+        Some("not_connected")
+    );
+    assert_eq!(
+        bridge
+            .ide_reveal("not a project id".into(), "src/cart.ts".into())
+            .err()
+            .map(|error| error.code),
+        Some("ide_request_invalid")
     );
     assert!(bridge.connect().await?.connected);
     assert_eq!(bridge.ide_focus()?.await?, None);

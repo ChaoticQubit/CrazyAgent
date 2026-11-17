@@ -1,4 +1,5 @@
 use super::tool::{self, Call};
+use crate::harnesses::records::json_files::Pattern;
 use crate::harnesses::transcript::record_message;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -37,6 +38,8 @@ const SNIPPET_LEAD_BYTES: usize = 100;
 const MESSAGE_CHARS_MAX: usize = 3000;
 const ROWS_MAX: usize = 20_000;
 const AGENTS_MAX: usize = 1024;
+/// The most account homes of one listed agent whose records the search walks.
+const ACCOUNTS_MAX: usize = 8;
 #[cfg(unix)]
 const DEPTH_MAX: usize = 5;
 const VISITS_MAX: usize = 50_000;
@@ -411,8 +414,9 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
         });
     }
     let kept = kept_records(connection, project).unwrap_or_default();
-    let trees = record_trees(connection, project, agents);
-    let (mut visits_left, mut records_left) = (VISITS_MAX, RECORDS_MAX);
+    let (trees, listed) = record_trees(connection, project, agents);
+    assert!(listed <= VISITS_MAX);
+    let (mut visits_left, mut records_left) = (VISITS_MAX - listed, RECORDS_MAX);
     let mut records = Vec::new();
     for (at, tree) in trees.iter().rev().enumerate() {
         let trees_left = trees.len() - at;
@@ -442,28 +446,37 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
 }
 
 /// One record folder of a team agent's home the search walks: the folder below the agents
-/// folder, the id prefix and label of its records and the harness that wrote them.
+/// folder, the id prefix and label of its records, the harness that wrote them and, for a
+/// listed agent, the record path each of its records must fit.
 struct Tree {
     place: PathBuf,
     prefix: String,
     label: String,
     harness: &'static str,
+    pattern: Option<Pattern>,
 }
 
 /// Lists the record folders of the project's team agents, newest agent first: each Claude
-/// Code or Codex home's own and, for a Claude Code agent, the home its native teammates run
-/// with, each only while the agent's folder and that home are plain folders. Takes the
-/// engine database, the project and the agents folder. Returns the folders.
-fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Tree> {
-    let mut trees = Vec::new();
+/// Code or Codex home's own, for a Claude Code agent the home its native teammates run with
+/// and a listed agent's ([`listed_trees`]), each only while the agent's folder and that home
+/// are plain folders. Takes the engine database, the project and the agents folder. Returns
+/// the folders and the entries their listing visited, at most `VISITS_MAX`.
+fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> (Vec<Tree>, usize) {
+    let (mut trees, mut visits) = (Vec::new(), 0);
     for (agent, harness, role) in team_agents(connection, project).unwrap_or_default() {
-        let Some(harness) = crate::harnesses::spec(&harness).map(|spec| spec.id) else {
+        let found = crate::harnesses::registry::registry().get(&harness);
+        let Some(harness) = found.map(|found| found.manifest().id.as_str()) else {
             continue;
         };
         let folder = match harness {
             "claude-code" => "projects",
             "codex" => "sessions",
-            _ => continue,
+            _ => {
+                let mine = (agent, role.as_str());
+                let listed = listed_trees(connection, project, agents, mine, harness, &mut visits);
+                trees.extend(listed);
+                continue;
+            }
         };
         let own = PathBuf::from(format!("agent-{agent}"));
         let home = own.join("home");
@@ -477,6 +490,7 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
             prefix: format!("agent-{agent}"),
             label: label.clone(),
             harness,
+            pattern: None,
         });
         if harness == "claude-code" && plain_dir(&agents.join(&mates)) {
             trees.push(Tree {
@@ -484,10 +498,77 @@ fn record_trees(connection: &Connection, project: &ProjectId, agents: &Path) -> 
                 prefix: format!("agent-{agent}/mates"),
                 label: format!("native teammates of {label}"),
                 harness,
+                pattern: None,
             });
         }
     }
-    trees
+    assert!(visits <= VISITS_MAX);
+    (trees, visits)
+}
+
+/// Lists the record folders of one team agent of a listed harness that keeps a jsonl-append
+/// record: in each account's private home, `<home>/<harness id>/<account>` (T18), the
+/// folder its record path fixes, ids under `agent-N/<account>`, for at most `ACCOUNTS_MAX`
+/// plain account folders among the entries the visit count allows. Takes the database,
+/// project, agents folder, agent and role, harness and visit count. Returns the folders.
+fn listed_trees(
+    connection: &Connection,
+    project: &ProjectId,
+    agents: &Path,
+    (agent, role): (i64, &str),
+    harness: &'static str,
+    visits: &mut usize,
+) -> Vec<Tree> {
+    use crate::harnesses::records::{self, Reader};
+    let Some(found) = crate::harnesses::registry::registry().get(harness) else {
+        return Vec::new();
+    };
+    let own = PathBuf::from(format!("agent-{agent}"));
+    let home = own.join("home");
+    let listed = home.join(harness);
+    let plain = |below: &Path| plain_dir(&agents.join(below));
+    let appended = records::stored(harness) == Some(Reader::JsonlAppend);
+    let folders = [&own, &home, &listed];
+    if !appended || !agents.is_absolute() || !folders.iter().all(|below| plain(below)) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(agents.join(&listed)) else {
+        return Vec::new();
+    };
+    let mut accounts = Vec::new();
+    for entry in entries {
+        if *visits >= VISITS_MAX {
+            break;
+        }
+        *visits += 1;
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let account = listed.join(entry.file_name());
+        if plain(&account) {
+            accounts.push(account);
+        }
+    }
+    accounts.sort();
+    accounts.truncate(ACCOUNTS_MAX);
+    if accounts.is_empty() {
+        return Vec::new();
+    }
+    let label = agent_label(connection, project, agent, role, harness);
+    accounts
+        .into_iter()
+        .filter_map(|account| {
+            let name = account.file_name()?.to_str()?.to_owned();
+            let pattern = Pattern::learning(found.manifest(), &agents.join(&account)).ok()?;
+            Some(Tree {
+                place: account.join(pattern.fixed_folder()),
+                prefix: format!("agent-{agent}/{name}"),
+                label: label.clone(),
+                harness,
+                pattern: Some(pattern),
+            })
+        })
+        .collect()
 }
 
 /// Reads one record folder's records within its share of the budgets: at most `visits_max`
@@ -508,6 +589,10 @@ fn tree_records(
     let mut records: Vec<Conversation> = paths
         .into_iter()
         .filter_map(|(below, at_ms)| {
+            let named = |pattern: &Pattern| pattern.matches(&agents.join(&below));
+            if !tree.pattern.as_ref().is_none_or(named) {
+                return None;
+            }
             let id = below
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -732,9 +817,10 @@ fn record_role(speaker: &'static str, text: &str) -> &'static str {
 }
 
 /// Tells cheaply, before any JSON is parsed, whether a record line can be a message: a
-/// Codex line naming a message, a tool call or a tool's output, or a Claude Code `user` or
-/// `assistant` line. Takes the catalog harness id and the line. Returns false only for
-/// lines that are never messages.
+/// Codex line naming a message, a tool call or a tool's output, a Claude Code `user` or
+/// `assistant` line, or any line of a jsonl-append record, whose manifest's rules alone tell
+/// its messages. Takes the catalog harness id and the line. Returns false only for lines
+/// that are never messages.
 fn maybe_message(harness: &str, line: &str) -> bool {
     match harness {
         "codex" => ["\"message\"", "\"function_call", "\"custom_tool_call"]
@@ -748,7 +834,10 @@ fn maybe_message(harness: &str, line: &str) -> bool {
         ]
         .iter()
         .any(|mark| line.contains(mark)),
-        _ => false,
+        _ => {
+            let reader = crate::harnesses::records::stored(harness);
+            reader == Some(crate::harnesses::records::Reader::JsonlAppend)
+        }
     }
 }
 

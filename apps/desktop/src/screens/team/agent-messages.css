@@ -11,8 +11,8 @@
 
 .am-title {
   margin: 0;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--font-body);
+  font-weight: var(--weight-ui);
 }
 
 .am-note {
@@ -58,16 +58,16 @@
 
 .am-time {
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   font-variant-numeric: tabular-nums;
 }
 
 .am-speaker {
-  font-weight: 600;
+  font-weight: var(--weight-ui);
 }
 
 .am-row[data-from="agent"] .am-speaker {
-  color: var(--accent-text);
+  color: var(--text);
 }
 
 .am-kind,
@@ -76,7 +76,7 @@
   border-radius: var(--radius-pill);
   background: var(--surface-2);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
 }
 
 .am-text,
@@ -92,12 +92,12 @@
   min-width: 0;
   margin: 0 0 0 var(--space-3);
   padding: var(--space-2) var(--space-3);
-  border-left: 3px solid var(--accent-text);
+  border-left: 3px solid var(--text);
   background: var(--surface-2);
 }
 
 .am-from {
   margin-bottom: var(--space-1);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
 }

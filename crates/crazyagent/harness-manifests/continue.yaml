@@ -1,0 +1,20 @@
+schema: 1
+kind: harness
+id: "continue"
+name: "Continue CLI"
+binaries:
+  - "cn"
+headless: "cn --print: one prompt, plain text reply"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+update:
+  npm:
+    scope: "@continuedev"
+    name: "cli"
+    package: "@continuedev/cli"
+    spec: "@continuedev/cli"
+  guide: "https://github.com/continuedev/continue/tree/main/extensions/cli"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

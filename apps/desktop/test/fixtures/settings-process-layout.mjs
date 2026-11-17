@@ -18,6 +18,7 @@ function answer(scene, command) {
   if (command === "desktop_process_text") return sceneRead(scene.saved ?? "ok", TEXTS, FAILURE, command);
   if (command === "desktop_plugin_skills") return [SKILL];
   if (command === "desktop_default_process") return sceneRead(scene.shipped ?? "ok", { ok: "The shipped process.\n" }, FAILURE, command);
+  if (command === "desktop_instruction_sources") return [];
   if (command === "desktop_import_instructions_file") return sceneRead(scene.file ?? "ok", { ok: "From my file.\n", closed: null }, FAILURE, command);
   if (command === "desktop_save_process_text") return sceneRead(scene.save ?? "ok", SAVES, FAILURE, command);
   if (command === "desktop_app_instruction_settings") return sceneRead(scene.ai ?? "ok", { ok: { edit_with_ai: true }, off: { edit_with_ai: false } }, FAILURE, command);
