@@ -3,8 +3,8 @@ use crate::client_controller::OwnerController;
 use crate::conversation::{ConversationCursor, ConversationMutation};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
 use crate::engine::owner::{
-    OwnerClientKind, OwnerData, OwnerMutation, OwnerPageCursor, OwnerRead, OwnerReadReply,
-    OwnerResponse, OwnerResult, OwnerSummary, OwnerView,
+    OwnerData, OwnerMutation, OwnerPageCursor, OwnerRead, OwnerReadReply, OwnerResponse,
+    OwnerResult, OwnerSummary, OwnerView,
 };
 use crate::engine::{Client, ClientError};
 use crate::protocol::{
@@ -40,6 +40,7 @@ pub(super) mod roadmap;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
+mod watch;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {
@@ -240,6 +241,7 @@ pub(super) struct Connection {
     client_id: ClientId,
     sequence: u64,
     engine: Option<Box<(crate::paths::Layout, crate::service::Service)>>,
+    watch: watch::Watch,
 }
 
 impl Connection {
@@ -278,6 +280,8 @@ impl Connection {
         let (owner_replies, owner_receiver) = sync_channel(1);
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stop = stopped.clone();
+        let slot = watch::Slot::default();
+        let watch = watch::Watch::start(slot.clone()).map_err(|e| e.to_string())?;
         let client_id = ClientId::new(format!(
             "tui-{}-{}",
             std::process::id(),
@@ -295,6 +299,7 @@ impl Connection {
                     WorkerMode::Ordinary(client) => (*client, None),
                     WorkerMode::Paired { socket, timeout } => {
                         let mut native = NativeOwner::new(socket, timeout);
+                        native.watch = slot;
                         let (client, event) = runtime.block_on(native.attach());
                         if owner_replies
                             .send(OwnerReply {
@@ -1031,6 +1036,7 @@ impl Connection {
             client_id,
             sequence: 0,
             engine: None,
+            watch,
         })
     }
 
@@ -1257,6 +1263,7 @@ struct NativeOwner {
     model_pending: Option<model_access::Submission>,
     model_operation: Option<(RequestId, String)>,
     rule_lane: Option<std::thread::JoinHandle<()>>,
+    watch: watch::Slot,
 }
 
 impl NativeOwner {
@@ -1277,59 +1284,13 @@ impl NativeOwner {
             model_pending: None,
             model_operation: None,
             rule_lane: None,
+            watch: watch::Slot::default(),
         }
     }
 
     fn ordinary(&self) -> Client {
         Client::new(self.socket.clone(), self.timeout)
             .expect("retained client configuration was validated")
-    }
-
-    fn detach(&mut self) {
-        self.ready = false;
-        self.scan = None;
-        if let Some(controller) = &mut self.controller {
-            controller.detach();
-        }
-    }
-
-    async fn attach(&mut self) -> (Client, OwnerEvent) {
-        self.scan = None;
-        let ordinary = self.ordinary();
-        let result = if let Some(controller) = &mut self.controller {
-            controller.reattach_configured(ordinary).await
-        } else {
-            OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
-                .await
-                .map(|(ordinary, controller)| {
-                    self.controller = Some(controller);
-                    ordinary
-                })
-        };
-        match result {
-            Ok(ordinary) => {
-                self.ready = true;
-                (
-                    ordinary,
-                    OwnerEvent::Access {
-                        ready: true,
-                        problem: String::new(),
-                        identity: self.controller.as_ref().map(|c| c.identity().clone()),
-                    },
-                )
-            }
-            Err(error) => {
-                self.detach();
-                (
-                    self.ordinary(),
-                    OwnerEvent::Access {
-                        ready: false,
-                        problem: access_problem(&error.0),
-                        identity: None,
-                    },
-                )
-            }
-        }
     }
 
     /// Settles the one change a screen left unconfirmed, such as a save that outlasted the
@@ -2570,7 +2531,7 @@ mod connection_loss_tests;
 mod creation_recovery_tests {
     use super::*;
     use crate::engine::bootstrap::EngineService;
-    use crate::engine::owner::{OwnerControl, OwnerDecision, OwnerResult};
+    use crate::engine::owner::{OwnerClientKind, OwnerControl, OwnerDecision, OwnerResult};
     use crate::protocol::Outcome;
     use std::os::unix::fs::PermissionsExt;
 

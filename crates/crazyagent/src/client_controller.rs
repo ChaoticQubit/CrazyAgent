@@ -483,11 +483,11 @@ impl OwnerController {
         self.begin(mutation, generation, None)
     }
 
-    /// Prepares one exact mutation like [`Self::begin_mutation`], but keeps as the read the
-    /// change was built from the query and reply the form showed, read before the fresh view,
-    /// so a stale resend checks what the owner saw. Inputs: the content, its generation and
-    /// that read. Output: the retained intent, or `controller_stale_view` when that read is
-    /// newer than the view.
+    /// Prepares one exact mutation like [`Self::begin_mutation`] on the read the form showed,
+    /// read before the fresh view: the change goes out at that read's revision, so any write
+    /// since is refused stale and a resend checks what the owner saw. Inputs: the content,
+    /// its generation and that read. Output: the retained intent, or `controller_stale_view`
+    /// when that read is newer than the view.
     pub fn begin_mutation_on(
         &mut self,
         mutation: OwnerMutation,
@@ -497,9 +497,10 @@ impl OwnerController {
         self.begin(mutation, generation, Some(basis))
     }
 
-    /// Prepares one exact mutation from the fresh view, with the read it was built from: the
-    /// given one, or else the view's own. Inputs: the content, its generation and the read, if
-    /// named. Output: the retained intent, or the refusal code.
+    /// Prepares one exact mutation from the fresh view, with the read it was built from, the
+    /// given one or else the view's own, and that read's revision as the expected one.
+    /// Inputs: the content, its generation and the read, if named. Output: the retained
+    /// intent, or the refusal code.
     fn begin(
         &mut self,
         mutation: OwnerMutation,
@@ -525,9 +526,10 @@ impl OwnerController {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new(crate::engine::owner::random_id()?)
                 .map_err(|e| EngineError(e.to_string()))?,
-            expected_revision: view.state.revision.clone(),
+            expected_revision: basis.1.revision.clone(),
             operation: OwnerOperation::Apply { mutation },
         };
+        assert!(request.expected_revision.value() <= view.state.revision.value());
         let hash = request.mutation_hash()?;
         self.pending = Some(PendingMutation {
             request,

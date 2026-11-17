@@ -291,6 +291,7 @@ fn drive(
     let mut asked: Option<Instant> = None;
     let mut tick = Instant::now();
     let mut refresh = Instant::now() + REFRESH;
+    let mut changed = false;
     let mut job_read = Instant::now() + JOB_READ;
     let mut reconnect = Instant::now() + RECONNECT;
     let mut showing_message = false;
@@ -304,6 +305,9 @@ fn drive(
         if let Some(result) = connection.poll().map_err(TuiError)? {
             shell.arrive(Arrival::Wire(result.map_err(|error| error.to_string())));
             dirty = true;
+        }
+        if !connection.changed().map_err(TuiError)?.is_empty() {
+            changed = true;
         }
         for _ in 0..FRAMES_PER_PASS {
             let Some((agent, frame)) = terminals.poll() else {
@@ -346,8 +350,9 @@ fn drive(
                     asked = Some(now);
                     send(request, shell, connection, terminals)?;
                     dirty = true;
-                } else if now >= refresh {
+                } else if changed || shell.reads_due(now >= refresh) {
                     shell.tick();
+                    changed = false;
                     refresh = now + REFRESH;
                     job_read = now + JOB_READ;
                 } else if now >= job_read {

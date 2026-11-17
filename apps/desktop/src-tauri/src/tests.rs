@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{Value, json};
+use std::sync::atomic::AtomicBool;
 use tauri::ipc::{CallbackFn, InvokeBody};
 use tauri::test::{
     INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets,
@@ -265,6 +266,28 @@ fn the_main_window_mirrors_its_theme_choice_and_a_wall_or_a_stray_word_changes_n
     assert!(set(main.as_ref(), "Light").is_err());
     assert!(set(main.as_ref(), "blue").is_err());
     assert_eq!(theme::mirrored(app.handle()), Some(dark));
+}
+
+/// v2.5 S3b: the engine watch is the main window's; a terminal wall that asks for it is
+/// refused before its channel is kept, so no watch starts for it.
+#[test]
+fn only_the_main_window_starts_the_engine_watch() {
+    let app = mock_builder()
+        .manage(Watching::default())
+        .invoke_handler(admit_pages(tauri::generate_handler![desktop_watch]))
+        .build(mock_context(noop_assets()))
+        .unwrap();
+    let wall =
+        WebviewWindowBuilder::new(&app, "terminals-0123456789abcdef-1", WebviewUrl::default())
+            .build()
+            .unwrap();
+    let asked = json!({ "changes": "__CHANNEL__:7" });
+    let refused = ask(wall.as_ref(), "desktop_watch", asked).unwrap_err();
+    assert_eq!(refused["code"], "window_denied");
+    assert!(
+        app.state::<Watching>().listen(Channel::new(|_| Ok(()))),
+        "the refused wall started no watch"
+    );
 }
 
 #[test]

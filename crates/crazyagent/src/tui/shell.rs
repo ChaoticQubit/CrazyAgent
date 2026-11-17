@@ -508,10 +508,10 @@ impl Shell {
         }
     }
 
-    /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
-    /// many change sets wait for the owner, in all and in the top screen's project, reads the
-    /// stored extras for the new free reset notice once a minute, then refreshes the top
-    /// screen.
+    /// Runs the refresh the run loop makes after a watch delivery or when [`Shell::reads_due`]:
+    /// asks the engine how many change sets wait for the owner, in all and in the top screen's
+    /// project, reads the stored extras for the new free reset notice once a minute, then
+    /// refreshes the top screen.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn tick(&mut self) {
         let project = self.top().project();
@@ -522,6 +522,15 @@ impl Shell {
         intake::ask(&mut self.ctx, IntakeQuery::JobStatus);
         self.watch_resets();
         self.refresh();
+    }
+
+    /// Tells whether the run loop refreshes with no watch delivery: the poll period ended while
+    /// the top screen follows engine work that can move with no engine.db commit, or the reset
+    /// read the minute gate held back may go now. Input: whether the poll period ended.
+    /// Output: the answer.
+    pub fn reads_due(&self, period_ended: bool) -> bool {
+        (period_ended && self.top().follows(&self.ctx))
+            || (self.ctx.link == Link::Ready && self.resets.owed(clock::now_ms()))
     }
 
     /// Reads the engine's intake job again between ticks while the stored one runs, so a
