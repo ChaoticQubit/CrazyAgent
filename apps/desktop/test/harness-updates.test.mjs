@@ -323,10 +323,10 @@ test("with harness updates off a harness that can't run still reads Can't run, a
 
 test("a harness the engine lists as Can't run is grouped under Can't run, never Ready, and reads the engine's line and Try again before its versions arrive", () => {
   const blocked = entry("codex", "Codex", { kind: "cant_run", reason: NEEDS_LINE });
-  const groups = view.harnessGroups([ready("claude-code", "Claude Code"), blocked, limited("cursor", "Cursor CLI"), missing("gemini-cli", "Gemini CLI")]);
+  const groups = view.harnessGroups([ready("claude-code", "Claude Code"), blocked, limited("aider", "Aider"), missing("gemini-cli", "Gemini CLI")]);
   assert.deepEqual(groups.map((group) => [group.title, group.entries.map((item) => item.id)]), [
     ["Ready", ["claude-code"]],
-    ["Limited control", ["cursor"]],
+    ["Limited control", ["aider"]],
     ["Can't run", ["codex"]],
     ["Not installed", ["gemini-cli"]],
   ]);

@@ -69,17 +69,17 @@ fn engine_table(
         "Subscription, API key",
         "Any account",
         "Subscription, API key",
-        "Subscription, API key",
         "Any API key or URL",
-        "Subscription",
         "Subscription, API key, Local model",
         "Any account",
+        "Any API key or URL",
+        "Any API key or URL",
     ];
     assert!(shown <= words.len());
     for (index, word) in words.iter().enumerate().take(shown) {
         let row = &mut rows[first + index];
         *row = put(row, works, &cut(word, room, "…"), room);
-        if index == 5 || index == 7 {
+        if index == 4 || index == 5 || index == 7 {
             *row = put(row, control, "◧ Limited control", 17);
         }
     }
@@ -120,11 +120,6 @@ fn a_harness_that_is_not_installed_says_how_to_add_it() {
     }
     let mut expected = fixture("harness-limited-80", &[]);
     engine_table(&mut expected, 6, 35, 54, 24, 9);
-    expected[17] = format!(
-        "{:<80}",
-        "  Limited control: tools are allowed or denied only through Cursor's"
-    );
-    expected[18] = format!("{:<80}", "  permission file.");
     assert_eq!(render(&mut shell, 80, 24), expected);
 }
 
@@ -196,24 +191,24 @@ fn words_follow_the_engine_catalog() {
         (status_word(codex), control_word(codex)),
         ("Ready", "Full control")
     );
-    let mut cursor = found
+    let mut limited = found
         .entries
         .iter()
-        .find(|entry| entry.id == "cursor-agent")
+        .find(|entry| entry.id == "fx")
         .unwrap()
         .clone();
     assert_eq!(
-        (status_word(&cursor), control_word(&cursor)),
+        (status_word(&limited), control_word(&limited)),
         ("Not installed", "Limited control")
     );
-    cursor.executable = Some(found.codex.clone());
-    cursor.status = HarnessStatus::Limited {
+    limited.executable = Some(found.codex.clone());
+    limited.status = HarnessStatus::Limited {
         reason: "installed, but CrazyAgent cannot start it yet".into(),
     };
-    assert_eq!(status_word(&cursor), "Can't start");
+    assert_eq!(status_word(&limited), "Can't start");
     assert_eq!(
-        control_sentence(&cursor),
-        "Limited control: installed, but CrazyAgent cannot start it yet; tools are allowed or denied only through Cursor's permission file."
+        control_sentence(&limited),
+        "Limited control: installed, but CrazyAgent cannot start it yet; no documented switch to turn tools off."
     );
     let opencode = found
         .entries
@@ -281,6 +276,7 @@ fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
         last: None,
         needs: None,
         sign_in_min: None,
+        run_min: None,
     }
 }
 
@@ -425,6 +421,144 @@ fn a_harness_that_signs_in_says_which_version_sign_in_needs() {
     quiet.key(Key::Char('c'));
     deliver(&mut quiet, newer());
     assert!(!frame(&mut quiet).contains("Sign-in needs"));
+}
+
+/// Task 21 (DEC-166): a harness older than the oldest version CrazyAgent drives says it needs
+/// that version or newer first on its Updates line, beside the update state, in the desktop's
+/// words; one at or past the floor says nothing of it.
+#[test]
+fn a_harness_below_the_floor_it_runs_at_says_it_needs_x_or_newer_beside_update() {
+    let found = found();
+    let floor = |installed: &str| HarnessVersions {
+        installed: Some(installed.into()),
+        run_min: Some("2.1.250".into()),
+        ..newer()
+    };
+    let line = "Claude Code 2.1.200 is too old for CrazyAgent; it needs 2.1.250 or newer.";
+    let mut shell = on_claude(&found);
+    press(&mut shell, 'c', floor("2.1.200"));
+    let shown = frame(&mut shell);
+    assert!(shown.contains(line), "{shown}");
+    let mut current = on_claude(&found);
+    press(&mut current, 'c', floor("2.1.309"));
+    assert!(!frame(&mut current).contains("is too old for CrazyAgent"));
+}
+
+/// Task 21 (Q3): with every bundled harness installed, the Control sentence of each one names
+/// each Limited control reason its manifest gives, word for word and once, the reasons the
+/// desktop shows; the TUI holds no list of reasons of its own.
+#[test]
+fn every_served_limited_reason_reads_once_word_for_word_in_the_control_sentence() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-th-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for spec in crate::harnesses::specs() {
+        let path = root.path().join(spec.binaries[0]);
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entries = catalog(&Search::new(
+        vec![root.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let mut limited = 0;
+    for (entry, spec) in entries.iter().zip(crate::harnesses::specs()) {
+        assert_eq!(entry.id, spec.id);
+        let sentence = control_sentence(entry);
+        let reasons: Vec<&str> = [spec.launch, spec.tools_limited]
+            .into_iter()
+            .flatten()
+            .collect();
+        for reason in &reasons {
+            let reason = reason.trim_end_matches('.');
+            assert_eq!(
+                sentence.matches(reason).count(),
+                1,
+                "{}: {sentence}",
+                entry.id
+            );
+        }
+        limited += usize::from(!reasons.is_empty());
+    }
+    assert!(limited >= 10, "the bundled manifests limit most harnesses");
+}
+
+/// T21-1: a harness whose only limit is its tools, which no bundled manifest gives (each one
+/// that limits its tools also names why it cannot start), is Limited by that reason once it
+/// is found, and its Control sentence names the reason once. A row manifest reaches the
+/// catalog's tools-only status and the sentence's dedupe, which the sweep above cannot.
+#[test]
+fn a_harness_limited_only_by_its_tools_names_that_reason_once_in_the_control_sentence() {
+    const TOOLS_ONLY: &str = "schema: 1\nkind: harness\nid: \"toolsonly\"\nname: \"Tools only\"\nbinaries:\n  - \"toolsonly\"\nheadless: \"toolsonly --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\ntools_limited: \"runs without tools.\"\n";
+    let built = crate::harnesses::registry::Registry::build(&[("toolsonly", TOOLS_ONLY)]);
+    let registry: &'static crate::harnesses::registry::Registry =
+        Box::leak(Box::new(built.expect("the row manifest loads")));
+    let harness = &registry.all()[0];
+    assert!(harness.manifest().cannot_start.is_none());
+    let root = tempfile::Builder::new()
+        .prefix("ca-th-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = root.path().join("toolsonly");
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let entry = crate::harnesses::entry(
+        harness,
+        &Search::new(vec![root.path().to_path_buf()], None, Vec::new()),
+    );
+
+    assert!(entry.executable.is_some(), "{entry:?}");
+    assert_eq!(
+        entry.status,
+        HarnessStatus::Limited {
+            reason: "runs without tools.".into()
+        }
+    );
+    assert_eq!(
+        entry.tools,
+        ToolControl::Limited {
+            reason: "runs without tools.".into()
+        }
+    );
+    assert_eq!(
+        control_sentence(&entry),
+        "Limited control: runs without tools."
+    );
+}
+
+/// T21-1 (rv-code2 addendum): a harness that starts but runs without tools gives that one
+/// reason as its status and as its tools, and the Control sentence names it once, so the
+/// sentence's dedupe is reached. No bundled manifest limits its tools without
+/// `cannot_start`, hence the stand-in.
+#[test]
+fn a_startable_harness_limited_only_in_its_tools_names_that_reason_once() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-th-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = root.path().join("standin-limited-tools");
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let search = Search::new(vec![root.path().to_path_buf()], None, Vec::new());
+    let harness = crate::harnesses::registry::registry().get("standin-limited-tools");
+
+    let entry = crate::harnesses::entry(harness.unwrap(), &search);
+
+    let reason = "runs without tools.";
+    let status = HarnessStatus::Limited {
+        reason: reason.into(),
+    };
+    let tools = ToolControl::Limited {
+        reason: reason.into(),
+    };
+    assert_eq!((entry.status.clone(), entry.tools.clone()), (status, tools));
+    assert_eq!(
+        control_sentence(&entry),
+        "Limited control: runs without tools."
+    );
 }
 
 #[test]
@@ -986,6 +1120,7 @@ fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
         last: None,
         needs: None,
         sign_in_min: None,
+        run_min: None,
     }
 }
 
@@ -1674,4 +1809,48 @@ fn a_node_row_still_checking_is_read_again_until_it_settles_and_r_reads_it_again
         calls.contains(&Sent::Setup),
         "r reads setup's Node row again: {calls:?}"
     );
+}
+
+/// T19b 19b-4 (leader 01:01): beside a listed harness whose manifest names research, Settings
+/// says it runs research jobs only and which harness kinds run the read-only kinds it cannot;
+/// a native harness that names research shows no such line.
+#[test]
+fn a_listed_research_harness_says_which_research_it_runs_and_which_harnesses_run_the_rest() {
+    let found = found();
+    let ctx = harness_ctx(120, 40);
+    let codex = found
+        .entries
+        .iter()
+        .find(|entry| entry.id == "codex")
+        .cloned()
+        .unwrap();
+    assert!(codex.research);
+    let listed = HarnessEntry {
+        id: "standin-acp".into(),
+        name: "Stand-in ACP".into(),
+        research: true,
+        ..codex.clone()
+    };
+    let text = |entry: &HarnessEntry| {
+        Harnesses::detail(entry, None, None, false, 116, &ctx)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let shown = text(&listed);
+    let native = text(&codex);
+
+    let words = crate::research::runner::LISTED_RESEARCH_WORDS;
+    assert!(shown.contains(&format!("Research {words}")), "{shown}");
+    assert!(!native.contains(words), "{native}");
 }

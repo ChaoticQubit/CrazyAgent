@@ -1,0 +1,84 @@
+schema: 1
+kind: harness
+id: "standin-jsonl-turn"
+name: "Stand-in JSON lines turn"
+binaries:
+  - "standin-jsonl-turn"
+headless: "standin-jsonl-turn: one process per turn, JSON lines out"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+  - "research"
+sub_agents: "app"
+piped:
+  driver: "jsonl-turn"
+  argv:
+    - "--home"
+    - "{home}"
+    - "--model"
+    - "{model}"
+    - "--prompt={prompt}"
+  resume:
+    - "--resume"
+    - "{session}"
+  tools_off:
+    - "--no-tools"
+  rules: "standin-events"
+rules:
+  standin-events:
+    session:
+      when:
+        type: "session"
+      emit: "ready"
+      session: "id"
+    started:
+      when:
+        type: "started"
+      emit: "turn_started"
+    text:
+      when:
+        type: "text"
+      emit: "text"
+      text: "delta"
+    tool:
+      when:
+        type: "tool"
+      emit: "tool_use"
+      name: "name"
+    waiting:
+      when:
+        type: "waiting"
+      emit: "waiting"
+    stopped:
+      when:
+        type: "stopped"
+      emit: "interrupted"
+    usage:
+      when:
+        type: "usage"
+      emit: "usage"
+      tokens:
+        - "usage.input"
+        - "usage.output"
+    done:
+      when:
+        type: "done"
+      emit: "turn_finished"
+      success: "ok"
+      tokens:
+        - "usage.input"
+        - "usage.output"
+    error:
+      when:
+        type: "error"
+      emit: "turn_error"
+      rate_limited: "message"
+    exit:
+      when:
+        type: "exit"
+      emit: "exited"

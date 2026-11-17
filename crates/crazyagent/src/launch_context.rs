@@ -1,5 +1,6 @@
 use crate::agent_git::Layout;
 use crate::coord::settings::{RoleSkills, SkillRole, TerminalDisplay};
+use crate::harnesses::drivers::{self, Piped};
 use crate::harnesses::launch::{LaunchError, SecretInCommand};
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -174,8 +175,10 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// whether a Claude Code lead runs its own agent team, the engine executable and mailbox
 /// of a team agent's message relay, the loopback port of the model proxy a team agent
 /// under the None network reaches its model through (S4b), the display its terminal draws
-/// with (N-D9, DEC-141) and whether its team tools section tells it to merge
-/// `crazyagent/main` ("Catch up with main", OS-8).
+/// with (N-D9, DEC-141), whether its team tools section tells it to merge
+/// `crazyagent/main` ("Catch up with main", OS-8), the account hand-over a listed harness
+/// is started with (T19b 19b-2) and the agent home a listed team agent's toolchain folders
+/// are in (rv-code4 T19b F2).
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -190,6 +193,8 @@ pub struct AgentContext {
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
     catch_up_main: bool,
+    handover: Option<crate::harnesses::accounts::Handover>,
+    tool_home: Option<PathBuf>,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -207,8 +212,10 @@ struct Process {
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
 /// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
 /// owner switched off, whether the lead runs its own agent team, the model proxy port its
-/// variables name, and the lock that keeps a second launch out of that home. Dropping it deletes every file holding a secret and the
-/// copied skills and hooks, unless `keep` left them to a pane that still runs.
+/// variables name, the account hand-over a listed harness's launch sets, the agent home its
+/// toolchain variables come from when that is not its own home, and the lock that
+/// keeps a second launch out of that home. Dropping it deletes every file holding a secret
+/// and the copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
@@ -222,7 +229,21 @@ pub struct Installed {
     model_proxy: Option<u16>,
     freeze_record: Option<PathBuf>,
     terminal_display: TerminalDisplay,
+    environment: Vec<(OsString, OsString)>,
+    engine_servers: Vec<EngineServer>,
+    handover: Option<crate::harnesses::accounts::Handover>,
+    tool_home: Option<PathBuf>,
     _lock: File,
+}
+
+/// The engine's own MCP server as an ACP launch hands it to its agent in `session/new`:
+/// its name, absolute command and arguments. It has no secret field, so no account key,
+/// connector key or owner secret can ride along.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 /// What a native-team lead's launch gives its teammates (DEC-104 K5a): the tmux program
@@ -235,13 +256,20 @@ pub struct NativeTeam {
 }
 
 /// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
-/// the pane later deletes them when the pane stops: the agent home, and whether the launch
-/// was for Codex, which also writes `config.toml` and the skill copies there.
+/// the pane later deletes them when the pane stops: the agent home, whether the launch
+/// was for Codex, which also writes `config.toml` and the skill copies there, the files
+/// a listed harness's manifest had written, as paths inside the home, and whether the home
+/// is a listed harness's private home, `<agent home>/<harness id>/<account>`, which is
+/// only ever reached by a no-follow walk from the agent home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstalledFiles {
     pub home: PathBuf,
     pub codex: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rendered: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub listed: bool,
 }
 
 struct Budget {
@@ -318,6 +346,8 @@ fn for_project_skills(
         freeze_record: None,
         terminal_display: TerminalDisplay::default(),
         catch_up_main,
+        handover: None,
+        tool_home: None,
     })
 }
 
@@ -648,10 +678,11 @@ impl AgentContext {
     /// tools off, for another harness, or with no context-mode tool and no skill to name.
     pub fn task_start(&self, harness: &str, tools: bool) -> Option<String> {
         const MORE: &str = ", and the other skills in the Skills section";
-        let id = crate::harnesses::spec(harness)
-            .map(|spec| spec.id)
-            .filter(|id| matches!(*id, "codex" | "claude-code"))?;
-        let claude = id == "claude-code";
+        let claude = match drivers::piped(harness).ok()? {
+            Piped::Codex => false,
+            Piped::Claude => true,
+            Piped::Acp | Piped::JsonlTurn | Piped::JsonlRpc | Piped::TextTurn => return None,
+        };
         let names = context_mode_names(claude, &self.off_tools);
         let context_mode = !names.is_empty()
             && self
@@ -734,6 +765,32 @@ impl AgentContext {
             );
         }
         paths
+    }
+
+    /// Gives one launch of a listed harness its account hand-over, which the caller that
+    /// holds the stored connection made with the relay it started (T19b 19b-2); the launch
+    /// sets its variables through the one exception to the agent variable guard. Input: the
+    /// hand-over. Output: the context.
+    pub fn with_handover(mut self, handover: crate::harnesses::accounts::Handover) -> Self {
+        self.handover = Some(handover);
+        assert!(self.handover.is_some());
+        self
+    }
+
+    /// The account hand-over this context gives its launch. Output: the hand-over, or none
+    /// for a native harness or a launch given none.
+    pub fn handover(&self) -> Option<&crate::harnesses::accounts::Handover> {
+        self.handover.as_ref()
+    }
+
+    /// Gives one launch of a listed team agent the agent home its sandbox was built from, so
+    /// its temp folder, its own `git` and its cargo home are the ones the team runtime made
+    /// there, while HOME stays its private home inside it (rv-code4 T19b F2). Input: the
+    /// agent home. Output: the context.
+    pub fn with_tool_home(mut self, home: &Path) -> Self {
+        assert!(home.is_absolute());
+        self.tool_home = Some(home.to_path_buf());
+        self
     }
 
     /// Adds a live master's own instructions to what its harness reads at launch, so they
@@ -982,6 +1039,7 @@ impl AgentContext {
         }
         self.plugins.servers.push(LaunchServer {
             name: name.into(),
+            engine: true,
             spec: ServerSpec::Stdio {
                 command,
                 args: std::iter::once(subcommand.to_owned())
@@ -1070,9 +1128,14 @@ impl AgentContext {
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
-    /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
-    /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
-    /// MCP server is given. On macOS the files hold the agent's own `getconf`
+    /// Input: a harness id or alias, the agent's 0700 home (its CODEX_HOME,
+    /// CLAUDE_CONFIG_DIR or private home) and the tools switch; with tools off no skill or
+    /// MCP server is given. Codex and Claude Code are written as their drivers read them;
+    /// any other harness the registry lists, with no piped driver or the ACP, jsonl-turn or
+    /// text-turn one, as its manifest asks ([`Self::install_listed`]); the rcli and
+    /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
+    /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
+    /// the files hold the agent's own `getconf`
     /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
     /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
     pub fn install(
@@ -1081,10 +1144,23 @@ impl AgentContext {
         home: &Path,
         tools: bool,
     ) -> Result<Installed, LaunchError> {
-        let id = crate::harnesses::spec(harness)
-            .map(|spec| spec.id)
-            .filter(|id| matches!(*id, "codex" | "claude-code"))
+        use crate::harnesses::manifest::DriverKind;
+        let listed = crate::harnesses::registry::registry()
+            .get(harness)
             .ok_or_else(|| failure("launch_harness_unsupported"))?;
+        let codex = match listed.manifest().piped {
+            Some(DriverKind::CodexAppServer) => true,
+            Some(DriverKind::ClaudeStreamJson) => false,
+            Some(DriverKind::Rcli | DriverKind::JsonlRpc) => {
+                return Err(failure("launch_harness_unsupported"));
+            }
+            Some(DriverKind::Acp | DriverKind::JsonlTurn | DriverKind::TextTurn) | None => {
+                return self.install_listed(listed.manifest(), home, tools);
+            }
+        };
+        if self.handover.is_some() {
+            return Err(failure("launch_account_handover_mismatch"));
+        }
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
@@ -1092,7 +1168,9 @@ impl AgentContext {
             arguments: Vec::new(),
             files: Some(InstalledFiles {
                 home: home.to_path_buf(),
-                codex: id == "codex",
+                codex,
+                rendered: Vec::new(),
+                listed: false,
             }),
             transcripts: self.transcripts,
             hooks: false,
@@ -1103,22 +1181,20 @@ impl AgentContext {
             model_proxy: self.model_proxy,
             freeze_record: self.freeze_record.clone(),
             terminal_display: self.terminal_display,
+            environment: Vec::new(),
+            engine_servers: Vec::new(),
+            handover: None,
+            tool_home: None,
             _lock: lock,
         };
         remove(&state);
         directory(&state, true)?;
         let given = match &self.process {
             Some(process) => {
-                let harness = crate::agent_home::Harness::from_id(id)
+                let harness = crate::harnesses::spec(harness)
+                    .and_then(|spec| crate::agent_home::Harness::from_id(spec.id))
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
-                let mut given = crate::agent_home::text(&process.project)
-                    .map_err(|problem| LaunchError(problem.0, None))?;
-                assert!(given.section_bytes <= given.text.len());
-                let section = given.text.split_off(given.text.len() - given.section_bytes);
-                given.text =
-                    crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
-                given.text.push_str(&section);
-                assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+                let given = process_text(process)?;
                 crate::agent_home::prepare(home, harness, &process.project, &given, process.caches)
                     .map_err(|problem| LaunchError(problem.0, None))?;
                 given
@@ -1146,7 +1222,7 @@ impl AgentContext {
         }
         let first_skill = names.first().copied();
         assert_eq!(first_skill.is_some(), skills);
-        if id == "codex" {
+        if codex {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
             remove_copies(home)?;
@@ -1298,9 +1374,9 @@ impl AgentContext {
         assert!(!installed.hooks || !hooks.is_empty());
         assert!(!installed.relay || self.relay.is_some());
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
-        assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
-        assert!(installed.native.is_none() || (id == "claude-code" && tools));
-        assert!(!installed.native_threads || (id == "codex" && tools));
+        assert!(installed.denied.is_empty() || (!codex && tools));
+        assert!(installed.native.is_none() || (!codex && tools));
+        assert!(!installed.native_threads || (codex && tools));
         assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
@@ -1324,6 +1400,169 @@ impl AgentContext {
         assert!(budget.files <= SKILL_FILES_MAX && budget.bytes <= SKILL_BYTES_MAX);
         Ok(())
     }
+
+    /// Writes this context into one private home for one launch of a listed harness, as its
+    /// manifest asks: the MCP servers and the instruction text ([`Self::listed_instructions`],
+    /// with a team agent's owner text) into the files its `mcp` and `instructions` blocks
+    /// name, and the environment its `home` block sets and the context's account hand-over,
+    /// on the guard. Inputs: the manifest, the private home
+    /// ([`crate::harnesses::home::prepare`]) and the tools switch; with tools off the MCP
+    /// file holds no server, a server with any tool the
+    /// owner switched off is left out whole, as the file cannot switch off one tool, and an
+    /// ACP harness's file leaves out the engine's own servers, which its session opens with.
+    /// With a tool home ([`Self::with_tool_home`]) it also writes the agent's own `getconf`
+    /// into that home's launch folder, as a native install does into its home, naming the
+    /// short temp folder there (rv-code4 T19b F7).
+    /// Output: the guard that deletes those files, `launch_context_unsafe` for a tool home
+    /// the private home is not inside or a launch folder there that is not a plain folder,
+    /// `launch_context_unwritable` when the `getconf` cannot be written, `launch_manifest_invalid`
+    /// for blocks that do not read, `launch_listed_hooks_unsupported` for a tools-on team
+    /// agent whose project turned hooks on, or `launch_home_busy`.
+    pub fn install_listed(
+        &self,
+        manifest: &crate::harnesses::manifest::Manifest,
+        home: &Path,
+        tools: bool,
+    ) -> Result<Installed, LaunchError> {
+        if self
+            .tool_home
+            .as_ref()
+            .is_some_and(|tools| !home.starts_with(tools) || home == tools)
+        {
+            return Err(failure("launch_context_unsafe"));
+        }
+        let instructions = self.listed_instructions(tools)?;
+        let invalid = |_: crate::harnesses::manifest::Refused| failure("launch_manifest_invalid");
+        let renders = crate::harnesses::render::read(manifest).map_err(invalid)?;
+        let asked = crate::harnesses::home::read(manifest).map_err(invalid)?;
+        let lock = lock_listed(home, Some(manifest.id.as_str()))?;
+        let rendered: Vec<String> = [
+            renders.mcp.as_ref().map(|file| file.path.clone()),
+            renders.instructions.as_ref().map(|file| file.path.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let count = rendered.len();
+        let installed = Installed {
+            arguments: Vec::new(),
+            files: Some(InstalledFiles {
+                home: home.to_path_buf(),
+                codex: false,
+                rendered,
+                listed: true,
+            }),
+            transcripts: self.transcripts,
+            hooks: false,
+            relay: false,
+            denied: Vec::new(),
+            native: None,
+            native_threads: false,
+            model_proxy: self.model_proxy,
+            freeze_record: self.freeze_record.clone(),
+            terminal_display: self.terminal_display,
+            environment: asked.environment(home),
+            engine_servers: self
+                .plugins
+                .servers
+                .iter()
+                .filter_map(engine_server)
+                .collect(),
+            handover: self.handover.clone(),
+            tool_home: self.tool_home.clone(),
+            _lock: lock,
+        };
+        let acp = manifest.piped == Some(crate::harnesses::manifest::DriverKind::Acp);
+        let servers = self.plugins.servers.iter().filter(|server| {
+            tools
+                && !(acp && server.engine)
+                && !self
+                    .off_tools
+                    .iter()
+                    .any(|(name, off)| *name == server.name && !off.is_empty())
+        });
+        let written = crate::harnesses::render::write(&renders, home, servers, &instructions)?;
+        assert_eq!(written.len(), count);
+        #[cfg(target_os = "macos")]
+        if let Some(tools) = &self.tool_home {
+            directory(&tools.join(STATE), false)?;
+            crate::sandbox::toolchains::write_getconf(tools, false)
+                .map_err(|_| failure("launch_context_unwritable"))?;
+        }
+        Ok(installed)
+    }
+
+    /// Whether a listed harness launch with this tools switch is refused for hooks: the
+    /// context's project turned hooks on, which run only with tools on, and a listed harness
+    /// runs none (T19b 19b-4, rv-secreview note 1). Input: the tools switch. Output: the
+    /// answer.
+    pub fn listed_hooks_refused(&self, tools: bool) -> bool {
+        tools
+            && self
+                .process
+                .as_ref()
+                .is_some_and(|process| !process.hooks.is_empty())
+    }
+
+    /// The text a listed harness's `instructions` render gets: this context's startup
+    /// instruction, then for a team agent the owner's app and project text with the owner's
+    /// text for this agent, as a native agent's instruction file holds them. A listed harness
+    /// runs no hooks, so a tools-on team agent whose project turned hooks on is refused, never
+    /// started with them dropped. Input: the tools switch. Output: the text,
+    /// `launch_listed_hooks_unsupported`, or the owner text's read failure.
+    fn listed_instructions(&self, tools: bool) -> Result<String, LaunchError> {
+        if self.listed_hooks_refused(tools) {
+            return Err(failure("launch_listed_hooks_unsupported"));
+        }
+        let Some(process) = &self.process else {
+            return Ok(self.instructions.clone());
+        };
+        let given = process_text(process)?;
+        let mut text = self.instructions.clone();
+        if !given.text.is_empty() {
+            if !text.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+            text.push_str(&given.text);
+        }
+        assert!(text.starts_with(self.instructions.as_str()));
+        assert!(text.len() <= self.instructions.len() + 2 + crate::agent_home::PROCESS_BYTES_MAX);
+        Ok(text)
+    }
+}
+
+/// The owner's text one team agent is given: the app and project instructions, with the
+/// owner's text for this agent before their instruction files section. Input: the agent's
+/// project and text. Output: the text, at most [`crate::agent_home::PROCESS_BYTES_MAX`]
+/// bytes, or the read failure.
+fn process_text(process: &Process) -> Result<crate::agent_home::Given, LaunchError> {
+    let mut given = crate::agent_home::text(&process.project)
+        .map_err(|problem| LaunchError(problem.0, None))?;
+    assert!(given.section_bytes <= given.text.len());
+    let section = given.text.split_off(given.text.len() - given.section_bytes);
+    given.text = crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
+    given.text.push_str(&section);
+    assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+    Ok(given)
+}
+
+/// The engine's own server as an ACP session takes it: one `AgentContext` marked as its
+/// own, run as a command and holding no secret. Input: one launch server. Output: its name,
+/// command and arguments, or none for any other server, whatever its name.
+fn engine_server(server: &LaunchServer) -> Option<EngineServer> {
+    match &server.spec {
+        ServerSpec::Stdio { command, args } if server.engine && server.secrets.is_empty() => {
+            Some(EngineServer {
+                name: server.name.clone(),
+                command: command.clone(),
+                args: args.clone(),
+            })
+        }
+        ServerSpec::Stdio { .. } | ServerSpec::Http { .. } => None,
+    }
 }
 
 impl Installed {
@@ -1332,6 +1571,32 @@ impl Installed {
     /// <file>`. Codex: none, it reads `config.toml` and `skills/` from its CODEX_HOME.
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+
+    /// The environment a listed harness's manifest sets through its `home` block, the
+    /// private home filled in; empty for Codex and Claude Code. Output: the names and values.
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        &self.environment
+    }
+
+    /// The engine's own MCP servers a listed launch carries for an ACP session to open with;
+    /// none for Codex and Claude Code, whose files name them. Output: the servers.
+    pub fn engine_servers(&self) -> &[EngineServer] {
+        &self.engine_servers
+    }
+
+    /// The account hand-over a listed harness's launch sets through the one exception to
+    /// the agent variable guard (T19b 19b-2), from the context it was installed from.
+    /// Output: the hand-over, or none for Codex, Claude Code and a launch given none.
+    pub fn handover(&self) -> Option<&crate::harnesses::accounts::Handover> {
+        self.handover.as_ref()
+    }
+
+    /// The agent home a listed team agent's temp folder, own `git` and cargo home are in
+    /// (rv-code4 T19b F2), from the context it was installed from. Output: the folder, or
+    /// none for Codex, Claude Code and a launch whose toolchain folders are in its own home.
+    pub fn tool_home(&self) -> Option<&Path> {
+        self.tool_home.as_deref()
     }
 
     /// Tells whether a headless Claude run of this launch keeps its transcript, as the
@@ -1398,8 +1663,12 @@ impl Installed {
     /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
-        crate::harnesses::launch::validate_home(&files.home)?;
-        let lock = lock(&files.home)?;
+        let lock = if files.listed {
+            lock_listed(&files.home, None)?
+        } else {
+            crate::harnesses::launch::validate_home(&files.home)?;
+            lock(&files.home)?
+        };
         Ok(Self {
             arguments: Vec::new(),
             files: Some(files.clone()),
@@ -1412,6 +1681,10 @@ impl Installed {
             model_proxy: None,
             freeze_record: None,
             terminal_display: TerminalDisplay::Classic,
+            environment: Vec::new(),
+            engine_servers: Vec::new(),
+            handover: None,
+            tool_home: None,
             _lock: lock,
         })
     }
@@ -1424,8 +1697,13 @@ impl Installed {
 }
 
 impl InstalledFiles {
-    /// Lists the generated file and folder paths a launch deletes, all inside its home.
+    /// Lists the generated file and folder paths a launch deletes by path, all inside its
+    /// home; none for a listed harness's private home, whose files go only through a
+    /// no-follow walk from the agent home.
     fn removals(&self) -> Vec<PathBuf> {
+        if self.listed {
+            return Vec::new();
+        }
         let mut paths = vec![self.home.join(STATE)];
         if self.codex {
             paths.push(self.home.join("config.toml"));
@@ -1446,6 +1724,9 @@ impl Drop for Installed {
             }
             if files.codex {
                 let _ = remove_copies(&files.home);
+            }
+            for path in &files.rendered {
+                crate::harnesses::render::remove(&files.home, path);
             }
         }
         #[cfg(unix)]
@@ -2291,11 +2572,14 @@ fn hook_command(root: &str, command: &str) -> String {
     )
 }
 
-/// Writes Claude Code's `--mcp-config` text: each approved server with its secrets as the
-/// variables of a command server or the headers of a URL server. Input: the servers.
-/// Output: the JSON text, or `launch_context_secret_invalid` or
-/// `launch_context_server_name_taken`.
-pub fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
+/// The MCP servers of one launch as the JSON file Claude Code reads with `--mcp-config`: an
+/// `mcpServers` map, each secret an environment value or a header, written without copying
+/// a secret. It is also the `json-mcp-servers` render of a harness manifest
+/// ([`crate::harnesses::render`]). Input: the servers. Output: the JSON text, or
+/// `launch_context_secret_invalid` or `launch_context_server_name_taken`.
+pub fn claude_config<'a>(
+    servers: impl IntoIterator<Item = &'a LaunchServer>,
+) -> Result<String, LaunchError> {
     let mut declared = std::collections::BTreeMap::new();
     for server in servers {
         let mut values = std::collections::BTreeMap::new();
@@ -2555,6 +2839,45 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Locks a home's launch lock once opened, only one [`lock_kept`] passes. Input: the open.
+/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
+#[cfg(unix)]
+fn lock_opened(opened: rustix::io::Result<std::os::fd::OwnedFd>) -> Result<File, LaunchError> {
+    let file = File::from(opened.map_err(|_| failure("launch_context_unsafe"))?);
+    let found = rustix::fs::fstat(&file).map_err(|_| failure("launch_context_unsafe"))?;
+    if !lock_kept(&found) {
+        return Err(failure("launch_context_unsafe"));
+    }
+    rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| failure("launch_home_busy"))?;
+    Ok(file)
+}
+
+/// Opens and locks a listed launch's private home's launch lock as [`lock`] does, relative
+/// to the home walked to from the agent home without following a link
+/// ([`crate::harnesses::home::listed_folder`]); no flag or ACL is cleared, as that works by
+/// path. Inputs: the private home and the harness id it must name when known. Output: the
+/// locked file, a `launch_account_home_*` refusal, `launch_context_unsafe` or
+/// `launch_home_busy`.
+#[cfg(unix)]
+fn lock_listed(home: &Path, id: Option<&str>) -> Result<File, LaunchError> {
+    use crate::harnesses::home::{Walk, listed_folder};
+    let folder = listed_folder(home, id, &[], Walk::Check)?;
+    lock_opened(rustix::fs::openat(
+        &folder,
+        LOCK,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    ))
+}
+
+/// Refuses a listed launch's lock where owner-only no-follow creation does not exist.
+/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
+#[cfg(not(unix))]
+fn lock_listed(_home: &Path, _id: Option<&str>) -> Result<File, LaunchError> {
+    Err(failure("launch_context_unavailable"))
+}
+
 /// Whether a home's launch lock is held and kept: this user's plain file, on macOS with no
 /// second link, which may be the owner's file an agent linked in and which the profile keeps
 /// a confined agent from making (r3, `sandbox::launch_denies`). On Linux Landlock and
@@ -2576,16 +2899,46 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
 }
 
+/// Whether a harness runs in a listed private home, `<agent home>/<harness id>/<account>`,
+/// as [`AgentContext::install`] sends it to [`AgentContext::install_listed`]: a manifest
+/// whose piped driver is ACP, jsonl-turn or text-turn, or that has none. Input: the harness
+/// id or alias. Output: the answer, false for a harness the registry does not list.
+pub(crate) fn listed_home(harness: &str) -> bool {
+    use crate::harnesses::manifest::DriverKind;
+    let found = crate::harnesses::registry::registry().get(harness);
+    found.is_some_and(|found| {
+        matches!(
+            found.manifest().piped,
+            Some(DriverKind::Acp | DriverKind::JsonlTurn | DriverKind::TextTurn) | None
+        )
+    })
+}
+
 /// Takes a context-less launch's hold on an agent home: the same per-home lock a full
-/// install takes, installing no files. The guard keeps a second launch out of the home
-/// while this one runs, so writing the launch key never lands on a home an agent already
-/// runs on. A Codex home also loses the skills an earlier run left in it, as a full install
-/// does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the lock guard,
+/// install takes, installing no files, and for a listed harness's private home, with a
+/// piped driver or none ([`listed_home`], T18-LEAD-GATE), only through its no-follow walk
+/// from the agent home ([`lock_listed`]), with the variables its home block sets, as
+/// [`AgentContext::install_listed`] gives them. The guard keeps a second launch
+/// out of the home while this one runs, so writing the launch key never lands on a home an
+/// agent already runs on. A Codex home also loses the skills an earlier run left in it, as a
+/// full install does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the
+/// lock guard, a `launch_account_home_*` refusal, `launch_manifest_invalid`,
 /// `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
-    crate::harnesses::launch::validate_home(home)?;
-    let lock = lock(home)?;
-    if crate::harnesses::spec(harness).is_some_and(|spec| spec.id == "codex") {
+    let (lock, environment) = if listed_home(harness) {
+        let listed = crate::harnesses::registry::registry()
+            .get(harness)
+            .ok_or_else(|| failure("launch_harness_unsupported"))?;
+        let manifest = listed.manifest();
+        let asked = crate::harnesses::home::read(manifest)
+            .map_err(|_| failure("launch_manifest_invalid"))?;
+        let lock = lock_listed(home, Some(manifest.id.as_str()))?;
+        (lock, asked.environment(home))
+    } else {
+        crate::harnesses::launch::validate_home(home)?;
+        (lock(home)?, Vec::new())
+    };
+    if drivers::piped(harness) == Ok(Piped::Codex) {
         remove_copies(home)?;
     }
     Ok(Installed {
@@ -2600,6 +2953,10 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         model_proxy: None,
         freeze_record: None,
         terminal_display: TerminalDisplay::Classic,
+        environment,
+        engine_servers: Vec::new(),
+        handover: None,
+        tool_home: None,
         _lock: lock,
     })
 }
@@ -3138,3 +3495,7 @@ fn copy_file(source: &Path, target: &Path, budget: &mut Budget) -> Result<(), La
 #[cfg(all(test, unix))]
 #[path = "launch_context/tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "launch_context/listed_tests.rs"]
+mod listed_tests;

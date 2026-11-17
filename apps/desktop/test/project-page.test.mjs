@@ -1006,6 +1006,9 @@ test("team tasks waiting for a pool ask the owner for one, with the engine's rea
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool"), teamTask(2, "needs_pool", { problem: "No account in this project's pool can run codex." })]),
     "2 team tasks wait: No account in this project's pool can run codex.");
   assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool")]), "A team task waits for an account in this project's pool.");
+  const gemini = "No account in this project's pool can run Row Harness. Accounts that fit it: a Gemini API key";
+  assert.equal(research.teamWaitingLine([teamTask(1, "needs_pool", { problem: gemini })]), `A team task waits: ${gemini}.`,
+    "Task 21: the engine's sentence naming the accounts that fit reads word for word");
   assert.equal(research.teamWaitingLine([]), null);
 });
 
@@ -1022,12 +1025,12 @@ test("Project Settings sends the engine's team fields only, never the tools choi
   const settings = await import("../src/screens/project/settings.tsx");
   const stored = { about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main" };
   const team = {
-    master: "cursor", master_tools: true, master_tools_wanted: false,
-    sub_harnesses: [{ harness: "cursor", agents: 2, tools: true, tools_wanted: false }], min_agents: 1, max_agents: 3,
+    master: "aider", master_tools: true, master_tools_wanted: false,
+    sub_harnesses: [{ harness: "aider", agents: 2, tools: true, tools_wanted: false }], min_agents: 1, max_agents: 3,
   };
   assert.deepEqual(settings.setupOf(stored, team), {
     about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main", documents: [],
-    team: { master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
+    team: { master: "aider", master_tools: true, sub_harnesses: [{ harness: "aider", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
   });
   assert.deepEqual(settings.setupOf({ ...stored, research: ["market_research", "roadmap_planning"] }, team).research, ["market_research", "roadmap_planning"],
     "saving the team keeps the stored roadmap choice");

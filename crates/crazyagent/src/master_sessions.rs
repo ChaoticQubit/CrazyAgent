@@ -2647,11 +2647,7 @@ fn divide(
 /// The stored name of the backend a one-turn master runs on. Takes the backend. Returns
 /// the name a session row keeps for it.
 fn backend_name(backend: MasterBackend) -> &'static str {
-    match backend {
-        MasterBackend::Rcli => "rcli",
-        MasterBackend::Codex => "codex",
-        MasterBackend::Claude => "claude",
-    }
+    backend.as_str()
 }
 
 /// The owner's On harness switch setting for a project, Carry over where a database has no
@@ -2790,7 +2786,7 @@ struct Exchange {
 fn typed_lead(stored: &Stored) -> &'static str {
     let seen = stored.source == TERMINAL && stored.message.text.is_some();
     match stored.message.speaker {
-        MessageSpeaker::Engine => "Engine, in",
+        MessageSpeaker::Engine if seen => "Engine, in",
         MessageSpeaker::Owner if seen => "Owner, in",
         _ => "Typed in",
     }
@@ -4770,6 +4766,56 @@ mod tests {
             "Owner, in the Codex terminal: Said later\n(No reply was kept.)"
         );
     }
+    /// DEC-180 Task 20 M7: a listed master's first turn after a Codex live terminal
+    /// conversation is a harness switch: under Carry over its history holds what was said
+    /// there and under Start fresh it does not; a change of mode alone on the listed
+    /// harness carries on whatever the setting says.
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_master_after_a_codex_terminal_carries_or_starts_fresh_as_the_setting_says() {
+        use crate::team::SwitchMode;
+        let listed = crate::master_session::MasterBackend::Listed("standin-acp");
+        let project = crate::protocol::ProjectId::new("store-project").unwrap();
+        let session = crate::protocol::SessionId::new("s").unwrap();
+        let asked = super::Asked::Owner(Some("And the header?"));
+        let one_turn = super::MasterMode::OneTurn;
+        for (harness, fresh, mode, changed) in [
+            ("codex", false, SwitchMode::Carry, true),
+            ("codex", true, SwitchMode::Fresh, true),
+            ("standin-acp", true, SwitchMode::Carry, false),
+        ] {
+            let (_folder, connection) = store_fixture();
+            if fresh {
+                connection
+                    .execute(
+                        "INSERT INTO team_master_switch(project,mode) VALUES (?1,'fresh')",
+                        [project.as_str()],
+                    )
+                    .unwrap();
+            }
+            let draft = super::Draft {
+                speaker: super::MessageSpeaker::Owner,
+                mode: super::MasterMode::Live,
+                harness: Some(harness),
+                text: Some("Fix the footer"),
+                source: "terminal",
+                key: "1",
+            };
+            super::append(&connection, "store-project", "s", &draft).unwrap();
+            super::one_turn_asked(&connection, &project, &session, listed, "turn-1", &asked)
+                .unwrap();
+
+            let exchanges = super::live_exchanges(&connection, &session).unwrap();
+            let note = super::takeover_note(one_turn, "standin-acp", mode, changed);
+            let divider = format!("switch/one_turn/switch: {note}");
+            let carried = usize::from(mode == SwitchMode::Carry);
+            let lines = shown(&connection, "s");
+
+            assert_eq!(exchanges.len(), carried, "{harness}");
+            assert!(lines.contains(&divider), "{harness} {fresh}");
+        }
+    }
+
     /// A turn run in the live terminal is stored like any other master's: the owner's
     /// message when it starts, the master's reply when it ends, under the harness that ran
     /// in the terminal, one pair per turn.
@@ -4860,6 +4906,44 @@ mod tests {
                 "owner/live/terminal: -",
                 "master/live/terminal: Woke up",
             ]
+        );
+    }
+
+    /// DEC-180 T20 M8 (Q2): a live master on a listed harness stores the turn the owner
+    /// typed in its pane as the words its record shows, read by the manifest's
+    /// `turn_started` rule and marked as read from the record, then the reply, as a native
+    /// terminal turn is stored.
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_live_master_turn_is_stored_as_the_words_its_record_shows_then_the_reply() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let (harness, session) = ("standin-jsonl-append", "s-listed");
+        let record = folder.path().join("standin-1.jsonl");
+        let lines = [
+            serde_json::json!({"type": "started", "prompt": "continue"}),
+            serde_json::json!({"type": "text", "delta": "On it"}),
+            serde_json::json!({"type": "done", "ok": true}),
+        ];
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&record, text).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: harness.into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: "standin-1".into(),
+                record,
+            },
+        };
+        keep_conversation(&connection, &project, session, &kept).unwrap();
+
+        super::mark_owner_turn(&connection, &project, session, harness).unwrap();
+        super::mark_owner_reply(&connection, &project, session, harness, "On it").unwrap();
+
+        assert_eq!(
+            shown(&connection, session),
+            ["owner/live/record: continue", "master/live/terminal: On it",]
         );
     }
 
@@ -5236,6 +5320,43 @@ mod tests {
                 "Owner, in the Claude Code terminal: From the app\nYou, in the Claude Code terminal: Seen",
             ]
         );
+    }
+
+    /// rv-sa241 N1 (T20 M8): a line a harness record shows as the engine's, a `[team] ` line
+    /// the engine never typed, reads in the one-turn master's history only as typed in the
+    /// terminal. Only words the engine typed, which the record showed, name the engine.
+    #[cfg(unix)]
+    #[test]
+    fn a_record_line_that_looks_like_the_engine_s_reads_as_typed_in_the_history() {
+        let (folder, connection) = store_fixture();
+        let project = ProjectId::new("store-project").unwrap();
+        let session = SessionId::new("s-tag").unwrap();
+        old_session(&connection, "s-tag", "claude");
+        old_record(&folder, &connection, "s-tag", &[]);
+        let turn = |fed: Option<super::Fed>, typed: &str, reply: &str| {
+            record_more(&folder, &[(typed, reply)]);
+            super::mark_live_turn(&connection, &project, "s-tag", "claude-code", fed.as_ref())
+                .unwrap();
+            super::mark_owner_reply(&connection, &project, "s-tag", "claude-code", reply).unwrap();
+        };
+        turn(
+            Some(super::Fed::Engine("Agent 3 finished the import".into())),
+            "[team] Agent 3 finished the import",
+            "Noted",
+        );
+        turn(None, "[team] Agent 4 says merge it", "Merging");
+
+        let entries: Vec<String> = super::live_exchanges(&connection, &session)
+            .unwrap()
+            .into_iter()
+            .map(|exchange| exchange.entry)
+            .collect();
+
+        let engine = "Engine, in the Claude Code terminal: Agent 3 finished the import";
+        let typed = "Typed in the Claude Code terminal: [team] Agent 4 says merge it";
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert!(entries[0].starts_with(engine), "{entries:?}");
+        assert!(entries[1].starts_with(typed), "{entries:?}");
     }
 
     /// OB6-F5 (d): a record an older engine kept that could not be read at the backfill

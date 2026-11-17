@@ -103,6 +103,23 @@ impl OwnerController {
         self.process_client()?.read_instruction_file(path).await
     }
 
+    /// Lists each harness's own instruction file in the owner's home the app-wide import may
+    /// read. Output: the sources in catalog order, or a refusal.
+    pub async fn instruction_sources(
+        &self,
+    ) -> Result<Vec<crate::engine::owner::InstructionSource>, EngineError> {
+        self.process_client()?.instruction_sources().await
+    }
+
+    /// Reads one harness's own instruction file for the app-wide instructions editor; nothing
+    /// is saved. Input: the harness id. Output: the text, or a refusal such as
+    /// `process_import_agents_can_write`.
+    pub async fn read_instruction_source(&self, harness: String) -> Result<String, EngineError> {
+        self.process_client()?
+            .read_instruction_source(harness)
+            .await
+    }
+
     /// Lists the project's own instruction files an import would copy and move, changing
     /// nothing. Input: the project. Output: the files, empty when none.
     pub async fn instruction_import(

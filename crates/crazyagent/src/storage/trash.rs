@@ -68,8 +68,10 @@ pub(crate) fn put(tx: &Connection, kind: &str, name: &str) -> Result<(), EngineE
 }
 
 /// Deletes what the removals left noted when the engine starts, after a settings write a
-/// crash left pending is recovered, so the catalog it checks is the one the engine runs on.
-/// Inputs: the engine connection and the catalog. Output: any failure.
+/// crash left pending is recovered, so the catalog it checks is the one the engine runs on,
+/// and the key copies and plugin files a crash left staged
+/// ([`crate::app_plugins::store::sweep_staged`]). Inputs: the engine connection and the
+/// catalog. Output: any failure of the noted removals.
 #[cfg(unix)]
 pub(crate) fn sweep_at_start(
     connection: &Connection,
@@ -79,6 +81,7 @@ pub(crate) fn sweep_at_start(
         .path()
         .and_then(|path| Path::new(path).parent())
         .ok_or_else(|| error("file_trash_root_unknown"))?;
+    crate::app_plugins::store::sweep_staged(root);
     sweep(connection, root, catalog).map(|_| ())
 }
 

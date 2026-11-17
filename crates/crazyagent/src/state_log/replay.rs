@@ -140,10 +140,12 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
 /// Redacts one logged event in place for an owner delete: its body becomes [`TOMBSTONE`]
 /// while its seq, revision, aggregate, kind and time stay, so replay stays contiguous and
 /// skips it. The old body is overwritten with zeros (`secure_delete` on for the update, then
-/// put back); the caller checkpoints the WAL after commit. Snapshot events are refused until
-/// compaction (L1b) can rewrite their run. The delete's fence is checked first, as for an
-/// append. Inputs: the delete's transaction, the seq and the fence. Output: Ok, a fence
-/// refusal, or `state_log_redact_missing` or `state_log_redact_snapshot`.
+/// put back by its keyword, since SQLite reads the number 2 as ON and not FAST); the caller
+/// checkpoints the WAL after commit. Snapshot events are refused until compaction (L1b) can
+/// rewrite their run. The delete's fence is checked first, as for an append. Inputs: the
+/// delete's transaction, the seq and the fence. Output: Ok, a fence refusal, or
+/// `state_log_redact_missing`, `state_log_redact_snapshot` or
+/// `state_log_redact_secure_delete` for a mode SQLite does not name.
 pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
     fence::check(tx, fence)?;
     let missing = || error("state_log_redact_missing");
@@ -165,6 +167,12 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
     let secure: i64 = tx
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .map_err(error)?;
+    let mode = match secure {
+        0 => "OFF",
+        1 => "ON",
+        2 => "FAST",
+        _ => return Err(error("state_log_redact_secure_delete")),
+    };
     tx.execute_batch("PRAGMA secure_delete=ON;")
         .map_err(error)?;
     let updated = tx
@@ -173,9 +181,104 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
             params![TOMBSTONE, seq],
         )
         .map_err(error);
-    tx.execute_batch(&format!("PRAGMA secure_delete={secure};"))
+    tx.execute_batch(&format!("PRAGMA secure_delete={mode};"))
         .map_err(error)?;
     updated.map(|_| ())
+}
+
+/// Redacts, for an owner delete, every event of the given aggregates, and of the given kinds
+/// when a list is given, whose body is a JSON object holding the top-level `field` as the
+/// string `value`, except the delete's own event `keep`, each through [`redact`]. Events are
+/// found by the quoted value's bytes, at most [`REPLAY_BATCH_MAX`] at a time, then matched
+/// exactly; `value` holds no character JSON escapes, so it is logged as its own bytes.
+/// Inputs: the delete's transaction, the aggregates, the kinds (none for all), the field, the
+/// value, the kept seq and the fence. Output: how many events were redacted, a fence or
+/// [`redact`] refusal, `state_log_redact_match` or `state_log_replay_row`.
+pub fn redact_matching(
+    tx: &Transaction<'_>,
+    aggregates: &[Aggregate],
+    kinds: Option<&[&str]>,
+    field: &str,
+    value: &str,
+    keep: u64,
+    fence: &Fence,
+) -> Result<usize, EngineError> {
+    fence::check(tx, fence)?;
+    if aggregates.is_empty()
+        || kinds.is_some_and(|kinds| kinds.is_empty())
+        || field.is_empty()
+        || value.is_empty()
+        || value
+            .chars()
+            .any(|letter| letter == '"' || letter == '\\' || letter.is_control())
+    {
+        return Err(error("state_log_redact_match"));
+    }
+    if !logged(tx)? {
+        return Ok(0);
+    }
+    let needle = format!("\"{value}\"");
+    let (mut after, mut redacted) = (0, 0);
+    loop {
+        let found = hits(tx, after, needle.as_bytes())?;
+        for (seq, aggregate, kind, body) in &found {
+            let listed = aggregates
+                .iter()
+                .any(|wanted| wanted.name() == aggregate.as_str())
+                && kinds.is_none_or(|kinds| kinds.iter().any(|wanted| *wanted == kind.as_str()));
+            let named = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
+                .is_ok_and(|object| {
+                    object.get(field).and_then(serde_json::Value::as_str) == Some(value)
+                });
+            if *seq != keep && listed && named {
+                redact(tx, *seq, fence)?;
+                redacted += 1;
+            }
+        }
+        match found.last() {
+            Some((seq, _, _, _)) if found.len() == REPLAY_BATCH_MAX => after = *seq,
+            _ => return Ok(redacted),
+        }
+    }
+}
+
+/// The events after `after` whose body holds the needle's bytes, at most
+/// [`REPLAY_BATCH_MAX`], in seq order, a body over [`BODY_BYTES_MAX`] refused before it is
+/// loaded. Inputs: the transaction, the last seq read and the needle. Output: each event's
+/// seq, aggregate name, kind and body, or `state_log_replay_row`.
+fn hits(
+    tx: &Transaction<'_>,
+    after: u64,
+    needle: &[u8],
+) -> Result<Vec<(u64, String, String, Vec<u8>)>, EngineError> {
+    let row_error = || error("state_log_replay_row");
+    let from = i64::try_from(after).map_err(|_| row_error())?;
+    let mut statement = tx
+        .prepare(
+            "SELECT seq, aggregate, kind, CASE WHEN length(body) <= ?4 THEN body END
+            FROM state_log WHERE seq>?1 AND instr(body, ?2) > 0 ORDER BY seq LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map(
+            params![from, needle, REPLAY_BATCH_MAX as i64, BODY_BYTES_MAX as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                ))
+            },
+        )
+        .map_err(error)?;
+    let mut found = Vec::new();
+    for row in rows {
+        let (seq, aggregate, kind, body) = row.map_err(error)?;
+        let seq = u64::try_from(seq).map_err(|_| row_error())?;
+        found.push((seq, aggregate, kind, body.ok_or_else(row_error)?));
+    }
+    Ok(found)
 }
 
 /// Every row of one table, ordered by all its columns, so a live table and its rebuild
@@ -224,7 +327,7 @@ fn batch(db: &Connection, after: u64, revision: u64) -> Result<Vec<Logged>, Engi
         return Ok(Vec::new());
     }
     let mut statement = db
-        .prepare_cached(
+        .prepare(
             "SELECT seq, revision, aggregate, kind, schema, at_ms,
             CASE WHEN length(body) <= ?3 THEN body END FROM state_log
             WHERE seq>?1 ORDER BY seq LIMIT ?2",

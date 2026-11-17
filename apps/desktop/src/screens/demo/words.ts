@@ -32,7 +32,7 @@ export const DEMO_MARK = "Demo";
 
 /** Why a pool cannot run the demo, by the engine's code, shown on that pool's row. */
 export const DEMO_POOL_REASONS: Readonly<Record<string, string>> = {
-  demo_harness_unavailable: "Its accounts run only on rcli, which has no live terminal or team agents yet.",
+  demo_harness_unavailable: "Its accounts run only on RCLI, which has no live terminal or team agents yet.",
   demo_pool_not_ready: "No account in this pool is ready for agents.",
   demo_pool_missing: "This pool is gone.",
 };
@@ -47,7 +47,7 @@ export const DEMO_REFUSALS: Readonly<Record<string, string>> = {
   demo_project_id_invalid: "This app sent a demo request the engine does not take. Update CrazyAgent, then try again.",
   demo_pool_missing: "That pool is gone. Pick another pool.",
   demo_pool_not_ready: "No account in that pool is ready for agents. Add a ChatGPT or Claude sign-in, or an OpenAI or Anthropic API key, or pick another pool.",
-  demo_harness_unavailable: "That pool's accounts run only on rcli, which has no live terminal or team agents yet. Pick a pool with an account that runs Claude Code or Codex.",
+  demo_harness_unavailable: "That pool's accounts run only on RCLI, which has no live terminal or team agents yet. Pick a pool with an account that runs Claude Code or Codex.",
   demo_platform_unqualified: "The demo runs only on macOS in this version.",
   demo_seed_failed: "CrazyAgent couldn't write the demo's files into your projects folder. Check that it can be written to, then try again.",
 };

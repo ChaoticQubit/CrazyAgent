@@ -405,7 +405,7 @@ fn a_lead_server_start_waiting_for_its_socket_holds_no_keeper_map() {
         };
         let _ = std::fs::remove_file(&started);
         std::thread::scope(|scope| {
-            let start = scope.spawn(|| host.keep_server(&lead, &target, mates, false));
+            let start = scope.spawn(|| host.keep_server(&lead, &target, mates));
             let deadline = Instant::now() + Duration::from_secs(10);
             while !started.exists() {
                 assert!(
@@ -473,7 +473,7 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
         "a refused own socket whose keeper ended cleanly was the lead's own server"
     );
     assert_eq!(
-        host.keep_server(&starting, &starting_socket, false, false),
+        host.keep_server(&starting, &starting_socket, false),
         Err(failure("terminal_unavailable")),
         "a start whose server program runs no server did not fail"
     );
@@ -602,7 +602,7 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
         }
         let _ = std::fs::remove_file(&started);
         assert_eq!(
-            host.keep_server(&lead, &target, true, false),
+            host.keep_server(&lead, &target, true),
             Err(failure("terminal_unavailable")),
             "a start whose server program runs no server did not fail"
         );

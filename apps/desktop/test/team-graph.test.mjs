@@ -251,7 +251,7 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.match(html, /aria-label="codex-2 terminal"/);
   assert.match(html, /aria-label="Close terminal"/);
   assert.match(html, /Connecting to the terminal\.\.\./);
-  assert.match(html, /<span class="tg-terminal-name">codex-2 \u00b7 codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
+  assert.match(html, /<span class="tg-terminal-name">codex-2 \u00b7 codex<\/span><span class="badge tone-info" data-working="true">(?:(?!<\/span>)[^])*Working<\/span>/);
   assert.match(html, /<span class="tg-terminal-detail">acct-work<\/span>/);
   const reported = renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], onClose() {}, reported: "Instructions: AGENTS.md - Skills used: tdd" }));
   assert.match(reported, /<span class="tg-terminal-detail" title="Instructions: AGENTS.md - Skills used: tdd">Instructions: AGENTS\.md - Skills used: tdd<\/span>/,
@@ -266,7 +266,7 @@ test("the terminal panel head is the mockup's: name, harness and state, Message,
   const sub = { ...team.nodes[0], branch: "crazyagent/calendar-api" };
   const html = withBox(() => renderToStaticMarkup(createElement(view.TerminalPanel, { node: sub, harness, onClose() {}, onStop() {}, swaps: true })));
   const head = html.slice(html.indexOf('class="tg-terminal-head"'), html.indexOf('class="tg-terminal-state"'));
-  assert.match(head, /<span class="tg-terminal-name">codex-2 · Codex<\/span><span class="badge tone-info">(?:(?!<\/span>)[^])*Working<\/span>/);
+  assert.match(head, /<span class="tg-terminal-name">codex-2 · Codex<\/span><span class="badge tone-info" data-working="true">(?:(?!<\/span>)[^])*Working<\/span>/);
   const order = [">Message</button>", ">Stop</button>", 'aria-label="Close terminal"'].map((part) => head.indexOf(part));
   assert.ok(order.every((at) => at > 0), `Message, Stop and Close are in the head: ${JSON.stringify(order)}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, "Message, then Stop, then Close");

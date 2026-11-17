@@ -557,6 +557,8 @@ async fn step_that_ends_the_transaction_is_restored_from_the_backup() {
     assert_eq!(rows(&root.connection()), started(before));
 }
 
+/// The rotation keeps the newest BACKUPS_KEPT backups. The upgrade from version 1 crosses
+/// 2.4's last version, so its own backup is the pinned one and stays outside the rotation.
 #[tokio::test]
 async fn only_the_newest_five_backups_are_kept() {
     let root = Root::new();
@@ -581,11 +583,18 @@ async fn only_the_newest_five_backups_are_kept() {
         .iter()
         .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
         .collect();
-    assert_eq!(names.len(), BACKUPS_KEPT, "{names:?}");
-    assert_eq!(names[0], "1-to-2-20000103T000000000Z");
-    assert!(names[BACKUPS_KEPT - 1].starts_with(&format!("1-to-{}-", latest(STEPS))));
+    assert!(latest(STEPS) > V24_VERSION_MAX);
+    assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
+    assert_eq!(names[0], "1-to-2-20000102T000000000Z");
+    let pin = &names[BACKUPS_KEPT];
+    assert!(
+        pin.starts_with(&format!("1-to-{}-", latest(STEPS))),
+        "{pin}"
+    );
+    let found = backups_in(&folder).unwrap();
+    let held = pinned(&folder, &found, SystemTime::now()).map(|index| found[index].1.as_str());
+    assert_eq!(held, Some(pin.as_str()));
     assert!(!folder.join("1-to-2-20000101T000000000Z").exists());
-    assert!(!folder.join("1-to-2-20000102T000000000Z").exists());
     assert!(folder.join("keep-me").is_dir());
     assert_eq!(
         std::fs::read(folder.join("1-to-2-notes.txt")).unwrap(),
@@ -1108,6 +1117,49 @@ fn step_11_lets_the_delete_record_hold_run_names_of_the_recorded_width_keeping_i
         )
         .unwrap();
     assert_eq!(tables, 0, "no record is made for a store that had none");
+}
+
+/// Fails unless the database holds the three app plugin store tables, each empty. Input:
+/// the connection. Output: none.
+fn empty_app_plugin_tables(db: &Connection) {
+    for table in ["app_plugin_secrets", "app_plugin_state", "app_plugin_trust"] {
+        let rows: i64 = db
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap_or_else(|cause| panic!("{table}: {cause}"));
+        assert_eq!(rows, 0, "{table}");
+    }
+}
+
+/// Step 12 (V250-H2): an upgrade from 2.4.2's version 11 adds the app plugin store's three
+/// tables, empty, under the backup the rotation pins, and a new database gets the same three
+/// at its first open, so both shapes match.
+#[tokio::test]
+async fn step_12_and_a_new_database_both_hold_the_empty_app_plugin_store_tables() {
+    let old = Root::new();
+    let mut db = old.connection();
+    db.execute_batch("CREATE TABLE unrelated (id INTEGER); PRAGMA user_version = 11;")
+        .unwrap();
+    upgrade(&mut db, &old.database(), None, STEPS).unwrap();
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    empty_app_plugin_tables(&db);
+    let backups = old.backups();
+    assert_eq!(backups.len(), 1);
+    let name = backups[0].file_name().unwrap().to_str().unwrap();
+    assert!(
+        name.starts_with(&format!("11-to-{}-", latest(STEPS))),
+        "{name}"
+    );
+    let found = backups_in(&old.path().join(BACKUPS)).unwrap();
+    let held = pinned(&old.path().join(BACKUPS), &found, SystemTime::now());
+    assert_eq!(held.map(|index| found[index].1.as_str()), Some(name));
+
+    let root = Root::new();
+    close(root.open().await.unwrap()).await;
+    let fresh = root.connection();
+    assert_eq!(version(&fresh).unwrap(), latest(STEPS));
+    empty_app_plugin_tables(&fresh);
 }
 
 /// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and

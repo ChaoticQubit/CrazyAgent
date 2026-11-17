@@ -1,0 +1,20 @@
+schema: 1
+kind: harness
+id: "crush"
+name: "Crush"
+binaries:
+  - "crush"
+headless: "crush run: one prompt, plain text reply"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+update:
+  npm:
+    scope: "@charmland"
+    name: "crush"
+    package: "@charmland/crush"
+    spec: "@charmland/crush"
+  guide: "https://github.com/charmbracelet/crush#readme"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

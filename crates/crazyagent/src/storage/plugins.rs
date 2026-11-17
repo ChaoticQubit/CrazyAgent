@@ -1574,6 +1574,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
         }
         servers.push(LaunchServer {
             name: server.name,
+            engine: false,
             spec,
             secrets,
         });

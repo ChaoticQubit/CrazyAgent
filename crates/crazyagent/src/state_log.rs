@@ -281,14 +281,14 @@ impl<'a, 'c> Appender<'a, 'c> {
         }
         let previous: i64 = self
             .tx
-            .prepare_cached("SELECT COALESCE(MAX(seq), 0) FROM state_log")
+            .prepare("SELECT COALESCE(MAX(seq), 0) FROM state_log")
             .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
             .map_err(error)?;
         let seq = previous
             .checked_add(1)
             .ok_or_else(|| error("state_log_seq_exhausted"))?;
         self.tx
-            .prepare_cached("INSERT INTO state_log VALUES (?1,?2,?3,?4,?5,?6,?7)")
+            .prepare("INSERT INTO state_log VALUES (?1,?2,?3,?4,?5,?6,?7)")
             .and_then(|mut statement| {
                 statement.execute(params![
                     seq,

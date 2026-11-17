@@ -116,6 +116,7 @@ impl OwnerRuntimeHandle {
             MasterBackend::Codex => self.registered_codex_executable()?,
             MasterBackend::Claude => self.registered_claude_executable()?,
             MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+            MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
         };
         let artifact_sha256 = executable.verified_sha256()?;
         if !is_hex_id(&artifact_sha256) {
@@ -728,6 +729,7 @@ fn require_master_delegate(
             crate::engine::claude_host::require_delegate(&turn.command, expected)?
         }
         MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+        MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
     }
     if turn.tool_record.as_deref() != expected.map(|tools| tools.drop) {
         return Err(failure("master_delegate_unverified"));
@@ -754,11 +756,10 @@ fn delegate_engine(
 fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineError> {
     let binding = prepared.profile.binding();
     let lease = &prepared.lease;
-    if !matches!(
-        prepared.session.selection.backend,
-        MasterBackend::Codex | MasterBackend::Claude
-    ) {
-        return Err(failure("master_runtime_backend_unsupported"));
+    match prepared.session.selection.backend {
+        MasterBackend::Codex | MasterBackend::Claude => {}
+        MasterBackend::Rcli => return Err(failure("master_runtime_backend_unsupported")),
+        MasterBackend::Listed(_) => return Err(failure("launch_harness_unsupported")),
     }
     if prepared.session.current_turn.is_none()
         || prepared.attempt.completion.is_some()
@@ -2520,6 +2521,176 @@ mod tests {
         assert!(!String::from_utf8_lossy(&listed.stdout).contains(&"b".repeat(64)));
     }
 
+    /// A listed master's home is its session's private home in its own keyless slot inside
+    /// the engine's native profiles folder (DEC-180 Task 20): the sandbox carves that one
+    /// home back out while the folder of profiles stays denied, so a real child reads and
+    /// writes its own home but neither another session's home in that slot nor another
+    /// slot. Runs on macOS only: it checks Seatbelt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listed_master_reaches_its_own_session_home_and_no_other() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let engine = root.engine_root().unwrap().to_path_buf();
+        let profiles = engine.join("native-profiles");
+        let key = crate::engine::bootstrap::listed_slot_key("account-1");
+        let slot = profiles.join(key).join("home");
+        let own = slot.join("session-a").join("standin-acp").join("account-1");
+        let neighbour = slot.join("session-b").join("standin-acp").join("account-1");
+        let other = profiles.join("b".repeat(64)).join("home");
+        for (home, text) in [(&own, "own"), (&neighbour, "neighbour"), (&other, "other")] {
+            private_directory(home);
+            std::fs::write(home.join("mcp.json"), text).unwrap();
+        }
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("standin-acp");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _capture_ref, _capture) = allocate_master_capture(&root).unwrap();
+        let built = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &own,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            &[],
+        );
+        assert!(
+            built.is_ok(),
+            "a listed master's own session home is refused: {:?}",
+            built.as_ref().err()
+        );
+        let sandbox = built.unwrap();
+        let text = sandbox.sandbox().profile();
+        let deny = text
+            .find(&format!("\n  (subpath \"{}\")", profiles.display()))
+            .expect("the profile denies the native profiles folder");
+        let allow = text
+            .find(&format!(
+                "(allow file-read* file-write*\n  (subpath \"{}\"))",
+                own.display()
+            ))
+            .expect("the profile allows the master's own session home");
+        assert!(deny < allow, "{text}");
+        assert!(!text.contains(&neighbour.display().to_string()), "{text}");
+        assert!(!text.contains(&other.display().to_string()), "{text}");
+        let run = |script: &str| {
+            let mut harness = Command::new("/bin/sh");
+            harness.arg("-c").arg(script).current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
+        };
+        let quoted = |path: &Path| format!("'{}'", path.display());
+        let read = run(&format!("cat {}", quoted(&own.join("mcp.json"))));
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(String::from_utf8_lossy(&read.stdout), "own");
+        let write = run(&format!("echo turn > {}", quoted(&own.join("turn.txt"))));
+        assert!(write.status.success(), "{write:?}");
+        for (home, text) in [(&neighbour, "neighbour"), (&other, "other")] {
+            let stolen = run(&format!("cat {}", quoted(&home.join("mcp.json"))));
+            assert!(!stolen.status.success(), "{stolen:?}");
+            assert!(!String::from_utf8_lossy(&stolen.stdout).contains(text));
+            let planted = run(&format!("echo x > {}", quoted(&home.join("planted"))));
+            assert!(!planted.status.success());
+            assert!(!home.join("planted").exists());
+        }
+        for folder in [&profiles, &slot] {
+            let listed = run(&format!("ls {}", quoted(folder)));
+            assert!(!listed.status.success(), "{listed:?}");
+            assert!(!String::from_utf8_lossy(&listed.stdout).contains("session-b"));
+        }
+    }
+
+    /// Only a listed master session's home in its own listed slot, of the exact shape, with
+    /// no sign-in's record in the slot home, is carved out of the native profiles folder: a
+    /// home in a slot with a Codex or Claude Code record, in a slot that is not its account's
+    /// listed one, under a slot folder other than `home`, or one folder too shallow or too
+    /// deep stays inside the secret and is refused. Runs on macOS only, beside the row above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listed_master_home_in_a_signed_in_slot_or_of_another_shape_is_not_carved() {
+        use crate::engine::bootstrap::{CLAUDE_RECORD, CODEX_RECORD, listed_slot_key};
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let profiles = root.engine_root().unwrap().join("native-profiles");
+        let session = |key: &str, slot: &str| {
+            profiles
+                .join(key)
+                .join(slot)
+                .join("session-a")
+                .join("standin-acp")
+        };
+        let own = listed_slot_key("account-1");
+        let codex = listed_slot_key("account-2");
+        let claude = listed_slot_key("account-3");
+        let shaped = session(&own, "home").join("account-1");
+        let refused = [
+            session(&codex, "home").join("account-2"),
+            session(&claude, "home").join("account-3"),
+            session(&"e".repeat(64), "home").join("account-1"),
+            session(&own, "home").join("account-5"),
+            session(&own, "profile").join("account-1"),
+            session(&own, "home"),
+            session(&own, "home").join("account-1").join("deeper"),
+            profiles.join(&own).join("home"),
+        ];
+        for home in refused.iter().chain([&shaped]) {
+            private_directory(home);
+        }
+        let record = |key: &str, name: &str| profiles.join(key).join("home").join(name);
+        std::fs::write(record(&codex, CODEX_RECORD), "{}").unwrap();
+        std::fs::write(record(&claude, CLAUDE_RECORD), "{}").unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("standin-acp");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let build = |home: &Path| {
+            let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                &[],
+            )
+        };
+        let carved = build(&shaped);
+        assert!(carved.is_ok(), "{:?}", carved.as_ref().err());
+        for home in &refused {
+            let built = build(home);
+            assert_eq!(
+                built.as_ref().err().map(|error| error.0.as_str()),
+                Some("master_sandbox_unavailable"),
+                "{}",
+                home.display()
+            );
+        }
+    }
+
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
     /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:
@@ -3166,3 +3337,7 @@ mod claude_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/codex_turn_tests.rs"]
 mod codex_turn_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/parity_tests.rs"]
+mod parity_tests;

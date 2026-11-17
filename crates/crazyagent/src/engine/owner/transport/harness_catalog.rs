@@ -11,7 +11,7 @@ mod tests;
 mod updates;
 #[cfg(unix)]
 pub(super) use updates::sign_in_version;
-pub(super) use updates::{UPDATES_TIMEOUT, slow};
+pub(super) use updates::{UPDATES_TIMEOUT, listed_install, slow};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -352,7 +352,7 @@ export function removeHarnessRow(team: TeamDraft, row: number): TeamDraft {
   return { ...team, sub_harnesses: team.sub_harnesses.filter((_, index) => index !== row) };
 }
 
-const harnessName = (harnesses: HarnessEntry[] | null, id: string) => entry(harnesses, id)?.name ?? id;
+const harnessName = (harnesses: HarnessEntry[] | null, id: string) => entry(harnesses, id)?.name ?? REMOVED_HARNESSES.get(id) ?? id;
 
 /** Lists the plain notes for limited harnesses the team uses.
  * Inputs: the team and the catalog. Output: one sentence per limitation, each once. */
@@ -402,6 +402,10 @@ export function masterNote(team: Pick<TeamPlan, "master">, harnesses: HarnessEnt
 }
 
 const HARNESS_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+/** The harnesses CrazyAgent once listed and no longer supports (DEC-180 addenda 1 and 2), the same
+ * five the engine names: the id a kept team may still hold, and the product's plain name. A test
+ * holds this copy to the engine's own list, id for id and name for name, in the engine's order. */
+export const REMOVED_HARNESSES: ReadonlyMap<string, string> = new Map([["antigravity", "Antigravity"], ["cursor-agent", "Cursor CLI"], ["amp", "Amp"], ["kiro", "Kiro CLI"], ["auggie", "Auggie"]]);
 const RANGE = "At most must be at least 1 and not less than At least.";
 
 /** Checks the Team step with the engine's own agent range rules.
@@ -411,6 +415,8 @@ export function teamErrors(team: TeamPlan, harnesses: HarnessEntry[] | null): { 
   const errors: { master?: string; rows: (string | undefined)[]; range?: string } = { rows: [] };
   const harnessProblem = (id: string, what: string, role: PickRole) => {
     if (!HARNESS_ID.test(id)) return `Pick a harness for ${what}.`;
+    const gone = REMOVED_HARNESSES.get(id);
+    if (gone !== undefined) return `${gone} is no longer supported. Pick another harness.`;
     const harness = entry(harnesses, id);
     if (harness?.status.kind === "not_installed") return `${harness.name} isn't installed on this Mac. Pick another harness.`;
     if (harness?.status.kind === "cant_run") return `${harness.name} can't run on this Mac. Pick another harness.`;
@@ -554,16 +560,17 @@ export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []
   return best?.pool.id ?? null;
 }
 
-/** Tells whether a pool holds an account a harness can use. A connection names its harness by
- * the catalog id or by one of the entry's aliases from the engine, such as "claude" for Claude Code.
+/** Tells whether a pool holds an account a harness can use, by the engine's rule (Task 21): a
+ * sign-in fits only the harness it was made with, by the catalog id or an alias such as "claude",
+ * and only one that lists subscription accounts; a key or no-key URL account fits by the wire
+ * format the harness lists, `*` standing for every format with that start; OAuth fits nothing.
  * Inputs: the harness and the pool's connections. Output: true when one fits. */
 export function poolFits(harness: HarnessEntry, members: ModelConnection[]): boolean {
   const names = [harness.id, ...harness.aliases];
+  const speaks = (protocol: string) => harness.account_protocols.some((listed) => listed.endsWith("*") ? protocol.startsWith(listed.slice(0, -1)) : listed === protocol);
   return members.some((member) => {
-    const same = names.includes(member.harness);
-    if (member.auth.method === "native_managed") return same && harness.account_kinds.includes("subscription");
-    if (member.auth.method === "api_key" || member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
-    return same || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
+    if (member.endpoint.kind === "native") return member.auth.method === "native_managed" && member.protocol === "native" && harness.account_kinds.includes("subscription") && names.includes(member.harness);
+    return (member.auth.method === "api_key" || member.auth.method === "none") && speaks(member.protocol);
   });
 }
 

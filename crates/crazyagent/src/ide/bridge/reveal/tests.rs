@@ -332,6 +332,40 @@ async fn a_reveal_names_only_paths_inside_the_workspace_folders() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_desktop_go_to_reveal_is_held_to_the_same_workspace_paths() {
+    let desk = Desk::start().await;
+    let (socket, alpha) = desk.capability("alpha").await;
+    let mut events = subscribe(&socket, alpha, "alpha").await;
+    let outside = desk.folders[1].join("context");
+    std::os::unix::fs::symlink(&outside, desk.folders[0].join("context").join("linked")).unwrap();
+    let project = ProjectId::new("alpha").unwrap();
+    for (path, code) in [
+        ("../beta/context/brief.md", "ide_reveal_invalid"),
+        ("/etc/hosts", "ide_reveal_invalid"),
+        ("context/linked/brief.md", "ide_reveal_outside"),
+    ] {
+        let target = RevealTarget::Project { path: path.into() };
+        assert_eq!(
+            desk.desktop
+                .ide_reveal(project.clone(), target)
+                .await
+                .unwrap_err()
+                .0,
+            code,
+            "{path}"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), read_reply(&mut events))
+            .await
+            .is_err(),
+        "a path outside the project sends no reveal"
+    );
+    assert_eq!(desk.desktop.ide_focus().await.unwrap(), None);
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reveal_the_ide_never_acknowledges_ends_unanswered() {
     let desk = Desk::start().await;
     let (socket, alpha) = desk.capability("alpha").await;
@@ -391,5 +425,28 @@ fn a_change_set_reveal_opens_its_worktree_or_a_file_in_it() {
             .0,
         "ide_reveal_not_listed",
         "a worktree the IDE workspace no longer lists is never revealed"
+    );
+}
+
+#[test]
+fn a_reveal_names_the_file_it_checked_with_links_inside_the_folder_resolved() {
+    let mut case = crate::ide::workspace::tests::Case::new();
+    let agent = case.agent("sub", "working");
+    case.change(&agent);
+    let id: String = case
+        .db
+        .query_row("SELECT id FROM landing_change_sets", [], |row| row.get(0))
+        .unwrap();
+    std::fs::create_dir_all(agent.worktree.join("real")).unwrap();
+    std::fs::write(agent.worktree.join("real").join("inner.txt"), "inner").unwrap();
+    std::os::unix::fs::symlink("real", agent.worktree.join("alias")).unwrap();
+    let target = RevealTarget::ChangeSet {
+        id: ChangeSetId::new(id).unwrap(),
+        path: Some("alias/inner.txt".into()),
+    };
+    assert_eq!(
+        resolve(&case.root, &case.project, &target).unwrap(),
+        format!("{}/real/inner.txt", agent.worktree.to_str().unwrap()),
+        "the IDE opens the file that was checked, not a link an agent can repoint afterwards"
     );
 }

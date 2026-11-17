@@ -1060,6 +1060,7 @@ fn launch_of(
         .into_iter()
         .map(|server| crate::plugins::LaunchServer {
             name: server.name,
+            engine: false,
             spec: server.spec,
             secrets: Vec::new(),
         })

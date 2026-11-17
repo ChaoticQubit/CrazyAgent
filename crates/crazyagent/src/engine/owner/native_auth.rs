@@ -1,5 +1,6 @@
 use super::{EngineError, NativeProfileBinding, failure, is_hex_id};
 use crate::config::ModelConnection;
+use crate::harnesses::manifest::DriverKind;
 use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -55,17 +56,33 @@ impl NativeAuthMethod {
 
     /// The method one harness runs for one way to sign in (DEC-141 PA-13), None where the
     /// harness has no such way: Claude Code has no sign-in code and a harness without managed
-    /// sign-in, such as RCLI, has none at all. Inputs: the connection's harness (`codex`,
+    /// sign-in, such as RCLI, has none at all. The registry names the harness's piped
+    /// driver; the two drivers with a sign-in of their own have their ways here and every
+    /// other driver kind is listed by name. A method is given only under the name a
+    /// connection stores for its harness. Inputs: the connection's harness (`codex`,
     /// `claude` or any other) and the way. Output: the method.
     pub fn for_way(harness: &str, way: SignInWay) -> Option<Self> {
-        match (harness, way) {
-            ("codex", SignInWay::Browser) => Some(Self::CodexBrowser),
-            ("codex", SignInWay::Code) => Some(Self::CodexDeviceCode),
-            ("codex", SignInWay::Check) => Some(Self::CodexExisting),
-            ("claude", SignInWay::Browser) => Some(Self::ClaudeOfficial),
-            ("claude", SignInWay::Check) => Some(Self::ClaudeExisting),
-            _ => None,
-        }
+        let driver = crate::harnesses::registry::registry()
+            .get(harness)?
+            .piped()?;
+        let method = match (driver, way) {
+            (DriverKind::CodexAppServer, SignInWay::Browser) => Self::CodexBrowser,
+            (DriverKind::CodexAppServer, SignInWay::Code) => Self::CodexDeviceCode,
+            (DriverKind::CodexAppServer, SignInWay::Check) => Self::CodexExisting,
+            (DriverKind::ClaudeStreamJson, SignInWay::Browser) => Self::ClaudeOfficial,
+            (DriverKind::ClaudeStreamJson, SignInWay::Check) => Self::ClaudeExisting,
+            (DriverKind::ClaudeStreamJson, SignInWay::Code) => return None,
+            (
+                DriverKind::Rcli
+                | DriverKind::Acp
+                | DriverKind::JsonlTurn
+                | DriverKind::JsonlRpc
+                | DriverKind::TextTurn,
+                SignInWay::Browser | SignInWay::Code | SignInWay::Check,
+            ) => return None,
+        };
+        assert_eq!(method.way(), way);
+        (method.harness() == harness).then_some(method)
     }
 
     /// The way to sign in this method is for the owner. Input: the method. Output: the way.
@@ -102,17 +119,25 @@ impl SignInWay {
     /// Every way, in the order the clients offer them.
     pub const ALL: [Self; 3] = [Self::Browser, Self::Code, Self::Check];
 
-    /// Why one harness cannot offer this way, as the sign-in screens say it. Input: the
+    /// Why one harness cannot offer this way, as the sign-in screens say it. A harness that
+    /// signs in through the browser the way Claude Code does and lacks this way lacks the
+    /// sign-in code, and is told so; every other case gets the general sentence. Input: the
     /// connection's harness. Output: the sentence, None when the harness offers the way.
     pub fn unavailable(self, harness: &str) -> Option<&'static str> {
         if NativeAuthMethod::for_way(harness, self).is_some() {
             return None;
         }
-        Some(match (harness, self) {
-            ("claude", Self::Code) => {
+        Some(match NativeAuthMethod::for_way(harness, Self::Browser) {
+            Some(NativeAuthMethod::ClaudeOfficial) => {
                 "Claude Code has no sign-in code. It signs in through your browser."
             }
-            _ => "This account kind has no managed sign-in.",
+            Some(
+                NativeAuthMethod::CodexBrowser
+                | NativeAuthMethod::CodexDeviceCode
+                | NativeAuthMethod::CodexExisting
+                | NativeAuthMethod::ClaudeExisting,
+            )
+            | None => "This account kind has no managed sign-in.",
         })
     }
 }
@@ -1267,9 +1292,29 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             NativeAuthMethod::for_way("codex", SignInWay::Check),
             Some(NativeAuthMethod::CodexExisting)
         );
-        assert!(SignInWay::Code.unavailable("claude").is_some());
+        for way in SignInWay::ALL {
+            for harness in ["claude-code", "opencode"] {
+                assert_eq!(
+                    NativeAuthMethod::for_way(harness, way),
+                    None,
+                    "{harness} {way:?}"
+                );
+                assert_eq!(
+                    way.unavailable(harness),
+                    Some("This account kind has no managed sign-in."),
+                    "{harness} {way:?}"
+                );
+            }
+        }
+        assert_eq!(
+            SignInWay::Code.unavailable("claude"),
+            Some("Claude Code has no sign-in code. It signs in through your browser.")
+        );
         assert!(SignInWay::Code.unavailable("codex").is_none());
-        assert!(SignInWay::Check.unavailable("rcli").is_some());
+        assert_eq!(
+            SignInWay::Check.unavailable("rcli"),
+            Some("This account kind has no managed sign-in.")
+        );
     }
 
     #[test]

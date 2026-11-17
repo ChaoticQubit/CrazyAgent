@@ -2,8 +2,8 @@ use super::{Busy, Grant, Order, Report, TeamRuntime, error, full_stop};
 use crate::agents::Agents;
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
-use crate::harnesses::interactive::{self, Support, Transcript};
-use crate::harnesses::terminal_session::{RecordSource, Resume};
+use crate::harnesses::interactive::{self, Support};
+use crate::harnesses::terminal_session::Resume;
 use crate::harnesses::transcript::{TranscriptReader, pending};
 use crate::project_setup::StoredSetup;
 use crate::protocol::CredentialRef;
@@ -53,12 +53,7 @@ pub(super) fn conversation(run: &Interrupted) -> Result<Resume, &'static str> {
     if !file.is_file() {
         return Err(RECORD_MISSING);
     }
-    let source = match &pane.source {
-        RecordSource::CodexRollouts { sessions } => Transcript::CodexRollouts {
-            sessions: sessions.clone(),
-        },
-        RecordSource::ClaudeSession { file } => Transcript::ClaudeSession { file: file.clone() },
-    };
+    let source = pane.transcript(None).map_err(|_| RECORD_UNREADABLE)?;
     let reader =
         TranscriptReader::resumed(source, cwd, file, None).map_err(|_| RECORD_UNREADABLE)?;
     let (id, record) = reader.conversation().ok_or(RECORD_UNREADABLE)?;

@@ -11,9 +11,12 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 
+pub mod chatgpt;
+use chatgpt::{CHATGPT_CODEX_BASE_URL, ChatGptSource, SIGN_IN_EXPIRED, SIGN_IN_EXPIRED_LINE};
+
 pub const TOKEN_PREFIX: &str = "crazyagent-relay-";
 pub const LOCAL_PLACEHOLDER: &str = "crazyagent-local";
-const TOKEN_HEX: usize = 64;
+pub(crate) const TOKEN_HEX: usize = 64;
 /// The longest key the engine writes into an account's key file: a relay token.
 pub const KEY_BYTES_MAX: usize = TOKEN_PREFIX.len() + TOKEN_HEX;
 const CURL: &str = "/usr/bin/curl";
@@ -29,7 +32,7 @@ const CLIENT_TIME: Duration = Duration::from_secs(60);
 const UPSTREAM_CONNECT_SECS: &str = "15";
 const UPSTREAM_TIME_SECS: &str = "1800";
 const POLL: Duration = Duration::from_millis(50);
-const REQUEST_DROPPED: [&str; 14] = [
+const REQUEST_DROPPED: [&str; 15] = [
     "host",
     "connection",
     "keep-alive",
@@ -44,7 +47,10 @@ const REQUEST_DROPPED: [&str; 14] = [
     "accept-encoding",
     "x-api-key",
     "authorization",
+    "x-goog-api-key",
 ];
+const CHATGPT_DROPPED: [&str; 3] = ["cookie", "openai-organization", "openai-project"];
+const CHATGPT_DROPPED_PREFIXES: [&str; 2] = ["chatgpt-", "x-openai-"];
 const RESPONSE_DROPPED: [&str; 6] = [
     "connection",
     "keep-alive",
@@ -131,9 +137,23 @@ fn target_byte(byte: u8) -> bool {
     (0x21..=0x7e).contains(&byte) && !matches!(byte, b'"' | b'\\' | b'#')
 }
 
+/// What a relay puts in place of the placeholder: a fixed provider key, or a ChatGPT
+/// sign-in whose access token the source renews.
+enum Key {
+    Fixed(SecretString),
+    ChatGpt(Arc<ChatGptSource>),
+}
+
+/// The credential one forwarded request goes up with: a fixed key in the header form the
+/// harness used, or a ChatGPT access token with its account id.
+enum Credential<'a> {
+    Key(KeyHeader, &'a SecretString),
+    SignedIn(&'a SecretString, Option<&'a str>),
+}
+
 struct Shared {
     upstream: Upstream,
-    key: SecretString,
+    key: Key,
     token: String,
     open: Mutex<Vec<Open>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -293,6 +313,10 @@ impl Relay {
     /// Inputs: the base URL (https, or http to loopback) and the key, kept only in memory.
     /// Output: the running relay, or `model_relay_upstream_invalid`, `model_relay_unavailable`.
     pub fn start(base_url: &str, key: SecretString) -> Result<Self, EngineError> {
+        Self::begin(base_url, Key::Fixed(key))
+    }
+
+    fn begin(base_url: &str, key: Key) -> Result<Self, EngineError> {
         let upstream = upstream(base_url)?;
         handed_bodies()?;
         let token = format!("{TOKEN_PREFIX}{}", random_hex(TOKEN_HEX / 2)?);
@@ -324,6 +348,41 @@ impl Relay {
             shared,
             accept: Some(accept),
         })
+    }
+
+    /// Starts a relay for a ChatGPT sign-in: it forwards only `POST /responses` under the
+    /// ChatGPT backend Codex uses, with the source's access token and account id in place
+    /// of the placeholder. Input: the sign-in source, which may be shared by several relays
+    /// of one account. Output: the running relay, or `model_relay_unavailable`.
+    pub fn start_chatgpt(source: Arc<ChatGptSource>) -> Result<Self, EngineError> {
+        Self::start_chatgpt_at(CHATGPT_CODEX_BASE_URL, source)
+    }
+
+    fn start_chatgpt_at(base_url: &str, source: Arc<ChatGptSource>) -> Result<Self, EngineError> {
+        Self::begin(base_url, Key::ChatGpt(source))
+    }
+
+    /// Whether this relay forwards with a ChatGPT sign-in rather than a fixed key.
+    pub fn is_chatgpt(&self) -> bool {
+        matches!(self.shared.key, Key::ChatGpt(_))
+    }
+
+    /// The native profile a ChatGPT relay forwards the sign-in of. Output: its reference,
+    /// or none for a relay with a fixed key.
+    pub fn chatgpt_profile(&self) -> Option<&crate::protocol::CredentialRef> {
+        match &self.shared.key {
+            Key::Fixed(_) => None,
+            Key::ChatGpt(source) => Some(source.profile()),
+        }
+    }
+
+    /// Why this relay stopped forwarding: `chatgpt_sign_in_expired` once its ChatGPT
+    /// sign-in could not be renewed. Output: the code, or none.
+    pub fn failure(&self) -> Option<&'static str> {
+        match &self.shared.key {
+            Key::Fixed(_) => None,
+            Key::ChatGpt(source) => source.failed(),
+        }
     }
 
     /// The loopback port the relay listens on, for the agent's sandbox network rule.
@@ -444,6 +503,7 @@ pub(crate) struct Incoming {
 pub(crate) enum KeyHeader {
     XApiKey,
     Bearer,
+    XGoogApiKey,
 }
 
 fn serve(mut stream: TcpStream, shared: &Shared, id: u64) {
@@ -477,9 +537,27 @@ fn exchange(
     let mut incoming = read_head(reader)?;
     let scheme = authorized(&incoming, &shared.token).ok_or(401_u16)?;
     shared.authorize(id);
-    confined(&incoming.target, &shared.upstream)?;
+    match &shared.key {
+        Key::Fixed(_) => confined(&incoming.target, &shared.upstream)?,
+        Key::ChatGpt(_) => responses_only(&incoming, &shared.upstream)?,
+    }
     incoming.body = read_body(reader, &incoming.headers)?;
-    let (mut child, mut config, body) = upstream_child(shared, &incoming, scheme)?;
+    let signed_in;
+    let credential = match &shared.key {
+        Key::Fixed(key) => Credential::Key(scheme, key),
+        Key::ChatGpt(source) => {
+            signed_in = match source.current(&|| shared.stop.load(Ordering::Acquire)) {
+                Ok(current) => current,
+                Err(problem) if problem.0 == SIGN_IN_EXPIRED => {
+                    let _ = sign_in_expired(stream);
+                    return Ok(());
+                }
+                Err(_) => return Err(503),
+            };
+            Credential::SignedIn(&signed_in.0, signed_in.1.as_deref())
+        }
+    };
+    let (mut child, mut config, body) = upstream_child(shared, &incoming, credential)?;
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
@@ -511,15 +589,36 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Answers a request whose ChatGPT sign-in could not be renewed: 401 with an OpenAI error
+/// body carrying `chatgpt_sign_in_expired` and its plain sentence, so the harness shows the
+/// owner what to do. Input: the harness connection. Output: the write's outcome.
+fn sign_in_expired(stream: &mut TcpStream) -> std::io::Result<()> {
+    let body = serde_json::json!({
+        "error": {
+            "message": SIGN_IN_EXPIRED_LINE,
+            "type": "invalid_request_error",
+            "code": SIGN_IN_EXPIRED,
+        }
+    })
+    .to_string();
+    stream.write_all(
+        format!(
+            "HTTP/1.1 401 Relay\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .as_bytes(),
+    )
+}
+
 /// Starts curl for one forwarded request. A body goes on a pipe curl inherits at its own
 /// number and reads as `/dev/fd/<n>`, so it is never written to disk, where an agent's temp
 /// folder grant could read or rewrite it (SA vid 201). Inputs: the relay, the request and
-/// the key header form. Output: curl, its config for stdin and the body pipe's write end
-/// (none for an empty body), or the status the harness gets.
+/// the credential it goes up with. Output: curl, its config for stdin and the body pipe's
+/// write end (none for an empty body), or the status the harness gets.
 fn upstream_child(
     shared: &Shared,
     incoming: &Incoming,
-    scheme: KeyHeader,
+    credential: Credential<'_>,
 ) -> Result<(Child, Vec<u8>, Option<std::io::PipeWriter>), u16> {
     let pipe = if incoming.body.is_empty() {
         None
@@ -527,13 +626,18 @@ fn upstream_child(
         Some(crate::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
     };
     let handed = pipe.as_ref().map(|(reader, _)| handed_path(reader));
-    let mut config = upstream_config(
-        &shared.upstream,
-        incoming,
-        scheme,
-        &shared.key,
-        handed.as_deref(),
-    )
+    let mut config = match credential {
+        Credential::Key(scheme, key) => {
+            upstream_config(&shared.upstream, incoming, scheme, key, handed.as_deref())
+        }
+        Credential::SignedIn(access, account_id) => chatgpt_config(
+            &shared.upstream,
+            incoming,
+            access,
+            account_id,
+            handed.as_deref(),
+        ),
+    }
     .map_err(|_| 400_u16)?;
     let mut command = upstream_command(&shared.upstream);
     let (spawned, body) = match pipe {
@@ -717,10 +821,12 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, u16> {
     }
 }
 
-/// Finds the placeholder the harness sent: `x-api-key: <token>` or
-/// `authorization: Bearer <token>`, compared in constant time. When a harness sends both,
-/// as Claude Code's key helper does, `x-api-key` wins, since provider keys go there.
-/// Output: which header carried it, or none when the token is missing or wrong.
+/// Finds the placeholder the harness sent: `x-api-key: <token>`,
+/// `authorization: Bearer <token>` or, as Google's SDK sends a Gemini key,
+/// `x-goog-api-key: <token>`, compared in constant time and looked for in that order. When a
+/// harness sends both of the first two, as Claude Code's key helper does, `x-api-key` wins,
+/// since provider keys go there. Output: which header carried it, or none when the token is
+/// missing or wrong.
 pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> {
     let matches = |value: &str| bool::from(value.as_bytes().ct_eq(token.as_bytes()));
     let presented = |wanted: &'static str| {
@@ -733,10 +839,15 @@ pub(crate) fn authorized(incoming: &Incoming, token: &str) -> Option<KeyHeader> 
     if presented("x-api-key").any(matches) {
         return Some(KeyHeader::XApiKey);
     }
-    presented("authorization")
+    if presented("authorization")
         .filter_map(|value| value.strip_prefix("Bearer "))
         .any(matches)
-        .then_some(KeyHeader::Bearer)
+    {
+        return Some(KeyHeader::Bearer);
+    }
+    presented("x-goog-api-key")
+        .any(matches)
+        .then_some(KeyHeader::XGoogApiKey)
 }
 
 /// Keeps the agent inside the provider base path: the target's path must be the base path
@@ -752,6 +863,17 @@ pub(crate) fn confined(target: &str, upstream: &Upstream) -> Result<(), u16> {
     if !inside || dot_segment(path) {
         return Err(404);
     }
+    Ok(())
+}
+
+/// Keeps a ChatGPT relay to the one request a model turn makes, because the access token
+/// opens the whole ChatGPT account: `POST <base>/responses` exactly, with no query and
+/// no other spelling of the path. Inputs: the request and the upstream. Output: Ok, or 404.
+fn responses_only(incoming: &Incoming, upstream: &Upstream) -> Result<(), u16> {
+    if incoming.method != "POST" || incoming.target != format!("{}/responses", upstream.path) {
+        return Err(404);
+    }
+    assert!(confined(&incoming.target, upstream).is_ok());
     Ok(())
 }
 
@@ -815,6 +937,29 @@ pub(crate) fn upstream_config(
     key: &SecretString,
     body: Option<&Path>,
 ) -> Result<Vec<u8>, EngineError> {
+    let mut pieces = forwarded(upstream, incoming, |_| false);
+    pieces.extend([
+        Plain(match scheme {
+            KeyHeader::XApiKey => "header = \"x-api-key: ",
+            KeyHeader::Bearer => "header = \"Authorization: Bearer ",
+            KeyHeader::XGoogApiKey => "header = \"x-goog-api-key: ",
+        }),
+        Escaped(key.expose()),
+        Plain("\"\n"),
+    ]);
+    body_line(&mut pieces, body)?;
+    crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
+}
+
+/// The start of every curl config: the provider URL, the method, and the harness's headers
+/// minus hop-by-hop, encoding and key headers and those `dropped` names, as pieces for
+/// [`crate::credentials::sized`]. Inputs: the upstream, the request and the extra drop
+/// test on lowercase header names. Output: the pieces.
+fn forwarded<'a>(
+    upstream: &'a Upstream,
+    incoming: &'a Incoming,
+    dropped: impl Fn(&str) -> bool,
+) -> Vec<crate::credentials::Piece<'a>> {
     let mut pieces = vec![
         Plain("url = \""),
         Escaped(&upstream.origin),
@@ -824,7 +969,7 @@ pub(crate) fn upstream_config(
         Plain("\"\nheader = \"Expect:\"\n"),
     ];
     for (name, value) in &incoming.headers {
-        if REQUEST_DROPPED.contains(&name.as_str()) {
+        if REQUEST_DROPPED.contains(&name.as_str()) || dropped(name.as_str()) {
             continue;
         }
         pieces.extend([
@@ -835,20 +980,55 @@ pub(crate) fn upstream_config(
             Plain("\"\n"),
         ]);
     }
-    pieces.extend([
-        Plain(match scheme {
-            KeyHeader::XApiKey => "header = \"x-api-key: ",
-            KeyHeader::Bearer => "header = \"Authorization: Bearer ",
-        }),
-        Escaped(key.expose()),
-        Plain("\"\n"),
-    ]);
+    pieces
+}
+
+/// Ends a curl config with the body file, when the request has a body.
+/// Inputs: the pieces and the body path. Output: Ok, or `model_relay_request_invalid`.
+fn body_line<'a>(
+    pieces: &mut Vec<crate::credentials::Piece<'a>>,
+    body: Option<&'a Path>,
+) -> Result<(), EngineError> {
     if let Some(body) = body {
         let body = body
             .to_str()
             .ok_or_else(|| failure("model_relay_request_invalid"))?;
         pieces.extend([Plain("data-binary = \"@"), Escaped(body), Plain("\"\n")]);
     }
+    Ok(())
+}
+
+/// Builds the curl config for one request forwarded with a ChatGPT sign-in, which goes
+/// only to curl's stdin: the backend URL, the method, the harness's headers minus the
+/// dropped ones and every account-scoped header, `Authorization: Bearer` with the access
+/// token, `chatgpt-account-id` when the sign-in has one, and the body file.
+/// Output: the config bytes, or `model_relay_request_invalid`.
+pub(crate) fn chatgpt_config(
+    upstream: &Upstream,
+    incoming: &Incoming,
+    access: &SecretString,
+    account_id: Option<&str>,
+    body: Option<&Path>,
+) -> Result<Vec<u8>, EngineError> {
+    let mut pieces = forwarded(upstream, incoming, |name| {
+        CHATGPT_DROPPED.contains(&name)
+            || CHATGPT_DROPPED_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+    });
+    pieces.extend([
+        Plain("header = \"Authorization: Bearer "),
+        Escaped(access.expose()),
+        Plain("\"\n"),
+    ]);
+    if let Some(account_id) = account_id {
+        pieces.extend([
+            Plain("header = \"chatgpt-account-id: "),
+            Escaped(account_id),
+            Plain("\"\n"),
+        ]);
+    }
+    body_line(&mut pieces, body)?;
     crate::credentials::sized(&pieces).ok_or_else(|| failure("model_relay_request_invalid"))
 }
 
@@ -929,3 +1109,6 @@ fn relay_reply(output: &mut impl BufRead, stream: &mut TcpStream) -> Result<(), 
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod chatgpt_tests;

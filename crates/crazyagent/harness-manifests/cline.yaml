@@ -1,0 +1,22 @@
+schema: 1
+kind: harness
+id: "cline"
+name: "Cline CLI"
+binaries:
+  - "cline"
+headless: "cline with --json output"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+update:
+  known_formulae:
+    - "cline"
+  npm:
+    name: "cline"
+    package: "cline"
+    spec: "cline"
+  guide: "https://docs.cline.bot/usage/cli-overview"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

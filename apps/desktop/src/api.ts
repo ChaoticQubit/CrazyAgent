@@ -1,12 +1,14 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, HarnessSubAgents, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
+import type { AccountCheck, AccountDraft, AccountView, ProviderEntry } from "./api-account-types";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
+export type { AccountCheck, AccountDraft, AccountField, AccountProvider, AccountStatus, AccountView, ProviderEntry, SignInMethod, SignInMethodEntry } from "./api-account-types";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
 export type Result<T> = { kind: "ok"; value: T } | Failure;
@@ -32,6 +34,12 @@ const COPY: Record<string, string> = {
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
+  engine_restoring: "CrazyAgent is bringing back your 2.4 data, so its engine stays stopped. Wait a minute, then reconnect.",
+  engine_restored: "Your 2.4 data is back. Install CrazyAgent 2.4.2 to use it. Restart engine goes back to 2.5, which updates that data again.",
+  storage_restore_unavailable: "There's no 2.4 backup to bring back. CrazyAgent keeps it for 30 days after the update to 2.5.",
+  storage_restore_agents_running: "Agents are running. Stop every agent and research run, then bring back your 2.4 data.",
+  storage_restore_busy: "Something else had CrazyAgent's data open, so your 2.4 data wasn't brought back. Close other CrazyAgent windows, then try again.",
+  storage_restore_failed: "Your 2.4 data wasn't brought back, and CrazyAgent went on with your 2.5 data. Try again.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",
@@ -415,6 +423,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   install_dependency: "installing a tool",
   fix_tool_permissions: "fixing a tool's permissions",
   refused_tool: "saving what setup offers for unused tools",
+  restore_pinned: "bringing back your data from before the update",
   pack_set: "changing the default pack",
   pack_remove: "removing a pack",
   team: "changing the team",
@@ -641,52 +650,6 @@ export function getMasterFrameSettings(): Promise<Result<MasterFrameSettings>> {
 /** Saves the master frame size limit. Input: the full setting. Output: ok once saved. */
 export function saveMasterFrameSettings(settings: MasterFrameSettings): Promise<Result<void>> {
   return change("desktop_set_master_frame_settings", { settings, generation: nextGeneration() });
-}
-
-export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
-export type SignInMethod = "subscription" | "api_key" | "url";
-export type AccountField = "hidden" | "optional" | "required";
-export type AccountStatus = "signed_in" | "not_signed_in" | "key_saved" | "unreachable" | "signing_in";
-
-export interface SignInMethodEntry {
-  method: SignInMethod;
-  label: string;
-  url: AccountField;
-  url_preset: string | null;
-  key: AccountField;
-  model: AccountField;
-}
-
-export interface ProviderEntry {
-  provider: AccountProvider;
-  name: string;
-  methods: SignInMethodEntry[];
-}
-
-export interface AccountDraft {
-  provider: AccountProvider;
-  method: SignInMethod;
-  name: string;
-  url?: string | null;
-  model?: string | null;
-}
-
-export interface AccountView {
-  id: string;
-  name: string;
-  provider: AccountProvider;
-  provider_name: string;
-  method: SignInMethod;
-  method_label: string;
-  url: string | null;
-  model: string | null;
-  status: AccountStatus;
-  status_label: string;
-}
-
-export interface AccountCheck {
-  account: AccountView;
-  models: string[];
 }
 
 /** Reads the provider catalog behind the Add account dialog. Output: providers in display
@@ -1011,6 +974,10 @@ export async function deletePool(id: string): Promise<Result<void>> {
 
 export type HarnessAccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
+/** One harness as the engine's catalog lists it: what was found on this machine, and what
+ * its manifest lets it be. `terminal` is true when the engine reads its replies back from a
+ * live terminal, `master` and `research` when it can run those; `sub_agents` says how its
+ * lead gets sub-agents and `account_protocols` the wire formats of its endpoint accounts. */
 export interface HarnessEntry {
   id: string;
   name: string;
@@ -1023,6 +990,11 @@ export interface HarnessEntry {
   account_kinds: HarnessAccountKind[];
   team: TeamUse;
   aliases: string[];
+  terminal: boolean;
+  master: boolean;
+  research: boolean;
+  sub_agents: HarnessSubAgents;
+  account_protocols: string[];
 }
 
 /** Reads the harness catalog with what is installed on this Mac, from the engine's last look

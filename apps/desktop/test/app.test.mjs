@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { App, AppView, EngineOutdatedView, ideFocusRoute, pageUnder } = await import("../src/app.tsx");
+const { App, AppView, EngineOutdatedView, ideFocusMoves, ideFocusRoute, pageUnder } = await import("../src/app.tsx");
 const { formatRoute, parseRoute } = await import("../src/ui/router.ts");
 const state = await import("../src/state.ts");
 const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
@@ -553,6 +553,18 @@ test("a TUI open in IDE focus opens that project's IDE tab, which the router kee
   assert.deepEqual(route, { name: "project", id: "harbor-notes", tab: "ide" });
   assert.equal(formatRoute(route), "#/projects/harbor-notes/ide");
   assert.deepEqual(parseRoute(formatRoute(route)), route);
+});
+
+test("a focus for a project whose IDE tab already shows does not move the page, so a Go to reveal keeps its answer and no extra history entry", () => {
+  const focus = { project: "harbor-notes", request: "reveal-0123456789abcdef01234567" };
+  const revealing = parseRoute("#/projects/harbor-notes/ide?section=file%3Asrc%2Fcart.ts");
+  assert.equal(ideFocusMoves(revealing, focus), false);
+  assert.equal(ideFocusMoves({ name: "project", id: "harbor-notes", tab: "ide" }, focus), false);
+  assert.equal(ideFocusMoves({ name: "project", id: "harbor-notes", tab: "agents" }, focus), true);
+  assert.equal(ideFocusMoves({ name: "project", id: "other", tab: "ide" }, focus), true);
+  assert.equal(ideFocusMoves({ name: "home" }, focus), true);
+  const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
+  assert.match(app, /if \(focus && ideFocusMoves\(parseRoute\(window\.location\.hash\), focus\)\) navigate\(ideFocusRoute\(focus\)\);/);
 });
 
 test("each sidebar row gets its project's working count, beside its unseen count", () => {

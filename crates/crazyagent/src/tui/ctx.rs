@@ -107,7 +107,8 @@ impl Default for Store {
 /// Everything a screen needs besides its own state: look, size, engine data,
 /// the owner identity of the current trusted connection, whether loading lines
 /// are still in their quiet first 150 ms, the owner's EDITOR, the one file waiting
-/// for it and whether it runs now, and the queues for requests and messages.
+/// for it and whether it runs now, the default engine's folder and whether Settings shows
+/// Restore 2.4 for it, and the queues for requests and messages.
 /// Input: owned by the shell and lent to screens. Output: requests and the
 /// latest message are drained by the shell.
 pub struct Ctx {
@@ -134,7 +135,10 @@ pub struct Ctx {
     pub shift_arrows: crate::tui::keys::ShiftArrows,
     pub shift_enter: crate::tui::keys::ShiftEnter,
     pub project_step: Option<(crate::protocol::ProjectId, bool)>,
+    pub messages_for: Option<(crate::protocol::ProjectId, String)>,
     pub starts_engine: bool,
+    pub engine_root: Option<std::path::PathBuf>,
+    pub restore_shown: bool,
     requests: VecDeque<Request>,
     refused: Vec<Arrival>,
     reconnect: bool,
@@ -179,7 +183,10 @@ impl Ctx {
             shift_arrows: crate::tui::keys::ShiftArrows::default(),
             shift_enter: crate::tui::keys::ShiftEnter::default(),
             project_step: None,
+            messages_for: None,
             starts_engine: false,
+            engine_root: None,
+            restore_shown: false,
             requests: VecDeque::new(),
             refused: Vec::new(),
             reconnect: false,

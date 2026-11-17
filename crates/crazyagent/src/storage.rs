@@ -26,14 +26,17 @@ pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
     MasterRuntimeCommand, MasterRuntimeObservation, MasterRuntimeResult, PreparedMasterTurn,
     close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
-    validate_configured_initial_conversation_receipt,
+    validate_configured_initial_conversation_receipt, validate_listed_initial_conversation_receipt,
 };
 #[cfg(unix)]
 pub use migrations::backup_failure;
 pub(crate) mod agent_text;
+mod events;
 mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
+pub(crate) use events::{Changes, changes};
+use events::{events, persist_event, persist_event_ids};
 mod owner_fence;
 pub(crate) use owner_fence::{check_owner_admission, check_owner_host};
 pub(crate) mod plugins;
@@ -1312,6 +1315,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::roadmap_status::initialize(connection)?;
     crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
+    crate::app_plugins::store::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
     setup::initialize(connection)?;
@@ -2103,79 +2107,6 @@ fn enforce_snapshot_bound(tx: &Transaction<'_>) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn events(tx: &Transaction<'_>, after: u64, revision: u64) -> Result<Outcome, EngineError> {
-    let first: Option<i64> = tx
-        .query_row("SELECT MIN(cursor) FROM events", [], |row| row.get(0))
-        .map_err(error)?;
-    if after > revision || first.is_some_and(|first| after.saturating_add(1) < first as u64) {
-        return Ok(Outcome::ResyncRequired);
-    }
-    let mut statement = tx
-        .prepare("SELECT body FROM events WHERE cursor>?1 ORDER BY cursor LIMIT 128")
-        .map_err(error)?;
-    let rows = statement
-        .query_map([after as i64], |row| row.get::<_, String>(0))
-        .map_err(error)?;
-    let events = rows
-        .map(|row| serde_json::from_str(&row.map_err(error)?).map_err(error))
-        .collect::<Result<Vec<Event>, _>>()?;
-    assert!(events.len() <= 128);
-    assert!(
-        events
-            .windows(2)
-            .all(|w| w[0].cursor.value() < w[1].cursor.value())
-    );
-    Ok(Outcome::Events { events })
-}
-
-fn persist_event(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    request: &WireRequest,
-    revision: u64,
-) -> Result<(), EngineError> {
-    persist_event_ids(
-        tx,
-        config,
-        &request.request_id,
-        &request.client_id,
-        revision,
-    )
-}
-
-fn persist_event_ids(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    request_id: &RequestId,
-    client_id: &ClientId,
-    revision: u64,
-) -> Result<(), EngineError> {
-    settings::ensure_clear(tx)?;
-    let event = Event {
-        cursor: Cursor::new(revision),
-        request_id: request_id.clone(),
-        client_id: client_id.clone(),
-    };
-    tx.execute("UPDATE state SET revision=?1 WHERE id=1", [revision as i64])
-        .map_err(error)?;
-    tx.execute(
-        "INSERT INTO events VALUES (?1,?2)",
-        params![
-            revision as i64,
-            serde_json::to_string(&event).map_err(error)?
-        ],
-    )
-    .map_err(error)?;
-    tx.execute(
-        "DELETE FROM events WHERE cursor<=?1",
-        [revision.saturating_sub(config.settings.events_retained as u64) as i64],
-    )
-    .map_err(error)?;
-    assert!(revision > 0);
-    assert_eq!(event.cursor.value(), revision);
-    Ok(())
-}
-
 pub(crate) fn task_context(
     tx: &Transaction<'_>,
     task_id: &TaskId,
@@ -2661,6 +2592,7 @@ fn owner_apply_with(
             current_revision: Cursor::new(revision),
         });
     }
+    let deleting = matches!(effect, Some(Effect::Delete(_)));
     let mut onboarded = None;
     let outcome = match (effect, &command) {
         (Some(Effect::Home(effect)), _) => {
@@ -2743,6 +2675,11 @@ fn owner_apply_with(
             command,
         };
         persist_event(&tx, config, &wire, next)?;
+        if let Some(removed) =
+            crate::project_setup::removed::event::removal(&wire.command, deleting)
+        {
+            crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
+        }
     }
     let provenance = OwnerProvenance {
         origin: "native_owner".into(),
@@ -2953,7 +2890,7 @@ fn owner_read(
             assert!(names.len() <= 25 + usize::from(config.settings.model_access.is_some()));
             OwnerData::Settings { names }
         }
-        OwnerRead::Setting { name } => read_owner_setting(config, name)?,
+        OwnerRead::Setting { name } => settings::read_owner_setting(config, name)?,
         OwnerRead::ConversationHistory {
             project_id,
             cursor,
@@ -3305,19 +3242,6 @@ fn pool_summaries(
     Ok(OwnerData::PoolSummaries { pools, next_offset })
 }
 
-fn read_owner_setting(config: &EffectiveConfig, name: &str) -> Result<OwnerData, EngineError> {
-    let descriptor = config
-        .descriptors
-        .get(name)
-        .ok_or_else(|| error("owner_setting_not_found"))?;
-    assert_eq!(descriptor.name, name);
-    assert!(config.validate().is_ok());
-    assert!(config.descriptors.len() <= 25 + usize::from(config.settings.model_access.is_some()));
-    Ok(OwnerData::Setting {
-        descriptor: Box::new(descriptor.clone()),
-    })
-}
-
 fn read_owner_baseline(tx: &Transaction<'_>, id: &BaselineId) -> Result<OwnerData, EngineError> {
     let (body,approved,revoked,current): (Option<String>,i64,i64,bool) = tx.query_row("SELECT CASE WHEN length(CAST(b.body AS BLOB))<=32768 THEN b.body END,b.approved,b.revoked,EXISTS(SELECT 1 FROM verification_current c WHERE c.project=b.project AND c.baseline=b.id) FROM verification_baselines b WHERE b.id=?1", [id.as_str()], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(error)?;
     let body = body.ok_or_else(|| error("owner_baseline_bounds"))?;
@@ -3637,81 +3561,10 @@ mod knowledge_storage_tests {
 }
 
 #[cfg(all(test, unix))]
-mod database_lock_tests {
-    use super::*;
-
-    #[test]
-    fn release_does_not_depend_on_a_stale_file_description_alias() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("db");
-        let lock = lock_database(&path).unwrap();
-        let stale_alias = lock.file.try_clone().unwrap();
-        assert!(lock_database(&path).is_err());
-
-        release_database_lock(lock).unwrap();
-        let new_owner = lock_database(&path).unwrap();
-        drop(stale_alias);
-        assert!(lock_database(&path).is_err());
-
-        release_database_lock(new_owner).unwrap();
-        let final_owner = lock_database(&path).unwrap();
-        release_database_lock(final_owner).unwrap();
-    }
-
-    #[test]
-    fn dropping_the_lock_frees_it_while_a_forked_alias_still_shares_its_file() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("db");
-        let lock = lock_database(&path).unwrap();
-        let forked_alias = lock.file.try_clone().unwrap();
-
-        drop(lock);
-        let next_owner = lock_database(&path).unwrap();
-        drop(forked_alias);
-        assert!(lock_database(&path).is_err());
-
-        drop(next_owner);
-        release_database_lock(lock_database(&path).unwrap()).unwrap();
-    }
-}
+mod open_tests;
 
 #[cfg(all(test, unix))]
-mod journal_mode_tests {
-    use super::*;
-
-    fn journal_mode(connection: &Connection) -> String {
-        connection
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .unwrap()
-    }
-
-    /// SQLITE-WAL-UNCHECKED: a store that answers the WAL request by keeping a rollback journal,
-    /// here an anonymous temporary database, fails the engine schema with one plain code instead
-    /// of opening in rollback mode, where a read-only reader beside the writer gets IOERR_LOCK.
-    #[test]
-    fn the_engine_schema_refuses_a_store_that_keeps_a_rollback_journal() {
-        let temporary = Connection::open("").unwrap();
-        let refused = initialize_schema(&temporary);
-        assert_eq!(
-            refused.map_err(|error| error.0),
-            Err("database_wal_refused: delete".to_owned())
-        );
-        assert_eq!(journal_mode(&temporary), "delete");
-    }
-
-    /// A store with a file name runs in write-ahead logging, and an anonymous in-memory store,
-    /// which no other connection can open, keeps its memory journal (DEC-147 addendum).
-    #[test]
-    fn a_file_store_runs_in_wal_and_an_anonymous_memory_store_keeps_its_memory_journal() {
-        let root = tempfile::tempdir().unwrap();
-        let file = Connection::open(root.path().join("engine.db")).unwrap();
-        initialize_schema(&file).unwrap();
-        assert_eq!(journal_mode(&file), "wal");
-        let memory = Connection::open_in_memory().unwrap();
-        initialize_schema(&memory).unwrap();
-        assert_eq!(journal_mode(&memory), "memory");
-    }
-}
+mod project_removed_tests;
 
 #[cfg(all(test, unix))]
 pub(crate) use configured_conversation_fixture::{

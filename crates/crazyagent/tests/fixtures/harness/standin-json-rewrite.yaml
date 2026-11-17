@@ -1,0 +1,66 @@
+schema: 1
+kind: harness
+id: "standin-json-rewrite"
+name: "Stand-in rewritten JSON record"
+binaries:
+  - "standin-json-rewrite"
+headless: "none: standin-json-rewrite runs in a terminal pane only"
+model_selection: true
+account_kinds:
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+roles:
+  - "agent"
+  - "master"
+sub_agents: "app"
+terminal:
+  argv:
+    - "--home"
+    - "{home}"
+    - "--session"
+    - "{session}"
+  resume:
+    - "--home"
+    - "{home}"
+    - "--resume"
+    - "{session}"
+  submit: "enter"
+  interrupt: "ctrl-c"
+  first_screen:
+    trust:
+      seen: "Trust this folder?"
+      press: "enter"
+  record:
+    reader: "json-rewrite"
+    path: "{home}/standin/records/{session}.json"
+    rules: "standin-record"
+rules:
+  standin-record:
+    started:
+      when:
+        type: "started"
+      emit: "turn_started"
+    text:
+      when:
+        type: "text"
+      emit: "text"
+      text: "delta"
+    tool:
+      when:
+        type: "tool"
+      emit: "tool_use"
+      name: "name"
+    stopped:
+      when:
+        type: "stopped"
+      emit: "interrupted"
+    done:
+      when:
+        type: "done"
+      emit: "turn_finished"
+      success: "ok"
+    error:
+      when:
+        type: "error"
+      emit: "turn_error"

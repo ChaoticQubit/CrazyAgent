@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn a_harness_id_is_short_lowercase_words() {
-        for id in ["claude-code", "codex", "cursor-agent", "rcli"] {
+        for id in ["claude-code", "codex", "gemini-cli", "rcli"] {
             assert!(harness_id(id).is_ok(), "{id}");
         }
         let long = "a".repeat(HARNESS_ID_BYTES_MAX + 1);

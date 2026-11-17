@@ -1,5 +1,6 @@
 import "./load-source.mjs";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -72,4 +73,21 @@ test("DEC-166: Settings, Harnesses says which version sign-in needs, for a harne
   const other = markup(createElement(view.HarnessRowView, { entry: ready("gemini-cli", "Gemini CLI"), versions: { ...claude, id: "gemini-cli", sign_in_min: undefined }, mode: "check_and_update",
     onCheck: quiet, onUpdate: quiet, onInstall: quiet, onGuide: quiet }));
   assert.doesNotMatch(other, /Sign-in needs/);
+});
+
+test("Task 21 (DEC-166): Settings, Harnesses says a harness older than the oldest version CrazyAgent drives needs that version or newer, beside Update", () => {
+  const row = (versions, mode = "check_and_update") => markup(createElement(view.HarnessRowView, { entry: ready("claude-code", "Claude Code"),
+    versions: { ...claude, sign_in_min: null, run_min: "2.1.250", ...versions }, mode, onCheck: quiet, onUpdate: quiet, onInstall: quiet, onGuide: quiet }));
+  const old = row({});
+  assert.match(old, /Claude Code 2\.1\.200 is too old for CrazyAgent; it needs 2\.1\.250 or newer\./);
+  assert.match(old, /<button[^>]*>Update<\/button>/);
+  for (const versions of [{ installed: "2.1.250" }, { installed: "2.1.325" }, { installed: "garbage" }, { installed: null }, { run_min: null }, { run_min: undefined }, { run_min: "2.1.x" }]) {
+    assert.doesNotMatch(row(versions), /too old for CrazyAgent/, JSON.stringify(versions));
+  }
+  assert.doesNotMatch(row({}, "off"), /too old for CrazyAgent/, "with updates off the row shows no update line");
+});
+
+test("Task 21: the needs X or newer line is the engine's words, the ones the TUI shows", () => {
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/harnesses/update.rs", import.meta.url), "utf8");
+  assert.ok(engine.includes('"{harness} {installed} is too old for CrazyAgent; it needs {minimum} or newer."'));
 });

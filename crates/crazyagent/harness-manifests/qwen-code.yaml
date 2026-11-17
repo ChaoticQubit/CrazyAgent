@@ -1,0 +1,23 @@
+schema: 1
+kind: harness
+id: "qwen-code"
+name: "Qwen Code"
+binaries:
+  - "qwen"
+headless: "qwen --prompt with --output-format stream-json"
+model_selection: true
+account_kinds:
+  - "subscription"
+  - "api_key"
+  - "open_ai_compatible_url"
+  - "local"
+update:
+  formulae:
+    - "qwen-code"
+  npm:
+    scope: "@qwen-code"
+    name: "qwen-code"
+    package: "@qwen-code/qwen-code"
+    spec: "@qwen-code/qwen-code@latest"
+  guide: "https://github.com/QwenLM/qwen-code#readme"
+cannot_start: "installed, but CrazyAgent cannot start it yet"

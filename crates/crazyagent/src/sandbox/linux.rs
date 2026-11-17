@@ -779,7 +779,7 @@ fn picked_ports(text: &str) -> Option<RangeInclusive<u16>> {
 
 /// Reads [`picked_ports`] for the network this process is in. No input. Output: the range,
 /// or none when the setting cannot be read.
-fn read_picked_ports() -> Option<RangeInclusive<u16>> {
+pub(crate) fn read_picked_ports() -> Option<RangeInclusive<u16>> {
     let mut text = String::new();
     fs::File::open(PICKED_PORTS_FILE)
         .ok()?
@@ -2374,7 +2374,7 @@ impl Grants {
         let carved = sandbox.carved_home.as_ref();
         assert!(read.iter().chain(&write).chain(&git_write).all(|grant| {
             secrets.iter().all(|secret| {
-                (carved == Some(grant) && grant.parent() == Some(secret.as_path()))
+                carved.is_some_and(|(home, folder)| home == grant && folder == secret)
                     || (!grant.starts_with(secret) && !secret.starts_with(grant))
             })
         }));

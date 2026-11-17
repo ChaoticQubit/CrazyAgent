@@ -37,7 +37,7 @@ const TABLES_MAX: usize = 4_096;
 type CopyCheck = fn(&Connection, &Path) -> Result<(), EngineError>;
 
 /// The database file name inside a backup folder.
-const DATABASE: &str = "engine.db";
+pub(crate) const DATABASE: &str = "engine.db";
 
 /// One forward engine.db schema step. `to` is the version the database reaches when
 /// the upgrade commits; `run` makes the change inside the upgrade transaction and
@@ -97,11 +97,15 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 12,
+        run: app_plugin_store,
+    },
+    Step {
+        to: 13,
         run: worktrees_on_the_log,
     },
 ];
 
-/// Step 12 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written
+/// Step 13 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written
 /// before the log reach replay through one snapshot run, appended through the open's proof
 /// since no engine host runs during an upgrade; a store with no worktree row gets none.
 /// Input: the open upgrade transaction. Output: Ok or the log's refusal.
@@ -124,6 +128,14 @@ const _: () = assert!(
     crate::projects_home::RECORDED_NAME_BYTES_MAX == STEP_11_NAME_BYTES_MAX,
     "a wider delete record needs a migration step that widens projects_delete_files"
 );
+
+/// Step 12 (V250-H2): the app plugin store's trust records, switches and secret bindings.
+/// An upgrade from 2.4 makes the three empty tables under its pinned backup; a new database
+/// gets them when the engine opens it. Input: the open upgrade transaction. Output: Ok, or
+/// `app_plugins_unavailable`.
+fn app_plugin_store(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    crate::app_plugins::store::initialize(tx)
+}
 
 /// Step 11 (RV-DS241-152): a delete records Overview and roadmap status run names of up to
 /// [`STEP_11_NAME_BYTES_MAX`] bytes, so `projects_delete_files` must hold them. An existing
@@ -391,6 +403,7 @@ pub(crate) fn upgrade(
     settings: Option<&SettingsSources>,
     steps: &[Step],
 ) -> Result<(), EngineError> {
+    forget_restore(path);
     upgrade_at(db, path, settings, steps, SystemTime::now(), check_copy)
 }
 
@@ -555,6 +568,210 @@ fn restore(
         return Err(error("storage_restore_mismatch"));
     }
     Ok(())
+}
+
+/// The name a restore gives the dated copy it keeps of the data it replaces (DEC-192), before
+/// `-<UTC time>`. It holds no `-to-`, so neither the rotation nor the pin ever counts it.
+const REPLACED: &str = "replaced";
+
+/// The code a restore starts with once no pinned 2.4 backup is left, after PINNED_DAYS.
+pub(crate) const RESTORE_UNAVAILABLE: &str = "storage_restore_unavailable";
+/// The code a restore starts with while a team agent or a research run still runs.
+pub(crate) const RESTORE_AGENTS_RUNNING: &str = "storage_restore_agents_running";
+/// The code a restore starts with while another connection holds engine.db.
+pub(crate) const RESTORE_BUSY: &str = "storage_restore_busy";
+/// The code any other failed restore starts with.
+pub(crate) const RESTORE_FAILED: &str = "storage_restore_failed";
+
+/// Until when the owner can still restore the pinned 2.4 backup of the engine at `root`, read
+/// without creating anything. Inputs: the engine root and the time now. Output: the moment the
+/// pin ends, or None when no pinned backup is left.
+pub(crate) fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTime> {
+    let folder = root.join(BACKUPS);
+    let metadata = std::fs::symlink_metadata(&folder).ok()?;
+    if !metadata.is_dir() || metadata.uid() != rustix::process::getuid().as_raw() {
+        return None;
+    }
+    let found = backups_in(&folder).ok()?;
+    let index = pinned(&folder, &found, now)?;
+    let until = stamp_time(&found[index].0)? + Duration::from_secs(86_400) * PINNED_DAYS;
+    assert!(until > now);
+    Some(until)
+}
+
+/// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192), at the time now.
+/// Inputs: the database path and the settings sources. Output: as [`restore_pinned_at`].
+pub(crate) fn restore_pinned(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+) -> Result<PathBuf, EngineError> {
+    restore_pinned_at(path, settings, SystemTime::now())
+}
+
+/// [`restore_pinned`] at a given time, which ages the pin. It holds engine.db alone for its
+/// whole run, refuses while an agent runs, keeps one dated 0700 copy of the data it replaces,
+/// then restores the pinned copy and checks every table against it. Inputs: the database
+/// path, the settings sources and the time. Output: the folder of the copy it kept.
+fn restore_pinned_at(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    now: SystemTime,
+) -> Result<PathBuf, EngineError> {
+    let root = path
+        .parent()
+        .ok_or_else(|| restore_failed("the database has no folder"))?;
+    let folder = backups_folder(root)?;
+    let found = backups_in(&folder)?;
+    let index = pinned(&folder, &found, now).ok_or_else(|| error(RESTORE_UNAVAILABLE))?;
+    let source = folder.join(&found[index].1);
+    let mut db = alone(path)?;
+    if agents_running(&db)? {
+        return Err(error(RESTORE_AGENTS_RUNNING));
+    }
+    let kept = keep_replaced(&db, &folder, settings, now)?;
+    let pinned_copy = source.join(DATABASE);
+    let restored = shape(&pinned_copy).and_then(|(version_pinned, schema_pinned)| {
+        restore(&mut db, &source, version_pinned, &schema_pinned)?;
+        check_copy(&db, &pinned_copy)?;
+        assert_eq!(version(&db)?, version_pinned);
+        Ok(())
+    });
+    if let Err(cause) = restored {
+        return Err(drop_unneeded(&db, &kept, cause));
+    }
+    assert!(kept.starts_with(&folder));
+    Ok(kept)
+}
+
+/// Settles the copy a failed restore kept: it is removed when the live database still holds
+/// exactly its rows, so retries leave no copies outside the rotation, and kept otherwise,
+/// since it may then hold the only whole 2.5 data. Inputs: the connection, the copy folder and
+/// the failure. Output: `storage_restore_failed` naming the cause and whether the copy stays.
+fn drop_unneeded(db: &Connection, kept: &Path, cause: EngineError) -> EngineError {
+    let unchanged = check_copy(db, &kept.join(DATABASE)).is_ok();
+    if unchanged && std::fs::remove_dir_all(kept).is_ok() {
+        return restore_failed(cause.0);
+    }
+    restore_failed(format!(
+        "{}; the replaced data stays in {}",
+        cause.0,
+        kept.display()
+    ))
+}
+
+/// Builds a restore error. Input: the cause. Output: `storage_restore_failed` with it.
+fn restore_failed(cause: impl std::fmt::Display) -> EngineError {
+    error(format!("{RESTORE_FAILED}: {cause}"))
+}
+
+/// Opens engine.db and holds it alone until the connection closes: exclusive locking mode
+/// and an exclusive transaction, with no wait, as the probe in changes.rs does. Any other
+/// connection, in this process or another, refuses the restore, and none can open while it
+/// runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
+fn alone(path: &Path) -> Result<Connection, EngineError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let db = Connection::open_with_flags(path, flags).map_err(restore_failed)?;
+    db.busy_timeout(Duration::ZERO).map_err(restore_failed)?;
+    match db.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;") {
+        Ok(()) => {}
+        Err(rusqlite::Error::SqliteFailure(cause, _))
+            if matches!(
+                cause.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            ) =>
+        {
+            return Err(error(RESTORE_BUSY));
+        }
+        Err(cause) => return Err(restore_failed(cause)),
+    }
+    assert!(db.is_autocommit());
+    let mode: String = db
+        .query_row("PRAGMA locking_mode", [], |row| row.get(0))
+        .map_err(restore_failed)?;
+    assert_eq!(mode, "exclusive");
+    Ok(db)
+}
+
+/// Whether a team agent or a research run still runs, as engine.db records it: a team_agents
+/// row, masters included, that is not stopped or failed, or a research_jobs row running. A
+/// table that does not exist holds none. Input: the connection. Output: the answer.
+pub(crate) fn agents_running(db: &Connection) -> Result<bool, EngineError> {
+    let checks = [
+        (
+            "team_agents",
+            "SELECT COUNT(*) FROM team_agents WHERE status NOT IN ('stopped', 'failed')",
+        ),
+        (
+            "research_jobs",
+            "SELECT COUNT(*) FROM research_jobs WHERE status = 'running'",
+        ),
+    ];
+    for (table, query) in checks {
+        let exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(restore_failed)?;
+        if !exists {
+            continue;
+        }
+        let running: i64 = db
+            .query_row(query, [], |row| row.get(0))
+            .map_err(restore_failed)?;
+        assert!(running >= 0);
+        if running > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Keeps one dated copy of the data a restore replaces (DEC-192): engine.db through the
+/// SQLite backup API and the settings sources, in a new 0700 `replaced-<UTC time>` folder
+/// under backups/, checked and marked as an upgrade backup is. Inputs: the connection, the
+/// backups folder, the settings sources and the time. Output: the folder; a copy that fails
+/// its check is removed.
+fn keep_replaced(
+    db: &Connection,
+    folder: &Path,
+    settings: Option<&SettingsSources>,
+    now: SystemTime,
+) -> Result<PathBuf, EngineError> {
+    let taken = stamp(now).map_err(|cause| restore_failed(cause.0))?;
+    let name = format!("{REPLACED}-{taken}");
+    assert!(backup_time(&name).is_none());
+    let target = folder.join(name);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&target)
+        .map_err(restore_failed)?;
+    let made = fill(db, &target, settings)
+        .and_then(|()| check_copy(db, &target.join(DATABASE)))
+        .and_then(|()| mark_checked(folder, &target));
+    if let Err(cause) = made {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(restore_failed(cause.0));
+    }
+    Ok(target)
+}
+
+/// The version and schema rows of the pinned copy, which the restored database must read.
+/// The copy is opened as `check_copy` opens it. Input: the copy's path. Output: both, or
+/// `storage_restore_failed` for a copy that is not 2.4 data.
+fn shape(copy: &Path) -> Result<(i64, Vec<String>), EngineError> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let opened = Connection::open_with_flags(copy, flags).map_err(restore_failed)?;
+    let found = version(&opened)?;
+    if found > V24_VERSION_MAX {
+        return Err(restore_failed("the pinned copy is not 2.4 data"));
+    }
+    Ok((found, schema(&opened)?))
 }
 
 /// Builds a backup error. Input: the cause. Output: `storage_backup_failed` with it.
@@ -808,6 +1025,76 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
         .find(|code| text == *code)
 }
 
+/// The private file beside engine.db that says how the owner's last restore stands, so a
+/// client can say so while no engine answers: `pending`, `restored <copy>` or
+/// `failed <code>`.
+pub(crate) const RESTORE_RECORD_FILE: &str = "restore-record";
+/// The record of a restore the engine stops for.
+pub(crate) const RECORD_PENDING: &str = "pending";
+/// The first word of the record of a restore that brought the 2.4 data back.
+pub(crate) const RECORD_RESTORED: &str = "restored";
+/// The first word of the record of a restore that changed nothing.
+pub(crate) const RECORD_FAILED: &str = "failed";
+/// The most a restore record holds.
+const RESTORE_RECORD_BYTES_MAX: usize = 512;
+
+/// Replaces the restore record of the engine at `root` with one line, written private and
+/// synced. Inputs: the root and the line. Output: Ok once it is on disk.
+pub(crate) fn write_restore_record(root: &Path, line: &str) -> Result<(), EngineError> {
+    assert!(!line.is_empty());
+    assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
+    let record = root.join(RESTORE_RECORD_FILE);
+    match std::fs::remove_file(&record) {
+        Ok(()) => {}
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        Err(cause) => return Err(restore_failed(cause)),
+    }
+    private_file(&record, line.as_bytes()).map_err(|cause| restore_failed(cause.0))
+}
+
+/// Reads the restore record of the engine at `root`, without an engine and without following
+/// a link: only a private regular file of this user counts. Input: the root. Output: its line,
+/// or none.
+pub(crate) fn read_restore_record(root: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(root.join(RESTORE_RECORD_FILE))
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+    {
+        return None;
+    }
+    let mut text = String::new();
+    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX).ok()?;
+    file.take(limit).read_to_string(&mut text).ok()?;
+    assert!(text.len() <= RESTORE_RECORD_BYTES_MAX);
+    Some(text)
+}
+
+/// Removes a pending or restored record as the engine starts, so a stale one never keeps a
+/// client from starting the engine after a crash or a return to 2.5; a failed one stays for
+/// the restore screen until the next request. Input: the database path. Output: none; a
+/// record that cannot be removed is logged.
+fn forget_restore(path: &Path) {
+    let Some(root) = path.parent() else {
+        return;
+    };
+    let Some(line) = read_restore_record(root) else {
+        return;
+    };
+    if line.split(' ').next() == Some(RECORD_FAILED) {
+        return;
+    }
+    if std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).is_err() {
+        eprintln!("storage_restore_record_kept");
+    }
+}
+
 /// Writes the database and settings copies into a new backup folder.
 /// Inputs: the connection, the folder and the settings sources. Output: Ok once every
 /// copy is on disk.
@@ -882,13 +1169,14 @@ fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, EngineError> {
     Ok(found)
 }
 
-/// The backup the rotation leaves alone: the oldest checked one a 2.5 upgrade took from a 2.4
-/// database, while its stamp is under PINNED_DAYS old. A stamp ahead of the clock counts as
-/// young. Inputs: the backups folder, its backups oldest first and the time now.
-/// Output: that backup's index, or None.
+/// The backup the rotation leaves alone and a restore brings back: the newest checked one a
+/// 2.5 upgrade took from a 2.4 database, while its stamp is under PINNED_DAYS old, so 2.4
+/// work done between a restore and the next upgrade is never lost to an older one. A stamp
+/// ahead of the clock counts as young. Inputs: the backups folder, its backups oldest first
+/// and the time now. Output: that backup's index, or None.
 fn pinned(folder: &Path, found: &[(String, String)], now: SystemTime) -> Option<usize> {
     let kept_for = Duration::from_secs(86_400) * PINNED_DAYS;
-    found.iter().position(|(time, name)| {
+    found.iter().rposition(|(time, name)| {
         let from_v24 = backup_versions(name)
             .is_some_and(|(from, to)| from <= V24_VERSION_MAX && to > V24_VERSION_MAX);
         let young = stamp_time(time)

@@ -590,7 +590,7 @@ const followRow = (markup, name) => {
 
 function following(extra = {}) {
   return renderToStaticMarkup(createElement(view.FollowingView, {
-    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null,
+    adoption: { kind: "ok", value: ADOPTION }, names: NAMES, finished: false, expanded: null, harness: (id) => ({ "claude-code": "Claude Code", codex: "Codex", rcli: "RCLI" })[id] ?? id,
     onFinished: never("onFinished"), onExpand: never("onExpand"), onMetrics: never("onMetrics"), onRetry: never("onRetry"), ...extra,
   }));
 }
@@ -607,6 +607,8 @@ test("Are agents following it shows one row per agent with its graph, context to
   assert.match(words(followRow(markup, "Master")), /Master Claude Code Not yet Missed None 10\+ min without graphify or context-mode/);
   assert.match(markup, /2 older agents are not listed\./);
   assert.match(markup, /aria-expanded="false"/);
+  const renamed = words(following({ harness: (id) => id === "claude-code" ? "Claude Prime" : id }));
+  assert.match(renamed, /Wren Claude Prime Missed/, "each agent's harness is named as the catalog names it");
 });
 
 test("finished agents wait behind Show finished, and a clicked row shows the agent's counts", () => {
@@ -889,6 +891,11 @@ test("a finding names the whole file, one line or each line it covers", () => {
   assert.deepEqual(Object.keys(client.FINDING_KINDS).sort(), ["broken_reference", "contradiction", "duplicate", "over_budget"]);
 });
 
+test("Edit with AI refused for a project's master harness names the harness kinds it runs on (T19b 19b-4)", () => {
+  assert.equal(client.processMessage({ kind: "error", code: "instructions_cleanup_master_harness", message: "raw engine words" }),
+    "Edit with AI runs on a Codex or Claude Code master, and this project's master is neither, so nothing was sent.");
+});
+
 test("every Edit with AI refusal reads as a plain sentence that says nothing changed or what to do", () => {
   const codes = ["instructions_cleanup_master_harness", "instructions_cleanup_pool_needed", "instructions_cleanup_pool_not_asked", "instructions_cleanup_pool_unknown", "instructions_cleanup_project_pool_missing",
     "instructions_cleanup_no_account", "instructions_cleanup_paused", "instructions_cleanup_busy", "instructions_cleanup_empty", "instructions_cleanup_failed",
@@ -950,4 +957,52 @@ test("Process names project text changed outside CrazyAgent in the engine's own 
   assert.equal(view.OUTSIDE_NOTICE, words);
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
   assert.match(source, /loaded\.value\.outside === true && <Notice tone="warn">\{OUTSIDE_NOTICE\}<\/Notice>/);
+});
+
+const HARNESS_SOURCES = [
+  { harness: "standin-pi", name: "Stand-in Pi", path: ".pi/agent/AGENTS.md", bytes: 2150 },
+  { harness: "standin-two", name: "Stand-in two", path: ".two/RULES.md", bytes: 12 },
+];
+
+test("H-import: each harness's own instructions file is offered beside Import from file, on the app page only", () => {
+  const markup = page({ sources: HARNESS_SOURCES, onImportSource: never("onImportSource") });
+  const words = markup.replace(/<[^>]*>/g, " ").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
+  assert.match(markup, /Import from file/);
+  assert.match(words, /Import from Stand-in Pi/);
+  assert.match(words, /~\/\.pi\/agent\/AGENTS\.md/);
+  assert.match(words, /Import from Stand-in two/);
+  assert.doesNotMatch(page(), /Import from Stand-in/, "no source, no extra button");
+  assert.doesNotMatch(projectPage({ sources: HARNESS_SOURCES, onImportSource: never("onImportSource") }), /Import from Stand-in/,
+    "a project's page never offers a home file");
+});
+
+test("H-import: the engine reads a harness file by its id, never a path the page sends, and a failed list shows nothing", () => {
+  const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
+  assert.match(api, /call<InstructionSource\[\]>\("desktop_instruction_sources"\)/);
+  assert.match(api, /call<string>\("desktop_import_instruction_source", \{ harness \}\)/);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const command = lib.slice(lib.indexOf("async fn desktop_import_instruction_source("), lib.indexOf("async fn desktop_instruction_import("));
+  assert.match(command, /harness: String/);
+  assert.doesNotMatch(command, /path/, "the page names a harness, never a file");
+  assert.match(command, /main_window\(&webview\)\?/);
+  assert.match(lib, /async fn desktop_instruction_sources\(/);
+  const build = readFileSync(new URL("../src-tauri/build.rs", import.meta.url), "utf8");
+  const capability = readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8");
+  for (const name of ["desktop_instruction_sources", "desktop_import_instruction_source"]) {
+    assert.match(build, new RegExp(`"${name}"`));
+    assert.match(capability, new RegExp(`"allow-${name.replace(/_/g, "-")}"`));
+  }
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /projectId === null \? loadInstructionSources\(\)/, "only the app page asks for the list");
+  assert.match(source, /sources\.kind === "ok" \? sources\.value : \[\]/, "a failed list shows no source and no failure");
+  assert.match(source, /importInstructionSource\(harness\)/);
+});
+
+test("H-import: a harness file agents can write is refused in the same words as the TUI", () => {
+  const code = "process_import_agents_can_write";
+  const words = "That file, or a link on its way, sits where agents can write, so CrazyAgent won't import it.";
+  assert.ok(client.PROCESS_REFUSALS.includes(code));
+  assert.equal(client.processMessage({ kind: "error", code, message: "" }), words);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/process.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${code}" => "${words}"`), "the TUI says the same");
 });

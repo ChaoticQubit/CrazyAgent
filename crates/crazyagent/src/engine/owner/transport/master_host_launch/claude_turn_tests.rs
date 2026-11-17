@@ -661,6 +661,10 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         checked(MasterBackend::Rcli, &turn, Some(&engine)),
         Err("master_runtime_backend_unsupported".to_owned())
     );
+    assert_eq!(
+        checked(MasterBackend::Listed("opencode"), &turn, Some(&engine)),
+        Err("launch_harness_unsupported".to_owned())
+    );
     let mut turn = turn;
     let record = turn.tool_record.replace(other_drop.clone());
     assert_eq!(
