@@ -2,10 +2,8 @@ use crate::plan::{Access, Ace, same};
 use crate::profile::check_path;
 
 /// The first line of every grants record, naming its format and version: version 2 records
-/// roles that only allow (DEC-193).
+/// roles that only allow (DEC-193), and any other version is refused.
 pub const HEADER: &str = "crazyagent-win-grants 2";
-/// The first line of a record an older boundary wrote, which put deny entries on paths.
-pub const HEADER_V1: &str = "crazyagent-win-grants 1";
 /// The most entries one record holds: the plans of two profiles, each far below it.
 pub const ENTRIES_MAX: usize = 4096;
 /// The largest record the helper reads: every entry at the longest path a profile allows.
@@ -20,18 +18,6 @@ const ACCESSES: [(Access, &str); 8] = [
     (Access::Hidden, "hidden"),
     (Access::Anchor, "anchor"),
     (Access::KeepEntries, "keepentries"),
-];
-
-/// The keywords of a version 1 record and the role each is read as. Every deny keyword reads as
-/// a role that does not cut, so the next plan withdraws its path or rewrites the container's
-/// entries there, older denies included.
-const ACCESSES_V1: [(Access, &str); 6] = [
-    (Access::ReadExecute, "readexecute"),
-    (Access::Modify, "modify"),
-    (Access::ReadExecute, "denywrite"),
-    (Access::ReadExecute, "denyall"),
-    (Access::ReadExecute, "anchor"),
-    (Access::ReadExecute, "keepentries"),
 ];
 
 fn keyword(access: Access) -> &'static str {
@@ -58,10 +44,10 @@ pub fn encode(entries: &[Ace]) -> Result<String, &'static str> {
     Ok(text)
 }
 
-/// Reads a record written by [`encode`], or by an older boundary in version 1, refusing
-/// anything else rather than guessing which paths still hold a grant: the header first, known
-/// keywords only, plain drive paths, no empty or carriage-return lines, at most 4096 entries.
-/// Input: the text. Output: the entries, or the refusal.
+/// Reads a record written by [`encode`], refusing anything else rather than guessing which
+/// paths still hold a grant: the header first, known keywords only, plain drive paths, no
+/// empty or carriage-return lines, at most 4096 entries. Input: the text. Output: the
+/// entries, or the refusal.
 pub fn decode(text: &str) -> Result<Vec<Ace>, &'static str> {
     const DAMAGED: &str = "the record of granted paths is damaged";
     if text.len() > RECORD_BYTES_MAX {
@@ -69,15 +55,13 @@ pub fn decode(text: &str) -> Result<Vec<Ace>, &'static str> {
     }
     let body = text.strip_suffix('\n').ok_or(DAMAGED)?;
     let mut lines = body.split('\n');
-    let keywords: &[(Access, &str)] = match lines.next() {
-        Some(HEADER) => &ACCESSES,
-        Some(HEADER_V1) => &ACCESSES_V1,
-        _ => return Err(DAMAGED),
-    };
+    if lines.next() != Some(HEADER) {
+        return Err(DAMAGED);
+    }
     let mut entries = Vec::new();
     for line in lines {
         let (word, path) = line.split_once(' ').ok_or(DAMAGED)?;
-        let (access, _) = keywords
+        let (access, _) = ACCESSES
             .iter()
             .find(|(_, known)| *known == word)
             .ok_or(DAMAGED)?;
@@ -181,10 +165,9 @@ mod tests {
         let good = encode(&[ace(PROJECT, Access::Modify)]).unwrap();
         for bad in [
             String::new(),
-            "crazyagent-win-grants 3\n".to_owned(),
+            "crazyagent-win-grants 1\n".to_owned(),
+            good.replace("grants 2", "grants 1"),
             good.replace("modify", "denywrite"),
-            good.replace("grants 2", "grants 1")
-                .replace("modify", "rootanchor"),
             good.replace("modify", "own"),
             good.replace(PROJECT, r"Projects\shop"),
             good.replace('\n', "\r\n"),
@@ -204,37 +187,6 @@ mod tests {
             .collect();
         assert!(decode(&format!("{HEADER}\n{listed}")).is_err());
         assert!(decode(&"x".repeat(RECORD_BYTES_MAX + 1)).is_err());
-    }
-
-    #[test]
-    fn an_older_record_reads_as_roles_that_do_not_cut() {
-        let older = format!(
-            "{HEADER_V1}\nmodify {PROJECT}\nreadexecute {TOOLS}\ndenywrite {CONTEXT}\n\
-             denyall {DOCUMENTS}\nanchor {GIT}\nkeepentries {PROJECT}\n"
-        );
-        let read = decode(&older).unwrap();
-        assert_eq!(
-            read,
-            [
-                ace(PROJECT, Access::Modify),
-                ace(TOOLS, Access::ReadExecute),
-                ace(CONTEXT, Access::ReadExecute),
-                ace(DOCUMENTS, Access::ReadExecute),
-                ace(GIT, Access::ReadExecute),
-                ace(PROJECT, Access::ReadExecute),
-            ]
-        );
-        assert!(read.iter().all(|entry| !entry.access.cuts()));
-        let planned = [
-            ace(CONTEXT, Access::ReadOnly),
-            ace(PROJECT, Access::RootAnchor),
-        ];
-        assert_eq!(
-            withdrawn(&read, &planned),
-            [TOOLS, DOCUMENTS, GIT],
-            "paths the plan still names have their older entries rewritten in place"
-        );
-        assert!(encode(&union(&read, &planned)).unwrap().starts_with(HEADER));
     }
 
     #[test]

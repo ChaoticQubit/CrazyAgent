@@ -129,7 +129,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 || text.len() > 2 * LIST_BYTES_MAX {
+    if !text.len().is_multiple_of(2) || text.len() > 2 * LIST_BYTES_MAX {
         return None;
     }
     let digit = |unit: u8| match unit {
@@ -383,7 +383,7 @@ mod tests {
         assert!(text.ends_with(" C:\\Users\\mira\\Projects\\shop\\my context\n"));
         assert_eq!(decode(&text).unwrap(), [first.clone(), second]);
         assert_eq!(decode(&encode(&[]).unwrap()).unwrap(), []);
-        let good = encode(&[first.clone()]).unwrap();
+        let good = encode(std::slice::from_ref(&first)).unwrap();
         for bad in [
             String::new(),
             good.replace(HEADER, "crazyagent-win-protected 2"),
