@@ -209,4 +209,33 @@ pools = [
         assert_eq!(summaries[1].summary, "1 ChatGPT");
         assert_eq!(summaries[1].project_count, 0);
     }
+
+    const TWO_OF_EACH: &str = r#"accounts = ["codex-1", "codex-2", "claude-1", "api-1", "api-2", "local-1", "local-2", "url-1", "url-2"]
+connections = [
+  { id = "codex-a", provider = "openai", harness = "codex", protocol = "native", account_ref = "codex-1", endpoint = { kind = "native" }, model = { id = "native-default", author = "openai" }, auth = { method = "native_managed", profile_ref = "codex-profile-a" } },
+  { id = "codex-b", provider = "openai", harness = "codex", protocol = "native", account_ref = "codex-2", endpoint = { kind = "native" }, model = { id = "native-default", author = "openai" }, auth = { method = "native_managed", profile_ref = "codex-profile-b" } },
+  { id = "claude-a", provider = "anthropic", harness = "claude", protocol = "native", account_ref = "claude-1", endpoint = { kind = "native" }, model = { id = "native-default", author = "anthropic" }, auth = { method = "native_managed", profile_ref = "claude-profile-a" } },
+  { id = "api-a", provider = "openrouter", harness = "rcli", protocol = "openai-chat", account_ref = "api-1", endpoint = { kind = "http", url = "https://openrouter.ai/api/v1" }, model = { id = "some/model", author = "openrouter" }, auth = { method = "api_key", credential_ref = "api-key-ref" } },
+  { id = "api-b", provider = "openrouter", harness = "rcli", protocol = "openai-chat", account_ref = "api-2", endpoint = { kind = "http", url = "https://openrouter.ai/api/v1" }, model = { id = "other/model", author = "openrouter" }, auth = { method = "api_key", credential_ref = "api-key-ref-2" } },
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-b", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-2", endpoint = { kind = "http", url = "http://127.0.0.1:8080/v1" }, model = { id = "llama", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "url-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "url-1", endpoint = { kind = "http", url = "https://models.example.invalid/v1" }, model = { id = "m", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "url-b", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "url-2", endpoint = { kind = "http", url = "https://other.example.invalid/v1" }, model = { id = "n", author = "openai-compatible" }, auth = { method = "none" } },
+]
+pools = [
+  { id = "pool-many", name = "Two of each", members = ["codex-a", "codex-b", "claude-a", "api-a", "api-b", "local-a", "local-b", "url-a", "url-b"], projects = [], roles = [], fallback_allowed = false },
+]"#;
+
+    /// V243-POOL-SUMMARY-PLURAL: a kind counted more than once reads in the plural, so a pool
+    /// says "2 Local models", never "2 Local model"; a provider name stays as it is.
+    #[test]
+    fn a_pool_summary_names_a_kind_counted_more_than_once_in_the_plural() {
+        let catalog: ModelAccess = toml::from_str(TWO_OF_EACH).unwrap();
+        catalog.validate().unwrap();
+        let summaries = summarize(&catalog, |_| true);
+        assert_eq!(
+            summaries[0].summary,
+            "2 ChatGPT, 1 Claude, 2 API keys, 2 URLs, 2 Local models"
+        );
+    }
 }
