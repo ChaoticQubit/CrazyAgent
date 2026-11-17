@@ -1,0 +1,51 @@
+{
+  "added": {
+    "id": "url-account-<id-1>",
+    "method": "url",
+    "method_label": "Connect a URL",
+    "model": "snapshot-model",
+    "name": "Snapshot compatible",
+    "provider": "openai_compatible",
+    "provider_name": "Any OpenAI-compatible URL",
+    "status": "key_saved",
+    "status_label": "Key saved",
+    "url": "http://127.0.0.1:<port>/v1"
+  },
+  "check": {
+    "account": {
+      "id": "url-account-<id-1>",
+      "method": "url",
+      "method_label": "Connect a URL",
+      "model": "snapshot-model",
+      "name": "Snapshot compatible",
+      "provider": "openai_compatible",
+      "provider_name": "Any OpenAI-compatible URL",
+      "status": "key_saved",
+      "status_label": "Key saved",
+      "url": "http://127.0.0.1:<port>/v1"
+    },
+    "models": [
+      "snapshot-model"
+    ]
+  },
+  "requests": [
+    {
+      "authorization": null,
+      "headers": [],
+      "line": ""
+    },
+    {
+      "authorization": {
+        "scheme": "Bearer",
+        "token_is_the_key": true
+      },
+      "headers": [
+        "host",
+        "accept",
+        "connection",
+        "authorization"
+      ],
+      "line": "GET /v1/models HTTP/1.1"
+    }
+  ]
+}

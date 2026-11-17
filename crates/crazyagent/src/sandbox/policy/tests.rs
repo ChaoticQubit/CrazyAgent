@@ -632,13 +632,13 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
         assert_eq!(
             rule(IdeAgentFiles::NoDeleteOrRename, older_agents),
             format!(
-                "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
+                "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+$\") (regex #\"{agents}/[^/]+/\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
             )
         );
         assert_eq!(
             rule(IdeAgentFiles::ReadOnly, older_agents),
             format!(
-                "(deny file-write*\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
+                "(deny file-write*\n  (regex #\"{agents}/[^/]+$\") (regex #\"{agents}/[^/]+/\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
             )
         );
     }

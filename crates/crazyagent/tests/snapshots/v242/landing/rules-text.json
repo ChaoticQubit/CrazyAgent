@@ -1,0 +1,132 @@
+{
+  "landing_rules": {
+    "clone": [
+      "",
+      "## How your work lands",
+      "",
+      "Your worktree is your own copy of the project, on its own branch. Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind. Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. When your task ends, CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder. This rule wins over any other instruction about branches or commits."
+    ],
+    "linked": [
+      "",
+      "## How your work lands",
+      "",
+      "CrazyAgent lands your work; you never do. Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. Leave your edits as files in your worktree. When your task ends, CrazyAgent turns them into a change set, and the owner accepts it in the project's Changes view onto the branch checked out in the project folder. This rule wins over any other instruction to branch or commit."
+    ]
+  },
+  "team_tools": [
+    {
+      "catch_up_main": true,
+      "own_clone": true,
+      "text": [
+        "",
+        "## Team tools",
+        "",
+        "Your team tools are in the `crazyagent-team` MCP server. The engine answers each by your place in the team:",
+        "- start_work: Start a unit of work and claim the files, modules or domains it touches.",
+        "- inspect_work: Read work state, your inbox and outbox, threads and the team.",
+        "- update_work: Record context, or send a message, question or reply to another agent.",
+        "- transfer_work: Assign, accept, decline, release, hand off or reopen a unit of work.",
+        "- finish_work: Record evidence and mark work review-ready, complete or closed.",
+        "- spawn: Start a lead or a sub-agent with its own worktree and branch.",
+        "- stop: Stop an agent you lead.",
+        "- merge: Merge a finished agent's branch into its lead's branch, locally.",
+        "- remember: Save a memory for the owner's approval.",
+        "- recall: Search the memories agents may read.",
+        "- sessions: Search or list past conversations.",
+        "- session: Read one past conversation a page at a time.",
+        "- log_activity: Log a new phase of the work or a finished test run to the project activity.",
+        "- discard: Discard a finished harness's waiting change set; the owner can restore it for 7 days.",
+        "Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.",
+        "Every question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.",
+        "Branches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.",
+        "When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened.",
+        "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish."
+      ]
+    },
+    {
+      "catch_up_main": true,
+      "own_clone": false,
+      "text": [
+        "",
+        "## Team tools",
+        "",
+        "Your team tools are in the `crazyagent-team` MCP server. The engine answers each by your place in the team:",
+        "- start_work: Start a unit of work and claim the files, modules or domains it touches.",
+        "- inspect_work: Read work state, your inbox and outbox, threads and the team.",
+        "- update_work: Record context, or send a message, question or reply to another agent.",
+        "- transfer_work: Assign, accept, decline, release, hand off or reopen a unit of work.",
+        "- finish_work: Record evidence and mark work review-ready, complete or closed.",
+        "- spawn: Start a lead or a sub-agent with its own worktree and branch.",
+        "- stop: Stop an agent you lead.",
+        "- merge: Merge a finished agent's branch into its lead's branch, locally.",
+        "- remember: Save a memory for the owner's approval.",
+        "- recall: Search the memories agents may read.",
+        "- sessions: Search or list past conversations.",
+        "- session: Read one past conversation a page at a time.",
+        "- log_activity: Log a new phase of the work or a finished test run to the project activity.",
+        "- discard: Discard a finished harness's waiting change set; the owner can restore it for 7 days.",
+        "Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.",
+        "Every question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.",
+        "Branches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.",
+        "When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened.",
+        "When main has moved on, bring it into your branch with git merge crazyagent/main before you finish."
+      ]
+    },
+    {
+      "catch_up_main": false,
+      "own_clone": true,
+      "text": [
+        "",
+        "## Team tools",
+        "",
+        "Your team tools are in the `crazyagent-team` MCP server. The engine answers each by your place in the team:",
+        "- start_work: Start a unit of work and claim the files, modules or domains it touches.",
+        "- inspect_work: Read work state, your inbox and outbox, threads and the team.",
+        "- update_work: Record context, or send a message, question or reply to another agent.",
+        "- transfer_work: Assign, accept, decline, release, hand off or reopen a unit of work.",
+        "- finish_work: Record evidence and mark work review-ready, complete or closed.",
+        "- spawn: Start a lead or a sub-agent with its own worktree and branch.",
+        "- stop: Stop an agent you lead.",
+        "- merge: Merge a finished agent's branch into its lead's branch, locally.",
+        "- remember: Save a memory for the owner's approval.",
+        "- recall: Search the memories agents may read.",
+        "- sessions: Search or list past conversations.",
+        "- session: Read one past conversation a page at a time.",
+        "- log_activity: Log a new phase of the work or a finished test run to the project activity.",
+        "- discard: Discard a finished harness's waiting change set; the owner can restore it for 7 days.",
+        "Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence. After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.",
+        "Every question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.",
+        "Branches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.",
+        "When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened."
+      ]
+    },
+    {
+      "catch_up_main": false,
+      "own_clone": false,
+      "text": [
+        "",
+        "## Team tools",
+        "",
+        "Your team tools are in the `crazyagent-team` MCP server. The engine answers each by your place in the team:",
+        "- start_work: Start a unit of work and claim the files, modules or domains it touches.",
+        "- inspect_work: Read work state, your inbox and outbox, threads and the team.",
+        "- update_work: Record context, or send a message, question or reply to another agent.",
+        "- transfer_work: Assign, accept, decline, release, hand off or reopen a unit of work.",
+        "- finish_work: Record evidence and mark work review-ready, complete or closed.",
+        "- spawn: Start a lead or a sub-agent with its own worktree and branch.",
+        "- stop: Stop an agent you lead.",
+        "- merge: Merge a finished agent's branch into its lead's branch, locally.",
+        "- remember: Save a memory for the owner's approval.",
+        "- recall: Search the memories agents may read.",
+        "- sessions: Search or list past conversations.",
+        "- session: Read one past conversation a page at a time.",
+        "- log_activity: Log a new phase of the work or a finished test run to the project activity.",
+        "- discard: Discard a finished harness's waiting change set; the owner can restore it for 7 days.",
+        "Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.",
+        "Every question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.",
+        "Branches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.",
+        "When you start a new phase of the work (for example architecture, building, testing) or finish a test run, call log_activity with the goal it serves and one line saying what happened."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "agent_one": {
+    "refused": "process_agent_unknown"
+  },
+  "agent_zero": {
+    "refused": "process_request_invalid"
+  },
+  "newest_master": {
+    "refused": "process_agent_unknown"
+  }
+}

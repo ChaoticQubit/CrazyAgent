@@ -1,0 +1,10 @@
+{
+  "confined-without-profile": "launch_sandbox_required",
+  "harness-without-headless-adapter": "launch_harness_unsupported",
+  "home-others-can-read": "launch_account_home_unsafe",
+  "key-not-routed": "launch_environment_refused",
+  "model-invalid": "launch_model_invalid",
+  "profile-and-unconfined": "launch_sandbox_conflict",
+  "relay-for-harness-without-adapter": "launch_key_relay_unsupported",
+  "url-with-query": "launch_url_invalid"
+}
