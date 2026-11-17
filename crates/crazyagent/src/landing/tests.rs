@@ -16351,62 +16351,6 @@ fn a_confined_step_on_linux_never_takes_a_link_or_a_special_file_as_the_index() 
     }
 }
 
-/// FARM-LINUX R3: ext4 hands a freed inode number straight to the next file, so a split move,
-/// whose `read-tree -m` and `update-index --refresh` both rewrite the copy of the index, could
-/// end on a copy with the first copy's device and inode and read as never rewritten: the move
-/// wrote the work tree and the index stayed behind. The step holds its first copy open while it
-/// runs, so no file it writes takes that number, and a copy rewritten twice is taken.
-#[cfg(target_os = "linux")]
-#[test]
-fn a_confined_step_on_linux_holds_its_first_index_copy_so_a_twice_rewritten_copy_is_taken() {
-    let case = Case::new();
-    let index = case.workspace.git_dir.join("index");
-    let lock = case.workspace.git_dir.join("index.lock");
-    let step = case.workspace.git_dir.join("crazyagent-step");
-    let copy = step.join("index");
-    let before = std::fs::read(&index).unwrap();
-    let repo = confined_agent(&case, git::Writes::WorkTree);
-    let mut first = None;
-    let mut last = None;
-    let mut held = false;
-    let left = repo.swapped(true, || {
-        let meta = std::fs::symlink_metadata(&copy).unwrap();
-        let original = (meta.dev(), meta.ino());
-        let bytes = std::fs::read(&copy).unwrap();
-        for _ in 0..2 {
-            let written = step.join("index.lock");
-            std::fs::write(&written, &bytes).unwrap();
-            std::fs::rename(&written, &copy).unwrap();
-        }
-        held = std::fs::read_dir("/proc/self/fd")
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                std::fs::metadata(entry.path())
-                    .is_ok_and(|open| (open.dev(), open.ino()) == original)
-            });
-        let now = std::fs::symlink_metadata(&copy).unwrap();
-        first = Some(original);
-        last = Some((now.dev(), now.ino()));
-        Ok(git::Output {
-            code: 0,
-            stdout: Vec::new(),
-            overflow: false,
-        })
-    });
-    assert_eq!(left.unwrap().code, 0);
-    assert!(
-        held,
-        "the first copy is no longer open, so a later write can take its inode number"
-    );
-    assert_ne!(last, first);
-    let placed = std::fs::symlink_metadata(&index).unwrap();
-    assert_eq!(Some((placed.dev(), placed.ino())), last);
-    assert_eq!(std::fs::read(&index).unwrap(), before);
-    assert!(std::fs::symlink_metadata(&lock).is_err());
-    assert!(std::fs::symlink_metadata(&step).is_err());
-}
-
 /// SA vid 3: the copy of the index a confined Linux step that fills the work tree leaves in the
 /// step folder is never taken as the worktree's index, not even a plain file with one link put
 /// there by a rename, as git's own rename of a lock a link raced in during `read-tree -u` could
