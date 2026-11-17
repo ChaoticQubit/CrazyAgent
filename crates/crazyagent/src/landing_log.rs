@@ -29,8 +29,13 @@ pub const WORKTREE_OWNER_EDITS_FORGOTTEN: &str = "WorktreeOwnerEditsForgotten";
 pub const CHANGE_SET_NUMBERED: &str = "ChangeSetNumbered";
 /// An owner approval made a baseline its project's current one (`verification_current`).
 pub const BASELINE_APPROVED: &str = "BaselineApproved";
+/// A Not now to a project's publish prompt, kept with the time it asks again
+/// (`github_publish_prompt`).
+pub const PUBLISH_PROMPT_SNOOZED: &str = "PublishPromptSnoozed";
+/// A Don't ask again to a project's publish prompt.
+pub const PUBLISH_PROMPT_NEVER: &str = "PublishPromptNever";
 /// Every landing event kind.
-pub const KINDS: [&str; 10] = [
+pub const KINDS: [&str; 12] = [
     AGENT_BRANCH_SET,
     AGENT_BRANCH_FORGOTTEN,
     BASE_SET,
@@ -41,6 +46,8 @@ pub const KINDS: [&str; 10] = [
     WORKTREE_OWNER_EDITS_FORGOTTEN,
     CHANGE_SET_NUMBERED,
     BASELINE_APPROVED,
+    PUBLISH_PROMPT_SNOOZED,
+    PUBLISH_PROMPT_NEVER,
 ];
 
 /// Whether a body path is absolute: `/`, then names `owner_edit::check_path` accepts, so
