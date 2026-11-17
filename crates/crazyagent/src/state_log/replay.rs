@@ -8,7 +8,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 mod tests;
@@ -20,6 +20,12 @@ pub const REPLAY_BATCH_MAX: usize = 4_096;
 pub const PROCESS_EXITED: &str = "ProcessExited";
 /// The most bytes a table name given to [`rows`] may hold.
 const TABLE_BYTES_MAX: usize = 64;
+/// The most times [`checkpoint`] tries to empty the WAL after a redact.
+pub const CHECKPOINT_ATTEMPTS_MAX: usize = 4;
+/// How long [`checkpoint`] waits between two tries, beside the connection's busy wait.
+const CHECKPOINT_RETRY_WAIT: Duration = Duration::from_millis(100);
+
+const _: () = assert!(CHECKPOINT_ATTEMPTS_MAX > 1);
 
 /// One event as replay reads it back from the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,7 +147,7 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
 /// while its seq, revision, aggregate, kind and time stay, so replay stays contiguous and
 /// skips it. The old body is overwritten with zeros (`secure_delete` on for the update, then
 /// put back by its keyword, since SQLite reads the number 2 as ON and not FAST); the caller
-/// checkpoints the WAL after commit. Snapshot events are refused until compaction (L1b) can
+/// runs [`checkpoint`] after commit. Snapshot events are refused until compaction (L1b) can
 /// rewrite their run. The delete's fence is checked first, as for an append. Inputs: the
 /// delete's transaction, the seq and the fence. Output: Ok, a fence refusal, or
 /// `state_log_redact_missing`, `state_log_redact_snapshot` or
@@ -184,6 +190,26 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), Engin
     tx.execute_batch(&format!("PRAGMA secure_delete={mode};"))
         .map_err(error)?;
     updated.map(|_| ())
+}
+
+/// Moves every WAL frame into the database file and empties the WAL after a redact
+/// committed, so no old body stays in the WAL. A reader still in the WAL makes a try busy;
+/// it is tried again, at most [`CHECKPOINT_ATTEMPTS_MAX`] times, each try within the
+/// connection's busy wait. Input: the connection.
+/// Output: true once the WAL is empty, false when every try was busy.
+pub fn checkpoint(db: &Connection) -> bool {
+    checkpoint_with(db, || std::thread::sleep(CHECKPOINT_RETRY_WAIT))
+}
+
+/// [`checkpoint`] with the wait between two tries given.
+/// Inputs: the connection and the wait.
+/// Output: true once the WAL is empty, false when every try was busy.
+fn checkpoint_with(db: &Connection, mut wait: impl FnMut()) -> bool {
+    let _ = &mut wait;
+    let busy = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+        row.get::<_, i64>(0)
+    });
+    matches!(busy, Ok(0))
 }
 
 /// Redacts, for an owner delete, every event of the given aggregates, and of the given kinds
