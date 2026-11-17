@@ -996,16 +996,22 @@ fn check_profile(checks: &Path, id: &str) -> PathBuf {
 /// Clears a removed server's check folder, with whatever its checks wrote there while they
 /// held the server's secrets, and its check profile: the folder moves aside at once and is
 /// deleted on a blocking thread of its own that nothing waits for, so no check home size
-/// holds up the answer, and the start sweep deletes a moved folder a crash left. Inputs:
-/// the engine's check folder and the server id. A failure other than a missing entry is logged.
+/// holds up the answer, and the start sweep deletes a moved folder a crash left. The
+/// profile goes once every access entry its checks were granted is taken back
+/// ([`grants_withdrawn`]). Inputs: the engine's check folder and the server id. A failure
+/// other than a missing entry is logged.
 fn remove_check_folder(checks: &Path, id: &str) {
-    match std::fs::remove_file(check_profile(checks, id)) {
-        Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
-            eprintln!("plugin_check_folder_not_removed cause={problem}");
+    let aside = crate::storage::plugins::move_check_folder_aside(checks, id);
+    let profile = check_profile(checks, id);
+    if grants_withdrawn(&profile) {
+        match std::fs::remove_file(&profile) {
+            Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
+                eprintln!("plugin_check_folder_not_removed cause={problem}");
+            }
+            _ => {}
         }
-        _ => {}
     }
-    match crate::storage::plugins::move_check_folder_aside(checks, id) {
+    match aside {
         Ok(Some(aside)) => drop(tokio::task::spawn_blocking(move || {
             if let Err(problem) = std::fs::remove_dir_all(aside) {
                 eprintln!("plugin_check_folder_not_removed cause={problem}");
@@ -1014,6 +1020,33 @@ fn remove_check_folder(checks: &Path, id: &str) {
         Ok(None) => {}
         Err(problem) => eprintln!("plugin_check_folder_not_removed cause={}", problem.0),
     }
+}
+
+/// Takes back every access entry the boundary helper granted a removed server's check
+/// container, read entries on the owner's folders included, and drops its record. It runs
+/// after the check folder moved aside, so the entries on that folder, which is deleted
+/// whole, are not rewritten first. Input: the check profile. Output: whether nothing is
+/// left granted; false keeps the profile, so the record of what is left keeps its container.
+#[cfg(windows)]
+fn grants_withdrawn(profile: &Path) -> bool {
+    match std::fs::symlink_metadata(profile) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return true,
+        _ => {}
+    }
+    match crazyagent_win_sandbox::release(profile) {
+        Ok(()) => true,
+        Err(problem) => {
+            eprintln!("plugin_check_grants_not_withdrawn cause={problem}");
+            false
+        }
+    }
+}
+
+/// Reports nothing granted where checks run under a profile that grants no access entries.
+/// Input: the profile, unused. Output: true.
+#[cfg(not(windows))]
+fn grants_withdrawn(_profile: &Path) -> bool {
+    true
 }
 
 async fn handle(

@@ -368,3 +368,59 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
         assert!(root.join(CHECK_FOLDER).join(ID).join(name).is_dir());
     }
 }
+
+/// The read entry a server's check was granted on its program's folder is taken back when the
+/// server is removed, so no entry for its dead container stays on the owner's folder; without
+/// the boundary helper beside the engine nothing is granted and the check says why.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_removed_servers_check_grants_are_taken_back_from_its_programs_folder() {
+    const ID: &str = "mcp-0123456789abcdef01234568";
+    const CONTAINER_SID: &str = "S-1-15-2-";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = base.join("engine");
+    let folder = base.join("server");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let server = folder.join("server.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
+    let containers = || {
+        let listed =
+            crate::spawn_gate::output(std::process::Command::new("icacls").arg(&folder)).unwrap();
+        assert!(listed.status.success(), "{listed:?}");
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter(|line| line.contains(CONTAINER_SID))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let before = containers();
+    let checked = boundary_check(
+        &root,
+        ID,
+        server.to_str().unwrap(),
+        &["--list".to_owned()],
+        &[],
+        &[],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap_err();
+    let helper = std::env::current_exe()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    if !helper.is_file() {
+        assert_eq!(
+            checked,
+            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+        );
+        return;
+    }
+    assert_eq!(checked, "server_exited");
+    assert!(containers().len() > before.len());
+    let checks = root.join(CHECK_FOLDER);
+    remove_check_folder(&checks, ID);
+    assert_eq!(containers(), before);
+    assert!(!check_profile(&checks, ID).exists());
+    assert!(!checks.join(ID).exists());
+}
