@@ -417,7 +417,8 @@ impl Storage {
                     if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
                     }
-                    match crate::github::proposals::start_store(&connection) {
+                    let open = opening::Opening::now();
+                    match crate::github::proposals::start_store(&connection, open) {
                         Ok(0) => {}
                         Ok(ended) => eprintln!("github_rule_proposals_cut_short count={ended}"),
                         Err(e) => eprintln!("github_rule_proposals_not_settled cause={}", e.0),
@@ -1326,8 +1327,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::project_setup::removed::initialize(connection)?;
-    let opened_ms = crate::state_log::replay::Clock::System.now_ms();
-    crate::worktrees::log::sweep(connection, opening::Opening::new(opened_ms))?;
+    crate::worktrees::log::sweep(connection, opening::Opening::now())?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;

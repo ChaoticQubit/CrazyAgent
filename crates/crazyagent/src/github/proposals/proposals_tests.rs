@@ -905,3 +905,6 @@ fn two_apply_passes_at_once_send_one_rule_change_at_a_time() {
     assert_eq!(most.load(Ordering::SeqCst), 1, "one rule change at a time");
     assert_eq!(case.statuses(), ["applied", "applied"]);
 }
+
+#[path = "log_tests.rs"]
+mod log_tests;

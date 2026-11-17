@@ -304,9 +304,12 @@ pub(crate) fn start(tx: &Transaction<'_>) -> Result<usize, EngineError> {
     Ok(stopped + orphaned)
 }
 
-/// Runs [`start`] in its own transaction as the engine's store opens. Input: the store's
-/// connection. Output: how many proposals ended, or the store error.
-pub(crate) fn start_store(db: &Connection) -> Result<usize, EngineError> {
+/// Runs [`start`] in its own transaction as the engine's store opens. Inputs: the store's
+/// connection and the open's proof. Output: how many proposals ended, or the store error.
+pub(crate) fn start_store(
+    db: &Connection,
+    _opening: crate::storage::opening::Opening,
+) -> Result<usize, EngineError> {
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
         .map_err(|_| failure(UNAVAILABLE))?;
     let ended = start(&tx)?;
