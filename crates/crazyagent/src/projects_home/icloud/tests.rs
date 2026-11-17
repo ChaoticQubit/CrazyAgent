@@ -103,6 +103,15 @@ fn downloads_run_side_by_side_and_each_dropped_claim_cancels_and_lets_go_only_it
 }
 
 #[test]
+#[should_panic(expected = "a download is held once")]
+fn a_download_already_held_is_never_held_twice() {
+    let downloads = Downloads::default();
+    let download = Arc::new(Download::default());
+    let _held = downloads.claim_for(Arc::clone(&download)).unwrap();
+    let _again = downloads.claim_for(download);
+}
+
+#[test]
 fn the_registry_refuses_a_download_past_its_bound_until_one_ends() {
     let downloads = Downloads::default();
     let mut claims: Vec<Claim<'_>> = (0..DOWNLOADS_MAX)
