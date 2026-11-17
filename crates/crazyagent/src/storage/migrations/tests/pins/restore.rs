@@ -67,7 +67,13 @@ fn a_restore_after_thirty_days_is_refused_and_changes_nothing() {
     let taken = stamp_time(backup_time(&names(&root)[0]).unwrap()).unwrap();
     let late = taken + DAY * PINNED_DAYS;
     assert_eq!(restorable_until(root.path(), start), Some(late));
+    let last = late - Duration::from_millis(1);
+    assert_eq!(restorable_until(root.path(), last), Some(late));
     assert_eq!(restorable_until(root.path(), late), None);
+    assert_eq!(
+        restorable_until(root.path(), late + Duration::from_millis(1)),
+        None
+    );
 
     let refused = restored(&root, late).unwrap_err().0;
 
@@ -188,7 +194,6 @@ fn a_later_upgrades_rotation_leaves_the_restore_copy() {
     let start = SystemTime::now();
     let (root, _) = upgraded(start);
     let copy = restored(&root, start + HOUR).unwrap();
-    let pin = names(&root)[0].clone();
     let sources = sources(&root);
     let mut db = root.connection();
     let extra: [StepRun; 7] = [probe, kept, kept, kept, kept, kept, kept];
@@ -208,8 +213,29 @@ fn a_later_upgrades_rotation_leaves_the_restore_copy() {
 
     let names = names(&root);
     assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
-    assert_eq!(names[0], pin);
     assert_eq!(replaced(&root), vec![copy.clone()]);
     assert!(copy.join(CHECKED).is_file());
     assert!(copy.join(DATABASE).is_file());
+}
+
+#[test]
+fn a_failed_restore_changes_nothing_and_keeps_no_copy() {
+    let start = SystemTime::now();
+    let (root, _) = upgraded(start);
+    let after = rows(&root.connection());
+    let pin = root.backups()[0].join(DATABASE);
+    let opened = Connection::open(&pin).unwrap();
+    opened
+        .pragma_update(None, "user_version", latest(STEPS) + 1)
+        .unwrap();
+    drop(opened);
+
+    let refused = restored(&root, start + HOUR).unwrap_err().0;
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(!refused.contains("stays in"), "{refused}");
+    assert_eq!(rows(&root.connection()), after);
+    assert!(probed(&root.connection()));
+    assert!(replaced(&root).is_empty());
+    assert_eq!(names(&root).len(), 1);
 }
