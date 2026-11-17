@@ -18,6 +18,10 @@ const OTHER: &str = "other";
 /// rebuilt from the log equal to the live store, and the engine's open writes off the log.
 mod areas;
 
+/// The settings aggregate (v2.5 L10) on this module's store: a removal tombstones the
+/// removed project's settings events, and an owner settings save logs at its revision.
+mod settings;
+
 /// Each area the removal's projection clears, with the rows [`seed`] gives one project
 /// there: three agents (stopped, failed, working), each with a pane, own instructions and
 /// sight of the hidden folder, and one row in every other area.
