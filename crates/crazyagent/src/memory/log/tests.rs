@@ -471,3 +471,23 @@ fn a_forgotten_row_releases_only_its_own_hold_on_a_text_a_global_copy_shares() {
     assert_eq!(kept, 0, "no row holds the text, so it is gone");
     replays_to_live(&mut db);
 }
+
+/// #403 F1: a store from v2.2.0 has `state` and 13 of the 14 memory tables, with no
+/// `memory_agent_scope`, which the open makes only after the steps ran. The first run makes
+/// the missing table and still puts the memory rows written before the log on it.
+#[test]
+fn the_first_run_covers_a_store_from_before_the_agent_scope_table() {
+    let mut db = unhosted(false);
+    db.execute_batch(
+        "DROP TABLE memory_agent_scope;
+        INSERT INTO memory_library(id,project,origin,text)
+        VALUES ('note-1','p1','{\"kind\":\"written\"}','Owner note');",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(first_run(&tx, Opening::for_test(1)).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(moved(&db).0, 1, "one run at one revision");
+    initialize(&db).unwrap();
+    replays_to_live(&mut db);
+}
