@@ -9,7 +9,43 @@ import { keepTerminalsOf, TerminalPanel, useKeptTerminalProjects } from "../../s
 
 let root = null;
 let probe = null;
+let gpu = false;
 const engine = { callbacks: new Map(), channel: null, next: 0, typed: [], attaches: 0, detaches: 0, nodes: [], graphs: [], resizes: [] };
+const canvasContext = HTMLCanvasElement.prototype.getContext;
+
+/** Lets the page's canvases hand out a WebGL2 context, or answers null for one as a machine
+ * without WebGL2 does. Off by default, so every row that reads the DOM rows' text runs on the
+ * DOM renderer; a renderer row turns it on before `open`. Input: whether WebGL2 is offered. */
+export function offerGpu(offered) {
+  gpu = offered;
+}
+
+HTMLCanvasElement.prototype.getContext = function getContext(kind, ...rest) {
+  if (kind === "webgl2" && !gpu) return null;
+  return canvasContext.call(this, kind, ...rest);
+};
+
+/** Which renderer draws the shown terminal: "webgl" while its screen holds the WebGL canvas and
+ * no DOM rows, "dom" while it holds DOM rows, "none" before it opens. Output: the name. */
+export function renderer() {
+  const screen = document.querySelector(".tg-terminal-screen .xterm-screen");
+  if (!screen) return "none";
+  if (screen.querySelector(".xterm-rows")) return "dom";
+  return screen.querySelector("canvas") ? "webgl" : "none";
+}
+
+/** Loses the shown terminal's WebGL context, as a GPU reset or a sleeping Mac does. Output:
+ * whether a context was there to lose. */
+export function loseGpu() {
+  for (const canvas of document.querySelectorAll(".tg-terminal-screen .xterm-screen canvas")) {
+    const context = canvasContext.call(canvas, "webgl2");
+    const lose = context instanceof WebGL2RenderingContext ? context.getExtension("WEBGL_lose_context") : null;
+    if (!lose) continue;
+    lose.loseContext();
+    return true;
+  }
+  return false;
+}
 
 /** Sends one message down the attached terminal's channel as the bridge does, in order.
  * Input: the message, a control frame or raw output bytes. */

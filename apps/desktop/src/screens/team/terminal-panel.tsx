@@ -10,7 +10,7 @@ import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../
 import { displayText } from "../conversation";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
 import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
-import { connectingLine, copyKey, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
@@ -560,9 +560,10 @@ export class KeptView implements Held {
   }
 
   private async open(): Promise<void> {
-    const [{ Terminal }, { FitAddon }] = await Promise.all([
+    const [{ Terminal }, { FitAddon }, webgl] = await Promise.all([
       import("@xterm/xterm"),
       import("@xterm/addon-fit"),
+      import("@xterm/addon-webgl").catch(() => null),
       import("@xterm/xterm/css/xterm.css"),
     ]);
     if (this.dropped) return;
@@ -571,6 +572,7 @@ export class KeptView implements Held {
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(this.host);
+    if (webgl) drawOnGpu(terminal, webgl.WebglAddon);
     this.terminal = terminal;
     this.fit = fit;
     const scrolled = followScroll(terminal, (behind) => this.set({ behind }));
