@@ -291,8 +291,9 @@ async fn handle<'e>(
 
 /// Whether the handshake still names the admitted owner, read behind the owner barrier.
 /// Inputs: the engine, the authority, the packet and the admission. Output: the barrier,
-/// held by the caller for as long as what it does must not overlap a revocation, or
-/// `owner_grant_stale_or_revoked`.
+/// held by the caller for as long as what it does must not overlap a revocation, the
+/// handshake's own refusal (`owner_authentication_failed` once the owner is revoked), or
+/// `owner_grant_stale_or_revoked` for a handshake that now names another admission.
 async fn admitted<'e>(
     engine: &'e Arc<Engine>,
     authority: &Arc<Authority>,
