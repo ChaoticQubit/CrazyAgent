@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
@@ -527,15 +527,35 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
     }
 }
 
-/// The tables the landing log rebuilds, emptied before its replay.
-const TABLES: [&str; 6] = [
-    "landing_agent_branches",
-    "landing_bases",
-    "landing_owner_edits",
-    "landing_change_set_numbers",
-    "verification_current",
-    "github_publish_prompt",
+/// The tables on the landing log, each with its columns in schema order and, for a table its
+/// module makes on first use, its schema: emptied before a replay and carried whole by a
+/// snapshot run.
+const TABLES: [(&str, &str, Option<&str>); 6] = [
+    ("landing_agent_branches", "worktree,repository,branch", None),
+    ("landing_bases", "worktree,base", None),
+    (
+        "landing_owner_edits",
+        "worktree,path,at_ms,change_set",
+        Some(crate::landing::owner_edit::SCHEMA),
+    ),
+    (
+        "landing_change_set_numbers",
+        "change_set,project,number",
+        None,
+    ),
+    ("verification_current", "project,baseline", None),
+    (
+        "github_publish_prompt",
+        "project,snoozed_until,never",
+        Some(crate::github::PROMPT_SCHEMA),
+    ),
 ];
+
+/// The most rows of one table a snapshot run carries, as L6's bound.
+const SNAPSHOT_ROWS_MAX: usize = 65_536;
+
+/// Room in one chunk body for its envelope (aggregate, table and seq), as L6's.
+const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 
 /// The first snapshot run of the landing tables, for the schema step that puts landing on
 /// the log (step 14): rows written before the log reach replay through it, through the
@@ -547,50 +567,257 @@ pub(crate) fn first_run(
     tx: &Transaction<'_>,
     opening: crate::storage::opening::Opening,
 ) -> Result<bool, EngineError> {
-    let _ = (tx, opening);
-    Ok(false)
+    if !has(tx, "state")? {
+        return Ok(false);
+    }
+    let mut rows: i64 = 0;
+    for (table, _, _) in TABLES {
+        if has(tx, table)? {
+            let count: i64 = tx
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .map_err(|_| failure("changes_unavailable"))?;
+            rows = rows.saturating_add(count);
+        }
+    }
+    if rows == 0 {
+        return Ok(false);
+    }
+    let at_ms = opening.at_ms();
+    let mut appender = Appender::opening(tx, opening)?;
+    let done = snapshot(&mut appender, at_ms)?;
+    assert!(done > 0, "a run closes at a seq");
+    assert!(rows > 0);
+    Ok(true)
+}
+
+/// Appends a snapshot run of every landing table as it stands, each in chunks that fit one
+/// event body and at least one chunk each (a table the store lacks is one empty chunk), so
+/// replay of a run always clears and fills them all. Inputs: the appender and the writer's
+/// clock. Output: the seq of the run's closing event, or `landing_log_snapshot_rows`,
+/// `landing_log_snapshot_cell`, `landing_log_row_too_large` or the log's refusal.
+pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let mut chunks = Vec::new();
+    for (table, columns, _) in TABLES {
+        let rows = appender.project(|tx| table_rows(tx, table, columns))?;
+        chunks.extend(pack(table, rows)?);
+    }
+    assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
+    assert_eq!(chunks[0].table, TABLES[0].0);
+    appender.snapshot(Aggregate::Landing, at_ms, chunks)
+}
+
+/// Every row of one landing table in column order, each as a JSON array of its cells; a
+/// table the store lacks has none. Inputs: the connection, the table and its columns.
+/// Output: the rows, `landing_log_snapshot_rows` past [`SNAPSHOT_ROWS_MAX`], or
+/// `landing_log_snapshot_cell` for a cell a snapshot does not carry.
+fn table_rows(
+    db: &Connection,
+    table: &str,
+    columns: &str,
+) -> Result<Vec<serde_json::Value>, EngineError> {
+    if !has(db, table)? {
+        return Ok(Vec::new());
+    }
+    let width = columns.split(',').count();
+    let unavailable = |_| failure("changes_unavailable");
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {columns} FROM {table} ORDER BY {columns} LIMIT ?1"
+        ))
+        .map_err(unavailable)?;
+    let limit =
+        i64::try_from(SNAPSHOT_ROWS_MAX + 1).map_err(|_| failure("landing_log_snapshot_rows"))?;
+    let stored = statement
+        .query_map([limit], |row| {
+            (0..width)
+                .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(unavailable)?;
+    if stored.len() > SNAPSHOT_ROWS_MAX {
+        return Err(failure("landing_log_snapshot_rows"));
+    }
+    let rows = stored
+        .into_iter()
+        .map(|row| {
+            let cells = row.into_iter().map(cell).collect::<Result<Vec<_>, _>>()?;
+            Ok(serde_json::Value::Array(cells))
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    assert!((2..=4).contains(&width));
+    assert!(
+        rows.iter()
+            .all(|row| row.as_array().is_some_and(|row| row.len() == width))
+    );
+    Ok(rows)
+}
+
+/// One stored cell as a snapshot carries it. Input: the cell. Output: its text, integer or
+/// null, or `landing_log_snapshot_cell` for a real or a blob, which no landing column holds.
+fn cell(value: rusqlite::types::Value) -> Result<serde_json::Value, EngineError> {
+    use rusqlite::types::Value as Stored;
+    match value {
+        Stored::Null => Ok(serde_json::Value::Null),
+        Stored::Integer(number) => Ok(serde_json::Value::from(number)),
+        Stored::Text(text) => Ok(serde_json::Value::String(text)),
+        Stored::Real(_) | Stored::Blob(_) => Err(failure("landing_log_snapshot_cell")),
+    }
+}
+
+/// Splits one table's rows, in order, into chunks whose rows fit one event body with room
+/// for the chunk's envelope; a table with no rows is one empty chunk. Inputs: the table and
+/// its rows. Output: the chunks, or `landing_log_row_too_large`.
+fn pack(table: &str, rows: Vec<serde_json::Value>) -> Result<Vec<Chunk>, EngineError> {
+    assert!(rows.len() <= SNAPSHOT_ROWS_MAX);
+    let budget = BODY_BYTES_MAX - CHUNK_ENVELOPE_BYTES;
+    let total = rows.len();
+    let empty = || Chunk {
+        table: table.into(),
+        rows: Vec::new(),
+    };
+    let mut chunks = vec![empty()];
+    let mut used = 0;
+    for row in rows {
+        let bytes = serde_json::to_vec(&row)
+            .map_err(|_| failure("landing_log_row_too_large"))?
+            .len()
+            + 1;
+        if bytes > budget {
+            return Err(failure("landing_log_row_too_large"));
+        }
+        if used + bytes > budget {
+            chunks.push(empty());
+            used = 0;
+        }
+        used += bytes;
+        if let Some(chunk) = chunks.last_mut() {
+            chunk.rows.push(row);
+        }
+    }
+    assert_eq!(
+        chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>(),
+        total
+    );
+    assert!(chunks.iter().all(|chunk| chunk.table == table));
+    Ok(chunks)
+}
+
+/// Inserts one snapshot chunk's rows into its landing table, making first a table its module
+/// makes on first use. Inputs: the connection and the chunk. Output: Ok, or
+/// `landing_log_chunk_invalid` for an unknown table, a row that is not that table's cells,
+/// or a row the table refuses.
+fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
+    let invalid = || failure("landing_log_chunk_invalid");
+    let (table, columns, schema) = TABLES
+        .into_iter()
+        .find(|(table, _, _)| *table == chunk.table)
+        .ok_or_else(invalid)?;
+    if chunk.rows.len() > SNAPSHOT_ROWS_MAX {
+        return Err(invalid());
+    }
+    if chunk.rows.is_empty() {
+        return Ok(());
+    }
+    if let Some(schema) = schema {
+        db.execute_batch(schema).map_err(|_| invalid())?;
+    }
+    let width = columns.split(',').count();
+    let marks = (1..=width)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>();
+    let mut statement = db
+        .prepare(&format!(
+            "INSERT INTO {table} ({columns}) VALUES ({})",
+            marks.join(",")
+        ))
+        .map_err(|_| invalid())?;
+    for row in &chunk.rows {
+        let values = row
+            .as_array()
+            .filter(|values| values.len() == width)
+            .ok_or_else(invalid)?;
+        let cells = values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Null => Some(rusqlite::types::Value::Null),
+                serde_json::Value::Number(number) => {
+                    number.as_i64().map(rusqlite::types::Value::Integer)
+                }
+                serde_json::Value::String(text) => Some(rusqlite::types::Value::Text(text.clone())),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(invalid)?;
+        statement
+            .execute(rusqlite::params_from_iter(cells))
+            .map_err(|_| invalid())?;
+    }
+    assert!((2..=4).contains(&width));
+    assert!(chunk.rows.len() <= SNAPSHOT_ROWS_MAX);
+    Ok(())
 }
 
 /// The most project removals a rebuild reads, as L6's bound.
 const REMOVALS_MAX: usize = 65_536;
 
 /// Rebuilds the tables on the landing log from it: empties each one the store has, then
-/// replays every landing event; a logged project Delete forgets its project's publish prompt
-/// answer at its place in the log, as its projection does (L6 Q10). Input: the store.
-/// Output: the last landing seq read, or the refusal.
+/// replays every landing event. A snapshot run holds every row of them all, so its first
+/// chunk empties them again; a chunk opens a run unless it follows another chunk at the
+/// previous seq, as L6's rebuild reads runs. A logged project Delete forgets its project's
+/// publish prompt answer at its place in the log, as its projection does (L6 Q10). Input:
+/// the store. Output: the last landing seq read, or the refusal.
 pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
     let mut deletes = deletes(db)?.into_iter().peekable();
     clear(db)?;
+    let mut chunk_seq = 0;
     let last = replay::replay(db, Aggregate::Landing, 0, |event| {
         while let Some((_, project)) = deletes.next_if(|(seq, _)| *seq < event.seq) {
             crate::github::forget_prompt(db, &project)?;
         }
-        apply(db, &Change::parse(event)?)
+        if event.kind != SNAPSHOT_CHUNK {
+            return apply(db, &Change::parse(event)?);
+        }
+        if chunk_seq == 0 || event.seq != chunk_seq + 1 {
+            clear(db)?;
+        }
+        chunk_seq = event.seq;
+        restore(db, &replay::chunk(event)?)
     })?;
     for (_, project) in deletes {
         crate::github::forget_prompt(db, &project)?;
     }
+    assert!(
+        last >= chunk_seq,
+        "replay reads past every chunk it applied"
+    );
     Ok(last)
 }
 
 /// Empties each table on the landing log the store has. Input: the store. Output: Ok, or
 /// `changes_unavailable`.
 fn clear(db: &Connection) -> Result<(), EngineError> {
-    let unavailable = |_| failure("changes_unavailable");
-    for table in TABLES {
-        let kept: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
-                [table],
-                |row| row.get(0),
-            )
-            .map_err(unavailable)?;
-        if kept {
+    for (table, _, _) in TABLES {
+        if has(db, table)? {
             db.execute(&format!("DELETE FROM {table}"), [])
-                .map_err(unavailable)?;
+                .map_err(|_| failure("changes_unavailable"))?;
         }
     }
     Ok(())
+}
+
+/// Whether the store has a table of that name. Inputs: the store and the name. Output: the
+/// answer, or `changes_unavailable`.
+fn has(db: &Connection, table: &str) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [table],
+        |row| row.get(0),
+    )
+    .map_err(|_| failure("changes_unavailable"))
 }
 
 /// Each logged project Delete, a removal that forgets the project's notes, as its seq and

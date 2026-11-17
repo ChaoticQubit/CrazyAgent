@@ -535,10 +535,23 @@ const WRITERS: [(&str, &[&str]); 6] = [
 /// The writers outside this module that take a snapshot, each with the only tables its runs
 /// may carry. A run copies those tables' stored columns as they stand, rows the typed events
 /// wrote; the run does not check them again.
-const SNAPSHOTS: [(&str, &[&str]); 1] = [(
-    "worktrees/log.rs",
-    &["repository_admissions", "worktree_leases"],
-)];
+const SNAPSHOTS: [(&str, &[&str]); 2] = [
+    (
+        "worktrees/log.rs",
+        &["repository_admissions", "worktree_leases"],
+    ),
+    (
+        "landing_log.rs",
+        &[
+            "landing_agent_branches",
+            "landing_bases",
+            "landing_owner_edits",
+            "landing_change_set_numbers",
+            "verification_current",
+            "github_publish_prompt",
+        ],
+    ),
+];
 
 /// A lease record as the worktrees events carry it, of task t1 in /repo under the engine's
 /// branch. Output: the record as JSON.
@@ -573,17 +586,7 @@ fn worktrees_runs_carry_only_their_named_tables() {
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     crate::worktrees::log::snapshot(&mut log, 9).unwrap();
     drop(log);
-    let mut statement = tx
-        .prepare("SELECT body FROM state_log WHERE kind=?1")
-        .unwrap();
-    let tables: Vec<String> = statement
-        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
-        .unwrap()
-        .map(|body| {
-            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
-            chunk["table"].as_str().unwrap().to_owned()
-        })
-        .collect();
+    let tables = chunk_tables(&tx);
     assert_eq!(tables.len(), named.len(), "one chunk per empty table");
     assert!(
         tables.iter().all(|table| named.contains(&table.as_str())),
@@ -721,6 +724,36 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
         );
     }
     worktrees_runs_carry_only_their_named_tables();
+    landing_runs_carry_only_their_named_tables();
+}
+
+/// Checks that a landing run carries only the tables [`SNAPSHOTS`] names for its writer, in
+/// that order, one empty chunk each in a store without them. Output: none.
+fn landing_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[1];
+    assert_eq!(writer, "landing_log.rs");
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::landing_log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    assert_eq!(chunk_tables(&tx), named, "one chunk per empty table");
+}
+
+/// The table of each snapshot chunk in a transaction's log, in seq order. Input: the
+/// transaction. Output: the tables.
+fn chunk_tables(tx: &rusqlite::Transaction<'_>) -> Vec<String> {
+    let mut statement = tx
+        .prepare("SELECT body FROM state_log WHERE kind=?1 ORDER BY seq")
+        .unwrap();
+    statement
+        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| {
+            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            chunk["table"].as_str().unwrap().to_owned()
+        })
+        .collect()
 }
 
 /// Checks that a snapshot's closing body holds only its aggregate, its chunk count and its
