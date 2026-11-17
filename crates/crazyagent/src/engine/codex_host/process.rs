@@ -94,7 +94,7 @@ struct PendingInput {
 }
 
 impl CodexHostProcess {
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(super) async fn spawn(
         command: Command,
         budget: &ResourceBudget,
