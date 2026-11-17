@@ -6,6 +6,7 @@ use crate::plugins::{
 };
 use crate::protocol::encode_frame;
 use crate::storage::plugins::{Command, ResultValue};
+use check_folders::{CheckOf, removed_server_checks};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -993,29 +994,6 @@ fn check_profile(checks: &Path, id: &str) -> PathBuf {
     checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
 }
 
-/// Clears a removed server's check folder, with whatever its checks wrote there while they
-/// held the server's secrets, and its check profile: the folder moves aside at once and is
-/// deleted on a blocking thread of its own that nothing waits for, so no check home size
-/// holds up the answer, and the start sweep deletes a moved folder a crash left. Inputs:
-/// the engine's check folder and the server id. A failure other than a missing entry is logged.
-fn remove_check_folder(checks: &Path, id: &str) {
-    match std::fs::remove_file(check_profile(checks, id)) {
-        Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
-            eprintln!("plugin_check_folder_not_removed cause={problem}");
-        }
-        _ => {}
-    }
-    match crate::storage::plugins::move_check_folder_aside(checks, id) {
-        Ok(Some(aside)) => drop(tokio::task::spawn_blocking(move || {
-            if let Err(problem) = std::fs::remove_dir_all(aside) {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
-        })),
-        Ok(None) => {}
-        Err(problem) => eprintln!("plugin_check_folder_not_removed cause={}", problem.0),
-    }
-}
-
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -1248,7 +1226,7 @@ async fn handle(
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
                                 crate::storage::plugins::remove_secrets(&root, references);
-                            remove_check_folder(&checks, &server);
+                            removed_server_checks(&checks, &server);
                             secrets
                         }
                         _ => Ok(()),
@@ -1436,6 +1414,9 @@ async fn start_check(
     authority: &Authority,
     id: String,
 ) -> Result<Reply, EngineError> {
+    let slot = CheckSlot::take()?;
+    let root = engine_root(authority)?;
+    let counted = CheckOf::take(&id, root.join(CHECK_FOLDER), &slot);
     let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
@@ -1445,8 +1426,6 @@ async fn start_check(
     let ServerSpec::Stdio { command, args } = *spec else {
         return Err(failure("server_check_command_only"));
     };
-    let slot = CheckSlot::take()?;
-    let root = engine_root(authority)?;
     let mut values: Vec<(String, Vec<u8>)> = Vec::with_capacity(secrets.len());
     for secret in &secrets {
         match crate::storage::plugins::read_secret(&root, &secret.reference) {
@@ -1480,6 +1459,7 @@ async fn start_check(
             outcome
         })
         .await;
+        drop(counted);
         let outcome = match outcome {
             Ok(Ok(tools)) => Ok(tools),
             Ok(Err(problem)) => Err(problem),
@@ -1691,5 +1671,6 @@ fn public_code(error: EngineError) -> String {
     }
 }
 
+mod check_folders;
 #[cfg(test)]
 mod tests;

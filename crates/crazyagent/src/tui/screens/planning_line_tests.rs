@@ -1,15 +1,13 @@
 use super::new_project_view::Look;
 use super::planning_line::{
-    PLAN_NOW, Planning, RETRY_UNAVAILABLE, STATUS_CHECKING, STATUS_OFF, StatusLine, planning,
-    planning_key, planning_value, refreshes_status, status_counts,
+    PLAN_NOW, Planning, STATUS_CHECKING, STATUS_OFF, StatusLine, planning, planning_key,
+    planning_value, refreshes_status, status_counts,
 };
 use crate::project_setup::{ResearchJob, ResearchKind, ResearchStatus, SetupAction};
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{ItemState, ItemStatus, Refresh, RoadmapItem, RoadmapStatus};
 use crate::tui::client::roadmap::{RoadmapEvent, RoadmapQuery, RoadmapReply};
 use crossterm::event::KeyCode;
-
-const MAC: &str = "macos";
 
 fn job(id: i64, kind: ResearchKind, status: ResearchStatus, error: Option<&str>) -> ResearchJob {
     ResearchJob {
@@ -31,6 +29,33 @@ fn job(id: i64, kind: ResearchKind, status: ResearchStatus, error: Option<&str>)
         started_ms: Some(1_793_000_001_000),
         heartbeat_ms: None,
         finished_ms: Some(1_793_000_002_000),
+        retryable: matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled),
+    }
+}
+
+/// A failed or stopped planning job the engine cannot run again, as on a system where it runs
+/// no research, shows no Retry; `r` still asks, so the engine's refusal is what the owner sees.
+#[test]
+fn a_planning_job_the_engine_cannot_run_again_shows_no_retry() {
+    let project = ProjectId::new("notes-cli").unwrap();
+    for (status, shown) in [
+        (
+            ResearchStatus::Failed,
+            "! Failed: planning stopped with an error",
+        ),
+        (ResearchStatus::Cancelled, "Stopped"),
+    ] {
+        let mut stuck = job(5, ResearchKind::RoadmapPlanning, status, None);
+        stuck.retryable = false;
+        let state = planning(&[stuck]);
+        assert_eq!(planning_value(&state, &Look::plain()).text(), shown);
+        assert_eq!(
+            planning_key(&state, &project, KeyCode::Char('r')),
+            Some(Ok(SetupAction::RetryResearch {
+                project_id: project.clone(),
+                job: 5,
+            }))
+        );
     }
 }
 
@@ -54,25 +79,23 @@ fn planning_line_shows_failed_with_retry() {
             job: 3,
             cancelled: false,
             reason: Some("the harness stopped before it wrote the roadmap".into()),
+            retryable: true,
         },
         "the newest planning job decides"
     );
-    let line = planning_value(&state, &Look::plain(), MAC).text();
+    let line = planning_value(&state, &Look::plain()).text();
     assert_eq!(
         line,
         "! Failed: the harness stopped before it wrote the roadmap   r Retry"
     );
     assert_eq!(
-        planning_key(&state, &project, KeyCode::Char('r'), MAC),
+        planning_key(&state, &project, KeyCode::Char('r')),
         Some(Ok(SetupAction::RetryResearch {
             project_id: project.clone(),
             job: 3,
         }))
     );
-    assert_eq!(
-        planning_key(&state, &project, KeyCode::Char('p'), MAC),
-        None
-    );
+    assert_eq!(planning_key(&state, &project, KeyCode::Char('p')), None);
 
     let stopped = planning(&[job(
         4,
@@ -81,7 +104,7 @@ fn planning_line_shows_failed_with_retry() {
         None,
     )]);
     assert_eq!(
-        planning_value(&stopped, &Look::plain(), MAC).text(),
+        planning_value(&stopped, &Look::plain()).text(),
         "Stopped   r Retry"
     );
 
@@ -91,20 +114,14 @@ fn planning_line_shows_failed_with_retry() {
         ResearchStatus::Running,
         None,
     )]);
+    assert_eq!(planning_value(&running, &Look::plain()).text(), "Planning");
     assert_eq!(
-        planning_value(&running, &Look::plain(), MAC).text(),
-        "Planning"
-    );
-    assert_eq!(
-        planning_key(&running, &project, KeyCode::Char('p'), MAC),
+        planning_key(&running, &project, KeyCode::Char('p')),
         Some(Err(
             "A roadmap is already being planned for this project. Wait for it to finish."
         ))
     );
-    assert_eq!(
-        planning_key(&running, &project, KeyCode::Char('r'), MAC),
-        None
-    );
+    assert_eq!(planning_key(&running, &project, KeyCode::Char('r')), None);
     assert!(refreshes_status(&running, KeyCode::Char('r')));
     assert!(!refreshes_status(&state, KeyCode::Char('r')));
     assert!(!refreshes_status(&running, KeyCode::Char('p')));
@@ -129,7 +146,7 @@ fn planning_line_shows_failed_with_retry() {
         "the engine holds planning back while research runs"
     );
     assert_eq!(
-        planning_value(&waiting, &Look::plain(), MAC).text(),
+        planning_value(&waiting, &Look::plain()).text(),
         "Waiting for research"
     );
 
@@ -141,16 +158,16 @@ fn planning_line_shows_failed_with_retry() {
     )]);
     assert_eq!(idle, Planning::Idle);
     assert_eq!(
-        planning_value(&idle, &Look::plain(), MAC).text(),
+        planning_value(&idle, &Look::plain()).text(),
         format!("Not planned   p {PLAN_NOW}")
     );
     assert_eq!(
-        planning_key(&idle, &project, KeyCode::Char('p'), MAC),
+        planning_key(&idle, &project, KeyCode::Char('p')),
         Some(Ok(SetupAction::PlanRoadmap {
             project_id: project.clone(),
         }))
     );
-    assert_eq!(planning_key(&idle, &project, KeyCode::Char('x'), MAC), None);
+    assert_eq!(planning_key(&idle, &project, KeyCode::Char('x')), None);
 }
 
 #[test]
@@ -181,7 +198,6 @@ fn planning_asks_before_it_can_replace_the_roadmap() {
     };
 
     let mut screen = ProjectScreen::new(project.clone(), "Notes".into(), None);
-    screen.os = MAC;
     screen.jobs = Some(vec![]);
     screen.context = Some(context(vec![brief.clone()]));
     assert_eq!(
@@ -450,7 +466,7 @@ fn a_queued_planning_job_shows_why_it_waits() {
         ResearchStatus::Queued,
         Some(REASON),
     )]);
-    let shown = planning_value(&waiting, &Look::plain(), MAC).text();
+    let shown = planning_value(&waiting, &Look::plain()).text();
     assert!(
         shown.starts_with("Planning") && shown.contains(REASON),
         "{shown}"
@@ -463,7 +479,7 @@ fn a_queued_planning_job_shows_why_it_waits() {
             blank,
         )]);
         assert_eq!(
-            planning_value(&queued, &Look::plain(), MAC).text(),
+            planning_value(&queued, &Look::plain()).text(),
             "Planning, waiting to start"
         );
     }
@@ -484,7 +500,7 @@ fn a_rate_limited_planning_job_reads_rate_limited_until_its_local_end() {
     let (until, _) = parked.rate_limited().unwrap();
     let local = super::project_time::clock(until, super::project_time::local_offset(until));
     assert_eq!(
-        planning_value(&planning(&[parked]), &Look::plain(), MAC).text(),
+        planning_value(&planning(&[parked]), &Look::plain()).text(),
         format!("! Rate limited until {local}  Usage limit reached")
     );
     let pool = planning(&[job(
@@ -494,39 +510,7 @@ fn a_rate_limited_planning_job_reads_rate_limited_until_its_local_end() {
         None,
     )]);
     assert_eq!(
-        planning_value(&pool, &Look::plain(), MAC).text(),
+        planning_value(&pool, &Look::plain()).text(),
         "Planning, waiting for a pool"
     );
-}
-
-#[test]
-fn a_failed_or_stopped_roadmap_plan_offers_no_retry_on_windows() {
-    let project = ProjectId::new("notes-cli").unwrap();
-    for cancelled in [false, true] {
-        let status = if cancelled {
-            ResearchStatus::Cancelled
-        } else {
-            ResearchStatus::Failed
-        };
-        let state = planning(&[job(4, ResearchKind::RoadmapPlanning, status, None)]);
-        assert!(matches!(state, Planning::Failed { .. }));
-        let shown = planning_value(&state, &Look::plain(), "windows").text();
-        assert!(!shown.contains("Retry"), "{shown}");
-        assert!(
-            planning_value(&state, &Look::plain(), MAC)
-                .text()
-                .ends_with("   r Retry")
-        );
-        assert_eq!(
-            planning_key(&state, &project, KeyCode::Char('r'), "windows"),
-            Some(Err(RETRY_UNAVAILABLE))
-        );
-        assert_eq!(
-            planning_key(&state, &project, KeyCode::Char('r'), MAC),
-            Some(Ok(SetupAction::RetryResearch {
-                project_id: project.clone(),
-                job: 4,
-            }))
-        );
-    }
 }

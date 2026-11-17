@@ -107,9 +107,6 @@ fn a_relayed_request_frees_no_copy_of_the_key() {
     assert_eq!(freed, 0, "freed blocks still holding the key");
 }
 
-/// SECRET-FORMAT-COPIES: `credentials::sized` writes each piece as the formatting it
-/// replaced did (the `replace` escaping, the form serializer, `{:02x}`), into a buffer of
-/// exactly that size, and refuses a control byte only in an escaped piece.
 /// SECRET-FORMAT-COPIES on Windows: curl cannot inherit the pipe that carries a request
 /// body there, so the relay refuses to start and never holds or relays a key.
 #[cfg(windows)]
@@ -123,6 +120,9 @@ fn a_relay_refuses_to_start_where_curl_cannot_take_the_body_pipe() {
     );
 }
 
+/// SECRET-FORMAT-COPIES: `credentials::sized` writes each piece as the formatting it
+/// replaced did (the `replace` escaping, the form serializer, `{:02x}`), into a buffer of
+/// exactly that size, and refuses a control byte only in an escaped piece.
 #[test]
 fn sized_writes_each_piece_as_the_old_formatting_did() {
     let text = "a b&c=d%e\"f\\g\u{e9}*-._~";

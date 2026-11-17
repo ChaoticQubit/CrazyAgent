@@ -63,15 +63,17 @@ pub fn run(request: &Request) -> Result<u32, BoundaryError> {
     launch::start(request, &container, &capabilities, &job)
 }
 
-/// Takes back every access entry the boundary recorded for the profile's container and removes
-/// the record, as when the agent's profile is removed; a later launch of that container grants
-/// afresh. Input: the profile file. Output: Ok, or why it stopped, with the record kept so a
-/// retry withdraws what is left.
+/// Takes back every access entry the boundary recorded for the profile's container, removes
+/// the record, then deletes the container's AppContainer profile with the folder Windows gave
+/// it, as when the agent's profile is removed; a later launch of that container creates it and
+/// grants afresh. Input: the profile file. Output: Ok, or why it stopped, with the record and
+/// the container kept so a retry withdraws what is left.
 pub fn release(profile: &Path) -> Result<(), BoundaryError> {
     let profile = BoundaryProfile::load(profile).map_err(BoundaryError::Profile)?;
     plan(&profile, |_| true).map_err(BoundaryError::Refused)?;
     let container = container::sid(&profile.container)?;
-    record::Record::open(&profile.grants, &profile.container)?.release(&container)
+    record::Record::open(&profile.grants, &profile.container)?.release(&container)?;
+    container::delete(&profile.container)
 }
 
 /// Bytes Windows wrote, such as a SID or an access list, kept in 4-byte words so they stay
