@@ -445,11 +445,8 @@ fn the_server_form_checks_locally_and_hides_secret_values() {
 #[test]
 fn local_checks_and_short_lines() {
     assert_eq!(
-        command_spec("/opt/homebrew/bin/uvx mcp-server-postgres --read-only"),
-        Ok(stdio(
-            "/opt/homebrew/bin/uvx",
-            &["mcp-server-postgres", "--read-only"]
-        ))
+        command_spec(&format!("{UVX} mcp-server-postgres --read-only")),
+        Ok(stdio(UVX, &["mcp-server-postgres", "--read-only"]))
     );
     assert_eq!(command_spec("uvx mcp"), Err(COMMAND_HINT));
     assert_eq!(
@@ -766,13 +763,47 @@ fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
 fn a_command_line_reads_back_as_the_same_command() {
     let spec = stdio(UVX, &["mcp-server-postgres", "--name", "it's here", ""]);
     assert_eq!(command_spec(&spec.runs()), Ok(spec));
-    assert_eq!(
-        words(r"a 'b c'd e\ f"),
-        Ok(vec!["a".to_owned(), "b cd".to_owned(), "e f".to_owned()])
-    );
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            words(r"a 'b c'd e\ f"),
+            Ok(vec!["a".to_owned(), "b cd".to_owned(), "e f".to_owned()])
+        );
+        assert_eq!(words("a \\"), Err("A backslash ends the line."));
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            words(r"a 'b c'd e\ f"),
+            Ok(vec![
+                "a".to_owned(),
+                "b cd".to_owned(),
+                r"e\".to_owned(),
+                "f".to_owned()
+            ])
+        );
+        assert_eq!(words(r"a \"), Ok(vec!["a".to_owned(), r"\".to_owned()]));
+        assert_eq!(
+            words(r"it\'s C:\x"),
+            Ok(vec!["it's".to_owned(), r"C:\x".to_owned()])
+        );
+    }
     assert_eq!(words("a 'b"), Err("A quote is not closed."));
-    assert_eq!(words("a \\"), Err("A backslash ends the line."));
     assert_eq!(words("  "), Ok(Vec::new()));
+}
+
+/// On Windows a backslash separates folders, so the command hint's own example, typed
+/// without quotes, reads as that command; a backslash keeps the next character only before
+/// a quote, as a saved line writes one.
+#[cfg(windows)]
+#[test]
+fn the_windows_hint_example_typed_without_quotes_reads_as_written() {
+    let example = r"C:\Users\you\.local\bin\uvx.exe";
+    assert!(COMMAND_HINT.contains(example), "{COMMAND_HINT}");
+    assert_eq!(
+        command_spec(&format!("{example} mcp-x")),
+        Ok(stdio(example, &["mcp-x"]))
+    );
 }
 
 #[test]
@@ -940,7 +971,7 @@ fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
     }
     form.key(&Key::Tab, &mut ctx);
     form.key(&Key::Tab, &mut ctx);
-    for character in "/opt/homebrew/bin/uvx mcp-server-postgres".chars() {
+    for character in format!("{UVX} mcp-server-postgres").chars() {
         form.key(&Key::Char(character), &mut ctx);
     }
     form.key(&Key::Enter, &mut ctx);
