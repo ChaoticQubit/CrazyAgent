@@ -149,7 +149,6 @@
   "crates/crazyagent/src/tui/screens/settings/pools.rs": 1600,
   "crates/crazyagent/src/tui/screens/settings_accounts/tests.rs": 1857,
   "crates/crazyagent/src/tui/screens/settings_add_account.rs": 2259,
-  "crates/crazyagent/src/tui/screens/settings_harnesses.rs": 1747,
   "crates/crazyagent/src/tui/screens/settings_harnesses/tests.rs": 1856,
   "crates/crazyagent/src/tui/screens/settings_memory.rs": 1665,
   "crates/crazyagent/src/tui/screens/settings_plugins.rs": 2420,
