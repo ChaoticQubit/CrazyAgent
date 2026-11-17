@@ -3321,3 +3321,35 @@ fn the_project_instructions_file_is_read_only_to_the_ide_server() {
     }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
+
+/// V243-FARM2-PRODUCT-SMALL: no regex the IDE profile adds for its locks, the agents' IDE
+/// config, their git admin folders or the agent folders rule ends in an optional `(/.*)?$`
+/// tail after an escaped character, which libsandbox fails to compile again in lower case;
+/// each matches a path and everything below it as an `X$` and an `X/` regex instead.
+#[test]
+fn ide_denies_match_at_or_below_without_an_escaped_optional_tail() {
+    let root = Path::new("/private/tmp/.tmpA1b2C3/project");
+    let folder = root.join(".crazyagent").join("context");
+    let text = [
+        locks(&[(folder.as_path(), root)]),
+        agent_config(root),
+        agent_admin(root),
+        AgentFilesRule {
+            choice: IdeAgentFiles::ReadOnly,
+            older_agents: true,
+        }
+        .seatbelt(root),
+    ]
+    .concat();
+    let bodies: Vec<&str> = text
+        .split("#\"")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('"').map(|(body, _)| body))
+        .collect();
+    assert!(bodies.len() >= 6, "{text}");
+    let escaped: Vec<&&str> = bodies
+        .iter()
+        .filter(|body| body.ends_with("(/.*)?$") && body.contains('\\'))
+        .collect();
+    assert!(escaped.is_empty(), "{escaped:#?}");
+}

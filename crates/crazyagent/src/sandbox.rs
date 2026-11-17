@@ -5927,7 +5927,7 @@ mod profile_string_tests {
         let open: Vec<String> = (0..64)
             .map(|at| format!("{at:02}{}", "n".repeat(40)))
             .collect();
-        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open)
             .unwrap()
             .keep_project_secrets(&project, &[])
             .unwrap()
@@ -6013,5 +6013,43 @@ mod profile_string_tests {
                 "{regranted}"
             );
         }
+    }
+
+    /// V243-FARM2-PRODUCT-SMALL: under a temporary folder whose name holds a dot, as every
+    /// `.tmp` folder does, no regex of a confined agent's profile, a clone's store denies or
+    /// a home's config denies ends in an optional `(/.*)?$` tail after an escaped character,
+    /// the shape libsandbox fails to compile again in lower case (the closed-tops row).
+    #[test]
+    fn no_profile_regex_puts_an_optional_tail_after_an_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        assert!(base.to_str().unwrap().contains("/."), "{}", base.display());
+        let (home, tmp, project) = (base.join("home"), base.join("tmp"), base.join("project"));
+        for folder in [&home, &tmp, &project] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&["notes".to_string()])
+            .unwrap();
+        let text = [
+            sandbox.profile(),
+            clone_store_denies(&base.join("clone")),
+            agent_config_denies(&home),
+        ]
+        .concat();
+        let bodies: Vec<&str> = text
+            .split("#\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('"').map(|(body, _)| body))
+            .collect();
+        assert!(bodies.len() > 20, "{text}");
+        let escaped: Vec<&&str> = bodies
+            .iter()
+            .filter(|body| body.ends_with("(/.*)?$") && body.contains('\\'))
+            .collect();
+        assert!(escaped.is_empty(), "{escaped:#?}");
     }
 }
