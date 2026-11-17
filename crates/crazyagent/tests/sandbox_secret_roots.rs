@@ -183,6 +183,28 @@ fn the_native_profiles_folder_is_an_engine_secret_no_root_may_cover() {
     assert!(guarded(&case).secret_paths().contains(&profiles));
 }
 
+/// The folder of keys the owner entered for app plugins is an engine secret like the saved
+/// account keys: no read root or worktree may be it or sit inside it, in either order, and
+/// the guarded sandbox names it among its secret paths.
+#[test]
+fn the_plugin_keys_folder_is_an_engine_secret_no_root_may_cover() {
+    let case = case();
+    let keys = case.runtime.join("plugin-keys");
+    let inner = keys.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    for root in [&keys, &inner] {
+        walled(guarded(&case).allow_read(root));
+        walled(guarded(&case).allow_worktree(root));
+        walled(
+            sandbox(&case)
+                .allow_read(root)
+                .unwrap()
+                .guard_engine(&case.runtime),
+        );
+    }
+    assert!(guarded(&case).secret_paths().contains(&keys));
+}
+
 /// CONFIGURED-HOMES-GUARD: the folder of configured SDK homes, where each keyed account's
 /// home keeps its key, is an engine secret. No read root or worktree may be it, one home in
 /// it or the engine root around it, in either order; the plain guard refuses an agent home

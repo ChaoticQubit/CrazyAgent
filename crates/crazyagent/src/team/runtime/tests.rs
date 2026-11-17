@@ -24930,10 +24930,7 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
     let plan = Plan {
         native: true,
         tmux: Some(fixture.tmux.clone()),
-        pane: Some((
-            crate::terminal::own_server(host.clone(), false),
-            agent.clone(),
-        )),
+        pane: Some((crate::terminal::own_server(host.clone()), agent.clone())),
         ..hooks_plan("claude-code", false)
     };
     let home = fixture.base.join("lead-home");
@@ -29751,7 +29748,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         ],
         transcript: Transcript::ClaudeSession { file: session },
     };
-    let placed = host.spawn_own_server(&lead, &command, false).unwrap();
+    let placed = host.spawn_own_server(&lead, &command).unwrap();
     assert!(crate::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");

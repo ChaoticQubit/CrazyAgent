@@ -1,0 +1,20 @@
+schema: 1
+kind: embedding
+name: voyage
+title: Voyage AI embeddings
+version: 1.0.0
+description: voyage-3.5-lite through the Voyage AI API at 256 dimensions. Enter a Voyage API key.
+http:
+  url: https://api.voyageai.com/v1/embeddings
+  hosts: [api.voyageai.com]
+  secrets: [api_key]
+  headers:
+    Authorization: "Bearer {{secret.api_key}}"
+  body:
+    model: voyage-3.5-lite
+    input: "{{inputs}}"
+    input_type: "{{purpose}}"
+    output_dimension: 256
+  vectors: data.*.embedding
+  dimensions: 256
+  batch: 64

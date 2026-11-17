@@ -1,11 +1,5 @@
 .cs {
   --cs-line: 20px;
-  --cs-dim: rgba(238, 234, 226, 0.66);
-  --cs-rule: rgba(238, 234, 226, 0.14);
-  --cs-tag-bg: rgba(255, 106, 69, 0.16);
-  --cs-error: #ff8a73;
-  --cs-code: #f2c66d;
-  --cs-box: rgba(238, 234, 226, 0.06);
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -16,7 +10,7 @@
   background: var(--terminal-bg);
   color: var(--terminal-fg);
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--font-body);
   line-height: var(--cs-line);
 }
 
@@ -58,15 +52,15 @@ section.cs :focus-visible {
 .cs-engine,
 .cs-tool,
 .cs-delegate {
-  color: var(--cs-dim);
+  color: var(--terminal-muted);
 }
 
 .cs-error {
-  color: var(--cs-error);
+  color: var(--terminal-bright-red);
 }
 
 .cs-activity {
-  color: var(--cs-dim);
+  color: var(--terminal-muted);
 }
 
 .cs-activity summary {
@@ -93,7 +87,11 @@ section.cs :focus-visible {
 .cs .markdown :is(h2, h3, h4, h5, h6, h7) {
   font-size: inherit;
   line-height: inherit;
-  font-weight: 700;
+  font-weight: var(--weight-ui);
+}
+
+.cs .markdown h2 {
+  font-weight: var(--weight-title);
 }
 
 .cs .markdown ul {
@@ -115,15 +113,15 @@ section.cs :focus-visible {
   padding: 0;
   border-radius: 0;
   background: none;
-  color: var(--cs-code);
+  color: var(--terminal-bright-yellow);
   font: inherit;
 }
 
 .cs .markdown pre {
   padding: 8px 10px;
-  border: 1px solid var(--cs-rule);
+  border: 1px solid var(--terminal-border);
   border-radius: 4px;
-  background: var(--cs-box);
+  background: var(--terminal-surface);
 }
 
 .cs .markdown pre code {
@@ -136,12 +134,12 @@ section.cs :focus-visible {
 
 .cs .markdown blockquote {
   padding: 0 0 0 1ch;
-  border-left: 2px solid var(--cs-rule);
-  color: var(--cs-dim);
+  border-left: 2px solid var(--terminal-border);
+  color: var(--terminal-muted);
 }
 
 .cs .markdown hr {
-  border-top: 1px dashed var(--cs-rule);
+  border-top: 1px dashed var(--terminal-border);
 }
 
 .cs .markdown table {
@@ -149,25 +147,25 @@ section.cs :focus-visible {
 }
 
 .cs .markdown :is(th, td) {
-  border-color: var(--cs-rule);
+  border-color: var(--terminal-border);
   padding: 2px 8px;
 }
 
 .cs .markdown th {
   background: none;
-  font-weight: 700;
+  font-weight: var(--weight-ui);
 }
 
 .cs-tag {
   padding: 0 2px;
   border-radius: 3px;
-  background: var(--cs-tag-bg);
+  background: var(--terminal-selection);
   color: var(--terminal-cursor);
 }
 
 .cs-entry {
   position: relative;
-  border-top: 1px solid var(--cs-rule);
+  border-top: 1px solid var(--terminal-border);
 }
 
 .cs-input {
@@ -197,8 +195,8 @@ section.cs :focus-visible {
 .cs-status {
   margin: 0;
   padding: 0 14px 8px;
-  color: var(--cs-dim);
-  font-size: 12px;
+  color: var(--terminal-muted);
+  font-size: var(--font-secondary);
   overflow-wrap: anywhere;
 }
 
@@ -212,7 +210,7 @@ section.cs :focus-visible {
   margin: 0;
   padding: 4px;
   overflow: auto;
-  border: 1px solid var(--cs-rule);
+  border: 1px solid var(--terminal-border);
   border-radius: var(--radius-control);
   background: var(--terminal-bg);
   box-shadow: var(--elev-1);
@@ -230,7 +228,8 @@ section.cs :focus-visible {
 }
 
 .cs-option[aria-selected="true"] {
-  background: var(--cs-tag-bg);
+  background: var(--terminal-selection);
+  box-shadow: inset 0 0 0 1px var(--terminal-fg);
 }
 
 .cs-name {
@@ -241,7 +240,7 @@ section.cs :focus-visible {
 .cs-detail {
   min-width: 0;
   overflow: hidden;
-  color: var(--cs-dim);
+  color: var(--terminal-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -95,6 +95,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 11,
         run: widen_delete_file_names,
     },
+    Step {
+        to: 12,
+        run: app_plugin_store,
+    },
 ];
 
 /// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step
@@ -105,6 +109,14 @@ const _: () = assert!(
     crate::projects_home::RECORDED_NAME_BYTES_MAX == STEP_11_NAME_BYTES_MAX,
     "a wider delete record needs a migration step that widens projects_delete_files"
 );
+
+/// Step 12 (V250-H2): the app plugin store's trust records, switches and secret bindings.
+/// An upgrade from 2.4 makes the three empty tables under its pinned backup; a new database
+/// gets them when the engine opens it. Input: the open upgrade transaction. Output: Ok, or
+/// `app_plugins_unavailable`.
+fn app_plugin_store(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    crate::app_plugins::store::initialize(tx)
+}
 
 /// Step 11 (RV-DS241-152): a delete records Overview and roadmap status run names of up to
 /// [`STEP_11_NAME_BYTES_MAX`] bytes, so `projects_delete_files` must hold them. An existing

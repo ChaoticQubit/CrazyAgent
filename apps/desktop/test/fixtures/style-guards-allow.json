@@ -1,51 +1,37 @@
 {
   "color": {
-    "src/screens/metrics/metrics.css": 4,
-    "src/screens/project/console.css": 6,
-    "src/screens/project/projects.css": 7
+    "src/screens/metrics/metrics.css": 4
   },
   "accent": {
-    "src/screens/changes/changes.css": 2,
     "src/screens/demo/demo.css": 1,
     "src/screens/metrics/metrics.css": 3,
     "src/screens/process.css": 1,
-    "src/screens/project/projects.css": 27,
+    "src/screens/project/projects.css": 22,
     "src/screens/project/questions.css": 1,
     "src/screens/project/team-activity.css": 2,
-    "src/screens/settings/settings.css": 7,
     "src/screens/skill-tag.css": 4,
-    "src/screens/team/agent-messages.css": 2,
-    "src/screens/team/team-graph.css": 11,
-    "src/style.css": 18
+    "src/style.css": 12
   },
   "weight600": {
     "src/screens/demo/demo.css": 1,
-    "src/screens/intake/intake.css": 2,
+    "src/screens/intake/intake.css": 1,
     "src/screens/metrics/metrics.css": 4,
     "src/screens/process.css": 4,
-    "src/screens/project/projects.css": 14,
+    "src/screens/project/projects.css": 10,
     "src/screens/project/questions.css": 1,
     "src/screens/project/team-activity.css": 1,
-    "src/screens/settings/settings.css": 11,
-    "src/screens/team/agent-messages.css": 2,
-    "src/screens/team/team-graph.css": 7,
     "src/screens/terminals/terminals.css": 2,
-    "src/style.css": 12
+    "src/style.css": 6
   },
   "fontSize": {
-    "src/screens/changes/changes.css": 1,
     "src/screens/demo/demo.css": 2,
-    "src/screens/intake/intake.css": 2,
+    "src/screens/intake/intake.css": 1,
     "src/screens/metrics/metrics.css": 18,
     "src/screens/process.css": 4,
-    "src/screens/project/console.css": 2,
     "src/screens/project/overview-tabs.css": 1,
-    "src/screens/project/projects.css": 37,
+    "src/screens/project/projects.css": 28,
     "src/screens/project/team-activity.css": 5,
-    "src/screens/settings/settings.css": 27,
-    "src/screens/team/agent-messages.css": 4,
-    "src/screens/team/team-graph.css": 17,
     "src/screens/terminals/terminals.css": 5,
-    "src/style.css": 24
+    "src/style.css": 19
   }
 }

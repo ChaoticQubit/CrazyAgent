@@ -1060,9 +1060,8 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   assert.ok(found.includes(`${svg("list-checks", 15)}Set up this project</button>`), found);
   assert.ok(found.includes(`${svg("arrow-right", 15)}Continue setup</button>`), found);
   assert.ok(found.includes(`${svg("trash", 15)}Remove project</button>`), found);
-  assert.ok(found.includes(svg("search", 12)), "Found carries its status icon");
-  assert.ok(found.includes(svg("list-checks", 12)), "Setting up carries its status icon");
-  assert.ok(found.includes(svg("circle-x", 12)), "Folder missing carries its status icon");
+  for (const word of ["Found", "Setting up", "Folder missing"]) assert.match(found, new RegExp(`<span class="badge[^"]*">${word}</span>`), `${word} is a status word alone; the stylesheet draws its dot`);
+  assert.ok(!found.includes(svg("search", 12)) && !found.includes(svg("circle-x", 12)), "no status badge draws an icon");
 
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
   const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "here" });

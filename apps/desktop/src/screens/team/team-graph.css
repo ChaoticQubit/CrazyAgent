@@ -21,7 +21,7 @@
   flex: 1 1 0;
   min-width: 180px;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--font-body);
   overflow-wrap: anywhere;
 }
 
@@ -80,7 +80,7 @@
 .tg-zoom {
   min-width: 44px;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
@@ -129,12 +129,12 @@
 }
 
 .tg-link.live {
-  stroke: var(--accent);
+  stroke: var(--primary);
 }
 
 .tg-message {
   fill: none;
-  stroke: var(--accent);
+  stroke: var(--primary);
   stroke-width: 1.5;
   stroke-dasharray: 4 4;
 }
@@ -221,7 +221,7 @@
   gap: 4px;
   min-width: 0;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   line-height: 16px;
 }
 
@@ -243,8 +243,8 @@
   border: 1px solid var(--border-input);
   border-radius: var(--radius-pill);
   color: var(--text-2);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: var(--font-meta);
+  font-weight: var(--weight-ui);
   white-space: nowrap;
 }
 
@@ -264,8 +264,8 @@
 }
 
 .tg-card.open {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--surface-3);
 }
 
 .tg-card-title {
@@ -274,8 +274,8 @@
   gap: 6px;
   min-width: 0;
   padding-right: 28px;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--font-body);
+  font-weight: var(--weight-ui);
   line-height: 18px;
 }
 
@@ -285,7 +285,7 @@
 
 .tg-card-detail {
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   line-height: 16px;
 }
 
@@ -294,7 +294,7 @@
   flex-direction: column;
   min-width: 0;
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   line-height: 16px;
 }
 
@@ -307,7 +307,7 @@
 }
 
 .tg-dot.tone-info {
-  background: var(--accent);
+  background: var(--running);
 }
 
 .tg-dot.tone-ok {
@@ -337,12 +337,12 @@
   gap: 3px;
   height: 20px;
   padding: 0 6px;
-  border: 1px solid var(--accent);
+  border: 1px solid var(--primary);
   border-radius: var(--radius-pill);
   background: var(--surface);
-  color: var(--accent-text);
-  font-size: 11px;
-  font-weight: 600;
+  color: var(--text);
+  font-size: var(--font-meta);
+  font-weight: var(--weight-ui);
   font-variant-numeric: tabular-nums;
 }
 
@@ -368,7 +368,10 @@
   border-radius: var(--radius-pill);
   background: var(--surface);
   color: var(--text-3);
-  font: 500 11px/14px var(--mono);
+  font-family: var(--mono);
+  font-size: var(--font-meta);
+  line-height: 14px;
+  font-weight: var(--weight-ui);
   white-space: nowrap;
   box-shadow: var(--elev-1);
 }
@@ -386,10 +389,9 @@
 }
 
 .tg-edge-label.live {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-text);
-  font-weight: 600;
+  border-color: var(--primary);
+  background: var(--surface-3);
+  color: var(--text);
 }
 
 .tg-edge-label.live::before {
@@ -398,7 +400,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--primary);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -420,7 +422,9 @@
   gap: var(--space-2);
   margin: 0;
   color: var(--text-3);
-  font: 11px/16px var(--mono);
+  font-family: var(--mono);
+  font-size: var(--font-meta);
+  line-height: var(--leading-meta);
 }
 
 .tg-legend .tg-edge-label {
@@ -444,7 +448,7 @@
   background: var(--surface);
   box-shadow: var(--elev-2);
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   pointer-events: none;
 }
 
@@ -460,7 +464,7 @@
 
 .tg-tip .tg-tip-title {
   color: var(--text);
-  font-weight: 600;
+  font-weight: var(--weight-ui);
 }
 
 .tg-terminal {
@@ -490,7 +494,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-weight: 600;
+  font-weight: var(--weight-ui);
 }
 
 .tg-terminal-name {
@@ -519,7 +523,7 @@
   gap: 2px 10px;
   min-width: 0;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   line-height: 16px;
 }
 
@@ -547,7 +551,7 @@
   max-width: 100%;
   overflow: hidden;
   color: var(--text-2);
-  font-size: 12px;
+  font-size: var(--font-secondary);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -561,7 +565,7 @@
   padding: var(--space-2) var(--space-3);
   background: var(--surface);
   color: var(--text-2);
-  font-size: 13px;
+  font-size: var(--font-body);
 }
 
 .tg-terminal-screen {
@@ -607,7 +611,7 @@
   padding: var(--space-1) var(--space-3);
   background: var(--surface);
   color: var(--text-3);
-  font-size: 12px;
+  font-size: var(--font-secondary);
 }
 
 .tg-terminal-note .btn:first-of-type {
@@ -655,7 +659,7 @@
   background: var(--terminal-surface);
   color: var(--terminal-muted);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--font-meta);
 }
 
 .tg-terminal.embedded .tg-composer {
@@ -770,8 +774,8 @@
 
 .tg-instructions-title {
   margin: 0;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--font-body);
+  font-weight: var(--weight-ui);
 }
 
 .tg-instructions-note {
