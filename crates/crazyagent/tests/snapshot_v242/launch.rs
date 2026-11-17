@@ -18,6 +18,7 @@ use crazyagent::team::{AgentRole, TeamAction, TeamStatus};
 use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, installed};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -283,6 +284,7 @@ pub(super) fn without_target(text: &str, target: &str) -> String {
 pub(super) struct Team {
     pub(super) engine: Engine,
     pub(super) project: ProjectId,
+    access: AgentAccess,
     target: String,
     projects: PathBuf,
     tmux: PathBuf,
@@ -515,6 +517,7 @@ impl Team {
         Ok(Self {
             engine,
             project,
+            access,
             target,
             projects: projects_home,
             tmux,
@@ -600,7 +603,7 @@ impl Team {
 
     /// Captures one launch: the arguments and variable names the stand-in was started
     /// with, the files in the agent's own home and the Seatbelt profile the engine
-    /// installed for it (none when it installed none), with the cargo target folder read as
+    /// installed for it (none only at full access, see [`profile_may_be_missing`]), with the cargo target folder read as
     /// [`TARGET_TOKEN`], the rules naming this Mac's own tool installs taken out and stable
     /// facts in their place, facts about its loopback remotes, and the engine root,
     /// projects home and agent home the masked paths in it stand for.
@@ -629,6 +632,7 @@ impl Team {
             let network = loopback_facts(&text, self.recorder.port);
             (Some(text), facts, network)
         } else {
+            profile_may_be_missing(self.access)?;
             (None, Value::Null, Value::Null)
         };
         let canonical = |folder: &Path| {
@@ -749,33 +753,123 @@ pub(super) fn sdkroot_fact(
     })
 }
 
-/// Takes out of a Seatbelt profile only the path lines that name exactly one of the given
-/// folders, so a rule widened to a parent or a child path stays and shows as a change; a
-/// closing parenthesis on a removed line moves to the line before it. Inputs: the profile
-/// and the folders. Output: the profile left, and whether every removed line sat in a rule
-/// that grants no write and whether any folder is still named anywhere, both reading
-/// `true` and `false` when there is nothing to remove.
+/// Refuses a launch captured with no Seatbelt profile unless it ran at full access, the only
+/// level the engine starts without one, so a wrong profile path or a sandboxed launch that
+/// installed none is never written as a golden. Input: the level. Output: nothing, or why.
+pub(super) fn profile_may_be_missing(access: AgentAccess) -> Result<(), String> {
+    match access {
+        AgentAccess::Full => Ok(()),
+        AgentAccess::Sandboxed | AgentAccess::OwnBranch => Err(format!(
+            "the {access:?} launch installed no Seatbelt profile; only a full-access launch is captured without one"
+        )),
+    }
+}
+
+/// Spells a folder as the engine's Seatbelt regex rules do, every regex character escaped,
+/// so a credential deny naming a machine folder is found. Input: the folder. Output: the
+/// pattern text, without anchors.
+fn seatbelt_escape(folder: &str) -> String {
+    let mut pattern = String::with_capacity(folder.len() * 2);
+    for character in folder.chars() {
+        if ".^$*+?()[]{}|".contains(character) {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    assert!(pattern.len() >= folder.len());
+    pattern
+}
+
+/// Reads one profile line that is a whole rule naming exactly one machine folder by one of
+/// the [`PATH_RULES`] forms, such as `(allow file-read* (literal "<folder>"))`. Inputs: the
+/// trimmed line and the folders. Output: the folder, the form and the rule's operations, or
+/// none for any other line.
+fn one_line_rule<'a>(body: &'a str, folders: &'a [String]) -> Option<(&'a str, &'a str, &'a str)> {
+    let rest = body
+        .strip_prefix("(allow ")
+        .or_else(|| body.strip_prefix("(deny "))?;
+    folders.iter().find_map(|folder| {
+        PATH_RULES.iter().find_map(|kind| {
+            let operations = rest.strip_suffix(&format!(" ({kind} \"{folder}\"))"))?;
+            let plain = !operations.is_empty() && !operations.contains(['(', ')', '"']);
+            plain.then_some((folder.as_str(), *kind, operations))
+        })
+    })
+}
+
+/// Tells whether one profile line, its closing parentheses taken off, is the credential deny
+/// the engine writes below a toolchain folder, anchored at one machine folder. Inputs: the
+/// line so trimmed and the folders. Output: the folder, or none.
+fn credential_deny<'a>(open: &str, folders: &'a [String]) -> Option<&'a str> {
+    folders
+        .iter()
+        .find(|folder| {
+            open.starts_with(&format!("(regex #\"^{}/(.*/)?(", seatbelt_escape(folder)))
+                && open.ends_with(")(/.*)?$\"")
+        })
+        .map(String::as_str)
+}
+
+/// Takes out of a Seatbelt profile only the lines that name exactly one of the given
+/// folders: a path line of a [`PATH_RULES`] form, a whole one-line rule of such a form and
+/// the credential deny regex below the folder, so a rule widened to a parent or a child path
+/// stays and shows as a change; a closing parenthesis on a removed line moves to the line
+/// before it. Inputs: the profile and the folders. Output: the profile left and three facts
+/// that read the same on a Mac with no such folder: whether every removed allow rule grants
+/// no write, whether any folder is still named anywhere, in plain or regex spelling, and
+/// whether every folder a removed allow rule grants by `subpath` lost a credential deny too.
 pub(super) fn without_machine_reads(profile: &str, folders: &[String]) -> (String, Value) {
     let mut kept = String::with_capacity(profile.len());
     let mut rule = "";
     let mut read_only = true;
+    let mut granted: BTreeSet<&str> = BTreeSet::new();
+    let mut denied: BTreeSet<&str> = BTreeSet::new();
     for line in profile.split_inclusive('\n') {
+        let body = line.trim();
         if line.starts_with('(') {
             rule = line;
+            match one_line_rule(body, folders) {
+                Some((folder, kind, operations)) if body.starts_with("(allow ") => {
+                    read_only &= !operations.contains("file-write");
+                    if kind == "subpath" {
+                        granted.insert(folder);
+                    }
+                }
+                Some(_) => {}
+                None => kept.push_str(line),
+            }
+            continue;
         }
-        let body = line.trim();
         let open = body.trim_end_matches(')');
         let closing = &body[open.len()..];
-        let named = folders.iter().any(|folder| {
-            PATH_RULES
-                .iter()
-                .any(|kind| open == format!("({kind} \"{folder}\"") && !closing.is_empty())
-        });
-        if !named || line.starts_with('(') {
+        if closing.is_empty() {
             kept.push_str(line);
             continue;
         }
-        read_only &= !rule.contains("file-write");
+        let allows = rule.starts_with("(allow ");
+        let path = folders.iter().find_map(|folder| {
+            PATH_RULES
+                .iter()
+                .find(|kind| open == format!("({kind} \"{folder}\""))
+                .map(|kind| (folder.as_str(), *kind))
+        });
+        match (path, credential_deny(open, folders)) {
+            (Some((folder, kind)), _) => {
+                if allows {
+                    read_only &= !rule.contains("file-write");
+                    if kind == "subpath" {
+                        granted.insert(folder);
+                    }
+                }
+            }
+            (None, Some(folder)) if rule.starts_with("(deny ") => {
+                denied.insert(folder);
+            }
+            _ => {
+                kept.push_str(line);
+                continue;
+            }
+        }
         let extra = &closing[1..];
         if !extra.is_empty() {
             let had_newline = kept.ends_with('\n');
@@ -788,12 +882,18 @@ pub(super) fn without_machine_reads(profile: &str, folders: &[String]) -> (Strin
             }
         }
     }
-    let elsewhere = folders.iter().any(|folder| {
-        kept.contains(&format!("\"{folder}\"")) || kept.contains(&format!("\"{folder}/"))
-    });
+    assert!(granted.len() <= folders.len() && denied.len() <= folders.len());
+    let elsewhere = folders
+        .iter()
+        .any(|folder| kept.contains(folder.as_str()) || kept.contains(&seatbelt_escape(folder)));
+    let credentials_denied = granted.iter().all(|folder| denied.contains(folder));
     (
         kept,
-        json!({"read_only": read_only, "named_elsewhere": elsewhere}),
+        json!({
+            "read_only": read_only,
+            "named_elsewhere": elsewhere,
+            "credentials_denied": credentials_denied,
+        }),
     )
 }
 
@@ -806,21 +906,28 @@ fn only_lines_naming_a_machine_folder_exactly_are_taken_out_and_a_parent_rule_st
         kept,
         "(allow file-read-metadata\n  (path-ancestors \"/opt/x\"))\n(allow file-read* file-map-executable\n  (subpath \"/Applications/Xcode.app\")\n  (subpath \"/Applications/Xcode.app/Contents/Developer/usr\"))\n(allow file-write*\n  (subpath \"/opt/w\"))\n"
     );
-    assert_eq!(facts, json!({"read_only": true, "named_elsewhere": true}));
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": true, "credentials_denied": false})
+    );
 }
 
 #[test]
 fn machine_read_facts_read_the_same_on_a_mac_with_no_machine_folders() {
-    let profile = "(allow file-read*\n  (subpath \"/opt/x\"))\n";
+    let profile = "(allow file-read*\n  (subpath \"/opt/x\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n";
     let (kept, facts) = without_machine_reads(profile, &[]);
     assert_eq!(kept, profile);
     let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
-    let with_xcode =
-        format!("(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n");
+    let with_xcode = format!(
+        "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"^/Applications/Xcode\\.app/Contents/Developer/(.*/)?(\\.netrc|\\.npmrc)(/.*)?$\"))\n(allow file-read* (literal \"{developer}\"))\n"
+    );
     let (kept_there, facts_there) = without_machine_reads(&with_xcode, &[developer]);
     assert_eq!(kept_there, kept);
     assert_eq!(facts_there, facts);
-    assert_eq!(facts, json!({"read_only": true, "named_elsewhere": false}));
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
+    );
 }
 
 #[test]
@@ -830,7 +937,82 @@ fn a_machine_folder_in_a_write_rule_turns_the_read_only_fact() {
         format!("(allow file-write*\n  (subpath \"/opt/w\")\n  (subpath \"{developer}\"))\n");
     let (kept, facts) = without_machine_reads(&profile, &[developer]);
     assert_eq!(kept, "(allow file-write*\n  (subpath \"/opt/w\"))\n");
-    assert_eq!(facts, json!({"read_only": false, "named_elsewhere": false}));
+    assert_eq!(
+        facts,
+        json!({"read_only": false, "named_elsewhere": false, "credentials_denied": false})
+    );
+}
+
+#[test]
+fn a_granted_machine_folder_without_its_credential_deny_turns_the_fact() {
+    let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
+    let profile = format!(
+        "(allow file-read* file-map-executable\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n"
+    );
+    let (kept, facts) = without_machine_reads(&profile, &[developer]);
+    assert_eq!(
+        kept,
+        "(allow file-read* file-map-executable\n  (subpath \"/opt/x\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n"
+    );
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": false})
+    );
+}
+
+#[test]
+fn a_one_line_rule_naming_a_machine_folder_is_taken_out_and_a_write_one_turns_read_only() {
+    let graphify = "/Users/o/.local/share/uv/tools/graphifyy".to_owned();
+    let base = "(allow file-read*\n  (subpath \"/opt/x\"))\n";
+    let read = format!("{base}(allow file-read* (literal \"{graphify}\"))\n");
+    let (kept, facts) = without_machine_reads(&read, std::slice::from_ref(&graphify));
+    assert_eq!(kept, base);
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
+    );
+    let write = format!("{base}(allow file-write* (subpath \"{graphify}\"))\n");
+    let (kept, facts) = without_machine_reads(&write, &[graphify]);
+    assert_eq!(kept, base);
+    assert_eq!(
+        facts,
+        json!({"read_only": false, "named_elsewhere": false, "credentials_denied": false})
+    );
+}
+
+#[test]
+fn a_machine_folder_in_a_regex_kept_elsewhere_reads_as_named_elsewhere() {
+    let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
+    let profile = "(allow file-read*\n  (regex #\"^/Applications/Xcode\\.app/Contents/Developer/usr/bin/[^/]+$\"))\n";
+    let (kept, facts) = without_machine_reads(profile, &[developer]);
+    assert_eq!(kept, profile);
+    assert_eq!(facts["named_elsewhere"], json!(true));
+}
+
+#[test]
+fn the_escape_spells_a_folder_as_the_engine_s_seatbelt_patterns_do() {
+    assert_eq!(
+        seatbelt_escape("/Applications/Xcode.app/Contents/Developer"),
+        "/Applications/Xcode\\.app/Contents/Developer"
+    );
+    assert_eq!(
+        seatbelt_escape("/u/.local/a+b(c)[d]{e}|f^g$h*i?j"),
+        "/u/\\.local/a\\+b\\(c\\)\\[d\\]\\{e\\}\\|f\\^g\\$h\\*i\\?j"
+    );
+}
+
+#[test]
+fn only_a_full_access_launch_may_be_captured_with_no_profile() {
+    assert_eq!(profile_may_be_missing(AgentAccess::Full), Ok(()));
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        let refused = profile_may_be_missing(access);
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|text| text.contains("no Seatbelt profile")),
+            "{access:?}: {refused:?}"
+        );
+    }
 }
 
 #[test]

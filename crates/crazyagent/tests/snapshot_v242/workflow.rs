@@ -47,6 +47,7 @@ pub(super) fn engine(scratch: &Path) -> Result<Engine, String> {
     let home = private_folder(scratch, "home")?;
     let mut engine = Engine::new("ca-snap-");
     engine.home = Some(home);
+    super::hermetic(&mut engine);
     engine.launch();
     Ok(engine)
 }

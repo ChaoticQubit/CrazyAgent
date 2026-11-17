@@ -18,7 +18,13 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::provider_retry::ProviderRetry;
 use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crazyagent::roadmap_status::Refresh;
-use crazyagent::sandbox::policy::AgentPolicy;
+use crazyagent::sandbox::policy::{
+    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles,
+    ToolCacheScope, ToolchainChoice,
+};
+use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
+use crazyagent::sandbox::toolchains::Toolchain;
+use crazyagent::sandbox::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::setup::RefusedTool;
 use crazyagent::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
@@ -171,10 +177,12 @@ struct Stopped {
     _disk: tempfile::TempDir,
 }
 
-/// Starts the engine on a fixture HOME and a fixed PATH, attaches as the TUI, sends the
-/// settings requests when asked, then stops it. Inputs: a scratch prefix and whether to seed
-/// the settings. Output: the stopped engine, or the request that failed.
+/// Starts the engine on a fixture HOME and a fixed PATH, with no git variable of this shell,
+/// attaches as the TUI, sends the settings requests when asked, then stops it; a panic on the
+/// way prints through the runner's guard. Inputs: a scratch prefix and whether to seed the
+/// settings. Output: the stopped engine, or the request that failed.
 fn seeded(prefix: &str, with_settings: bool) -> Result<Stopped, String> {
+    super::guard_panics();
     let home = e2e_support::scratch("ca-p5-home-");
     fs::write(home.path().join(".gitconfig"), OWNER_GIT).map_err(said)?;
     let disk = e2e_support::scratch("ca-p5-disk-");
@@ -185,6 +193,7 @@ fn seeded(prefix: &str, with_settings: bool) -> Result<Stopped, String> {
     let mut engine = Engine::new(prefix);
     engine.home = Some(home.path().to_path_buf());
     engine.env.push(("PATH", FIXTURE_PATH.into()));
+    super::hermetic(&mut engine);
     engine.launch();
     let seeding = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -528,19 +537,15 @@ async fn versioned_settings(
         "sandbox_settings",
         owner
             .controller
-            .set_sandbox_settings(SandboxSettings::default(), 0, generation)
+            .set_sandbox_settings(sandbox_seed(), 0, generation)
             .await,
     )?;
     let generation = owner.next();
-    let policy = AgentPolicy {
-        ide_git_hooks: true,
-        ..AgentPolicy::default()
-    };
     recorded(
         "agent_policy",
         owner
             .controller
-            .set_project_agent_policy(id(), 0, policy, generation)
+            .set_project_agent_policy(id(), 0, policy_seed(), generation)
             .await,
     )?;
     let generation = owner.next();
@@ -569,6 +574,74 @@ async fn versioned_settings(
     Ok(())
 }
 
+/// The loopback port the fixture's agent policy grants: outside the engine's reserved,
+/// proxy, relay and dynamic ports, so the save's grant check keeps it.
+const SEED_PORT: u16 = 5173;
+
+/// The sandbox settings the fixture saves, each knob away from its default. They are Linux
+/// knobs, so a macOS engine only stores them.
+fn sandbox_seed() -> SandboxSettings {
+    SandboxSettings {
+        linux_sockets: LinuxSockets::Refuse,
+        linux_supervisor: LinuxSupervisor::Off,
+        linux_strict: LinuxStrict::On,
+    }
+}
+
+/// The agent policy the fixture saves for its project, each field away from its default. The
+/// level is Own branch, never Full, since an upgrade row may read this fixture; the grant is
+/// one port, since a temp folder or socket grant would name a folder of this Mac.
+fn policy_seed() -> AgentPolicy {
+    AgentPolicy {
+        access: AgentAccess::OwnBranch,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed: false,
+        }],
+        ide_git_hooks: true,
+        network: AgentNetwork::Https,
+        tool_cache: ToolCacheScope::PerAgent,
+        home_caches: HomeCaches::Keep,
+        ide_agent_files: IdeAgentFiles::NoDeleteOrRename,
+        apply_changes: AccessApply::NextStart,
+        grants: vec![AccessGrant::Port { port: SEED_PORT }],
+        shared_folders: SharedFolders {
+            scope: SharedScope::Chosen,
+            access: SharedAccess::ReadWrite,
+            chosen: vec!["notes".to_owned()],
+            secrets: Vec::new(),
+        },
+    }
+}
+
+/// The cleanup settings the fixture saves, both away from their defaults.
+fn cleanup_seed() -> CleanupSettings {
+    CleanupSettings {
+        mode: CleanupMode::Manual,
+        days: 14,
+    }
+}
+
+/// The quit settings the fixture saves, each away from its default.
+fn quit_seed() -> QuitSettings {
+    QuitSettings {
+        on_quit: OnQuit::Stop,
+        left_running: LeftRunning::Never,
+        hours: 12,
+    }
+}
+
+/// The harness update settings the fixture saves, each away from its default. On open is
+/// read only by the TUI's harness settings screen, so the fixture engine runs no check.
+fn update_seed() -> UpdateSettings {
+    UpdateSettings {
+        mode: UpdateMode::CheckOnly,
+        when: CheckWhen::OnOpen,
+        online: OnlineLookup::Off,
+        install: InstallFromApp::Off,
+    }
+}
+
 /// Sends the app-wide settings requests: cleanup, quit, provider retry, the three master
 /// limits, the refused-tool choice, one learning mark, harness updates and a global memory.
 /// Input: the attached owner. Output: nothing, or the request the engine did not store.
@@ -578,13 +651,7 @@ async fn app_settings(owner: &mut Owner) -> Result<(), String> {
         "cleanup_settings",
         owner
             .controller
-            .set_cleanup_settings(
-                CleanupSettings {
-                    mode: CleanupMode::AfterDays,
-                    days: 14,
-                },
-                generation,
-            )
+            .set_cleanup_settings(cleanup_seed(), generation)
             .await,
     )?;
     let generation = owner.next();
@@ -592,14 +659,7 @@ async fn app_settings(owner: &mut Owner) -> Result<(), String> {
         "quit_settings",
         owner
             .controller
-            .set_quit_settings(
-                QuitSettings {
-                    on_quit: OnQuit::KeepRunning,
-                    left_running: LeftRunning::AfterHours,
-                    hours: 12,
-                },
-                generation,
-            )
+            .set_quit_settings(quit_seed(), generation)
             .await,
     )?;
     let generation = owner.next();
@@ -665,12 +725,7 @@ async fn app_settings(owner: &mut Owner) -> Result<(), String> {
         .map_err(|error| format!("learning_mark: {error:?}"))?
         .ok_or("learning_mark: the engine already held the mark")?;
     recorded("learning_mark", Ok::<OwnerResponse, String>(mark))?;
-    let update = UpdateSettings {
-        mode: UpdateMode::CheckOnly,
-        when: CheckWhen::OnButton,
-        online: OnlineLookup::Off,
-        install: InstallFromApp::Off,
-    };
+    let update = update_seed();
     let stored = owner
         .controller
         .harness_set_update_settings(update)
@@ -1316,4 +1371,43 @@ fn the_committed_upgrade_fixture_holds_no_private_text() {
         private_text(&String::from_utf8_lossy(&bytes)).map_err(|failure| shown(&failure)),
         Ok(())
     );
+}
+
+#[test]
+fn every_seeded_setting_is_away_from_its_default() {
+    let sandbox = sandbox_seed();
+    let unset = SandboxSettings::default();
+    assert_ne!(sandbox.linux_sockets, unset.linux_sockets);
+    assert_ne!(sandbox.linux_supervisor, unset.linux_supervisor);
+    assert_ne!(sandbox.linux_strict, unset.linux_strict);
+    let policy = policy_seed();
+    let unset = AgentPolicy::default();
+    assert_ne!(policy.access, unset.access);
+    assert_ne!(policy.access, AgentAccess::Full);
+    assert_ne!(policy.network, unset.network);
+    assert_ne!(policy.tool_cache, unset.tool_cache);
+    assert_ne!(policy.home_caches, unset.home_caches);
+    assert_ne!(policy.ide_agent_files, unset.ide_agent_files);
+    assert_ne!(policy.apply_changes, unset.apply_changes);
+    assert_ne!(policy.ide_git_hooks, unset.ide_git_hooks);
+    assert_ne!(policy.toolchains, unset.toolchains);
+    assert_ne!(policy.grants, unset.grants);
+    assert_ne!(policy.shared_folders.scope, unset.shared_folders.scope);
+    assert_ne!(policy.shared_folders.access, unset.shared_folders.access);
+    assert_eq!(policy.validate(), Ok(()));
+    let quit = quit_seed();
+    let unset = QuitSettings::default();
+    assert_ne!(quit.on_quit, unset.on_quit);
+    assert_ne!(quit.left_running, unset.left_running);
+    assert_ne!(quit.hours, unset.hours);
+    let cleanup = cleanup_seed();
+    let unset = CleanupSettings::default();
+    assert_ne!(cleanup.mode, unset.mode);
+    assert_ne!(cleanup.days, unset.days);
+    let update = update_seed();
+    let unset = UpdateSettings::default();
+    assert_ne!(update.mode, unset.mode);
+    assert_ne!(update.when, unset.when);
+    assert_ne!(update.online, unset.online);
+    assert_ne!(update.install, unset.install);
 }

@@ -63,6 +63,7 @@ pub(super) fn seeded(
     let project = ProjectId::new(PROJECT).map_err(debug)?;
     let mut engine = Engine::new(prefix);
     engine.home = Some(home.path().to_path_buf());
+    super::hermetic(&mut engine);
     engine.launch();
     let seeding = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

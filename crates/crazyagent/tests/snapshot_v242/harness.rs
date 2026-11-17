@@ -6,7 +6,10 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView};
+use crazyagent::sandbox::policy::{
+    AgentAccess, AgentPolicy, PolicyView, ToolchainChoice, ToolchainView,
+};
+use crazyagent::sandbox::toolchains::{ToolHomes, Toolchain};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -743,9 +746,22 @@ fn interactive_support(_scratch: &Path) -> Result<Value, String> {
 /// The project the policy scenarios set up.
 const POLICY_PROJECT: &str = "snapshot-p2-policy";
 
-/// The policy view fields that read what this Mac has installed, never kept in a golden
-/// (NOTE-20:43 Q3): the toolchains found and the tool caches offered.
-const MACHINE_FIELDS: [&str; 2] = ["toolchains", "tool_caches"];
+/// The toolchain choices each policy scenario saves, one per family, so the view shows a row
+/// for every family whatever this Mac has installed; mixed, so a lost or flipped choice shows.
+const TOOLCHAIN_CHOICES: [ToolchainChoice; 3] = [
+    ToolchainChoice {
+        toolchain: Toolchain::Rust,
+        allowed: true,
+    },
+    ToolchainChoice {
+        toolchain: Toolchain::Node,
+        allowed: false,
+    },
+    ToolchainChoice {
+        toolchain: Toolchain::Python,
+        allowed: true,
+    },
+];
 
 /// The policy a save of one view at another access level sends, keeping every other choice
 /// the view shows and no toolchain. Inputs: the view and the level. Output: the policy.
@@ -808,15 +824,22 @@ pub(super) async fn set_level(
     if before.access == access {
         return Ok(());
     }
+    save_policy(owner, project, before.version, at_level(&before, access)).await
+}
+
+/// Saves one project's agent policy over the version a view read, as the owner's policy
+/// screen saves it. Inputs: the owner, the project, that version and the policy. Output:
+/// nothing, or why the save was not applied.
+async fn save_policy(
+    owner: &mut super::e2e_support::Owner,
+    project: &ProjectId,
+    version: u64,
+    policy: AgentPolicy,
+) -> Result<(), String> {
     let generation = owner.next();
     let saved = owner
         .controller
-        .set_project_agent_policy(
-            project.clone(),
-            before.version,
-            at_level(&before, access),
-            generation,
-        )
+        .set_project_agent_policy(project.clone(), version, policy, generation)
         .await
         .map_err(|error| error.0)?;
     let result = recorded(saved)?;
@@ -826,12 +849,13 @@ pub(super) async fn set_level(
     Ok(())
 }
 
-/// Captures the agent policy a new project's agents get at one access level, as the owner's
-/// policy screen reads it: the level, network, the choices offered, the grants and their
-/// log, apply timing, shared and local folders and the temp folder a grant would hand over,
-/// with whether that folder is the owner's own private temp folder, since the runner masks
-/// it, all but the fields that read this Mac's installs. Inputs: the scratch folder and the
-/// level. Output: the view as JSON.
+/// Captures the agent policy a new project's agents get at one access level, saved with
+/// [`TOOLCHAIN_CHOICES`], as the owner's policy screen reads it: the level, network, the
+/// choices offered, the tool caches, the grants and their log, apply timing, shared and local
+/// folders and the temp folder a grant would hand over, with whether that folder is the
+/// owner's own private temp folder, since the runner masks it, and the toolchain rows as
+/// [`toolchain_rows`] reads them on any Mac. Inputs: the scratch folder and the level.
+/// Output: the view as JSON.
 fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
     let projects = scratch
         .canonicalize()
@@ -852,13 +876,27 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
                 return Err(format!("create_project: {created:?}"));
             }
             let project = ProjectId::new(POLICY_PROJECT).map_err(|error| error.to_string())?;
-            set_level(&mut owner, &project, access).await?;
+            let before = policy_view(&mut owner, &project).await?;
+            let policy = AgentPolicy {
+                toolchains: TOOLCHAIN_CHOICES.to_vec(),
+                ..at_level(&before, access)
+            };
+            save_policy(&mut owner, &project, before.version, policy).await?;
             policy_view(&mut owner, &project).await
         };
         let view = steps.await;
         (owner, view)
     })?;
     assert_eq!(view.access, access);
+    if view.toolchains.len() != TOOLCHAIN_CHOICES.len() {
+        return Err(format!(
+            "the policy view shows {} toolchain rows for {} saved choices",
+            view.toolchains.len(),
+            TOOLCHAIN_CHOICES.len()
+        ));
+    }
+    let homes = ToolHomes::owner().map_err(|error| format!("{error:?}"))?;
+    let toolchains = toolchain_rows(&view.toolchains, |toolchain| toolchain.installed(&homes));
     let owner_temp = crazyagent::sandbox::grants::owner_temp_folder().ok();
     let temp_folder_is_the_owners =
         view.temp_folder.path.as_deref() == owner_temp.as_deref().and_then(Path::to_str);
@@ -866,14 +904,36 @@ fn agent_policy(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
     let fields = captured
         .as_object_mut()
         .ok_or_else(|| "a policy view is not an object".to_owned())?;
-    for field in MACHINE_FIELDS {
-        fields.remove(field);
-    }
+    fields.insert("toolchains".to_owned(), toolchains);
     fields.insert(
         "temp_folder_is_the_owners".to_owned(),
         Value::Bool(temp_folder_is_the_owners),
     );
     Ok(captured)
+}
+
+/// The toolchain rows of a policy view as they read on any Mac: each row's family, label,
+/// use and choice, and in place of whether this Mac has the family installed, whether the
+/// row says so as the engine's own check finds it. Inputs: the rows and that check.
+/// Output: the rows as JSON, in view order.
+pub(super) fn toolchain_rows(
+    rows: &[ToolchainView],
+    installed: impl Fn(Toolchain) -> bool,
+) -> Value {
+    let read: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "toolchain": row.toolchain,
+                "label": row.label,
+                "used": row.used,
+                "allowed": row.allowed,
+                "installed_as_this_mac_has_it": row.installed == installed(row.toolchain),
+            })
+        })
+        .collect();
+    assert_eq!(read.len(), rows.len());
+    Value::Array(read)
 }
 
 fn agent_policy_sandboxed(scratch: &Path) -> Result<Value, String> {
@@ -886,4 +946,47 @@ fn agent_policy_own_branch(scratch: &Path) -> Result<Value, String> {
 
 fn agent_policy_full(scratch: &Path) -> Result<Value, String> {
     agent_policy(scratch, AgentAccess::Full)
+}
+
+#[test]
+fn toolchain_rows_read_the_same_on_a_mac_with_and_without_the_toolchains() {
+    let row = |toolchain: Toolchain, installed: bool, allowed: bool| ToolchainView {
+        toolchain,
+        label: toolchain.label().to_owned(),
+        installed,
+        used: false,
+        allowed,
+    };
+    let here = [
+        row(Toolchain::Rust, true, true),
+        row(Toolchain::Node, true, false),
+        row(Toolchain::Python, false, true),
+    ];
+    let there = [
+        row(Toolchain::Rust, false, true),
+        row(Toolchain::Node, false, false),
+        row(Toolchain::Python, true, true),
+    ];
+    let read_here = toolchain_rows(&here, |toolchain| toolchain != Toolchain::Python);
+    let read_there = toolchain_rows(&there, |toolchain| toolchain == Toolchain::Python);
+    assert_eq!(read_here, read_there);
+    let fact = |toolchain: Toolchain, allowed: bool| {
+        json!({
+            "toolchain": toolchain,
+            "label": toolchain.label(),
+            "used": false,
+            "allowed": allowed,
+            "installed_as_this_mac_has_it": true,
+        })
+    };
+    assert_eq!(
+        read_here,
+        json!([
+            fact(Toolchain::Rust, true),
+            fact(Toolchain::Node, false),
+            fact(Toolchain::Python, true),
+        ])
+    );
+    let misread = toolchain_rows(&there, |_| true);
+    assert_eq!(misread[0]["installed_as_this_mac_has_it"], json!(false));
 }

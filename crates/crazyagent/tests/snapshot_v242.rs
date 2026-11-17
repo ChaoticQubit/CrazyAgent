@@ -738,9 +738,11 @@ fn withheld(line: &str, home: Option<&str>, user: Option<&str>) -> String {
 }
 
 /// Runs one scenario in a fresh scratch folder and normalises what it captures. A driver
-/// that panics fails only its own capture, so the scenarios after it still run.
-/// Input: the scenario. Output: the golden text, or why the capture failed.
+/// that panics fails only its own capture, so the scenarios after it still run, and its
+/// panic prints through [`guard_panics`]. Input: the scenario. Output: the golden text, or
+/// why the capture failed.
 fn capture_text(scenario: &Scenario) -> Result<String, String> {
+    guard_panics();
     let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
     let captured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         (scenario.capture)(scratch.path())
@@ -752,12 +754,82 @@ fn capture_text(scenario: &Scenario) -> Result<String, String> {
 /// The failure text of a driver that panicked. Input: the panic payload.
 /// Output: the payload's message when it is text, else a fixed line.
 fn panicked(payload: &(dyn std::any::Any + Send)) -> String {
-    let text = payload
+    format!("the driver panicked: {}", payload_text(payload))
+}
+
+/// The text of a panic payload. Input: the payload. Output: its message when it is text,
+/// else a fixed line.
+fn payload_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
         .downcast_ref::<&str>()
         .map(|text| (*text).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "a payload that is not text".to_owned());
-    format!("the driver panicked: {text}")
+        .unwrap_or_else(|| "a payload that is not text".to_owned())
+}
+
+/// The git variables a snapshot engine never inherits, whatever this machine's shell holds:
+/// each can replace the fixture HOME's `.gitconfig` or the identity and dates git writes.
+const GIT_VARIABLES: [&str; 11] = [
+    "GIT_AUTHOR_DATE",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_NAME",
+    "GIT_COMMITTER_DATE",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_SYSTEM",
+];
+
+/// Sets up a snapshot engine so git inside it reads only the fixture HOME, never a git
+/// variable of the shell the capture runs in: every name in [`GIT_VARIABLES`] and every
+/// other inherited `GIT_` variable is taken out of what the engine inherits. Input: the
+/// engine, not yet launched.
+fn hermetic(engine: &mut e2e_support::Engine) {
+    let inherited = std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| name.starts_with("GIT_"));
+    let names: BTreeSet<String> = GIT_VARIABLES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .chain(inherited)
+        .collect();
+    assert!(names.len() >= GIT_VARIABLES.len());
+    engine.env_removed.extend(names);
+}
+
+/// The line a panic prints in place of its own text when that text holds private text.
+/// Inputs: the panic text and this machine's HOME and USER. Output: the line, or none when
+/// the text holds nothing private and prints as Rust prints it.
+fn panic_text(message: &str, home: Option<&str>, user: Option<&str>) -> Option<String> {
+    refuse_private(message, home, user)
+        .err()
+        .map(|kind| format!("a panic: text withheld, it {kind}"))
+}
+
+/// Installs, once per test process, the panic hook that prints a panic's text only when it
+/// and its source location hold no private text, so a driver or fixture panic, on any thread,
+/// never puts a user path, name or token in a test log; a clean panic prints as before,
+/// through the hook it replaced.
+fn guard_panics() {
+    static GUARD: std::sync::Once = std::sync::Once::new();
+    GUARD.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let at = info.location().map(ToString::to_string).unwrap_or_default();
+            let text = format!("{} at {at}", payload_text(info.payload()));
+            let home = std::env::var("HOME").ok();
+            let user = std::env::var("USER")
+                .ok()
+                .filter(|user| !KINDS.contains(&user.as_str()));
+            match panic_text(&text, home.as_deref(), user.as_deref()) {
+                Some(line) => eprintln!("{line}"),
+                None => previous(info),
+            }
+        }));
+    });
 }
 
 /// Lists golden files no scenario names, so a dropped driver cannot drop its capture silently.
@@ -859,6 +931,42 @@ fn a_panicking_driver_fails_only_its_own_capture() {
         Err("the driver panicked: driver stopped at step 2".to_owned())
     );
     assert!(capture_text(&first).is_ok());
+}
+
+#[test]
+fn a_panic_naming_private_text_is_withheld_and_a_clean_one_prints() {
+    let home = Some("/Users/ann");
+    let user = Some("ann");
+    let line = panic_text(
+        "the engine was not ready within 30 s: /Users/ann/Library/engine.log",
+        home,
+        user,
+    )
+    .expect("a panic naming the home is withheld");
+    assert!(line.starts_with("a panic: text withheld, it "), "{line}");
+    assert!(
+        !line.contains("/Users/ann") && !line.contains("Library"),
+        "{line}"
+    );
+    assert_eq!(
+        panic_text("the engine was not ready within 30 s", home, user),
+        None
+    );
+}
+
+#[test]
+fn a_snapshot_engine_starts_with_no_inherited_git_variable() {
+    let mut engine = e2e_support::Engine::new("ca-snap-git-");
+    hermetic(&mut engine);
+    let removed: BTreeSet<String> = engine
+        .command()
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .filter_map(|(name, _)| name.to_str().map(str::to_owned))
+        .collect();
+    for name in GIT_VARIABLES {
+        assert!(removed.contains(name), "{name} reaches the engine");
+    }
 }
 
 #[test]
