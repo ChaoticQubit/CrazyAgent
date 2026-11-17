@@ -20,18 +20,19 @@ function looks(theme) {
 }
 
 for (const theme of ["light", "dark"]) {
-  test(`${theme}: the Agents tab's lists are hairline rows with no box, closed by one hairline`, async () => {
+  test(`${theme}: the Agents tab's Team table and lists are hairline rows with no box, closed by one hairline`, async () => {
     const seen = await looks(theme);
     const line = `1px ${seen.border}`;
-    for (const name of ["team", "research"]) {
+    assert.deepEqual(seen.team, { side: "0px", top: "0px", bottom: line, corner: "0px", fill: CLEAR }, "the boxed Team table");
+    for (const name of ["tasks", "research"]) {
       assert.deepEqual(seen[name], { side: "0px", top: "0px", bottom: line, corner: "0px", fill: CLEAR, first: "0px", last: line }, name);
     }
-    assert.equal(seen.mates.bottom.split(" ")[0], "0px", "a nested teammates list adds no second closing line");
+    assert.deepEqual([seen.mates.side, seen.mates.bottom.split(" ")[0], seen.mates.fill], ["0px", "0px", CLEAR], "a teammates list inside a name cell adds no box and no closing line");
   });
 
-  test(`${theme}: the fold label, team and research names and task titles sit at 500`, async () => {
+  test(`${theme}: the fold label, team names and their cells, task titles, the Research heading and research names sit at 500`, async () => {
     const seen = await looks(theme);
-    assert.deepEqual(seen.weights, { fold: "500", lead: "500", task: "500", job: "500" });
+    assert.deepEqual(seen.weights, { fold: "500", lead: "500", cell: "500", task: "500", heading: "500", job: "500" });
   });
 }
 

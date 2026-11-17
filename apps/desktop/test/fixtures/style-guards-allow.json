@@ -18,7 +18,7 @@
     "src/screens/intake/intake.css": 2,
     "src/screens/metrics/metrics.css": 4,
     "src/screens/process.css": 4,
-    "src/screens/project/projects.css": 12,
+    "src/screens/project/projects.css": 11,
     "src/screens/project/questions.css": 1,
     "src/screens/project/team-activity.css": 1,
     "src/screens/settings/settings.css": 11,
