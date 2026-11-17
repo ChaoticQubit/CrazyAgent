@@ -2646,6 +2646,7 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
         tool: "graphify".into(),
         reason: crate::tools::Reason::Refused,
         needs: None,
+        found: None,
         looked: Vec::new(),
         refused: Some(Box::new(crate::tools::Refused {
             file: std::path::PathBuf::from("/h/tool/bin/python3"),

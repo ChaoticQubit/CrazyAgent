@@ -390,7 +390,8 @@ fn sets_marker_size(
 /// the set's base and head. A path the merge has and the commit lacks still counts as held
 /// when the commit holds that file whole under another name than the head does, so a lead
 /// that moved a worker's file holds it; a file moved and changed does not, and that set
-/// waits for the owner. Output: the answer.
+/// waits for the owner. A git older than 2.40 cannot merge again, so the answer is no and
+/// the set waits for the owner as well (#274). Output: the answer.
 pub(super) fn holds_changes_since(
     owner: &Repo,
     commit: &str,
@@ -399,6 +400,9 @@ pub(super) fn holds_changes_since(
 ) -> Result<bool, EngineError> {
     assert!(is_object_id(base));
     assert!(is_object_id(head));
+    if owner.old_git() {
+        return Ok(false);
+    }
     let Some(Remerged {
         conflicts,
         differences,

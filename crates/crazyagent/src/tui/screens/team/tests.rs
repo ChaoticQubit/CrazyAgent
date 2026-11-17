@@ -5542,6 +5542,13 @@ fn master_shell(screen: super::Team, width: u16, height: u16) -> Shell {
     Shell::with(ctx, Box::new(screen))
 }
 
+/// The start of the owner line where the live master's terminal can't open: tmux missing on
+/// Unix, no terminal program on Windows ([`crate::tools::TMUX_MISSING`]).
+#[cfg(unix)]
+const TERMINAL_MISSING_START: &str = "tmux is missing, so the live master's";
+#[cfg(not(unix))]
+const TERMINAL_MISSING_START: &str = "The live master's terminal can't open";
+
 /// On a Mac with no tmux the engine turns the live master off with the line that says tmux
 /// is missing and how to install it. The master view shows that line, never the endless
 /// wait, and s tries again, which turns the switch on once more (owner 11-12).
@@ -5562,10 +5569,7 @@ fn a_master_with_no_tmux_says_tmux_is_missing_and_s_tries_again() {
     assert!(requests(&mut shell).is_empty(), "one start per open");
     let rows = render(&mut shell);
     let body = rows[4..22].join("\n");
-    assert!(
-        body.contains("tmux is missing, so the live master's"),
-        "{body}"
-    );
+    assert!(body.contains(TERMINAL_MISSING_START), "{body}");
     assert!(body.contains("s tries again."), "{body}");
     assert!(!body.contains("Starting the master's terminal"), "{body}");
     assert!(rows[23].contains("s Try again"), "{}", rows[23]);
@@ -5645,10 +5649,7 @@ fn a_master_stopped_before_its_terminal_opened_says_why_and_s_tries_again() {
     requests(&mut shell);
     let rows = render(&mut shell);
     let body = rows[4..22].join("\n");
-    assert!(
-        body.contains("tmux is missing, so the live master's"),
-        "{body}"
-    );
+    assert!(body.contains(TERMINAL_MISSING_START), "{body}");
     assert!(body.contains("s tries again."), "{body}");
     assert!(rows[23].contains("s Try again"), "{}", rows[23]);
     shell.key(Key::Char('x'));

@@ -196,7 +196,9 @@ impl Harness {
     /// harness lists subscription accounts, and a ChatGPT sign-in also fits a harness that
     /// [takes it](Self::takes_chatgpt_sign_in) through the ChatGPT relay; an endpoint
     /// account, with a key or without, fits every harness that speaks its wire format,
-    /// whatever harness it was stored with. Input: the stored connection. Output: the answer.
+    /// whatever harness it was stored with, except that an account holding a key fits a
+    /// harness the key relay carries only where the relay can start
+    /// ([`super::keyed_runs_here`]). Input: the stored connection. Output: the answer.
     pub fn account_fits(&self, connection: &crate::config::ModelConnection) -> bool {
         use crate::config::{ModelAuthentication, ModelEndpoint};
         let protocol = connection.protocol.as_str();
@@ -208,7 +210,10 @@ impl Harness {
             (
                 ModelEndpoint::Http { .. },
                 ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
-            ) => self.speaks(protocol),
+            ) => {
+                let keyed = matches!(connection.auth, ModelAuthentication::ApiKey { .. });
+                (!keyed || super::keyed_runs_here(&self.manifest.id)) && self.speaks(protocol)
+            }
             _ => false,
         }
     }

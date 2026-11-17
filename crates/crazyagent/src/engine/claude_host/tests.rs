@@ -653,10 +653,10 @@ async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease
 
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, PIPE_HOLDING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
-        Ok(processes.leader)
+        Ok(processes.group)
     );
     assert_eq!(
         fixture
@@ -675,6 +675,8 @@ async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
+/// A process that left the harness group holds neither cleanup nor the lease, by backend
+/// ([`HarnessProcesses::assert_stopped_by`]).
 #[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_lease() {
@@ -683,26 +685,18 @@ async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_
     };
 
     let mut fixture = MasterFixture::new("claude");
+    let check = fixture.lineage_check();
     let mut claude = stand_in_master(&mut fixture, GROUP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
     );
     let started = std::time::Instant::now();
-    let cancelled = claude.cancel().await;
+    let cancelled = claude.cancel().await.map_err(|error| error.0);
     let elapsed = started.elapsed();
-    assert_eq!(
-        cancelled.map_err(|error| error.0),
-        Err("claude_host_cleanup_uncertain".to_owned()),
-        "after {elapsed:?}"
-    );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-    processes.assert_harness_gone();
-    assert_eq!(
-        rustix::process::test_kill_process(processes.descendant),
-        Ok(())
-    );
+    processes.assert_stopped_by(check, cancelled, "claude_host_cleanup_uncertain");
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
@@ -715,7 +709,7 @@ async fn a_claude_master_process_that_left_its_group_is_stopped_with_the_master(
 
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, GROUP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
@@ -738,7 +732,7 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
 
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, ZOMBIE_HOLDING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
@@ -756,7 +750,7 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    while rustix::process::test_kill_process_group(processes.group) != Err(rustix::io::Errno::SRCH)
     {
         assert!(
             started.elapsed() < Duration::from_secs(12),
@@ -793,7 +787,7 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
     let mut fixture = MasterFixture::new("claude");
     let mut claude =
         stand_in_master_under(&mut fixture, ZOMBIE_HOLDING_HARNESS, false, Some(clock)).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     tokio::time::sleep(clock + Duration::from_secs(1)).await;
     let closed = claude.close().await;
     assert_eq!(
@@ -803,7 +797,7 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
     );
     assert!(!claude.settled(), "a cleanup in doubt is never settled");
     let started = std::time::Instant::now();
-    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    while rustix::process::test_kill_process_group(processes.group) != Err(rustix::io::Errno::SRCH)
     {
         assert!(
             started.elapsed() < Duration::from_secs(12),
@@ -825,7 +819,7 @@ async fn a_claude_master_whose_harness_it_can_never_reap_still_ends_and_releases
             "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
         )
         .await;
-        if !reap_before_the_host(&fixture.project) {
+        if !reap_before_the_host(&fixture.project, || claude.process_group()) {
             continue;
         }
         let started = std::time::Instant::now();
@@ -2190,6 +2184,7 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     };
     assert_ne!(check, LineageCheck::FullAccess);
     let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
+    let _processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     fs::write(fixture.project.join(RUN_FOLDER).join("go"), "").unwrap();
     let own_end = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -2211,7 +2206,6 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     );
     let closed = claude.close().await.map_err(|error| error.0);
     if check == LineageCheck::Sandboxed {
-        let _processes = HarnessProcesses::wait(&fixture.project);
         assert!(closed.is_err(), "{closed:?}");
         assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
     } else {

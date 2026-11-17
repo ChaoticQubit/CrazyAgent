@@ -1266,7 +1266,7 @@ fn open_actor_database(
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
         let started = std::time::Instant::now();
-        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+        if let Some(held @ 1..) = crate::project_setup::removed::hold_left(&connection)? {
             eprintln!(
                 "projects_removed_backfill held={held} ms={}",
                 started.elapsed().as_millis()
@@ -2939,6 +2939,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                unavailable: crate::sandbox::hidden_paths::UNAVAILABLE,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())

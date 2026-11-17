@@ -34,6 +34,7 @@ fn words(command: &[&str]) -> Vec<String> {
     command.iter().map(|word| (*word).to_owned()).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_unit_quotes_paths_and_escapes_specifiers() {
     let mut linux = service(Platform::Linux);
@@ -66,6 +67,7 @@ WantedBy=default.target
 
 /// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
 /// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[cfg(unix)]
 #[test]
 fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
     let mut linux = service(Platform::Linux);
@@ -271,6 +273,7 @@ fn status_output_is_read_per_manager() {
 /// The service PATH keeps the shell's absolute folders in order, then adds the user's and the
 /// system folders once each, and leaves out any folder another user can change on this host
 /// (on a CI runner `/usr/local/bin` can be one).
+#[cfg(unix)]
 #[test]
 fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
     let kept = |folders: &[&str]| {
@@ -432,7 +435,7 @@ fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (kind, before) = raw_user_path();
     let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("cra'zy;$(exit 7)");
+    let folder = root.path().join("cra'zy$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
     let first = link_cli(&executable, root.path());
@@ -444,6 +447,27 @@ fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
     let shown = folder.to_str().unwrap();
     assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
     assert_eq!(raw_user_path(), (kind, before));
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() {
+    let _held = USER_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (kind, before) = raw_user_path();
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("cra;zy");
+    std::fs::create_dir(&folder).unwrap();
+    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
+    let after = raw_user_path();
+    restore_raw_user_path(&kind, &before);
+    let refusal = linked.unwrap_err().to_string();
+    assert!(
+        refusal.contains("cra;zy") && refusal.contains("PATH is unchanged"),
+        "{refusal}"
+    );
+    assert_eq!(after, (kind, before));
 }
 
 #[cfg(windows)]

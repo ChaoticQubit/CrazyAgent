@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
     let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -59,6 +60,7 @@ fn launchd_plist_gives_the_engine_the_defining_home_escaped() {
     assert!(!text.contains("o&<"));
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_escapes_markup_in_paths() {
     let mut odd = service(Platform::MacOs);

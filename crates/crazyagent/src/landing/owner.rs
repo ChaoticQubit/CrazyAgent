@@ -2504,9 +2504,9 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// holds its head or merging its work onto the tip changes nothing, else the remainder a
 /// clean merge adds. A set whose work starts at the tip, so that merge is a fast-forward,
 /// shows its whole change without a merge, the same range a stored change shows. An empty
-/// change, a conflicting merge or a configured filter or merge driver leaves the whole
-/// change shown, measured as [`measured_from`] says (DEC-107). Inputs: the store, the
-/// owner repository, the change set and the tip. Output: the judgement.
+/// change, a conflicting merge, a git older than 2.40 or a configured filter or merge driver
+/// leaves the whole change shown, measured as [`measured_from`] says (DEC-107). Inputs: the
+/// store, the owner repository, the change set and the tip. Output: the judgement.
 fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
     let whole = |from: &str| -> Result<Shown, EngineError> {
         let stats = diff::stats(owner, from, &record.head)?;
@@ -2529,7 +2529,7 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
         return whole(&from).map(Judged::Open);
     }
     let paths = merge_paths(owner, &from, tip, &record.head)?;
-    if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
+    if owner.old_git() || uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
         return whole(&from).map(Judged::Open);
     }
     let (tree, conflicts) = merge(owner, &from, tip, &record.head)?;

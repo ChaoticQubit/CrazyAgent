@@ -239,11 +239,7 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
 
     let mut fixture = MasterFixture::new("codex");
     let mut process = stand_in_host(&mut fixture, PIPE_HOLDING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
-    assert_eq!(
-        u32::try_from(processes.leader.as_raw_nonzero().get()),
-        Ok(process.pid())
-    );
+    let processes = HarnessProcesses::wait(&fixture.project, || Some(process.pid()));
     let group = rustix::process::getpgid(Some(processes.descendant));
     assert_eq!(
         fixture
@@ -262,11 +258,13 @@ async fn closing_a_codex_host_kills_its_whole_group_and_releases_the_lease() {
         "SA-VID14-R2 F2: a clean close is settled"
     );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-    assert_eq!(group, Ok(processes.leader));
+    assert_eq!(group, Ok(processes.group));
     processes.assert_gone();
     assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
 
+/// A process that left the harness group holds neither custody nor the lease, by backend
+/// ([`HarnessProcesses::assert_stopped_by`]).
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
 async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lease() {
@@ -275,26 +273,18 @@ async fn a_codex_host_process_that_left_its_group_cannot_hold_custody_or_the_lea
     };
 
     let mut fixture = MasterFixture::new("codex");
+    let check = fixture.lineage_check();
     let mut process = stand_in_host(&mut fixture, GROUP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || Some(process.pid()));
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
     );
     let started = Instant::now();
-    let closed = process.close().await;
+    let closed = process.close().await.map(drop).map_err(|error| error.0);
     let elapsed = started.elapsed();
-    assert_eq!(
-        closed.map_err(|error| error.0),
-        Err("codex_host_cleanup_uncertain".to_owned()),
-        "after {elapsed:?}"
-    );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-    processes.assert_harness_gone();
-    assert_eq!(
-        rustix::process::test_kill_process(processes.descendant),
-        Ok(())
-    );
+    processes.assert_stopped_by(check, closed, "codex_host_cleanup_uncertain");
     assert!(fixture.sign_in("codex-group-next", 3).is_ok());
 }
 
@@ -307,7 +297,7 @@ async fn a_codex_host_process_that_left_its_group_is_stopped_with_the_host() {
 
     let mut fixture = MasterFixture::new("codex");
     let mut process = stand_in_host(&mut fixture, GROUP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || Some(process.pid()));
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
@@ -330,7 +320,7 @@ async fn a_codex_host_whose_group_keeps_an_unreaped_process_still_ends_and_relea
 
     let mut fixture = MasterFixture::new("codex");
     let mut process = stand_in_host(&mut fixture, ZOMBIE_HOLDING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || Some(process.pid()));
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
@@ -352,7 +342,7 @@ async fn a_codex_host_whose_group_keeps_an_unreaped_process_still_ends_and_relea
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    while rustix::process::test_kill_process_group(processes.group) != Err(rustix::io::Errno::SRCH)
     {
         assert!(
             started.elapsed() < Duration::from_secs(12),
@@ -375,7 +365,7 @@ async fn a_codex_host_whose_harness_it_can_never_reap_still_ends_and_releases_th
             "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
         )
         .await;
-        if !reap_before_the_host(&fixture.project) {
+        if !reap_before_the_host(&fixture.project, || Some(process.pid())) {
             continue;
         }
         let started = Instant::now();

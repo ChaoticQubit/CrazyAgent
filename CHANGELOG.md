@@ -68,6 +68,7 @@ Status of each version:
 - The TUI's Pick a pool box wraps its sentence inside the box instead of cutting it off.
 - On a project's Settings tab in the TUI, Move into CrazyAgent folder takes M instead of m, which the plugins section on that tab took for Add MCP server, so the move never started. Restart them, for the agents that can still open a hidden folder, takes R.
 - New Project asks for your GitHub sign-in once when the engine connects after the page opened, instead of twice.
+- The macOS release builds stopped at the app icon check: the dark app icon needs actool from Xcode 26, and the build machine's default Xcode is older. The build now runs actool from an installed Xcode 26 or newer, and stops before the long compile when none is installed.
 
 ### Security
 

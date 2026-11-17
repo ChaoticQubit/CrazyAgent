@@ -42,15 +42,17 @@ pub(super) fn permission_bits(metadata: &fs::Metadata) -> u32 {
 }
 
 /// What tells an entry left as it was from one changed or replaced between a move's check
-/// of its copy and the delete of its source: a write gives it a new size or modify time, and
-/// a rename over gives the path a new inode. The change time is left out, since deleting one
-/// hard link of a file changes it for every other link.
+/// of its copy and the delete of its source: its device, inode, size and modify time
+/// ([`Stamp::same_entry`]), and its change time, which alone moves for a same-size rewrite
+/// with its modify time put back, a new file given a freed inode, or any link of a
+/// hard-linked file once another link is deleted (V243-INODE-STAMPS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Stamp {
     device: u64,
     inode: u64,
     bytes: u64,
     modified: (i64, i64),
+    changed: (i64, i64),
 }
 
 impl Stamp {
@@ -68,10 +70,24 @@ impl Stamp {
         assert!(now >= 0 && window >= 0);
         modified + window > now
     }
+
+    /// Tells whether this stamp names the entry `checked` stamped, with the size and modify
+    /// time it had then: every field but the change time equal. Input: the stamp the check
+    /// saw. Output: the answer.
+    pub(super) fn same_entry(&self, checked: &Self) -> bool {
+        (self.device, self.inode, self.bytes, self.modified)
+            == (
+                checked.device,
+                checked.inode,
+                checked.bytes,
+                checked.modified,
+            )
+    }
 }
 
-/// The stamp of an entry. Unix: its device, inode, size and modify time to the nanosecond.
-/// Input: the entry's own metadata, links not followed. Output: the stamp.
+/// The stamp of an entry. Unix: its device, inode, size, modify time and change time, each
+/// time to the nanosecond. Input: the entry's own metadata, links not followed. Output: the
+/// stamp.
 #[cfg(unix)]
 pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
     use std::os::unix::fs::MetadataExt;
@@ -80,11 +96,12 @@ pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
         inode: metadata.ino(),
         bytes: metadata.size(),
         modified: (metadata.mtime(), metadata.mtime_nsec()),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
     })
 }
 
-/// The stamp of an entry. Windows: its size and modify time; none when the time is
-/// unreadable, so that entry is never deleted. Written, not tested.
+/// The stamp of an entry. Windows: its size and modify time, with no change time; none when
+/// the time is unreadable, so that entry is never deleted. Written, not tested.
 #[cfg(target_os = "windows")]
 pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
     let since = metadata
@@ -100,6 +117,7 @@ pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
             i64::try_from(since.as_secs()).ok()?,
             i64::from(since.subsec_nanos()),
         ),
+        changed: (0, 0),
     })
 }
 

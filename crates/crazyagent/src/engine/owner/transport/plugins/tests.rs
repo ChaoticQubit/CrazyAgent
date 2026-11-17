@@ -327,3 +327,132 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         "the check lists the context-mode tools: {tools:?}"
     );
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
+    const ID: &str = "mcp-0123456789abcdef01234567";
+    let directory = tempfile::tempdir().unwrap();
+    let root = crate::sandbox::canonical(directory.path())
+        .unwrap()
+        .join("engine");
+    std::fs::create_dir_all(&root).unwrap();
+    let check = |command: &Path| {
+        boundary_check(
+            &root,
+            ID,
+            command.to_str().unwrap(),
+            &["--list".to_owned()],
+            &[],
+            &[],
+            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap_err()
+    };
+    assert_eq!(
+        check(&root.join("missing-server.exe")),
+        "server_command_not_found"
+    );
+    let server = std::env::current_exe().unwrap();
+    let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
+    let checked = check(&server);
+    if helper.is_file() {
+        assert_eq!(checked, "server_exited");
+    } else {
+        assert_eq!(
+            checked,
+            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+        );
+    }
+    for name in ["project", "home", "tmp"] {
+        assert!(root.join(CHECK_FOLDER).join(ID).join(name).is_dir());
+    }
+}
+
+/// The read entry a server's check was granted on its program's folder is taken back when the
+/// server is removed, and its container is deleted with the folder Windows gave it, so nothing
+/// of the dead container stays; without the boundary helper beside the engine nothing is
+/// granted and the check says why.
+#[cfg(target_os = "windows")]
+#[tokio::test]
+async fn a_removed_servers_check_grants_and_container_are_taken_back() {
+    const ID: &str = "mcp-0123456789abcdef01234568";
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = base.join("engine");
+    let folder = base.join("server");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&folder).unwrap();
+    let server = folder.join("server.exe");
+    std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
+    let entries = || {
+        let listed =
+            crate::spawn_gate::output(std::process::Command::new("icacls").arg(&folder)).unwrap();
+        assert!(listed.status.success(), "{listed:?}");
+        String::from_utf8_lossy(&listed.stdout).into_owned()
+    };
+    let before = entries();
+    let checked = boundary_check(
+        &root,
+        ID,
+        server.to_str().unwrap(),
+        &["--list".to_owned()],
+        &[],
+        &[],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap_err();
+    let helper = std::env::current_exe()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    if !helper.is_file() {
+        assert_eq!(
+            checked,
+            crate::plugins::check_refused(crate::sandbox::windows::APPCONTAINER_MISSING)
+        );
+        return;
+    }
+    assert_eq!(checked, "server_exited");
+    assert_ne!(entries(), before);
+    let checks = root.join(CHECK_FOLDER);
+    let profile = check_profile(&checks, ID);
+    let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
+        .unwrap()
+        .container;
+    let container = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join("Packages")
+        .join(name);
+    assert!(container.is_dir());
+    let cleared = check_folders::remove_check_folder(&checks, ID);
+    assert!(!checks.join(ID).exists());
+    cleared.await.unwrap();
+    assert_eq!(entries(), before);
+    assert!(!profile.exists());
+    assert!(!container.exists());
+}
+
+/// A server removed while one of its checks runs keeps its check folder until that check
+/// ends, so the check cannot put back what the removal cleared; a server with no check
+/// running is cleared at once.
+#[tokio::test]
+async fn a_removed_servers_check_folder_is_cleared_when_its_running_check_ends() {
+    const ID: &str = "mcp-0123456789abcdef01234569";
+    const IDLE: &str = "mcp-0123456789abcdef0123456a";
+    let directory = tempfile::tempdir().unwrap();
+    let checks = directory.path().join(CHECK_FOLDER);
+    for id in [ID, IDLE] {
+        std::fs::create_dir_all(checks.join(id).join("home")).unwrap();
+    }
+    let slot = CheckSlot::take().unwrap();
+    let counted = CheckOf::take(ID, checks.clone(), &slot);
+    removed_server_checks(&checks, IDLE);
+    assert!(!checks.join(IDLE).exists());
+    removed_server_checks(&checks, ID);
+    assert!(checks.join(ID).is_dir());
+    assert!(check_folders::checking().removed.contains(&ID.to_owned()));
+    drop(counted);
+    assert!(!checks.join(ID).exists());
+    assert!(!check_folders::checking().removed.contains(&ID.to_owned()));
+    assert!(!check_folders::checking().running.contains(&ID.to_owned()));
+    drop(slot);
+}

@@ -335,6 +335,15 @@ fn option_rows(
     lines
 }
 
+/// The projects home hint, naming a folder in this system's own home form.
+const HOME_PATH_HINT: &str = if cfg!(target_os = "windows") {
+    "Use a full folder path, such as C:\\Users\\you\\Projects."
+} else if cfg!(target_os = "linux") {
+    "Use a full folder path, such as /home/you/Projects."
+} else {
+    "Use a full folder path, such as /Users/you/Projects."
+};
+
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
 /// request, otherwise the setup, projects home or GitHub sentence for the code,
@@ -345,7 +354,7 @@ pub fn setup_plain(code: &str) -> String {
         "trusted_connection_unavailable" | "controller_disconnected" => {
             "CrazyAgent is not connected to the engine right now."
         }
-        "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        "home_path_invalid" => HOME_PATH_HINT,
         "cleanup_settings_invalid" => {
             "The stored finished agents setting is not one this version knows."
         }
