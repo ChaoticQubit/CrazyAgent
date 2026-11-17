@@ -498,16 +498,10 @@ pub(crate) fn within<T>(
 /// Inputs: the transaction and the set's id. Output: whether the set has a row to log, or
 /// the refusal.
 pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineError> {
-    let Some(cells) = row_cells(tx, id)? else {
+    let Some((project, digest)) = keep_row(tx, id)? else {
         return Ok(false);
     };
     let refused = || failure("landing_log_row");
-    let project = cells
-        .get("project")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(refused)?
-        .to_owned();
-    let owner = crate::protocol::ProjectId::new(project.as_str()).map_err(|_| refused())?;
     let number: Option<i64> = tx
         .query_row(
             "SELECT number FROM landing_change_set_numbers WHERE change_set=?1",
@@ -520,19 +514,44 @@ pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineE
         .map(u64::try_from)
         .transpose()
         .map_err(|_| refused())?;
-    let text = serde_json::to_vec(&cells).map_err(|_| refused())?;
-    let holder = format!("landing_change_sets/{id}/row");
-    let row = crate::owner_texts::keep(tx, &holder, Some(&owner), &text)?;
     let saved = Saved {
         change_set: id.to_owned(),
         project,
-        row,
+        row: digest,
         number,
     };
     record(tx, &Change::ChangeSetSaved(saved))?;
     assert!(!tx.is_autocommit());
     Ok(true)
 }
+
+/// Keeps a change set's stored row, its cells by column name, as an owner text under the
+/// set's row holder, which lets go the text the holder had. Inputs: the writer's
+/// transaction and the set's id. Output: the set's project and the row's digest, none
+/// without the row, or `landing_log_row` or the owner text's refusal.
+fn keep_row(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> Result<Option<(String, crate::owner_texts::TextDigest)>, EngineError> {
+    let Some(cells) = row_cells(tx, id)? else {
+        return Ok(None);
+    };
+    let refused = || failure("landing_log_row");
+    let project = cells
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(refused)?
+        .to_owned();
+    let owner = crate::protocol::ProjectId::new(project.as_str()).map_err(|_| refused())?;
+    let text = serde_json::to_vec(&cells).map_err(|_| refused())?;
+    let holder = format!("{CHANGE_SETS}/{id}/row");
+    let row = crate::owner_texts::keep(tx, &holder, Some(&owner), &text)?;
+    assert_eq!(owner.as_str(), project);
+    Ok(Some((project, row)))
+}
+
+/// The change set table, logged by its rows' digests rather than by cells (QUESTION-1056 A).
+const CHANGE_SETS: &str = "landing_change_sets";
 
 /// The most columns a change set row has, a bound on the reads of its cells.
 const ROW_COLUMNS_MAX: usize = 64;
@@ -545,7 +564,7 @@ fn row_cells(
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, EngineError> {
     let unavailable = |_| failure("changes_unavailable");
     let mut statement = db
-        .prepare("SELECT * FROM landing_change_sets WHERE id=?1")
+        .prepare(&format!("SELECT * FROM {CHANGE_SETS} WHERE id=?1"))
         .map_err(unavailable)?;
     let names: Vec<String> = statement
         .column_names()
@@ -583,15 +602,9 @@ fn row_cells(
 /// connection and the save. Output: Ok, `landing_log_row`, `landing_log_row_cell` or the
 /// store's refusal.
 fn apply_saved(db: &Connection, saved: &Saved) -> Result<(), EngineError> {
-    let mut missing = Vec::new();
-    let text = crate::owner_texts::replayed(db, &saved.row, &mut missing)?;
-    if !missing.is_empty() {
-        assert!(text.is_empty(), "a missing text reads as none");
+    if !upsert_kept(db, &saved.change_set, &saved.project, &saved.row)? {
         return Ok(());
     }
-    let cells: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(&text).map_err(|_| failure("landing_log_row"))?;
-    upsert_row(db, saved, &cells)?;
     if let Some(number) = saved.number {
         let number = i64::try_from(number).map_err(|_| failure("landing_log_row"))?;
         db.execute(
@@ -604,25 +617,48 @@ fn apply_saved(db: &Connection, saved: &Saved) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Upserts a change set row from the text kept under its digest; a text a later write
+/// released is a superseded row and is skipped. Inputs: the connection, the set's id and
+/// project and the digest. Output: whether the row was upserted, `landing_log_row` for a
+/// text that is not one row's cells, or the refusal of [`upsert_row`].
+fn upsert_kept(
+    db: &Connection,
+    change_set: &str,
+    project: &str,
+    row: &crate::owner_texts::TextDigest,
+) -> Result<bool, EngineError> {
+    let mut missing = Vec::new();
+    let text = crate::owner_texts::replayed(db, row, &mut missing)?;
+    if !missing.is_empty() {
+        assert!(text.is_empty(), "a missing text reads as none");
+        return Ok(false);
+    }
+    let cells: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&text).map_err(|_| failure("landing_log_row"))?;
+    upsert_row(db, change_set, project, &cells)?;
+    assert!(missing.is_empty());
+    Ok(true)
+}
+
 /// Upserts a change set row from its cells by column name: a cell the table has no column
 /// for, or of a type no column holds, fails closed; a column with no cell takes its default.
-/// Inputs: the connection, the save and the cells. Output: Ok, `landing_log_row` for cells of
-/// another set, `landing_log_row_cell`, or the store's refusal.
+/// A store without the table refuses every cell. Inputs: the connection, the set's id and
+/// project and the cells. Output: Ok, `landing_log_row` for cells of another set,
+/// `landing_log_row_cell`, or the store's refusal.
 fn upsert_row(
     db: &Connection,
-    saved: &Saved,
+    change_set: &str,
+    project: &str,
     cells: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<(), EngineError> {
     use rusqlite::types::Value as Stored;
     use serde_json::Value as Cell;
     let refused = || failure("landing_log_row_cell");
     let named = |key: &str| cells.get(key).and_then(Cell::as_str);
-    if named("id") != Some(saved.change_set.as_str())
-        || named("project") != Some(saved.project.as_str())
-    {
+    if named("id") != Some(change_set) || named("project") != Some(project) {
         return Err(failure("landing_log_row"));
     }
-    let columns = table_columns(db, "landing_change_sets")?;
+    let columns = table_columns(db, CHANGE_SETS)?;
     let mut names = Vec::with_capacity(cells.len());
     let mut values = Vec::with_capacity(cells.len());
     for (name, value) in cells {
@@ -644,7 +680,7 @@ fn upsert_row(
         .filter(|column| column.as_str() != "id")
         .map(|column| format!("\"{column}\"=excluded.\"{column}\""));
     let sql = format!(
-        "INSERT INTO landing_change_sets({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
+        "INSERT INTO {CHANGE_SETS}({}) VALUES ({}) ON CONFLICT(id) DO UPDATE SET {}",
         names.join(","),
         marks.collect::<Vec<_>>().join(","),
         updates.collect::<Vec<_>>().join(",")
@@ -820,7 +856,8 @@ pub(crate) fn first_run(
         return Ok(false);
     }
     let mut rows: i64 = 0;
-    for (table, _, _) in TABLES {
+    let tables = TABLES.map(|(table, _, _)| table);
+    for table in [CHANGE_SETS].into_iter().chain(tables) {
         if has(tx, table)? {
             let count: i64 = tx
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -843,18 +880,74 @@ pub(crate) fn first_run(
 
 /// Appends a snapshot run of every landing table as it stands, each in chunks that fit one
 /// event body and at least one chunk each (a table the store lacks is one empty chunk), so
-/// replay of a run always clears and fills them all. Inputs: the appender and the writer's
-/// clock. Output: the seq of the run's closing event, or `landing_log_snapshot_rows`,
+/// replay of a run always clears and fills them all. Change sets lead, each as its id,
+/// project and row digest, the row kept as an owner text. Inputs: the appender and the
+/// writer's clock. Output: the seq of the run's closing event, or `landing_log_snapshot_rows`,
 /// `landing_log_snapshot_cell`, `landing_log_row_too_large` or the log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
-    let mut chunks = Vec::new();
+    let mut chunks = pack(CHANGE_SETS, appender.project(kept_rows)?)?;
     for (table, columns, _) in TABLES {
         let rows = appender.project(|tx| table_rows(tx, table, columns))?;
         chunks.extend(pack(table, rows)?);
     }
-    assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
-    assert_eq!(chunks[0].table, TABLES[0].0);
+    assert!(chunks.len() > TABLES.len(), "one chunk or more per table");
+    assert_eq!(chunks[0].table, CHANGE_SETS);
     appender.snapshot(Aggregate::Landing, at_ms, chunks)
+}
+
+/// Every change set as a snapshot carries it: its id, project and the digest of its row,
+/// kept as an owner text in the run's transaction; a store without the table has none.
+/// Input: the run's transaction. Output: the rows by id, `landing_log_snapshot_rows` past
+/// [`SNAPSHOT_ROWS_MAX`], or the refusal of [`keep_row`].
+fn kept_rows(tx: &Transaction<'_>) -> Result<Vec<serde_json::Value>, EngineError> {
+    if !has(tx, CHANGE_SETS)? {
+        return Ok(Vec::new());
+    }
+    let unavailable = |_| failure("changes_unavailable");
+    let limit =
+        i64::try_from(SNAPSHOT_ROWS_MAX + 1).map_err(|_| failure("landing_log_snapshot_rows"))?;
+    let ids = tx
+        .prepare(&format!(
+            "SELECT id FROM {CHANGE_SETS} ORDER BY id LIMIT ?1"
+        ))
+        .map_err(unavailable)?
+        .query_map([limit], |row| row.get::<_, String>(0))
+        .map_err(unavailable)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(unavailable)?;
+    if ids.len() > SNAPSHOT_ROWS_MAX {
+        return Err(failure("landing_log_snapshot_rows"));
+    }
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let (project, row) = keep_row(tx, &id)?.ok_or_else(|| failure("changes_unavailable"))?;
+        rows.push(serde_json::json!([id, project, row]));
+    }
+    assert!(rows.len() <= SNAPSHOT_ROWS_MAX);
+    assert!(
+        rows.iter()
+            .all(|row| row.as_array().is_some_and(|row| row.len() == 3))
+    );
+    Ok(rows)
+}
+
+/// Upserts each change set of a snapshot chunk from the row text its digest names, skipping
+/// a row a later write released. Inputs: the connection and the chunk. Output: Ok,
+/// `landing_log_chunk_invalid` for a row that is not an id, a project and a digest, or the
+/// refusal of [`upsert_kept`].
+fn restore_kept(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
+    assert_eq!(chunk.table, CHANGE_SETS);
+    if chunk.rows.len() > SNAPSHOT_ROWS_MAX {
+        return Err(failure("landing_log_chunk_invalid"));
+    }
+    for row in &chunk.rows {
+        let (change_set, project, digest): (String, String, crate::owner_texts::TextDigest) =
+            serde_json::from_value(row.clone())
+                .map_err(|_| failure("landing_log_chunk_invalid"))?;
+        upsert_kept(db, &change_set, &project, &digest)?;
+    }
+    assert!(chunk.rows.len() <= SNAPSHOT_ROWS_MAX);
+    Ok(())
 }
 
 /// Every row of one landing table in column order, each as a JSON array of its cells; a
@@ -960,6 +1053,9 @@ fn pack(table: &str, rows: Vec<serde_json::Value>) -> Result<Vec<Chunk>, EngineE
 /// `landing_log_chunk_invalid` for an unknown table, a row that is not that table's cells,
 /// or a row the table refuses.
 fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
+    if chunk.table == CHANGE_SETS {
+        return restore_kept(db, chunk);
+    }
     let invalid = || failure("landing_log_chunk_invalid");
     let (table, columns, schema) = TABLES
         .into_iter()
@@ -1083,7 +1179,7 @@ pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
 /// `changes_unavailable`.
 fn clear(db: &Connection) -> Result<(), EngineError> {
     let tables = TABLES.map(|(table, _, _)| table);
-    for table in tables.into_iter().chain(["landing_change_sets"]) {
+    for table in tables.into_iter().chain([CHANGE_SETS]) {
         if has(db, table)? {
             db.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|_| failure("changes_unavailable"))?;
