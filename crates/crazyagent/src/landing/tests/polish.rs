@@ -768,3 +768,24 @@ fn on_git_2_39_a_cut_short_undo_of_a_master_merge_marks_the_set_it_closed_undone
     );
     shape_git(None);
 }
+
+/// V243-GIT-FLOOR-THIRD-DOOR (#312 F1): on git 2.39 the master's own fix of a conflicted set
+/// is not landed by the master and waits for the owner, a clean no where the conflict-fix
+/// check refused with `changes_git_old` and the master runtime logged it. On 2.40 it lands.
+#[test]
+fn on_git_2_39_a_master_fix_of_a_conflict_waits_for_the_owner_and_lands_on_2_40() {
+    let case = Case::new();
+    let (sub, fix, resolved) = master_fixing_a_conflict(&case);
+    shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    let waited = land_master_set(&case.db, &case.home, &fix).map_err(|error| error.0);
+    assert_eq!(waited, Ok(None), "the master's set waits, no refusal");
+    master_set_waits(&case, &fix, &sub, ChangeState::Conflict, "git 2.39");
+    shape_git(Some("git version 2.40.0"));
+    assert!(matches!(
+        land_master_set(&case.db, &case.home, &fix).map_err(|error| error.0),
+        Ok(Some(AcceptOutcome::Landed { .. }))
+    ));
+    assert_eq!(case.view(&sub).state, ChangeState::Accepted);
+    assert_eq!(case.owner(&["show", "main:README"]), resolved);
+    shape_git(None);
+}
