@@ -7,6 +7,7 @@ use crate::storage::opening::Opening;
 use crate::worktrees::{Admission, Identity, LeaseRecord, LeaseState, WorktreeLease};
 use rusqlite::types::Value;
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 
 type Tables = (Vec<Vec<Value>>, Vec<Vec<Value>>);
 
@@ -55,16 +56,26 @@ fn admission(repository: &str) -> Admission {
     }
 }
 
-/// A lease record of project p1 with no checked-out directory, under the engine's branch.
-/// Inputs: the task, the repository and the state. Output: the record.
+/// The 64-hex digest a test lease's path and branch end in, one per task, as `prepare`
+/// builds both from one digest. Input: the task. Output: the digest.
+fn digest_of(task: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(task.as_bytes()));
+    assert_eq!(digest.len(), 64);
+    digest
+}
+
+/// A lease record of project p1 with no checked-out directory, its path and the engine's
+/// branch ending in one digest. Inputs: the task, the repository and the state. Output:
+/// the record.
 fn record_of(task: &str, repository: &str, state: LeaseState) -> LeaseRecord {
+    let digest = digest_of(task);
     LeaseRecord {
         lease: WorktreeLease {
             project_id: ProjectId::new("p1").unwrap(),
             task_id: TaskId::new(task).unwrap(),
             repository: repository.into(),
-            path: format!("{repository}/.wt/{task}"),
-            branch: format!("crazyagent/{}", "a".repeat(64)),
+            path: format!("{repository}/.wt/{digest}"),
+            branch: format!("crazyagent/{digest}"),
             owner_session: SessionId::new("s1").unwrap(),
             native_descendant: None,
             state,
@@ -237,12 +248,11 @@ fn an_event_that_does_not_fit_the_tables_is_refused() {
     assert_eq!((before.0.len(), before.1.len()), (1, 1));
 }
 
-/// v2.5 L6 and L1-N1: replay reads only the three worktrees kinds at schema 1 with exactly
-/// their fields, ids as ids and a typed record whose texts are checked paths, the engine's
-/// branch and a commit id; anything else, free text in any of them included, is refused.
-#[test]
-fn replay_refuses_a_worktrees_event_it_does_not_know() {
-    let logged = |kind: &str, schema: u16, body: &str| Logged {
+/// One logged worktrees event at seq 1. Inputs: the kind, the schema and the body text.
+/// Output: the event as replay reads it.
+fn logged(kind: &str, schema: u16, body: &str) -> Logged {
+    assert!(!kind.is_empty());
+    Logged {
         seq: 1,
         revision: 1,
         aggregate: Aggregate::Worktrees,
@@ -250,7 +260,11 @@ fn replay_refuses_a_worktrees_event_it_does_not_know() {
         schema,
         at_ms: 1,
         body: body.as_bytes().to_vec(),
-    };
+    }
+}
+
+/// The body of t1's save at /r1 as `record` logs it, checked to decode. Output: the text.
+fn good_save() -> String {
     let Event::Saved(event) = saved("t1", "/r1", LeaseState::Ready) else {
         unreachable!("saved builds a save")
     };
@@ -259,12 +273,28 @@ fn replay_refuses_a_worktrees_event_it_does_not_know() {
         decode(&logged(KIND_SAVED, 1, &good)),
         Ok(Event::Saved(_))
     ));
+    good
+}
+
+/// A body with one text replaced, checked to occur exactly once. Inputs: the body, the
+/// text and its replacement. Output: the changed body.
+fn swapped_once(body: &str, from: &str, to: &str) -> String {
+    assert_eq!(body.matches(from).count(), 1, "{from}");
+    body.replacen(from, to, 1)
+}
+
+/// v2.5 L6 and L1-N1: replay reads only the three worktrees kinds at schema 1 with exactly
+/// their fields, ids as ids and a typed record whose paths are checked absolute paths, its
+/// branch the engine's and its head a commit id; free text in an id, the body, the branch or
+/// the head is refused, as are a relative path and a `..` part.
+#[test]
+fn replay_refuses_a_worktrees_event_it_does_not_know() {
+    let good = good_save();
     let secret = "the owner's secret prompt with sk-ant-api03-key";
-    let swapped = |from: &str, to: &str| {
-        assert_eq!(good.matches(from).count(), 1, "{from}");
-        good.replacen(from, to, 1)
-    };
-    let branch = format!("crazyagent/{}", "a".repeat(64));
+    let swapped = |from: &str, to: &str| swapped_once(&good, from, to);
+    let digest = digest_of("t1");
+    let branch = format!("crazyagent/{digest}");
+    let path = format!("\"path\":\"/r1/.wt/{digest}\"");
     for (kind, schema, body) in [
         ("LeaseDropped", 1, good.clone()),
         (KIND_SAVED, 2, good.clone()),
@@ -287,12 +317,12 @@ fn replay_refuses_a_worktrees_event_it_does_not_know() {
         (
             KIND_SAVED,
             1,
-            swapped("\"path\":\"/r1/.wt/t1\"", "\"path\":\"r1/.wt/t1\""),
+            swapped(&path, &format!("\"path\":\"r1/.wt/{digest}\"")),
         ),
         (
             KIND_SAVED,
             1,
-            swapped("\"path\":\"/r1/.wt/t1\"", "\"path\":\"/r1/../t1\""),
+            swapped(&path, &format!("\"path\":\"/r1/../{digest}\"")),
         ),
         (KIND_SAVED, 1, swapped(&branch, secret)),
         (KIND_SAVED, 1, swapped(&"0".repeat(40), secret)),
@@ -515,4 +545,28 @@ fn the_first_run_writes_nothing_without_worktree_rows() {
         !first_run(&tx, Opening::for_test(3)).unwrap(),
         "no state table"
     );
+}
+
+/// V250-L6-LOWS F1 and F2: a save body decodes only with exactly its fields at every level
+/// and a lease path ending in its branch's digest; a key more in the record, its admission
+/// or the admission's root identity, or a path off the digest, is refused.
+#[test]
+fn a_save_with_a_nested_key_more_or_a_path_off_its_digest_is_refused() {
+    let good = good_save();
+    let note = "\"note\":\"the owner's secret prompt with sk-ant-api03-key\",";
+    let digest = digest_of("t1");
+    let path = format!("/r1/.wt/{digest}");
+    for body in [
+        swapped_once(&good, "\"head\":", &format!("{note}\"head\":")),
+        swapped_once(&good, "\"admission\":{", &format!("\"admission\":{{{note}")),
+        swapped_once(&good, "\"root\":{", &format!("\"root\":{{{note}")),
+        swapped_once(&good, &path, "/r1/.wt/the owner's secret prompt"),
+        swapped_once(&good, &path, &format!("/r1/.wt/{}", digest_of("t2"))),
+    ] {
+        assert_eq!(
+            code(decode(&logged(KIND_SAVED, 1, &body))),
+            Some("worktrees_log_event_invalid".into()),
+            "{body}"
+        );
+    }
 }

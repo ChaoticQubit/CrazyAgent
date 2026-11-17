@@ -51,6 +51,18 @@ impl Store {
         rusqlite::Connection::open(self.root.path().join("db")).unwrap()
     }
 
+    /// Moves the store's revision to the newest `events` row, as a client catching up from
+    /// events does after an engine write it did not make (an ide ask moves the revision).
+    fn catch_up(&mut self) {
+        let cursor: i64 = self
+            .database()
+            .query_row("SELECT MAX(cursor) FROM events", [], |row| row.get(0))
+            .unwrap();
+        let cursor = u64::try_from(cursor).unwrap();
+        assert!(cursor > self.revision, "an ask published a newer revision");
+        self.revision = cursor;
+    }
+
     async fn command(&mut self, command: Command) -> Outcome {
         self.sequence += 1;
         let reply = self
@@ -241,9 +253,20 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     );
     assert_eq!(store.memories(&p, None).await, shown);
     let database = store.database();
+    let host = crate::ide::log::seed(&database);
     let now = 1_000_000;
-    ask(&database, &p, &id("fact"), 1, Decision::Reject, now).unwrap();
-    ask(&database, &p, &id("fact"), 1, Decision::Approve, now + 1).unwrap();
+    ask(&database, &host, &p, &id("fact"), 1, Decision::Reject, now).unwrap();
+    ask(
+        &database,
+        &host,
+        &p,
+        &id("fact"),
+        1,
+        Decision::Approve,
+        now + 1,
+    )
+    .unwrap();
+    store.catch_up();
     let waiting = asks(&database, &p, now + 2).unwrap();
     assert_eq!(
         waiting
@@ -280,6 +303,7 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     for (n, entry) in many.iter().enumerate() {
         ask(
             &database,
+            &host,
             &r,
             &id(entry),
             1,
@@ -288,6 +312,7 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
         )
         .unwrap();
     }
+    store.catch_up();
     assert_eq!(
         asks(&database, &r, now + 100)
             .unwrap()
@@ -345,7 +370,17 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
         }),
         "a rejection from the IDE is only asked too"
     );
-    ask(&database, &p, &id("other"), 1, Decision::Reject, now + 3).unwrap();
+    ask(
+        &database,
+        &host,
+        &p,
+        &id("other"),
+        1,
+        Decision::Reject,
+        now + 3,
+    )
+    .unwrap();
+    store.catch_up();
     assert_eq!(
         asks(&database, &p, now + 4)
             .unwrap()
@@ -445,7 +480,17 @@ async fn an_ask_table_from_an_earlier_build_gains_the_decision_column() {
         [("fact".to_owned(), Decision::Approve)],
         "an ask from the earlier build reads as the approval it was"
     );
-    ask(&database, &old, &id("fact"), 1, Decision::Reject, now + 2).unwrap();
+    let host = crate::ide::log::seed(&database);
+    ask(
+        &database,
+        &host,
+        &old,
+        &id("fact"),
+        1,
+        Decision::Reject,
+        now + 2,
+    )
+    .unwrap();
     assert_eq!(
         decided(&database, now + 3),
         [("fact".to_owned(), Decision::Reject)]

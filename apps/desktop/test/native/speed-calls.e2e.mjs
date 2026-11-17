@@ -152,6 +152,9 @@ test("C1: the candidate makes no bridge call 2.3.2 never made and none more than
       if (!kept) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     }
   }
+  for (const cmd of ["desktop_ide_focus", "desktop_team_events"]) {
+    assert.equal(counts.candidate["idle:home"][cmd] ?? 0, 0, `v2.5 S3c: a minute idle on Home reads ${cmd} only on an engine change, evidence ${evidence}`);
+  }
   const findings = countFindings(counts.base, counts.candidate);
   writeFileSync(join(evidence, "findings.json"), JSON.stringify(findings, null, 1));
   assert.deepEqual(findings, [], `calls 2.4.x adds over 2.3.2 (scenario cmd base -> candidate):\n${findings.map((item) => `${item.scenario} ${item.cmd} ${item.base} -> ${item.candidate}`).join("\n")}\nevidence ${evidence}`);
