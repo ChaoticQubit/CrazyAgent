@@ -1,15 +1,15 @@
 use super::acl::{ACL_BYTES_MAX, Local};
 use super::{BoundaryError, last_error, windows};
 use crate::dacl::{
-    ANCESTOR_CHANGES, DENY_TYPES, FILE_CHANGES, OWN_FOLDER_CHANGES, SID_BYTES_MAX, other_writer,
-    trusted_owner,
+    ANCESTOR_CHANGES, DENY_TYPES, FILE_CHANGES, OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX,
+    first_changeable_part, held_only_by,
 };
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
-    ERROR_INVALID_NAME, ERROR_INVALID_SID, ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE,
-    INVALID_HANDLE_VALUE,
+    ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_INVALID_SID, ERROR_PATH_NOT_FOUND,
+    ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
@@ -91,21 +91,40 @@ pub fn owner_only(program: &Path) -> Result<(), BoundaryError> {
 fn changed_only_by(path: &Path, user: &[u8], rights: u32) -> Result<(), BoundaryError> {
     let (owner, dacl) =
         security(path).map_err(windows("read a program's owner and access list"))?;
-    if !trusted_owner(&owner, user) {
-        return Err(BoundaryError::Refused(
-            "another account owns the program or a folder above it",
-        ));
-    }
-    let Some(dacl) = dacl else {
-        return Err(BoundaryError::Refused(
-            "the program or a folder above it has no access list, so everyone can change it",
-        ));
+    held_only_by(&owner, dacl.as_deref(), user, rights).map_err(BoundaryError::Refused)
+}
+
+/// The first part of `path`, the entry first, that an account other than SYSTEM, the
+/// administrators, TrustedInstaller and the engine's own user can change, each part read
+/// where it sits without following a link ([`crate::dacl::first_changeable_part`]). A
+/// relative or too deep path, or an unread user, names the path itself. Input: the path.
+/// Output: the part, or none.
+pub fn changeable_part(path: &Path) -> Option<PathBuf> {
+    let Ok(user) = user_sid() else {
+        return Some(path.to_path_buf());
     };
-    match other_writer(&dacl, user, rights).map_err(BoundaryError::Refused)? {
-        None => Ok(()),
-        Some(_) => Err(BoundaryError::Refused(
-            "another account can change the program or a folder above it",
-        )),
+    if !path.is_absolute() || path.ancestors().nth(FOLDERS_MAX + 1).is_some() {
+        return Some(path.to_path_buf());
+    }
+    let parts: Vec<Part> = path.ancestors().map(read_part).collect();
+    assert!(!parts.is_empty() && parts.len() <= FOLDERS_MAX + 1);
+    first_changeable_part(&parts, &user)
+        .and_then(|depth| path.ancestors().nth(depth))
+        .map(Path::to_path_buf)
+}
+
+/// Reads one part of a path where it sits, without following a link: missing when Windows
+/// finds no file or folder there, unreadable on any other failure. Input: the part.
+/// Output: the read.
+fn read_part(part: &Path) -> Part {
+    match security(part) {
+        Ok((owner, list)) => Part::Found {
+            owner,
+            list,
+            folder: std::fs::symlink_metadata(part).is_ok_and(|metadata| metadata.is_dir()),
+        },
+        Err(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => Part::Missing,
+        Err(_) => Part::Unreadable,
     }
 }
 

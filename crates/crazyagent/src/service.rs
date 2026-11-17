@@ -99,11 +99,10 @@ pub struct Status {
     pub pid: Option<u32>,
 }
 
-/// Builds the PATH the service gives the engine for its harness lookup: the absolute
-/// entries of the installing shell's PATH, then `~/.local/bin` and the usual system
-/// folders, each once. Folders inside the running AppImage's mount folder `appdir` and
-/// folders [`changeable_by_others`] names are left out, since the service outlives the
-/// mount and must not look harnesses up where another user can plant one.
+/// Builds the PATH the service gives the engine for its harness lookup: the absolute entries
+/// of the installing shell's PATH, then `~/.local/bin` and the usual system folders, each
+/// once, leaving out folders in the AppImage mount `appdir`, ones [`changeable_by_others`]
+/// names and, on Windows, missing ones, where a drive added later could plant a harness.
 /// Inputs: the current PATH, home folder and mount folder. Output: the joined PATH.
 pub fn service_path(
     current: Option<&OsStr>,
@@ -127,6 +126,7 @@ pub fn service_path(
             && !appdir
                 .as_ref()
                 .is_some_and(|appdir| canonical(&folder).starts_with(appdir))
+            && (!cfg!(windows) || folder.is_dir())
             && changeable_by_others(&folder).is_none()
         {
             folders.push(folder);
@@ -1067,18 +1067,22 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
     None
 }
 
-/// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
-/// runs from the folder the installer chose. Input unused. Output: none.
-#[cfg(not(unix))]
-pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
-    None
+/// The first entry on a path that an account other than SYSTEM, the administrators,
+/// TrustedInstaller and this user can change, read as written and with its links resolved
+/// ([`crazyagent_win_sandbox::changeable_part`]); an unreadable entry counts. Input: the
+/// absolute path. Output: the entry, or none.
+#[cfg(windows)]
+pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
+    crazyagent_win_sandbox::changeable_part(path)
+        .or_else(|| crazyagent_win_sandbox::changeable_part(&canonical(path)))
 }
 
-/// Reports no changeable entry where Unix owners and modes do not exist. Input unused.
-/// Output: none.
-#[cfg(not(unix))]
-pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
-    None
+/// [`changeable_by_others`] for the tools the resolver runs. Windows has no sticky folder,
+/// and a folder further up already passes when others may only add to it. Input: the
+/// absolute path. Output: the entry, or none.
+#[cfg(windows)]
+pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
+    changeable_by_others(path)
 }
 
 /// Whether a path lies on a disk image or another disk (`/Volumes/...`) or in a Gatekeeper
