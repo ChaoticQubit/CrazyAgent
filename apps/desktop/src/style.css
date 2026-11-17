@@ -231,7 +231,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .windowed-row { position: absolute; left: 0; right: 0; }
 
 .list-head, .account-row { display: grid; grid-template-columns: minmax(130px, 2fr) minmax(64px, 1fr) minmax(104px, 1fr) 132px 40px; gap: var(--space-3); align-items: center; padding: 0 var(--space-3); }
-.list-head { height: 32px; font-family: var(--mono); font-size: 12px; color: var(--text-3); border-bottom: 1px solid var(--border); }
+.list-head { height: 32px; font-family: var(--mono); font-size: var(--font-secondary); color: var(--text-3); border-bottom: 1px solid var(--border); }
 .account-row { width: 100%; height: 100%; border: 0; border-bottom: 1px solid var(--border); background: transparent; text-align: left; cursor: pointer; }
 .account-row:hover { background: var(--surface-2); }
 .cell { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -295,7 +295,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .details-grid dt { color: var(--text-3); font-size: 12px; }
 .details-grid dd { margin: 0; min-width: 0; }
 .item-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); align-items: center; padding: var(--space-3) var(--space-4); }
-.item-row .title { font-weight: 600; }
+.item-row .title { font-weight: var(--weight-ui); }
 .review { margin: 0 var(--space-4) 14px; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-panel); display: grid; gap: 6px; }
 
 .stub-page { padding-top: var(--space-6); }
@@ -317,7 +317,7 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .account-line .account-row { flex: 1 1 0; min-width: 0; border-bottom: 0; }
 .account-line > .menu { position: sticky; right: 0; flex: 0 0 44px; align-self: stretch; display: flex; align-items: center; background: var(--surface); }
 .account-line > .menu:has(.menu-list) { z-index: var(--z-menu); }
-.account-pick { flex: none; width: 16px; height: 16px; margin: 0 var(--space-2) 0 var(--space-3); accent-color: var(--accent-solid); }
+.account-pick { flex: none; width: 16px; height: 16px; margin: 0 var(--space-2) 0 var(--space-3); accent-color: var(--primary); }
 .accounts-selectable .list-head { padding-left: calc(36px + var(--space-3)); }
 .accounts-actions .list-head { padding-right: calc(44px + var(--space-3)); }
 .accounts-selectable, .accounts-actions { min-width: 0; }
