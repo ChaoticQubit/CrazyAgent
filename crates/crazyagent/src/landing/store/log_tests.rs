@@ -407,7 +407,7 @@ fn the_first_run_puts_landing_rows_from_before_the_log_on_it() {
     let kinds: Vec<String> = events(&db).into_iter().map(|(kind, _)| kind).collect();
     assert_eq!(
         kinds.len(),
-        7,
+        8,
         "a chunk per table and the closing event: {kinds:?}"
     );
     assert_eq!(landing_rows(&db), live, "the run changes no row");
@@ -591,4 +591,57 @@ fn a_row_cell_the_table_lacks_fails_replay_and_a_missing_cell_takes_its_default(
         })
         .unwrap();
     assert_eq!(summary, "", "the column default");
+}
+
+/// V250-L9 step 14 (QUESTION-1056 A): a change set stored before the log reaches replay
+/// through the run as its id, project and the digest of its row, kept as an owner text, so
+/// no text rides in a chunk; a later save releases that text and the rebuild takes its row.
+#[test]
+fn the_first_run_carries_a_change_set_as_its_row_digest() {
+    let db = unhosted();
+    let mut record = change_set(std::path::Path::new("/repo"), 'c');
+    write(&db, &record).unwrap();
+    db.execute(
+        "INSERT INTO landing_change_set_numbers VALUES (?1,'project-1',1)",
+        [record.id.as_str()],
+    )
+    .unwrap();
+    let live = change_set_rows(&db);
+    assert!(first_run(&db));
+    let logged = events(&db);
+    assert_eq!(logged.len(), 8, "a chunk per table and the closing event");
+    assert!(
+        logged
+            .iter()
+            .all(|(_, body)| !body.to_string().contains("secret"))
+    );
+    let tables: Vec<&str> = logged
+        .iter()
+        .filter_map(|(_, body)| body["table"].as_str())
+        .collect();
+    assert_eq!(
+        tables[0], "landing_change_sets",
+        "rows before their numbers"
+    );
+    let rows = logged[0].1["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], record.id.as_str());
+    assert_eq!(rows[0][1], "project-1");
+    let digest: crate::owner_texts::TextDigest =
+        serde_json::from_value(rows[0][2].clone()).unwrap();
+    assert!(crate::owner_texts::text(&db, &digest).unwrap().is_some());
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), live);
+
+    crate::landing_log::seed(&db);
+    record.message = "Add a second page".into();
+    save(&db, &record).unwrap();
+    assert_eq!(
+        crate::owner_texts::text(&db, &digest).unwrap(),
+        None,
+        "the save released it"
+    );
+    let saved = change_set_rows(&db);
+    rebuild(&db).unwrap();
+    assert_eq!(change_set_rows(&db), saved);
 }

@@ -545,6 +545,7 @@ const SNAPSHOTS: [(&str, &[&str]); 2] = [
     (
         "landing_log.rs",
         &[
+            "landing_change_sets",
             "landing_agent_branches",
             "landing_bases",
             "landing_owner_edits",
