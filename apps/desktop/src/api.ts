@@ -423,7 +423,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   install_dependency: "installing a tool",
   fix_tool_permissions: "fixing a tool's permissions",
   refused_tool: "saving what setup offers for unused tools",
-  restore_pinned: "bringing back your 2.4 data",
+  restore_pinned: "bringing back your data from before the update",
   pack_set: "changing the default pack",
   pack_remove: "removing a pack",
   team: "changing the team",
