@@ -166,6 +166,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         IntakeQuery::GitHubPublishStart { .. } => "github publish",
                         IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
                         IntakeQuery::GitHubPublishPrompt { .. } => "github publish prompt",
+                        IntakeQuery::ReinstallOffer { .. } => "reinstall offer",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -762,6 +763,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "pool projects",
             "pending import",
             "uncommitted",
+            "reinstall offer",
             "recovery",
             "setup",
             "team graph",
@@ -770,7 +772,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "context",
             "memories"
         ],
-        "a project page also reads its instruction files waiting to import, its uncommitted move and its recovery notices"
+        "a project page also reads its instruction files waiting to import, its uncommitted move, its reinstall offer and its recovery notices"
     );
     let shown = render(&mut shell, 80, 24);
     assert!(
