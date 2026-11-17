@@ -74,5 +74,5 @@ test("projects folder, onboarding, setup, pack and team words carry their icons"
   assert.equal(statusIcon("Found 3.4"), undefined);
   assert.equal(statusIcon("Online"), undefined);
   for (const name of ["folder-input", "git-branch", "wrench", "blocks"]) assert.ok(ICON_NAMES.includes(name), `${name} is vendored`);
-  assert.match(renderToStaticMarkup(createElement(StatusBadge, { word: "Installing" })), /class="icon spin"/);
+  assert.equal(renderToStaticMarkup(createElement(StatusBadge, { word: "Installing" })), '<span class="badge tone-info">Installing</span>');
 });
