@@ -358,7 +358,7 @@ pub(super) async fn serve(
     assert!(exchange > 0);
     let client = matches!(sink, Sink::Client(_));
     let _running = match mutation && client {
-        true => match Running::claim(authority, &a.owner_id, &id) {
+        true => match trace::claim(&id, Running::claim(authority, &a.owner_id, &id)) {
             Some(running) => Some(running),
             None => {
                 let reply =

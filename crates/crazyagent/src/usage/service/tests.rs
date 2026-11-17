@@ -556,7 +556,7 @@ fn each_claude_free_resets_source_picks_the_detail_user_agent_or_none() {
 fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
     use super::spend::{ResetsSource, SpendSettings};
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::harnesses::finding::outside_temp("ca-usage-");
     let team = root.path().join("team");
     std::fs::create_dir(&team).unwrap();
     let claude = root.path().join("claude");
@@ -651,7 +651,7 @@ fn dont_read_forgets_the_stored_claude_free_resets_and_keeps_codex() {
 fn the_detail_user_agent_names_the_installed_claude_code_and_reads_it_again_after_an_update() {
     use super::spend::ResetsSource;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::harnesses::finding::outside_temp("ca-usage-");
     let team = root.path().join("team");
     std::fs::create_dir(&team).unwrap();
     let bin = root.path().join("bin");

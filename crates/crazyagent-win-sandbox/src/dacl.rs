@@ -9,11 +9,15 @@ const ACL_HEADER_BYTES: usize = 8;
 const ACE_HEADER_BYTES: usize = 8;
 const ACCESS_ALLOWED: u8 = 0;
 const ACCESS_DENIED: u8 = 1;
+/// The entry types that only take rights away: the plain, object, callback and callback
+/// object deny entries.
+pub const DENY_TYPES: [u8; 4] = [ACCESS_DENIED, 6, 10, 12];
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
 const INHERIT_ONLY: u8 = 0x08;
 const INHERITED: u8 = 0x10;
-const SID_BYTES_MAX: usize = 68;
+/// The most bytes a SID takes: its header and fifteen sub-authorities.
+pub const SID_BYTES_MAX: usize = 68;
 
 /// One allow or deny entry read from an access list: its type, flags, rights and SID bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +185,175 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
                 && entry.mask & READ_EXECUTE == READ_EXECUTE
         })
     })
+}
+
+/// The SID `S-1-5-18` (SYSTEM) as bytes.
+pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+/// The SID `S-1-5-32-544` (the Administrators group) as bytes.
+pub const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
+/// The SID of the TrustedInstaller service as bytes:
+/// `S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464`.
+pub const TRUSTED_INSTALLER: [u8; 32] = [
+    1, 6, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0, 181, 137, 251, 56, 25, 132, 194, 203, 92, 108, 35, 109,
+    87, 0, 119, 110, 192, 2, 100, 135,
+];
+/// The SID `S-1-3-4` (OWNER RIGHTS) as bytes, which stands for whoever owns the object.
+pub const OWNER_RIGHTS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+
+const WRITE_DATA: u32 = 0x0000_0002;
+const APPEND_DATA: u32 = 0x0000_0004;
+const WRITE_EA: u32 = 0x0000_0010;
+const DELETE_CHILD: u32 = 0x0000_0040;
+const WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+const DELETE: u32 = 0x0001_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
+const WRITE_OWNER: u32 = 0x0008_0000;
+const GENERIC_ALL: u32 = 0x1000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+
+/// Every right that changes a file: its data, its extended attributes and attributes, its
+/// deletion, its access list or owner, and generic write or all, which map onto those.
+pub const FILE_CHANGES: u32 = WRITE_DATA
+    | APPEND_DATA
+    | WRITE_EA
+    | WRITE_ATTRIBUTES
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | GENERIC_WRITE
+    | GENERIC_ALL;
+/// Every right that changes a program's own folder: those of a file, where writing and
+/// appending data are adding a file or a folder, plus deleting what is in it, so no one can
+/// plant a library beside the program.
+pub const OWN_FOLDER_CHANGES: u32 = FILE_CHANGES | DELETE_CHILD;
+/// The rights on a folder further up that can swap what lies below it: deleting what is in
+/// it or the folder itself, changing its access list or owner, and generic write or all.
+/// Adding a new file or folder alone swaps nothing that is already there.
+pub const ANCESTOR_CHANGES: u32 =
+    DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+
+/// Whether an owner may hold a program the engine starts with its own rights, or a folder
+/// above it: SYSTEM, the administrators, TrustedInstaller or the engine's own user, who can
+/// change it anyway. Inputs: the owner's SID bytes and the user's. Output: the answer.
+pub fn trusted_owner(owner: &[u8], user: &[u8]) -> bool {
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        user,
+    ]
+    .contains(&owner)
+}
+
+/// The first SID other than SYSTEM, the administrators, TrustedInstaller, OWNER RIGHTS and
+/// the engine's own user that an allow entry applying to the object itself gives any of
+/// `rights`: inherited entries count, inherit-only ones do not, and deny entries are not
+/// counted, as they only take rights away. An applying entry of any other type, such as a
+/// conditional, object or compound allow entry this reader does not parse, is an error the
+/// caller refuses on (#317 r2 F2). Inputs: the access list bytes, the user's SID bytes and
+/// the rights. Output: that SID, none when only those may change the object, or the reason
+/// the list is malformed or holds an entry the check cannot read.
+pub fn other_writer<'a>(
+    acl: &'a [u8],
+    user: &[u8],
+    rights: u32,
+) -> Result<Option<&'a [u8]>, &'static str> {
+    assert_ne!(rights, 0);
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    let allowed = [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        &OWNER_RIGHTS[..],
+        user,
+    ];
+    for span in spans(acl)? {
+        let kind = acl[span.range.start];
+        if acl[span.range.start + 1] & INHERIT_ONLY != 0 {
+            continue;
+        }
+        match span.entry {
+            Some(entry)
+                if entry.allows && entry.mask & rights != 0 && !allowed.contains(&entry.sid) =>
+            {
+                return Ok(Some(entry.sid));
+            }
+            Some(_) => {}
+            None if DENY_TYPES.contains(&kind) => {}
+            None => return Err("the access list holds an allow entry this check cannot read"),
+        }
+    }
+    Ok(None)
+}
+
+/// Whether only the trusted accounts may change an object: one of them owns it
+/// ([`trusted_owner`]) and its access list gives no other SID any of `rights`
+/// ([`other_writer`]). Inputs: the owner, the list (None when it has none), the user's SID
+/// and the rights. Output: Ok, or the reason another account can change it.
+pub fn held_only_by(
+    owner: &[u8],
+    list: Option<&[u8]>,
+    user: &[u8],
+    rights: u32,
+) -> Result<(), &'static str> {
+    if !trusted_owner(owner, user) {
+        return Err("another account owns the program or a folder above it");
+    }
+    let Some(list) = list else {
+        return Err(
+            "the program or a folder above it has no access list, so everyone can change it",
+        );
+    };
+    match other_writer(list, user, rights)? {
+        None => Ok(()),
+        Some(_) => Err("another account can change the program or a folder above it"),
+    }
+}
+
+/// One part of a path as [`first_changeable_part`] reads it: missing, unreadable, or its
+/// owner SID, its access list (None when it has none) and whether it is a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Part {
+    Missing,
+    Unreadable,
+    Found {
+        owner: Vec<u8>,
+        list: Option<Vec<u8>>,
+        folder: bool,
+    },
+}
+
+/// The first part, the entry first, that someone other than the trusted accounts can change
+/// ([`held_only_by`]): a file entry with [`FILE_CHANGES`], a folder entry, a file's own folder
+/// and a folder above a missing part with [`OWN_FOLDER_CHANGES`], any other folder with
+/// [`ANCESTOR_CHANGES`]. A missing part is never named, an unreadable one always. Inputs: the
+/// parts from the entry up and the user's SID. Output: the part's index, or none.
+pub fn first_changeable_part(parts: &[Part], user: &[u8]) -> Option<usize> {
+    let folder_entry = matches!(parts.first(), Some(Part::Found { folder: true, .. }));
+    let mut below_exists = false;
+    for (depth, part) in parts.iter().enumerate() {
+        let rights = match depth {
+            0 if folder_entry => OWN_FOLDER_CHANGES,
+            0 => FILE_CHANGES,
+            1 if !folder_entry => OWN_FOLDER_CHANGES,
+            _ if !below_exists => OWN_FOLDER_CHANGES,
+            _ => ANCESTOR_CHANGES,
+        };
+        let changeable = match part {
+            Part::Missing => false,
+            Part::Unreadable => true,
+            Part::Found { owner, list, .. } => {
+                held_only_by(owner, list.as_deref(), user, rights).is_err()
+            }
+        };
+        if changeable {
+            assert!(*part != Part::Missing);
+            return Some(depth);
+        }
+        below_exists = *part != Part::Missing;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -401,5 +574,189 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(!reads(&denied, &ALL_APPLICATION_PACKAGES));
+    }
+
+    const USERS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 33, 2, 0, 0];
+    const AUTHENTICATED_USERS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
+    const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
+    const OWNER: [u8; 28] = [
+        1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
+    ];
+    const OTHER_ACCOUNT: [u8; 28] = [
+        1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 234, 3, 0, 0,
+    ];
+    const FULL: u32 = 0x001F_01FF;
+    const ADD_SUBDIRECTORY: u32 = 0x0000_0004;
+
+    /// #306 sec F1: a program under Program Files, where TrustedInstaller, SYSTEM and the
+    /// administrators may change it, every user and every container may only read and run it,
+    /// and CREATOR OWNER's entry only passes down, is changed by no one else at any level.
+    #[test]
+    fn a_program_files_list_lets_only_the_system_change_a_program() {
+        let list = acl(&[
+            ace(ACCESS_ALLOWED, INHERITED, FULL, &TRUSTED_INSTALLER),
+            ace(ACCESS_ALLOWED, INHERITED, MODIFY, &SYSTEM),
+            ace(ACCESS_ALLOWED, INHERITED, MODIFY, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, INHERITED, READ_EXECUTE, &USERS),
+            ace(
+                ACCESS_ALLOWED,
+                INHERITED,
+                READ_EXECUTE,
+                &ALL_APPLICATION_PACKAGES,
+            ),
+            ace(
+                ACCESS_ALLOWED,
+                OBJECT_INHERIT | CONTAINER_INHERIT | INHERIT_ONLY | INHERITED,
+                GENERIC_ALL,
+                &CREATOR_OWNER,
+            ),
+            ace(ACCESS_ALLOWED, 0, FULL, &OWNER_RIGHTS),
+        ]);
+        for rights in [FILE_CHANGES, OWN_FOLDER_CHANGES, ANCESTOR_CHANGES] {
+            assert_eq!(other_writer(&list, &OWNER, rights), Ok(None));
+        }
+        let own = acl(&[ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER)]);
+        assert_eq!(other_writer(&own, &OWNER, FILE_CHANGES), Ok(None));
+    }
+
+    /// #306 sec F1: every user with modify, another account, or an agent's container that can
+    /// change a program is named, and a group that may only add a folder, as Authenticated
+    /// Users may at a drive's root, passes as a folder further up but not as the program's own
+    /// folder, where it could plant a library.
+    #[test]
+    fn another_account_or_a_container_that_can_change_a_program_is_named() {
+        let users = acl(&[ace(ACCESS_ALLOWED, INHERITED, MODIFY, &USERS)]);
+        assert_eq!(
+            other_writer(&users, &OWNER, FILE_CHANGES),
+            Ok(Some(&USERS[..]))
+        );
+        let other = acl(&[ace(ACCESS_ALLOWED, 0, DELETE, &OTHER_ACCOUNT)]);
+        assert_eq!(
+            other_writer(&other, &OWNER, ANCESTOR_CHANGES),
+            Ok(Some(&OTHER_ACCOUNT[..]))
+        );
+        let container = acl(&[ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER)]);
+        assert_eq!(
+            other_writer(&container, &OWNER, FILE_CHANGES),
+            Ok(Some(&CONTAINER[..]))
+        );
+        let root = acl(&[ace(
+            ACCESS_ALLOWED,
+            0,
+            ADD_SUBDIRECTORY,
+            &AUTHENTICATED_USERS,
+        )]);
+        assert_eq!(other_writer(&root, &OWNER, ANCESTOR_CHANGES), Ok(None));
+        assert_eq!(
+            other_writer(&root, &OWNER, OWN_FOLDER_CHANGES),
+            Ok(Some(&AUTHENTICATED_USERS[..]))
+        );
+    }
+
+    /// V243-WIN-CHANGEABLE-BY-OTHERS: a file's own folder is judged as `owner_only` judges
+    /// it, a folder entry's parent only for swapping it, a folder above a missing part for
+    /// adding one; a missing part is never named, and an unreadable part, another owner or
+    /// no access list always is.
+    #[test]
+    fn the_first_changeable_part_reads_each_depth_with_its_own_rights() {
+        let own = acl(&[ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER)]);
+        let adds = acl(&[
+            ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, 0, ADD_SUBDIRECTORY, &AUTHENTICATED_USERS),
+        ]);
+        let found = |list: &[u8], folder: bool| Part::Found {
+            owner: OWNER.to_vec(),
+            list: Some(list.to_vec()),
+            folder,
+        };
+        let (file, folder, open) = (found(&own, false), found(&own, true), found(&adds, true));
+        let first = |parts: &[&Part]| {
+            let parts: Vec<Part> = parts.iter().map(|part| (*part).clone()).collect();
+            first_changeable_part(&parts, &OWNER)
+        };
+        assert_eq!(first(&[&file, &folder, &folder]), None);
+        assert_eq!(first(&[&file, &open, &folder]), Some(1));
+        assert_eq!(first(&[&file, &folder, &open]), None);
+        assert_eq!(first(&[&folder, &open]), None);
+        assert_eq!(first(&[&open, &folder]), Some(0));
+        assert_eq!(first(&[&Part::Missing, &Part::Missing, &open]), Some(2));
+        assert_eq!(first(&[&Part::Missing, &folder, &open]), None);
+        assert_eq!(first(&[&file, &Part::Unreadable]), Some(1));
+        let foreign = Part::Found {
+            owner: OTHER_ACCOUNT.to_vec(),
+            list: Some(own.clone()),
+            folder: true,
+        };
+        assert_eq!(first(&[&file, &folder, &foreign]), Some(2));
+        let bare = Part::Found {
+            owner: OWNER.to_vec(),
+            list: None,
+            folder: true,
+        };
+        assert_eq!(first(&[&file, &folder, &bare]), Some(2));
+        assert_eq!(first(&[]), None);
+    }
+
+    /// #306 sec F1: an inherit-only entry, which passes down without applying, and a deny
+    /// entry, which only takes rights away, name no one, while a malformed list is an error
+    /// the caller refuses on.
+    #[test]
+    fn inherit_only_and_deny_entries_name_no_one_and_a_malformed_list_is_an_error() {
+        let list = acl(&[
+            ace(
+                ACCESS_ALLOWED,
+                OBJECT_INHERIT | CONTAINER_INHERIT | INHERIT_ONLY,
+                MODIFY,
+                &USERS,
+            ),
+            ace(ACCESS_DENIED, 0, MODIFY, &AUTHENTICATED_USERS),
+        ]);
+        assert_eq!(other_writer(&list, &OWNER, FILE_CHANGES), Ok(None));
+        let mut broken = acl(&[ace(ACCESS_ALLOWED, 0, MODIFY, &USERS)]);
+        broken[2..4].copy_from_slice(&200u16.to_le_bytes());
+        assert!(other_writer(&broken, &OWNER, FILE_CHANGES).is_err());
+    }
+
+    /// #317 r2 F2: an allow entry of a type the reader does not parse, here a conditional
+    /// entry giving another account full control, refuses instead of passing, while an
+    /// inherit-only one and the deny kinds still name no one.
+    #[test]
+    fn an_allow_entry_the_check_cannot_read_refuses_and_deny_kinds_do_not() {
+        const ALLOWED_CALLBACK: u8 = 9;
+        for kind in [ALLOWED_CALLBACK, 4, 5, 11] {
+            let list = acl(&[ace(kind, 0, FULL, &OTHER_ACCOUNT)]);
+            assert!(other_writer(&list, &OWNER, FILE_CHANGES).is_err(), "{kind}");
+            let later = acl(&[ace(
+                kind,
+                INHERIT_ONLY | CONTAINER_INHERIT,
+                FULL,
+                &OTHER_ACCOUNT,
+            )]);
+            assert_eq!(
+                other_writer(&later, &OWNER, FILE_CHANGES),
+                Ok(None),
+                "{kind}"
+            );
+        }
+        for kind in DENY_TYPES {
+            let list = acl(&[ace(kind, 0, FULL, &OTHER_ACCOUNT)]);
+            assert_eq!(
+                other_writer(&list, &OWNER, FILE_CHANGES),
+                Ok(None),
+                "{kind}"
+            );
+        }
+    }
+
+    /// #306 sec F1: SYSTEM, the administrators, TrustedInstaller and the engine's own user may
+    /// own a program the engine starts; every user, another account and a container may not.
+    #[test]
+    fn only_the_system_the_administrators_trustedinstaller_or_the_user_may_own_a_program() {
+        for owner in [&SYSTEM[..], &ADMINISTRATORS, &TRUSTED_INSTALLER, &OWNER] {
+            assert!(trusted_owner(owner, &OWNER), "{owner:?}");
+        }
+        for owner in [&USERS[..], &OTHER_ACCOUNT, &CONTAINER, &OWNER_RIGHTS] {
+            assert!(!trusted_owner(owner, &OWNER), "{owner:?}");
+        }
     }
 }

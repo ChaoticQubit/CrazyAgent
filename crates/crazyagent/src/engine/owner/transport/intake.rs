@@ -200,7 +200,8 @@ impl Intake {
         if authority.intake.directs() > 0 {
             return Err(failure("job_busy"));
         }
-        let Some(claim) = Running::claim(authority, &a.owner_id, &asked.request_id) else {
+        let taken = Running::claim(authority, &a.owner_id, &asked.request_id);
+        let Some(claim) = trace::claim(&asked.request_id, taken) else {
             return Err(failure("job_busy"));
         };
         let replaced = held.as_ref().map(|ended| ended.job.id().clone());

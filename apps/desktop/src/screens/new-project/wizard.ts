@@ -556,13 +556,16 @@ export function preselectPool(pools: PoolChoice[], summaries: PoolSummary[] = []
 
 /** Tells whether a pool holds an account a harness can use. A connection names its harness by
  * the catalog id or by one of the entry's aliases from the engine, such as "claude" for Claude Code.
+ * An account holding a key fits only where the engine lists API keys for the harness on this
+ * system, whatever harness it was stored with.
  * Inputs: the harness and the pool's connections. Output: true when one fits. */
 export function poolFits(harness: HarnessEntry, members: ModelConnection[]): boolean {
   const names = [harness.id, ...harness.aliases];
   return members.some((member) => {
     const same = names.includes(member.harness);
     if (member.auth.method === "native_managed") return same && harness.account_kinds.includes("subscription");
-    if (member.auth.method === "api_key" || member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
+    if (member.auth.method === "api_key") return harness.account_kinds.includes("api_key");
+    if (member.auth.method === "oauth") return same || harness.account_kinds.includes("api_key");
     return same || harness.account_kinds.includes("open_ai_compatible_url") || harness.account_kinds.includes("local");
   });
 }

@@ -207,7 +207,7 @@ fn malformed() -> std::io::Error {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
 
@@ -270,12 +270,14 @@ pub(crate) mod tests {
         bytes
     }
 
+    #[cfg(unix)]
     fn written(folder: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = folder.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         path
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_a_program_glibc_loads_counts_as_glibc() {
         let folder = tempfile::tempdir().unwrap();
@@ -320,6 +322,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_script_a_broken_file_or_a_missing_one_is_not_glibc() {
         let folder = tempfile::tempdir().unwrap();
@@ -368,6 +371,7 @@ pub(crate) mod tests {
         assert!(!glibc_program(Path::new("/bin/ls")), "a Mach-O program");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_script_is_judged_by_its_interpreter_one_level_deep() {
         let folder = tempfile::tempdir().unwrap();

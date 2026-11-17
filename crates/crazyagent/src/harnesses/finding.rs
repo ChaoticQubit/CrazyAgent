@@ -601,12 +601,13 @@ pub fn looked(search: &Search, id: &str) -> Vec<String> {
 
 /// A folder for a row's harness files where an owner's install would be: outside every
 /// folder the agent space holds, the engine's own temp folder among them, and outside the
-/// shared temp folders other users can change; this user's cache folder on macOS, the temp
-/// folder elsewhere. Input: the folder name's prefix. Output: the folder, removed when dropped.
+/// shared temp folders other users can change; this user's `getconf` cache folder on macOS,
+/// elsewhere the one [`outside_temp`] makes, since the temp folder there is the shared `/tmp`.
+/// Input: the folder name's prefix. Output: the folder, removed when dropped.
 #[cfg(all(test, unix))]
 pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
     if !cfg!(target_os = "macos") {
-        return tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+        return outside_temp(prefix);
     }
     let cache = crate::spawn_gate::output(
         std::process::Command::new("/usr/bin/getconf")
@@ -622,5 +623,76 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
         .tempdir_in(cache)
         .unwrap();
     assert!(folder.path().is_absolute());
+    folder
+}
+
+/// The folder a row's own temp folders go in, which no other user can change: on macOS the
+/// temp folder, this user's own; elsewhere, where it is the shared `/tmp` that
+/// [`crate::service::changeable_by_others`] rightly counts, this user's cache folder
+/// ([`user_caches`]). Output: the folder, real.
+#[cfg(all(test, unix))]
+pub(crate) fn private_root() -> PathBuf {
+    let folder = if cfg!(target_os = "macos") {
+        std::fs::canonicalize(std::env::temp_dir()).unwrap()
+    } else {
+        user_caches()
+    };
+    assert!(folder.is_absolute());
+    let changeable = crate::service::changeable_by_others(&folder);
+    assert_eq!(changeable, None, "others can change {}", folder.display());
+    folder
+}
+
+/// This user's cache folder: `~/Library/Caches` on macOS, `~/.cache` elsewhere. A HOME
+/// without it, as the gate's own HOME is, gets it made private. Input: none, it reads HOME.
+/// Output: the folder, real.
+#[cfg(all(test, unix))]
+fn user_caches() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    assert!(home.is_absolute(), "HOME is absolute: {}", home.display());
+    let caches = if cfg!(target_os = "macos") {
+        home.join("Library").join("Caches")
+    } else {
+        home.join(".cache")
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&caches)
+        .unwrap();
+    caches.canonicalize().unwrap()
+}
+
+/// A folder for a row's owner entry outside every temp folder and every folder agents or
+/// other users can change, in this user's cache folder ([`user_caches`]): the `getconf`
+/// cache folder is a temp folder, and the checkout sits below a project folder. A HOME below
+/// a `.crazyagent` folder stops the row here, naming it. Input: the folder name's prefix.
+/// Output: the folder, removed when dropped.
+#[cfg(all(test, unix))]
+pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
+    let folder = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(user_caches())
+        .unwrap();
+    let place = folder.path().canonicalize().unwrap();
+    assert_eq!(
+        crate::service::changeable_by_others(&place),
+        None,
+        "others can change the cache folder: {}",
+        place.display()
+    );
+    assert!(
+        !crate::tools::temp_roots()
+            .iter()
+            .any(|temp| place.starts_with(temp)),
+        "HOME lies in a temp folder: {}",
+        place.display()
+    );
+    assert!(
+        !crate::tools::Places::from_environment(None).agent_writable(&place),
+        "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
+        place.display()
+    );
     folder
 }

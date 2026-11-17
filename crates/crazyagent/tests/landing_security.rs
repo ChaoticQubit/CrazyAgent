@@ -335,9 +335,9 @@ fn no_filter_driver_runs_during_commit_diff_or_accept() {
         crazyagent::activity::AcceptPlace::Changes,
     ) {
         Ok(_) => {}
-        Err(EngineError(code)) => assert_eq!(
-            code, "changes_git_unsupported",
-            "accept must refuse rather than run a configured filter driver"
+        Err(EngineError(code)) => assert!(
+            matches!(code.as_str(), "changes_git_unsupported" | "changes_git_old"),
+            "accept must refuse rather than run a configured filter driver: {code}"
         ),
     }
     fx.assert_marker_absent("accept");

@@ -1390,23 +1390,19 @@ mod tests {
 
     #[test]
     fn engine_options_preserve_writable_settings_with_codex_in_both_orders() {
+        #[cfg(unix)]
+        const CODEX: &str = "/official/codex";
+        #[cfg(not(unix))]
+        const CODEX: &str = r"C:\official\codex.exe";
         for options in [
-            vec![
-                "--writable-settings",
-                "--codex-executable",
-                "/official/codex",
-            ],
-            vec![
-                "--codex-executable",
-                "/official/codex",
-                "--writable-settings",
-            ],
+            vec!["--writable-settings", "--codex-executable", CODEX],
+            vec!["--codex-executable", CODEX, "--writable-settings"],
         ] {
             let mut arguments = engine_arguments();
             arguments.extend(options.into_iter().map(OsString::from));
             let (writable, executable) = engine_options(&arguments).unwrap();
             assert!(writable);
-            assert_eq!(executable, Some(Path::new("/official/codex")));
+            assert_eq!(executable, Some(Path::new(CODEX)));
         }
     }
 
