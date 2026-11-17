@@ -47,7 +47,7 @@ const _: () = assert!(
             | WRITE_OWNER
 );
 
-const ACL_BYTES_MAX: usize = 64 * 1024;
+pub(super) const ACL_BYTES_MAX: usize = 64 * 1024;
 
 /// Puts each planned entry on its path for the container, skipping an entry the path already
 /// holds so later launches leave large folders alone. A granted root that holds an explicit
@@ -143,7 +143,7 @@ pub(super) fn revoke(container: &Words, path: &str) -> Result<(), BoundaryError>
 }
 
 /// Frees memory the system allocated with `LocalAlloc` for this caller when dropped.
-struct Local(HLOCAL);
+pub(super) struct Local(pub(super) HLOCAL);
 
 impl Drop for Local {
     /// Frees the block. Relies on it being a `LocalAlloc` block owned by this value alone.

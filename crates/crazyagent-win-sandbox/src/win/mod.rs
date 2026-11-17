@@ -3,10 +3,12 @@ mod container;
 mod job;
 mod launch;
 mod name;
+mod owner;
 mod record;
 mod tree;
 
 pub use name::final_name;
+pub use owner::owner_only;
 pub use tree::ProcessTree;
 
 use crate::plan::plan;
