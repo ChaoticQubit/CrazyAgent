@@ -392,15 +392,29 @@ pub(crate) fn write(db: &Connection, change: &Change) -> Result<(), EngineError>
     Ok(())
 }
 
-/// Applies one landing change to its table with the same statements live and in replay.
-/// Inputs: the connection and the change. Output: Ok, or the table's refusal.
+/// Applies one landing change to its table with the same statements live and in replay,
+/// within the change's row bound. Inputs: the connection and the change. Output: Ok, or the
+/// table's refusal.
 pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
     let unavailable = |_| failure("changes_unavailable");
     if change.owner_edit() {
         db.execute_batch(crate::landing::owner_edit::SCHEMA)
             .map_err(unavailable)?;
     }
-    let changed = match change {
+    let changed = statements(db, change).map_err(unavailable)?;
+    let changed = i64::try_from(changed).map_err(|_| failure("changes_unavailable"))?;
+    let bound = change.rows_max();
+    assert!(
+        bound.is_none_or(|max| changed <= max),
+        "a landing change stays in its row bound"
+    );
+    Ok(())
+}
+
+/// Runs one landing change's statements. Inputs: the connection and the change. Output:
+/// the rows the last statement changed, or the database's refusal.
+fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
+    match change {
         Change::AgentBranchSet(set) => db.execute(
             "INSERT OR REPLACE INTO landing_agent_branches(worktree,repository,branch) \
              VALUES (?1,?2,?3)",
@@ -453,14 +467,6 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
                 )
             }),
     }
-    .map_err(unavailable)?;
-    let changed = i64::try_from(changed).map_err(|_| failure("changes_unavailable"))?;
-    let bound = change.rows_max();
-    assert!(
-        bound.is_none_or(|max| changed <= max),
-        "a landing change stays in its row bound"
-    );
-    Ok(())
 }
 
 /// The tables the landing log rebuilds, emptied before its replay.
