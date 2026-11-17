@@ -332,6 +332,40 @@ async fn a_reveal_names_only_paths_inside_the_workspace_folders() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_desktop_go_to_reveal_is_held_to_the_same_workspace_paths() {
+    let desk = Desk::start().await;
+    let (socket, alpha) = desk.capability("alpha").await;
+    let mut events = subscribe(&socket, alpha, "alpha").await;
+    let outside = desk.folders[1].join("context");
+    std::os::unix::fs::symlink(&outside, desk.folders[0].join("context").join("linked")).unwrap();
+    let project = ProjectId::new("alpha").unwrap();
+    for (path, code) in [
+        ("../beta/context/brief.md", "ide_reveal_invalid"),
+        ("/etc/hosts", "ide_reveal_invalid"),
+        ("context/linked/brief.md", "ide_reveal_outside"),
+    ] {
+        let target = RevealTarget::Project { path: path.into() };
+        assert_eq!(
+            desk.desktop
+                .ide_reveal(project.clone(), target)
+                .await
+                .unwrap_err()
+                .0,
+            code,
+            "{path}"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), read_reply(&mut events))
+            .await
+            .is_err(),
+        "a path outside the project sends no reveal"
+    );
+    assert_eq!(desk.desktop.ide_focus().await.unwrap(), None);
+    desk.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reveal_the_ide_never_acknowledges_ends_unanswered() {
     let desk = Desk::start().await;
     let (socket, alpha) = desk.capability("alpha").await;

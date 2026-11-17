@@ -204,6 +204,20 @@ test("the Agents tab offers Messages on each sub-agent and finished agent, never
   assert.match(finished, /aria-label="Messages for Sub-agent 5"/u, "finished agents keep their history");
 });
 
+test("an agent Go to opened shows its Messages row open in the Team view, and no other", () => {
+  const status = {
+    project_id: "p", keep_warm: false, show_finished: false, paused: false, min_agents: 1, max_agents: 6, harnesses: [], messages: [], plan: [], tasks: [],
+    events: { recent: [], waiting: [], notifications: [], paused: false, wake: null, questions: [] },
+    message_settings: api.DEFAULT_MESSAGE_SETTINGS,
+    agents: [sub(1, "working", { role: "master", label: "Master" }), sub(2, "working", { label: NAME }), sub(3, "idle")],
+  };
+  const data = { id: "p", now: 60_000, notify() {} };
+  const read = { result: { kind: "ok", value: status }, at: 60_000 };
+  const panel = renderToStaticMarkup(createElement(team.TeamPanel, { data, team: read, filter: "all", harnesses: null, accounts: [], reload() {}, opened: "agent-3" }));
+  assert.match(panel, /aria-label="Messages for Sub-agent 3" aria-expanded="true"/u);
+  assert.match(panel, /aria-label="Messages for Ada \(@charts\)" aria-expanded="false"/u);
+});
+
 test("the open graph card shows its sub-agent's Messages beside its instructions, and the master's card none", () => {
   const node = (id, kind, label, agent) => ({ id, kind, parent: null, label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: "t", agent });
   const open = renderToStaticMarkup(createElement(messages.NodeMessages, { projectId: "p", node: node("team-5", "agent", NAME, 5), refresh: 0 }));
