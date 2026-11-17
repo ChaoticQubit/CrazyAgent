@@ -246,6 +246,7 @@ impl Screen for Team {
                 if !self.master {
                     questions::Questions::read(&self.project, ctx);
                 }
+                self.open_picked(ctx);
             }
             Arrival::Terminal { agent, frame } => self.stream(agent, frame, ctx),
             Arrival::Owner(event) => match event.as_ref() {
@@ -297,6 +298,13 @@ impl Screen for Team {
             self.read_switch(ctx);
         }
         self.pump_settings(ctx);
+        let tree_view = !self.master;
+        if let Some((_, node)) = ctx
+            .messages_for
+            .take_if(|(project, _)| tree_view && *project == self.project)
+        {
+            self.messages_for = Some(node);
+        }
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });

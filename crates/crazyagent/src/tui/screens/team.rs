@@ -194,6 +194,7 @@ pub struct Team {
     messages: Option<Messages>,
     settings: Option<TeamView>,
     held: Vec<Key>,
+    messages_for: Option<String>,
 }
 
 impl Team {
@@ -227,6 +228,7 @@ impl Team {
             messages: None,
             settings: None,
             held: Vec::new(),
+            messages_for: None,
         }
     }
 
@@ -1044,6 +1046,38 @@ impl Team {
             local_offset(now),
         ));
         self.ask_messages(ctx);
+    }
+
+    /// Opens the Messages list of the card Go to picked once the tree is read, with the
+    /// cursor on that card, as `m` on it does. Input: the context. Output: none; a card no
+    /// longer in the tree gets a plain message, and the pick is used once either way.
+    fn open_picked(&mut self, ctx: &mut Ctx) {
+        if self.graph.ready().is_none() {
+            return;
+        }
+        let Some(picked) = self.messages_for.take() else {
+            return;
+        };
+        let node = self
+            .graph
+            .ready()
+            .and_then(|graph| graph.nodes.iter().position(|node| node.id == picked));
+        let Some(node) = node else {
+            ctx.say(Message::warning(
+                "That agent is no longer on the team.",
+                "It stopped or left after Go to listed it.",
+            ));
+            return;
+        };
+        if let Some(at) = self
+            .items(ctx.glyphs)
+            .iter()
+            .position(|item| *item == Item::Node(node))
+        {
+            self.cursor = at;
+        }
+        self.open_messages(node, ctx);
+        assert!(self.messages_for.is_none());
     }
 
     /// Sends the open Messages list's next page read, if one is due.

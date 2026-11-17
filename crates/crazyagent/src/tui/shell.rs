@@ -60,12 +60,13 @@ pub struct Target {
 }
 
 /// What picking a Go to row does: `Open` opens its place; `Agent` opens its place, the
-/// project's Agents tab, and says to pick the agent its label names there; `File` stays on
-/// the page Go to opened on and asks the IDE to show that project's file its label names.
+/// project's Team screen, on the Messages list of the card whose graph node id it holds;
+/// `File` stays on the page Go to opened on and asks the IDE to show that project's file its
+/// label names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pick {
     Open,
-    Agent,
+    Agent(String),
     File(ProjectId),
 }
 
@@ -166,8 +167,8 @@ pub fn rank(query: &str, label: &str) -> Option<u8> {
 /// The running sub-agents of a team graph, as Go to lists them: the role-sub agents the graph
 /// draws as harness leads and as sub-agents under a lead, not native teammates, while
 /// starting, idle or working, in graph order, as the desktop lists them. Input: the graph.
-/// Output: their names.
-fn go_to_agents(graph: &TeamGraph) -> Vec<String> {
+/// Output: each one's graph node id and name.
+fn go_to_agents(graph: &TeamGraph) -> Vec<(String, String)> {
     graph
         .nodes
         .iter()
@@ -175,7 +176,7 @@ fn go_to_agents(graph: &TeamGraph) -> Vec<String> {
             matches!(node.kind, NodeKind::Lead | NodeKind::Sub)
                 && node.status.is_some_and(AgentStatus::live)
         })
-        .map(|node| node.label.clone())
+        .map(|node| (node.id.clone(), node.label.clone()))
         .collect()
 }
 
@@ -209,7 +210,7 @@ struct Here {
     project: ProjectId,
     name: String,
     tab: ProjectTab,
-    agents: Vec<String>,
+    agents: Vec<(String, String)>,
     files: Option<(String, Vec<String>)>,
     asked: Option<String>,
 }
@@ -223,11 +224,14 @@ impl Here {
             name: self.name.clone(),
             tab,
         };
-        let agents = self.agents.iter().map(|label| Target {
+        let agents = self.agents.iter().map(|(node, label)| Target {
             label: label.clone(),
             kind: "Agent",
-            place: place(ProjectTab::Agents),
-            pick: Pick::Agent,
+            place: Place::Team {
+                id: self.project.clone(),
+                name: self.name.clone(),
+            },
+            pick: Pick::Agent(node.clone()),
         });
         let files = self
             .files
@@ -704,15 +708,12 @@ impl Shell {
     fn pick(&mut self, target: Target) {
         match target.pick {
             Pick::Open => self.go(target.place),
-            Pick::Agent => {
+            Pick::Agent(node) => {
+                let Place::Team { id, .. } = &target.place else {
+                    unreachable!("an agent row goes to its project's Team screen");
+                };
+                self.ctx.messages_for = Some((id.clone(), node));
                 self.go(target.place);
-                self.ctx.say(Message::success(
-                    "Opened Agents.",
-                    &format!(
-                        "Pick {} in the agents list, then press M for its messages.",
-                        target.label
-                    ),
-                ));
             }
             Pick::File(project) => self.ctx.request(Request::Reveal(Box::new(RevealQuery {
                 project,
@@ -1178,7 +1179,7 @@ impl Shell {
                             Pick::File(_) => {
                                 path_tail(&target.label, GO_TO_LABEL_CELLS, ctx.glyphs.ellipsis)
                             }
-                            Pick::Open | Pick::Agent => target.label.clone(),
+                            Pick::Open | Pick::Agent(_) => target.label.clone(),
                         }),
                         styled(target.kind, Role::Muted, theme),
                     ],
