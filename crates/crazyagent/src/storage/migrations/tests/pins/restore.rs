@@ -294,7 +294,8 @@ fn key_files(base: &Path, folder: &str) -> Vec<String> {
 /// binding held and a key of an account added after the upgrade, into the same key folders
 /// of the dated copy it keeps of the 2.5 data (DEC-192), private as they were, and deletes
 /// the staged copies in both key folders, while the key of an account the 2.4 copy holds
-/// stays where it is.
+/// stays where it is. A key no row of either copy names, left by a removal, is deleted, not
+/// kept in the copy (leader 05:05).
 #[test]
 fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_accounts_key() {
     use crate::storage::accounts::{self, ACCOUNT_KEYS, KEY_FOLDERS, PLUGIN_KEYS};
@@ -334,8 +335,10 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
     drop(db);
     for (folder, name) in [
         (PLUGIN_KEYS, "plugin-key-restore"),
+        (PLUGIN_KEYS, "plugin-key-orphan"),
         (ACCOUNT_KEYS, "restore-old-key"),
         (ACCOUNT_KEYS, "restore-new-key"),
+        (ACCOUNT_KEYS, "restore-orphan-key"),
     ] {
         let reference = crate::protocol::CredentialRef::new(name).unwrap();
         accounts::replace_key_in(root.path(), folder, &reference, b"sk-restore".to_vec()).unwrap();
@@ -347,11 +350,20 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
     }
     assert_eq!(
         key_files(root.path(), PLUGIN_KEYS),
-        [".replace-restore", "plugin-key-restore"]
+        [
+            ".replace-restore",
+            "plugin-key-orphan",
+            "plugin-key-restore"
+        ]
     );
     assert_eq!(
         key_files(root.path(), ACCOUNT_KEYS),
-        [".replace-restore", "restore-new-key", "restore-old-key"]
+        [
+            ".replace-restore",
+            "restore-new-key",
+            "restore-old-key",
+            "restore-orphan-key"
+        ]
     );
 
     let copy = restored(&root, start + HOUR).unwrap();
