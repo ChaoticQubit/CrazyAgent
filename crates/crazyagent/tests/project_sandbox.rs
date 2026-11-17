@@ -104,8 +104,9 @@ fn command_env(sandbox: &ProjectSandbox, profile: &Path) -> BTreeMap<String, Str
 }
 
 /// T8 row 1 and C1: the tool cache is one more writable root, listed as a non-working-tree
-/// root in the SM1-R rule, whose other lines stay as they were. The rule's closing
-/// parentheses ride on its last line, so the lines are compared without them.
+/// root in the SM1-R rule as one line of an `X$` and an `X/` regex, whose other lines stay
+/// as they were. The rule's closing parentheses ride on its last line, so the lines are
+/// compared without them.
 #[test]
 fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
     let case = case();
@@ -117,7 +118,7 @@ fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
         .unwrap();
     let rule = |text: &str| -> Vec<String> {
         text.lines()
-            .filter(|line| line.contains("[gG](i|I|\u{131})[tT](/.*)?$"))
+            .filter(|line| line.contains("[gG](i|I|\u{131})[tT]$\""))
             .map(|line| line.trim_end_matches(')').to_owned())
             .collect()
     };

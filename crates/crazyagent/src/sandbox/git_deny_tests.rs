@@ -444,7 +444,8 @@ fn widened(case: &Case) -> (ProjectSandbox, PathBuf, PathBuf) {
 
 /// RV-DS241-16: every root the agent may write is listed in the nested-repository rule, its
 /// working tree with a `.git` denied below its top, every other root, the owner's temp folder
-/// and a shared writable folder included, with a `.git` denied at any depth.
+/// and a shared writable folder included, with a `.git` denied at any depth as an `X$` and an
+/// `X/` regex rather than one with an optional `(/.*)?$` tail (V243-FARM2-PRODUCT-SMALL).
 #[test]
 fn every_writable_root_is_under_the_nested_git_rule() {
     let case = case();
@@ -458,7 +459,9 @@ fn every_writable_root_is_under_the_nested_git_rule() {
         let rule = if *root == worktree {
             format!("(regex #\"^{pattern}/.+/{dot_git}(/.*)?$\")")
         } else {
-            format!("(regex #\"^{pattern}/(.+/)?{dot_git}(/.*)?$\")")
+            format!(
+                "(regex #\"^{pattern}/(.+/)?{dot_git}$\") (regex #\"^{pattern}/(.+/)?{dot_git}/\")"
+            )
         };
         assert!(text.contains(&rule), "{}\n{text}", root.display());
     }

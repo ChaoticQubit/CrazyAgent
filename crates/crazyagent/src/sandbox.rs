@@ -5964,4 +5964,37 @@ mod profile_string_tests {
         }
         assert!(!target.exists());
     }
+
+    /// V243-FARM2-PRODUCT-SMALL: the agent home's config and kept-entry denies and the
+    /// regranted flag and `.git` denies match a path and everything below it as an `X$` and
+    /// an `X/` regex, never as one regex with an optional `(/.*)?$` tail, which libsandbox
+    /// fails to compile again in lower case once an escaped dot, as in `.tmp`, comes first.
+    #[test]
+    fn home_denies_match_at_or_below_without_an_optional_tail() {
+        let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
+        let data = Path::new("/private/tmp/.tmpA1b2C3/data");
+        let config = agent_config_denies(home);
+        assert!(!config.contains("(/.*)?$"), "{config}");
+        let regranted = regranted_denies(home, &[data]);
+        assert_eq!(
+            regranted.matches("(/.*)?$").count(),
+            launch_denies(home).matches("(/.*)?$").count(),
+            "{regranted}"
+        );
+        let flagged = seatbelt_pattern(home);
+        assert!(
+            regranted.contains(&format!(
+                "(deny file-write-flags file-write-acl (regex #\"^{flagged}$\") (regex #\"^{flagged}/\"))"
+            )),
+            "{regranted}"
+        );
+        let git = any_case(".git");
+        for root in [home, data] {
+            let below = format!("{}/(.+/)?{git}", seatbelt_pattern(root));
+            assert!(
+                regranted.contains(&format!("(regex #\"^{below}$\") (regex #\"^{below}/\")")),
+                "{regranted}"
+            );
+        }
+    }
 }
