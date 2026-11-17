@@ -347,9 +347,10 @@ fn start_run(
 
 /// Marks a setup run as going for the owner's explicit Set up tools, Install missing or a
 /// tool row's Try again, unless one is going: the ticked pack entries start over as
-/// installing, each tool keeps its row until the run's step on it, so a lone job's row
-/// stays, and the background probes look for tool folders again at once. Inputs: the
-/// engine root and the ticked pack entries. Output: whether this run begins.
+/// installing, the rows the last run left are cleared so each tool reads as the check finds
+/// it until the run's step on it, a row a lone job holds stays, and the background probes
+/// look for tool folders again at once. Inputs: the engine root and the ticked pack
+/// entries. Output: whether this run begins.
 pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
     let begun = progress::with(root, |state| {
         if state.running {
@@ -357,6 +358,8 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
         }
         state.running = true;
         state.step = None;
+        let held = &state.jobs;
+        state.dependencies.retain(|dep, _| held.contains(dep));
         state.pack = entries
             .iter()
             .map(|entry| (entry.id.clone(), PackState::Installing))

@@ -113,8 +113,8 @@ pub struct LastUpdate {
 /// the code for why a button is not offered, `guide` the vendor's page for that case,
 /// `needs` what an installed harness lacks before it can run, as the tool resolver reads it,
 /// `sign_in_min` the oldest version CrazyAgent signs in with, for a harness that signs in,
-/// and `waiting` the catalog id of the harness whose job this running job waits behind,
-/// since the two would change the same folder.
+/// and `waiting` the job this running job waits behind, since the two would change the same
+/// folder: a harness by its catalog id, a setup job by its name ([`crate::setup::job_name`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HarnessVersions {

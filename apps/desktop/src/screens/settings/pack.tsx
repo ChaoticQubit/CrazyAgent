@@ -140,7 +140,7 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
   onRefusedTool?: (choice: RefusedTool) => void;
   onRetry: () => void;
 }) {
-  const running = status.kind === "ok" && setupBusy(status.value);
+  const running = status.kind === "ok" && status.value.running;
   return <div className="stack">
     <div className="settings-top"><div><h2>Pack</h2><p>The skills and plugins every project starts with. Switching one off stops agents using it; removing it deletes what it installed.</p></div></div>
     {status.kind === "loading" ? <Skeleton shape="row" count={6} />

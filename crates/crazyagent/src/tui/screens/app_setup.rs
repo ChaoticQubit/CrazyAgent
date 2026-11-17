@@ -771,7 +771,7 @@ impl AppSetup {
             Load::Ready(status) => status.running,
             _ => return Flow::Handled,
         };
-        if running || self.started || self.sent.is_some() || self.fixing.is_some() {
+        if running || self.started || self.sent.is_some() {
             ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
@@ -835,7 +835,9 @@ impl AppSetup {
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
         if let Some(name) = self.fixing {
             self.fixed(name, status, ctx);
-            return Flow::Handled;
+            if !self.started {
+                return Flow::Handled;
+            }
         }
         if status.running {
             self.started = true;

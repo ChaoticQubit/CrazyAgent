@@ -1108,11 +1108,12 @@ export function rowInstall(dependency: Dependency, status: SetupStatus): boolean
 }
 
 /** Tells whether Settings, Pack offers Install tools: a tool is missing, failed or found and not
- * used, never one setup can't install on this system, and nothing is running or checking. Input: the status.
- * Output: the answer. */
+ * used, never one setup can't install on this system, no setup run goes on (DEC-199: a lone job
+ * on one tool leaves it offered, the run taking its turn on that tool) and nothing is checking.
+ * Input: the status. Output: the answer. */
 export function toolsOffer(status: SetupStatus): boolean {
   const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed" || item.state.state === "refused");
-  return wanted && !setupBusy(status) && !toolsChecking(status);
+  return wanted && !status.running && !toolsChecking(status);
 }
 
 /** Tells whether setup is still working. Input: the status. Output: true while a setup run
