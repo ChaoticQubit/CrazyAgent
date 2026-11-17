@@ -900,3 +900,59 @@ fn a_client_save_after_an_own_write_applies() {
         "a save at the caught-up revision"
     );
 }
+
+/// v2.5 L6 Q10: removing a project forgets its admissions through the log. The removal
+/// appends AdmissionsForgotten at the request's next revision, so a replay of the log brings
+/// none of them back. Input: a fresh engine database. Output: none.
+#[test]
+fn a_removed_project_s_admissions_do_not_come_back_on_replay() {
+    use crate::worktrees::log::{self, Admitted, Event};
+    let (_root, path, cfg) = fixture();
+    let (mut db, _lock) = open_database(&path, false).unwrap();
+    let started = owner_start_hosted(&mut db).unwrap();
+    db.execute("INSERT INTO projects(id, body) VALUES ('gone', '{}')", [])
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    let fence = crate::state_log::fence::Fence::Engine(started.host.clone());
+    let mut appender = crate::state_log::Appender::own(&tx, fence).unwrap();
+    for repository in ["/r1", "/r2"] {
+        let admitted = Admitted {
+            project: "gone".into(),
+            repository: repository.into(),
+            body: "{}".into(),
+        };
+        log::record(&mut appender, 1, &Event::Admitted(admitted)).unwrap();
+    }
+    let revision = appender.revision();
+    tx.commit().unwrap();
+    let admissions = |db: &Connection| -> i64 {
+        db.query_row("SELECT COUNT(*) FROM repository_admissions", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(admissions(&db), 2);
+    let tx = db.transaction().unwrap();
+    let remove = crate::project_setup::SetupAction::Remove {
+        project_id: crate::protocol::ProjectId::new("gone").unwrap(),
+    };
+    assert_eq!(
+        crate::project_setup::execute(&tx, &cfg, &remove, revision).unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(admissions(&db), 0);
+    let last: (i64, String) = db
+        .query_row(
+            "SELECT revision, kind FROM state_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(last, (revision as i64 + 1, log::KIND_FORGOTTEN.to_owned()));
+    let tx = db.transaction().unwrap();
+    log::rebuild(&tx).unwrap();
+    assert_eq!(admissions(&tx), 0, "a replay brings no admission back");
+    drop(tx);
+    crate::state_log::fence::host_stopped(&started.host);
+}
