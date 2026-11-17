@@ -1,7 +1,7 @@
 schema: 1
 kind: embedding
 name: ollama
-title: Ollama on this Mac
+title: Ollama on this computer
 version: 1.0.0
 description: nomic-embed-text through a local Ollama server at 127.0.0.1 port 11434, local and not encrypted. Run ollama pull nomic-embed-text first.
 http:

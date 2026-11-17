@@ -1,7 +1,7 @@
 use super::manifest::{self, Manifest, Runs};
 use super::{
-    Binding, LOCAL_PLUGIN, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, Problem,
-    SecretView, USER_PLUGINS_MAX, sha256_hex, yaml,
+    Binding, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, Problem, SecretView,
+    USER_PLUGINS_MAX, sha256_hex, yaml,
 };
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
@@ -37,8 +37,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(sqlite)
 }
 
-const BUNDLED: [(&str, &str); 4] = [
-    ("local", include_str!("../../assets/app-plugins/local.yaml")),
+const BUNDLED: [(&str, &str); 3] = [
     (
         "openai",
         include_str!("../../assets/app-plugins/openai.yaml"),
@@ -64,7 +63,7 @@ const ACCOUNT: &str = "account";
 const KEY: &str = "key";
 
 /// The plugins that ship with the app, in screen order, as (name, manifest text) pairs.
-/// They are trusted by shipping and can only be turned off, never removed.
+/// They are trusted by shipping, start off, and turn on and off but are never removed.
 pub fn bundled() -> &'static [(&'static str, &'static str)] {
     &BUNDLED
 }
@@ -316,7 +315,7 @@ fn reviewed(db: &Connection, origin: Origin, manifest: &Manifest) -> Result<bool
     Ok(trusted.as_deref() == Some(manifest.sha256.as_str()))
 }
 
-fn enabled_flag(db: &Connection, name: &str, origin: Origin) -> Result<bool, EngineError> {
+fn enabled_flag(db: &Connection, name: &str) -> Result<bool, EngineError> {
     let stored: Option<bool> = db
         .query_row(
             "SELECT enabled FROM app_plugin_state WHERE name=?1",
@@ -325,7 +324,7 @@ fn enabled_flag(db: &Connection, name: &str, origin: Origin) -> Result<bool, Eng
         )
         .optional()
         .map_err(sqlite)?;
-    Ok(stored.unwrap_or(origin == Origin::Bundled && name == LOCAL_PLUGIN))
+    Ok(stored.unwrap_or(false))
 }
 
 fn set_flag(db: &Connection, name: &str, enabled: bool) -> Result<(), EngineError> {
@@ -451,7 +450,7 @@ fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, Engine
         PluginStatus::Ready
     };
     Ok(PluginView {
-        enabled: reviewed && enabled_flag(db, &manifest.name, found.origin)?,
+        enabled: reviewed && enabled_flag(db, &manifest.name)?,
         runs: Some(manifest.runs_view()),
         name: manifest.name,
         title: manifest.title,
@@ -862,7 +861,7 @@ pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineE
     if !reviewed(db, found.origin, &manifest)? {
         return Err(error("app_plugin_needs_review"));
     }
-    if !enabled_flag(db, &manifest.name, found.origin)? {
+    if !enabled_flag(db, &manifest.name)? {
         return Err(error("app_plugin_off"));
     }
     let mut bindings = Vec::with_capacity(manifest.secrets().len());

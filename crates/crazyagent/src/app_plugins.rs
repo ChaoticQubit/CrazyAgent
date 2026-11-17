@@ -11,8 +11,6 @@ pub mod yaml;
 pub const FOLDER: &str = "app-plugins";
 /// The most user plugin files the engine reads from the folder, in name order.
 pub const USER_PLUGINS_MAX: usize = 64;
-/// The bundled plugin that runs the built-in local embedding runtime.
-pub const LOCAL_PLUGIN: &str = "local";
 
 /// Why a manifest or a plugin request was refused: a stable code, the manifest line or
 /// field it is about when there is one, and one plain sentence naming them. Never holds a
