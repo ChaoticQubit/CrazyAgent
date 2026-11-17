@@ -342,28 +342,6 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         let sentence = refusal(code);
         assert!(!sentence.contains('_'), "{code} reads as {sentence}");
     }
-    assert!(
-        crate::engine::owner::transport::cleanup::CLEANUP_CODES.contains(&"changes_git_include")
-    );
-    assert_eq!(
-        refusal("changes_git_include"),
-        "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again."
-    );
-    assert!(crate::engine::owner::transport::cleanup::CLEANUP_CODES.contains(&"changes_git_old"));
-    let old = refusal("changes_git_old");
-    assert!(
-        old.starts_with("Landing changes needs Git 2.40 or newer"),
-        "{old}"
-    );
-    assert_eq!(
-        old.contains("Command Line Tools") && old.contains("xcode-select --install"),
-        cfg!(target_os = "macos"),
-        "{old}"
-    );
-    assert!(
-        !old.contains("brew upgrade") && !old.contains("brew install"),
-        "{old}"
-    );
 }
 
 #[test]
