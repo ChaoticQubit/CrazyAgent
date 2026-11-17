@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 mod tests;
@@ -104,9 +105,26 @@ pub struct Appender<'a, 'c> {
 
 impl<'a, 'c> Appender<'a, 'c> {
     /// Starts appending in an owner request's transaction, whose revision the request
-    /// already moved. Inputs: the transaction and that revision. Output: the appender.
+    /// already moved: it must be the `state` revision now and newer than the last logged
+    /// one, so each appending transaction brings its own and none goes back. Inputs: the
+    /// transaction and that revision. Output: the appender, or `state_log_revision_stale`
+    /// or `state_log_revision_not_newer`.
     pub fn owner(tx: &'a Transaction<'c>, revision: u64) -> Result<Self, EngineError> {
         ensure(tx)?;
+        if revision != state_revision(tx)? {
+            return Err(error("state_log_revision_stale"));
+        }
+        let last: Option<i64> = tx
+            .query_row(
+                "SELECT revision FROM state_log ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        if revision == 0 || last.is_some_and(|last| revision <= last as u64) {
+            return Err(error("state_log_revision_not_newer"));
+        }
         Ok(Self {
             tx,
             revision,
@@ -115,14 +133,19 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 
     /// Starts appending in a transaction of a writer on its own connection, moving the
-    /// `state` revision once for it. Input: the transaction. Output: the appender.
+    /// `state` revision once for it. Input: the transaction. Output: the appender, or
+    /// `state_log_revision_exhausted` when the revision is at its largest value.
     pub fn own(tx: &'a Transaction<'c>) -> Result<Self, EngineError> {
-        ensure(tx)?;
-        Ok(Self {
-            tx,
-            revision: 0,
-            appended: 0,
-        })
+        let moved = tx
+            .execute(
+                "UPDATE state SET revision=revision+1 WHERE id=1 AND revision<?1",
+                [i64::MAX],
+            )
+            .map_err(error)?;
+        if moved != 1 {
+            return Err(error("state_log_revision_exhausted"));
+        }
+        Self::owner(tx, state_revision(tx)?)
     }
 
     /// The revision this transaction's events carry. Output: the revision.
@@ -130,27 +153,187 @@ impl<'a, 'c> Appender<'a, 'c> {
         self.revision
     }
 
-    /// Appends one event. Input: the draft. Output: its `seq`.
-    pub fn append(&mut self, _draft: &Draft<'_>) -> Result<u64, EngineError> {
-        Ok(0)
+    /// Appends one event; the snapshot kinds are written only by [`Self::snapshot`]. Input:
+    /// the draft. Output: its `seq`, or `state_log_kind_reserved` or a bound's refusal.
+    pub fn append(&mut self, draft: &Draft<'_>) -> Result<u64, EngineError> {
+        if draft.kind == SNAPSHOT_CHUNK || draft.kind == SNAPSHOT_DONE {
+            return Err(error("state_log_kind_reserved"));
+        }
+        self.push(draft)
     }
 
-    /// Appends a snapshot run of an aggregate. Inputs: the aggregate, the time and the
-    /// chunks in order. Output: the `seq` of the closing event.
+    /// Appends a snapshot run of an aggregate: one chunk event per chunk, in order from 0,
+    /// closed by an event holding the chunk count and the sha256 of the chunk bodies in
+    /// order. Every chunk is checked under [`BODY_BYTES_MAX`] before any is appended.
+    /// Inputs: the aggregate, the time and the chunks. Output: the `seq` of the closing
+    /// event, or `state_log_chunk_bounds` or `state_log_transaction_full`.
     pub fn snapshot(
         &mut self,
-        _aggregate: Aggregate,
-        _at_ms: u64,
-        _chunks: Vec<Chunk>,
+        aggregate: Aggregate,
+        at_ms: u64,
+        chunks: Vec<Chunk>,
     ) -> Result<u64, EngineError> {
-        Ok(0)
+        if chunks.len() >= TRANSACTION_EVENTS_MAX - self.appended {
+            return Err(error("state_log_transaction_full"));
+        }
+        let count = chunks.len() as u32;
+        let bodies = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(seq, chunk)| {
+                serde_json::to_vec(&SnapshotChunk {
+                    aggregate,
+                    table: chunk.table,
+                    seq: seq as u32,
+                    rows: chunk.rows,
+                })
+                .map_err(error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if bodies.iter().any(|body| body.len() > BODY_BYTES_MAX) {
+            return Err(error("state_log_chunk_bounds"));
+        }
+        let mut digest = Sha256::new();
+        for body in &bodies {
+            digest.update(body);
+            self.push(&Draft {
+                aggregate,
+                kind: SNAPSHOT_CHUNK,
+                schema: 1,
+                at_ms,
+                body,
+            })?;
+        }
+        let done = serde_json::to_vec(&SnapshotDone {
+            aggregate,
+            chunks: count,
+            sha256: format!("{:x}", digest.finalize()),
+        })
+        .map_err(error)?;
+        self.push(&Draft {
+            aggregate,
+            kind: SNAPSHOT_DONE,
+            schema: 1,
+            at_ms,
+            body: &done,
+        })
+    }
+
+    /// Appends one checked event at the next `seq`, refusing one past the transaction's
+    /// bound or past the last possible `seq`. Input: the draft. Output: its `seq`.
+    fn push(&mut self, draft: &Draft<'_>) -> Result<u64, EngineError> {
+        check(draft)?;
+        if self.appended >= TRANSACTION_EVENTS_MAX {
+            return Err(error("state_log_transaction_full"));
+        }
+        let previous: i64 = self
+            .tx
+            .prepare_cached("SELECT COALESCE(MAX(seq), 0) FROM state_log")
+            .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
+            .map_err(error)?;
+        let seq = previous
+            .checked_add(1)
+            .ok_or_else(|| error("state_log_seq_exhausted"))?;
+        self.tx
+            .prepare_cached("INSERT INTO state_log VALUES (?1,?2,?3,?4,?5,?6,?7)")
+            .and_then(|mut statement| {
+                statement.execute(params![
+                    seq,
+                    self.revision as i64,
+                    draft.aggregate.name(),
+                    draft.kind,
+                    draft.schema,
+                    draft.at_ms as i64,
+                    draft.body
+                ])
+            })
+            .map_err(error)?;
+        self.appended += 1;
+        Ok(seq as u64)
     }
 }
 
-/// Checks the snapshot run a closing event ends. Inputs: the connection and the closing
-/// event's `seq`. Output: Ok, or the refusal.
-pub fn verify_snapshot(_db: &Connection, _done: u64) -> Result<(), EngineError> {
+/// Checks the snapshot run a closing event ends: the sha256 of the bodies of the events
+/// before it, as many as it counts, must match, and each must be a chunk of its aggregate
+/// in order from 0. A missing, changed or reordered chunk fails the hash. Inputs: the
+/// connection and the closing event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
+/// `state_log_snapshot_invalid`, `state_log_snapshot_hash` or `state_log_snapshot_chunks`.
+pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
+    let missing = || error("state_log_snapshot_missing");
+    let seq = i64::try_from(done).map_err(|_| missing())?;
+    let closing: Option<(String, Vec<u8>)> = db
+        .query_row(
+            "SELECT kind, body FROM state_log WHERE seq=?1",
+            [seq],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((_, body)) = closing.filter(|(kind, _)| kind == SNAPSHOT_DONE) else {
+        return Err(missing());
+    };
+    let closed: SnapshotDone =
+        serde_json::from_slice(&body).map_err(|_| error("state_log_snapshot_invalid"))?;
+    let mut statement = db
+        .prepare("SELECT kind, body FROM state_log WHERE seq>=?1 AND seq<?2 ORDER BY seq")
+        .map_err(error)?;
+    let rows = statement
+        .query_map([seq - i64::from(closed.chunks), seq], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(error)?;
+    let mut digest = Sha256::new();
+    let mut count: u32 = 0;
+    let mut in_order = true;
+    for row in rows {
+        let (kind, body) = row.map_err(error)?;
+        digest.update(&body);
+        let chunk = (kind == SNAPSHOT_CHUNK)
+            .then(|| serde_json::from_slice::<SnapshotChunk>(&body).ok())
+            .flatten();
+        in_order &=
+            chunk.is_some_and(|chunk| chunk.aggregate == closed.aggregate && chunk.seq == count);
+        count = count.saturating_add(1);
+    }
+    if format!("{:x}", digest.finalize()) != closed.sha256 {
+        return Err(error("state_log_snapshot_hash"));
+    }
+    if !in_order || count != closed.chunks {
+        return Err(error("state_log_snapshot_chunks"));
+    }
     Ok(())
+}
+
+/// Refuses a draft out of the log's bounds: a body over [`BODY_BYTES_MAX`], a kind that
+/// is not 1 to [`KIND_BYTES_MAX`] ASCII letters and digits, schema 0, or a time past the
+/// largest `i64`. Input: the draft. Output: Ok, or the refusal.
+fn check(draft: &Draft<'_>) -> Result<(), EngineError> {
+    if draft.body.len() > BODY_BYTES_MAX {
+        return Err(error("state_log_body_bounds"));
+    }
+    if draft.kind.is_empty()
+        || draft.kind.len() > KIND_BYTES_MAX
+        || !draft.kind.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(error("state_log_kind"));
+    }
+    if draft.schema == 0 {
+        return Err(error("state_log_schema"));
+    }
+    if draft.at_ms > i64::MAX as u64 {
+        return Err(error("state_log_at_ms"));
+    }
+    Ok(())
+}
+
+/// Reads the store's `state` revision. Input: the connection. Output: the revision.
+fn state_revision(db: &Connection) -> Result<u64, EngineError> {
+    let revision: i64 = db
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    u64::try_from(revision).map_err(error)
 }
 
 /// Creates the log table inside the caller's transaction when it is absent, so it
