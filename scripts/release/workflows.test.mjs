@@ -318,6 +318,7 @@ test(`no Windows target ships before WIN-1's sandbox redesign is in the tree: wh
 });
 
 test("the Windows signing tools are prepared only with all six Azure secrets: the step sees whether each is set, never its value; none set lets a dev or stable build go on unsigned with a notice, and a partial set fails naming what is missing (DEC-195 Q8)", async () => {
+  assert.doesNotMatch(await workflow("release.yml"), /CRAZYAGENT_REQUIRE_SIGNING/, "no release step makes a stable Windows build require signing while the owner ships it unsigned");
   const step = await releaseStep("build", "Prepare Windows signing tools");
   assert.match(step, /^ {6}- name: Prepare Windows signing tools\n {8}if: matrix\.os == 'windows'\n {8}env:\n/);
   assert.deepEqual([...step.matchAll(/^ +(\S+: )?(\$\{\{.*?\}\})$/gm)].map((match) => `${match[1] ?? ""}${match[2]}`), SECRET_NAMES.map((name) => `${name}_SET: \${{ secrets.${name} != '' }}`), "the step's only expressions say whether each secret is set, never a value");
