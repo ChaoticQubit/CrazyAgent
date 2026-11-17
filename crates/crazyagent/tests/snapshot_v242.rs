@@ -11,8 +11,12 @@ mod e2e_support;
 mod check;
 #[path = "snapshot_v242/harness.rs"]
 mod harness;
+#[path = "snapshot_v242/landing.rs"]
+mod landing;
 #[path = "snapshot_v242/launch.rs"]
 mod launch;
+#[path = "snapshot_v242/packs.rs"]
+mod packs;
 #[path = "snapshot_v242/provider.rs"]
 mod provider;
 #[path = "snapshot_v242/role.rs"]
@@ -60,7 +64,9 @@ fn scenarios() -> Vec<Scenario> {
     }];
     all.extend(check::scenarios());
     all.extend(harness::scenarios());
+    all.extend(landing::scenarios());
     all.extend(launch::scenarios());
+    all.extend(packs::scenarios());
     all.extend(provider::scenarios());
     all.extend(role::scenarios());
     all.extend(workflow::scenarios());
