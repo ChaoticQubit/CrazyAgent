@@ -141,7 +141,7 @@ fn delete_activity(
     Ok(Outcome::Applied)
 }
 
-fn review(
+pub(super) fn review(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     id: &RequestId,

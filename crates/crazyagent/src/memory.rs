@@ -13,7 +13,7 @@ pub mod library;
 mod review;
 mod text;
 
-use review::{nominations, owner};
+use review::{nominations, owner, review};
 pub use text::visible_text;
 pub(crate) use text::{hidden_char, hidden_text};
 use text::{memory_text_valid, text_valid};
