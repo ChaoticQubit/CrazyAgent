@@ -973,4 +973,22 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// v2.5 L6 Q9: `start_owner_runtime` starts the owner runtime once; a second start on a
+    /// running owner is refused, never run twice.
+    #[tokio::test]
+    async fn a_second_owner_runtime_start_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cfg =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), cfg).await.unwrap();
+        engine.start_owner_runtime().await.unwrap();
+        assert_eq!(
+            engine.start_owner_runtime().await.unwrap_err().0,
+            "owner_runtime_unavailable_or_busy"
+        );
+        engine.close().await.unwrap();
+    }
 }

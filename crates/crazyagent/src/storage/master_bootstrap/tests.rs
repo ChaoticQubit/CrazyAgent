@@ -940,3 +940,141 @@ fn a_renumbered_master_lease_requalifies_on_the_first_send() {
     let git_dir = crate::worktrees::lease_git_dir(&case.db, &lease).unwrap();
     assert!(git_dir.is_dir(), "{}", git_dir.display());
 }
+
+/// The `state` revision of a store. Input: the store. Output: the revision.
+fn revision(db: &Connection) -> u64 {
+    let revision: i64 = db
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    u64::try_from(revision).unwrap()
+}
+
+/// The revision and kind of each logged worktrees event other than a snapshot run, in log
+/// order. Input: the store. Output: the pairs.
+fn logged(db: &Connection) -> Vec<(u64, String)> {
+    db.prepare(
+        "SELECT revision, kind FROM state_log WHERE aggregate='worktrees'
+         AND kind NOT IN ('SnapshotChunk','SnapshotDone') ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// Asserts that replay of the log rebuilds both worktree tables as they stand. Input: the
+/// store. Output: none.
+fn replays_to_live(db: &mut Connection) {
+    let tables = |db: &Connection| {
+        (
+            crate::state_log::replay::rows(db, "repository_admissions").unwrap(),
+            crate::state_log::replay::rows(db, "worktree_leases").unwrap(),
+        )
+    };
+    let live = tables(db);
+    let tx = db.transaction().unwrap();
+    worktrees::log::rebuild(&tx).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(tables(db), live, "replay equals the live tables");
+}
+
+/// Admits the case's repository, reserves its bootstrap lease and checks it out. Input: the
+/// case. Output: the task and the repository.
+fn provisioned(case: &mut Case) -> (crate::protocol::TaskId, String) {
+    let repository = case.repository.to_str().unwrap().to_owned();
+    let task = case.session.bootstrap_task_id.clone();
+    let tx = case.db.transaction().unwrap();
+    assert_eq!(
+        worktrees::admit(&tx, &case.session.project_id, &repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        worktrees::reserve_master_bootstrap(
+            &tx,
+            case.root.path(),
+            &case.session.project_id,
+            &task,
+            &case.session.session_id,
+            &repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    worktrees::provision(&case.db, &task, &repository).unwrap();
+    (task, repository)
+}
+
+/// v2.5 L6 Q8 items 2 and 3: the bootstrap admission and reservation each append through
+/// `own` with the store's engine host, and the checkout's save through `own` in its own
+/// transaction, one revision each; replay rebuilds both worktree tables as they stand.
+#[test]
+fn bootstrap_lease_writes_are_logged_and_replay_to_the_live_tables() {
+    let mut case = Case::new();
+    let before = revision(&case.db);
+    provisioned(&mut case);
+    assert_eq!(
+        logged(&case.db),
+        [
+            (before + 1, worktrees::log::KIND_ADMITTED.to_owned()),
+            (before + 2, worktrees::log::KIND_RESERVED.to_owned()),
+            (before + 3, worktrees::log::KIND_SAVED.to_owned()),
+        ]
+    );
+    assert_eq!(revision(&case.db), before + 3);
+    replays_to_live(&mut case.db);
+}
+
+/// v2.5 L6 Q3 fence row at the lease writers: with no engine host of the store running in
+/// this process, an admission is refused at its fence and writes nothing.
+#[test]
+fn a_lease_write_without_a_running_host_is_refused_and_writes_nothing() {
+    let mut case = Case::new();
+    let repository = case.repository.to_str().unwrap().to_owned();
+    let before = revision(&case.db);
+    crate::state_log::fence::host_stopped(&case.started.host);
+    let tx = case.db.transaction().unwrap();
+    assert_eq!(
+        worktrees::admit(&tx, &case.session.project_id, &repository)
+            .unwrap_err()
+            .0,
+        "state_log_fence_out_of_process"
+    );
+    drop(tx);
+    crate::state_log::fence::host_started(&case.started.host);
+    assert_eq!(revision(&case.db), before);
+    let admissions: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM repository_admissions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(admissions, 0);
+}
+
+/// v2.5 L6 Q8 item 4: after a restart settles the Ready lease RecoveryRequired (the open's
+/// sweep, logged as one snapshot run), requalify inside a master request appends its save
+/// through `owner` at the request's signed next revision, moving `state` there once; replay
+/// rebuilds both worktree tables as they stand.
+#[test]
+fn a_requalified_lease_is_logged_at_its_request_s_next_revision() {
+    let mut case = Case::new();
+    let (task, repository) = provisioned(&mut case);
+    crate::state_log::fence::host_stopped(&case.started.host);
+    let opening = crate::storage::opening::Opening::for_test(9);
+    assert!(worktrees::log::sweep(&case.db, opening).unwrap());
+    crate::state_log::fence::host_started(&case.started.host);
+    let next = revision(&case.db) + 1;
+    let tx = case.db.transaction().unwrap();
+    assert!(worktrees::requalify(&tx, &task, &repository, next).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(revision(&case.db), next);
+    assert_eq!(
+        logged(&case.db).last(),
+        Some(&(next, worktrees::log::KIND_SAVED.to_owned()))
+    );
+    replays_to_live(&mut case.db);
+}

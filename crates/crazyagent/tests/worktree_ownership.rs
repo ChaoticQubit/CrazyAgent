@@ -75,7 +75,21 @@ async fn apply(engine: &Engine, id: &str, revision: u64, command: Command) -> Wi
     send(engine, request(id, revision, command)).await
 }
 
+/// Opens the engine, creates the project and pins its task, and starts the owner runtime the
+/// way `serve` does at boot, so lease writes run under the store's engine host. Inputs: the
+/// root and the repository. Output: the engine and its configuration.
 async fn setup(root: &Path, repo: &Path) -> (Engine, crazyagent::config::EffectiveConfig) {
+    let (engine, config) = setup_unstarted(root, repo).await;
+    engine.start_owner_runtime().await.unwrap();
+    (engine, config)
+}
+
+/// Opens the engine, creates the project and pins its task, with no owner runtime started.
+/// Inputs: the root and the repository. Output: the engine and its configuration.
+async fn setup_unstarted(
+    root: &Path,
+    repo: &Path,
+) -> (Engine, crazyagent::config::EffectiveConfig) {
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
     let engine = Engine::open(&root.join("db"), config.clone())
@@ -749,6 +763,105 @@ async fn entries_agents_may_create_mark_only_the_lease_they_touch() {
         leases(&engine).await[0].state,
         crazyagent::worktrees::LeaseState::Ready
     );
+    engine.close().await.unwrap();
+}
+
+/// The revision and kind of each logged worktrees event other than a snapshot run, in log
+/// order. Input: the closed store's path. Output: the pairs.
+fn logged(database: &Path) -> Vec<(i64, String)> {
+    let db = rusqlite::Connection::open(database).unwrap();
+    db.prepare(
+        "SELECT revision, kind FROM state_log WHERE aggregate='worktrees'
+         AND kind NOT IN ('SnapshotChunk','SnapshotDone') ORDER BY seq",
+    )
+    .unwrap()
+    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+    .unwrap()
+    .collect::<rusqlite::Result<_>>()
+    .unwrap()
+}
+
+/// Asserts that replay of the closed store's log rebuilds both worktree tables as they
+/// stand, inside a transaction that is rolled back. Input: the store's path. Output: none.
+fn replays_to_live(database: &Path) {
+    use crazyagent::state_log::replay::rows;
+    let mut db = rusqlite::Connection::open(database).unwrap();
+    let tables = |db: &rusqlite::Connection| {
+        (
+            rows(db, "repository_admissions").unwrap(),
+            rows(db, "worktree_leases").unwrap(),
+        )
+    };
+    let live = tables(&db);
+    assert!(!live.0.is_empty() && !live.1.is_empty());
+    let tx = db.transaction().unwrap();
+    crazyagent::worktrees::log::rebuild(&tx).unwrap();
+    assert_eq!(tables(&tx), live, "replay equals the live tables");
+}
+
+/// v2.5 L6 Q8 item 3: a wire admission appends RepositoryAdmitted through `own` and replies
+/// one revision later; an allocation appends WorktreeReserved, then the checkout's
+/// LeaseSaved, each through `own`, and replies one revision after the save. Replay of the
+/// store rebuilds both worktree tables as they stand.
+#[tokio::test]
+async fn wire_lease_writes_are_logged_and_replay_to_the_live_tables() {
+    let root = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(root.path()).unwrap();
+    let repo = repository(&root, "repo");
+    let (engine, _config) = setup(&root, &repo).await;
+    let admitted = apply(
+        &engine,
+        "admit",
+        2,
+        Command::AdmitRepository {
+            project_id: ProjectId::new("project").unwrap(),
+            repository: repo.to_str().unwrap().into(),
+        },
+    )
+    .await;
+    assert_eq!(admitted.outcome, Outcome::Applied);
+    assert_eq!(admitted.revision.value(), 4);
+    let allocated = apply(&engine, "allocate", 4, allocate(&repo, "owner", None)).await;
+    assert_eq!(allocated.outcome, Outcome::Applied);
+    assert_eq!(allocated.revision.value(), 7);
+    engine.close().await.unwrap();
+    let database = root.join("db");
+    assert_eq!(
+        logged(&database),
+        [
+            (3, "RepositoryAdmitted".to_owned()),
+            (5, "WorktreeReserved".to_owned()),
+            (6, "LeaseSaved".to_owned()),
+        ]
+    );
+    replays_to_live(&database);
+}
+
+/// v2.5 L6 Q9: before an owner runtime starts, a wire admission is refused at its fence
+/// (`owner_runtime_stale`) and writes nothing: once the runtime starts, the same request at
+/// the same revision is applied.
+#[tokio::test]
+async fn a_wire_admission_before_an_owner_runtime_starts_is_refused_and_writes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(root.path()).unwrap();
+    let repo = repository(&root, "repo");
+    let (engine, _config) = setup_unstarted(&root, &repo).await;
+    let admit = request(
+        "admit",
+        2,
+        Command::AdmitRepository {
+            project_id: ProjectId::new("project").unwrap(),
+            repository: repo.to_str().unwrap().into(),
+        },
+    );
+    assert_eq!(
+        engine.apply(admit.clone()).await.unwrap_err().0,
+        "owner_runtime_stale"
+    );
+    engine.start_owner_runtime().await.unwrap();
+    let reply = send(&engine, admit).await;
+    assert_eq!(reply.outcome, Outcome::Applied);
+    assert_eq!(reply.revision.value(), 4);
     engine.close().await.unwrap();
 }
 
