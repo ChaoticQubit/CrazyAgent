@@ -269,35 +269,6 @@ impl Journal {
         first.map_or(Ok(()), Err)
     }
 
-    /// Undoes and forgets the entries of one kind, newest first, and keeps every other
-    /// kind. Inputs: the kind and the undo for one entry. Output: Ok when no entry of that
-    /// kind is left, else the first failure; the entries that failed stay recorded.
-    pub fn settle(
-        &mut self,
-        kind: &str,
-        mut undo: impl FnMut(&Entry) -> Result<(), EngineError>,
-    ) -> Result<(), EngineError> {
-        assert!(!kind.is_empty());
-        let mut kept = Vec::new();
-        let mut first = None;
-        for entry in self.entries.iter().rev() {
-            if entry.kind != kind {
-                kept.push(entry.clone());
-            } else if let Err(problem) = undo(entry) {
-                kept.push(entry.clone());
-                first = first.or(Some(problem));
-            }
-        }
-        kept.reverse();
-        assert!(kept.len() <= self.entries.len());
-        if kept.len() != self.entries.len() {
-            self.persist(&kept)?;
-            self.entries = kept;
-        }
-        assert!(first.is_some() || self.entries.iter().all(|entry| entry.kind != kind));
-        first.map_or(Ok(()), Err)
-    }
-
     /// Replaces the journal file with the given entries: writes a draft, syncs it, renames
     /// it over the file and syncs the folder. Input: the entries. Output: Ok, or why not.
     fn persist(&self, entries: &[Entry]) -> Result<(), EngineError> {

@@ -522,7 +522,7 @@ fn put_the_lid_setting_back_now_is_an_owner_change_on_windows_only() {
     let ac = sensors(PowerSource::Ac, Some(80));
     let resting = evaluate(&connection, NOW_MS, Some(&ac)).unwrap();
     assert_eq!(resting.state.want, Want::Nothing);
-    let outcome = act(&connection, action, NOW_MS);
+    let outcome = act(&connection, action.clone(), NOW_MS);
     if !cfg!(windows) {
         assert_eq!(outcome, rejected("keep_awake_no_lid_setting"));
         return;
