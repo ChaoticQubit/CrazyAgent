@@ -96,7 +96,10 @@ fn a_stale_pending_record_with_no_request_in_this_process_restores_nothing() {
     let global = dir.path().join("global.toml");
     let project = dir.path().join("project.toml");
 
-    assert_eq!(after_stop_when(false, dir.path(), &global, &project), Ok(()));
+    assert_eq!(
+        after_stop_when(false, dir.path(), &global, &project),
+        Ok(())
+    );
 
     assert_eq!(std::fs::read(dir.path().join("engine.db")).unwrap(), before);
     assert_eq!(state(dir.path()), Some(RestoreState::Pending));
