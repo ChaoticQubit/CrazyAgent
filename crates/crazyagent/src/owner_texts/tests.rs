@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 
 const HOLDER: &str = "landing_change_sets/c1/summary";
@@ -12,7 +12,7 @@ fn store() -> Connection {
 
 /// The number of rows in a text table. Inputs: the store and the table. Output: the count.
 fn count(db: &Connection, table: &str) -> i64 {
-    assert!(table.starts_with("owner_text"));
+    assert!(table.starts_with("kept_text"));
     db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
         row.get(0)
     })
@@ -29,7 +29,7 @@ fn a_shared_text_survives_until_its_last_holder_is_released() {
     let first = keep(&tx, "landing_change_sets/c1/prompt_line", None, prompt).unwrap();
     let second = keep(&tx, "landing_change_sets/c2/prompt_line", None, prompt).unwrap();
     assert_eq!(first, second, "one text, one digest");
-    assert_eq!(count(&tx, "owner_texts"), 1);
+    assert_eq!(count(&tx, "kept_texts"), 1);
     release(&tx, "landing_change_sets/c1/prompt_line").unwrap();
     assert_eq!(
         text(&tx, &first).unwrap().as_deref(),
@@ -39,7 +39,7 @@ fn a_shared_text_survives_until_its_last_holder_is_released() {
     release(&tx, "landing_change_sets/c2/prompt_line").unwrap();
     assert_eq!(text(&tx, &first).unwrap(), None);
     assert_eq!(
-        (count(&tx, "owner_texts"), count(&tx, "owner_text_refs")),
+        (count(&tx, "kept_texts"), count(&tx, "kept_text_refs")),
         (0, 0)
     );
     release(&tx, "landing_change_sets/c2/prompt_line").unwrap();
@@ -61,7 +61,7 @@ fn a_holder_kept_again_with_another_text_releases_the_old_one() {
     );
     assert_eq!(keep(&tx, HOLDER, None, b"second summary").unwrap(), new);
     assert_eq!(
-        (count(&tx, "owner_texts"), count(&tx, "owner_text_refs")),
+        (count(&tx, "kept_texts"), count(&tx, "kept_text_refs")),
         (1, 1)
     );
 }
@@ -80,9 +80,9 @@ fn a_text_over_its_bound_is_refused_and_nothing_is_written() {
     initialize(&tx).unwrap();
     assert_eq!(
         [
-            count(&tx, "owner_texts"),
-            count(&tx, "owner_text_refs"),
-            count(&tx, "owner_text_key")
+            count(&tx, "kept_texts"),
+            count(&tx, "kept_text_refs"),
+            count(&tx, "kept_text_key")
         ],
         [0, 0, 0]
     );
@@ -187,7 +187,7 @@ fn a_holder_key_that_is_not_engine_built_is_refused() {
         );
     }
     initialize(&tx).unwrap();
-    assert_eq!(count(&tx, "owner_texts"), 0);
+    assert_eq!(count(&tx, "kept_texts"), 0);
     let at = "h".repeat(HOLDER_BYTES_MAX);
     keep(&tx, &at, None, b"text").unwrap();
 }
@@ -206,10 +206,7 @@ fn a_project_clear_takes_its_texts_and_keeps_a_shared_one() {
     let wide = keep(&tx, "user_profile/owner/bio", None, b"p1 only").unwrap();
     assert_eq!(own, wide, "one text, one digest across holders");
     let cleared = tx
-        .execute(
-            "DELETE FROM owner_text_refs WHERE project=?1",
-            [p1.as_str()],
-        )
+        .execute("DELETE FROM kept_text_refs WHERE project=?1", [p1.as_str()])
         .unwrap();
     assert_eq!(cleared, 2);
     assert!(text(&tx, &shared).unwrap().is_some(), "p2 still holds it");
@@ -219,5 +216,47 @@ fn a_project_clear_takes_its_texts_and_keeps_a_shared_one() {
     );
     release(&tx, "user_profile/owner/bio").unwrap();
     assert_eq!(text(&tx, &own).unwrap(), None);
-    assert_eq!(count(&tx, "owner_text_refs"), 1);
+    assert_eq!(count(&tx, "kept_text_refs"), 1);
+}
+
+/// V250-OWNER-TEXT r2 (#347 F1): no kept-text table, index or trigger takes a name the owner
+/// schema check reserves (`owner_*`), which would stop the owner runtime's next start.
+#[test]
+fn no_kept_text_object_takes_an_owner_schema_name() {
+    let db = store();
+    initialize(&db).unwrap();
+    let (objects, reserved): (i64, i64) = db
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(name GLOB 'owner_*'), 0) FROM sqlite_schema \
+             WHERE sql IS NOT NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(objects, 7, "three tables, two indexes, two triggers");
+    assert_eq!(reserved, 0);
+}
+
+/// V250-OWNER-TEXT r2 (#347 F2): a read before any text was kept finds nothing and writes
+/// nothing, so it works on a read-only connection and leaves a writable one without tables.
+#[test]
+fn a_read_before_any_kept_text_finds_nothing_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("engine.db");
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch("CREATE TABLE seed(x)")
+        .unwrap();
+    let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let digest = TextDigest::new("a".repeat(64)).unwrap();
+    assert_eq!(text(&reader, &digest).unwrap(), None);
+    let mut missing = Vec::new();
+    assert_eq!(replayed(&reader, &digest, &mut missing).unwrap(), b"");
+    assert_eq!(missing, [digest.clone()]);
+    let writable = store();
+    assert_eq!(text(&writable, &digest).unwrap(), None);
+    let objects: i64 = writable
+        .query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(objects, 0, "a read made no table");
 }
