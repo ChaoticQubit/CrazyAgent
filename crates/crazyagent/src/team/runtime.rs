@@ -154,6 +154,10 @@ enum AtQuit {
 const FROZEN_NOTE: &str = "Frozen while CrazyAgent was closed; it continues when CrazyAgent opens";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
+/// What every master does before it hands out work: diagnose itself, plan, then give each
+/// sub-agent its part with an acceptance check (V243-MASTER-ANALYZE-FIRST). Without it the
+/// master read "sub-agents do the hands-on work" as handing down the debugging too.
+const MASTER_FIRST_RULES: &str = "\n## Your own task first\n\nBefore you hand out work, find out yourself what is wrong or what is asked: read every error in the owner's message and the code and logs it points to, and reproduce the failure or probe it when that is cheap and safe. That diagnosis is your work, never a sub-agent's. Then plan: the cause or the design, the parts, which agent takes each, and how each is checked. Tell the owner what you found, its evidence and the plan. Give each sub-agent its part: the confirmed cause, or the open question it must settle and how; the files; and the acceptance check. Name a cause you could not confirm as unconfirmed. Sub-agents make the edits, each in its own git worktree of the project folder.\n";
 /// How streams, leads and their branches work, given to every master (N3).
 const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works in its own git worktree and branch. The sub-agent you start for a stream of work leads it and may start workers of its own, up to the owner's Sub-agent depth setting. Workers' work lands on their lead's branch; the owner accepts a lead's work onto any branch. One harness per stream means one lead agent per stream, on the harness and model the owner chose or the settings default. Never ask the owner how streams share a branch.\n";
 /// What a sub-agent that may lead its own workers is told with each task (N3).
@@ -11338,7 +11342,7 @@ fn framing(
         block_text()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}{MASTER_NESTING_RULES}\nProject brief:\n{}\n\n",
+        "You are the master agent of the project \"{}\".\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{MASTER_FIRST_RULES}{}{MASTER_NESTING_RULES}\nProject brief:\n{}\n\n",
         stored.name,
         team,
         crate::launch_context::MASTER_LANDING_RULES,
@@ -11448,7 +11452,7 @@ fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
         block_text()
     };
     let text = format!(
-        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}{MASTER_NESTING_RULES}",
+        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{MASTER_FIRST_RULES}{}{MASTER_NESTING_RULES}",
         bound_text(&stored.name, crate::launch_context::NAME_BYTES_MAX),
         crate::launch_context::MASTER_LANDING_RULES
     );

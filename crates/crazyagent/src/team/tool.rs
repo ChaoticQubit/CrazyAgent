@@ -774,7 +774,7 @@ fn spec(name: &str) -> Value {
         SPAWN_TOOL => (
             "Start an agent for one task in its own worktree and branch: the master starts a lead, and a lead starts a sub-agent of its own within the owner's Sub-agent depth setting. The engine tells you when it ends.",
             json!({"type": "object", "properties": {
-                "task": {"type": "string", "description": "What the agent should do, in plain words."},
+                "task": {"type": "string", "description": "In plain words: the goal, what you found (the cause with its evidence, or what is still unknown), this agent's part of your plan, and its acceptance check."},
                 "harness": {"type": "string", "description": "Optional harness, such as codex or claude-code."},
                 "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
                 "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
