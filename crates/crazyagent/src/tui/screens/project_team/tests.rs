@@ -3762,7 +3762,7 @@ fn the_terminal_display_shows_fullscreen_by_default_and_space_flips_it() {
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
     let display = |view: &TeamView| find(&frame(view, 120, 40), "Terminal display").to_owned();
     assert!(
-        display(&view).contains("Fullscreen. rcli stays Classic"),
+        display(&view).contains("Fullscreen. RCLI stays Classic"),
         "{}",
         display(&view)
     );

@@ -64,6 +64,10 @@ mod projects_home_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
+/// The folder beside engine.db that holds one folder per upgrade backup, each with a full
+/// engine.db copy and the settings texts kept with it.
+pub(crate) const BACKUPS: &str = "backups";
+
 /// Upper bound on waiting for a master runtime job. Preparing a master turn provisions
 /// a Git worktree inside the storage actor, which can outlast the owner request timeout
 /// on a busy machine.
