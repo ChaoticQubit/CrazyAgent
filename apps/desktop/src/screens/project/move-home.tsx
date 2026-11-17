@@ -57,6 +57,15 @@ export async function stopThenMove(id: string, mode: AddFolderMode, overrides: A
   return { stopped: true, result: await steps.move(id, mode, overrides) };
 }
 
+/** The overrides a project move sends: the owner's, plus download_everything when the switch is
+ * on or the folder read failed, as a move never leaves folders in iCloud it did not show first
+ * (DEC-198, leader 16:30). Inputs: the overrides, the switch and the folder read. Output: the
+ * overrides to send. */
+export function moveOverrides(overrides: AddOverride[], everything: boolean, size: Loaded<FolderSize> | null): AddOverride[] {
+  void size;
+  return withEverything(overrides, everything);
+}
+
 /** The question before a project moves: what happens to the team and its work, Move or Copy,
  * where the folder goes, its size, the rebuildable folders it leaves in iCloud with the Download
  * everything (slow) switch, and what a move or copy can lose. Inputs: whether it is open, the

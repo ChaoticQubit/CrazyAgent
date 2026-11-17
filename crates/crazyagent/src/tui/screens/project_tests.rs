@@ -4475,6 +4475,79 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     }
 }
 
+/// #383 code F1 r2 (leader 16:30, B): a failed folder read lets m and c go on, says the move
+/// downloads everything, offers no switch, and both moves send Download everything.
+#[test]
+fn a_failed_move_read_says_the_move_downloads_everything_and_sends_it() {
+    use crate::projects_home::AddMode;
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    for (key_char, mode) in [('m', AddMode::Move), ('c', AddMode::Copy)] {
+        assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
+        screen.move_read_failed();
+        let drawn = project_screen(&mut screen, 80, 30, &Look::plain());
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("CrazyAgent couldn't read this folder."),
+            "{shown}"
+        );
+        assert!(shown.contains("rebuildable folders too"), "{shown}");
+        assert!(!shown.contains("Download everything (slow)"), "{shown}");
+        assert!(!drawn.help.iter().any(|(key, _)| *key == "Space"));
+        assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+        assert_eq!(
+            screen.key(key(KeyCode::Char(key_char))),
+            ProjectReply::MoveHome(mode, true)
+        );
+        assert!(!screen.confirm_move);
+    }
+}
+
+/// #383 code F1 r2: in an 80x24 terminal the move ask with left folders keeps its switch, its
+/// buttons and its bottom border inside the screen, folding every folder into the count.
+#[test]
+fn the_move_ask_with_left_folders_fits_an_80_by_24_terminal() {
+    use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders {
+        listed: vec![Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        }],
+        more: Some(SkippedMore {
+            folders: 40,
+            files: None,
+        }),
+    });
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(drawn.rows.len() <= 20, "{}", drawn.rows.len());
+    let lines: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let shown = lines.join("\n");
+    assert!(
+        shown.contains("and 41 more folders (files not counted)"),
+        "{shown}"
+    );
+    assert!(shown.contains("[ ] Download everything (slow)"), "{shown}");
+    let buttons = lines
+        .iter()
+        .position(|line| line.contains("[> Keep it here ]"))
+        .unwrap_or_else(|| panic!("no buttons: {shown}"));
+    let corner = look.glyph("\u{2514}");
+    assert!(
+        lines
+            .get(buttons + 1)
+            .is_some_and(|line| line.contains(corner)),
+        "{shown}"
+    );
+}
+
 /// #383 code F1 (DEC-198): the move ask reads the folder first; until the read lands m and c
 /// wait. It then lists the rebuildable folders a move leaves in iCloud, with the ones only
 /// counted, says where they stay, and Space switches Download everything, which m sends.

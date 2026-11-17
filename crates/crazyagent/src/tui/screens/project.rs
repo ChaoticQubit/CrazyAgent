@@ -2503,6 +2503,10 @@ impl ProjectScreen {
         }
     }
 
+    /// Takes a folder read for the move ask that failed: the move then downloads everything, as
+    /// it never leaves folders in iCloud it did not show first (DEC-198, leader 16:30).
+    pub fn move_read_failed(&mut self) {}
+
     /// Answers one key in the move ask: m moves the project into the projects home, c copies
     /// it there, both only once the folder read landed, Space switches Download everything
     /// while the read names folders a move leaves in iCloud, and n or Esc keeps it where it is.

@@ -65,7 +65,25 @@ test("#383 code F1: the move question lists the folders a move leaves in iCloud,
   }
   assert.match(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, everything: true })), /Downloaded too:/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: { kind: "ok", value: { bytes: 2048 } } })), /role="switch"|Left in iCloud/);
-  assert.match(read("src/screens/project/move-home.tsx"), /stopThenMove\(data\.id, chosen, withEverything\(overrides, everything\)/);
+  assert.match(read("src/screens/project/move-home.tsx"), /stopThenMove\(data\.id, chosen, moveOverrides\(overrides, everything, size\)/);
+});
+
+test("#383 code F1 r2 (leader 16:30, B): a failed folder read makes Move and Copy download everything, and the question says so", () => {
+  const failed = { kind: "error", code: "folder_size_timeout", message: "Reading the folder took too long." };
+  const read = { kind: "ok", value: { bytes: 2048, same_volume: true, skipped: [{ path: "node_modules", files: 3 }] } };
+  assert.deepEqual(view.moveOverrides([], false, failed), ["download_everything"]);
+  assert.deepEqual(view.moveOverrides(["too_large"], false, { kind: "not_ready" }), ["too_large", "download_everything"]);
+  assert.deepEqual(view.moveOverrides([], true, failed), ["download_everything"]);
+  assert.deepEqual(view.moveOverrides([], false, read), []);
+  assert.deepEqual(view.moveOverrides([], true, read), ["download_everything"]);
+  assert.deepEqual(view.moveOverrides([], false, { kind: "loading" }), []);
+  assert.deepEqual(view.moveOverrides([], false, null), []);
+  const props = { open: true, name: "TessyAI", folder: "/Users/o/Desktop/TessyAI", home: "/Users/o/CrazyAgent", way: "copy", size: failed,
+    busy: false, problem: "", everything: false, onEverything: idle, onWay: idle, onConfirm: idle, onCancel: idle };
+  const page = renderToStaticMarkup(createElement(view.MoveHomeDialog, props));
+  assert.match(page, /CrazyAgent couldn(&#x27;|')t read this folder\. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow\./);
+  assert.doesNotMatch(page, /role="switch"/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(view.MoveHomeDialog, { ...props, size: read })), /couldn(&#x27;|')t read this folder/);
 });
 
 test("the move question says the team stops first and work not landed follows the move", () => {
