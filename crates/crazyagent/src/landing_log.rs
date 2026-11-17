@@ -11,8 +11,10 @@ pub const SCHEMA: u16 = 1;
 pub const AGENT_BRANCH_SET: &str = "AgentBranchSet";
 /// An agent worktree's task branch forgotten.
 pub const AGENT_BRANCH_FORGOTTEN: &str = "AgentBranchForgotten";
+/// The commit a worktree's next change set opens above stored (`landing_bases`).
+pub const BASE_SET: &str = "BaseSet";
 /// Every landing event kind.
-pub const KINDS: [&str; 2] = [AGENT_BRANCH_SET, AGENT_BRANCH_FORGOTTEN];
+pub const KINDS: [&str; 3] = [AGENT_BRANCH_SET, AGENT_BRANCH_FORGOTTEN, BASE_SET];
 
 /// Whether a body path is absolute: `/`, then names `owner_edit::check_path` accepts, so
 /// no free text rides in it (v2.5 L6 Q11). Input: the path. Output: the answer.

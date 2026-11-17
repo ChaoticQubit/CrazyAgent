@@ -1,5 +1,5 @@
 use super::*;
-use crate::landing_log::{AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, rebuild, seed};
+use crate::landing_log::{AGENT_BRANCH_FORGOTTEN, AGENT_BRANCH_SET, BASE_SET, rebuild, seed};
 use crate::state_log::replay::rows;
 use serde_json::json;
 
@@ -93,4 +93,23 @@ fn a_store_without_a_running_host_refuses_an_agent_branch_write_and_leaves_nothi
     assert!(rows(&db, "landing_agent_branches").unwrap().is_empty());
     assert!(events(&db).is_empty());
     assert_eq!(revision(&db), before, "a refused write moves no revision");
+}
+
+/// V250-L9: a worktree's base set twice is logged once per write with a closed body (the
+/// worktree and a 40 hex commit), and the table rebuilt from the log keeps the last base.
+#[test]
+fn a_base_set_again_is_logged_and_rebuilds_to_the_last_base() {
+    let (root, db) = store();
+    let worktree = root.path().join("repo/.wt/one");
+    let (first, last) = ("a".repeat(40), "b".repeat(40));
+    set_base(&db, &worktree, &first).unwrap();
+    set_base(&db, &worktree, &last).unwrap();
+    let logged = events(&db);
+    assert_eq!(logged.len(), 2, "one event per base write");
+    assert!(logged.iter().all(|(kind, _)| kind == BASE_SET));
+    assert_eq!(logged[1].1, json!({"worktree": worktree, "base": last}));
+    let live = rows(&db, "landing_bases").unwrap();
+    assert_eq!(live.len(), 1);
+    rebuild(&db).unwrap();
+    assert_eq!(rows(&db, "landing_bases").unwrap(), live);
 }
