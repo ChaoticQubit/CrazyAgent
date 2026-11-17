@@ -483,14 +483,18 @@ pub fn accept_tcp_std(
     Ok((stream, peer))
 }
 
-/// Accepts one connection where child processes inherit no socket by default.
-/// Input: the listener. Output: the stream and peer.
+/// Accepts one connection where child processes inherit no socket by default. Winsock
+/// gives the accepted socket the listener's non-blocking mode, so the stream is set
+/// blocking, as on Unix, and its read timeouts hold. Input: the listener. Output: the
+/// blocking stream and peer.
 #[cfg(not(unix))]
 #[allow(clippy::disallowed_methods)]
 pub fn accept_tcp_std(
     listener: &std::net::TcpListener,
 ) -> io::Result<(std::net::TcpStream, std::net::SocketAddr)> {
-    listener.accept()
+    let (stream, peer) = listener.accept()?;
+    stream.set_nonblocking(false)?;
+    Ok((stream, peer))
 }
 
 /// Accepts connections forever, as `TcpListener::incoming` does, through

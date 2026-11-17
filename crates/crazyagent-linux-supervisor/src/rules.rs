@@ -676,6 +676,7 @@ mod tests {
         assert!(!none.allows(&address(&v4([127, 0, 0, 1], 8080))));
     }
 
+    #[cfg(unix)]
     fn own() -> GitOwn {
         GitOwn {
             trees: vec!["/work/project".into(), "/work/project/worktrees/a1".into()],
@@ -684,6 +685,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_git_entry_is_made_outside_the_agents_own_git_folders() {
         let own = own();
@@ -889,6 +891,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_that_holds_an_own_git_folder_is_not_moved_away() {
         let own = own();
@@ -924,6 +927,7 @@ mod tests {
         assert!(GitOwn::default().moves(Path::new("/work/project")));
     }
 
+    #[cfg(unix)]
     fn held() -> Held {
         Held {
             entries: vec![
@@ -936,6 +940,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_held_entry_and_everything_in_a_held_tree_is_held_and_a_neighbour_is_not() {
         let held = held();
@@ -964,6 +969,7 @@ mod tests {
         assert!(!Held::default().holds(Path::new("/p/.git/worktrees/a/HEAD")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_held_entry_or_a_folder_above_one_is_never_moved_away() {
         let held = held();
@@ -990,6 +996,7 @@ mod tests {
         assert!(held.pins(Path::new("p/worktrees/a/src")), "not a real path");
     }
 
+    #[cfg(unix)]
     fn nodes() -> HeldNodes {
         let held = held();
         let map = [
@@ -1011,6 +1018,7 @@ mod tests {
         HeldNodes::taken(&held, stat).unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_held_nodes_are_taken_once_and_a_held_name_that_is_not_there_yet_is_kept() {
         let nodes = nodes();
@@ -1088,6 +1096,7 @@ mod tests {
         assert!(!plainly_named(new, &missing, there));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_held_node_or_anything_in_a_held_tree_is_held_whatever_name_reaches_it() {
         let nodes = nodes();
@@ -1108,6 +1117,7 @@ mod tests {
         assert!(!HeldNodes::default().holds(Some((1, 14)), &admin));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_above_a_held_entry_is_never_moved_and_a_sibling_folder_is() {
         let nodes = nodes();
@@ -1153,6 +1163,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_in_a_held_store_is_stored_by_name_and_a_neighbour_is_not() {
         let held = Held {
@@ -1200,6 +1211,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_whose_chain_runs_through_a_held_store_is_stored() {
         let held = Held {

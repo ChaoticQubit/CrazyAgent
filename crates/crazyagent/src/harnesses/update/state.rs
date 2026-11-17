@@ -560,8 +560,9 @@ impl Updates {
 
     /// Checks one installed harness for a newer version, by its install method: the
     /// installing tool for Homebrew and npm, the vendor pointer for a self-updating install
-    /// with online lookups on. Inputs: the id, method, real path, roots, settings and the
-    /// installed version. Output: the check result.
+    /// with online lookups on. Where the engine runs no tool ([`run_raw`] refuses, Windows)
+    /// a tool check is not run and reads as not checked, never as a failure. Inputs: the id,
+    /// method, real path, roots, settings and the installed version. Output: the check result.
     fn looked(
         &self,
         id: &str,
@@ -571,13 +572,25 @@ impl Updates {
         settings: UpdateSettings,
         installed: &str,
     ) -> Latest {
+        let tools_run = cfg!(unix);
         match method {
-            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. } => {
+            Method::Homebrew { .. } | Method::HomebrewFormula { .. } | Method::Npm { .. }
+                if tools_run =>
+            {
                 tool_check(id, method, real, roots, installed)
             }
-            Method::SelfUpdate if settings.online == OnlineLookup::Off => Latest::NoCheck,
-            Method::SelfUpdate => self.pointed(id, method, installed),
-            Method::WithApp | Method::Unknown => Latest::NotChecked,
+            Method::SelfUpdate if settings.online == OnlineLookup::Off && tools_run => {
+                Latest::NoCheck
+            }
+            Method::SelfUpdate if settings.online != OnlineLookup::Off => {
+                self.pointed(id, method, installed)
+            }
+            Method::Homebrew { .. }
+            | Method::HomebrewFormula { .. }
+            | Method::Npm { .. }
+            | Method::SelfUpdate
+            | Method::WithApp
+            | Method::Unknown => Latest::NotChecked,
         }
     }
 
@@ -596,7 +609,8 @@ impl Updates {
         runs: bool,
     ) -> HarnessVersions {
         let id = spec.id;
-        let real = std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf());
+        let real =
+            crate::sandbox::canonical(executable).unwrap_or_else(|_| executable.to_path_buf());
         let method = method(id, &real, roots);
         let command = update_command(id, executable, &real, roots);
         let off = settings.mode == UpdateMode::Off;
@@ -705,7 +719,7 @@ impl Updates {
             return Err(super::TOOL_UNSAFE);
         }
         let running = self.begin(id)?;
-        let real = std::fs::canonicalize(&executable).unwrap_or_else(|_| executable.clone());
+        let real = crate::sandbox::canonical(&executable).unwrap_or_else(|_| executable.clone());
         let fixed = update_command(id, &executable, &real, roots)?;
         let home = roots.home.clone();
         let places = roots.places.clone();
@@ -847,5 +861,50 @@ impl Updates {
         }
         state.queued.remove(0);
         assert!(state.last.len() <= harnesses::specs().len());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    /// W1 (leader 01:25, DEC-194): on Windows, where the engine runs no Homebrew or npm and
+    /// no updater, a check of an install those tools made is not run and is no failure, and a
+    /// self-updating install with online lookups off reads as not checked, never as one that
+    /// Update asks to look.
+    #[test]
+    fn a_windows_install_is_not_checked_by_a_tool_and_never_offers_update_to_look() {
+        let updates = Updates::new();
+        let roots = Roots {
+            home: PathBuf::from(r"C:\Users\unit"),
+            brew_prefixes: Vec::new(),
+            casks: false,
+            npm: None,
+            places: crate::tools::Places::new(Vec::new(), None),
+        };
+        let real =
+            Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
+        let settings = UpdateSettings {
+            mode: UpdateMode::CheckAndUpdate,
+            ..CLOSED
+        };
+        for method in [
+            Method::Npm {
+                package: "@openai/codex".into(),
+            },
+            Method::Homebrew {
+                cask: "codex".into(),
+            },
+            Method::HomebrewFormula {
+                formula: "opencode".into(),
+            },
+            Method::SelfUpdate,
+        ] {
+            assert_eq!(
+                updates.looked("codex", &method, real, &roots, settings, "0.164.0"),
+                Latest::NotChecked,
+                "{method:?}"
+            );
+        }
     }
 }

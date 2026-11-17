@@ -1,5 +1,9 @@
-use super::{guarded, output, spawn, status};
-use std::process::{Command, Stdio};
+use super::{guarded, spawn};
+#[cfg(unix)]
+use super::{output, status};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 #[test]
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
@@ -7,6 +11,7 @@ fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_gate_is_usable_again_after_a_reentry_panic() {
     let reentry = std::thread::spawn(|| guarded(|| status(&mut Command::new("/usr/bin/true"))));
@@ -18,6 +23,7 @@ fn the_gate_is_usable_again_after_a_reentry_panic() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn output_keeps_the_stdio_the_caller_set() {
     let captured = output(
@@ -138,4 +144,39 @@ fn a_low_free_port_is_outside_the_system_and_proxy_ranges_and_each_call_moves_on
         let listener = super::bind_tcp_std_exclusive(address).unwrap();
         assert_eq!(listener.local_addr().unwrap(), address);
     }
+}
+
+/// 2.4.3 W10: a stream accepted from a non-blocking listener, as the model proxy's are, is
+/// blocking on every system, so a read with a timeout waits that long for the client
+/// instead of failing at once (Winsock hands the listener's mode to the accepted socket).
+/// Input: none. Output: passes or panics.
+#[test]
+fn a_stream_accepted_from_a_non_blocking_listener_waits_out_its_read_timeout() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let listener = super::bind_tcp_std("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let _client = super::connect_tcp_std(listener.local_addr().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut stream, _) = loop {
+        match super::accept_tcp_std(&listener) {
+            Ok(accepted) => break accepted,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept: {error}"),
+        }
+    };
+    let timeout = Duration::from_millis(300);
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    let started = Instant::now();
+    let read = stream.read(&mut [0u8; 1]);
+    let waited = started.elapsed();
+    assert!(read.is_err(), "the silent client sent nothing: {read:?}");
+    assert!(
+        waited >= timeout / 2,
+        "the read failed after {waited:?}, not after its timeout"
+    );
 }

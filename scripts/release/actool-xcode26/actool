@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+developer="${CRAZYAGENT_ACTOOL_XCODE:-}"
+if [ -z "$developer" ] || [ ! -x "$developer/usr/bin/actool" ]; then
+  echo "actool-xcode26: CRAZYAGENT_ACTOOL_XCODE names no Xcode developer folder with actool; the release job's actool step sets it (DEC-181)" >&2
+  exit 1
+fi
+DEVELOPER_DIR="$developer" exec /usr/bin/actool "$@"

@@ -1727,7 +1727,7 @@ pub fn count_turn(
         count_reported(db, attribution, reported, session, now_ms)?;
         reported
     };
-    let prefix = format!("{}/", home.to_string_lossy());
+    let prefix = format!("{}{}", home.to_string_lossy(), std::path::MAIN_SEPARATOR);
     db.execute(
         "DELETE FROM usage_files WHERE substr(path,1,length(?1))=?1",
         params![prefix],
@@ -1907,7 +1907,7 @@ fn forget_finished_runs(db: &Connection, now_ms: i64) -> Result<(), EngineError>
         }
         db.execute(
             "DELETE FROM usage_files WHERE substr(path,1,length(?1))=?1",
-            params![format!("{home}/")],
+            params![format!("{home}{}", std::path::MAIN_SEPARATOR)],
         )
         .map_err(storage)?;
         db.execute("DELETE FROM usage_cut WHERE home=?1", [&home])

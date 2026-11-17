@@ -480,8 +480,18 @@ fn shared_screen_decoder_preserves_terminal_cells() {
     );
 }
 
+/// The TUI speed probe's own checks pass, and every `test_` check in its file ran: the probe
+/// prints how many it ran, and a check defined after its `__main__` block never runs.
 #[test]
 fn tui_speed_row_reads_screens_and_names_its_times() {
+    let defined = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/qualification/test_tui_speed.py"
+    ))
+    .lines()
+    .filter(|line| line.starts_with("def test_"))
+    .count();
+    assert!(defined > 0);
     let output = crazyagent::spawn_gate::output(
         Command::new("python3")
             .env_remove("PYTHONOPTIMIZE")
@@ -496,9 +506,10 @@ fn tui_speed_row_reads_screens_and_names_its_times() {
     )
     .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let ran = format!("tui_speed_checks={defined}");
     assert!(
-        output.status.success() && stdout.contains("tui_speed_checks=7"),
-        "{}\n{}",
+        output.status.success() && stdout.lines().any(|line| line == ran),
+        "want {ran}\n{}\n{}",
         stdout,
         String::from_utf8_lossy(&output.stderr)
     );
