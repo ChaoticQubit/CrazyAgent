@@ -186,10 +186,11 @@ fn the_first_upgrade_of_a_2_4_database_checks_and_pins_its_backup() {
     )
     .unwrap();
 
-    assert_eq!(version(&db).unwrap(), V24_VERSION_MAX + 1);
+    let first = latest(STEPS) + 1;
+    assert_eq!(version(&db).unwrap(), first);
     let names = names(&root);
     assert_eq!(names.len(), 1);
-    let prefix = format!("{V24_VERSION_MAX}-to-{}-", V24_VERSION_MAX + 1);
+    let prefix = format!("{V24_VERSION_MAX}-to-{first}-");
     assert!(names[0].starts_with(&prefix), "{names:?}");
     let backup = &root.backups()[0];
     assert_eq!(mode(&backup.join(CHECKED)), 0o600);
@@ -279,6 +280,7 @@ fn the_pinned_backup_survives_six_later_upgrades() {
     let mut db = root.connection();
     let start = SystemTime::now();
     let extra: [StepRun; 7] = [probe, kept, kept, kept, kept, kept, kept];
+    let first = latest(STEPS) + 1;
 
     for index in 0..extra.len() {
         let now = start + HOUR * u32::try_from(index).unwrap();
@@ -291,15 +293,15 @@ fn the_pinned_backup_survives_six_later_upgrades() {
             check_copy,
         )
         .unwrap();
-        let reached = V24_VERSION_MAX + 1 + i64::try_from(index).unwrap();
+        let reached = first + i64::try_from(index).unwrap();
         assert_eq!(version(&db).unwrap(), reached);
     }
 
     let names = names(&root);
     assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
-    let first = format!("{V24_VERSION_MAX}-to-{}-", V24_VERSION_MAX + 1);
-    assert!(names[0].starts_with(&first), "{names:?}");
-    let oldest_later = format!("{}-to-{}-", V24_VERSION_MAX + 2, V24_VERSION_MAX + 3);
+    let pin = format!("{V24_VERSION_MAX}-to-{first}-");
+    assert!(names[0].starts_with(&pin), "{names:?}");
+    let oldest_later = format!("{}-to-{}-", first + 1, first + 2);
     assert!(names[1].starts_with(&oldest_later), "{names:?}");
     assert_eq!(pinned_name(&root, start + HOUR * 6), Some(names[0].clone()));
     for name in &names {
@@ -476,7 +478,7 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
     )
     .unwrap();
 
-    assert_eq!(version(&db).unwrap(), V24_VERSION_MAX + 1);
+    assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
     let mut after = rows(&db);
     assert_eq!(after.remove("migration_probe").unwrap().len(), 1);
     assert_eq!(after, before);
