@@ -1,12 +1,16 @@
 use super::process::{
-    CLOSE_TIME, CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WriteRequest,
+    CLOSE_TIME, CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WAIT_MAX, WriteRequest,
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+#[cfg(unix)]
+use crate::platform::fd_wait;
 use crate::protocol::ProjectId;
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
+#[cfg(unix)]
+use rustix::event::{PollFd, PollFlags};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 #[cfg(unix)]
@@ -30,6 +34,10 @@ const READS_PER_POLL: usize = 16;
 /// How long custody still drains the harness pipes once the harness is reaped and its group
 /// is empty; a pipe still open after it is held by a process that left the group.
 const DRAIN_TIME: Duration = Duration::from_millis(100);
+
+/// The first wait for a live harness whose stdout and stderr have both ended, so no pipe
+/// reports its exit; each pass doubles it up to [`WAIT_MAX`].
+const EXIT_WAIT_MIN: Duration = Duration::from_millis(1);
 
 struct PendingWrite {
     request: WriteRequest,
@@ -85,6 +93,7 @@ pub(super) fn run(
         shared.fail("codex_host_custody_missing");
         return;
     };
+    let mut exit_wait = EXIT_WAIT_MIN;
     loop {
         #[cfg(test)]
         shared.custody_passes.fetch_add(1, Ordering::SeqCst);
@@ -104,7 +113,7 @@ pub(super) fn run(
         if shared.stop.load(Ordering::Acquire) || input.is_closed() {
             child.stop();
         }
-        std::thread::sleep(POLL_TIME);
+        exit_wait = child.wait(deadline, exit_wait);
     }
 }
 
@@ -162,6 +171,7 @@ fn start(
     let mut state = shared.lock().map_err(|_| "codex_host_custody_poisoned")?;
     state.started = Some(Ok(retained.child.id()));
     drop(state);
+    shared.changed.notify_one();
     Ok(custody)
 }
 
@@ -222,6 +232,66 @@ impl OwnedChild {
         {
             self.stdin = None;
         }
+    }
+
+    /// Waits until a pipe custody reads is ready, stdin can take the pending write, the host
+    /// rouses custody, or the bound passes, cut to the clock's deadline while it is ahead. A
+    /// stopped or reaped harness keeps the [`POLL_TIME`] tick, as no pipe reports its kill,
+    /// reap or group; a live one whose pipes both ended waits `exit_wait`, doubled each pass;
+    /// any other waits [`WAIT_MAX`]. Inputs: the deadline and the exit wait. Output: the next.
+    fn wait(&self, deadline: Option<Instant>, exit_wait: Duration) -> Duration {
+        assert!(exit_wait >= EXIT_WAIT_MIN && exit_wait <= WAIT_MAX);
+        let stopping = self.stopped_at.is_some()
+            || self.status.is_some()
+            || self.shared.stop.load(Ordering::Acquire);
+        let ended = self.stdout_eof && self.stderr_eof;
+        let bound = match (stopping, ended) {
+            (true, _) => POLL_TIME,
+            (false, true) => exit_wait,
+            (false, false) => WAIT_MAX,
+        };
+        let now = Instant::now();
+        let until = deadline
+            .filter(|deadline| *deadline > now)
+            .map_or(now + bound, |deadline| deadline.min(now + bound));
+        assert!(until <= now + WAIT_MAX);
+        self.wait_until(until);
+        if ended && !stopping {
+            (exit_wait * 2).min(WAIT_MAX)
+        } else {
+            EXIT_WAIT_MIN
+        }
+    }
+
+    /// Polls stdout, unless the output queue is full and it stays unread, stderr, stdin while a
+    /// write is pending, and the wake end, until one is ready or `until`, then drains the wake;
+    /// a failed poll sleeps [`POLL_TIME`]. Input: the instant to stop at. Output: none.
+    #[cfg(unix)]
+    fn wait_until(&self, until: Instant) {
+        let mut fds = Vec::with_capacity(4);
+        if let (Some(stdout), false) = (&self.stdout, self.waiting) {
+            fds.push(PollFd::new(stdout, PollFlags::IN));
+        }
+        if let Some(stderr) = &self.stderr {
+            fds.push(PollFd::new(stderr, PollFlags::IN));
+        }
+        if let (Some(stdin), Some(_)) = (&self.stdin, &self.pending) {
+            fds.push(PollFd::new(stdin, PollFlags::OUT));
+        }
+        fds.push(PollFd::new(&self.shared.woken, PollFlags::IN));
+        assert!(fds.len() <= 4);
+        if fd_wait::ready(&mut fds, Some(until)).is_err() {
+            std::thread::sleep(POLL_TIME);
+        }
+        self.shared.woken.drain();
+    }
+
+    /// Sleeps the [`POLL_TIME`] tick where there is no poll(2) here. Input: the instant the
+    /// wait may run to. Output: none.
+    #[cfg(not(unix))]
+    fn wait_until(&self, until: Instant) {
+        let _ = (&self.shared.woken, until);
+        std::thread::sleep(POLL_TIME);
     }
 
     fn write_pending(&mut self) {
@@ -503,6 +573,7 @@ impl OwnedChild {
             };
             state.doubted |= state.cleanup_error.is_some();
         }
+        self.shared.changed.notify_one();
     }
 }
 
@@ -595,6 +666,7 @@ fn record_output(
     if total.is_none_or(|total| total > limit) {
         state.error.get_or_insert("codex_host_output_limit");
         shared.stop.store(true, Ordering::Release);
+        shared.changed.notify_one();
         return Ok(());
     }
     if stderr || shared.stop.load(Ordering::Acquire) {
@@ -605,6 +677,7 @@ fn record_output(
         .output
         .push_back(CodexHostOutput::Stdout(bytes.to_vec()));
     assert!(state.output.len() <= OUTPUT_QUEUE_MAX);
+    shared.changed.notify_one();
     Ok(())
 }
 
@@ -620,6 +693,7 @@ mod tests {
     fn shared(queued: usize) -> ProcessShared {
         assert!(queued <= OUTPUT_QUEUE_MAX);
         let chunk = || CodexHostOutput::Stdout(vec![b'x'; READ_BYTES]);
+        let (wake, woken) = crate::platform::fd_wait::wake_pair().unwrap();
         ProcessShared {
             state: Mutex::new(ProcessState {
                 started: None,
@@ -633,6 +707,10 @@ mod tests {
             }),
             stop: AtomicBool::new(false),
             close_stdin: AtomicBool::new(false),
+            changed: tokio::sync::Notify::new(),
+            ended: AtomicBool::new(false),
+            wake,
+            woken,
             custody_passes: std::sync::atomic::AtomicU64::new(0),
             host_passes: std::sync::atomic::AtomicU64::new(0),
         }
