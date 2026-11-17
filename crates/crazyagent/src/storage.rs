@@ -649,6 +649,7 @@ impl Storage {
                             };
                             if let Ok(started) = &result {
                                 owner_runtime = Some(started.host.clone());
+                                crate::state_log::fence::host_started(&started.host);
                                 if let Err(error) = native_auth::recover_native_auth(
                                     &mut connection,
                                     custody.as_mut().unwrap(),
@@ -665,6 +666,7 @@ impl Storage {
                             let result = owner_stop(&mut connection, &stamp);
                             if result.is_ok() {
                                 owner_runtime = None;
+                                crate::state_log::fence::host_stopped(&stamp);
                             }
                             let _ = reply.send(result);
                         }
@@ -1143,6 +1145,7 @@ impl Storage {
                         Job::Close(reply) => {
                             if let Some(stamp) = &owner_runtime {
                                 let _ = owner_stop(&mut connection, stamp);
+                                crate::state_log::fence::host_stopped(stamp);
                             }
                             drop(connection);
                             drop(custody.take());
