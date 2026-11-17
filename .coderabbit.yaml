@@ -37,8 +37,6 @@ reviews:
       - "^chore/v3\\S*$"
   path_filters:
     - "!**/CHANGELOG.md"
-    - "!**/Cargo.lock"
-    - "!**/package-lock.json"
   path_instructions:
     - path: "**/*"
       instructions: |
