@@ -157,53 +157,6 @@ pub(in crate::tui) fn left_running_title(left_running: LeftRunning, hours: u16) 
     }
 }
 
-/// The title of one master step limit option and what it does, the same words as the
-/// desktop Settings. Input: the option. Output: the title and the sentence.
-pub(in crate::tui) fn step_limit_words(limit: StepLimit) -> (&'static str, &'static str) {
-    match limit {
-        StepLimit::NoLimit => (
-            "No limit",
-            "A turn runs until the master replies or its time is up.",
-        ),
-        StepLimit::Steps50 => ("50 steps", "A turn stops after 50 steps."),
-        StepLimit::Steps100 => ("100 steps", "A turn stops after 100 steps."),
-        StepLimit::Steps200 => ("200 steps", "A turn stops after 200 steps."),
-    }
-}
-
-/// The title of one master time limit option and what it does, the same words as the
-/// desktop Settings. Input: the option. Output: the title and the sentence.
-pub(in crate::tui) fn time_limit_words(limit: TimeLimit) -> (&'static str, &'static str) {
-    match limit {
-        TimeLimit::NoLimit => (
-            "No limit",
-            "A turn runs until the master replies or you stop it.",
-        ),
-        TimeLimit::Minutes10 => ("10 min", "A turn stops after 10 minutes."),
-        TimeLimit::Minutes30 => ("30 min", "A turn stops after 30 minutes."),
-        TimeLimit::Minutes60 => ("60 min", "A turn stops after 60 minutes."),
-    }
-}
-
-/// The title of one master frame size limit option and what it is for, the same words as
-/// the desktop Settings. Input: the option. Output: the title and the sentence.
-pub(in crate::tui) fn frame_size_words(limit: FrameSize) -> (&'static str, &'static str) {
-    match limit {
-        FrameSize::Kib64 => (
-            "64 KiB",
-            "The engine's own message size; enough for most turns.",
-        ),
-        FrameSize::Kib256 => (
-            "256 KiB",
-            "Room for long instructions and large pasted text.",
-        ),
-        FrameSize::Mib1 => (
-            "1 MiB",
-            "The largest; for a turn that still stops at 256 KiB.",
-        ),
-    }
-}
-
 /// The title of one provider retry option and what it does, the same words as the desktop
 /// Settings. Input: the option. Output: the title and the sentence.
 pub(in crate::tui) fn provider_retry_words(choice: ProviderRetry) -> (&'static str, &'static str) {
@@ -335,6 +288,15 @@ fn option_rows(
     lines
 }
 
+/// The projects home hint, naming a folder in this system's own home form.
+const HOME_PATH_HINT: &str = if cfg!(target_os = "windows") {
+    "Use a full folder path, such as C:\\Users\\you\\Projects."
+} else if cfg!(target_os = "linux") {
+    "Use a full folder path, such as /home/you/Projects."
+} else {
+    "Use a full folder path, such as /Users/you/Projects."
+};
+
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
 /// request, otherwise the setup, projects home or GitHub sentence for the code,
@@ -345,7 +307,7 @@ pub fn setup_plain(code: &str) -> String {
         "trusted_connection_unavailable" | "controller_disconnected" => {
             "CrazyAgent is not connected to the engine right now."
         }
-        "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        "home_path_invalid" => HOME_PATH_HINT,
         "cleanup_settings_invalid" => {
             "The stored finished agents setting is not one this version knows."
         }
@@ -2992,3 +2954,8 @@ impl Screen for AppSetup {
         })
     }
 }
+
+/// The titles and sentences of the master step, time and frame size limit options, the
+/// same words as the desktop Settings.
+mod master_limits;
+use master_limits::{frame_size_words, step_limit_words, time_limit_words};

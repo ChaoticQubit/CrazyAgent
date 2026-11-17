@@ -5896,16 +5896,15 @@ impl TeamRuntime {
             let pane = AgentId::team(id).ok()?;
             host.pane_pid(&pane).ok().flatten()
         });
-        let answer = match crate::launch_context::codex_pinned_keys(home) {
-            Some(keys) if keys.is_empty() => return true,
-            Some(keys) => crate::coord::delivery::codex::hooks_trusted(home, pane, &keys),
-            None => Err("codex_config_unreadable"),
-        };
-        let text = match answer {
-            Ok(true) => return true,
-            Ok(false) => crate::coord::settings::CODEX_HOOKS_UNTRUSTED,
-            Err(_) if worker.spawned.elapsed() < HOOK_TRUST_WAIT => return false,
-            Err(_) => crate::coord::settings::CODEX_HOOKS_UNCHECKED,
+        let trust = hook_trust(
+            crate::launch_context::codex_pinned_keys(home),
+            |keys| crate::coord::delivery::codex::hooks_trusted(home, pane, keys),
+            worker.spawned.elapsed() >= HOOK_TRUST_WAIT,
+        );
+        let text = match trust {
+            HookTrust::Settled => return true,
+            HookTrust::Later => return false,
+            HookTrust::Notice(text) => text,
         };
         let Ok(tx) = self.connection.unchecked_transaction() else {
             return false;
@@ -13728,54 +13727,6 @@ impl Drop for NewClone {
     }
 }
 
-/// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
-/// so the engine's later commits never rely on what the agent may write: for a linked
-/// worktree a folder directly in the project's `.git/worktrees` whose `gitdir` file names
-/// this worktree, both pointer files read through one open that follows no link and never
-/// waits on a FIFO, kept only when regular and within `GIT_POINTER_BYTES_MAX` bytes, since
-/// an agent with Full access can replace them; for an agent's own clone the real folder
-/// `agent_git::git_dir` names. Inputs: the project root, the worktree and its layout.
-/// Output: the root, worktree and metadata folder as text, or the plain reason.
-fn agent_git_dir(root: &Path, worktree: &Path, layout: Layout) -> Result<[String; 3], String> {
-    if layout == Layout::Clone {
-        let git_dir = crate::agent_git::git_dir(worktree);
-        let plain = std::fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir());
-        let text = |path: &Path| path.to_str().map(str::to_owned);
-        let found = [text(root), text(worktree), text(&git_dir)];
-        return match found {
-            [Some(root), Some(worktree), Some(git_dir)] if plain => Ok([root, worktree, git_dir]),
-            _ => Err(with_code(
-                "the agent worktree could not be checked",
-                Some("team_worktree_git_dir"),
-            )),
-        };
-    }
-    let refused = || {
-        with_code(
-            "the agent worktree could not be checked",
-            Some("team_worktree_git_dir"),
-        )
-    };
-    let read = |path: &Path| {
-        crate::platform::read_plain_file(path, GIT_POINTER_BYTES_MAX).ok_or_else(refused)
-    };
-    let pointer = read(&worktree.join(".git"))?;
-    let git_dir = pointer
-        .strip_prefix("gitdir: ")
-        .and_then(|path| path.strip_suffix('\n'))
-        .map(PathBuf::from)
-        .ok_or_else(refused)?;
-    if git_dir.parent() != Some(root.join(".git").join("worktrees").as_path())
-        || read(&git_dir.join("gitdir"))? != format!("{}\n", worktree.join(".git").display())
-    {
-        return Err(refused());
-    }
-    let text = |path: &Path| path.to_str().map(str::to_owned).ok_or_else(refused);
-    let found = [text(root)?, text(worktree)?, text(&git_dir)?];
-    assert!(found[2].starts_with(&found[0]) && found[1].starts_with(&found[0]));
-    Ok(found)
-}
-
 /// The plain code for a failed file step, named by its kind so an owner line never quotes
 /// the system's error text or a path. Input: the I/O error. Output: the code.
 fn io_code(error: &std::io::Error) -> &'static str {
@@ -14832,6 +14783,44 @@ fn test_by() -> HoldBy {
     }
 }
 
+/// Where a Codex agent's hook trust check stands (PA1213R2-F2): settled with nothing to say,
+/// to be asked again on a later tick, or settled once the engine's notice with this text is
+/// kept in the agent's Messages timeline.
+#[derive(Debug, PartialEq, Eq)]
+enum HookTrust {
+    Settled,
+    Later,
+    Notice(&'static str),
+}
+
+/// Judges a Codex agent's hook trust from the keys its launch pinned, asking its app-server
+/// only about keys read from the launch's own list, so a hook the engine could not read is
+/// never asked about nor taken as trusted. Inputs: the keys, the question to the app-server
+/// and whether `HOOK_TRUST_WAIT` has passed since the agent started. Output: the [`HookTrust`].
+fn hook_trust(
+    keys: Result<Vec<String>, crate::launch_context::HookKeysUnread>,
+    ask: impl FnOnce(&[String]) -> Result<bool, &'static str>,
+    waited: bool,
+) -> HookTrust {
+    let answer = match keys {
+        Ok(keys) if keys.is_empty() => return HookTrust::Settled,
+        Ok(keys) => ask(&keys),
+        Err(_) if !waited => return HookTrust::Later,
+        Err(crate::launch_context::HookKeysUnread::Absent) => {
+            return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNLISTED);
+        }
+        Err(crate::launch_context::HookKeysUnread::Unreadable) => {
+            return HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_LIST_UNREADABLE);
+        }
+    };
+    match answer {
+        Ok(true) => HookTrust::Settled,
+        Ok(false) => HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNTRUSTED),
+        Err(_) if !waited => HookTrust::Later,
+        Err(_) => HookTrust::Notice(crate::coord::settings::CODEX_HOOKS_UNCHECKED),
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]
 mod tests;
@@ -14862,3 +14851,7 @@ mod live_network_none_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_stop_hook_tests.rs"]
 mod live_stop_hook_tests;
+
+/// Where Git keeps a new agent worktree's metadata, read before any agent runs in it.
+mod worktree_git_dir;
+use worktree_git_dir::agent_git_dir;

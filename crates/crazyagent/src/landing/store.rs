@@ -3,7 +3,7 @@ use super::{
     AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
 };
 use crate::engine::EngineError;
-use crate::landing_log::{self, AgentBranch, Base, Change, Worktree};
+use crate::landing_log::{self, AgentBranch, Base, Change, Numbered, Worktree};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -479,14 +479,16 @@ fn signed(value: u64) -> Result<i64, EngineError> {
 }
 
 /// Writes a change set, adding it or updating every column of the row with its id, except
-/// that a record with no place keeps the place stored, and gives a set with no number the
-/// next number of its project in the same savepoint.
+/// that a record with no place keeps the place stored, gives a set with no number the next
+/// number of its project and logs the stored row as `ChangeSetSaved`, in one transaction.
 /// Inputs: the store and the record. Output: Ok once stored; a second open change set
 /// for the same worktree is refused with `changes_agent_has_pending` and both rows stay.
 pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> {
-    within(db, "landing_save", || {
-        write(db, record)?;
-        number(db, &record.id, &record.project)?;
+    landing_log::within(db, |tx| {
+        write(tx, record)?;
+        number(tx, &record.id, &record.project)?;
+        let logged = landing_log::record_row(tx, record.id.as_str())?;
+        assert!(logged, "a saved change set has its row");
         Ok(())
     })
 }
@@ -584,38 +586,55 @@ pub(super) fn project_kept(db: &Connection, project: &ProjectId) -> Result<bool,
 }
 
 /// Stores the subject an agent's summary gives a change set (F22), touching no other
-/// column, so a landing step running beside it keeps what it wrote. Inputs: the store, the
-/// change set and the subject, empty to clear it. Output: Ok once stored.
+/// column, so a landing step running beside it keeps what it wrote, and logs the row as
+/// `ChangeSetSaved`. Inputs: the store, the change set and the subject, empty to clear it.
+/// Output: Ok once stored, or the log's refusal with nothing stored.
 pub(super) fn set_summary(
     db: &Connection,
     id: &ChangeSetId,
     summary: &str,
 ) -> Result<(), EngineError> {
     initialize(db)?;
-    db.execute(
-        "UPDATE landing_change_sets SET summary=?2 WHERE id=?1",
-        params![id.as_str(), summary],
-    )
-    .map_err(storage)?;
-    Ok(())
+    landing_log::within(db, |tx| {
+        let changed = tx
+            .execute(
+                "UPDATE landing_change_sets SET summary=?2 WHERE id=?1",
+                params![id.as_str(), summary],
+            )
+            .map_err(storage)?;
+        let logged = landing_log::record_row(tx, id.as_str())?;
+        assert_eq!(logged, changed == 1, "a stored summary is logged");
+        Ok(())
+    })
 }
 
 /// Stores what a landing try that changed nothing did to a change set (F23), touching no
-/// other column, and only while the set is open, so a set closed beside it keeps its result.
-/// Inputs: the store, the change set and the result. Output: Ok once stored.
+/// other column, and only while the set is open, so a set closed beside it keeps its result;
+/// a stored result logs the row as `ChangeSetSaved`. Inputs: the store, the change set and
+/// the result. Output: Ok once stored, or the log's refusal with nothing stored.
 pub(super) fn set_landing_result(
     db: &Connection,
     id: &ChangeSetId,
     result: LandingResult,
 ) -> Result<(), EngineError> {
     initialize(db)?;
-    db.execute(
-        "UPDATE landing_change_sets SET landing_result=?2 \
-         WHERE id=?1 AND state IN ('pending','conflict','updating')",
-        params![id.as_str(), landing_name(result)],
-    )
-    .map_err(storage)?;
-    Ok(())
+    landing_log::within(db, |tx| {
+        let changed = tx
+            .execute(
+                "UPDATE landing_change_sets SET landing_result=?2 \
+                 WHERE id=?1 AND state IN ('pending','conflict','updating')",
+                params![id.as_str(), landing_name(result)],
+            )
+            .map_err(storage)?;
+        if changed == 1 {
+            assert!(
+                landing_log::record_row(tx, id.as_str())?,
+                "a stored result is logged"
+            );
+        }
+        assert!(changed <= 1, "an id names one change set");
+        Ok(())
+    })
 }
 
 /// Gives a change set the next number of its project when it has none yet: the project's
@@ -663,12 +682,15 @@ pub(super) fn number_of(db: &Connection, id: &ChangeSetId) -> Result<Option<u64>
     }))
 }
 
-/// Numbers the change sets of the projects the engine has that carry no number yet, such
-/// as the ones an engine without numbers wrote, after each project's highest number, in the
-/// order they were made, the id breaking a tie, at most `NUMBER_PASS_MAX` a pass. Input: the
-/// store. Output: how many sets got a number.
+/// Numbers the change sets of the projects the engine has that carry no number yet, after
+/// each project's highest number, in the order they were made (the id breaks a tie), at most
+/// `NUMBER_PASS_MAX` a pass, in one transaction with one `ChangeSetNumbered` event per set
+/// (v2.5 L9); a pass with nothing to number writes nothing. Input: the store, outside a
+/// transaction. Output: how many sets got a number.
 pub(super) fn number_unnumbered(db: &Connection) -> Result<usize, EngineError> {
-    let sets = db
+    let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
+        .map_err(storage)?;
+    let sets = tx
         .prepare(
             "SELECT id, project FROM landing_change_sets \
              WHERE id NOT IN (SELECT change_set FROM landing_change_set_numbers) \
@@ -682,38 +704,53 @@ pub(super) fn number_unnumbered(db: &Connection) -> Result<usize, EngineError> {
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(storage)?;
-    within(db, "landing_numbers", || {
-        for (id, project) in &sets {
-            let id = ChangeSetId::new(id.clone()).map_err(|_| failure("changes_unavailable"))?;
-            let project =
-                ProjectId::new(project.clone()).map_err(|_| failure("changes_unavailable"))?;
-            number(db, &id, &project)?;
-        }
-        Ok(sets.len())
-    })
+    if sets.is_empty() {
+        return Ok(0);
+    }
+    let changes = next_numbers(&tx, &sets)?;
+    assert_eq!(
+        changes.len(),
+        sets.len(),
+        "every unnumbered set gets one number"
+    );
+    landing_log::record_all(&tx, &changes)?;
+    tx.commit().map_err(storage)?;
+    Ok(changes.len())
 }
 
-/// Runs `work` inside a savepoint, kept when it succeeds and undone when it fails, so it
-/// nests inside a caller's transaction. Inputs: the store, the savepoint's name and the
-/// work. Output: the work's result.
-fn within<T>(
-    db: &Connection,
-    name: &str,
-    work: impl FnOnce() -> Result<T, EngineError>,
-) -> Result<T, EngineError> {
-    db.execute_batch(&format!("SAVEPOINT {name}"))
-        .map_err(storage)?;
-    match work() {
-        Ok(value) => {
-            db.execute_batch(&format!("RELEASE {name}"))
-                .map_err(storage)?;
-            Ok(value)
-        }
-        Err(error) => {
-            let _ = db.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}"));
-            Err(error)
-        }
+/// The numbering pass's changes: each set gets its project's highest number plus one,
+/// counting the sets numbered before it in the pass. Inputs: the transaction and the sets
+/// as (id, project), at most `NUMBER_PASS_MAX`. Output: one `ChangeSetNumbered` per set, or
+/// `changes_unavailable` for an id or project that is not one.
+fn next_numbers(db: &Connection, sets: &[(String, String)]) -> Result<Vec<Change>, EngineError> {
+    assert!(i64::try_from(sets.len()).is_ok_and(|count| count <= NUMBER_PASS_MAX));
+    let mut highest: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    let mut changes = Vec::with_capacity(sets.len());
+    for (id, project) in sets {
+        ChangeSetId::new(id.as_str()).map_err(|_| failure("changes_unavailable"))?;
+        ProjectId::new(project.as_str()).map_err(|_| failure("changes_unavailable"))?;
+        let last = match highest.get(project.as_str()) {
+            Some(last) => *last,
+            None => db
+                .query_row(
+                    "SELECT COALESCE(MAX(number), 0) FROM landing_change_set_numbers \
+                     WHERE project=?1",
+                    [project],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(storage)?
+                .unsigned_abs(),
+        };
+        let number = last + 1;
+        highest.insert(project, number);
+        changes.push(Change::ChangeSetNumbered(Numbered {
+            change_set: id.clone(),
+            project: project.clone(),
+            number,
+        }));
     }
+    assert!(highest.values().all(|number| *number >= 1));
+    Ok(changes)
 }
 
 /// Stores the commit the next change set of a worktree opens above, logged as `BaseSet`
@@ -806,6 +843,16 @@ pub(super) fn agent_branch_taken(
     )
     .map(|count| count > 0)
     .map_err(storage)
+}
+
+/// Forgets the base of an agent worktree that is gone, as retire does once the worktree is
+/// removed or left, logged as `BaseForgotten` (v2.5 L9). Inputs: the store and the worktree
+/// path. Output: Ok, or the log's refusal with the row kept.
+pub(super) fn forget_base(db: &Connection, worktree: &str) -> Result<(), EngineError> {
+    let gone = Worktree {
+        worktree: worktree.to_owned(),
+    };
+    landing_log::write(db, &Change::BaseForgotten(gone))
 }
 
 /// Forgets the task branch of an agent worktree that is gone, logged as

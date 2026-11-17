@@ -3,6 +3,8 @@ use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::research::jobs::RUN_AGAIN;
 use crate::sandbox::policy::LevelView;
+use retry::retry_research;
+pub use retry::{RESEARCH_UNAVAILABLE_HERE, retryable};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -441,7 +443,8 @@ pub struct ReadPaths {
 
 /// The folders a project's agents are kept out of in saved order, with the version the
 /// owner's screen sends back when it changes them, and the kinds of engine runs still
-/// running that started before one of them was hidden (SA-VID14-R2-N2).
+/// running that started before one of them was hidden (SA-VID14-R2-N2), and whether this
+/// system offers hidden folders at all ([`crate::sandbox::hidden_paths::UNAVAILABLE`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiddenPaths {
@@ -449,6 +452,8 @@ pub struct HiddenPaths {
     pub version: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<crate::sandbox::hidden_paths::RunKind>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +619,7 @@ pub struct ResearchJob {
     pub started_ms: Option<i64>,
     pub heartbeat_ms: Option<i64>,
     pub finished_ms: Option<i64>,
+    pub retryable: bool,
 }
 
 const RATE_LIMITED: &str = "rate_limited until ";
@@ -1675,6 +1681,7 @@ fn job(row: JobRow) -> Result<ResearchJob, EngineError> {
         started_ms,
         heartbeat_ms,
         finished_ms,
+        retryable: retryable(status),
     })
 }
 
@@ -2456,50 +2463,6 @@ fn cancel_research(
     Ok(Outcome::Applied)
 }
 
-/// Queues a failed or cancelled research job again with a fresh attempt budget. A job whose
-/// kind was turned off turns it back on, so the next setup edit does not cancel it again.
-/// Takes the transaction, configuration, project and job id. Returns Applied,
-/// `research_job_missing`, `project_setup_missing`, `setup_unconfirmed` for a kind turned off in
-/// an unconfirmed setup review, or `research_job_not_retryable` for a job that is not stopped.
-fn retry_research(
-    tx: &Transaction<'_>,
-    config: &EffectiveConfig,
-    project_id: &ProjectId,
-    id: i64,
-) -> Result<Outcome, EngineError> {
-    let Some(job) = project_job(tx, project_id, id)? else {
-        return Ok(rejected("research_job_missing"));
-    };
-    if !matches!(
-        job.status,
-        ResearchStatus::Failed | ResearchStatus::Cancelled
-    ) {
-        return Ok(rejected("research_job_not_retryable"));
-    }
-    let Some(mut stored) = load_setup(tx, project_id)? else {
-        return Ok(rejected("project_setup_missing"));
-    };
-    if !stored.research.contains(&job.kind) && unconfirmed(tx, project_id, &stored)? {
-        return Ok(rejected("setup_unconfirmed"));
-    }
-    let status = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
-    let changed = tx
-        .execute(
-            &format!(
-                "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
-                cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
-                finished_ms=NULL, {RUN_AGAIN} WHERE id=?1 AND status IN ('failed','cancelled')"
-            ),
-            params![id, status.stored()],
-        )
-        .map_err(error)?;
-    if changed != 1 {
-        return Ok(rejected("research_job_not_retryable"));
-    }
-    turn_on(tx, &mut stored, job.kind)?;
-    Ok(Outcome::Applied)
-}
-
 /// Whether a found or cloned project's setup review is still open, so its setup was never saved.
 /// Takes the transaction, project and stored setup. Returns true until the owner confirms it.
 fn unconfirmed(
@@ -2944,11 +2907,11 @@ fn finish_removed_agent_notices(
 
 /// Records a Delete everything once the owner transport finished its disk work: the
 /// project's records go as in Remove from dashboard when every folder reached the Trash,
-/// with its answer to the GitHub publish question and its GitHub publish job too, which
-/// Remove keeps (DEC-178 add.1), the caller recording the exact names and folder identities of its engine files in the
-/// same write, and otherwise the refusal is kept with nothing removed. Inputs: the
-/// transaction, the action, the transport's outcome and the revision. Output: the outcome
-/// to record.
+/// with its GitHub publish job too and, through its ProjectRemoved event, its publish answer,
+/// which Remove keeps (DEC-178 add.1, V250-L9), the caller recording its engine files' names
+/// and folder identities in the same write, and otherwise the refusal is kept with nothing
+/// removed. Inputs: the transaction, the action, the transport's outcome and the revision.
+/// Output: the outcome to record.
 pub(crate) fn record_delete(
     tx: &Transaction<'_>,
     action: &SetupAction,
@@ -2969,11 +2932,10 @@ pub(crate) fn record_delete(
         }
     };
     let removed = remove(tx, project_id, revision, false)?;
-    if matches!(removed, Outcome::Applied) {
-        crate::github::forget_prompt(tx, project_id)?;
-        if let Some(folder) = &folder {
-            crate::github::forget_job(tx, folder);
-        }
+    if matches!(removed, Outcome::Applied)
+        && let Some(folder) = &folder
+    {
+        crate::github::forget_job(tx, folder);
     }
     Ok(removed)
 }
@@ -4119,5 +4081,6 @@ pub mod links;
 /// The removal record (DEC-178 addendum 1): which ids removals hold, which folder a
 /// project removed from the dashboard comes back from, and the id a new onboarding gets.
 pub(crate) mod removed;
+mod retry;
 #[cfg(all(test, unix))]
 mod tests;

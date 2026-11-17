@@ -30,6 +30,10 @@ mod native_auth_host;
 #[path = "engine/native_auth_host_unavailable.rs"]
 mod native_auth_host;
 pub mod owner;
+/// The `owner-trace` feature's one stderr line per owner exchange: request id, operation
+/// kind, claim, end and reply, never a payload, path or name. Off by default; only the test
+/// farm's build turns it on, and no release build may ([`owner_trace::connection`]).
+pub(crate) mod owner_trace;
 
 #[cfg(unix)]
 pub use native_auth_host::{

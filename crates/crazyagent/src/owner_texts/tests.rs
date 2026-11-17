@@ -252,7 +252,7 @@ fn a_read_before_any_kept_text_finds_nothing_and_writes_nothing() {
     assert_eq!(text(&reader, &digest).unwrap(), None);
     let mut missing = Vec::new();
     assert_eq!(replayed(&reader, &digest, &mut missing).unwrap(), b"");
-    assert_eq!(missing, [digest.clone()]);
+    assert_eq!(missing, std::slice::from_ref(&digest));
     let writable = store();
     assert_eq!(text(&writable, &digest).unwrap(), None);
     let objects: i64 = writable

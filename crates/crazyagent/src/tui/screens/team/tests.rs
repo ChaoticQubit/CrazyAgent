@@ -5542,6 +5542,13 @@ fn master_shell(screen: super::Team, width: u16, height: u16) -> Shell {
     Shell::with(ctx, Box::new(screen))
 }
 
+/// The start of the owner line where the live master's terminal can't open: tmux missing on
+/// Unix, no terminal program on Windows ([`crate::tools::TMUX_MISSING`]).
+#[cfg(unix)]
+const TERMINAL_MISSING_START: &str = "tmux is missing, so the live master's";
+#[cfg(not(unix))]
+const TERMINAL_MISSING_START: &str = "The live master's terminal can't open";
+
 /// On a Mac with no tmux the engine turns the live master off with the line that says tmux
 /// is missing and how to install it. The master view shows that line, never the endless
 /// wait, and s tries again, which turns the switch on once more (owner 11-12).
@@ -5562,10 +5569,7 @@ fn a_master_with_no_tmux_says_tmux_is_missing_and_s_tries_again() {
     assert!(requests(&mut shell).is_empty(), "one start per open");
     let rows = render(&mut shell);
     let body = rows[4..22].join("\n");
-    assert!(
-        body.contains("tmux is missing, so the live master's"),
-        "{body}"
-    );
+    assert!(body.contains(TERMINAL_MISSING_START), "{body}");
     assert!(body.contains("s tries again."), "{body}");
     assert!(!body.contains("Starting the master's terminal"), "{body}");
     assert!(rows[23].contains("s Try again"), "{}", rows[23]);
@@ -5645,10 +5649,7 @@ fn a_master_stopped_before_its_terminal_opened_says_why_and_s_tries_again() {
     requests(&mut shell);
     let rows = render(&mut shell);
     let body = rows[4..22].join("\n");
-    assert!(
-        body.contains("tmux is missing, so the live master's"),
-        "{body}"
-    );
+    assert!(body.contains(TERMINAL_MISSING_START), "{body}");
     assert!(body.contains("s tries again."), "{body}");
     assert!(rows[23].contains("s Try again"), "{}", rows[23]);
     shell.key(Key::Char('x'));
@@ -5785,54 +5786,7 @@ fn keys_typed_into_the_master_terminal_across_the_minute_never_act_on_the_view()
     assert_eq!(starts_asked(&mut shell), 1);
 }
 
-/// DEC-161 bug 2: a master harness saved while a failed start left the live master off
-/// starts it on the new harness at the next team read, with no other open of the view, and
-/// the old harness's line goes; a read naming the same harness by its alias starts nothing.
-#[test]
-fn a_saved_master_harness_switch_starts_a_stopped_live_master_on_the_new_harness_at_once() {
-    let codex = "The live master was turned off: it could not start: No account in this project's pool can run codex";
-    let mut shell = master_view(100, 24);
-    requests(&mut shell);
-    shell.arrive(harnessed(Some(false), "codex", None));
-    let sent = requests(&mut shell);
-    assert!(
-        sent.iter().any(|sent| live_master_change(sent, true)),
-        "the open starts it: {sent:?}"
-    );
-    shell.arrive(turned(true, Ok(())));
-    requests(&mut shell);
-    let mut refused = harnessed_status(Some(false), "codex", None);
-    refused.live_problem = Some(codex.into());
-    shell.arrive(team_read(refused));
-    assert!(
-        requests(&mut shell)
-            .iter()
-            .all(|sent| !live_master_change(sent, true)),
-        "a refused start is not sent again on its own"
-    );
-    let mut switched = harnessed_status(Some(false), "claude-code", None);
-    switched.live_problem = Some(codex.into());
-    shell.arrive(team_read(switched));
-    let sent = requests(&mut shell);
-    assert!(
-        sent.iter().any(|sent| live_master_change(sent, true)),
-        "the saved switch starts it on the new harness at once: {sent:?}"
-    );
-    let rows = render(&mut shell);
-    assert!(
-        rows.iter().all(|row| !row.contains("can run codex")),
-        "the old harness's line is gone: {rows:?}"
-    );
-    shell.arrive(turned(true, Ok(())));
-    requests(&mut shell);
-    let mut alias = harnessed_status(Some(false), "claude", None);
-    alias.live_problem =
-        Some("The live master was turned off: it could not start: claude is not installed".into());
-    shell.arrive(team_read(alias));
-    assert!(
-        requests(&mut shell)
-            .iter()
-            .all(|sent| !live_master_change(sent, true)),
-        "the alias names the same harness, so nothing starts again"
-    );
-}
+/// The saved master harness switch row (DEC-161 bug 2): a master harness saved while the
+/// live master was off starts it on the new harness at the next team read. Inputs: the team
+/// screen and its shell. Output: none; the row asserts.
+mod master_harness_switch;

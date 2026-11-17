@@ -34,7 +34,7 @@ pub use job::{
 };
 pub use plan::{GitHubPlanField, default_description, default_repo_name, plan_problem};
 pub use prompt::{GitHubPromptAnswer, SNOOZE_MS};
-pub(crate) use prompt::{carry_publish, forget_job, forget_prompt};
+pub(crate) use prompt::{PROMPT_SCHEMA, carry_publish, forget_job, forget_prompt};
 #[cfg(all(test, unix))]
 pub(crate) use prompt::{keep_job, keep_prompt_answer, kept_job, kept_prompt_answer};
 #[cfg(all(test, unix))]

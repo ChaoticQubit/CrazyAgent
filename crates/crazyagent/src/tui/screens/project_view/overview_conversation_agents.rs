@@ -707,8 +707,8 @@ pub(super) fn agents(
         ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running => {
             Some(("x", "Stop"))
         }
-        ResearchStatus::Failed | ResearchStatus::Cancelled => Some(("r", "Retry")),
-        ResearchStatus::Done => None,
+        ResearchStatus::Failed | ResearchStatus::Cancelled if job.retryable => Some(("r", "Retry")),
+        ResearchStatus::Failed | ResearchStatus::Cancelled | ResearchStatus::Done => None,
     }));
     help.extend([
         ("Enter", "Open report"),

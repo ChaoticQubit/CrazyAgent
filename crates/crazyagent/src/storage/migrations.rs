@@ -105,6 +105,13 @@ pub(crate) const STEPS: &[Step] = &[
         to: 13,
         run: worktrees_on_the_log,
     },
+    Step {
+        to: 14,
+        run: |tx| {
+            let at_ms = crate::state_log::replay::Clock::System.now_ms();
+            crate::landing_log::first_run(tx, super::opening::Opening::new(at_ms)).map(drop)
+        },
+    },
 ];
 
 /// Step 13 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written

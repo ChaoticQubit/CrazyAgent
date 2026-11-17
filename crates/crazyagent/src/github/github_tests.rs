@@ -1,54 +1,13 @@
 use super::test_server::{Answer, Seen, Server, base64};
 use super::*;
-use crate::credentials::test_keychain::TestKeychain;
-use crate::credentials::{Keychain, reference};
+use crate::credentials::reference;
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-struct Scratch {
-    root: tempfile::TempDir,
-    namespace: String,
-    store: Arc<Keychain>,
-    _keychain: TestKeychain,
-}
-
-impl Scratch {
-    fn new() -> Self {
-        let mut bytes = [0_u8; 6];
-        getrandom::fill(&mut bytes).unwrap();
-        let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        let namespace = format!("dev.crazyagent.test-{suffix}");
-        let mut keychain = TestKeychain::temporary();
-        keychain.serve(&namespace);
-        Self {
-            root: tempfile::tempdir().unwrap(),
-            store: Arc::new(Keychain::new(&namespace).unwrap()),
-            namespace,
-            _keychain: keychain,
-        }
-    }
-
-    fn account(&self, server: &Server) -> GitHub {
-        GitHub::new(
-            &self.root.path().canonicalize().unwrap(),
-            self.namespace.clone(),
-            Arc::clone(&self.store) as Arc<dyn Store>,
-            Endpoints::loopback(server.port),
-        )
-    }
-
-    fn state(&self) -> Option<String> {
-        std::fs::read_to_string(self.root.path().join("github.json")).ok()
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let item = reference(&format!("{}.github", self.namespace), "token").unwrap();
-        let _ = self.store.delete(&item);
-    }
-}
+#[path = "github_tests/scratch.rs"]
+mod scratch;
+use scratch::Scratch;
 
 fn token() -> String {
     let mut bytes = [0_u8; 18];
@@ -2323,7 +2282,7 @@ fn project_id(id: &str) -> crate::protocol::ProjectId {
 
 #[test]
 fn the_publish_prompt_asks_a_project_without_a_remote_and_not_now_waits_exactly_seven_days() {
-    let scratch = Scratch::new();
+    let scratch = Scratch::logged();
     let server = unused_server();
     let account = scratch.account(&server);
     let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);
@@ -2356,7 +2315,7 @@ fn the_publish_prompt_asks_a_project_without_a_remote_and_not_now_waits_exactly_
 
 #[test]
 fn dont_ask_again_never_asks_and_a_later_not_now_does_not_undo_it() {
-    let scratch = Scratch::new();
+    let scratch = Scratch::logged();
     let server = unused_server();
     let account = scratch.account(&server);
     let (_folder, project) = new_project(&[("main.rs", "fn main() {}\n")]);

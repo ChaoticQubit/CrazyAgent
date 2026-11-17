@@ -73,6 +73,7 @@ impl Harness {
         let engine = Engine::open(&root.path().join("db"), config.clone())
             .await
             .unwrap();
+        engine.start_owner_runtime().await.unwrap();
         Self {
             root,
             engine,
@@ -222,6 +223,70 @@ async fn human_admission_is_exact_and_current_baseline_does_not_rewrite_pin() {
         other => panic!("{other:?}"),
     }
     h.engine.close().await.unwrap();
+}
+
+/// V250-L9: an owner approval appends one `BaselineApproved` landing event at the revision
+/// its reply carries, whose body holds only the project and baseline ids; a refused approval
+/// appends none.
+#[tokio::test]
+async fn an_approval_is_logged_once_at_the_revision_its_reply_carries() {
+    let mut h = Harness::open().await;
+    let project = Command::CreateProject {
+        project_id: ProjectId::new("project").unwrap(),
+        spec: ProjectSpec {
+            name: "project".into(),
+            repositories: vec![],
+        },
+    };
+    assert_eq!(h.call(project).await, Outcome::Applied);
+    assert_eq!(
+        h.call(Command::ProposeBaseline { draft: draft() }).await,
+        Outcome::Applied
+    );
+    let mut unknown = draft();
+    unknown.requirements.push_str(" and never proposed");
+    let missing = OwnerVerification::Approve {
+        baseline_id: unknown.identity().unwrap(),
+    };
+    assert_ne!(h.owner(missing).await, Outcome::Applied);
+    let baseline_id = draft().identity().unwrap();
+    let approve = OwnerVerification::Approve {
+        baseline_id: baseline_id.clone(),
+    };
+    assert_eq!(h.owner(approve).await, Outcome::Applied);
+    let approved_at = h.revision;
+    h.engine.close().await.unwrap();
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let db = rusqlite::Connection::open_with_flags(h.root.path().join("db"), flags).unwrap();
+    let logged: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let events: Vec<(String, i64, Vec<u8>)> = if logged {
+        db.prepare(
+            "SELECT kind, revision, body FROM state_log WHERE aggregate='landing' ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        events.len(),
+        1,
+        "one event for the approval, none for the refused one"
+    );
+    assert_eq!(events[0].0, crazyagent::landing_log::BASELINE_APPROVED);
+    assert_eq!(u64::try_from(events[0].1).unwrap(), approved_at);
+    let body: serde_json::Value = serde_json::from_slice(&events[0].2).unwrap();
+    let expected = serde_json::json!({"project": "project", "baseline": baseline_id.as_str()});
+    assert_eq!(body, expected);
 }
 
 #[tokio::test]
@@ -735,6 +800,7 @@ async fn storage_interruption_rolls_back_admission_and_operation_acknowledgement
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     let request = h.request(Command::OwnerVerification {
         action: OwnerVerification::Approve {
             baseline_id: draft().identity().unwrap(),

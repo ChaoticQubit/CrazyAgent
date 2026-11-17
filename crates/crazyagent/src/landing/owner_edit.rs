@@ -1,4 +1,5 @@
 use crate::engine::EngineError;
+use crate::landing_log::{self, Change};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -7,7 +8,8 @@ pub const PATHS_PER_WORKTREE_MAX: i64 = 1000;
 /// The most bytes an owner-edited path may hold.
 pub const PATH_BYTES_MAX: usize = 4096;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_owner_edits (
+/// The owner edits table, made on first use here and by the landing log's apply and rebuild.
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_owner_edits (
     worktree TEXT NOT NULL,
     path TEXT NOT NULL,
     at_ms INTEGER NOT NULL,
@@ -17,17 +19,18 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_owner_edits (
 
 /// Records that the owner edited `path` in an agent's worktree at `at`. The edit waits
 /// for the worktree's next turn end, which settles it on the change set that turn end
-/// records, so only that change set marks the file `OwnerEdited`. Inputs: the store, the
-/// agent's worktree, the path relative to it and the time in ms. Output: Ok once kept,
-/// `changes_path_invalid` for a path outside the worktree or `changes_owner_edits_full`
-/// past `PATHS_PER_WORKTREE_MAX` waiting paths.
+/// records, so only that change set marks the file `OwnerEdited`. The write is logged as
+/// `OwnerEditKept` in the same transaction (v2.5 L9). Inputs: the store, the agent's
+/// worktree, the path relative to it and the time in ms. Output: Ok once kept,
+/// `changes_path_invalid` for a path outside the worktree, `changes_owner_edits_full` past
+/// `PATHS_PER_WORKTREE_MAX` waiting paths, or the log's refusal with nothing kept.
 pub fn record(db: &Connection, worktree: &Path, path: &str, at: u64) -> Result<(), EngineError> {
     check_path(path)?;
     let worktree = worktree
         .to_str()
         .filter(|_| worktree.is_absolute())
         .ok_or_else(invalid)?;
-    let at = i64::try_from(at).map_err(|_| invalid())?;
+    i64::try_from(at).map_err(|_| invalid())?;
     db.execute_batch(SCHEMA).map_err(storage)?;
     let tx = rusqlite::Transaction::new_unchecked(db, rusqlite::TransactionBehavior::Immediate)
         .map_err(storage)?;
@@ -53,12 +56,12 @@ pub fn record(db: &Connection, worktree: &Path, path: &str, at: u64) -> Result<(
             return Err(EngineError("changes_owner_edits_full".into()));
         }
     }
-    tx.execute(
-        "INSERT INTO landing_owner_edits(worktree, path, at_ms) VALUES (?1,?2,?3)
-         ON CONFLICT(worktree, change_set, path) DO UPDATE SET at_ms=excluded.at_ms",
-        params![worktree, path, at],
-    )
-    .map_err(storage)?;
+    let kept = landing_log::OwnerEdit {
+        worktree: worktree.to_owned(),
+        path: path.to_owned(),
+        at_ms: at,
+    };
+    landing_log::record(&tx, &Change::OwnerEditKept(kept))?;
     tx.commit().map_err(storage)
 }
 
@@ -79,57 +82,45 @@ pub fn check_path(path: &str) -> Result<(), EngineError> {
 
 /// Settles the owner edits waiting in a worktree on the change set its turn end just
 /// recorded, or drops them when the turn end left none open because nothing differs.
-/// Failing leaves them waiting for the next turn end. Inputs: the store, the worktree and
-/// the change set the turn end returned. Output: Ok once settled.
+/// Failing leaves them waiting for the next turn end. Logged as `OwnerEditsSettled` or
+/// `OwnerEditsDropped` (v2.5 L9). Inputs: the store, the worktree and the change set the
+/// turn end returned. Output: Ok once settled.
 #[cfg(unix)]
 pub(super) fn settle(
     db: &Connection,
     worktree: &Path,
     kept: Option<&super::ChangeSetId>,
 ) -> Result<(), EngineError> {
-    let worktree = worktree.to_str().ok_or_else(invalid)?;
-    db.execute_batch(SCHEMA).map_err(storage)?;
-    match kept {
-        Some(id) => db.execute(
-            "UPDATE OR REPLACE landing_owner_edits SET change_set=?2
-             WHERE worktree=?1 AND change_set=''",
-            params![worktree, id.as_str()],
-        ),
-        None => db.execute(
-            "DELETE FROM landing_owner_edits WHERE worktree=?1 AND change_set=''",
-            [worktree],
-        ),
-    }
-    .map_err(storage)?;
-    Ok(())
+    let worktree = worktree.to_str().ok_or_else(invalid)?.to_owned();
+    let change = match kept {
+        Some(id) => Change::OwnerEditsSettled(landing_log::Settled {
+            worktree,
+            change_set: id.as_str().to_owned(),
+        }),
+        None => Change::OwnerEditsDropped(landing_log::Worktree { worktree }),
+    };
+    landing_log::write(db, &change)
 }
 
 /// Forgets the owner edits settled on a change set once no review can show them again:
 /// it was accepted, or discarded and pruned past its restore window. Inputs: the store and
-/// the change set. Output: Ok once forgotten.
+/// the change set. Output: Ok once forgotten, logged as `OwnerEditsForgotten` (v2.5 L9).
 #[cfg(unix)]
 pub(super) fn forget(db: &Connection, change_set: &super::ChangeSetId) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(storage)?;
-    db.execute(
-        "DELETE FROM landing_owner_edits WHERE change_set=?1",
-        [change_set.as_str()],
-    )
-    .map_err(storage)?;
-    Ok(())
+    let gone = landing_log::ChangeSet {
+        change_set: change_set.as_str().to_owned(),
+    };
+    landing_log::write(db, &Change::OwnerEditsForgotten(gone))
 }
 
 /// Forgets every owner edit of a worktree, waiting or settled, once the worktree is
-/// removed. Inputs: the store and the worktree. Output: Ok once forgotten.
+/// removed. Inputs: the store and the worktree. Output: Ok once forgotten, logged as
+/// `WorktreeOwnerEditsForgotten` (v2.5 L9).
 #[cfg(unix)]
 pub(super) fn forget_worktree(db: &Connection, worktree: &Path) -> Result<(), EngineError> {
-    let worktree = worktree.to_str().ok_or_else(invalid)?;
-    db.execute_batch(SCHEMA).map_err(storage)?;
-    db.execute(
-        "DELETE FROM landing_owner_edits WHERE worktree=?1",
-        [worktree],
-    )
-    .map_err(storage)?;
-    Ok(())
+    let worktree = worktree.to_str().ok_or_else(invalid)?.to_owned();
+    let gone = landing_log::Worktree { worktree };
+    landing_log::write(db, &Change::WorktreeOwnerEditsForgotten(gone))
 }
 
 /// Logs a failed cleanup of owner edits by its plain code. The step it followed already

@@ -14,6 +14,10 @@ use std::path::Path;
 use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "client_controller/fixtures.rs"]
+mod fixtures;
+use fixtures::draft;
+
 struct OwnedCli {
     child: Child,
 }
@@ -122,31 +126,6 @@ fn request(id: &str, revision: Cursor, operation: OwnerOperation) -> OwnerReques
         request_id: RequestId::new(id).unwrap(),
         expected_revision: revision,
         operation,
-    }
-}
-
-fn draft() -> BaselineDraft {
-    BaselineDraft {
-        version: 1,
-        project_id: ProjectId::new("project").unwrap(),
-        origin: BaselineOrigin::Imported,
-        requirements: "Actual queued late delivery fixture".into(),
-        checks: vec![
-            CheckSpec {
-                id: RequestId::new("code").unwrap(),
-                kind: CheckKind::Code,
-                minimum_risk: Risk::Low,
-                content: b"real code".to_vec(),
-            },
-            CheckSpec {
-                id: RequestId::new("integrity").unwrap(),
-                kind: CheckKind::TestIntegrity,
-                minimum_risk: Risk::Low,
-                content: b"real integrity".to_vec(),
-            },
-        ],
-        rules: vec![],
-        retry_limit: 0,
     }
 }
 
@@ -1128,6 +1107,7 @@ async fn controller_preserves_actual_unavailable_verification_outcome() {
     let engine = crazyagent::engine::Engine::open(&root.path().join("engine.db"), config.clone())
         .await
         .unwrap();
+    engine.start_owner_runtime().await.unwrap();
     let seeded: Result<(), crazyagent::engine::EngineError> = async {
         let mut revision = Cursor::new(0);
         let baseline = draft();
