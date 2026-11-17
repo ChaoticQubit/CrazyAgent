@@ -42,6 +42,9 @@ const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
+/// The marker that closes a bracketed paste. A program may read typed bytes per read, so
+/// no split of them cuts it (RV-DS241-69).
+pub(crate) const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub const PROMPT_BYTES_MAX: usize = 4096;
 pub const CHUNK_BYTES_MAX: usize = 8192;
 pub const SIZE_MIN: u16 = 2;
