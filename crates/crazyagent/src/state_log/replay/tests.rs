@@ -808,6 +808,76 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     );
 }
 
+/// A checkpoint after a redact tries again while a reader holds the WAL. Held through every
+/// try, it gives up after [`CHECKPOINT_ATTEMPTS_MAX`] tries with the old body still in the
+/// WAL; released at the first wait, the next try empties the WAL and neither file keeps the
+/// body.
+#[test]
+fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("engine.db");
+    let mut db = Connection::open(&path).unwrap();
+    let mode: String = db
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    db.busy_timeout(Duration::from_millis(10)).unwrap();
+    db.execute_batch(
+        "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
+        INSERT INTO state VALUES (1,0);",
+    )
+    .unwrap();
+    fence::seed(&db);
+    let marker = b"checkpoint-marker-8e2c";
+    let body = marker.repeat(1_000);
+    let tx = db.transaction().unwrap();
+    let seq = Appender::own(&tx, fence::engine())
+        .unwrap()
+        .append(&Draft {
+            aggregate: Aggregate::Worktrees,
+            kind: "Secret",
+            schema: 1,
+            at_ms: 1,
+            body: &body,
+        })
+        .unwrap();
+    tx.commit().unwrap();
+    let reader = Connection::open(&path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let read: i64 = reader
+        .query_row("SELECT COUNT(*) FROM state_log", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(read, 1, "the reader holds a snapshot in the WAL");
+    let tx = db.transaction().unwrap();
+    redact(&tx, seq, &fence::engine()).unwrap();
+    tx.commit().unwrap();
+    let wal = path.with_extension("db-wal");
+    let mut waits = 0;
+    assert!(
+        !checkpoint_with(&db, || waits += 1),
+        "a held reader keeps every try busy"
+    );
+    assert_eq!(
+        waits,
+        CHECKPOINT_ATTEMPTS_MAX - 1,
+        "one wait between two tries"
+    );
+    assert!(holds(&wal, marker), "the busy WAL still holds the old body");
+    let mut held = Some(reader);
+    let mut released = 0;
+    assert!(checkpoint_with(&db, || {
+        released += 1;
+        drop(held.take());
+    }));
+    assert_eq!(released, 1, "the try after the release empties the WAL");
+    assert_eq!(
+        std::fs::metadata(&wal).unwrap().len(),
+        0,
+        "the WAL is empty"
+    );
+    assert!(!holds(&path, marker), "the database file keeps no copy");
+}
+
 #[test]
 fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_one() {
     let mut db = store();

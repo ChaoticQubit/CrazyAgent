@@ -103,14 +103,12 @@ pub(super) fn log_deleted(
 }
 
 /// Moves the WAL into the database file and empties it after a Delete redacted earlier
-/// events, so no old body stays in the WAL, as `redact` asks of its caller. A busy
-/// checkpoint is logged, not returned: the delete is already committed. Input: the
+/// events, so no old body stays in the WAL, as `redact` asks of its caller, trying again
+/// while a reader keeps it busy, up to the bound of the shared checkpoint. A checkpoint
+/// still busy is logged, not returned: the delete is already committed. Input: the
 /// connection. Output: none.
 pub(super) fn checkpoint(db: &Connection) {
-    let busy = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-        row.get::<_, i64>(0)
-    });
-    if !matches!(busy, Ok(0)) {
+    if !crate::state_log::replay::checkpoint(db) {
         eprintln!("state_log_redact_checkpoint_busy");
     }
 }

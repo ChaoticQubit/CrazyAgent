@@ -433,3 +433,78 @@ async fn a_plain_reconnect_names_a_restore_that_brought_the_data_back() {
     assert!(!ready);
     assert_eq!(problem, crate::restore::ENGINE_RESTORED);
 }
+
+/// V250-OWN-REVISION-RETRY TUI row: a project the TUI creates lands though another window
+/// saved an unrelated setting between the creation's read and its send, and the creation
+/// event names the resent request, so the screen accepts the engine's receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_after_an_unrelated_change_lands_under_the_resent_id() {
+    use crate::cleanup_settings::{CleanupMode, CleanupSettings};
+    let root = tempfile::Builder::new()
+        .prefix("ca-resend-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let mut service = crate::engine::bootstrap::EngineService::start(
+        root.path(),
+        "engine.sock",
+        &config,
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let mut native = NativeOwner::new(root.path().join("engine.sock"), Duration::from_secs(2));
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+    let submission = CreationSubmission {
+        identity: native.controller.as_ref().unwrap().identity().clone(),
+        generation: 7,
+        navigation: 9,
+        project_id: ProjectId::new("resent-target").unwrap(),
+        spec: ProjectSpec {
+            name: "Resent target".into(),
+            repositories: vec!["/absent/resent target".into()],
+        },
+        setup: None,
+    };
+    native.prepare_creation(&submission).await.unwrap();
+    let first = native.creation_operation.clone().unwrap();
+    let mut other = OwnerController::attach(
+        root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let settings = CleanupSettings {
+        mode: CleanupMode::Manual,
+        days: 30,
+    };
+    let changed = other.set_cleanup_settings(settings, 1).await.unwrap();
+    assert!(
+        matches!(&changed, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{changed:?}"
+    );
+    let result = native
+        .deliver_creation(MutationDelivery::Submit)
+        .await
+        .map(Box::new);
+    let event = native.creation_event(submission, result);
+    assert!(!event.retained);
+    let resent = event.operation.clone().unwrap();
+    assert_ne!(resent.0, first.0, "the resend is its own request");
+    assert!(
+        matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+            if operation.result == OwnerResult::Applied
+                && operation.provenance.operation_id == resent.0
+                && operation.provenance.request_hash == resent.1),
+        "{:?}",
+        event.result
+    );
+    drop(other);
+    drop(native);
+    service.shutdown().await.unwrap();
+}
