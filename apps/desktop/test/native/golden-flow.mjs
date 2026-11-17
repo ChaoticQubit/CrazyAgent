@@ -124,6 +124,10 @@ export function ownerRepo(folder, { identity = null } = {}) {
   git(folder, "init", "-q", "-b", "main");
   git(folder, "add", ".");
   git(folder, ...author, "commit", "-q", "-m", "Start the fruit stand");
+  if (identity !== null) {
+    git(folder, "config", "user.name", identity[0]);
+    git(folder, "config", "user.email", identity[1]);
+  }
   return git(folder, "rev-parse", "HEAD");
 }
 

@@ -217,6 +217,8 @@ pub fn owner_repo(folder: &Path, identity: Option<[&str; 2]>) -> String {
     repository(folder, "README.md", README);
     if let Some([name, email]) = identity {
         assert!(!name.is_empty() && !email.is_empty());
+        git(folder, &["config", "user.name", name]);
+        git(folder, &["config", "user.email", email]);
     }
     git_text(folder, &["rev-parse", "HEAD"])
 }
