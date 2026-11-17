@@ -620,25 +620,31 @@ fn restore_pinned_at(
     if let Err(cause) = restored {
         return Err(drop_unneeded(&db, &kept, cause));
     }
-    sweep_unbound_keys(&db, root, settings);
+    sweep_unbound_keys(&db, root, settings, &kept);
     assert!(kept.starts_with(&folder));
     Ok(kept)
 }
 
-/// Deletes the owner's key files the restored 2.4 rows no longer name (V250-L5-N5): each
-/// plugin key no restored app plugin binding holds, so every one for a 2.4 copy, and each
-/// account key neither a restored account nor the live settings name, as the start sweep
-/// judges ([`super::trash::referenced`]); no settings, or settings that cannot be read, keep
-/// every account key. A failure is logged by folder and code and never fails the checked
-/// restore. Inputs: the restored connection, still held alone, the engine root and the
-/// settings sources.
-fn sweep_unbound_keys(db: &Connection, root: &Path, settings: Option<&SettingsSources>) {
-    use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, remove_unkept_in};
-    let plugin = remove_unkept_in(root, PLUGIN_KEYS, |name| plugin_key_bound(db, name));
+/// Moves the owner's key files the restored 2.4 rows no longer name into the same key
+/// folders of the dated copy of the replaced 2.5 data (V250-L5-N5, DEC-192), where they stay
+/// with the data that names them: each plugin key no restored app plugin binding holds, so
+/// every one for a 2.4 copy, and each account key neither a restored account nor the live
+/// settings name, as the start sweep judges ([`super::trash::referenced`]); no settings, or
+/// settings that cannot be read, keep every account key in place. A failure is logged by
+/// folder and code and never fails the checked restore. Inputs: the restored connection,
+/// still held alone, the engine root, the settings sources and the dated copy's folder.
+fn sweep_unbound_keys(
+    db: &Connection,
+    root: &Path,
+    settings: Option<&SettingsSources>,
+    copy: &Path,
+) {
+    use super::accounts::{ACCOUNT_KEYS, PLUGIN_KEYS, move_unkept_in};
+    let plugin = move_unkept_in(root, PLUGIN_KEYS, copy, |name| plugin_key_bound(db, name));
     let account = match settings.map(SettingsSources::config) {
         Some(Ok(config)) => {
             let catalog = config.settings.model_access.as_ref();
-            remove_unkept_in(root, ACCOUNT_KEYS, |name| {
+            move_unkept_in(root, ACCOUNT_KEYS, copy, |name| {
                 super::trash::referenced(db, catalog, super::trash::ACCOUNT_KEY, name)
             })
         }
