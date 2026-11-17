@@ -253,3 +253,45 @@ fn an_unanswered_restore_counts_as_sent_and_drops_the_connection_and_a_refusal_k
     );
     assert!(!lost);
 }
+
+fn write_record(root: &std::path::Path, line: &str) {
+    let path = root.join("restore-record");
+    let _ = std::fs::remove_file(&path);
+    let mut record = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .unwrap();
+    std::io::Write::write_all(&mut record, line.as_bytes()).unwrap();
+}
+
+/// L5 F1: a failed connect to the TUI's own engine names the restore that holds it, as the
+/// desktop's connect does: restoring only while the login service still runs the copying
+/// process, restored either way; a failed record or none leaves the problem as it was.
+#[test]
+fn a_failed_connect_names_the_restore_that_holds_the_engine() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-held-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let held_by = |running: bool| held("engine_start_failed".into(), root.path(), running);
+    assert_eq!(held_by(true), "engine_start_failed", "no record");
+    write_record(root.path(), "pending");
+    assert_eq!(held_by(true), "engine_restoring");
+    assert_eq!(
+        held_by(false),
+        "engine_start_failed",
+        "a pending record whose process is gone was left by a restore that died"
+    );
+    write_record(root.path(), "restored replaced-20261117T020000Z");
+    assert_eq!(held_by(true), "engine_restored");
+    assert_eq!(held_by(false), "engine_restored");
+    write_record(root.path(), "failed storage_restore_busy");
+    assert_eq!(
+        held_by(true),
+        "engine_start_failed",
+        "2.5 runs again after a failure"
+    );
+}
