@@ -1,8 +1,12 @@
 use crate::engine::EngineError;
+use fence::Fence;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// The write fence on append, one per writer class, and the engine hosts this process runs
+/// (v2.5 L3).
+pub(crate) mod fence;
 /// Replay of the log into projections, the compare of rebuilt tables, redaction in place, the
 /// writers' clock and the process exit event (v2.5 L2).
 pub mod replay;
@@ -102,20 +106,63 @@ struct SnapshotDone {
 }
 
 /// Appends the events of one write transaction to `state_log` at that transaction's
-/// `state` revision, each with the next `seq`.
+/// `state` revision, each with the next `seq`, behind the writer's fence.
 pub struct Appender<'a, 'c> {
     tx: &'a Transaction<'c>,
     revision: u64,
     appended: usize,
+    fence: Fence,
 }
 
 impl<'a, 'c> Appender<'a, 'c> {
     /// Starts appending in an owner request's transaction, whose revision the request
     /// already moved: it must be the `state` revision now and newer than the last logged
-    /// one, so each appending transaction brings its own and none goes back. Inputs: the
-    /// transaction and that revision. Output: the appender, or `state_log_revision_stale`
-    /// or `state_log_revision_not_newer`.
-    pub fn owner(tx: &'a Transaction<'c>, revision: u64) -> Result<Self, EngineError> {
+    /// one, so each appending transaction brings its own and none goes back. The fence is
+    /// checked first, once for the transaction. Inputs: the transaction, that revision and
+    /// the fence. Output: the appender, a fence refusal, `state_log_revision_stale` or
+    /// `state_log_revision_not_newer`.
+    pub(crate) fn owner(
+        tx: &'a Transaction<'c>,
+        revision: u64,
+        fence: Fence,
+    ) -> Result<Self, EngineError> {
+        fence::check(tx, &fence)?;
+        Self::begin(tx, revision, fence)
+    }
+
+    /// Starts appending in a transaction of a writer on its own connection, moving the
+    /// `state` revision once for it after its fence is checked. Inputs: the transaction and
+    /// the fence. Output: the appender, a fence refusal, or `state_log_revision_exhausted`
+    /// when the revision is at its largest value.
+    pub(crate) fn own(tx: &'a Transaction<'c>, fence: Fence) -> Result<Self, EngineError> {
+        fence::check(tx, &fence)?;
+        let moved = tx
+            .execute(
+                "UPDATE state SET revision=revision+1 WHERE id=1 AND revision<?1",
+                [i64::MAX],
+            )
+            .map_err(error)?;
+        if moved != 1 {
+            return Err(error("state_log_revision_exhausted"));
+        }
+        Self::begin(tx, state_revision(tx)?, fence)
+    }
+
+    /// Runs one projection apply in the appender's transaction after checking the fence
+    /// again, the pair of the check at the start. Input: the apply. Output: its result, or
+    /// the fence refusal without running it.
+    pub fn project<T>(
+        &self,
+        apply: impl FnOnce(&Transaction<'c>) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        fence::check(self.tx, &self.fence)?;
+        apply(self.tx)
+    }
+
+    /// Opens the appender at a fenced revision: it must be the `state` revision now and
+    /// newer than the last logged one. Inputs: the transaction, the revision and the fence.
+    /// Output: the appender, or `state_log_revision_stale` or `state_log_revision_not_newer`.
+    fn begin(tx: &'a Transaction<'c>, revision: u64, fence: Fence) -> Result<Self, EngineError> {
         ensure(tx)?;
         if revision != state_revision(tx)? {
             return Err(error("state_log_revision_stale"));
@@ -135,23 +182,8 @@ impl<'a, 'c> Appender<'a, 'c> {
             tx,
             revision,
             appended: 0,
+            fence,
         })
-    }
-
-    /// Starts appending in a transaction of a writer on its own connection, moving the
-    /// `state` revision once for it. Input: the transaction. Output: the appender, or
-    /// `state_log_revision_exhausted` when the revision is at its largest value.
-    pub fn own(tx: &'a Transaction<'c>) -> Result<Self, EngineError> {
-        let moved = tx
-            .execute(
-                "UPDATE state SET revision=revision+1 WHERE id=1 AND revision<?1",
-                [i64::MAX],
-            )
-            .map_err(error)?;
-        if moved != 1 {
-            return Err(error("state_log_revision_exhausted"));
-        }
-        Self::owner(tx, state_revision(tx)?)
     }
 
     /// The revision this transaction's events carry. Output: the revision.

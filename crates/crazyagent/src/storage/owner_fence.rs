@@ -3,6 +3,9 @@ use crate::engine::EngineError;
 use crate::engine::owner::{Admission, HostStamp};
 use rusqlite::{Transaction, params};
 
+#[cfg(all(test, unix))]
+mod tests;
+
 pub(crate) fn check_owner_host(tx: &Transaction<'_>, stamp: &HostStamp) -> Result<(), EngineError> {
     let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_meta WHERE singleton=1 AND schema_version=1 AND db_instance=?1 AND engine_epoch=?2 AND runtime_state='active')", params![stamp.db_instance, stamp.engine_epoch], |r|r.get(0)).map_err(error)?;
     if !valid {

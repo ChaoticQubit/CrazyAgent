@@ -1,3 +1,4 @@
+use super::fence::{self, Fence};
 use super::{
     Aggregate, BODY_BYTES_MAX, Chunk, SNAPSHOT_CHUNK, SNAPSHOT_DONE, SnapshotChunk, TOMBSTONE,
     error, verify_snapshot,
@@ -140,9 +141,11 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
 /// while its seq, revision, aggregate, kind and time stay, so replay stays contiguous and
 /// skips it. The old body is overwritten with zeros (`secure_delete` on for the update, then
 /// put back); the caller checkpoints the WAL after commit. Snapshot events are refused until
-/// compaction (L1b) can rewrite their run. Inputs: the delete's transaction and the seq.
-/// Output: Ok, or `state_log_redact_missing` or `state_log_redact_snapshot`.
-pub fn redact(tx: &Transaction<'_>, seq: u64) -> Result<(), EngineError> {
+/// compaction (L1b) can rewrite their run. The delete's fence is checked first, as for an
+/// append. Inputs: the delete's transaction, the seq and the fence. Output: Ok, a fence
+/// refusal, or `state_log_redact_missing` or `state_log_redact_snapshot`.
+pub(crate) fn redact(tx: &Transaction<'_>, seq: u64, fence: &Fence) -> Result<(), EngineError> {
+    fence::check(tx, fence)?;
     let missing = || error("state_log_redact_missing");
     let seq = i64::try_from(seq).map_err(|_| missing())?;
     if !logged(tx)? {
