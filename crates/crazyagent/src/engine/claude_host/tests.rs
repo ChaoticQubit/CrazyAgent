@@ -2568,3 +2568,104 @@ async fn wake_idle_claude_drive() {
     }
     claude.cancel().await.unwrap();
 }
+
+/// A stand-in Claude Code master that finishes its turn, marks the `run` folder, then closes
+/// its stdout and stderr and lives on, so its host waits for an exit no pipe reports.
+const PIPES_CLOSED_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session",'
+printf '%s\n' '"model":"observed-model","capabilities":[]}'
+printf '%s' '{"type":"assistant","uuid":"said-1","session_id":"native-session",'
+printf '%s' '"parent_tool_use_id":null,"message":{"id":"message-1","type":"message",'
+printf '%s' '"role":"assistant","model":"observed-model",'
+printf '%s\n' '"content":[{"type":"text","text":"DONE"}]}}'
+printf '%s' '{"type":"result","subtype":"success","uuid":"result-1",'
+printf '%s\n' '"session_id":"native-session","is_error":false,"result":"DONE"}'
+: > run/closed
+exec >&- 2>&-
+exec /bin/sleep 120
+"#;
+
+/// Starts a stand-in master running `body` under a 300 s clock, starts one turn and waits up
+/// to 10 s for the stand-in to write `run/<mark>`. Inputs: the fixture, the script body and
+/// the mark. Output: the host, its turn started.
+async fn turn_until_marked(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    mark: &str,
+) -> ClaudeHost {
+    let clock = Some(Duration::from_secs(300));
+    let mut claude = stand_in_master_under(fixture, body, false, clock).await;
+    let turn = RequestId::new("wake-turn").unwrap();
+    claude.start_turn(turn, "Wait.").await.unwrap();
+    let marked = fixture.project.join("run").join(mark);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !marked.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never wrote {mark}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    claude
+}
+
+/// Counts the passes a host's drive loop makes in one second, after waiting `settle`.
+/// Inputs: the host and the settle time. Output: the count.
+async fn passes_in_a_second(claude: &ClaudeHost, settle: Duration) -> u64 {
+    tokio::time::sleep(settle).await;
+    let passes = claude.drive_passes();
+    let before = passes.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    passes.load(Ordering::SeqCst) - before
+}
+
+#[tokio::test]
+async fn a_quiet_claude_turn_wakes_the_drive_loop_a_few_times_a_second() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = turn_until_marked(&mut fixture, WAKE_IDLE_HARNESS, "quiet").await;
+    let passes = passes_in_a_second(&claude, Duration::from_millis(300)).await;
+    assert!(passes <= 10, "{passes} drive passes in a quiet second");
+    claude.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_a_quiet_claude_turn_wakes_its_drive_loop_at_once() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = turn_until_marked(&mut fixture, WAKE_IDLE_HARNESS, "quiet").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let passes = claude.drive_passes();
+    let before = passes.load(Ordering::SeqCst);
+    let noticed = async {
+        let started = std::time::Instant::now();
+        while passes.load(Ordering::SeqCst) == before && started.elapsed() < Duration::from_secs(2)
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        started.elapsed()
+    };
+    let (cancelled, took) = tokio::join!(claude.cancel(), noticed);
+    assert!(cancelled.is_ok(), "{cancelled:?}");
+    assert!(
+        took < Duration::from_millis(50),
+        "the drive loop saw the stop after {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_harness_that_closed_its_pipes_after_its_turn_is_waited_for_without_spinning() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = turn_until_marked(&mut fixture, PIPES_CLOSED_HARNESS, "closed").await;
+    let passes = passes_in_a_second(&claude, Duration::from_millis(600)).await;
+    assert!(
+        passes <= 10,
+        "{passes} drive passes in a second with no pipe open"
+    );
+    claude.cancel().await.unwrap();
+}

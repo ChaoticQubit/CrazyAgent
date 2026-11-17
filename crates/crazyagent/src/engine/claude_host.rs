@@ -525,6 +525,8 @@ pub(in crate::engine) struct ClaudeHost {
     close_time: Duration,
     expires: Option<tokio::time::Instant>,
     frame_bytes: usize,
+    #[cfg(test)]
+    passes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Waits for a master host's wall clock to run out; with none, the owner's choice of no
@@ -574,6 +576,8 @@ impl ClaudeHost {
         let doubt = Arc::new(AtomicBool::new(false));
         let group = Arc::new(AtomicU32::new(0));
         let kept = Arc::new(std::sync::Mutex::new(None));
+        #[cfg(test)]
+        let passes = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let mut host = Self {
             turns,
             events,
@@ -592,6 +596,8 @@ impl ClaudeHost {
                 .run_time
                 .map(|time| tokio::time::Instant::now() + time),
             frame_bytes,
+            #[cfg(test)]
+            passes: Arc::clone(&passes),
         };
         let _custodian = std::thread::Builder::new()
             .name("claude-master-custodian".into())
@@ -611,6 +617,8 @@ impl ClaudeHost {
                         doubt,
                         group,
                         diagnostic: kept,
+                        #[cfg(test)]
+                        passes,
                     },
                 );
             })
@@ -730,6 +738,13 @@ impl ClaudeHost {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// How many passes the custodian's drive loop has made, shared, so a row can count them
+    /// while it stops the host. Output: the shared count.
+    #[cfg(test)]
+    pub(in crate::engine) fn drive_passes(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.passes)
     }
 
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {

@@ -42,6 +42,8 @@ pub(super) struct Channels {
     pub(super) doubt: Arc<AtomicBool>,
     pub(super) group: Arc<AtomicU32>,
     pub(super) diagnostic: Arc<Mutex<Option<StreamDiagnostic>>>,
+    #[cfg(test)]
+    pub(super) passes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 struct PendingInput {
@@ -80,6 +82,8 @@ struct Process {
     deadline: Option<Instant>,
     record: StreamDiagnostic,
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
+    #[cfg(test)]
+    passes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Runs one Claude Code master under custody until it retires, in a cleared environment
@@ -104,6 +108,8 @@ pub(super) fn run(
         doubt,
         group,
         diagnostic,
+        #[cfg(test)]
+        passes,
     } = channels;
     let tools = match validate_command(&command, &profile, &home) {
         Ok(tools) => tools,
@@ -211,6 +217,8 @@ pub(super) fn run(
         deadline: limits.run_time.map(|time| Instant::now() + time),
         record: StreamDiagnostic::default(),
         kept: diagnostic,
+        #[cfg(test)]
+        passes,
     };
     process.stdin = process.child.stdin.take();
     process.stdout = process.child.stdout.take();
@@ -270,6 +278,8 @@ impl Process {
         assert!(self.status.is_none());
         assert!(self.pending.is_none());
         loop {
+            #[cfg(test)]
+            self.passes.fetch_add(1, Ordering::SeqCst);
             if self.stop.load(Ordering::Acquire) {
                 return;
             }
