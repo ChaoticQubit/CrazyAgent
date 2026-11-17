@@ -2101,4 +2101,51 @@ mod tests {
         assert!(seen.contains(&id(2_000)), "4,000 ids back is still known");
         assert!(!seen.contains(&WireId::Number(5_999)));
     }
+
+    /// W1 (farm3, 111 Windows rows): a path Codex sends on Windows is absolute only with a
+    /// drive prefix, so a plain drive path is valid, as the codexHome of its initialize
+    /// reply and the cwd of a thread. A UNC, verbatim or device prefix, a forward slash, a
+    /// relative drive path, `.` or `..` stays refused.
+    #[cfg(windows)]
+    #[test]
+    fn a_plain_drive_path_is_valid_on_windows_and_every_other_form_stays_refused() {
+        for plain in [
+            r"C:\Users\unit\.codex",
+            r"c:\unit\worktree",
+            r"D:\work\project",
+        ] {
+            assert_eq!(valid_path(Path::new(plain)), Some(plain), "{plain}");
+        }
+        for refused in [
+            r"C:\",
+            r"C:unit\codex",
+            r"\unit\codex",
+            "/unit/codex",
+            r"C:/unit/codex",
+            r"C:\unit/codex",
+            r"C:\unit\..\escape",
+            r"C:\unit\.\codex",
+            r"C:\unit\codex\",
+            r"\\server\share\codex",
+            r"\\?\C:\codex",
+            r"\\.\pipe\codex",
+        ] {
+            assert_eq!(valid_path(Path::new(refused)), None, "{refused}");
+        }
+        let mut protocol = CodexProtocol::new();
+        protocol.initialize().unwrap();
+        let reply = json!({"id":1,"result":{
+            "userAgent":"unit-wire-data", "codexHome":r"C:\Users\unit\.codex",
+            "platformFamily":"windows", "platformOs":"windows"
+        }});
+        let mut line = serde_json::to_vec(&reply).unwrap();
+        line.push(b'\n');
+        assert_eq!(protocol.receive(&line).unwrap(), vec![Event::Initialized]);
+        protocol.initialized().unwrap();
+        assert!(
+            protocol
+                .start_thread(Path::new(r"C:\unit\worktree"))
+                .is_ok()
+        );
+    }
 }
