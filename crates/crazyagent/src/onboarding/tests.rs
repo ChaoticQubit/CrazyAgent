@@ -1203,14 +1203,18 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
 /// The graph step's installer finds the graphify setup put in `<engine root>/setup/bin`, a
 /// stand-in here, and looks again on each step: once it is gone it finds none. The installer
 /// looks only in that folder, not this Mac's own installs, which come first on the engine's
-/// places, so the row reads the same in any HOME. macOS only: by DEC-094 a Linux host
+/// places, so the row reads the same in any HOME. The stand-in sits under the real temp
+/// folder, not the `/tmp` link: the resolver judges every link on a tool's way (0be8ec608),
+/// and `/tmp` leads into a folder every user can write. macOS only: by DEC-094 a Linux host
 /// installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     use crate::setup::Installer;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
     let bin = root.path().join("setup/bin");
     let installer = crate::setup::pinned::PinnedInstaller::with_places(
         root.path(),
