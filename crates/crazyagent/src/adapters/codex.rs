@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::{Component, Path};
+use std::path::{Component, Path, Prefix};
 
 use super::claude::SeenIds;
 use super::{LINE_BYTES_MAX, clip_text};
@@ -1905,16 +1905,26 @@ fn instructed(instructions: &str) -> Result<&str, ProtocolError> {
     Ok(instructions)
 }
 
+/// Checks a path Codex names or is sent: absolute, at most 4096 bytes and 64 parts, no
+/// control characters, `.` or `..`. A drive prefix such as `C:` is the one prefix allowed,
+/// and on Windows the text must be a plain drive path ([`crate::sandbox::windows_clean_text`]),
+/// never a UNC, verbatim, device or forward-slash path. Input: the path. Output: its text.
 fn valid_path(path: &Path) -> Option<&str> {
     let text = path.to_str()?;
     if !path.is_absolute()
         || text.len() > 4096
         || text.chars().any(char::is_control)
         || path.components().count() > 64
-        || path
-            .components()
-            .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+        || !path.components().all(|part| match part {
+            Component::Prefix(prefix) => matches!(prefix.kind(), Prefix::Disk(_)),
+            Component::RootDir | Component::Normal(_) => true,
+            Component::CurDir | Component::ParentDir => false,
+        })
     {
+        return None;
+    }
+    #[cfg(windows)]
+    if !crate::sandbox::windows_clean_text(text) {
         return None;
     }
     Some(text)
