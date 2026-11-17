@@ -14,7 +14,7 @@
   },
   "weight600": {
     "src/screens/demo/demo.css": 1,
-    "src/screens/intake/intake.css": 2,
+    "src/screens/intake/intake.css": 1,
     "src/screens/metrics/metrics.css": 4,
     "src/screens/process.css": 4,
     "src/screens/project/projects.css": 10,
@@ -25,7 +25,7 @@
   },
   "fontSize": {
     "src/screens/demo/demo.css": 2,
-    "src/screens/intake/intake.css": 2,
+    "src/screens/intake/intake.css": 1,
     "src/screens/metrics/metrics.css": 18,
     "src/screens/process.css": 4,
     "src/screens/project/overview-tabs.css": 1,
