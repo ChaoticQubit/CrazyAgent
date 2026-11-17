@@ -16,6 +16,97 @@ fn tmux_output_octal_escapes_decode_to_the_exact_bytes() {
     assert_eq!(decode(b""), b"");
 }
 
+/// V243-PASTE-CHUNKS: typed bytes go to tmux as `send-keys -H` commands of at most
+/// `SEND_KEYS_BYTES_MAX` bytes for the one target, every byte once and in order, and no
+/// command for no bytes, so a paste never holds the server in one long command parse.
+#[test]
+fn typed_bytes_go_as_send_keys_commands_of_at_most_256_bytes_in_order() {
+    assert!(send_keys_lines("%7", &[]).is_empty());
+    for length in [1, 255, 256, 257, 512, 1000, INPUT_BYTES_MAX] {
+        let bytes: Vec<u8> = (0..length).map(|at| (at * 7 % 256) as u8).collect();
+        let runs: Vec<Vec<u8>> = send_keys_lines("%7", &bytes)
+            .iter()
+            .map(|line| {
+                let keys = line
+                    .strip_prefix("send-keys -t %7 -H ")
+                    .expect("send-keys -H for %7");
+                keys.split(' ')
+                    .map(|key| u8::from_str_radix(key, 16).unwrap())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            runs.len(),
+            length.div_ceil(SEND_KEYS_BYTES_MAX),
+            "{length} bytes"
+        );
+        assert!(
+            runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX),
+            "{length} bytes"
+        );
+        assert!(runs.iter().all(|run| !run.is_empty()), "{length} bytes");
+        assert_eq!(
+            runs.concat(),
+            bytes,
+            "{length} bytes arrive once each, in order"
+        );
+    }
+}
+
+/// V243-PASTE-CHUNKS: a full input request typed into a real pane arrives whole and in
+/// order across its `send-keys` commands, read back from what the pane's app received.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_full_input_request_reaches_the_pane_whole_and_in_order_across_its_commands() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let ready = home.path().join("ready");
+    let received = home.path().join("received");
+    let script = format!(
+        "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+        ready.display(),
+        received.display()
+    );
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never set its terminal raw"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let bytes: Vec<u8> = (0..INPUT_BYTES_MAX)
+        .map(|at| b' ' + (at * 7 % 95) as u8)
+        .collect();
+    host.input(&agent, &bytes).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(&received).map_or(0, |file| file.len()) < bytes.len() as u64 {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never received every typed byte"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::read(&received).unwrap(), bytes);
+}
+
 #[test]
 fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert_eq!(
