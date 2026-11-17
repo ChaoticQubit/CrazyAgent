@@ -134,6 +134,15 @@ test("the end-to-end bridge routes match the app's commands", () => {
   assert.equal(readFileSync(ROUTES, "utf8"), render(lib, impls), "routes.rs is stale: run node test/native/bridge-routes.mjs");
 });
 
+test("a std type an arm names is imported from lib.rs's own use, and std types no arm names are not", () => {
+  const routes = render(lib, impls);
+  assert.match(routes, /rules: BTreeSet<GitHubRule>,/);
+  assert.match(routes, /^    use std::collections::BTreeSet;$/m, "BTreeSet<GitHubRule> needs lib.rs's std import or routes.rs does not build");
+  for (const unused of ["Arc", "AtomicBool", "Ordering"]) {
+    assert.doesNotMatch(routes, new RegExp(`^    use std::.*\\b${unused};$`, "m"), unused);
+  }
+});
+
 test("every plain bridge command is routed with its own arguments and native ones are left out", () => {
   const planned = new Map(commands(lib).map((command) => [command.name, plan(command, impls)]));
   const setup = planned.get("desktop_update_project_setup").route;

@@ -7,8 +7,11 @@ pub mod plan;
 pub mod profile;
 pub mod quote;
 pub mod request;
+pub mod snapshot;
 #[cfg(windows)]
 mod win;
 
 #[cfg(windows)]
-pub use win::{BoundaryError, final_name, release, run};
+pub use win::{
+    BoundaryError, ProcessTree, file_id, final_name, listener_beside, owner_only, release, run,
+};

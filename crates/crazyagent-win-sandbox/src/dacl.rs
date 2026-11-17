@@ -1,4 +1,4 @@
-use crate::plan::{Access, READ_EXECUTE};
+use crate::plan::{Access, READ_EXECUTE, Rights};
 use std::ops::Range;
 
 /// The SID `S-1-15-2-1` (ALL APPLICATION PACKAGES) as bytes. System folders such as
@@ -9,11 +9,16 @@ const ACL_HEADER_BYTES: usize = 8;
 const ACE_HEADER_BYTES: usize = 8;
 const ACCESS_ALLOWED: u8 = 0;
 const ACCESS_DENIED: u8 = 1;
+/// The entry types that only take rights away: the plain, object, callback and callback
+/// object deny entries.
+pub const DENY_TYPES: [u8; 4] = [ACCESS_DENIED, 6, 10, 12];
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
+const NO_PROPAGATE: u8 = 0x04;
 const INHERIT_ONLY: u8 = 0x08;
 const INHERITED: u8 = 0x10;
-const SID_BYTES_MAX: usize = 68;
+/// The most bytes a SID takes: its header and fifteen sub-authorities.
+pub const SID_BYTES_MAX: usize = 68;
 
 /// One allow or deny entry read from an access list: its type, flags, rights and SID bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,22 +129,6 @@ pub fn without(acl: &[u8], sid: &[u8]) -> Result<Option<Vec<u8>>, &'static str> 
     Ok(Some(list))
 }
 
-/// Whether the list gives `sid` more than `mask` through an allow entry of its own, explicit
-/// or inherit-only, as when an earlier profile granted modify where this one grants read and
-/// run. Inherited entries follow the folder above and are not counted. Inputs: the access
-/// list bytes, the SID and the planned rights. Output: true when it does; true for a
-/// malformed list, so it is never taken as settled.
-pub fn exceeds(acl: &[u8], sid: &[u8], mask: u32) -> bool {
-    entries(acl).map_or(true, |found| {
-        found.iter().any(|entry| {
-            entry.allows
-                && entry.sid == sid
-                && entry.flags & INHERITED == 0
-                && entry.mask & !mask != 0
-        })
-    })
-}
-
 fn sid_at(bytes: &[u8]) -> Result<&[u8], &'static str> {
     if bytes.len() < 8 || bytes[0] != 1 {
         return Err("an access entry holds a bad SID");
@@ -149,24 +138,6 @@ fn sid_at(bytes: &[u8]) -> Result<&[u8], &'static str> {
         return Err("an access entry holds a bad SID");
     }
     Ok(&bytes[..length])
-}
-
-/// Whether the list already holds the explicit entry the boundary would add for `sid`: the same
-/// allow or deny type, at least the access's rights, not inherited, applying to the path itself,
-/// and inherited by files and folders below when the path is a folder and the access inherits.
-/// Inputs: the access list bytes, the SID bytes, the access and whether the path is a folder.
-/// Output: true when present; false for a malformed list, so the entry is written again.
-pub fn holds(acl: &[u8], sid: &[u8], access: Access, folder: bool) -> bool {
-    let inherit = OBJECT_INHERIT | CONTAINER_INHERIT;
-    entries(acl).is_ok_and(|found| {
-        found.iter().any(|entry| {
-            entry.allows != access.denies()
-                && entry.sid == sid
-                && entry.mask & access.mask() == access.mask()
-                && entry.flags & (INHERITED | INHERIT_ONLY) == 0
-                && (!folder || !access.inherits() || entry.flags & inherit == inherit)
-        })
-    })
 }
 
 /// Whether the list lets `sid` read and run the path itself through any allow entry, explicit
@@ -182,11 +153,368 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
         })
     })
 }
+/// The SID `S-1-5-18` (SYSTEM) as bytes.
+pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+/// The SID `S-1-5-32-544` (the Administrators group) as bytes.
+pub const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 32, 2, 0, 0];
+/// The SID of the TrustedInstaller service as bytes:
+/// `S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464`.
+pub const TRUSTED_INSTALLER: [u8; 32] = [
+    1, 6, 0, 0, 0, 0, 0, 5, 80, 0, 0, 0, 181, 137, 251, 56, 25, 132, 194, 203, 92, 108, 35, 109,
+    87, 0, 119, 110, 192, 2, 100, 135,
+];
+/// The SID `S-1-3-4` (OWNER RIGHTS) as bytes, which stands for whoever owns the object.
+pub const OWNER_RIGHTS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+
+const WRITE_DATA: u32 = 0x0000_0002;
+const APPEND_DATA: u32 = 0x0000_0004;
+const WRITE_EA: u32 = 0x0000_0010;
+const DELETE_CHILD: u32 = 0x0000_0040;
+const WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+const DELETE: u32 = 0x0001_0000;
+const WRITE_DAC: u32 = 0x0004_0000;
+const WRITE_OWNER: u32 = 0x0008_0000;
+const GENERIC_ALL: u32 = 0x1000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+
+/// Every right that changes a file: its data, its extended attributes and attributes, its
+/// deletion, its access list or owner, and generic write or all, which map onto those.
+pub const FILE_CHANGES: u32 = WRITE_DATA
+    | APPEND_DATA
+    | WRITE_EA
+    | WRITE_ATTRIBUTES
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | GENERIC_WRITE
+    | GENERIC_ALL;
+/// Every right that changes a program's own folder: those of a file, where writing and
+/// appending data are adding a file or a folder, plus deleting what is in it, so no one can
+/// plant a library beside the program.
+pub const OWN_FOLDER_CHANGES: u32 = FILE_CHANGES | DELETE_CHILD;
+/// The rights on a folder further up that can swap what lies below it: deleting what is in
+/// it or the folder itself, changing its access list or owner, and generic write or all.
+/// Adding a new file or folder alone swaps nothing that is already there.
+pub const ANCESTOR_CHANGES: u32 =
+    DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL;
+
+/// Whether an owner may hold a program the engine starts with its own rights, or a folder
+/// above it: SYSTEM, the administrators, TrustedInstaller or the engine's own user, who can
+/// change it anyway. Inputs: the owner's SID bytes and the user's. Output: the answer.
+pub fn trusted_owner(owner: &[u8], user: &[u8]) -> bool {
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        user,
+    ]
+    .contains(&owner)
+}
+
+/// The first SID other than SYSTEM, the administrators, TrustedInstaller, OWNER RIGHTS and
+/// the engine's own user that an allow entry applying to the object itself gives any of
+/// `rights`: inherited entries count, inherit-only ones do not, and deny entries are not
+/// counted, as they only take rights away. An applying entry of any other type, such as a
+/// conditional, object or compound allow entry this reader does not parse, is an error the
+/// caller refuses on (#317 r2 F2). Inputs: the access list bytes, the user's SID bytes and
+/// the rights. Output: that SID, none when only those may change the object, or the reason
+/// the list is malformed or holds an entry the check cannot read.
+pub fn other_writer<'a>(
+    acl: &'a [u8],
+    user: &[u8],
+    rights: u32,
+) -> Result<Option<&'a [u8]>, &'static str> {
+    assert_ne!(rights, 0);
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    let allowed = [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        &OWNER_RIGHTS[..],
+        user,
+    ];
+    for span in spans(acl)? {
+        let kind = acl[span.range.start];
+        if acl[span.range.start + 1] & INHERIT_ONLY != 0 {
+            continue;
+        }
+        match span.entry {
+            Some(entry)
+                if entry.allows && entry.mask & rights != 0 && !allowed.contains(&entry.sid) =>
+            {
+                return Ok(Some(entry.sid));
+            }
+            Some(_) => {}
+            None if DENY_TYPES.contains(&kind) => {}
+            None => return Err("the access list holds an allow entry this check cannot read"),
+        }
+    }
+    Ok(None)
+}
+
+/// The file rights each generic right stands for, as Windows maps them for files and folders:
+/// read, write, execute and all.
+const GENERIC_FILE_RIGHTS: [(u32, u32); 4] = [
+    (0x8000_0000, 0x0012_0089),
+    (0x4000_0000, 0x0012_0116),
+    (0x2000_0000, 0x0012_00a0),
+    (0x1000_0000, 0x001f_01ff),
+];
+const GENERIC_ALL_BITS: u32 = 0xf000_0000;
+
+const _: () = assert!(GENERIC_FILE_RIGHTS[0].1 | GENERIC_FILE_RIGHTS[2].1 == READ_EXECUTE);
+
+/// The rights a mask grants on a file or folder once its generic rights are replaced by the
+/// file rights Windows maps them to, so an inheritable `GENERIC_READ | GENERIC_EXECUTE` entry
+/// compares with read and run. Input: an access mask. Output: the mask without generic bits.
+pub fn specific(mask: u32) -> u32 {
+    let mapped = GENERIC_FILE_RIGHTS
+        .iter()
+        .filter(|(generic, _)| mask & generic != 0)
+        .fold(mask & !GENERIC_ALL_BITS, |rights, (_, file)| rights | file);
+    assert_eq!(mapped & GENERIC_ALL_BITS, 0);
+    assert_eq!(mapped & mask & !GENERIC_ALL_BITS, mask & !GENERIC_ALL_BITS);
+    mapped
+}
+
+/// Whether a SID names an app container or a capability (`S-1-15-2-*` or `S-1-15-3-*`), the
+/// SIDs a container's access check counts: its own, a teammate's, ALL APPLICATION PACKAGES and
+/// capabilities such as internetClient. Input: SID bytes. Output: true when it is one.
+pub fn package(sid: &[u8]) -> bool {
+    sid.len() >= 12
+        && sid[0] == 1
+        && sid[1] >= 1
+        && sid[2..8] == [0, 0, 0, 0, 0, 15]
+        && matches!(
+            u32::from_le_bytes([sid[8], sid[9], sid[10], sid[11]]),
+            2 | 3
+        )
+}
+
+/// Where an entry of a converged list came from: the container's own explicit entry, an entry
+/// still inherited from the folder above, or any other entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Own,
+    Inherited,
+    Other,
+}
+
+/// The access list a path must hold for the container's role on it, built from its current
+/// list. A role that cuts turns every inherited entry explicit; one that does not leaves
+/// inherited entries as they are. A role that narrows others keeps every other package SID's
+/// explicit allow within the role's rights, split into a part for the folder itself and a
+/// part its files and folders inherit, and gone when nothing is left; it refuses a list
+/// holding an entry type other than allow or deny, so no entry the boundary cannot read keeps
+/// granting a container. The container's own explicit entries become the role's entries,
+/// kept in place when they already are. Inputs: the current list, the container SID, the role
+/// and whether the path is a folder. Output: the new list, None when the path already holds
+/// it, or the reason the current list is refused.
+pub fn converge(
+    acl: &[u8],
+    sid: &[u8],
+    access: Access,
+    folder: bool,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    assert!(package(sid), "a container SID is a package SID");
+    assert!(!access.cuts() || access.narrows_others());
+    let target = own_entries(sid, access, folder);
+    let mut body = parts(acl, sid, access, folder)?;
+    let current: Vec<&[u8]> = body
+        .iter()
+        .filter(|(_, part)| *part == Part::Own)
+        .map(|(bytes, _)| bytes.as_slice())
+        .collect();
+    if current != target.iter().map(Vec::as_slice).collect::<Vec<_>>() {
+        body.retain(|(_, part)| *part != Part::Own);
+        let at = body
+            .iter()
+            .position(|(_, part)| *part == Part::Inherited)
+            .unwrap_or(body.len());
+        body.splice(
+            at..at,
+            target.iter().map(|bytes| (bytes.clone(), Part::Own)),
+        );
+    }
+    let aces: Vec<Vec<u8>> = body.into_iter().map(|(bytes, _)| bytes).collect();
+    let list = list_from(&acl[..ACL_HEADER_BYTES], &aces)?;
+    let found = entries(&list)?;
+    assert!(!access.cuts() || found.iter().all(|entry| entry.flags & INHERITED == 0));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|entry| entry.sid == sid && entry.flags & INHERITED == 0)
+            .count(),
+        target.len()
+    );
+    let size = usize::from(u16::from_le_bytes([acl[2], acl[3]]));
+    Ok((list.as_slice() != &acl[..size]).then_some(list))
+}
+
+/// The entries of the current list as the role keeps them, before the container's own entries
+/// are placed: see [`converge`].
+fn parts(
+    acl: &[u8],
+    sid: &[u8],
+    access: Access,
+    folder: bool,
+) -> Result<Vec<(Vec<u8>, Part)>, &'static str> {
+    let spans = spans(acl)?;
+    let (cut, narrow) = (access.cuts(), access.narrows_others());
+    let mut body: Vec<(Vec<u8>, Part)> = Vec::with_capacity(2 * spans.len());
+    for span in &spans {
+        let mut bytes = acl[span.range.clone()].to_vec();
+        let inherited = bytes[1] & INHERITED != 0;
+        let Some(entry) = span.entry else {
+            if narrow {
+                return Err("an access list holds an entry the boundary does not read");
+            }
+            let part = if inherited {
+                Part::Inherited
+            } else {
+                Part::Other
+            };
+            body.push((bytes, part));
+            continue;
+        };
+        if inherited && !cut {
+            body.push((bytes, Part::Inherited));
+            continue;
+        }
+        let entry = Entry {
+            flags: entry.flags & !INHERITED,
+            ..entry
+        };
+        bytes[1] = entry.flags;
+        if entry.sid == sid {
+            if !inherited {
+                body.push((bytes, Part::Own));
+            }
+            continue;
+        }
+        if narrow && entry.allows && package(entry.sid) {
+            let kept = narrowed(&entry, access.rights(), folder);
+            body.extend(kept.into_iter().map(|bytes| (bytes, Part::Other)));
+            continue;
+        }
+        body.push((bytes, Part::Other));
+    }
+    assert!(body.len() <= 2 * spans.len());
+    assert!(!cut || body.iter().all(|(_, part)| *part != Part::Inherited));
+    Ok(body)
+}
+
+/// The entries the container gets for its role: on a file, the role's rights on the file; on
+/// a folder, one entry its files and folders inherit when the rights match, else one for the
+/// folder itself and an inherit-only one for what is below. An entry with no rights is left
+/// out, so a hidden path holds none. Inputs: the container SID, the role and whether the path
+/// is a folder. Output: the entries' bytes in order.
+fn own_entries(sid: &[u8], access: Access, folder: bool) -> Vec<Vec<u8>> {
+    let Rights { this, below } = access.rights();
+    let inherit = OBJECT_INHERIT | CONTAINER_INHERIT;
+    let planned: Vec<(u8, u32)> = if !folder {
+        vec![(0, this)]
+    } else if this == below {
+        vec![(inherit, this)]
+    } else {
+        vec![(0, this), (inherit | INHERIT_ONLY, below)]
+    };
+    let own: Vec<Vec<u8>> = planned
+        .into_iter()
+        .filter(|(_, mask)| *mask != 0)
+        .map(|(flags, mask)| ace_bytes(ACCESS_ALLOWED, flags, mask, sid))
+        .collect();
+    assert!(own.len() <= 2);
+    assert_eq!(own.is_empty(), this == 0 && (!folder || below == 0));
+    own
+}
+
+/// Another package's allow entry narrowed to a role's rights: on a file or where the rights
+/// match, one entry with its flags and the rights it keeps; on a folder where they differ, a
+/// part for the folder itself unless the entry is inherit-only, and an inherit-only part when
+/// it is inherited below, each with what it keeps of its side's rights. A part left with no
+/// rights goes. Inputs: the entry with its inherited flag cleared, the rights and whether the
+/// path is a folder. Output: the parts' bytes in order.
+fn narrowed(entry: &Entry<'_>, rights: Rights, folder: bool) -> Vec<Vec<u8>> {
+    assert!(entry.allows);
+    assert_eq!(entry.flags & INHERITED, 0);
+    let mask = specific(entry.mask);
+    let inherit = OBJECT_INHERIT | CONTAINER_INHERIT;
+    let mut parts: Vec<(u8, u32)> = Vec::with_capacity(2);
+    if !folder || rights.this == rights.below {
+        parts.push((entry.flags, mask & rights.this));
+    } else {
+        if entry.flags & INHERIT_ONLY == 0 {
+            parts.push((0, mask & rights.this));
+        }
+        if entry.flags & inherit != 0 {
+            let flags = (entry.flags & (inherit | NO_PROPAGATE)) | INHERIT_ONLY;
+            parts.push((flags, mask & rights.below));
+        }
+    }
+    parts
+        .into_iter()
+        .filter(|(_, kept)| *kept != 0)
+        .map(|(flags, kept)| ace_bytes(ACCESS_ALLOWED, flags, kept, entry.sid))
+        .collect()
+}
+
+/// One allow or deny entry's bytes. Inputs: the type, flags, rights and SID bytes. Output:
+/// the entry.
+fn ace_bytes(kind: u8, flags: u8, mask: u32, sid: &[u8]) -> Vec<u8> {
+    assert!(sid.len() <= SID_BYTES_MAX);
+    let length = u16::try_from(ACE_HEADER_BYTES + sid.len()).expect("a SID is short");
+    let mut bytes = Vec::with_capacity(usize::from(length));
+    bytes.extend([kind, flags]);
+    bytes.extend(length.to_le_bytes());
+    bytes.extend(mask.to_le_bytes());
+    bytes.extend_from_slice(sid);
+    assert_eq!(bytes.len(), usize::from(length));
+    bytes
+}
+
+/// An access list holding `aces` in order, with the revision and reserved bytes of `header`.
+/// Inputs: the old list's header and the entries. Output: the list, or the refusal when it
+/// would not fit an access list's size field.
+fn list_from(header: &[u8], aces: &[Vec<u8>]) -> Result<Vec<u8>, &'static str> {
+    assert_eq!(header.len(), ACL_HEADER_BYTES);
+    const TOO_BIG: &str = "the access list would grow past its limit";
+    let body: usize = aces.iter().map(Vec::len).sum();
+    let size = u16::try_from(ACL_HEADER_BYTES + body).map_err(|_| TOO_BIG)?;
+    let count = u16::try_from(aces.len()).map_err(|_| TOO_BIG)?;
+    let mut list = Vec::with_capacity(usize::from(size));
+    list.extend_from_slice(&header[..2]);
+    list.extend(size.to_le_bytes());
+    list.extend(count.to_le_bytes());
+    list.extend_from_slice(&header[6..]);
+    for ace in aces {
+        list.extend_from_slice(ace);
+    }
+    assert_eq!(list.len(), usize::from(size));
+    Ok(list)
+}
+
+/// The explicit part of an access list: every entry not inherited from the folder above, in
+/// order, the part Windows keeps when the path's inheritance is turned back on. Input: the
+/// list. Output: the explicit list, or the reason the list is malformed.
+pub fn explicit(acl: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let spans = spans(acl)?;
+    let kept: Vec<Vec<u8>> = spans
+        .iter()
+        .filter(|span| acl[span.range.start + 1] & INHERITED == 0)
+        .map(|span| acl[span.range.clone()].to_vec())
+        .collect();
+    assert!(kept.len() <= spans.len());
+    let list = list_from(&acl[..ACL_HEADER_BYTES], &kept)?;
+    assert!(list.len() <= acl.len());
+    Ok(list)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{DENY_WRITE, KEEP_ENTRIES, MODIFY};
+    use crate::plan::{ANCHOR, KEEP_ENTRIES, MODIFY};
 
     const CONTAINER: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 7, 0, 0, 0, 9, 0, 0, 0];
 
@@ -221,7 +549,7 @@ mod tests {
         let list = acl(&[
             ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER),
             object_ace,
-            ace(ACCESS_DENIED, 0x13, DENY_WRITE, &ALL_APPLICATION_PACKAGES),
+            ace(ACCESS_DENIED, 0x13, 0x000d_0156, &ALL_APPLICATION_PACKAGES),
         ]);
         let found = entries(&list).unwrap();
         assert_eq!(found.len(), 2);
@@ -257,44 +585,9 @@ mod tests {
         let mut revision = good.clone();
         revision[16] = 2;
         assert!(entries(&revision).is_err());
-        assert!(!holds(&sid_count, &CONTAINER, Access::Modify, true));
+        assert!(converge(&sid_count, &CONTAINER, Access::Modify, true).is_err());
         assert!(!reads(&revision, &CONTAINER));
         assert!(entries(&acl(&[])).unwrap().is_empty());
-    }
-
-    #[test]
-    fn holds_finds_only_the_explicit_entry_the_boundary_writes() {
-        let folder = acl(&[ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER)]);
-        assert!(holds(&folder, &CONTAINER, Access::Modify, true));
-        assert!(holds(&folder, &CONTAINER, Access::ReadExecute, true));
-        assert!(!holds(&folder, &CONTAINER, Access::DenyWrite, true));
-        assert!(!holds(
-            &folder,
-            &ALL_APPLICATION_PACKAGES,
-            Access::Modify,
-            true
-        ));
-        let inherited = acl(&[ace(ACCESS_ALLOWED, 0x13, MODIFY, &CONTAINER)]);
-        assert!(!holds(&inherited, &CONTAINER, Access::Modify, true));
-        let inherit_only = acl(&[ace(ACCESS_ALLOWED, 0x0b, MODIFY, &CONTAINER)]);
-        assert!(!holds(&inherit_only, &CONTAINER, Access::Modify, true));
-        let file = acl(&[ace(ACCESS_ALLOWED, 0x00, MODIFY, &CONTAINER)]);
-        assert!(holds(&file, &CONTAINER, Access::Modify, false));
-        assert!(!holds(&file, &CONTAINER, Access::Modify, true));
-        let denied = acl(&[ace(ACCESS_DENIED, 0x03, DENY_WRITE, &CONTAINER)]);
-        assert!(holds(&denied, &CONTAINER, Access::DenyWrite, true));
-        assert!(!holds(&denied, &CONTAINER, Access::DenyAll, true));
-        assert!(!holds(&denied, &CONTAINER, Access::Modify, true));
-        assert!(holds(&denied, &CONTAINER, Access::KeepEntries, true));
-        let kept = acl(&[ace(ACCESS_DENIED, 0x00, KEEP_ENTRIES, &CONTAINER)]);
-        assert!(holds(&kept, &CONTAINER, Access::KeepEntries, true));
-        assert!(!holds(&kept, &CONTAINER, Access::DenyWrite, true));
-        assert!(!holds(
-            &kept,
-            &ALL_APPLICATION_PACKAGES,
-            Access::KeepEntries,
-            true
-        ));
     }
 
     #[test]
@@ -353,27 +646,6 @@ mod tests {
     }
 
     #[test]
-    fn exceeds_finds_an_explicit_grant_beyond_the_planned_rights() {
-        let modify = acl(&[ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER)]);
-        assert!(exceeds(&modify, &CONTAINER, READ_EXECUTE));
-        assert!(!exceeds(&modify, &CONTAINER, MODIFY));
-        assert!(!exceeds(&modify, &ALL_APPLICATION_PACKAGES, READ_EXECUTE));
-        let inherited = acl(&[ace(ACCESS_ALLOWED, 0x13, MODIFY, &CONTAINER)]);
-        assert!(
-            !exceeds(&inherited, &CONTAINER, READ_EXECUTE),
-            "an inherited grant follows the folder above"
-        );
-        let inherit_only = acl(&[ace(ACCESS_ALLOWED, 0x0b, MODIFY, &CONTAINER)]);
-        assert!(exceeds(&inherit_only, &CONTAINER, READ_EXECUTE));
-        let denied = acl(&[ace(ACCESS_DENIED, 0x03, DENY_WRITE, &CONTAINER)]);
-        assert!(!exceeds(&denied, &CONTAINER, READ_EXECUTE));
-        assert!(
-            exceeds(&modify[..7], &CONTAINER, MODIFY),
-            "a list that cannot be read is never taken as settled"
-        );
-    }
-
-    #[test]
     fn reads_accepts_inherited_read_grants_for_all_application_packages() {
         let program_files = acl(&[
             ace(ACCESS_ALLOWED, 0x0b, 0xa000_0000, &ALL_APPLICATION_PACKAGES),
@@ -401,5 +673,499 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(!reads(&denied, &ALL_APPLICATION_PACKAGES));
+    }
+
+    const TEAMMATE: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];
+    const INTERNET_CLIENT: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 15, 3, 0, 0, 0, 1, 0, 0, 0];
+    const GENERIC_READ_EXECUTE: u32 = 0xa000_0000;
+    const OICI: u8 = OBJECT_INHERIT | CONTAINER_INHERIT;
+
+    fn inherited_project_list() -> Vec<u8> {
+        acl(&[
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, MODIFY, &CONTAINER),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, MODIFY, &TEAMMATE),
+            ace(
+                ACCESS_ALLOWED,
+                OICI | INHERIT_ONLY | INHERITED,
+                GENERIC_READ_EXECUTE,
+                &ALL_APPLICATION_PACKAGES,
+            ),
+        ])
+    }
+
+    #[test]
+    fn package_sids_are_app_containers_and_capabilities_only() {
+        assert!(package(&CONTAINER));
+        assert!(package(&TEAMMATE));
+        assert!(package(&ALL_APPLICATION_PACKAGES));
+        assert!(package(&INTERNET_CLIENT));
+        assert!(!package(&SYSTEM));
+        assert!(!package(&OWNER));
+        assert!(!package(&[1, 1, 0, 0, 0, 0, 0, 15, 1, 0, 0, 0]));
+        assert!(!package(&[1, 0, 0, 0, 0, 0, 0, 15]));
+        assert!(!package(&[]));
+    }
+
+    #[test]
+    fn generic_rights_map_to_the_file_rights_windows_gives_them() {
+        assert_eq!(specific(GENERIC_READ_EXECUTE), READ_EXECUTE);
+        assert_eq!(specific(0x1000_0000), FULL);
+        assert_eq!(specific(0x4000_0000), 0x0012_0116);
+        assert_eq!(specific(MODIFY), MODIFY);
+        assert_eq!(specific(0x8000_0002), 0x0012_008b);
+    }
+
+    #[test]
+    fn a_read_only_folder_is_cut_and_every_package_keeps_read_and_run_at_most() {
+        let cut = converge(
+            &inherited_project_list(),
+            &CONTAINER,
+            Access::ReadOnly,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cut,
+            acl(&[
+                ace(ACCESS_ALLOWED, OICI, FULL, &SYSTEM),
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                ace(ACCESS_ALLOWED, OICI, READ_EXECUTE, &TEAMMATE),
+                ace(
+                    ACCESS_ALLOWED,
+                    OICI | INHERIT_ONLY,
+                    READ_EXECUTE,
+                    &ALL_APPLICATION_PACKAGES,
+                ),
+                ace(ACCESS_ALLOWED, OICI, READ_EXECUTE, &CONTAINER),
+            ]),
+            "inherited entries turn explicit, other SIDs stay as they were, a teammate's modify \
+             narrows to read and run, and the container's own entry is replaced"
+        );
+        assert_eq!(
+            converge(&cut, &CONTAINER, Access::ReadOnly, true),
+            Ok(None),
+            "a path already at its target is left alone"
+        );
+        let teammate = converge(&cut, &TEAMMATE, Access::ReadOnly, true).unwrap();
+        assert_eq!(
+            teammate, None,
+            "a teammate guarding the same path finds the list it would set"
+        );
+    }
+
+    #[test]
+    fn a_read_only_file_gets_an_entry_that_inherits_nothing() {
+        let file = acl(&[
+            ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, INHERITED, MODIFY, &CONTAINER),
+        ]);
+        assert_eq!(
+            converge(&file, &CONTAINER, Access::ReadOnly, false)
+                .unwrap()
+                .unwrap(),
+            acl(&[
+                ace(ACCESS_ALLOWED, 0, FULL, &OWNER),
+                ace(ACCESS_ALLOWED, 0, READ_EXECUTE, &CONTAINER),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_hidden_path_keeps_no_allow_entry_of_any_package() {
+        let list = acl(&[
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, MODIFY, &CONTAINER),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, MODIFY, &TEAMMATE),
+            ace(
+                ACCESS_ALLOWED,
+                OICI | INHERIT_ONLY | INHERITED,
+                GENERIC_READ_EXECUTE,
+                &ALL_APPLICATION_PACKAGES,
+            ),
+            ace(ACCESS_ALLOWED, INHERITED, 0x2, &INTERNET_CLIENT),
+            ace(ACCESS_DENIED, INHERITED, FULL, &TEAMMATE),
+        ]);
+        assert_eq!(
+            converge(&list, &CONTAINER, Access::Hidden, true)
+                .unwrap()
+                .unwrap(),
+            acl(&[
+                ace(ACCESS_ALLOWED, OICI, FULL, &SYSTEM),
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                ace(ACCESS_DENIED, 0, FULL, &TEAMMATE),
+            ]),
+            "every package allow goes, the owner's entries and a deny stay explicit"
+        );
+    }
+
+    #[test]
+    fn an_allow_narrowed_to_nothing_goes_and_a_deny_of_a_package_stays() {
+        let list = acl(&[
+            ace(ACCESS_DENIED, OICI | INHERITED, 0x2, &TEAMMATE),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, 0x2 | 0x4, &TEAMMATE),
+            ace(
+                ACCESS_ALLOWED,
+                OICI | INHERITED,
+                0x1000_0000,
+                &INTERNET_CLIENT,
+            ),
+        ]);
+        assert_eq!(
+            converge(&list, &CONTAINER, Access::ReadOnly, true)
+                .unwrap()
+                .unwrap(),
+            acl(&[
+                ace(ACCESS_DENIED, OICI, 0x2, &TEAMMATE),
+                ace(ACCESS_ALLOWED, OICI, READ_EXECUTE, &INTERNET_CLIENT),
+                ace(ACCESS_ALLOWED, OICI, READ_EXECUTE, &CONTAINER),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_list_the_boundary_cannot_read_whole_is_refused() {
+        let object_ace = {
+            let mut bytes = vec![5, 0];
+            bytes.extend(16u16.to_le_bytes());
+            bytes.extend([0; 12]);
+            bytes
+        };
+        let unknown = acl(&[ace(ACCESS_ALLOWED, 0, FULL, &OWNER), object_ace]);
+        assert!(converge(&unknown, &CONTAINER, Access::ReadOnly, true).is_err());
+        let good = inherited_project_list();
+        assert!(converge(&good[..7], &CONTAINER, Access::ReadOnly, true).is_err());
+        let mut slack = good.clone();
+        slack.extend([0; 8]);
+        let size = u16::try_from(slack.len()).unwrap();
+        slack[2..4].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(
+            converge(&slack, &CONTAINER, Access::ReadOnly, true),
+            converge(&good, &CONTAINER, Access::ReadOnly, true),
+            "unused room at the end of a list does not change the target"
+        );
+    }
+
+    #[test]
+    fn an_anchored_folder_splits_every_package_into_itself_and_below() {
+        let anchored = converge(&inherited_project_list(), &CONTAINER, Access::Anchor, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            anchored,
+            acl(&[
+                ace(ACCESS_ALLOWED, OICI, FULL, &SYSTEM),
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                ace(ACCESS_ALLOWED, 0, ANCHOR, &TEAMMATE),
+                ace(ACCESS_ALLOWED, OICI | INHERIT_ONLY, MODIFY, &TEAMMATE),
+                ace(
+                    ACCESS_ALLOWED,
+                    OICI | INHERIT_ONLY,
+                    READ_EXECUTE,
+                    &ALL_APPLICATION_PACKAGES,
+                ),
+                ace(ACCESS_ALLOWED, 0, ANCHOR, &CONTAINER),
+                ace(ACCESS_ALLOWED, OICI | INHERIT_ONLY, MODIFY, &CONTAINER),
+            ]),
+            "the folder itself keeps no delete for any package, while work below goes on"
+        );
+        assert_eq!(
+            converge(&anchored, &CONTAINER, Access::Anchor, true),
+            Ok(None)
+        );
+        assert_eq!(
+            converge(&anchored, &TEAMMATE, Access::Anchor, true),
+            Ok(None)
+        );
+        let kept = converge(&anchored, &CONTAINER, Access::KeepEntries, true)
+            .unwrap()
+            .unwrap();
+        let found = entries(&kept).unwrap();
+        assert!(
+            found
+                .iter()
+                .filter(|entry| entry.flags & INHERIT_ONLY == 0 && package(entry.sid))
+                .all(|entry| entry.mask & !KEEP_ENTRIES == 0),
+            "a kept folder lets no package add an entry to it"
+        );
+        assert_eq!(
+            converge(&kept, &CONTAINER, Access::KeepEntries, true),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_root_holding_guarded_paths_narrows_explicit_entries_and_keeps_inherited_ones() {
+        let list = acl(&[
+            ace(ACCESS_DENIED, 0, KEEP_ENTRIES, &CONTAINER),
+            ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, OICI, MODIFY, &CONTAINER),
+            ace(ACCESS_ALLOWED, OICI | NO_PROPAGATE, MODIFY, &TEAMMATE),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+            ace(
+                ACCESS_ALLOWED,
+                OICI | INHERIT_ONLY | INHERITED,
+                GENERIC_READ_EXECUTE,
+                &ALL_APPLICATION_PACKAGES,
+            ),
+        ]);
+        let anchored = converge(&list, &CONTAINER, Access::RootAnchor, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            anchored,
+            acl(&[
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                ace(ACCESS_ALLOWED, 0, ANCHOR, &TEAMMATE),
+                ace(
+                    ACCESS_ALLOWED,
+                    OICI | NO_PROPAGATE | INHERIT_ONLY,
+                    MODIFY,
+                    &TEAMMATE
+                ),
+                ace(ACCESS_ALLOWED, 0, ANCHOR, &CONTAINER),
+                ace(ACCESS_ALLOWED, OICI | INHERIT_ONLY, MODIFY, &CONTAINER),
+                ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+                ace(
+                    ACCESS_ALLOWED,
+                    OICI | INHERIT_ONLY | INHERITED,
+                    GENERIC_READ_EXECUTE,
+                    &ALL_APPLICATION_PACKAGES,
+                ),
+            ]),
+            "an older deny of the container goes, its entries go before the inherited ones, and \
+             the inherited ones stay as Windows wrote them"
+        );
+        assert_eq!(
+            converge(&anchored, &CONTAINER, Access::RootAnchor, true),
+            Ok(None)
+        );
+        let object_ace = {
+            let mut bytes = vec![5, 0];
+            bytes.extend(16u16.to_le_bytes());
+            bytes.extend([0; 12]);
+            bytes
+        };
+        let unknown = acl(&[object_ace, ace(ACCESS_ALLOWED, OICI, FULL, &OWNER)]);
+        assert!(converge(&unknown, &CONTAINER, Access::RootKeep, true).is_err());
+        assert!(converge(&unknown, &CONTAINER, Access::Modify, true).is_ok());
+    }
+
+    #[test]
+    fn a_granted_root_changes_only_the_containers_own_entry() {
+        let object_ace = {
+            let mut bytes = vec![5, 0];
+            bytes.extend(16u16.to_le_bytes());
+            bytes.extend([0; 12]);
+            bytes
+        };
+        let list = acl(&[
+            ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, OICI, READ_EXECUTE, &CONTAINER),
+            object_ace.clone(),
+            ace(ACCESS_ALLOWED, OICI, MODIFY, &TEAMMATE),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, MODIFY, &CONTAINER),
+        ]);
+        let granted = converge(&list, &CONTAINER, Access::Modify, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            granted,
+            acl(&[
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+                object_ace,
+                ace(ACCESS_ALLOWED, OICI, MODIFY, &TEAMMATE),
+                ace(ACCESS_ALLOWED, OICI, MODIFY, &CONTAINER),
+                ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+                ace(ACCESS_ALLOWED, OICI | INHERITED, MODIFY, &CONTAINER),
+            ]),
+            "a plain grant narrows no teammate and leaves what it cannot read"
+        );
+        assert_eq!(
+            converge(&granted, &CONTAINER, Access::Modify, true),
+            Ok(None)
+        );
+        let first = acl(&[
+            ace(ACCESS_ALLOWED, OICI, MODIFY, &CONTAINER),
+            ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+        ]);
+        assert_eq!(
+            converge(&first, &CONTAINER, Access::Modify, true),
+            Ok(None),
+            "an own entry already in place stays where it is"
+        );
+        let file = acl(&[ace(ACCESS_ALLOWED, 0, FULL, &OWNER)]);
+        assert_eq!(
+            converge(&file, &CONTAINER, Access::ReadExecute, false)
+                .unwrap()
+                .unwrap(),
+            acl(&[
+                ace(ACCESS_ALLOWED, 0, FULL, &OWNER),
+                ace(ACCESS_ALLOWED, 0, READ_EXECUTE, &CONTAINER),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_explicit_part_keeps_only_entries_not_inherited() {
+        let list = acl(&[
+            ace(ACCESS_DENIED, 0, 0x2, &TEAMMATE),
+            ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+            ace(ACCESS_ALLOWED, OICI | INHERITED, FULL, &SYSTEM),
+            ace(ACCESS_ALLOWED, INHERITED, MODIFY, &CONTAINER),
+        ]);
+        assert_eq!(
+            explicit(&list).unwrap(),
+            acl(&[
+                ace(ACCESS_DENIED, 0, 0x2, &TEAMMATE),
+                ace(ACCESS_ALLOWED, OICI, FULL, &OWNER),
+            ])
+        );
+        assert_eq!(explicit(&acl(&[])).unwrap(), acl(&[]));
+        assert!(explicit(&list[..7]).is_err());
+    }
+
+    const USERS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 33, 2, 0, 0];
+    const AUTHENTICATED_USERS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
+    const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
+    const OWNER: [u8; 28] = [
+        1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
+    ];
+    const OTHER_ACCOUNT: [u8; 28] = [
+        1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 234, 3, 0, 0,
+    ];
+    const FULL: u32 = 0x001F_01FF;
+    const ADD_SUBDIRECTORY: u32 = 0x0000_0004;
+
+    /// #306 sec F1: a program under Program Files, where TrustedInstaller, SYSTEM and the
+    /// administrators may change it, every user and every container may only read and run it,
+    /// and CREATOR OWNER's entry only passes down, is changed by no one else at any level.
+    #[test]
+    fn a_program_files_list_lets_only_the_system_change_a_program() {
+        let list = acl(&[
+            ace(ACCESS_ALLOWED, INHERITED, FULL, &TRUSTED_INSTALLER),
+            ace(ACCESS_ALLOWED, INHERITED, MODIFY, &SYSTEM),
+            ace(ACCESS_ALLOWED, INHERITED, MODIFY, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, INHERITED, READ_EXECUTE, &USERS),
+            ace(
+                ACCESS_ALLOWED,
+                INHERITED,
+                READ_EXECUTE,
+                &ALL_APPLICATION_PACKAGES,
+            ),
+            ace(
+                ACCESS_ALLOWED,
+                OBJECT_INHERIT | CONTAINER_INHERIT | INHERIT_ONLY | INHERITED,
+                GENERIC_ALL,
+                &CREATOR_OWNER,
+            ),
+            ace(ACCESS_ALLOWED, 0, FULL, &OWNER_RIGHTS),
+        ]);
+        for rights in [FILE_CHANGES, OWN_FOLDER_CHANGES, ANCESTOR_CHANGES] {
+            assert_eq!(other_writer(&list, &OWNER, rights), Ok(None));
+        }
+        let own = acl(&[ace(ACCESS_ALLOWED, INHERITED, FULL, &OWNER)]);
+        assert_eq!(other_writer(&own, &OWNER, FILE_CHANGES), Ok(None));
+    }
+
+    /// #306 sec F1: every user with modify, another account, or an agent's container that can
+    /// change a program is named, and a group that may only add a folder, as Authenticated
+    /// Users may at a drive's root, passes as a folder further up but not as the program's own
+    /// folder, where it could plant a library.
+    #[test]
+    fn another_account_or_a_container_that_can_change_a_program_is_named() {
+        let users = acl(&[ace(ACCESS_ALLOWED, INHERITED, MODIFY, &USERS)]);
+        assert_eq!(
+            other_writer(&users, &OWNER, FILE_CHANGES),
+            Ok(Some(&USERS[..]))
+        );
+        let other = acl(&[ace(ACCESS_ALLOWED, 0, DELETE, &OTHER_ACCOUNT)]);
+        assert_eq!(
+            other_writer(&other, &OWNER, ANCESTOR_CHANGES),
+            Ok(Some(&OTHER_ACCOUNT[..]))
+        );
+        let container = acl(&[ace(ACCESS_ALLOWED, 0x03, MODIFY, &CONTAINER)]);
+        assert_eq!(
+            other_writer(&container, &OWNER, FILE_CHANGES),
+            Ok(Some(&CONTAINER[..]))
+        );
+        let root = acl(&[ace(
+            ACCESS_ALLOWED,
+            0,
+            ADD_SUBDIRECTORY,
+            &AUTHENTICATED_USERS,
+        )]);
+        assert_eq!(other_writer(&root, &OWNER, ANCESTOR_CHANGES), Ok(None));
+        assert_eq!(
+            other_writer(&root, &OWNER, OWN_FOLDER_CHANGES),
+            Ok(Some(&AUTHENTICATED_USERS[..]))
+        );
+    }
+
+    /// #306 sec F1: an inherit-only entry, which passes down without applying, and a deny
+    /// entry, which only takes rights away, name no one, while a malformed list is an error
+    /// the caller refuses on.
+    #[test]
+    fn inherit_only_and_deny_entries_name_no_one_and_a_malformed_list_is_an_error() {
+        let list = acl(&[
+            ace(
+                ACCESS_ALLOWED,
+                OBJECT_INHERIT | CONTAINER_INHERIT | INHERIT_ONLY,
+                MODIFY,
+                &USERS,
+            ),
+            ace(ACCESS_DENIED, 0, MODIFY, &AUTHENTICATED_USERS),
+        ]);
+        assert_eq!(other_writer(&list, &OWNER, FILE_CHANGES), Ok(None));
+        let mut broken = acl(&[ace(ACCESS_ALLOWED, 0, MODIFY, &USERS)]);
+        broken[2..4].copy_from_slice(&200u16.to_le_bytes());
+        assert!(other_writer(&broken, &OWNER, FILE_CHANGES).is_err());
+    }
+
+    /// #317 r2 F2: an allow entry of a type the reader does not parse, here a conditional
+    /// entry giving another account full control, refuses instead of passing, while an
+    /// inherit-only one and the deny kinds still name no one.
+    #[test]
+    fn an_allow_entry_the_check_cannot_read_refuses_and_deny_kinds_do_not() {
+        const ALLOWED_CALLBACK: u8 = 9;
+        for kind in [ALLOWED_CALLBACK, 4, 5, 11] {
+            let list = acl(&[ace(kind, 0, FULL, &OTHER_ACCOUNT)]);
+            assert!(other_writer(&list, &OWNER, FILE_CHANGES).is_err(), "{kind}");
+            let later = acl(&[ace(
+                kind,
+                INHERIT_ONLY | CONTAINER_INHERIT,
+                FULL,
+                &OTHER_ACCOUNT,
+            )]);
+            assert_eq!(
+                other_writer(&later, &OWNER, FILE_CHANGES),
+                Ok(None),
+                "{kind}"
+            );
+        }
+        for kind in DENY_TYPES {
+            let list = acl(&[ace(kind, 0, FULL, &OTHER_ACCOUNT)]);
+            assert_eq!(
+                other_writer(&list, &OWNER, FILE_CHANGES),
+                Ok(None),
+                "{kind}"
+            );
+        }
+    }
+
+    /// #306 sec F1: SYSTEM, the administrators, TrustedInstaller and the engine's own user may
+    /// own a program the engine starts; every user, another account and a container may not.
+    #[test]
+    fn only_the_system_the_administrators_trustedinstaller_or_the_user_may_own_a_program() {
+        for owner in [&SYSTEM[..], &ADMINISTRATORS, &TRUSTED_INSTALLER, &OWNER] {
+            assert!(trusted_owner(owner, &OWNER), "{owner:?}");
+        }
+        for owner in [&USERS[..], &OTHER_ACCOUNT, &CONTAINER, &OWNER_RIGHTS] {
+            assert!(!trusted_owner(owner, &OWNER), "{owner:?}");
+        }
     }
 }

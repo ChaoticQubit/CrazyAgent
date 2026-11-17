@@ -1228,6 +1228,7 @@ mod tests {
     }
 
     /// F08: at most two sockets, four ports and one temp folder, each plain and named once.
+    /// A socket grant is a Unix socket path, so off Unix every socket is refused.
     #[test]
     fn grants_are_bounded_per_kind_plain_and_named_once() {
         let with = |grants: Vec<AccessGrant>| AgentPolicy {
@@ -1238,19 +1239,22 @@ mod tests {
             path: std::path::PathBuf::from(format!("/private/tmp/{name}")),
         };
         let port = |port| AccessGrant::Port { port };
-        assert!(
-            with(vec![
-                socket("a"),
-                socket("b"),
-                port(1),
-                port(2),
-                port(3),
-                port(4),
-                AccessGrant::TempFolder
-            ])
-            .validate()
-            .is_ok()
-        );
+        let held = |mut grants: Vec<AccessGrant>| {
+            grants.extend([port(1), port(2), port(3), port(4), AccessGrant::TempFolder]);
+            with(grants).validate()
+        };
+        #[cfg(unix)]
+        assert!(held(vec![socket("a"), socket("b")]).is_ok());
+        #[cfg(not(unix))]
+        {
+            assert!(held(Vec::new()).is_ok());
+            assert_eq!(
+                held(vec![AccessGrant::Socket {
+                    path: r"C:\Temp\a".into(),
+                }]),
+                Err("agent_grants_invalid")
+            );
+        }
         for refused in [
             vec![socket("a"), socket("b"), socket("c")],
             vec![port(1), port(2), port(3), port(4), port(5)],
@@ -1675,6 +1679,7 @@ mod tests {
     /// Read only every write at and below each agent folder, in any letter case, and both
     /// keep the agents root from being removed or moved aside. The older root is named only
     /// while agents stay there.
+    #[cfg(unix)]
     #[test]
     fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
         let root = Path::new("/tmp/ca-proj");

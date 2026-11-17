@@ -915,3 +915,30 @@ fn a_teammate_s_set_a_lead_s_worker_s_set_and_a_set_with_no_clash_wait_as_before
     assert_eq!(case.set().state, ChangeState::Pending);
     assert!(case.resolve_tasks().is_empty());
 }
+
+/// V243-GIT-FLOOR-SWEEP door 4 (rv-code4 #314 F1): on git 2.39 a team agent's turn end with
+/// main moved under its work leaves the set for the owner with no catch-up: the check of its
+/// conflicts with main answers no, where it refused `changes_git_old` and the turn end logged
+/// `catch_up_skipped`. On 2.40 the same check finds the clash.
+#[test]
+fn on_git_2_39_a_set_behind_a_moved_main_is_left_for_the_owner_with_no_catch_up() {
+    let (case, recorded) = Case::build_with(true, true, false, |_, _, _| {
+        landing::shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    });
+    assert_eq!(
+        recorded.map_err(|error| error.0),
+        Ok(Landed::Added(case.id.clone()))
+    );
+    let clash =
+        || landing::conflicts_with_main(&case.db, &case.id, None, None).map_err(|error| error.0);
+    assert_eq!(
+        clash(),
+        Ok(false),
+        "a git that cannot merge again answers no"
+    );
+    assert_eq!(case.set().state, ChangeState::Pending);
+    assert!(case.resolve_tasks().is_empty());
+    landing::shape_git(Some("git version 2.40.0"));
+    assert_eq!(clash(), Ok(true));
+    landing::shape_git(None);
+}

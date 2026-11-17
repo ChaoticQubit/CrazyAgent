@@ -16,7 +16,7 @@ thread_local! {
 
 /// Test helper: how many children this thread has started through the gate, so a row can
 /// bound the processes one call starts. Output: the count.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn spawned() -> usize {
     SPAWNED.get()
 }
@@ -361,11 +361,20 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     Ok(std::net::TcpListener::from(socket))
 }
 
-/// The [`bind_tcp_std_exclusive`] of a system whose `std` bind sets no `SO_REUSEADDR`.
-/// Input: the address. Output: the listener.
+/// The [`bind_tcp_std_exclusive`] of Windows, whose `std` bind sets no `SO_REUSEADDR` yet
+/// sits beside a listener on another address of the port: it binds, then reads the system's
+/// listener table and fails with `AddrInUse` when such a listener holds the port. A listener
+/// bound after that read is not seen. Input: the address. Output: the listener.
 #[cfg(not(unix))]
 pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
-    bind_tcp_std(address)
+    let listener = bind_tcp_std(address)?;
+    if crazyagent_win_sandbox::listener_beside(listener.local_addr()?)? {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "a listener on another address holds the port",
+        ));
+    }
+    Ok(listener)
 }
 
 /// Holds a free loopback TCP port that refuses every connect, as a model provider that is
@@ -483,14 +492,18 @@ pub fn accept_tcp_std(
     Ok((stream, peer))
 }
 
-/// Accepts one connection where child processes inherit no socket by default.
-/// Input: the listener. Output: the stream and peer.
+/// Accepts one connection where child processes inherit no socket by default. Winsock
+/// gives the accepted socket the listener's non-blocking mode, so the stream is set
+/// blocking, as on Unix, and its read timeouts hold. Input: the listener. Output: the
+/// blocking stream and peer.
 #[cfg(not(unix))]
 #[allow(clippy::disallowed_methods)]
 pub fn accept_tcp_std(
     listener: &std::net::TcpListener,
 ) -> io::Result<(std::net::TcpStream, std::net::SocketAddr)> {
-    listener.accept()
+    let (stream, peer) = listener.accept()?;
+    stream.set_nonblocking(false)?;
+    Ok((stream, peer))
 }
 
 /// Accepts connections forever, as `TcpListener::incoming` does, through

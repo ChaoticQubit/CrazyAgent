@@ -5,7 +5,8 @@ use crate::plugins::{
     EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView, check,
 };
 use crate::protocol::encode_frame;
-use crate::storage::plugins::{Command, ResultValue};
+use crate::storage::plugins::{Command, ResultValue, check_profile};
+use check_folders::{CheckOf, removed_server_checks};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -13,7 +14,7 @@ const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
 pub(super) const CHECK_FOLDER: &str = crate::storage::plugins::CHECK_FOLDER;
-pub(super) const CHECK_PROFILES: &str = "profiles";
+pub(super) const CHECK_PROFILES: &str = crate::storage::plugins::CHECK_PROFILES;
 pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
@@ -987,35 +988,6 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("plugin_store_unavailable"))
 }
 
-/// Names the sandbox profile file the checks of one server run under.
-/// Inputs: the engine's check folder and the server id. Output: the profile path.
-fn check_profile(checks: &Path, id: &str) -> PathBuf {
-    checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
-}
-
-/// Clears a removed server's check folder, with whatever its checks wrote there while they
-/// held the server's secrets, and its check profile: the folder moves aside at once and is
-/// deleted on a blocking thread of its own that nothing waits for, so no check home size
-/// holds up the answer, and the start sweep deletes a moved folder a crash left. Inputs:
-/// the engine's check folder and the server id. A failure other than a missing entry is logged.
-fn remove_check_folder(checks: &Path, id: &str) {
-    match std::fs::remove_file(check_profile(checks, id)) {
-        Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
-            eprintln!("plugin_check_folder_not_removed cause={problem}");
-        }
-        _ => {}
-    }
-    match crate::storage::plugins::move_check_folder_aside(checks, id) {
-        Ok(Some(aside)) => drop(tokio::task::spawn_blocking(move || {
-            if let Err(problem) = std::fs::remove_dir_all(aside) {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
-        })),
-        Ok(None) => {}
-        Err(problem) => eprintln!("plugin_check_folder_not_removed cause={}", problem.0),
-    }
-}
-
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -1248,7 +1220,7 @@ async fn handle(
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
                                 crate::storage::plugins::remove_secrets(&root, references);
-                            remove_check_folder(&checks, &server);
+                            removed_server_checks(&checks, &server);
                             secrets
                         }
                         _ => Ok(()),
@@ -1436,6 +1408,9 @@ async fn start_check(
     authority: &Authority,
     id: String,
 ) -> Result<Reply, EngineError> {
+    let slot = CheckSlot::take()?;
+    let root = engine_root(authority)?;
+    let counted = CheckOf::take(&id, root.join(CHECK_FOLDER), &slot);
     let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
@@ -1445,8 +1420,6 @@ async fn start_check(
     let ServerSpec::Stdio { command, args } = *spec else {
         return Err(failure("server_check_command_only"));
     };
-    let slot = CheckSlot::take()?;
-    let root = engine_root(authority)?;
     let mut values: Vec<(String, Vec<u8>)> = Vec::with_capacity(secrets.len());
     for secret in &secrets {
         match crate::storage::plugins::read_secret(&root, &secret.reference) {
@@ -1480,6 +1453,7 @@ async fn start_check(
             outcome
         })
         .await;
+        drop(counted);
         let outcome = match outcome {
             Ok(Ok(tools)) => Ok(tools),
             Ok(Err(problem)) => Err(problem),
@@ -1513,7 +1487,6 @@ async fn start_check(
 /// server id, approved command, arguments, secret values and the configured local model
 /// ports to keep. Output: the tool names, or a plain rejection code, or for a boundary that
 /// cannot hold the check the boundary's own reason ([`crate::plugins::check_refused`]).
-#[cfg(unix)]
 fn boundary_check(
     root: &Path,
     id: &str,
@@ -1523,9 +1496,7 @@ fn boundary_check(
     kept: &[u16],
     network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, String> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxError};
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxError, canonical};
     assert!(valid_id(id));
     use crate::context_mode::ForCheck;
     let approved = ServerSpec::Stdio {
@@ -1563,11 +1534,17 @@ fn boundary_check(
     };
     let install = crate::context_mode::shared_install(&launched);
     let program = Path::new(command);
+    #[cfg(unix)]
+    let runnable = |found: &std::fs::Metadata| {
+        std::os::unix::fs::PermissionsExt::mode(&found.permissions()) & 0o111 != 0
+    };
+    #[cfg(windows)]
+    let runnable = |_: &std::fs::Metadata| true;
     match std::fs::metadata(program) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err("server_command_not_found".into());
         }
-        Ok(found) if found.is_file() && found.permissions().mode() & 0o111 != 0 => {}
+        Ok(found) if found.is_file() && runnable(&found) => {}
         _ => return Err("server_command_not_runnable".into()),
     }
     let refused = |cause: &dyn std::fmt::Display| {
@@ -1582,30 +1559,21 @@ fn boundary_check(
         other => refused(&other).to_owned(),
     };
     let checks = root.join(CHECK_FOLDER);
-    let mut folders = Vec::with_capacity(3);
-    for name in ["project", "home", "tmp"] {
-        let folder = checks.join(id).join(name);
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&folder)
-            .map_err(|error| refused(&error))?;
-        let plain = checks
-            .join(id)
-            .canonicalize()
-            .map_err(|error| refused(&error))?
-            .join(name);
-        if folder.canonicalize().map_err(|error| refused(&error))? != plain {
+    let mut private = std::fs::DirBuilder::new();
+    private.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
+    private.create(&checks).map_err(|error| refused(&error))?;
+    let folders = crate::storage::plugins::check_sandbox_folders(&checks, id)
+        .map_err(|error| refused(&error))?;
+    for folder in &folders {
+        private.create(folder).map_err(|error| refused(&error))?;
+        if canonical(folder).map_err(|error| refused(&error))? != *folder {
             return Err(refused(&"check folder is not the plain folder the engine made").into());
         }
-        folders.push(plain);
     }
     let profiles = checks.join(CHECK_PROFILES);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&profiles)
-        .map_err(|error| refused(&error))?;
+    private.create(&profiles).map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
     #[cfg(target_os = "linux")]
     let (calls, strict) = {
@@ -1632,26 +1600,10 @@ fn boundary_check(
     server.args(args).current_dir(&folders[0]);
     let mut process = sandbox.wrap(&server).map_err(boundary)?;
     for (name, value) in secrets {
-        process.env(name, std::ffi::OsStr::from_bytes(value));
+        process.env(name, check::env_value(value)?);
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
     check::check_command(process, check::CHECK_TIME, sandbox.lineage_check()).map_err(String::from)
-}
-
-/// Refuses to check a command server where no process group can be stopped. Takes the
-/// engine folder, server id, command, arguments, secrets and kept ports, all unused. Returns
-/// `server_check_unavailable`, like [`check::check_stdio`] on this system.
-#[cfg(not(unix))]
-fn boundary_check(
-    _root: &Path,
-    _id: &str,
-    _command: &str,
-    _args: &[String],
-    _secrets: &[(String, Vec<u8>)],
-    _kept: &[u16],
-    _network: crate::sandbox::SandboxNetwork,
-) -> Result<Vec<String>, String> {
-    Err("server_check_unavailable".into())
 }
 
 async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineError> {
@@ -1710,5 +1662,6 @@ fn public_code(error: EngineError) -> String {
     }
 }
 
+mod check_folders;
 #[cfg(test)]
 mod tests;
