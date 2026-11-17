@@ -2130,7 +2130,11 @@ mod tests {
     fn an_intake_job_that_did_not_land_is_said_as_a_warning_and_a_stop_reads_it_again() {
         let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
         let running = shop(JobState::Downloading {
-            progress: crate::projects_home::icloud::Progress { total: 3, done: 1 },
+            progress: crate::projects_home::icloud::Progress {
+                total: 3,
+                done: 1,
+                ..Default::default()
+            },
         });
         shell.arrive(status_arrival(vec![running.clone()]));
         shell.arrive(intake_arrival(
@@ -2169,6 +2173,7 @@ mod tests {
             progress: crate::projects_home::icloud::Progress {
                 total: 3000,
                 done: 12,
+                ..Default::default()
             },
         });
         let shown = |jobs: &[JobView], status: &str| {

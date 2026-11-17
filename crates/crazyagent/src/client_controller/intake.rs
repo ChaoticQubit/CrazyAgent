@@ -62,9 +62,11 @@ impl OwnerController {
             OwnerData::FolderSize {
                 bytes,
                 placeholders,
+                skipped,
             } => Ok(crate::projects_home::Measured {
                 bytes,
                 placeholders,
+                skipped,
             }),
             _ => Err(EngineError("controller_read_response".into())),
         }

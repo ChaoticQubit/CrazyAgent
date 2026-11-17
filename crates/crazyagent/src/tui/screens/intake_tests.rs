@@ -2764,6 +2764,7 @@ fn measured(
         Ok(IntakeView::FolderSize(Measured {
             bytes: 10,
             placeholders,
+            skipped: Vec::new(),
         })),
     ));
     shell.key(Key::Enter);
@@ -2901,7 +2902,11 @@ fn an_icloud_folder_asks_first_and_download_and_move_starts_the_job_after_the_mo
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Starting"), "{rows:#?}");
     let downloading = JobState::Downloading {
-        progress: Progress { total: 0, done: 0 },
+        progress: Progress {
+            total: 0,
+            done: 0,
+            ..Default::default()
+        },
     };
     shell.arrive(intake(
         start(&typed, AddMode::Move, Vec::new()),
@@ -3131,6 +3136,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
         progress: Progress {
             total: 3000,
             done: 12,
+            ..Default::default()
         },
     });
     job_read(&mut shell, vec![running.clone()]);

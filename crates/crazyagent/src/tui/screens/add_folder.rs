@@ -33,6 +33,7 @@ const OVERRIDE_ORDER: [AddOverride; ADD_OVERRIDES_MAX] = [
     AddOverride::Worktrees,
     AddOverride::LinkedCheckout,
     AddOverride::TooLarge,
+    AddOverride::DownloadEverything,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -778,7 +779,7 @@ impl Screen for AddFolder {
                 {
                     self.worktrees = crate::projects_home::linked_worktrees(Path::new(path));
                     *size = match result {
-                        Ok(IntakeView::FolderSize(measured)) => Load::Ready(*measured),
+                        Ok(IntakeView::FolderSize(measured)) => Load::Ready(measured.clone()),
                         Ok(_) => Load::Failed("intake_change_outcome_unknown".into()),
                         Err(code) => Load::Failed(code.clone()),
                     };

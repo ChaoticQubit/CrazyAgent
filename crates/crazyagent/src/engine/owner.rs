@@ -1443,6 +1443,8 @@ pub enum OwnerData {
         bytes: u64,
         #[serde(default, skip_serializing_if = "no_placeholders")]
         placeholders: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<crate::projects_home::icloud::Skipped>,
     },
     Onboarding {
         onboarding: Box<crate::onboarding::OnboardingView>,

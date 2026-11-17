@@ -18,11 +18,12 @@ fn a_move_deletes_only_the_source_entries_still_as_its_check_saw_them() {
         COPY_BOUNDS,
         &Tally::default(),
     )
-    .unwrap();
+    .unwrap()
+    .verified;
     fs::write(source.join("sub/synced.txt"), "from another Mac\n").unwrap();
     fs::write(source.join("a.txt"), "A\n").unwrap();
 
-    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS).unwrap_err();
+    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS, &[]).unwrap_err();
     assert_eq!(left.0, "home_move_source_left");
     assert_eq!(
         fs::read_to_string(source.join("sub/synced.txt")).unwrap(),
@@ -80,7 +81,8 @@ fn a_move_keeps_a_source_file_rewritten_with_the_same_size_and_modify_time() {
         COPY_BOUNDS,
         &Tally::default(),
     )
-    .unwrap();
+    .unwrap()
+    .verified;
 
     let checked = fs::metadata(source.join("a.txt")).unwrap();
     fs::write(source.join("a.txt"), "A\n").unwrap();
@@ -91,7 +93,7 @@ fn a_move_keeps_a_source_file_rewritten_with_the_same_size_and_modify_time() {
     fs::remove_file(landed.join("old.txt")).unwrap();
     fs::remove_file(landed.join("lost.txt")).unwrap();
 
-    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS).unwrap_err();
+    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS, &[]).unwrap_err();
     assert_eq!(left.0, "home_move_source_left");
     assert_eq!(
         fs::read_to_string(source.join("a.txt")).unwrap(),
@@ -139,7 +141,8 @@ fn a_move_keeps_an_old_source_file_rewritten_in_place_with_its_size_and_modify_t
         COPY_BOUNDS,
         &Tally::default(),
     )
-    .unwrap();
+    .unwrap()
+    .verified;
 
     let file = source.join("a.txt");
     let checked = fs::symlink_metadata(&file).unwrap();
@@ -174,7 +177,7 @@ fn a_move_keeps_an_old_source_file_rewritten_in_place_with_its_size_and_modify_t
         "the rewrite moved the change time"
     );
 
-    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS);
+    let left = remove_verified(&source, &landed, &verified, COPY_BOUNDS, &[]);
     assert_eq!(
         fs::read_to_string(&file).ok().as_deref(),
         Some("A\n"),
@@ -556,4 +559,144 @@ fn a_refill_never_writes_through_a_target_folder_swapped_for_a_link() {
         "the folder the link names took a mode"
     );
     assert_eq!(filled.unwrap_err().0, "home_copy_entry_swapped");
+}
+
+/// An iCloud project for the DEC-198 rows: `node_modules` holds a file still only in iCloud
+/// (marked for [`super::super::icloud::fake`]), `.venv` is fully on this Mac, and the source
+/// files have landed. Output: the folder holding it and the project's path.
+fn icloud_project() -> (tempfile::TempDir, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let project = fs::canonicalize(root.path()).unwrap().join("shop");
+    for dir in ["src", "node_modules/left-pad", ".venv/lib"] {
+        fs::create_dir_all(project.join(dir)).unwrap();
+    }
+    for (file, text) in [
+        ("src/main.rs", "fn main() {}\n"),
+        ("node_modules/left-pad/index.js", "module.exports = 1;\n"),
+        ("node_modules/left-pad/package.json", "{}\n"),
+        (".venv/lib/site.py", "x = 1\n"),
+    ] {
+        fs::write(project.join(file), text).unwrap();
+    }
+    let mark = fs::Permissions::from_mode(super::super::icloud::fake::MODE);
+    fs::set_permissions(project.join("node_modules/left-pad/index.js"), mark).unwrap();
+    fs::set_permissions(
+        project.join("node_modules"),
+        fs::Permissions::from_mode(0o750),
+    )
+    .unwrap();
+    (root, project)
+}
+
+fn skipping() -> CopyBounds {
+    CopyBounds {
+        skip_rebuildable: true,
+        ..COPY_BOUNDS
+    }
+}
+
+#[test]
+fn a_move_out_of_icloud_leaves_rebuildable_folders_still_in_icloud_at_the_source_and_ends_ok() {
+    super::super::icloud::fake::placeholders();
+    let (_root, source) = icloud_project();
+    let home = tempfile::tempdir().unwrap();
+    let destination = fs::canonicalize(home.path()).unwrap().join("shop");
+    let plan = AddPlan::new(
+        source.clone(),
+        destination.clone(),
+        AddMode::Move,
+        skipping(),
+    );
+    let Placed::Copied(old) = plan.place_by_copy(&Tally::default()).unwrap() else {
+        panic!("a move by copy leaves its source to clear");
+    };
+    old.clear().unwrap();
+    assert_eq!(
+        fs::read_to_string(destination.join("src/main.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+    assert!(destination.join(".venv/lib/site.py").is_file());
+    assert!(fs::symlink_metadata(destination.join("node_modules")).is_err());
+    let names: Vec<_> = fs::read_dir(&source)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["node_modules"], "only the skipped folder stays");
+    assert_eq!(bits(&source.join("node_modules")), 0o750);
+    assert_eq!(
+        bits(&source.join("node_modules/left-pad/index.js")),
+        super::super::icloud::fake::MODE
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("node_modules/left-pad/package.json")).unwrap(),
+        "{}\n"
+    );
+}
+
+#[test]
+fn a_copy_out_of_icloud_leaves_the_same_folders_out_and_download_everything_still_refuses() {
+    super::super::icloud::fake::placeholders();
+    let (_root, source) = icloud_project();
+    let home = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(home.path()).unwrap();
+    let copied = base.join("shop");
+    AddPlan::new(source.clone(), copied.clone(), AddMode::Copy, skipping())
+        .run()
+        .unwrap();
+    assert!(copied.join("src/main.rs").is_file());
+    assert!(copied.join(".venv/lib/site.py").is_file());
+    assert!(fs::symlink_metadata(copied.join("node_modules")).is_err());
+    assert!(source.join("node_modules/left-pad/package.json").is_file());
+    assert!(source.join("src/main.rs").is_file());
+    let everything = AddPlan::new(source.clone(), base.join("all"), AddMode::Copy, COPY_BOUNDS);
+    assert_eq!(
+        everything.run().unwrap_err().0,
+        "home_icloud_not_downloaded"
+    );
+    assert!(fs::symlink_metadata(base.join("all")).is_err());
+}
+
+#[test]
+fn folder_size_names_rebuildable_folders_still_in_icloud_with_their_file_counts() {
+    super::super::icloud::fake::placeholders();
+    let (_root, source) = icloud_project();
+    fs::write(source.join("src/data.bin"), "only in iCloud").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mark = fs::Permissions::from_mode(super::super::icloud::fake::MODE);
+        fs::set_permissions(source.join("src/data.bin"), mark).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let measured = folder_size(source.to_str().unwrap(), deadline).unwrap();
+    assert_eq!(
+        measured,
+        Measured {
+            bytes: ("fn main() {}\n".len() + "x = 1\n".len() + "only in iCloud".len()) as u64,
+            placeholders: 1,
+            skipped: vec![super::super::icloud::Skipped {
+                path: "node_modules".into(),
+                files: Some(2),
+            }],
+        }
+    );
+}
+
+#[test]
+fn download_everything_goes_with_either_mode_and_turns_the_skip_off() {
+    use super::super::{AddOverride, add_bounds, check_overrides};
+    assert!(add_bounds(&[]).skip_rebuildable);
+    assert!(!add_bounds(&[AddOverride::DownloadEverything]).skip_rebuildable);
+    let forced = add_bounds(&[AddOverride::TooLarge, AddOverride::DownloadEverything]);
+    assert_eq!(
+        (forced.entries, forced.depth, forced.skip_rebuildable),
+        (FORCED_COPY_BOUNDS.entries, FORCED_COPY_BOUNDS.depth, false)
+    );
+    for mode in [AddMode::Move, AddMode::Copy] {
+        assert!(check_overrides(mode, &[AddOverride::DownloadEverything]).is_ok());
+    }
+    assert_eq!(
+        serde_json::to_string(&AddOverride::DownloadEverything).unwrap(),
+        "\"download_everything\""
+    );
 }

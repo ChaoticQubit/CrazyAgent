@@ -30,7 +30,11 @@ fn failed(code: &str, phase: Phase) -> JobState {
 #[test]
 fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
     let downloading = |done, total| JobState::Downloading {
-        progress: Progress { total, done },
+        progress: Progress {
+            total,
+            done,
+            ..Default::default()
+        },
     };
     assert_eq!(
         line(&job(downloading(0, 0))),
@@ -202,7 +206,11 @@ fn a_job_waiting_its_turn_names_the_job_it_waits_behind_and_offers_stop() {
 #[test]
 fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys_do() {
     let downloading = JobState::Downloading {
-        progress: Progress { total: 3, done: 1 },
+        progress: Progress {
+            total: 3,
+            done: 1,
+            ..Default::default()
+        },
     };
     let rows = [
         (
@@ -273,7 +281,11 @@ fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys
 #[test]
 fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name() {
     let downloading = |done, total| JobState::Downloading {
-        progress: Progress { total, done },
+        progress: Progress {
+            total,
+            done,
+            ..Default::default()
+        },
     };
     let briefs = [
         (job(downloading(0, 0)), "Downloading shop..."),
@@ -539,7 +551,11 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
     let cases = [
         (
             job(JobState::Downloading {
-                progress: Progress { total: 3, done: 7 },
+                progress: Progress {
+                    total: 3,
+                    done: 7,
+                    ..Default::default()
+                },
             }),
             "Downloading shop from iCloud...",
             "Downloading shop...",

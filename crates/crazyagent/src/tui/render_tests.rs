@@ -446,6 +446,7 @@ fn home_frame_with_an_intake_job_matches_the_design() {
             progress: Progress {
                 total: 3000,
                 done: 12,
+                ..Default::default()
             },
         },
     }];

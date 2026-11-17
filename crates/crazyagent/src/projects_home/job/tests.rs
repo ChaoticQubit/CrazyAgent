@@ -24,7 +24,11 @@ fn a_job_reads_downloading_then_copying_with_its_counts() {
     assert_eq!(
         view.state,
         JobState::Downloading {
-            progress: Progress { total: 0, done: 0 }
+            progress: Progress {
+                total: 0,
+                done: 0,
+                ..Default::default()
+            }
         }
     );
     job.copying();
