@@ -1,4 +1,4 @@
-use super::icloud::{Download, Progress, Skipped};
+use super::icloud::{Download, JOB_SKIPPED_LISTED_MAX, Progress, Skipped, SkippedMore};
 use super::{ADD_OVERRIDES_MAX, AddMode, AddOverride, PATH_BYTES_MAX, Tally};
 use crate::engine::EngineError;
 use crate::project_setup::ProjectSetup;
@@ -125,8 +125,9 @@ pub enum JobState {
 /// project a move, a delete or a New Project takes, the folder (for a delete or a New Project
 /// the project's name, which labels its end line), the mode (a delete reads Move, unused), the soft
 /// refusals it goes past, whether a stop was asked, its state, and the rebuildable folders its
-/// download left in iCloud, which an add leaves out. A client answering a soft refusal starts
-/// again with these overrides and the new one.
+/// download left in iCloud, which an add leaves out: the first `JOB_SKIPPED_LISTED_MAX` named,
+/// the rest counted. A client answering a soft refusal starts again with these overrides and
+/// the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
@@ -140,6 +141,8 @@ pub struct JobView {
     pub state: JobState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<Skipped>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_more: Option<SkippedMore>,
 }
 
 impl JobState {
@@ -483,6 +486,7 @@ impl IntakeJob {
             Stage::Ended(state) => state.clone(),
         };
         assert!(!matches!(state, JobState::Stopping { agents_left: 0 }));
+        let (left, left_more) = self.download.skipped().cut(JOB_SKIPPED_LISTED_MAX);
         let view = JobView {
             id: self.id.clone(),
             kind: self.kind,
@@ -495,7 +499,8 @@ impl IntakeJob {
             overrides: self.overrides.clone(),
             stopping: self.tally.stopped(),
             state,
-            left: self.download.skipped(),
+            left,
+            left_more,
         };
         assert!(view.overrides.len() <= ADD_OVERRIDES_MAX);
         assert_eq!(view.kind != JobKind::Add, view.project_id.is_some());

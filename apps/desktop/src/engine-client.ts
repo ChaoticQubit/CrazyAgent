@@ -1418,6 +1418,13 @@ export interface SkippedFolder {
   files: number | null;
 }
 
+/** The rebuildable folders past the ones a reply names: how many, and the files they hold, null
+ * when one of them is only in iCloud itself and cannot be counted. */
+export interface SkippedMore {
+  folders: number;
+  files: number | null;
+}
+
 /** What the native bridge read about a picked folder: its bytes, or null with the size code when
  * it could not be measured, how many of its files are only in iCloud outside the rebuildable
  * folders an add leaves out, those folders, its GitHub repository, its linked worktrees and their

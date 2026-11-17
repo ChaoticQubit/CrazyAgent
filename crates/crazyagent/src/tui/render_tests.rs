@@ -436,6 +436,7 @@ fn home_frame_with_an_intake_job_matches_the_design() {
     ctx.store.accounts = Load::Ready(accounts());
     ctx.store.intake = vec![JobView {
         left: Vec::new(),
+        left_more: None,
         id: crate::protocol::RequestId::new("add-1").unwrap(),
         kind: crate::projects_home::job::JobKind::Add,
         project_id: None,

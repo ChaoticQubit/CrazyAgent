@@ -279,7 +279,8 @@ const SETUP_CODES: [&str; 48] = [
 /// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
 /// folders, whether a Move keeps its git links and which link it breaks, whether a Copy keeps
 /// its own git data, whether it has git at all, whether it is on the projects folder's
-/// disk (None when that is unknown), and the rebuildable folders an add leaves in iCloud.
+/// disk (None when that is unknown), and the rebuildable folders an add leaves in iCloud, the
+/// first ones named and the rest counted.
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: Option<u64>,
@@ -288,6 +289,8 @@ pub struct FolderSize {
     pub placeholders: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<crazyagent::projects_home::icloud::Skipped>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_more: Option<crazyagent::projects_home::icloud::SkippedMore>,
     pub github: Option<String>,
     pub worktrees: usize,
     pub worktree_paths: Vec<String>,
@@ -555,19 +558,20 @@ impl NativeBridge {
             _ => return Err(failure("owner_read_failed")),
         };
         let read = self.owner_read(OwnerRead::FolderSize { path }).await;
-        let (bytes, placeholders, skipped, size_problem) = match read {
+        let (bytes, placeholders, skipped, skipped_more, size_problem) = match read {
             Ok(OwnerData::FolderSize {
                 bytes,
                 placeholders,
                 skipped,
-            }) => (Some(bytes), placeholders, skipped, None),
+                skipped_more,
+            }) => (Some(bytes), placeholders, skipped, skipped_more, None),
             Ok(_) => return Err(failure("owner_read_failed")),
             Err(error) => match SIZE_PROBLEMS
                 .iter()
                 .copied()
                 .find(|code| *code == error.code)
             {
-                Some(code) => (None, 0, Vec::new(), Some(code)),
+                Some(code) => (None, 0, Vec::new(), None, Some(code)),
                 None => return Err(error),
             },
         };
@@ -578,6 +582,7 @@ impl NativeBridge {
             size_problem,
             placeholders,
             skipped,
+            skipped_more,
             github,
             worktrees,
             worktree_paths,
@@ -1472,6 +1477,7 @@ mod tests {
     fn an_intake_job_reaches_the_window_with_listed_codes_only() {
         let view = |state| JobView {
             left: Vec::new(),
+            left_more: None,
             id: RequestId::new("add-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Add,
             project_id: None,
@@ -1538,6 +1544,7 @@ mod tests {
         }
         let view = JobView {
             left: Vec::new(),
+            left_more: None,
             id: RequestId::new("delete-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Delete,
             project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
@@ -1593,6 +1600,7 @@ mod tests {
         }
         let view = |state| JobView {
             left: Vec::new(),
+            left_more: None,
             id: RequestId::new("setup-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Setup,
             project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),

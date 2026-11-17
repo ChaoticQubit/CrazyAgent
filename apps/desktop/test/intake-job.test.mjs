@@ -30,6 +30,12 @@ test("V243-ICLOUD-MOVE-ZERO: a done add says which rebuildable folders it left i
   assert.equal(intake.jobLine(job({ state: "done" }, { left: [] })), "shop is in your projects folder. Set it up from Home.");
 });
 
+test("#383 F1: a done add counts the left folders the engine named no more of", () => {
+  const named = ["a", "b", "c"].map((name) => ({ path: `${name}/node_modules`, files: 1 }));
+  assert.match(intake.jobLine(job({ state: "done" }, { left: named, left_more: { folders: 1997, files: null }, mode: "copy" })),
+    / a\/node_modules, b\/node_modules, c\/node_modules and 1997 more were not copied; reinstall them/);
+});
+
 test("an intake job line says what it does now, with counts as files land", () => {
   assert.equal(intake.jobLine(job(downloading(0, 0))), "Downloading shop from iCloud...");
   assert.equal(intake.jobLine(job(downloading(12, 3000))), "macOS is downloading shop: 12 of 3000 files");

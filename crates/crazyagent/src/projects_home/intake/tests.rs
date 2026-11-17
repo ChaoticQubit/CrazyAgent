@@ -674,11 +674,49 @@ fn folder_size_names_rebuildable_folders_still_in_icloud_with_their_file_counts(
         Measured {
             bytes: ("fn main() {}\n".len() + "x = 1\n".len() + "only in iCloud".len()) as u64,
             placeholders: 1,
-            skipped: vec![super::super::icloud::Skipped {
-                path: "node_modules".into(),
-                files: Some(2),
-            }],
+            skipped: super::super::icloud::SkippedFolders {
+                listed: vec![super::super::icloud::Skipped {
+                    path: "node_modules".into(),
+                    files: Some(2),
+                }],
+                more: None,
+            },
         }
+    );
+}
+
+#[test]
+fn folder_size_names_32_of_2000_rebuildable_folders_and_its_reply_fits_one_frame() {
+    use std::os::unix::fs::PermissionsExt;
+    super::super::icloud::fake::placeholders();
+    let (_root, source) = icloud_project();
+    let mark = fs::Permissions::from_mode(super::super::icloud::fake::MODE);
+    for at in 0..2000 {
+        let cache = source.join(format!("pkg{at:04}/__pycache__"));
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("m.pyc"), "1").unwrap();
+        fs::set_permissions(cache.join("m.pyc"), mark.clone()).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let measured = folder_size(source.to_str().unwrap(), deadline).unwrap();
+    let skipped = &measured.skipped;
+    assert_eq!(
+        skipped.listed.len(),
+        super::super::icloud::SKIPPED_LISTED_MAX
+    );
+    assert_eq!(skipped.len(), 2001, "2000 caches and node_modules");
+    assert!(skipped.more.is_some_and(|more| more.files.is_some()));
+    let reply = crate::engine::owner::OwnerData::FolderSize {
+        bytes: measured.bytes,
+        placeholders: measured.placeholders,
+        skipped: skipped.listed.clone(),
+        skipped_more: skipped.more,
+    };
+    let encoded = serde_json::to_vec(&reply).unwrap();
+    assert!(
+        encoded.len() <= crate::protocol::FRAME_BYTES_MAX,
+        "{} bytes",
+        encoded.len()
     );
 }
 

@@ -6,6 +6,7 @@ use crate::protocol::RequestId;
 fn job(state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-1").unwrap(),
         kind: crate::projects_home::job::JobKind::Add,
         project_id: None,
@@ -321,6 +322,7 @@ fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name
 fn moving(state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("move-1").unwrap(),
         kind: JobKind::MoveProject,
         project_id: Some(crate::protocol::ProjectId::new("reading").unwrap()),
@@ -442,6 +444,7 @@ fn a_project_move_job_says_it_waits_for_its_agents_moves_and_ends_in_the_move_s_
 fn deleting(state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: crate::protocol::RequestId::new("delete-1").unwrap(),
         kind: JobKind::Delete,
         project_id: Some(crate::protocol::ProjectId::new("notes").unwrap()),
@@ -621,6 +624,35 @@ fn the_download_line_says_macos_downloads_with_the_files_and_bytes_landed() {
         line(&job(landing(1, 2, 9, 4))),
         "macOS is downloading shop: 1 of 2 files",
         "bytes past their total are left out"
+    );
+}
+
+#[test]
+fn a_done_add_counts_the_left_folders_it_does_not_name() {
+    let folder = |path: &str| crate::projects_home::icloud::Skipped {
+        path: path.into(),
+        files: Some(1),
+    };
+    let capped = JobView {
+        left: vec![
+            folder("a/node_modules"),
+            folder("b/node_modules"),
+            folder("c/node_modules"),
+        ],
+        left_more: Some(crate::projects_home::icloud::SkippedMore {
+            folders: 1997,
+            files: None,
+        }),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&capped).contains(
+            " a/node_modules, b/node_modules, c/node_modules and 1997 more were not copied; \
+             reinstall them"
+        ),
+        "{}",
+        line(&capped)
     );
 }
 

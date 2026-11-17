@@ -1258,12 +1258,13 @@ fn same_bytes(
 /// What `folder_size` found in a folder: the bytes of its files, how many of its entries
 /// are placeholders whose data lives only in iCloud, counted without listing a placeholder
 /// folder, so a folder inside one counts once, and the rebuildable folders an add leaves
-/// out because they still need downloading, counted in neither.
+/// out because they still need downloading, counted in neither, the first
+/// `SKIPPED_LISTED_MAX` named and the rest counted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Measured {
     pub bytes: u64,
     pub placeholders: u64,
-    pub skipped: Vec<super::icloud::Skipped>,
+    pub skipped: super::icloud::SkippedFolders,
 }
 
 /// Adds up the bytes of the files in a folder without following links, and counts its
@@ -1288,7 +1289,7 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
         return Ok(Measured {
             bytes: 0,
             placeholders: 1,
-            skipped: Vec::new(),
+            skipped: super::icloud::SkippedFolders::default(),
         });
     }
     let look = |path: &Path| fs::symlink_metadata(path);
@@ -1298,7 +1299,7 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
     };
     let mut bytes = 0u64;
     let mut placeholders = 0u64;
-    let mut skipped = Vec::new();
+    let mut skipped = super::icloud::SkippedFolders::default();
     let mut entries = 0u64;
     let mut stack = vec![root.clone()];
     while let Some(folder) = stack.pop() {
@@ -1355,7 +1356,7 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
         }
     }
     assert!(entries <= ENTRIES_MAX);
-    assert!(placeholders + skipped.len() as u64 <= entries);
+    assert!(placeholders + skipped.len() <= entries);
     Ok(Measured {
         bytes,
         placeholders,

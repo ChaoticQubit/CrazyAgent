@@ -8,7 +8,7 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{KeptFile, ProjectSetup, ResearchKind, SetupAction, SetupQuery};
-use crate::projects_home::icloud::{Progress, Skipped};
+use crate::projects_home::icloud::{Progress, Skipped, SkippedFolders, SkippedMore};
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView, Phase};
 use crate::projects_home::{AddMode, AddOverride, Measured};
 use crate::protocol::{ProjectId, RequestId};
@@ -2739,7 +2739,7 @@ fn measured(
     placeholders: u64,
     shown: Option<JobState>,
 ) -> (Shell, String) {
-    measured_leaving(user, mode, placeholders, Vec::new(), shown)
+    measured_leaving(user, mode, placeholders, SkippedFolders::default(), shown)
 }
 
 /// As [`measured`], with the size read naming the rebuildable folders an add leaves in iCloud.
@@ -2747,7 +2747,7 @@ fn measured_leaving(
     user: &Path,
     mode: AddMode,
     placeholders: u64,
-    skipped: Vec<Skipped>,
+    skipped: SkippedFolders,
     shown: Option<JobState>,
 ) -> (Shell, String) {
     let user = user.canonicalize().unwrap();
@@ -2852,6 +2852,7 @@ fn with_start_id(query: IntakeQuery) -> IntakeQuery {
 fn job_for(folder: &str, mode: AddMode, state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-2").unwrap(),
         kind: JobKind::Add,
         project_id: None,
@@ -2951,6 +2952,10 @@ fn download_and_copy_turns_a_move_into_a_copy_and_starts_it_at_once() {
 }
 
 /// The rebuildable folders an iCloud size read names: one counted, one only in iCloud.
+fn named(listed: Vec<Skipped>) -> SkippedFolders {
+    SkippedFolders { listed, more: None }
+}
+
 fn left_folders() -> Vec<Skipped> {
     vec![
         Skipped {
@@ -2965,9 +2970,34 @@ fn left_folders() -> Vec<Skipped> {
 }
 
 #[test]
+fn the_icloud_question_counts_the_left_folders_it_does_not_name_and_downloads_them_too() {
+    let user = tempfile::tempdir().unwrap();
+    let skipped = SkippedFolders {
+        listed: vec![Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        }],
+        more: Some(SkippedMore {
+            folders: 1968,
+            files: Some(1968),
+        }),
+    };
+    let (mut shell, _typed) = measured_leaving(user.path(), AddMode::Move, 3, skipped, None);
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "and 1968 more folders (1968 files)"),
+        "{rows:#?}"
+    );
+    shell.key(Key::Char(' '));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "59079 files are only in iCloud"), "{rows:#?}");
+}
+
+#[test]
 fn the_icloud_question_names_the_folders_it_leaves_and_space_downloads_everything() {
     let user = tempfile::tempdir().unwrap();
-    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Move, 3, left_folders(), None);
+    let (mut shell, typed) =
+        measured_leaving(user.path(), AddMode::Move, 3, named(left_folders()), None);
     let rows = render(&mut shell, 80, 40);
     for text in [
         "3 files are only in iCloud; CrazyAgent",
@@ -2996,7 +3026,8 @@ fn the_icloud_question_names_the_folders_it_leaves_and_space_downloads_everythin
 #[test]
 fn space_twice_leaves_the_folders_in_icloud_and_sends_no_override() {
     let user = tempfile::tempdir().unwrap();
-    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Copy, 3, left_folders(), None);
+    let (mut shell, typed) =
+        measured_leaving(user.path(), AddMode::Copy, 3, named(left_folders()), None);
     shell.key(Key::Char(' '));
     shell.key(Key::Char(' '));
     shell.key(Key::Enter);
@@ -3010,7 +3041,7 @@ fn a_folder_whose_only_icloud_files_sit_in_left_folders_still_asks_and_offers_mo
         path: "node_modules".into(),
         files: Some(2),
     }];
-    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Move, 0, only, None);
+    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Move, 0, named(only), None);
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Some of shop stays in iCloud"), "{rows:#?}");
     assert!(!shows(&rows, "only in iCloud;"), "{rows:#?}");
@@ -3143,6 +3174,7 @@ fn a_start_refused_for_the_same_folder_says_so_though_a_job_for_it_runs() {
 fn shop_job(state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-1").unwrap(),
         kind: JobKind::Add,
         project_id: None,
@@ -3298,6 +3330,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
 fn reading_job(source: &str, state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("move-1").unwrap(),
         kind: JobKind::MoveProject,
         project_id: Some(ProjectId::new("reading").unwrap()),
@@ -3319,6 +3352,7 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
     let mut shell = Shell::with(ctx, screen);
     let failed = JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("setup-1").unwrap(),
         kind: JobKind::Setup,
         project_id: Some(ProjectId::new("project-tidepool").unwrap()),
@@ -3359,6 +3393,7 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
 fn a_new_project_copying_its_documents_reads_in_the_desktops_words() {
     let building = |done, total| JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("setup-1").unwrap(),
         kind: JobKind::Setup,
         project_id: Some(ProjectId::new("project-tidepool").unwrap()),
@@ -3531,6 +3566,7 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
 fn notes_delete(state: JobState) -> JobView {
     JobView {
         left: Vec::new(),
+        left_more: None,
         id: RequestId::new("delete-1").unwrap(),
         kind: JobKind::Delete,
         project_id: Some(ProjectId::new("notes").unwrap()),

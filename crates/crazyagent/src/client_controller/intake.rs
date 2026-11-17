@@ -57,10 +57,14 @@ impl OwnerController {
                 bytes,
                 placeholders,
                 skipped,
+                skipped_more,
             } => Ok(crate::projects_home::Measured {
                 bytes,
                 placeholders,
-                skipped,
+                skipped: crate::projects_home::icloud::SkippedFolders {
+                    listed: skipped,
+                    more: skipped_more,
+                },
             }),
             _ => Err(EngineError("controller_read_response".into())),
         }

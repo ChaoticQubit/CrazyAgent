@@ -112,6 +112,62 @@ fn a_download_already_held_is_never_held_twice() {
 }
 
 #[test]
+fn a_skip_list_names_the_first_32_folders_and_counts_the_rest_with_their_files() {
+    let folder = |at: usize, files: Option<u64>| Skipped {
+        path: format!("p{at}/__pycache__"),
+        files,
+    };
+    let mut gathered = SkippedFolders::default();
+    for at in 0..40 {
+        gathered.push(folder(at, Some(2)));
+    }
+    assert_eq!(gathered.listed.len(), SKIPPED_LISTED_MAX);
+    let eight = SkippedMore {
+        folders: 8,
+        files: Some(16),
+    };
+    assert_eq!(gathered.more, Some(eight));
+    assert_eq!(gathered.len(), 40);
+    gathered.push(folder(40, None));
+    let uncounted = SkippedMore {
+        folders: 9,
+        files: None,
+    };
+    assert_eq!(gathered.more, Some(uncounted));
+    let (named, more) = gathered.cut(JOB_SKIPPED_LISTED_MAX);
+    assert_eq!(named, gathered.listed[..JOB_SKIPPED_LISTED_MAX]);
+    let rest = SkippedMore {
+        folders: 38,
+        files: None,
+    };
+    assert_eq!(more, Some(rest));
+    let few = SkippedFolders {
+        listed: vec![folder(0, Some(1))],
+        more: None,
+    };
+    assert_eq!(few.cut(JOB_SKIPPED_LISTED_MAX), (few.listed.clone(), None));
+    let mut whole = SkippedFolders::default();
+    whole.absorb(gathered.clone());
+    whole.absorb(gathered);
+    assert_eq!(whole.listed.len(), SKIPPED_LISTED_MAX);
+    assert_eq!(whole.len(), 82);
+}
+
+#[test]
+fn a_shown_path_is_cut_to_its_bound_at_a_character_edge() {
+    let root = Path::new("/r");
+    let long = format!("{}é/node_modules", "a".repeat(SKIPPED_PATH_MAX - 4));
+    let cut = shown(root, &root.join(&long));
+    assert!(cut.len() <= SKIPPED_PATH_MAX, "{} bytes", cut.len());
+    assert!(cut.ends_with("..."), "{cut}");
+    assert!(long.starts_with(cut.trim_end_matches("...")));
+    assert_eq!(
+        shown(root, &root.join("web/node_modules")),
+        "web/node_modules"
+    );
+}
+
+#[test]
 fn the_registry_refuses_a_download_past_its_bound_until_one_ends() {
     let downloads = Downloads::default();
     let mut claims: Vec<Claim<'_>> = (0..DOWNLOADS_MAX)
@@ -791,7 +847,8 @@ fn listed(root: &Path, bounds: CopyBounds) -> (Vec<String>, Vec<Skipped>) {
         .iter()
         .map(|entry| shown(root, &entry.path))
         .collect();
-    let mut skipped = listing.skipped;
+    assert_eq!(listing.skipped.more, None);
+    let mut skipped = listing.skipped.listed;
     wanted.sort();
     skipped.sort_by(|a, b| a.path.cmp(&b.path));
     (wanted, skipped)
@@ -893,7 +950,7 @@ fn a_download_keeps_the_folders_it_left_so_the_job_can_say_where_they_stayed() {
         FAST,
     );
     assert_eq!(asked.unwrap(), 3);
-    let mut left = download.skipped();
+    let mut left = download.skipped().listed;
     left.sort_by(|a, b| a.path.cmp(&b.path));
     let paths: Vec<&str> = left.iter().map(|folder| folder.path.as_str()).collect();
     assert_eq!(paths, ["dist", "node_modules", "web/__pycache__"]);
@@ -919,7 +976,7 @@ fn a_download_keeps_the_folders_it_left_so_the_job_can_say_where_they_stayed() {
         "only a left folder needs iCloud, so nothing is asked"
     );
     assert_eq!(
-        nothing.skipped(),
+        nothing.skipped().listed,
         [Skipped {
             path: "node_modules".into(),
             files: Some(1),

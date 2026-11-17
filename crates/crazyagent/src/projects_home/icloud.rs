@@ -108,7 +108,7 @@ pub struct Download {
     done: AtomicU64,
     bytes_total: AtomicU64,
     bytes_done: AtomicU64,
-    skipped: Mutex<Vec<Skipped>>,
+    skipped: Mutex<SkippedFolders>,
     cancelled: AtomicBool,
 }
 
@@ -139,8 +139,9 @@ impl Download {
     }
 
     /// The rebuildable folders the download left in iCloud, as its listings found them; an
-    /// add leaves the same ones behind. Output: their paths below the folder and file counts.
-    pub fn skipped(&self) -> Vec<Skipped> {
+    /// add leaves the same ones behind. Output: the first `SKIPPED_LISTED_MAX` with their paths
+    /// below the folder and file counts, and the count of the rest.
+    pub fn skipped(&self) -> SkippedFolders {
         self.skipped
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -149,13 +150,13 @@ impl Download {
 
     /// Records the folders a listing left out. Inputs: the folders and whether the listing
     /// went through the whole folder, so they replace the ones recorded, or one landed folder.
-    fn leave(&self, folders: Vec<Skipped>, whole: bool) {
+    pub(super) fn leave(&self, folders: SkippedFolders, whole: bool) {
         let mut held = self.skipped.lock().unwrap_or_else(PoisonError::into_inner);
         if whole {
-            held.clear();
+            *held = SkippedFolders::default();
         }
-        held.extend(folders);
-        assert!(held.len() as u64 <= FORCED_COPY_BOUNDS.entries);
+        held.absorb(folders);
+        assert!(held.len() <= FORCED_COPY_BOUNDS.entries);
     }
 
     fn record(&self, now: Progress) {
@@ -471,12 +472,98 @@ pub struct Skipped {
     pub files: Option<u64>,
 }
 
+/// The most rebuildable folders a folder-size reply or a download names; past it they are only
+/// counted, so a tree with thousands of them keeps its reply inside one frame.
+pub const SKIPPED_LISTED_MAX: usize = 32;
+
+/// The most of them an intake job names, as its line shows three; a job list carries several
+/// jobs in one reply, so each stays small.
+pub const JOB_SKIPPED_LISTED_MAX: usize = 3;
+
+/// The most bytes of one named folder's path; a longer one is cut and ends in "...".
+pub const SKIPPED_PATH_MAX: usize = 256;
+
+/// The most bytes one named folder takes in a reply: its path with every byte escaped as JSON
+/// escapes a control character, six bytes each, and the field names and file count around it.
+const SKIPPED_ENTRY_BYTES_MAX: usize = 6 * SKIPPED_PATH_MAX + 64;
+const _: () = assert!(
+    SKIPPED_LISTED_MAX * SKIPPED_ENTRY_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX
+);
+const _: () = assert!(
+    JOB_SKIPPED_LISTED_MAX * SKIPPED_ENTRY_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX / 8
+);
+
+/// The rebuildable folders past the named ones: how many, and the files they hold, None when
+/// one of them is only in iCloud itself and cannot be counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkippedMore {
+    pub folders: u64,
+    pub files: Option<u64>,
+}
+
+/// Rebuildable folders as a listing gathers them: the first `SKIPPED_LISTED_MAX` named, the
+/// rest only counted, so the list stays bounded whatever the tree holds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkippedFolders {
+    pub listed: Vec<Skipped>,
+    pub more: Option<SkippedMore>,
+}
+
+impl SkippedFolders {
+    /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted.
+    /// Input: the folder. Output: none.
+    pub fn push(&mut self, folder: Skipped) {
+        self.listed.push(folder);
+    }
+
+    fn count(&mut self, extra: SkippedMore) {
+        self.more = Some(match self.more {
+            None => extra,
+            Some(more) => SkippedMore {
+                folders: more.folders.saturating_add(extra.folders),
+                files: more
+                    .files
+                    .zip(extra.files)
+                    .map(|(had, adds)| had.saturating_add(adds)),
+            },
+        });
+    }
+
+    /// Adds every folder another listing gathered. Input: those folders. Output: none.
+    pub fn absorb(&mut self, other: SkippedFolders) {
+        for folder in other.listed {
+            self.push(folder);
+        }
+        if let Some(more) = other.more {
+            self.count(more);
+        }
+    }
+
+    /// How many folders were gathered, named or counted. Output: the count.
+    pub fn len(&self) -> u64 {
+        self.listed.len() as u64 + self.more.map_or(0, |more| more.folders)
+    }
+
+    /// Whether no folder was gathered. Output: the answer.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The folders as a reply names them. Input: the most to name. Output: the named folders
+    /// and the count of the rest.
+    pub fn cut(&self, cap: usize) -> (Vec<Skipped>, Option<SkippedMore>) {
+        let _ = cap;
+        (self.listed.clone(), self.more)
+    }
+}
+
 /// What one listing of a download's folder found: the entries to ask for, the rebuildable
 /// folders left out and how many entries it went through.
 #[derive(Debug, Default)]
 struct Listing {
     wanted: Vec<Wanted>,
-    skipped: Vec<Skipped>,
+    skipped: SkippedFolders,
     entries: u64,
 }
 
@@ -557,7 +644,7 @@ fn survey(
             }
         }
     }
-    assert!(found.wanted.len() as u64 + found.skipped.len() as u64 <= found.entries);
+    assert!(found.wanted.len() as u64 + found.skipped.len() <= found.entries);
     Ok(found)
 }
 

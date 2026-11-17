@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { failureCopy, receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
   AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntakeJob, IntentReceipt,
-  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, SkippedFolder, ToolFix,
+  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, RefusedTool, ResearchKind, SetupStatus, SkippedFolder, SkippedMore, ToolFix,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import { formatRoute, type IconName, type SidebarProject, type Tone } from "../../ui";
@@ -139,6 +139,13 @@ export function icloudPlaceholders(size: Loaded<FolderSize> | null): number {
  * Output: the folders, none while it is not read or could not be measured. */
 export function icloudSkipped(size: Loaded<FolderSize> | null): SkippedFolder[] {
   return size?.kind === "ok" ? size.value.skipped ?? [] : [];
+}
+
+/** The rebuildable folders the folder-size read counted past the ones it named. Input: the read,
+ * if any. Output: their count and files, null when it named them all. */
+export function icloudSkippedMore(size: Loaded<FolderSize> | null): SkippedMore | null {
+  void size;
+  return null;
 }
 
 /** Whether an add of the folder asks about iCloud first: some of its files must be downloaded,

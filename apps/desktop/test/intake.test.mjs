@@ -1105,7 +1105,7 @@ test("a soft engine refusal asks again only when the override for it was not sen
 
 const icloudProps = (extra = {}) => ({
   open: true, name: "shop", source: "/Users/mira/Desktop/shop", placeholders: 3, way: "move",
-  skipped: [], everything: false, onEverything: noop, onDownload: noop, onCancel: noop, ...extra,
+  skipped: [], skippedMore: null, everything: false, onEverything: noop, onDownload: noop, onCancel: noop, ...extra,
 });
 const SKIPPED = [{ path: "node_modules", files: 57108 }, { path: "web/.venv", files: null }];
 const dialogParts = (dialog) => [].concat(dialog.props.children).flat(Infinity).flatMap(function walk(node) {
@@ -1142,6 +1142,13 @@ test("V243-ICLOUD-MOVE-ZERO: the iCloud question names the rebuildable folders i
   assert.match(page, /role="switch"[^>]*aria-checked="false"/);
   assert.match(page, /Download everything \(slow\)/);
   assert.doesNotMatch(html(ICloudDialog, icloudProps()), /role="switch"|Left in iCloud/, "no switch without a folder to leave");
+});
+
+test("#383 F1: the iCloud question counts the left folders the engine named no more of, and Download everything takes them too", () => {
+  const more = { folders: 1968, files: 1968 };
+  assert.match(html(ICloudDialog, icloudProps({ skipped: SKIPPED.slice(0, 1), skippedMore: more })), /and 1968 more folders \(1968 files\)/);
+  assert.match(html(ICloudDialog, icloudProps({ skipped: SKIPPED.slice(0, 1), skippedMore: { folders: 1, files: null } })), /and 1 more folder \(files not counted\)/);
+  assert.match(html(ICloudDialog, icloudProps({ skipped: SKIPPED.slice(0, 1), skippedMore: more, everything: true })), /59079 files are only in iCloud/);
 });
 
 test("V243-ICLOUD-MOVE-ZERO: Download everything counts the left folders in, and its switch reports the owner's choice", () => {
@@ -1184,6 +1191,11 @@ test("V243-ICLOUD-MOVE-ZERO: the add asks about iCloud for left folders alone, a
   assert.equal(intake.icloudWanted(3, SKIPPED, true), null);
   assert.equal(intake.icloudWanted(3, SKIPPED.slice(0, 1), true), 57111);
   assert.equal(intake.icloudWanted(null, [], false), null);
+  assert.equal(intake.icloudWanted(3, SKIPPED.slice(0, 1), true, { folders: 1968, files: 1968 }), 59079, "#383 F1: the counted folders download too");
+  assert.equal(intake.icloudWanted(3, SKIPPED.slice(0, 1), true, { folders: 1968, files: null }), null);
+  assert.equal(intake.icloudWanted(3, SKIPPED.slice(0, 1), false, { folders: 1968, files: 1968 }), 3);
+  assert.deepEqual(intake.icloudSkippedMore(read({ skipped: SKIPPED, skipped_more: { folders: 1968, files: 1968 } })), { folders: 1968, files: 1968 });
+  assert.equal(intake.icloudSkippedMore(read({ skipped: SKIPPED })), null);
   assert.deepEqual(intake.withEverything(["worktrees"], true), ["worktrees", "download_everything"]);
   assert.deepEqual(intake.withEverything(["worktrees"], false), ["worktrees"]);
   assert.deepEqual(intake.withEverything(["download_everything"], true), ["download_everything"]);

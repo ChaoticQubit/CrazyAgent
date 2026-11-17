@@ -2,7 +2,7 @@ use super::intake::{AddWarning, COPY_WARN_BYTES, ask, copy, event};
 use super::intake_job;
 use super::new_project::{complete, expand, size_label};
 use super::{Flow, Place, Screen, open};
-use crate::projects_home::icloud::Skipped;
+use crate::projects_home::icloud::SkippedFolders;
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView};
 use crate::projects_home::{
     ADD_OVERRIDES_MAX, AddMode, AddOverride, GitLink, Measured, PATH_BYTES_MAX,
@@ -118,7 +118,7 @@ struct Question {
 struct Icloud {
     source: String,
     placeholders: Option<u64>,
-    skipped: Vec<Skipped>,
+    skipped: SkippedFolders,
     everything: bool,
     choice: usize,
 }
@@ -131,6 +131,7 @@ impl Icloud {
             return self.placeholders;
         }
         self.skipped
+            .listed
             .iter()
             .try_fold(self.placeholders?, |sum, folder| {
                 sum.checked_add(folder.files?)
@@ -450,7 +451,7 @@ impl AddFolder {
     fn proceed(&mut self, source: String, mode: AddMode, ctx: &mut Ctx) -> Flow {
         let (placeholders, skipped) = match self.sized(&source) {
             Some(Load::Ready(measured)) => (measured.placeholders, measured.skipped.clone()),
-            _ => (0, Vec::new()),
+            _ => (0, SkippedFolders::default()),
         };
         let fetched = self.agreed.as_deref() == Some(source.as_str());
         if !self.confirming && (placeholders > 0 || !skipped.is_empty()) && !fetched {
@@ -476,7 +477,7 @@ impl AddFolder {
         source: &str,
         mode: AddMode,
         placeholders: Option<u64>,
-        skipped: Vec<Skipped>,
+        skipped: SkippedFolders,
     ) {
         assert!(placeholders != Some(0) || !skipped.is_empty());
         assert!(self.agreed.as_deref() != Some(source));
@@ -1272,7 +1273,7 @@ fn icloud_lines(icloud: &Icloud, limit: usize, ctx: &Ctx, lines: &mut Vec<Line<'
             }
             .to_owned(),
         );
-        texts.extend(icloud.skipped.iter().map(|folder| {
+        texts.extend(icloud.skipped.listed.iter().map(|folder| {
             let files = match folder.files {
                 Some(1) => "1 file".to_owned(),
                 Some(count) => format!("{count} files"),
