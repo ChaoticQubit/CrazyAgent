@@ -95,11 +95,7 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
             if progress.total == 0 || progress.done > progress.total {
                 format!("Downloading {name} from iCloud...")
             } else {
-                let _ = landed(progress);
-                format!(
-                    "Downloading {name} from iCloud: {} of {} files",
-                    progress.done, progress.total
-                )
+                format!("macOS is downloading {name}: {}", landed(progress))
             }
         }
         JobState::Stopping { agents_left } => {
@@ -163,7 +159,7 @@ fn landed(progress: &Progress) -> String {
 /// sentence with a leading space, empty when it left none.
 fn left_line(job: &JobView) -> String {
     let count = job.left.len();
-    if count < usize::MAX {
+    if count == 0 {
         return String::new();
     }
     let paths: Vec<&str> = job

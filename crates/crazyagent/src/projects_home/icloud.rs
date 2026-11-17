@@ -141,9 +141,6 @@ impl Download {
     /// The rebuildable folders the download left in iCloud, as its listings found them; an
     /// add leaves the same ones behind. Output: their paths below the folder and file counts.
     pub fn skipped(&self) -> Vec<Skipped> {
-        if !self.cancelled.load(Ordering::SeqCst) {
-            return Vec::new();
-        }
         self.skipped
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

@@ -453,7 +453,7 @@ impl AddFolder {
             _ => (0, Vec::new()),
         };
         let fetched = self.agreed.as_deref() == Some(source.as_str());
-        if !self.confirming && (placeholders > 0) && !fetched {
+        if !self.confirming && (placeholders > 0 || !skipped.is_empty()) && !fetched {
             self.ask_icloud(&source, mode, Some(placeholders), skipped);
             return Flow::Handled;
         }
@@ -509,7 +509,7 @@ impl AddFolder {
             Key::Right | Key::Tab => icloud.choice = (icloud.choice + 1) % count,
             Key::Left | Key::BackTab => icloud.choice = (icloud.choice + count - 1) % count,
             Key::Esc => self.icloud = None,
-            Key::Char(' ') if icloud.skipped.is_empty() => icloud.everything = !icloud.everything,
+            Key::Char(' ') if !icloud.skipped.is_empty() => icloud.everything = !icloud.everything,
             Key::Enter => {
                 let mode = match icloud.choice {
                     0 => AddMode::Move,
@@ -545,7 +545,7 @@ impl AddFolder {
         ctx: &mut Ctx,
     ) -> Flow {
         let everything = AddOverride::DownloadEverything;
-        if self.everything.as_deref() == Some(source.as_str()) && overrides.contains(&everything) {
+        if self.everything.as_deref() == Some(source.as_str()) && !overrides.contains(&everything) {
             overrides.push(everything);
         }
         assert!(overrides.len() <= ADD_OVERRIDES_MAX);
