@@ -45,6 +45,7 @@ const GO_TO_QUERY_MAX: usize = 100;
 const HELP_WIDTH: u16 = 74;
 const GO_TO_WIDTH: u16 = 58;
 const GO_TO_TOP: u16 = 5;
+const GO_TO_LABEL_CELLS: usize = 32;
 const QUIT_WIDTH: u16 = 46;
 const QUIET: Duration = Duration::from_millis(150);
 const JOB_NOTE_CELLS_MAX: usize = 64;
@@ -162,21 +163,43 @@ pub fn rank(query: &str, label: &str) -> Option<u8> {
         .then_some(2)
 }
 
-/// The running sub-agents of a team graph, as Go to lists them: sub-agents starting, idle or
-/// working, in graph order. Input: the graph. Output: their names.
+/// The running sub-agents of a team graph, as Go to lists them: the role-sub agents the graph
+/// draws as harness leads and as sub-agents under a lead, not native teammates, while
+/// starting, idle or working, in graph order, as the desktop lists them. Input: the graph.
+/// Output: their names.
 fn go_to_agents(graph: &TeamGraph) -> Vec<String> {
     graph
         .nodes
         .iter()
         .filter(|node| {
-            node.kind == NodeKind::Sub
-                && matches!(
-                    node.status,
-                    Some(AgentStatus::Starting | AgentStatus::Idle | AgentStatus::Working)
-                )
+            matches!(node.kind, NodeKind::Lead | NodeKind::Sub)
+                && node.status.is_some_and(AgentStatus::live)
         })
         .map(|node| node.label.clone())
         .collect()
+}
+
+/// Cuts a path from the front to a width so its file name stays: the ellipsis, then the
+/// path's last characters. Inputs: the path, the width in cells and the ellipsis. Output:
+/// the path itself when it fits, else text no wider than the width.
+fn path_tail(path: &str, limit: usize, ellipsis: &str) -> String {
+    if super::text::width(path) <= limit {
+        return path.to_owned();
+    }
+    let room = limit.saturating_sub(super::text::width(ellipsis));
+    let mut used = 0;
+    let mut kept: Vec<char> = path
+        .chars()
+        .rev()
+        .take_while(|character| {
+            used += super::text::char_width(*character);
+            used <= room
+        })
+        .collect();
+    kept.reverse();
+    let out = format!("{ellipsis}{}", kept.into_iter().collect::<String>());
+    assert!(super::text::width(&out) <= limit.max(super::text::width(ellipsis)));
+    out
 }
 
 /// The project page Go to opened on, read only while Go to is open: that project's running
@@ -303,6 +326,8 @@ impl GoTo {
             }
             _ => {}
         }
+        let count = self.matches(ctx).len();
+        self.selected = self.selected.min(count.saturating_sub(1));
     }
 
     fn matches(&self, ctx: &Ctx) -> Vec<Target> {
@@ -1147,9 +1172,14 @@ impl Shell {
         for (index, target) in matches.iter().enumerate() {
             body.push(list_row(
                 cells(
-                    &[32, 14],
+                    &[GO_TO_LABEL_CELLS, 14],
                     vec![
-                        Line::raw(target.label.clone()),
+                        Line::raw(match target.pick {
+                            Pick::File(_) => {
+                                path_tail(&target.label, GO_TO_LABEL_CELLS, ctx.glyphs.ellipsis)
+                            }
+                            Pick::Open | Pick::Agent => target.label.clone(),
+                        }),
                         styled(target.kind, Role::Muted, theme),
                     ],
                     2,

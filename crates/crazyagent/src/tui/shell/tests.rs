@@ -975,6 +975,10 @@ fn tidepool_team() -> TeamGraph {
             sub("team-2", "Grace", AgentStatus::Idle),
             sub("team-3", "Linus", AgentStatus::Stopped),
             sub("team-4", "Hopper", AgentStatus::Starting),
+            GraphNode {
+                kind: NodeKind::Teammate,
+                ..sub("teammate-4-12", "Teammate %12", AgentStatus::Working)
+            },
         ],
         edges: Vec::new(),
         messages: Vec::new(),
@@ -1034,8 +1038,8 @@ fn files(query: &str, paths: &[&str]) -> Arrival {
 }
 
 #[test]
-fn go_to_lists_only_live_sub_agents_of_the_team_graph() {
-    assert_eq!(go_to_agents(&tidepool_team()), ["Grace", "Hopper"]);
+fn go_to_lists_the_live_role_sub_agents_of_the_team_graph_leads_included() {
+    assert_eq!(go_to_agents(&tidepool_team()), ["Ada", "Grace", "Hopper"]);
 }
 
 #[test]
@@ -1057,7 +1061,7 @@ fn go_to_on_a_project_page_reads_its_agents_and_files_only_while_open() {
     shell.arrive(files("", &["src/main.rs", "README.md"]));
     let rows = go_to_rows(&shell);
     assert_eq!(rows.len(), GO_TO_ROWS_MAX);
-    assert_eq!(rows[ProjectTab::ALL.len()], ("Grace".to_owned(), "Agent"));
+    assert_eq!(rows[ProjectTab::ALL.len()], ("Ada".to_owned(), "Agent"));
 
     typed(&mut shell, "main");
     assert_eq!(files_asked(&mut shell), ["m"], "one read at a time");
@@ -1165,4 +1169,58 @@ fn go_to_opens_agents_for_a_picked_agent_and_says_how_to_read_its_messages() {
         said.rest,
         "Pick Grace in the agents list, then press M for its messages."
     );
+}
+
+#[test]
+fn a_go_to_file_row_keeps_the_end_of_a_long_path() {
+    let long = "crates/crazyagent/src/tui/shell/tests.rs";
+    let ellipsis = UNICODE.ellipsis;
+    assert_eq!(path_tail("src/main.rs", 32, ellipsis), "src/main.rs");
+    assert_eq!(
+        path_tail(long, 20, ellipsis),
+        format!(
+            "{ellipsis}{}",
+            &long[long.len() - (20 - ellipsis.chars().count())..]
+        )
+    );
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    shell.arrive(files("", &[long]));
+    typed(&mut shell, "tests.rs");
+    let Some(Overlay::GoTo(go)) = &shell.overlay else {
+        panic!("Go to is not open");
+    };
+    let (modal, _) = shell.go_to_modal(go);
+    let text: Vec<String> = modal
+        .body
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    assert!(
+        text.iter()
+            .any(|line| line.contains("shell/tests.rs") && line.contains("File")),
+        "{text:?}"
+    );
+}
+
+#[test]
+fn go_to_keeps_its_selection_on_a_row_when_a_read_shrinks_the_list() {
+    let mut shell = tidepool_page();
+    shell.key(Key::Ctrl('k'));
+    shell.arrive(files("", &[]));
+    typed(&mut shell, "zzq");
+    shell.arrive(files("z", &["zzq/one.rs", "zzq/two.rs"]));
+    assert_eq!(go_to_rows(&shell).len(), 2);
+    shell.key(Key::Down);
+    shell.arrive(files("zzq", &["zzq/one.rs"]));
+    assert_eq!(go_to_rows(&shell), [("zzq/one.rs".to_owned(), "File")]);
+    let Some(Overlay::GoTo(go)) = &shell.overlay else {
+        panic!("Go to is not open");
+    };
+    assert_eq!(go.selected, 0);
 }
