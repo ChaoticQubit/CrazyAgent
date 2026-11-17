@@ -2766,3 +2766,93 @@ fn enter_runs_setup_while_this_screens_own_fix_runs() {
         lead(&shell)
     );
 }
+
+/// V243-SETUP-TUI-FIX-PENDING (#381 F3): on first run, a setup run that ends while this
+/// screen's own permission fix still runs, or while its tool is checked again, keeps Setup
+/// open; once the fix ends the screen says how the tool reads and only then leaves for the
+/// Harnesses step, as `quiet` requires for the 'c' key.
+#[test]
+fn first_run_leaves_only_after_its_own_fix_ends_when_the_run_ends_first() {
+    let mut shell = first_run(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Run { .. }))
+    );
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let mut fixing = refused_status(crate::setup::RefusedTool::FixButton);
+    fixing.dependencies[2].busy = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(fixing))));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Setup { first_run: true }),
+        "the run ended while the fix runs: {}",
+        lead(&shell)
+    );
+    let mut checking = installed_status();
+    checking.dependencies[2].state = DependencyState::Checking;
+    shell.arrive(event(AppSetupEvent::Status(Ok(checking))));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Setup { first_run: true }),
+        "the fixed tool is checked again: {}",
+        lead(&shell)
+    );
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    assert_eq!(
+        lead(&shell),
+        "Permissions fixed. Graphify command can run now."
+    );
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
+}
+
+/// V243-SETUP-TUI-FIX-PENDING (#381 F3 r2): in Settings a run that ends while this screen's
+/// own permission fix runs says so at once, and the fix's outcome, said when it ends, is the
+/// last word, never overwritten by the run's end.
+#[test]
+fn settings_says_the_run_end_then_its_own_fix_outcome_last() {
+    let mut shell = settings(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    for _ in 0..5 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Run { .. }))
+    );
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let mut fixing = refused_status(crate::setup::RefusedTool::FixButton);
+    fixing.dependencies[2].busy = true;
+    shell.arrive(event(AppSetupEvent::Status(Ok(fixing))));
+    assert!(
+        lead(&shell).starts_with("Setup finished"),
+        "{}",
+        lead(&shell)
+    );
+    shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
+    assert_eq!(
+        lead(&shell),
+        "Permissions fixed. Graphify command can run now."
+    );
+}
