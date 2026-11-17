@@ -244,7 +244,7 @@ async fn the_owner_adds_a_project_through_new_project_and_finds_it_set_up() {
     );
     let folder = Path::new(&setup.folder);
     assert!(
-        folder.starts_with(&golden.projects) && folder.is_dir(),
+        folder.starts_with(golden.projects.as_path()) && folder.is_dir(),
         "the project's folder is made in the projects folder"
     );
     let (_, _, saved_pools) = pools(&mut golden.owner.controller).await;
