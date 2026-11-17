@@ -141,7 +141,7 @@
   "crates/crazyagent/src/tui/screens/settings_harnesses/tests.rs": 1856,
   "crates/crazyagent/src/tui/screens/settings_plugins.rs": 2420,
   "crates/crazyagent/src/tui/screens/settings_plugins/tests.rs": 1947,
-  "crates/crazyagent/src/tui/screens/team/tests.rs": 5838,
+  "crates/crazyagent/src/tui/screens/team/tests.rs": 5792,
   "crates/crazyagent/src/tui/screens/usage/tests.rs": 1623,
   "crates/crazyagent/src/usage/capture.rs": 1957,
   "crates/crazyagent/src/usage/capture/counting_tests.rs": 1880,
