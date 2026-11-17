@@ -170,33 +170,31 @@ pub(super) fn npm_wrap(
 }
 
 /// Takes back what the boundary granted a finished job's container and deletes the container
-/// ([`crazyagent_win_sandbox::release`]), named from the job's folder and home as its launch
-/// named it ([`crate::sandbox::windows::container_for`]), then deletes the profile. A profile
-/// never written means nothing was granted. Inputs: the job's profile, folder and home.
-/// Output: whether nothing is left; a refused release keeps the profile and is logged with its
-/// cause.
+/// ([`crazyagent_win_sandbox::release`]), then deletes the profile. The container is named
+/// from the canonical job folder and home its launch used, read before the job ran, since the
+/// job may rename or delete its own folders ([`crate::sandbox::windows::container_for`]). A
+/// profile never written means nothing was granted. Inputs: the job's profile, folder and
+/// home. Output: whether nothing is left; a profile that cannot be read or a refused release
+/// is logged with its cause and kept.
 pub(super) fn release(profile: &Path, folder: &Path, home: &Path) -> bool {
+    assert!(folder.is_absolute(), "{}", folder.display());
+    assert!(home.is_absolute(), "{}", home.display());
     match std::fs::symlink_metadata(profile) {
+        Ok(_) => {}
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return true,
-        _ => {}
+        Err(problem) => {
+            eprintln!("context_mode_container_not_released cause={problem}");
+            return false;
+        }
     }
-    let named = crate::sandbox::canonical(folder)
-        .and_then(|folder| Ok((folder, crate::sandbox::canonical(home)?)))
-        .map(|(folder, home)| crate::sandbox::windows::container_for(&folder, &home));
-    let released = named
-        .map_err(|problem| problem.to_string())
-        .and_then(|container| {
-            assert!(container.starts_with("crazyagent."));
-            crazyagent_win_sandbox::release(profile, &container).map_err(|cause| cause.to_string())
-        });
-    match released {
+    let container = crate::sandbox::windows::container_for(folder, home);
+    match crazyagent_win_sandbox::release(profile, &container) {
         Ok(()) => {
             let _ = std::fs::remove_file(profile);
             true
         }
         Err(cause) => {
             eprintln!("context_mode_container_not_released cause={cause}");
-            assert!(profile.exists());
             false
         }
     }
