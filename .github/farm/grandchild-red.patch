@@ -1,0 +1,26 @@
+diff --git a/crates/crazyagent/src/harnesses/update/run.rs b/crates/crazyagent/src/harnesses/update/run.rs
+index 984bc4e45..1150f2859 100644
+--- a/crates/crazyagent/src/harnesses/update/run.rs
++++ b/crates/crazyagent/src/harnesses/update/run.rs
+@@ -378,7 +378,7 @@ mod windows {
+         let stdout = Tail::start(child.stdout.take());
+         let stderr = Tail::start(child.stderr.take());
+         let status = waited(&mut child, limit);
+-        drop(tree);
++        std::mem::forget(tree);
+         let _ = child.kill();
+         let _ = child.wait();
+         let (stdout, stderr) = (stdout.taken(), stderr.taken());
+diff --git a/crates/crazyagent/src/plugins/check.rs b/crates/crazyagent/src/plugins/check.rs
+index e4be460a8..5cbcf5c9c 100644
+--- a/crates/crazyagent/src/plugins/check.rs
++++ b/crates/crazyagent/src/plugins/check.rs
+@@ -201,7 +201,7 @@ pub fn check_command(
+         (Some(stdin), Some(stdout)) => converse(stdin, stdout, limit),
+         _ => Err("server_cant_start"),
+     };
+-    drop(tree);
++    std::mem::forget(tree);
+     let _ = child.kill();
+     let _ = child.wait();
+     result
