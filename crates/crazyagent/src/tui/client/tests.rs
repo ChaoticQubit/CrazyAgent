@@ -287,6 +287,7 @@ fn idle_service(
         executable,
         root: layout.root().to_path_buf(),
         path: "/usr/bin:/bin".into(),
+        home: None,
         definition: folder.join("not-installed.plist"),
         user: None,
     }

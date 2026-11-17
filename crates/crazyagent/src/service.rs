@@ -1,5 +1,9 @@
 use crate::engine::owner::{OwnerClient, OwnerClientKind};
 use crate::paths::{Layout, Platform, RootEnvironment};
+use markup::{
+    bounded_text, plist_string, systemd_environment_quoted, systemd_quoted, systemd_specifiers,
+    systemd_unquoted, windows_quoted, xml,
+};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -69,6 +73,10 @@ pub struct Service {
     pub executable: PathBuf,
     pub root: PathBuf,
     pub path: OsString,
+    /// The HOME of the process that defined the service. A launchd property list gives it to
+    /// the engine, so the engine sees the HOME its CLI or app saw; none when that process had
+    /// none, and only macOS writes it.
+    pub home: Option<PathBuf>,
     pub definition: PathBuf,
     pub user: Option<String>,
 }
@@ -241,6 +249,7 @@ impl Service {
                 home.as_deref(),
                 std::env::var_os("APPDIR").as_deref().map(Path::new),
             ),
+            home: home.clone(),
             definition,
             user: user.filter(|_| platform == Platform::Windows),
         })
@@ -283,13 +292,22 @@ impl Service {
                 "the service executable and data folder must be absolute",
             ));
         }
+        if self.platform == Platform::MacOs
+            && let Some(home) = &self.home
+            && (!home.is_absolute() || control(&home.to_string_lossy()))
+        {
+            return Err(failure(
+                "the service HOME must be absolute without control characters",
+            ));
+        }
         Ok(())
     }
 
     /// The text of the service definition: a launchd property list, a systemd unit or a
-    /// Task Scheduler XML document. It runs `<executable> engine --home <root>`, appends
-    /// output to `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no
-    /// output redirection) and restarts after a crash.
+    /// Task Scheduler XML document. It runs `<executable> engine --home <root>` with the
+    /// service PATH (and on macOS the defining HOME), appends output to
+    /// `<root>/logs/engine.log` (through `cmd.exe` on Windows, whose task has no output
+    /// redirection) and restarts after a crash.
     pub fn definition_text(&self) -> Result<String, ServiceError> {
         self.checked()?;
         let executable = self.executable.to_string_lossy();
@@ -315,6 +333,7 @@ impl Service {
 \t<dict>\n\
 \t\t<key>PATH</key>\n\
 \t\t<string>{path}</string>\n\
+{home}\
 \t</dict>\n\
 \t<key>RunAtLoad</key>\n\
 \t<true/>\n\
@@ -336,6 +355,12 @@ impl Service {
                 executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
+                home = self.home.as_deref().map_or_else(String::new, |home| {
+                    format!(
+                        "\t\t<key>HOME</key>\n\t\t<string>{}</string>\n",
+                        xml(&home.to_string_lossy())
+                    )
+                }),
                 log = xml(&log),
             ),
             Platform::Linux => format!(
@@ -1306,107 +1331,6 @@ fn copy_private(source: &Path, copy: &Path) -> std::io::Result<()> {
     file.sync_all()
 }
 
-fn xml(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&apos;"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-fn systemd_specifiers(text: &str) -> String {
-    text.replace('%', "%%")
-}
-
-/// The largest definition or Info.plist read when telling installed versions apart.
-const PLIST_BYTES_MAX: u64 = 64 << 10;
-
-/// Reads a small file as UTF-8 text. Input: the path. Output: the text, or none when it is
-/// missing, not UTF-8 or larger than [`PLIST_BYTES_MAX`].
-fn bounded_text(path: &Path) -> Option<String> {
-    use std::io::Read;
-    let mut text = String::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(PLIST_BYTES_MAX + 1)
-        .read_to_string(&mut text)
-        .ok()?;
-    (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
-}
-
-/// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
-/// the line. Output: the text, or none for a line that holds no such element.
-fn plist_string(line: &str) -> Option<String> {
-    let inner = line
-        .trim()
-        .strip_prefix("<string>")?
-        .strip_suffix("</string>")?;
-    Some(
-        inner
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&amp;", "&"),
-    )
-}
-
-/// Reads back the first word of an ExecStart= line as [`systemd_quoted`] wrote it.
-/// Input: the line after `ExecStart=`. Output: the word, or none when it is not quoted so.
-fn systemd_unquoted(text: &str) -> Option<String> {
-    let mut characters = text.strip_prefix('"')?.chars();
-    let mut word = String::new();
-    while let Some(character) = characters.next() {
-        match character {
-            '"' => return Some(word),
-            '\\' => word.push(characters.next()?),
-            '%' | '$' => {
-                if characters.next()? != character {
-                    return None;
-                }
-                word.push(character);
-            }
-            other => word.push(other),
-        }
-    }
-    None
-}
-
-/// Quotes one word of an ExecStart= line, where systemd also expands `$` variables, so a
-/// `$` is doubled on top of [`systemd_environment_quoted`]. Input: the word. Output: the
-/// quoted text.
-fn systemd_quoted(text: &str) -> String {
-    systemd_environment_quoted(&text.replace('$', "$$"))
-}
-
-/// Quotes a value for systemd: backslash and double quote are escaped and `%` (a specifier)
-/// is doubled. Environment= expands no variables, so `$` is written as is. Input: the value.
-/// Output: the quoted text.
-fn systemd_environment_quoted(text: &str) -> String {
-    let mut quoted = String::from("\"");
-    for character in text.chars() {
-        match character {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            '%' => quoted.push_str("%%"),
-            other => quoted.push(other),
-        }
-    }
-    quoted.push('"');
-    quoted
-}
-
-fn windows_quoted(text: &str) -> String {
-    format!("\"{text}\"")
-}
-
 #[cfg(unix)]
 fn current_uid() -> u32 {
     rustix::process::getuid().as_raw()
@@ -1989,6 +1913,11 @@ fn unanswered(layout: &Layout, bound: Duration) -> ServiceError {
 mod acl;
 mod cli_link;
 pub use cli_link::{WINDOWS_PATH_FOLDER_VARIABLE, link_cli, windows_path_command};
+
+/// The escapes and quotes each manager's definition format needs, and the bounded reads
+/// that take a written definition or Info.plist apart again. Inputs: text or a path.
+/// Outputs: the escaped, quoted or read-back text.
+mod markup;
 
 #[cfg(test)]
 mod tests;
