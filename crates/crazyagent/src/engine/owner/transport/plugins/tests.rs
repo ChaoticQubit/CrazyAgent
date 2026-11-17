@@ -353,6 +353,12 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
         check(&root.join("missing-server.exe")),
         "server_command_not_found"
     );
+    assert_eq!(check(&root.join("npx.cmd")), "server_command_not_found");
+    let shipped = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(&shipped, root.join("tool")).unwrap();
+    assert_eq!(check(&root.join("tool")), "server_batch_file");
     let server = std::env::current_exe().unwrap();
     let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
     let checked = check(&server);

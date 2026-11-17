@@ -1,6 +1,7 @@
-/// V243-WIN-MCP-NPX: an approved server whose command is a Windows batch file other than
-/// npm's npx.cmd is left out of a launch, by name in `batch_files` and `left_out`, while a
-/// server whose command is a program runs as approved.
+/// V243-WIN-MCP-NPX and #341 sec F1: an approved server whose command is a Windows batch file
+/// other than npm's npx.cmd, or a name with no extension or a dotted one with a `.cmd` beside
+/// it, is left out of a launch, by name in `batch_files` and `left_out`, while a server whose
+/// command is a program runs as approved.
 #[test]
 fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     use super::{Command, ResultValue, execute};
@@ -20,12 +21,19 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     connection
         .execute("INSERT INTO projects(id, body) VALUES('app', ?1)", [app])
         .unwrap();
-    let batch = root.join("run.bat");
-    std::fs::write(&batch, "@ECHO off\r\n").unwrap();
+    for name in ["run.bat", "tool.cmd", "tool.v2.cmd"] {
+        std::fs::write(root.join(name), "@ECHO off\r\n").unwrap();
+    }
     let program = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
         .join("System32")
         .join("where.exe");
-    for (name, command) in [("notes", batch), ("lookup", program)] {
+    let servers = [
+        ("notes", root.join("run.bat")),
+        ("bare", root.join("tool")),
+        ("dotted", root.join("tool.v2")),
+        ("lookup", program),
+    ];
+    for (name, command) in servers {
         let spec = ServerSpec::Stdio {
             command: command.to_str().unwrap().to_owned(),
             args: Vec::new(),
@@ -60,8 +68,13 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     .unwrap() else {
         panic!("launch set required");
     };
-    assert_eq!(launch.batch_files, ["notes"]);
-    assert_eq!(launch.left_out, ["notes"]);
+    let sorted = |names: &[String]| {
+        let mut names = names.to_vec();
+        names.sort();
+        names
+    };
+    assert_eq!(sorted(&launch.batch_files), ["bare", "dotted", "notes"]);
+    assert_eq!(sorted(&launch.left_out), ["bare", "dotted", "notes"]);
     assert_eq!(launch.context_mode_off, None);
     let names: Vec<&str> = launch.servers.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["lookup"]);

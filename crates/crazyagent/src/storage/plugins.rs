@@ -1698,11 +1698,17 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 continue;
             }
         };
-        let Some(spec) = crate::plugins::without_cmd_exe(root, spec) else {
-            eprintln!("plugin_server_batch_left_out name={}", server.name);
-            batch_files.push(server.name.clone());
-            left_out.push(server.name);
-            continue;
+        let spec = match crate::plugins::without_cmd_exe(root, spec) {
+            Ok(spec) => spec,
+            Err(code) => {
+                eprintln!(
+                    "plugin_server_batch_left_out name={} code={code}",
+                    server.name
+                );
+                batch_files.push(server.name.clone());
+                left_out.push(server.name);
+                continue;
+            }
         };
         let mut secrets = Vec::with_capacity(server.secrets.len());
         for secret in server.secrets {
