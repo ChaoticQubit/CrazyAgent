@@ -3349,6 +3349,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.ide_run(project_id, command)?; call.await }.await;
             routed(result)
         }
+        "desktop_ide_reveal" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                path: String,
+            }
+            let Args { project_id, path } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.ide_reveal(project_id, path)?; call.await }.await;
+            routed(result)
+        }
         "desktop_ide_run_mode" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
