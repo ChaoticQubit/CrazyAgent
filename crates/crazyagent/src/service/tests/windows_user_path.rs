@@ -1,3 +1,4 @@
+#![cfg(windows)]
 use super::*;
 
 /// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry

@@ -2481,5 +2481,4 @@ mod launchd;
 /// The Windows user PATH rows of link_cli: a folder named like PowerShell code is added
 /// once, one holding a ';' is refused, and the PATH keeps its kind and unexpanded
 /// references. Inputs: the user's stored PATH, restored after each row. Output: none.
-#[cfg(windows)]
 mod windows_user_path;
