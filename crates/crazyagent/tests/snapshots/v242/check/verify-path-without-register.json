@@ -1,0 +1,36 @@
+{
+  "1-propose": {
+    "result": {
+      "kind": "Applied"
+    }
+  },
+  "2-approve": {
+    "result": {
+      "kind": "Applied"
+    }
+  },
+  "3-pin": {
+    "kind": "Applied"
+  },
+  "4-verify": {
+    "response": {
+      "kind": "OutcomeUnknown",
+      "operation_id": "<id-1>"
+    }
+  },
+  "5-inspect": {
+    "refused": "candidate_missing"
+  },
+  "6-accept": {
+    "data": {
+      "kind": "Domain",
+      "outcome": {
+        "code": "candidate_missing",
+        "kind": "Rejected"
+      }
+    }
+  },
+  "7-facts": {
+    "names_draft_identity": false
+  }
+}

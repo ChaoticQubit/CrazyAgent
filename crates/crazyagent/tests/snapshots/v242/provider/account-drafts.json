@@ -1,0 +1,259 @@
+[
+  {
+    "method": "subscription",
+    "provider": "chatgpt",
+    "stored": {
+      "connection": {
+        "account_ref": "chatgpt-login-<id-1>",
+        "auth": {
+          "method": "native_managed",
+          "profile_ref": "chatgpt-profile-<id-1>"
+        },
+        "endpoint": {
+          "kind": "native"
+        },
+        "harness": "codex",
+        "id": "chatgpt-account-<id-1>",
+        "model": {
+          "author": "openai",
+          "id": "native-default"
+        },
+        "protocol": "native",
+        "provider": "openai"
+      },
+      "details": {
+        "name": "ChatGPT / Codex",
+        "provider": "chatgpt"
+      }
+    }
+  },
+  {
+    "method": "api_key",
+    "provider": "chatgpt",
+    "stored": {
+      "connection": {
+        "account_ref": "chatgpt-login-<id-1>",
+        "auth": {
+          "credential_ref": "chatgpt-key-<id-1>",
+          "method": "api_key"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "https://api.openai.com/v1"
+        },
+        "harness": "rcli",
+        "id": "chatgpt-account-<id-1>",
+        "model": {
+          "author": "openai",
+          "id": "snapshot-model"
+        },
+        "protocol": "openai-chat",
+        "provider": "openai"
+      },
+      "details": {
+        "name": "ChatGPT / Codex",
+        "provider": "chatgpt"
+      }
+    }
+  },
+  {
+    "method": "subscription",
+    "provider": "claude",
+    "stored": {
+      "connection": {
+        "account_ref": "claude-login-<id-1>",
+        "auth": {
+          "method": "native_managed",
+          "profile_ref": "claude-profile-<id-1>"
+        },
+        "endpoint": {
+          "kind": "native"
+        },
+        "harness": "claude",
+        "id": "claude-account-<id-1>",
+        "model": {
+          "author": "anthropic",
+          "id": "native-default"
+        },
+        "protocol": "native",
+        "provider": "anthropic"
+      },
+      "details": {
+        "name": "Claude",
+        "provider": "claude"
+      }
+    }
+  },
+  {
+    "method": "api_key",
+    "provider": "claude",
+    "stored": {
+      "connection": {
+        "account_ref": "claude-login-<id-1>",
+        "auth": {
+          "credential_ref": "claude-key-<id-1>",
+          "method": "api_key"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "https://api.anthropic.com/v1"
+        },
+        "harness": "rcli",
+        "id": "claude-account-<id-1>",
+        "model": {
+          "author": "anthropic",
+          "id": "snapshot-model"
+        },
+        "protocol": "anthropic-messages",
+        "provider": "anthropic"
+      },
+      "details": {
+        "name": "Claude",
+        "provider": "claude"
+      }
+    }
+  },
+  {
+    "method": "api_key",
+    "provider": "openrouter",
+    "stored": {
+      "connection": {
+        "account_ref": "openrouter-login-<id-1>",
+        "auth": {
+          "credential_ref": "openrouter-key-<id-1>",
+          "method": "api_key"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "https://openrouter.ai/api/v1"
+        },
+        "harness": "rcli",
+        "id": "openrouter-account-<id-1>",
+        "model": {
+          "author": "openrouter",
+          "id": "snapshot-model"
+        },
+        "protocol": "openai-chat",
+        "provider": "openrouter"
+      },
+      "details": {
+        "name": "OpenRouter",
+        "provider": "openrouter"
+      }
+    }
+  },
+  {
+    "method": "api_key",
+    "provider": "openai_api",
+    "stored": {
+      "connection": {
+        "account_ref": "openai-login-<id-1>",
+        "auth": {
+          "credential_ref": "openai-key-<id-1>",
+          "method": "api_key"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "https://api.openai.com/v1"
+        },
+        "harness": "rcli",
+        "id": "openai-account-<id-1>",
+        "model": {
+          "author": "openai",
+          "id": "snapshot-model"
+        },
+        "protocol": "openai-chat",
+        "provider": "openai"
+      },
+      "details": {
+        "name": "OpenAI API",
+        "provider": "openai_api"
+      }
+    }
+  },
+  {
+    "method": "api_key",
+    "provider": "anthropic_api",
+    "stored": {
+      "connection": {
+        "account_ref": "anthropic-login-<id-1>",
+        "auth": {
+          "credential_ref": "anthropic-key-<id-1>",
+          "method": "api_key"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "https://api.anthropic.com/v1"
+        },
+        "harness": "rcli",
+        "id": "anthropic-account-<id-1>",
+        "model": {
+          "author": "anthropic",
+          "id": "snapshot-model"
+        },
+        "protocol": "anthropic-messages",
+        "provider": "anthropic"
+      },
+      "details": {
+        "name": "Anthropic API",
+        "provider": "anthropic_api"
+      }
+    }
+  },
+  {
+    "method": "url",
+    "provider": "openai_compatible",
+    "stored": {
+      "connection": {
+        "account_ref": "url-login-<id-1>",
+        "auth": {
+          "method": "none"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "https://models.example.invalid/v1"
+        },
+        "harness": "rcli",
+        "id": "url-account-<id-1>",
+        "model": {
+          "author": "openai-compatible",
+          "id": "snapshot-model"
+        },
+        "protocol": "openai-chat",
+        "provider": "openai-compatible"
+      },
+      "details": {
+        "name": "Any OpenAI-compatible URL",
+        "provider": "openai_compatible"
+      }
+    }
+  },
+  {
+    "method": "url",
+    "provider": "local",
+    "stored": {
+      "connection": {
+        "account_ref": "local-login-<id-1>",
+        "auth": {
+          "method": "none"
+        },
+        "endpoint": {
+          "kind": "http",
+          "url": "http://127.0.0.1:<port>/v1"
+        },
+        "harness": "rcli",
+        "id": "local-account-<id-1>",
+        "model": {
+          "author": "openai-compatible",
+          "id": "snapshot-model"
+        },
+        "protocol": "openai-chat",
+        "provider": "openai-compatible"
+      },
+      "details": {
+        "name": "Local models (Ollama)",
+        "provider": "local"
+      }
+    }
+  }
+]

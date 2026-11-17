@@ -1,0 +1,15 @@
+{
+  "read": {
+    "lead": [
+      "release-notes",
+      "code-review"
+    ],
+    "master": null,
+    "worker": []
+  },
+  "saved": {
+    "result": {
+      "kind": "Applied"
+    }
+  }
+}

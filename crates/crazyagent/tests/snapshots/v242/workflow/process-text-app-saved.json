@@ -1,0 +1,19 @@
+{
+  "read": {
+    "ok": {
+      "outside": false,
+      "text": "Run the tests before every commit.\nKeep each change set small.\n",
+      "version": 1
+    }
+  },
+  "saved": {
+    "ok": {
+      "kind": "saved",
+      "size": {
+        "bytes": 116,
+        "claude_bytes_max": 21142
+      },
+      "version": 1
+    }
+  }
+}

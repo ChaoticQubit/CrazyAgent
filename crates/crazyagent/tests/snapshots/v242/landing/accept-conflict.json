@@ -1,0 +1,37 @@
+{
+  "decision": {
+    "conflict": [
+      "README"
+    ]
+  },
+  "owner": {
+    "branch": "main",
+    "commits": [
+      {
+        "author": "E2E Owner <e2e@example.invalid>",
+        "body": [],
+        "parents": [
+          "<id-1>"
+        ],
+        "subject": "Owner: line two"
+      },
+      {
+        "author": "E2E Owner <e2e@example.invalid>",
+        "body": [],
+        "parents": [],
+        "subject": "first"
+      }
+    ],
+    "files": [
+      {
+        "path": "README",
+        "text": [
+          "one",
+          "two owners",
+          "three"
+        ]
+      }
+    ]
+  },
+  "owner_status": []
+}
