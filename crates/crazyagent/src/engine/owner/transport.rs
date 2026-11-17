@@ -17,7 +17,7 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::{Engine, io_error, read_frame, verify_peer};
+use crate::engine::{Engine, io_error, owner_trace as trace, read_frame, verify_peer};
 use crate::model_gateway::{ConnectionState, Observation};
 use crate::platform::FileExt;
 use crate::platform::unix_socket::{UnixListener, UnixStream};
@@ -1514,9 +1514,9 @@ impl OwnerServer {
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
-            tasks.clients.spawn(async move {
+            tasks.clients.spawn(trace::connection(async move {
                 serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
-            });
+            }));
         }
     }
 
@@ -2309,7 +2309,7 @@ async fn serve_admitted(
     deadline: Instant,
 ) {
     let body = &frame[4..];
-    let exchange = async {
+    let exchange = trace::ended(async {
         let Some(a) = admission else {
             let request: RunnerRequest =
                 serde_json::from_slice(body).map_err(|_| failure("runner_request_invalid"))?;
@@ -2395,7 +2395,7 @@ async fn serve_admitted(
         }
         let request: OwnerRequest =
             serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
-        request.validate()?;
+        trace::request(&request).validate()?;
         if projects_home::handles(&request) {
             return Ok(Some(Deferred::ProjectsHome(a, Box::new(request))));
         }
@@ -2471,7 +2471,7 @@ async fn serve_admitted(
                 .map(|()| None);
         }
         if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
-            && projects_home::running(authority, &a, operation_id)
+            && trace::held(projects_home::running(authority, &a, operation_id))
         {
             let reply = projects_home::still_running(engine, authority, auth, &a, operation_id)
                 .await
@@ -2513,7 +2513,7 @@ async fn serve_admitted(
         write_owner_reply(stream, result, id, mutation)
             .await
             .map(|()| None)
-    };
+    });
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
@@ -2685,7 +2685,7 @@ async fn refuse(
     let Some(reply) = refusal(&auth[..4] == b"CAR1", &frame[4..], code)? else {
         return Ok(());
     };
-    stream.write_all(&reply).await.map_err(io_error)
+    trace::refused(stream, &reply).await.map_err(io_error)
 }
 
 /// Encodes the refusal of one request in the reply shape of its protocol.
@@ -2736,7 +2736,7 @@ async fn write_owner_reply(
     mutation: bool,
 ) -> Result<(), EngineError> {
     let frame = owner_reply_frame(result, id, mutation)?;
-    write_reply(stream, &frame).await
+    trace::reply(write_reply(stream, &frame), "written").await
 }
 
 /// The longest a reply written under the owner barrier waits for its client to read it.
