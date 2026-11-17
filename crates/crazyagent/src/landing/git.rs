@@ -959,7 +959,11 @@ impl Repo {
     /// lock goes when the copy is not put back, so a git the step killed never leaves a lock there
     /// that no sweep removes, and the index is copied only from a plain file with one link, opened
     /// without following a link or waiting on a FIFO, and keeps the index's modified time, so an
-    /// entry racy against the index stays racy and git still reads its file (RV-DS241-147). Once
+    /// entry racy against the index stays racy and git still reads its file (RV-DS241-147). The
+    /// first copy stays open until the step's copy is judged, so no file written meanwhile takes
+    /// its inode number, which ext4 hands straight to the next file: a copy rewritten twice, as a
+    /// split move's `read-tree -m` and `update-index --refresh` do, or replaced by a link, never
+    /// reads as the first copy (FARM-LINUX R3). Once
     /// git exits 0 having rewritten the copy, the copy takes the index's place only when it too is
     /// a plain file with one link, so whatever a raced step leaves there is never taken, and a step
     /// that only reads leaves the index as it was; the step itself never writes the git folder
@@ -1032,40 +1036,44 @@ impl Repo {
             });
         }
         let plain = |meta: &std::fs::Metadata| meta.file_type().is_file() && meta.nlink() == 1;
-        let fresh = || {
+        let fresh = || -> Option<Option<std::fs::File>> {
             let renewed = std::fs::remove_dir_all(folder)
                 .err()
                 .is_none_or(|error| error.kind() == std::io::ErrorKind::NotFound)
                 && std::fs::create_dir(folder).is_ok();
-            renewed
-                && match std::fs::OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                    .open(&index)
-                {
-                    Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-                    Ok(mut real) => match real.metadata() {
-                        Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
-                            .and_then(|mut written| {
-                                std::io::copy(&mut real, &mut written)?;
-                                let modified =
-                                    std::fs::FileTimes::new().set_modified(meta.modified()?);
-                                written.set_times(modified)
-                            })
-                            .is_ok(),
-                        _ => false,
-                    },
-                }
+            if !renewed {
+                return None;
+            }
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&index)
+            {
+                Err(error) => (error.kind() == std::io::ErrorKind::NotFound).then_some(None),
+                Ok(mut real) => match real.metadata() {
+                    Ok(meta) if plain(&meta) => std::fs::File::create_new(copy)
+                        .and_then(|mut written| {
+                            std::io::copy(&mut real, &mut written)?;
+                            let modified = std::fs::FileTimes::new().set_modified(meta.modified()?);
+                            written.set_times(modified)?;
+                            Ok(written)
+                        })
+                        .ok()
+                        .map(Some),
+                    _ => None,
+                },
+            }
         };
-        let copied = fresh();
+        let held = fresh();
         let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino());
-        let ran = if copied {
-            let before = std::fs::symlink_metadata(copy)
-                .ok()
-                .map(|meta| identity(&meta));
-            step().map(|output| (before, output))
-        } else {
-            Err(failed())
+        let ran = match &held {
+            Some(first) => first
+                .as_ref()
+                .map(|first| first.metadata().map(|meta| identity(&meta)))
+                .transpose()
+                .map_err(|_| failed())
+                .and_then(|before| step().map(|output| (before, output))),
+            None => Err(failed()),
         };
         let left = std::fs::symlink_metadata(copy).ok();
         let rewritten = matches!(&ran, Ok((before, output))
@@ -1075,6 +1083,7 @@ impl Repo {
             && std::fs::symlink_metadata(copy).is_ok_and(|meta| plain(&meta))
             && std::fs::rename(copy, &lock).is_ok()
             && std::fs::rename(&lock, &index).is_ok();
+        drop(held);
         let _ = std::fs::remove_dir_all(folder);
         if !kept {
             let _ = std::fs::remove_file(&lock);
