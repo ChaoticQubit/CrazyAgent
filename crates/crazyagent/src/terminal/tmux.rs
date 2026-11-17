@@ -2476,15 +2476,15 @@ impl Host for Tmux {
     }
 }
 
-const _: () = assert!(SEND_KEYS_BYTES_MAX > 0);
+const _: () = assert!(SEND_KEYS_BYTES_MAX >= super::PASTE_CLOSE.len());
 const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
-/// and the bytes. Returns one command per run of at most `SEND_KEYS_BYTES_MAX` bytes, none
-/// for no bytes.
+/// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
+/// bytes, so none cuts a character or the closing paste marker, and none for no bytes.
 fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
-    let lines: Vec<String> = bytes
-        .chunks(SEND_KEYS_BYTES_MAX)
+    let lines: Vec<String> = super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
+        .into_iter()
         .map(|run| {
             let mut line = format!("send-keys -t {target} -H");
             for byte in run {
@@ -2493,7 +2493,8 @@ fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
             line
         })
         .collect();
-    assert_eq!(lines.len(), bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+    assert!(lines.len() >= bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+    assert!(lines.len() <= super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
     lines
 }
 

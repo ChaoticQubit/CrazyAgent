@@ -87,6 +87,55 @@ impl From<HostError> for EngineError {
     }
 }
 
+/// The most bytes a UTF-8 character holds after its first byte: how far `input_runs` moves
+/// a run's end back to keep a character whole.
+const CHARACTER_TAIL_BYTES_MAX: usize = 3;
+
+/// The most runs `input_runs` cuts `length` bytes into at `run_bytes_max` bytes a run. Every
+/// run but the last and the one that ends at the closing marker keeps at least
+/// `run_bytes_max - CHARACTER_TAIL_BYTES_MAX` bytes. Inputs: the length and the run size,
+/// at least the marker's length. Output: the bound.
+pub(crate) const fn input_runs_max(length: usize, run_bytes_max: usize) -> usize {
+    assert!(run_bytes_max >= PASTE_CLOSE.len());
+    length.div_ceil(run_bytes_max - CHARACTER_TAIL_BYTES_MAX) + 1
+}
+
+/// Splits typed bytes into runs of at most `run_bytes_max` bytes, in order, never inside a
+/// UTF-8 character or inside the closing paste marker that ends them, so a program that
+/// reads them per read sees each whole (RV-DS241-69). Bytes that are not UTF-8 are cut at
+/// the size. Inputs: the bytes and the run size. Output: the runs, none for no bytes.
+pub(crate) fn input_runs(bytes: &[u8], run_bytes_max: usize) -> Vec<&[u8]> {
+    assert!(run_bytes_max >= PASTE_CLOSE.len());
+    let continues = |byte: u8| byte & 0xc0 == 0x80;
+    let marker = if bytes.ends_with(PASTE_CLOSE) {
+        bytes.len() - PASTE_CLOSE.len()
+    } else {
+        bytes.len()
+    };
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let mut end = (start + run_bytes_max).min(bytes.len());
+        if marker < end && end < bytes.len() {
+            end = marker;
+        }
+        if end < bytes.len() && continues(bytes[end]) {
+            let floor = end.saturating_sub(CHARACTER_TAIL_BYTES_MAX).max(start + 1);
+            end = (floor..end)
+                .rev()
+                .find(|&at| !continues(bytes[at]))
+                .unwrap_or(end);
+        }
+        assert!(end > start);
+        runs.push(&bytes[start..end]);
+        start = end;
+    }
+    assert!(runs.iter().all(|run| run.len() <= run_bytes_max));
+    assert!(runs.len() <= input_runs_max(bytes.len(), run_bytes_max));
+    assert_eq!(runs.concat(), bytes);
+    runs
+}
+
 fn failure(code: &str) -> HostError {
     HostError(code.into())
 }
