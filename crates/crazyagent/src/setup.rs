@@ -547,6 +547,7 @@ pub(crate) fn program_not_found(name: &str) -> crate::tools::Missing {
         tool: name.to_owned(),
         reason: crate::tools::Reason::NotFound,
         needs: None,
+        found: None,
         looked: Vec::new(),
         refused: None,
     }

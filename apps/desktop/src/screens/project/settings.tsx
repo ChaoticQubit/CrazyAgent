@@ -4,11 +4,10 @@ import { useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type HiddenRunKind, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
-import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
+import type { IntakeJob, IntentReceipt, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
 import { loadIntakeJob } from "../../api-intake";
 import { refusalLine } from "../intake/intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
-import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -20,6 +19,7 @@ import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
 import { MoveHome } from "./move-home";
+import { MessagesSection } from "./messages-section";
 import { GitHubRulesSection } from "./github-section";
 import { RemoveDialogView, deleteReady, removeChoices, removeTitle } from "./remove-dialog";
 import type { RemoveChoice } from "./remove-dialog";
@@ -545,6 +545,13 @@ export function seersLine(agents: TeamAgent[]): string {
   return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
 }
 
+/** Whether the hidden folders section is offered: until the engine's read says this system
+ * has no hidden folders (DEC-194), so it shows while loading. Input: the latest read, or null.
+ * Output: true when offered. */
+export function hiddenOffered(saved: HiddenPaths | null): boolean {
+  return saved?.unavailable !== true;
+}
+
 function HiddenSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<HiddenPaths | null>(null);
   const [latest, setLatest] = useState<HiddenPaths | null>(null);
@@ -630,6 +637,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.reloadTeam();
   }
 
+  if (!hiddenOffered(latest)) return null;
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
@@ -755,54 +763,6 @@ function AccessSection({ data }: { data: ProjectData }) {
       onCancel={() => setConfirming(false)} onConfirm={() => void save()}>
       {FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}
     </ConfirmDialog>
-  </div>;
-}
-
-/** The Messages section: the six settings of the sub-agents' Messages timelines, each with every
- * choice and the proposed default named. A choice changes its one setting against what the
- * engine stores now; when another client changed the settings since this view was read, it
- * saves nothing and shows the stored ones. The section shows the outcome until the next team
- * read, then what the engine stored. Input: the project data. Output: the section. */
-function MessagesSection({ data }: { data: ProjectData }) {
-  const [pending, setPending] = useState<{ settings: MessageSettings; at: number } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
-  const read = data.team.result;
-  const saved = read?.kind === "ok" ? messageSettingsOf(read.value) : null;
-  const shown = pending !== null && data.team.at < pending.at ? pending.settings : saved;
-
-  async function choose(key: keyof MessageSettings, value: string) {
-    if (busy || shown === null) return;
-    setBusy(true);
-    const change = await changeMessageSetting(data.id, shown, key, value);
-    setBusy(false);
-    if (change.kind === "elsewhere") {
-      setPending({ settings: change.settings, at: Date.now() });
-      setNote("Messages settings changed elsewhere, so nothing was saved. This shows what's saved now; choose again.");
-    } else {
-      const message = changeNote(change.result, "Messages settings");
-      setPending(message || change.kind === "unread" ? null : { settings: change.settings, at: Date.now() });
-      setNote(message);
-    }
-    data.reloadTeam();
-  }
-
-  return <div className="pj-stack">
-    <h2>Messages</h2>
-    <p className="pj-secondary">Each sub-agent's Messages show its tasks, what the master and you told it, and its questions, progress and results, newest first. Open them from the Agents tab or the team graph.</p>
-    {read === undefined && <p className="pj-muted" role="status">Loading...</p>}
-    {read?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
-    {read?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(read)}</p>}
-    {read?.kind === "ok" && shown === null && <NotReady what="Messages settings aren't in this build." />}
-    {shown !== null && MESSAGE_SETTING_FIELDS.map((field) => {
-      const proposed = field.options.find((option) => option.value === fieldValue(DEFAULT_MESSAGE_SETTINGS, field.key));
-      return <div className="pj-field" key={field.key}>
-        <span className="pj-label" aria-hidden="true">{field.label}</span>
-        <Segmented label={field.label} value={fieldValue(shown, field.key)} options={[...field.options]} onValue={(value) => void choose(field.key, value)} />
-        <p className="pj-help">{field.help} Recommended: {proposed?.label}.</p>
-      </div>;
-    })}
-    {note && <p className="pj-note warn" role="status">{note}</p>}
   </div>;
 }
 

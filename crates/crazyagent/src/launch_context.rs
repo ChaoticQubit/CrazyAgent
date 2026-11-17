@@ -1287,6 +1287,12 @@ impl AgentContext {
                     sub_agents.as_ref(),
                 )?,
             )?;
+            let keys = codex_hook_keys(&config_hooks, &source.to_string_lossy());
+            write_private(
+                &state.join(CODEX_HOOK_KEYS),
+                &serde_json::to_vec(&keys)
+                    .map_err(|_| failure("launch_context_hook_unavailable"))?,
+            )?;
         } else {
             installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
@@ -2428,7 +2434,8 @@ fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
     table.set_implicit(true);
     let mut state = toml_edit::Table::new();
     state.set_implicit(true);
-    for hook in hooks {
+    let keys = codex_hook_keys(hooks, source);
+    for (hook, key) in hooks.iter().zip(&keys) {
         let mut handler = toml_edit::Table::new();
         handler["type"] = toml_edit::value("command");
         handler["command"] = toml_edit::value(hook.command.as_str());
@@ -2449,44 +2456,31 @@ fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
         else {
             unreachable!("each event holds a list of groups");
         };
-        let key = format!("{source}:{}:{}:0", hook.label, groups.len());
+        assert_eq!(*key, format!("{source}:{}:{}:0", hook.label, groups.len()));
         groups.push(group);
         let mut pinned = toml_edit::Table::new();
         pinned["trusted_hash"] = toml_edit::value(codex_hook_hash(hook));
-        state.insert(&key, toml_edit::Item::Table(pinned));
+        state.insert(key, toml_edit::Item::Table(pinned));
     }
     assert_eq!(state.len(), hooks.len());
     table.insert("state", toml_edit::Item::Table(state));
     table
 }
 
-/// The most bytes of a Codex home's `config.toml` `codex_pinned_keys` reads.
-const CODEX_CONFIG_BYTES_MAX: u64 = 256 * 1024;
-
-/// The hook trust keys a Codex launch pinned under `[hooks.state]` in its home's
-/// `config.toml`, so the engine can ask Codex whether it trusts each one (PA1213R2-F2).
-/// Takes the agent's `CODEX_HOME`. Returns the keys, empty when the launch pinned none, or
-/// None for a config that cannot be read whole within `CODEX_CONFIG_BYTES_MAX` or parsed.
-pub fn codex_pinned_keys(home: &Path) -> Option<Vec<String>> {
-    let file = File::open(home.join("config.toml")).ok()?;
-    let mut text = String::new();
-    std::io::Read::read_to_string(
-        &mut std::io::Read::take(file, CODEX_CONFIG_BYTES_MAX + 1),
-        &mut text,
-    )
-    .ok()?;
-    if text.len() as u64 > CODEX_CONFIG_BYTES_MAX {
-        return None;
-    }
-    let config = text.parse::<toml_edit::DocumentMut>().ok()?;
-    Some(
-        config
-            .get("hooks")
-            .and_then(|hooks| hooks.get("state"))
-            .and_then(toml_edit::Item::as_table_like)
-            .map(|state| state.iter().map(|(key, _)| key.to_owned()).collect())
-            .unwrap_or_default(),
-    )
+/// The trust key Codex 0.167.1 reads for each hook a launch pins, in launch order:
+/// `<source>:<label>:<group>:0`, the group counting the earlier hooks on the same event.
+/// Inputs: the hooks and the canonical `config.toml` path. Output: one key per hook.
+fn codex_hook_keys(hooks: &[CodexHook], source: &str) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    hooks
+        .iter()
+        .map(|hook| {
+            let group = groups.entry(hook.event).or_insert(0);
+            let key = format!("{source}:{}:{group}:0", hook.label);
+            *group += 1;
+            key
+        })
+        .collect()
 }
 
 /// The owner's hooks a Codex launch runs (PA-12): those on an event Codex has, each copied
@@ -3499,3 +3493,7 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "launch_context/listed_tests.rs"]
 mod listed_tests;
+
+/// The Codex hook trust keys a launch pinned, read back from the launch's own key list.
+mod pinned_keys;
+pub use pinned_keys::*;

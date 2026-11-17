@@ -40,7 +40,7 @@ impl Screen for Harnesses {
         }
         if self.chosen().is_some() && mode != UpdateMode::Off {
             hints.push(hint("c", "Check for updates"));
-            if mode == UpdateMode::CheckAndUpdate {
+            if update_blocked(mode).is_none() {
                 hints.push(hint("u", "Update"));
             }
         }

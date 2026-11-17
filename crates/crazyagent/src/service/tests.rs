@@ -34,6 +34,7 @@ fn words(command: &[&str]) -> Vec<String> {
     command.iter().map(|word| (*word).to_owned()).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_unit_quotes_paths_and_escapes_specifiers() {
     let mut linux = service(Platform::Linux);
@@ -66,6 +67,7 @@ WantedBy=default.target
 
 /// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
 /// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[cfg(unix)]
 #[test]
 fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
     let mut linux = service(Platform::Linux);
@@ -271,6 +273,7 @@ fn status_output_is_read_per_manager() {
 /// The service PATH keeps the shell's absolute folders in order, then adds the user's and the
 /// system folders once each, and leaves out any folder another user can change on this host
 /// (on a CI runner `/usr/local/bin` can be one).
+#[cfg(unix)]
 #[test]
 fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
     let kept = |folders: &[&str]| {
@@ -391,86 +394,6 @@ fn powershell(script: &str, env: &[(&str, &str)]) -> String {
     .unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
-}
-
-/// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry
-/// kind. Takes nothing. Returns the kind name and the value, both empty when it is unset.
-#[cfg(windows)]
-fn raw_user_path() -> (String, String) {
-    let shown = powershell(
-        "$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
-if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write($k.GetValueKind('Path').ToString() + \"`n\" + \
-$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) }",
-        &[],
-    );
-    match shown.split_once('\n') {
-        Some((kind, value)) => (kind.to_owned(), value.to_owned()),
-        None => (String::new(), String::new()),
-    }
-}
-
-/// Stores the user's PATH back as it was: the same text with the same registry kind, or no
-/// value when the kind is empty. Takes the kind name and the value. Returns nothing.
-#[cfg(windows)]
-fn restore_raw_user_path(kind: &str, value: &str) {
-    powershell(
-        "if ([string]::IsNullOrEmpty($env:CRAZYAGENT_TEST_KIND)) { \
-Remove-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -ErrorAction SilentlyContinue } else { \
-Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND }",
-        &[
-            ("CRAZYAGENT_TEST_KIND", kind),
-            ("CRAZYAGENT_TEST_PATH", value),
-        ],
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
-    let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("cra'zy;$(exit 7)");
-    std::fs::create_dir(&folder).unwrap();
-    let executable = folder.join("crazyagent.exe");
-    let first = link_cli(&executable, root.path());
-    let second = link_cli(&executable, root.path());
-    let (_, after) = raw_user_path();
-    restore_raw_user_path(&kind, &before);
-    assert_eq!(first.unwrap(), folder);
-    assert_eq!(second.unwrap(), folder);
-    let shown = folder.to_str().unwrap();
-    assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
-    assert_eq!(raw_user_path(), (kind, before));
-}
-
-#[cfg(windows)]
-#[test]
-fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
-    let reference = r"%USERPROFILE%\crazyagent-kind-check";
-    restore_raw_user_path("ExpandString", &format!("{reference};{before}"));
-    let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("bin");
-    std::fs::create_dir(&folder).unwrap();
-    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
-    let after = raw_user_path();
-    restore_raw_user_path(&kind, &before);
-    assert_eq!(linked.unwrap(), folder);
-    assert_eq!(after.0, "ExpandString", "{after:?}");
-    assert!(after.1.starts_with(&format!("{reference};")), "{after:?}");
-    let shown = folder.to_str().unwrap();
-    assert_eq!(
-        after.1.split(';').filter(|entry| *entry == shown).count(),
-        1,
-        "{after:?}"
-    );
-    assert_eq!(raw_user_path(), (kind, before));
 }
 
 #[cfg(unix)]
@@ -2554,3 +2477,8 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
 /// engine and how it escapes paths. Inputs: the macOS service from [`service`]. Output:
 /// none; each row asserts on the written text.
 mod launchd;
+
+/// The Windows user PATH rows of link_cli: a folder named like PowerShell code is added
+/// once, one holding a ';' is refused, and the PATH keeps its kind and unexpanded
+/// references. Inputs: the user's stored PATH, restored after each row. Output: none.
+mod windows_user_path;

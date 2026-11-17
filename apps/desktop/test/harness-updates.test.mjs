@@ -57,6 +57,14 @@ test("the Update confirm shows the exact command, how it was installed and what 
   assert.match(html, /Agents that are running keep their version until they start again\./);
 });
 
+test("a Windows install has no Update button, says CrazyAgent can't update it here and links the guide (DEC-194)", () => {
+  const html = row({ entry: ready("codex", "Codex"), versions: { ...claude, id: "codex", method: { kind: "npm", package: "@openai/codex" }, installed: null, latest: { kind: "not_checked" }, command: null, refusal: "harness_update_unsupported_here", guide: "https://developers.openai.com/codex/cli" }, mode: "check_and_update" });
+  assert.doesNotMatch(html, />Update</);
+  assert.match(html, /CrazyAgent can't update it on this computer\./);
+  assert.match(html, /href="https:\/\/developers\.openai\.com\/codex\/cli"/);
+  assert.doesNotMatch(html, /This install updates itself/);
+});
+
 test("an unknown install has no Update button, says why and links the harness's guide", () => {
   const html = row({ entry: ready("claude-code", "Claude Code"), versions: { ...claude, method: { kind: "unknown" }, command: null, refusal: "harness_update_unknown_install", guide: "https://code.claude.com/docs/en/setup" }, mode: "check_and_update" });
   assert.doesNotMatch(html, />Update</);

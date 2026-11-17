@@ -1,5 +1,9 @@
-use super::{guarded, output, spawn, status};
-use std::process::{Command, Stdio};
+use super::{guarded, spawn};
+#[cfg(unix)]
+use super::{output, status};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 
 #[test]
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
@@ -7,6 +11,7 @@ fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
 }
 
+#[cfg(unix)]
 #[test]
 fn the_gate_is_usable_again_after_a_reentry_panic() {
     let reentry = std::thread::spawn(|| guarded(|| status(&mut Command::new("/usr/bin/true"))));
@@ -18,6 +23,7 @@ fn the_gate_is_usable_again_after_a_reentry_panic() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn output_keeps_the_stdio_the_caller_set() {
     let captured = output(
@@ -62,8 +68,7 @@ fn accept_failures_a_later_accept_outlives_are_retried_and_lasting_ones_end_the_
 
 /// An exclusive listener binds on either loopback address, holds its port against a second
 /// exclusive bind, which fails with `AddrInUse`, and accepts a connection there (S4B-2W1,
-/// G1).
-#[cfg(unix)]
+/// G1). On Windows its own row in the listener table never counts against it (W10b).
 #[test]
 fn an_exclusive_listener_binds_each_loopback_keeps_its_port_and_accepts() {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -80,6 +85,33 @@ fn an_exclusive_listener_binds_each_loopback_keeps_its_port_and_accepts() {
         let _client = super::connect_tcp_std(bound).unwrap();
         let (_, peer) = super::accept_tcp_std(&listener).unwrap();
         assert_eq!(peer.ip(), loopback.ip());
+    }
+}
+
+/// W10b (row 230 on Windows): an exclusive bind on a loopback address fails with `AddrInUse`
+/// on a port this user's wildcard listener holds, in its own family or, for 127.0.0.1, the
+/// IPv6 wildcard, which may take both families, so it never sits beside that listener and
+/// takes its loopback connections. macOS skips the last case, where its own bind rules decide.
+/// Windows reads the listener table after its bind, so a wildcard listener bound after that
+/// read still sits beside it there; unix refuses that later bind itself.
+#[test]
+fn an_exclusive_bind_fails_beside_a_wildcard_listener_of_this_user() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let mut cases = vec![("0.0.0.0:0", v4), ("[::]:0", v6)];
+    if !cfg!(target_os = "macos") {
+        cases.push(("[::]:0", v4));
+    }
+    for (holder, loopback) in cases {
+        let held = super::bind_tcp_std(holder).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let refused = super::bind_tcp_std_exclusive(SocketAddr::new(loopback, port)).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::AddrInUse,
+            "{holder} {loopback}"
+        );
     }
 }
 
@@ -138,4 +170,39 @@ fn a_low_free_port_is_outside_the_system_and_proxy_ranges_and_each_call_moves_on
         let listener = super::bind_tcp_std_exclusive(address).unwrap();
         assert_eq!(listener.local_addr().unwrap(), address);
     }
+}
+
+/// 2.4.3 W10: a stream accepted from a non-blocking listener, as the model proxy's are, is
+/// blocking on every system, so a read with a timeout waits that long for the client
+/// instead of failing at once (Winsock hands the listener's mode to the accepted socket).
+/// Input: none. Output: passes or panics.
+#[test]
+fn a_stream_accepted_from_a_non_blocking_listener_waits_out_its_read_timeout() {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let listener = super::bind_tcp_std("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let _client = super::connect_tcp_std(listener.local_addr().unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut stream, _) = loop {
+        match super::accept_tcp_std(&listener) {
+            Ok(accepted) => break accepted,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept: {error}"),
+        }
+    };
+    let timeout = Duration::from_millis(300);
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    let started = Instant::now();
+    let read = stream.read(&mut [0u8; 1]);
+    let waited = started.elapsed();
+    assert!(read.is_err(), "the silent client sent nothing: {read:?}");
+    assert!(
+        waited >= timeout / 2,
+        "the read failed after {waited:?}, not after its timeout"
+    );
 }

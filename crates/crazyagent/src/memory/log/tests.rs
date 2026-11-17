@@ -73,11 +73,6 @@ fn moved(db: &Connection) -> (i64, i64) {
     (revision, events)
 }
 
-/// The refusal code of a result, none when it succeeded. Input: the result. Output: the code.
-fn code<T>(result: Result<T, EngineError>) -> Option<String> {
-    result.err().map(|error| error.0)
-}
-
 /// Runs one owner request's memory writes and closes it at the next revision, as
 /// `owner_apply_with` does before it persists the request's event. Inputs: the store and
 /// the writes. Output: none.
@@ -395,6 +390,19 @@ fn the_first_run_puts_memory_rows_written_before_the_log_on_it() {
     assert!(events >= 2, "chunks and the closing event");
     initialize(&db).unwrap();
     replays_to_live(&mut db);
+}
+
+/// v2.5 L8 STEPS row: a store whose memory is already on the log gets no second run, so the
+/// step run again over it, as an upgrade from a reset version runs it, moves nothing.
+#[test]
+fn the_first_run_skips_a_store_whose_memory_is_already_logged() {
+    let mut db = hosted();
+    request(&mut db, &first_writes());
+    let before = moved(&db);
+    let tx = db.transaction().unwrap();
+    assert!(!first_run(&tx, Opening::for_test(2)).unwrap());
+    tx.commit().unwrap();
+    assert_eq!(moved(&db), before, "no second snapshot run");
 }
 
 /// v2.5 L8 L1-N1: a change body decodes only with its three fields, closed tables, cells
