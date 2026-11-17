@@ -9,7 +9,10 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     let directory = tempfile::tempdir().unwrap();
     let root = crate::sandbox::canonical(directory.path()).unwrap();
     let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
-    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    super::initialize(&connection).unwrap();
+    connection
+        .execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);")
+        .unwrap();
     let app = serde_json::to_string(&crate::protocol::StoredProject {
         project_id: crate::protocol::ProjectId::new("app").unwrap(),
         spec: crate::protocol::ProjectSpec {
