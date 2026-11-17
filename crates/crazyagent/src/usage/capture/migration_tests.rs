@@ -347,7 +347,12 @@ fn a_left_out_record_read_to_its_end_without_a_file_identity_is_not_uncounted() 
     };
     let oldest = folder.join("s000.jsonl");
     std::fs::write(&oldest, line("m0")).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::File::options()
+        .write(true)
+        .open(&oldest)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
     for index in 1..=FILES_PER_SCAN_MAX {
         std::fs::write(
             folder.join(format!("s{index:03}.jsonl")),
