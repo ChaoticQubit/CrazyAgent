@@ -1502,7 +1502,7 @@ fn no_channel_names_a_listed_sub_agent_in_a_kept_session_under_native_only_tools
     let listed = HarnessKind::from_harness("standin-screen").unwrap();
     assert_eq!(listed, HarnessKind::Listed("standin-screen"));
     let mut named = Vec::new();
-    for delivery in [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly] {
+    for delivery in [Delivery::Auto, Delivery::TypingOnly, Delivery::NativeOnly] {
         settings::set_delivery(&fixture.db, &project(), listed, delivery).unwrap();
         for role in [AgentRole::Master, AgentRole::Sub, AgentRole::Teammate] {
             for tools in [false, true] {
@@ -1529,7 +1529,6 @@ fn no_channel_names_a_listed_sub_agent_in_a_kept_session_under_native_only_tools
         LISTED_NO_CHANNEL,
         "Messages come as a task of their own once it is idle: Native only never types, and this harness has no channel of its own."
     );
-    settings::set_delivery(&fixture.db, &project(), listed, Delivery::NativeOnly).unwrap();
     let agent = fixture.agent("sub", "standin-screen", "idle", None);
     let now = 1_000_000;
     let waits = fixture.send(Party::Owner, agent, MessageKind::Prompt, "Waits", now);
