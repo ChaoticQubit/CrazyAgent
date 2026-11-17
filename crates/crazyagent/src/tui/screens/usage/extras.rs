@@ -138,8 +138,8 @@ pub struct ResetWatch {
 }
 
 impl ResetWatch {
-    /// Tells whether the shell asks for the stored extras now: never asked, `RESET_WATCH_MS`
-    /// since the last ask, or a clock that went back; a yes marks the ask, a no owes the read.
+    /// Tells whether the shell asks for the stored extras now, as the minute gate lets it; a
+    /// yes marks the ask, a no owes the read.
     /// Input: now. Output: the answer.
     pub fn due(&mut self, now_ms: i64) -> bool {
         let due = self.open(now_ms);
@@ -157,7 +157,9 @@ impl ResetWatch {
         self.owed && self.open(now_ms)
     }
 
-    /// Tells whether the minute gate lets an ask through now. Input: now. Output: the answer.
+    /// Tells whether the minute gate lets an ask through now: never asked, `RESET_WATCH_MS`
+    /// since the last ask, or a clock that went back.
+    /// Input: now. Output: the answer.
     fn open(&self, now_ms: i64) -> bool {
         self.asked_ms
             .is_none_or(|at| at > now_ms || now_ms - at >= RESET_WATCH_MS)

@@ -7,8 +7,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
-/// The most deliveries the watch thread keeps for the run loop. One waiting already makes a
-/// refresh due, so a delivery past these is dropped rather than held.
+/// The most deliveries the watch thread keeps for the run loop, the bound of the channel
+/// between the thread and `Connection::changed`. One waiting already makes a refresh due, so
+/// a delivery past these is dropped rather than held.
 const DELIVERIES_MAX: usize = 8;
 
 /// The TUI's watch thread (v2.5 S3d): it follows the client in its [`Slot`] through the
@@ -56,7 +57,9 @@ impl Watch {
 }
 
 impl Drop for Watch {
-    /// Ends the follow where it waits, a held watch included, then waits for the thread.
+    /// Ends the follow where it waits, a held watch included, then waits for the thread; a
+    /// stop sent to a thread that already ended is ignored.
+    /// Input: none. Output: none, once the thread has ended.
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
@@ -90,14 +93,16 @@ impl Connection {
 pub(super) struct Slot(Arc<Mutex<Option<Arc<OwnerClient>>>>);
 
 impl Slot {
-    /// Puts the client to follow in the slot, or none to stop following.
+    /// Puts the client to follow in the slot, or none to stop following; the watch thread
+    /// takes it on its next turn.
     /// Input: the client. Output: none.
     fn publish(&self, client: Option<Arc<OwnerClient>>) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = client;
     }
 
-    /// The client to follow now.
-    /// Input: none. Output: the client, none while the worker is detached.
+    /// The client to follow now, read by the watch thread on each turn of the feed.
+    /// Input: none.
+    /// Output: the client, none while the worker is detached.
     pub(super) fn current(&self) -> Option<Arc<OwnerClient>> {
         self.0
             .lock()
