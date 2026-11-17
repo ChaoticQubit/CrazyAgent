@@ -186,7 +186,13 @@ pub(super) fn node_row(status: &SetupStatus) -> Option<DependencyState> {
         .dependencies
         .iter()
         .find(|tool| tool.name == Dependency::Node)
-        .map(|tool| tool.state.clone())
+        .map(|tool| {
+            if tool.busy {
+                DependencyState::Installing
+            } else {
+                tool.state.clone()
+            }
+        })
 }
 
 /// Tells whether the step reads again for Node while a harness needs it: setup's Node row is

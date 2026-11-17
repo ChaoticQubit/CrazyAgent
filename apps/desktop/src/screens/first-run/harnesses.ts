@@ -164,7 +164,9 @@ export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean 
  * run's step or a lone install, else its own state. Input: setup's status, null while unread.
  * Output: the state, null without a Node row. */
 export function nodeRow(setup: SetupStatus | null): DependencyState | null {
-  return setup?.dependencies.find((item) => item.name === "node")?.state ?? null;
+  const row = setup?.dependencies.find((item) => item.name === "node");
+  if (!row) return null;
+  return row.busy ? { state: "installing" } : row.state;
 }
 
 /** Tells whether the step reads again for Node while a harness needs it: setup's Node row is still
