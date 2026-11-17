@@ -35,13 +35,10 @@ export function statusIcon(word: string): IconName | undefined {
   return STATUSES.find(([pattern]) => pattern.test(word))?.[1];
 }
 
-/** A status badge: always the word, with the design icon and tone color when the word is in
- * the table, text only otherwise. Inputs: the status word and an optional tone override. */
+/** A status badge: always the word, toned when the word is in the table; the stylesheet draws
+ * its dot in the tone color. Inputs: the status word and an optional tone override. */
 export function StatusBadge({ word, tone = statusTone(word) }: { word: string; tone?: Tone }) {
-  const icon = statusIcon(word);
-  return <span className={`badge${tone === "neutral" ? "" : ` tone-${tone}`}`}>
-    {icon && <Icon name={icon} size={12} spin={icon === "loader-circle"} />}{word}
-  </span>;
+  return <span className={`badge${tone === "neutral" ? "" : ` tone-${tone}`}`}>{word}</span>;
 }
 
 /** An inline notice with an icon. Inputs: tone, optional icon, content, alert role. */
