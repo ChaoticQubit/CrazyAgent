@@ -32,16 +32,16 @@ test("every status word from the design icon table gets its icon and tone", () =
   }
 });
 
-test("a status word without an entry renders as text only, and the word is always shown", () => {
+test("a status badge is its word alone in markup, toned when the word has an entry; the stylesheet draws its dot", () => {
   assert.equal(statusIcon("Mystery state"), undefined);
   assert.equal(statusTone("Mystery state"), "neutral");
   const plain = renderToStaticMarkup(createElement(StatusBadge, { word: "Mystery state" }));
   assert.equal(plain, '<span class="badge">Mystery state</span>');
   const signedIn = renderToStaticMarkup(createElement(StatusBadge, { word: "Key saved" }));
-  assert.match(signedIn, /^<span class="badge tone-ok"><svg[^>]*class="icon"[\s\S]*<\/svg>Key saved<\/span>$/);
+  assert.equal(signedIn, '<span class="badge tone-ok">Key saved</span>');
   const live = renderToStaticMarkup(createElement(StatusBadge, { word: "Signing in..." }));
-  assert.match(live, /class="icon spin"/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(StatusBadge, { word: "Queued" })), /spin/);
+  assert.equal(live, '<span class="badge tone-info">Signing in...</span>');
+  assert.doesNotMatch(renderToStaticMarkup(createElement(StatusBadge, { word: "Queued" })), /<svg/);
 });
 
 test("the spinner only turns when the system allows motion", () => {
