@@ -17,6 +17,9 @@ while IFS= read -r line; do
   said="$said $line"
   case "$line" in *"$e[201~"*) open=0 ;; esac
   [ "$open" = 1 ] && continue
+  case "$said" in
+    *golden.md*) printf 'Apples are red.\n' > golden.md ;;
+  esac
   said=
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Wrote golden.md."}]}}\n' >> "$f"
