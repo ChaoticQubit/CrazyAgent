@@ -3322,6 +3322,17 @@ fn settings_offers_no_hidden_folders_where_the_engine_says_they_are_unavailable(
     assert!(screen.hidden.is_none());
 }
 
+/// A hidden folder refused as not plain is told in this system's own path form: on Windows
+/// a drive path joined by backslashes, elsewhere a path with no quote or backslash.
+#[test]
+fn a_hidden_folder_refused_as_not_plain_is_told_in_this_systems_path_form() {
+    #[cfg(windows)]
+    let wanted = r"A folder path must be a plain drive path such as C:\Users\you\project\secrets, with no quotes, / or control characters.";
+    #[cfg(not(windows))]
+    let wanted = "A folder path can't hold quotes, backslashes or control characters.";
+    assert_eq!(plain_problem("hidden_path_not_plain"), wanted);
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
