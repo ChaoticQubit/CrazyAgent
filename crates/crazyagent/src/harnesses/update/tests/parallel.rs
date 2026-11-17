@@ -276,3 +276,32 @@ fn no_catalog_harness_goes_by_a_setup_tool_or_the_setup_run_name() {
         harnesses::specs().len() + setup.len()
     );
 }
+
+/// V243-SETUP-PARALLEL: setup jobs name folders not made yet, and two spellings of one
+/// folder, one through a link, are one folder in the line: the second job waits for the
+/// first and takes its turn once the first ends.
+#[test]
+fn a_folder_not_made_yet_is_one_folder_whatever_path_names_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let alias = dir.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let turns = super::super::turn::Turns::default();
+    let tool = |base: &Path| vec![base.join("setup/.jobs/node")];
+    let first = turns
+        .take("claude-code", tool(&real), Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        turns
+            .take("codex", tool(&alias), Duration::from_millis(200))
+            .is_none(),
+        "the same folder through a link waits"
+    );
+    drop(first);
+    assert!(
+        turns
+            .take("codex", tool(&alias), Duration::from_millis(200))
+            .is_some()
+    );
+}

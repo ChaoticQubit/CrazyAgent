@@ -124,6 +124,8 @@ fn setup(state: DependencyState, running: bool) -> Arrival {
                 name: Dependency::Node,
                 label: "Node.js".into(),
                 state,
+                busy: false,
+                waiting: None,
             }],
             pack: Vec::new(),
             running,

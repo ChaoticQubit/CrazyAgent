@@ -44,6 +44,8 @@ fn tool(name: Dependency, state: DependencyState) -> DependencyStatus {
         name,
         label: name.label().into(),
         state,
+        busy: false,
+        waiting: None,
     }
 }
 
