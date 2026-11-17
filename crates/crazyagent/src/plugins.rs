@@ -574,13 +574,15 @@ pub(crate) fn exact_version(version: &str) -> bool {
 
 /// The effective set with each server's secret values already read, ready for a harness
 /// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
-/// the default pack's context-mode server was left out, none when it was not, and
-/// `left_out` names each server so left out, whose hooks the launch leaves out too.
+/// the default pack's context-mode server was left out, `batch_files` names each server left
+/// out because its command is a Windows batch file ([`without_cmd_exe`]), and `left_out`
+/// names every server left out, whose hooks the launch leaves out too.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
     pub context_mode_off: Option<ContextModeOff>,
+    pub batch_files: Vec<String>,
     pub left_out: Vec<String>,
 }
 

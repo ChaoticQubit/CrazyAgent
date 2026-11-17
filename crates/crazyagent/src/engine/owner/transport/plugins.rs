@@ -1475,18 +1475,19 @@ async fn start_check(
     Ok(Reply::Server { server: *view })
 }
 
-/// Checks an approved command server inside the boundary agents run it in, running what an
-/// agent launch runs once the default pack's context-mode has its shared install
-/// ([`crate::context_mode::for_check`]). That spec never runs as npx here, nor does one only
-/// shaped like it whose npx the tool resolver does not find: while its install runs, after a
-/// recent failure, without npm beside npx, for a version the pack does not pin or for such an
-/// npx, the check is not run and says why. Its own project, home and temp folders under
-/// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
-/// that shared install only, open network without binding the owner's ports, and only its
-/// own secrets, under the owner's call supervisor choice on Linux. Inputs: the engine folder,
-/// server id, approved command, arguments, secret values and the configured local model
-/// ports to keep. Output: the tool names, or a plain rejection code, or for a boundary that
-/// cannot hold the check the boundary's own reason ([`crate::plugins::check_refused`]).
+/// Checks an approved command server inside the boundary agents run it in, running what an agent
+/// launch runs once the default pack's context-mode has its shared install
+/// ([`crate::context_mode::for_check`]). That spec never runs as npx here, nor does one only shaped
+/// like it whose npx the tool resolver does not find: while its install runs, after a recent
+/// failure, without npm beside npx, for a version the pack does not pin or for such an npx, or for
+/// a Windows batch command other than npm's npx.cmd ([`crate::plugins::without_cmd_exe`]), the
+/// check is not run and says why. Its own project, home and temp folders under `mcp-checks/<id>` in
+/// the engine folder, reads of system paths, the command's folder and that shared install only,
+/// open network without binding the owner's ports, and only its own secrets, under the owner's call
+/// supervisor choice on Linux. Inputs: the engine folder, server id, approved command, arguments,
+/// secret values and the configured local model ports to keep. Output: the tool names, or a plain
+/// rejection code, or for a boundary that cannot hold the check the boundary's own reason
+/// ([`crate::plugins::check_refused`]).
 fn boundary_check(
     root: &Path,
     id: &str,
@@ -1528,6 +1529,9 @@ fn boundary_check(
             eprintln!("plugin_check_install_refused cause={code}");
             return Err("server_cant_start".into());
         }
+    };
+    let Some(launched) = crate::plugins::without_cmd_exe(root, launched) else {
+        return Err("server_batch_file".into());
     };
     let ServerSpec::Stdio { command, args } = &launched else {
         return Err("server_check_command_only".into());
