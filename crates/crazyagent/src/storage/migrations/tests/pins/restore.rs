@@ -372,3 +372,124 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         assert_eq!(std::fs::read(&moved).unwrap(), b"sk-restore");
     }
 }
+
+/// Saves one account row as the accounts store writes it: a local connection with the given
+/// authentication, and its details. Inputs: the database, the id and the authentication.
+fn save_account(db: &Connection, id: &str, auth: crate::config::ModelAuthentication) {
+    let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+    let account = crate::config::ModelConnection {
+        id: reference(id),
+        provider: reference("openai-compatible"),
+        harness: reference("rcli"),
+        protocol: reference("openai-chat"),
+        account_ref: reference("local-account"),
+        endpoint: crate::config::ModelEndpoint::Http {
+            url: "http://127.0.0.1:8000/v1".into(),
+        },
+        model: crate::config::ModelReference {
+            id: "m".into(),
+            author: reference("openai-compatible"),
+        },
+        auth,
+    };
+    let details = crate::accounts::AccountDetails {
+        name: "Lab".into(),
+        provider: crate::accounts::Provider::OpenaiCompatible,
+    };
+    let body = serde_json::to_vec(&serde_json::json!({"connection": account, "details": details}))
+        .unwrap();
+    db.execute(
+        "INSERT INTO accounts (id, body) VALUES (?1, ?2)",
+        rusqlite::params![id, body],
+    )
+    .unwrap();
+}
+
+/// The folder name the engine gives an account's profile slot or generated home: the
+/// SHA-256 of its reference in hex. Input: the reference. Output: the name.
+fn slot_name(reference: &str) -> String {
+    format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(reference.as_bytes())
+    )
+}
+
+/// Makes one private file holding a dummy secret, its 0700 folders included. Input: the
+/// file. Output: none.
+fn private_secret(file: &Path) {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(file.parent().unwrap())
+        .unwrap();
+    std::fs::write(file, "secret-dummy").unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// V250-L5-N5B: a restore deletes the generated SDK home holding the key of an API key account
+/// only the replaced 2.5 data holds, and the sign-in files of a native account only it holds,
+/// keeping the rest of that slot, while the home of an account the 2.4 copy holds stays.
+#[test]
+fn a_restore_deletes_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds() {
+    use crate::config::ModelAuthentication;
+    let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+    let start = SystemTime::now();
+    let (root, _) = fixture();
+    let old = root.connection();
+    crate::storage::accounts::initialize(&old).unwrap();
+    let old_key = ModelAuthentication::ApiKey {
+        credential_ref: reference("restore-old-key"),
+    };
+    save_account(&old, "restore-old", old_key);
+    drop(old);
+    let sources = sources(&root);
+    let mut db = root.connection();
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        &steps(&[probe]),
+        start,
+        check_copy,
+    )
+    .unwrap();
+    let new_key = ModelAuthentication::ApiKey {
+        credential_ref: reference("restore-new-key"),
+    };
+    save_account(&db, "restore-new", new_key);
+    let native = ModelAuthentication::NativeManaged {
+        profile_ref: reference("restore-new-profile"),
+    };
+    save_account(&db, "restore-native", native);
+    drop(db);
+    let homes = root.path().join("configured-sdk-homes");
+    let kept_home = homes.join(slot_name("restore-old-key"));
+    let new_home = homes.join(slot_name("restore-new-key"));
+    for home in [&kept_home, &new_home] {
+        private_secret(&home.join(".backboard/config.json"));
+        private_secret(&home.join(".backboard/keys.json"));
+    }
+    let slot = root
+        .path()
+        .join("native-profiles")
+        .join(slot_name("restore-new-profile"));
+    let sign_ins = [
+        slot.join("home/auth.json"),
+        slot.join("home/.credentials.json"),
+        slot.join("home/Library/Keychains/login.keychain-db"),
+    ];
+    let identity = slot.join("identity.json");
+    for file in sign_ins.iter().chain([&identity]) {
+        private_secret(file);
+    }
+
+    restored(&root, start + HOUR).unwrap();
+
+    assert_eq!(version(&root.connection()).unwrap(), V24_VERSION_MAX);
+    assert!(kept_home.join(".backboard/keys.json").exists());
+    assert!(!new_home.exists());
+    for file in &sign_ins {
+        assert!(!file.exists(), "{}", file.display());
+    }
+    assert!(identity.exists());
+}
