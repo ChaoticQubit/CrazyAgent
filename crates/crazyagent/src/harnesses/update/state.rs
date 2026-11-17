@@ -367,14 +367,29 @@ fn version_gate(executable: &Path, _places: &crate::tools::Places) -> Option<()>
 }
 
 /// Lets a harness file be started for its version only when a session would start it, the
-/// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), since
-/// [`super::trusted`] refuses every program here and keeps every update refused. Inputs: the
+/// gate Windows launch passes ([`crate::harnesses::interactive::launch_tool`]), and only
+/// SYSTEM, the administrators, TrustedInstaller and this user can change it
+/// ([`crazyagent_win_sandbox::owner_only`]), the Windows twin of [`super::trusted`], which
+/// refuses every program here and keeps every update refused. The check covers the entry as
+/// written, the program launch would start and the real file the read runs. Inputs: the
 /// harness file and the resolver's places. Output: Some when it may start.
 #[cfg(windows)]
 fn version_gate(executable: &Path, places: &crate::tools::Places) -> Option<()> {
-    crate::harnesses::interactive::launch_tool(executable, places)
-        .ok()
-        .map(drop)
+    let launched = crate::harnesses::interactive::launch_tool(executable, places).ok()?;
+    let read = crate::tools::resolve_entry(executable, places).ok()?;
+    let mut programs = vec![
+        executable,
+        launched.program.as_path(),
+        read.program.as_path(),
+    ];
+    programs.dedup();
+    for program in programs {
+        if let Err(refused) = crazyagent_win_sandbox::owner_only(program) {
+            eprintln!("harness_version_owner_refused cause={refused}");
+            return None;
+        }
+    }
+    Some(())
 }
 
 /// Asks a harness for its version only when it passes [`version_gate`] and the tool resolver
@@ -956,5 +971,32 @@ mod windows_tests {
         let places = crate::tools::Places::from_environment(None);
         let version = version_if_runs(&curl, &home, &places).unwrap();
         assert!(super::super::plain_version(&version), "{version}");
+    }
+
+    /// #306 r2 (rv-sec3 F1): a program a session would start still tells no version when
+    /// another account can change it. A copy of the curl Windows ships in a folder only this
+    /// user can change tells its version; once that folder grants Users Modify, neither the
+    /// entry nor the usage read asks it.
+    #[test]
+    fn a_windows_program_another_account_can_change_tells_no_version() {
+        let home = home_folder().unwrap();
+        let places = crate::tools::Places::from_environment(None);
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        let folder = tempfile::tempdir_in(&home).unwrap();
+        let kept = crate::sandbox::canonical(folder.path()).unwrap();
+        let curl = kept.join("curl.exe");
+        std::fs::copy(&shipped, &curl).unwrap();
+        assert!(version_if_runs(&curl, &home, &places).is_some());
+
+        let granted = std::process::Command::new("icacls")
+            .arg(&kept)
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"])
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{granted:?}");
+        assert_eq!(version_if_runs(&curl, &home, &places), None);
+        assert_eq!(super::super::version_under_home(&curl), None);
     }
 }
