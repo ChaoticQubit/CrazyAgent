@@ -1,6 +1,7 @@
 use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::ide::RevealQuery;
 use super::client::intake::{IntakeEvent, IntakeQuery, IntakeView};
 use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
@@ -13,6 +14,7 @@ use super::frame::{
 };
 use super::glyphs::Glyphs;
 use super::keys::{Global, Key, global};
+use super::screens::console::files_query;
 use super::screens::intake::not_ready;
 use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
@@ -25,8 +27,11 @@ use super::text::{cells, cut, join, list_row, pad, styled};
 use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
+use crate::ide::bridge::reveal::RevealTarget;
 use crate::learning::MarkStep;
 use crate::projects_home::job::{JobKind, JobState, JobView};
+use crate::protocol::ProjectId;
+use crate::team::{AgentStatus, NodeKind, TeamGraph};
 use crate::terminal::TerminalFrame;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -44,12 +49,23 @@ const QUIT_WIDTH: u16 = 46;
 const QUIET: Duration = Duration::from_millis(150);
 const JOB_NOTE_CELLS_MAX: usize = 64;
 
-/// One Go to destination.
+/// One Go to destination: its label, kind, the place it opens and what else a pick does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub label: String,
     pub kind: &'static str,
     pub place: Place,
+    pub pick: Pick,
+}
+
+/// What picking a Go to row does: `Open` opens its place; `Agent` opens its place, the
+/// project's Agents tab, and says to pick the agent its label names there; `File` stays on
+/// the page Go to opened on and asks the IDE to show that project's file its label names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Open,
+    Agent,
+    File(ProjectId),
 }
 
 /// Lists every Go to destination: projects and their tabs, Settings sections
@@ -75,6 +91,7 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
                     name: card.name.clone(),
                     tab,
                 },
+                pick: Pick::Open,
             });
         }
     }
@@ -82,28 +99,33 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         label: "Home".into(),
         kind: "Place",
         place: Place::Home,
+        pick: Pick::Open,
     });
     out.push(Target {
         label: "Usage".into(),
         kind: "Place",
         place: Place::Usage,
+        pick: Pick::Open,
     });
     for section in SettingsSection::ALL {
         out.push(Target {
             label: format!("Settings / {}", section.label()),
             kind: "Settings",
             place: Place::Settings(section),
+            pick: Pick::Open,
         });
     }
     out.push(Target {
         label: "Settings / Setup".into(),
         kind: "Settings",
         place: Place::Setup { first_run: false },
+        pick: Pick::Open,
     });
     out.push(Target {
         label: "Settings / GitHub".into(),
         kind: "Settings",
         place: Place::GitHubDefaults,
+        pick: Pick::Open,
     });
     for (label, place) in [
         ("New project", Place::NewProject),
@@ -114,6 +136,7 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
             label: label.into(),
             kind: "Action",
             place,
+            pick: Pick::Open,
         });
     }
     out
@@ -139,14 +162,159 @@ pub fn rank(query: &str, label: &str) -> Option<u8> {
         .then_some(2)
 }
 
+/// The running sub-agents of a team graph, as Go to lists them: sub-agents starting, idle or
+/// working, in graph order. Input: the graph. Output: their names.
+fn go_to_agents(graph: &TeamGraph) -> Vec<String> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.kind == NodeKind::Sub
+                && matches!(
+                    node.status,
+                    Some(AgentStatus::Starting | AgentStatus::Idle | AgentStatus::Working)
+                )
+        })
+        .map(|node| node.label.clone())
+        .collect()
+}
+
+/// The project page Go to opened on, read only while Go to is open: that project's running
+/// sub-agents, the files last read with the query they were read for, and the query of the
+/// read in flight.
+struct Here {
+    project: ProjectId,
+    name: String,
+    tab: ProjectTab,
+    agents: Vec<String>,
+    files: Option<(String, Vec<String>)>,
+    asked: Option<String>,
+}
+
+impl Here {
+    /// This project's running sub-agents, then the files last read, as Go to rows.
+    /// Input: none. Output: the rows in that order.
+    fn targets(&self) -> Vec<Target> {
+        let place = |tab| Place::Project {
+            id: self.project.clone(),
+            name: self.name.clone(),
+            tab,
+        };
+        let agents = self.agents.iter().map(|label| Target {
+            label: label.clone(),
+            kind: "Agent",
+            place: place(ProjectTab::Agents),
+            pick: Pick::Agent,
+        });
+        let files = self
+            .files
+            .iter()
+            .flat_map(|(_, paths)| paths)
+            .map(|path| Target {
+                label: path.clone(),
+                kind: "File",
+                place: place(self.tab),
+                pick: Pick::File(self.project.clone()),
+            });
+        agents.chain(files).collect()
+    }
+}
+
 struct GoTo {
     query: TextField,
     selected: usize,
+    here: Option<Here>,
 }
 
 impl GoTo {
+    /// Opens Go to over a place; on a project page it also asks for that project's team graph
+    /// and files. Inputs: the top screen's place and the context. Output: Go to.
+    fn new(place: Option<Place>, ctx: &mut Ctx) -> Self {
+        let here = match place {
+            Some(Place::Project { id, name, tab }) => Some(Here {
+                project: id,
+                name,
+                tab,
+                agents: Vec::new(),
+                files: None,
+                asked: None,
+            }),
+            _ => None,
+        };
+        let mut go = Self {
+            query: TextField::new("Go to", GO_TO_QUERY_MAX),
+            selected: 0,
+            here,
+        };
+        if let Some(here) = &go.here
+            && ctx.link == Link::Ready
+        {
+            ctx.request(Request::TeamGraph {
+                project: here.project.clone(),
+            });
+        }
+        go.ask_files(ctx);
+        go
+    }
+
+    /// Asks for the open project's files for the typed query, one read at a time, unless the
+    /// files for that query are here already. Input: the context. Output: none.
+    fn ask_files(&mut self, ctx: &mut Ctx) {
+        let Some(here) = &mut self.here else {
+            return;
+        };
+        let query = files_query(self.query.value().trim());
+        if here.asked.is_some()
+            || ctx.link != Link::Ready
+            || here
+                .files
+                .as_ref()
+                .is_some_and(|(listed, _)| *listed == query)
+        {
+            return;
+        }
+        ctx.request(Request::ProjectFiles {
+            project: here.project.clone(),
+            query: query.clone(),
+        });
+        here.asked = Some(query);
+    }
+
+    /// Takes the reads Go to asked for: the open project's team graph, and the files of the
+    /// read in flight, then asks for the query typed since. Inputs: the arrival and the
+    /// context. Output: none.
+    fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) {
+        let Some(here) = &mut self.here else {
+            return;
+        };
+        match arrival {
+            Arrival::TeamGraph {
+                project,
+                result: Ok(graph),
+            } if *project == here.project => here.agents = go_to_agents(graph),
+            Arrival::ProjectFiles {
+                project,
+                query,
+                result,
+            } if *project == here.project && here.asked.as_ref() == Some(query) => {
+                here.asked = None;
+                here.files = Some((query.clone(), result.clone().unwrap_or_default()));
+                self.ask_files(ctx);
+            }
+            _ => {}
+        }
+    }
+
     fn matches(&self, ctx: &Ctx) -> Vec<Target> {
-        let mut ranked: Vec<(u8, usize, Target)> = targets(ctx)
+        let mut all = targets(ctx);
+        if let Some(here) = &self.here {
+            let at = all
+                .iter()
+                .position(|target| target.place == Place::Home)
+                .expect("Go to always lists Home");
+            all.splice(at..at, here.targets());
+        }
+        let mut ranked: Vec<(u8, usize, Target)> = all
             .into_iter()
             .enumerate()
             .filter_map(|(index, target)| {
@@ -506,6 +674,28 @@ impl Shell {
         }
     }
 
+    /// Acts on one picked Go to row as its `Pick` says.
+    /// Input: the row. Output: none.
+    fn pick(&mut self, target: Target) {
+        match target.pick {
+            Pick::Open => self.go(target.place),
+            Pick::Agent => {
+                self.go(target.place);
+                self.ctx.say(Message::success(
+                    "Opened Agents.",
+                    &format!(
+                        "Pick {} in the agents list, then press M for its messages.",
+                        target.label
+                    ),
+                ));
+            }
+            Pick::File(project) => self.ctx.request(Request::Reveal(Box::new(RevealQuery {
+                project,
+                target: RevealTarget::Project { path: target.label },
+            }))),
+        }
+    }
+
     /// Handles one key: below the smallest window only Ctrl+Q or Ctrl+C acts
     /// ([`Self::small_key`]); otherwise overlays first, then a screen in raw mode
     /// takes every key, then the global keys, then the top screen; an Esc the
@@ -538,10 +728,8 @@ impl Shell {
         match global(&key, typing) {
             Some(Global::Quit) => return self.ask_quit(),
             Some(Global::GoTo) if !modal && self.go_to_allowed() => {
-                self.overlay = Some(Overlay::GoTo(GoTo {
-                    query: TextField::new("Go to", GO_TO_QUERY_MAX),
-                    selected: 0,
-                }));
+                let place = self.top().place();
+                self.overlay = Some(Overlay::GoTo(GoTo::new(place, &mut self.ctx)));
                 return;
             }
             Some(Global::Help) if !modal => {
@@ -620,12 +808,13 @@ impl Shell {
                     self.overlay = Some(Overlay::GoTo(go));
                 }
                 Key::Enter => match go.matches(&self.ctx).into_iter().nth(go.selected) {
-                    Some(target) => self.go(target.place),
+                    Some(target) => self.pick(target),
                     None => self.overlay = Some(Overlay::GoTo(go)),
                 },
                 other => {
                     if go.query.key(other) {
                         go.selected = 0;
+                        go.ask_files(&mut self.ctx);
                     }
                     self.overlay = Some(Overlay::GoTo(go));
                 }
@@ -765,6 +954,9 @@ impl Shell {
                 ..
             } => self.ctx.learn(MarkStep::Terminal),
             _ => {}
+        }
+        if let Some(Overlay::GoTo(go)) = &mut self.overlay {
+            go.arrive(&arrival, &mut self.ctx);
         }
         super::screens::new_project_page::carry_background(&arrival, &mut self.ctx);
         let count = self.stack.len();
@@ -972,7 +1164,11 @@ impl Shell {
         }
         body.push(Line::default());
         body.push(styled(
-            "Projects, tabs, settings, actions. Enter goes there.",
+            if go.here.is_some() {
+                "Projects, agents, files, settings. Enter goes there."
+            } else {
+                "Projects, tabs, settings, actions. Enter goes there."
+            },
             Role::Muted,
             theme,
         ));
