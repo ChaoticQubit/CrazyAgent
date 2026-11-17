@@ -116,6 +116,14 @@ export function renderer() {
   return screen.querySelector("canvas") ? "webgl" : "none";
 }
 
+/** The text the shown terminal's DOM rows draw, as the owner reads it on screen, so a row
+ * can tell a drawn screen from one whose buffer holds the text while nothing is drawn.
+ * Output: the text, or null while no DOM rows draw it. */
+export function domText() {
+  const rows = document.querySelector(".tg-terminal-screen .xterm-rows");
+  return rows ? rows.textContent.replace(/\u00a0/g, " ") : null;
+}
+
 /** Loses the shown terminal's WebGL context, as a GPU reset or a sleeping Mac does. Output:
  * whether a context was there to lose. */
 export function loseGpu() {

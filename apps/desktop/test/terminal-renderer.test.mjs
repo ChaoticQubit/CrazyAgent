@@ -28,10 +28,16 @@ function drawnWith(evaluate, name) {
   return evaluate(`Fixture.until(() => Fixture.renderer() === ${JSON.stringify(name)})`);
 }
 
-/** Waits until the page's terminal shows a line. Inputs: `evaluate` and the text. Output:
- * whether it did within the fixture's wait. */
+/** Waits until the page's terminal holds a line in its buffer. Inputs: `evaluate` and the
+ * text. Output: whether it did within the fixture's wait. */
 function shows(evaluate, text) {
   return evaluate(`Fixture.until(() => Fixture.view().text.includes(${JSON.stringify(text)}))`);
+}
+
+/** Waits until the page's terminal draws a line with DOM rows, on screen and not only in its
+ * buffer. Inputs: `evaluate` and the text. Output: whether it did within the fixture's wait. */
+function drawsRows(evaluate, text) {
+  return evaluate(`Fixture.until(() => (Fixture.domText() ?? "").includes(${JSON.stringify(text)}))`);
 }
 
 test("V243-TERMINAL-SLOW: a terminal on a page with WebGL2 draws on the GPU, not with DOM rows", async () => {
@@ -45,7 +51,7 @@ test("V243-TERMINAL-SLOW: a terminal on a page with WebGL2 draws on the GPU, not
 test("V243-TERMINAL-SLOW: a terminal on a page without WebGL2 keeps the DOM renderer and shows its output", async () => {
   const seen = await withPage(async ({ evaluate }) => {
     await live(evaluate, false);
-    const shown = await shows(evaluate, "drawn line");
+    const shown = await drawsRows(evaluate, "drawn line");
     return { shown, renderer: await evaluate("Fixture.renderer()") };
   });
   assert.deepEqual(seen, { shown: true, renderer: "dom" });
@@ -59,16 +65,17 @@ test("V243-TERMINAL-SLOW: a terminal whose WebGL context is lost goes back to DO
     const back = await evaluate('Fixture.until(() => Fixture.renderer() === "dom", 10000)');
     await evaluate('Fixture.output("after the loss\\r\\n")');
     const shown = await evaluate('Fixture.until(() => Fixture.view().text.includes("drawn line") && Fixture.view().text.includes("after the loss"))');
-    return { gpu, lost, back, shown };
+    const drawn = (await drawsRows(evaluate, "drawn line")) && (await drawsRows(evaluate, "after the loss"));
+    return { gpu, lost, back, shown, drawn };
   });
-  assert.deepEqual(seen, { gpu: true, lost: true, back: true, shown: true });
+  assert.deepEqual(seen, { gpu: true, lost: true, back: true, shown: true, drawn: true });
 });
 
 for (const [platform, drawn] of [["MacIntel", "webgl"], ["Win32", "webgl"], ["Linux x86_64", "dom"]]) {
   test(`#358 r2 (NOTE-1215): with nothing chosen, a GPU machine on ${platform} draws with ${drawn}`, async () => {
     const seen = await withPage(async ({ evaluate }) => {
       await live(evaluate, true, { platform });
-      return { drawn: await drawnWith(evaluate, drawn), shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()"), probed: (await evaluate("Fixture.gpuAsked()")) > 0 };
+      return { drawn: await drawnWith(evaluate, drawn), shown: await (drawn === "dom" ? drawsRows : shows)(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()"), probed: (await evaluate("Fixture.gpuAsked()")) > 0 };
     });
     assert.deepEqual(seen, { drawn: true, shown: true, renderer: drawn, probed: drawn === "webgl" });
   });
@@ -77,7 +84,7 @@ for (const [platform, drawn] of [["MacIntel", "webgl"], ["Win32", "webgl"], ["Li
 test("#358 r2: under GPU, a machine whose WebGL is a software renderer keeps DOM rows", async () => {
   const seen = await withPage(async ({ evaluate }) => {
     await live(evaluate, true, { renderer: "Fixture.SOFTWARE" });
-    return { shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
+    return { shown: await drawsRows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
   });
   assert.deepEqual(seen, { shown: true, renderer: "dom" });
 });
@@ -85,7 +92,7 @@ test("#358 r2: under GPU, a machine whose WebGL is a software renderer keeps DOM
 test("#358 r2: Standard keeps DOM rows on a machine with a GPU and never asks for a WebGL2 context, not even to probe", async () => {
   const seen = await withPage(async ({ evaluate }) => {
     await live(evaluate, true, { choice: "standard" });
-    return { shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()"), asked: await evaluate("Fixture.gpuAsked()") };
+    return { shown: await drawsRows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()"), asked: await evaluate("Fixture.gpuAsked()") };
   });
   assert.deepEqual(seen, { shown: true, renderer: "dom", asked: 0 });
 });
@@ -93,7 +100,7 @@ test("#358 r2: Standard keeps DOM rows on a machine with a GPU and never asks fo
 test("#358 r2: Automatic keeps DOM rows on a software renderer and draws on a GPU", async () => {
   const software = await withPage(async ({ evaluate }) => {
     await live(evaluate, true, { renderer: "Fixture.SOFTWARE", choice: "auto" });
-    return { shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
+    return { shown: await drawsRows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
   });
   assert.deepEqual(software, { shown: true, renderer: "dom" });
   const hardware = await withPage(async ({ evaluate }) => {
@@ -114,7 +121,7 @@ test("#358 r2: under Automatic one failed start keeps the terminal on DOM rows u
     await evaluate("Fixture.away()");
     await evaluate(`Fixture.back("master", ${harness})`);
     const held = await drawnWith(evaluate, "dom");
-    const heldText = await shows(evaluate, "drawn line");
+    const heldText = await drawsRows(evaluate, "drawn line");
     await evaluate('Fixture.choose("gpu")');
     const gpu = await drawnWith(evaluate, "webgl");
     await evaluate('Fixture.choose("auto")');
@@ -130,7 +137,7 @@ test("#358 r2: a new Terminal renderer choice applies to an open terminal at onc
     const gpu = await drawnWith(evaluate, "webgl");
     await evaluate('Fixture.choose("standard")');
     const standard = await drawnWith(evaluate, "dom");
-    const standardText = await shows(evaluate, "drawn line");
+    const standardText = await drawsRows(evaluate, "drawn line");
     await evaluate('Fixture.choose("gpu")');
     const back = await drawnWith(evaluate, "webgl");
     await evaluate('Fixture.output("after the switch\\r\\n")');
@@ -146,11 +153,12 @@ test("#358 r2: a Terminal renderer choice made in another window applies to this
     const gpu = await drawnWith(evaluate, "webgl");
     await evaluate('Fixture.chooseElsewhere("standard")');
     const standard = await drawnWith(evaluate, "dom");
+    const standardText = await drawsRows(evaluate, "drawn line");
     await evaluate('Fixture.chooseElsewhere("gpu")');
     const back = await drawnWith(evaluate, "webgl");
-    return { gpu, standard, back, text: await shows(evaluate, "drawn line") };
+    return { gpu, standard, standardText, back, text: await shows(evaluate, "drawn line") };
   });
-  assert.deepEqual(seen, { gpu: true, standard: true, back: true, text: true });
+  assert.deepEqual(seen, { gpu: true, standard: true, standardText: true, back: true, text: true });
 });
 
 test("#358 r2: a hidden terminal holds no WebGL context and draws on the GPU again, with what it printed meanwhile, once shown", async () => {
@@ -209,10 +217,11 @@ test("#358 r1 F1: the terminal's text and row height read the same under WebGL a
     const onGpu = (await evaluate("Fixture.view()")).rowHeight;
     await evaluate('Fixture.choose("standard")');
     const dom = await drawnWith(evaluate, "dom");
+    const drawn = await drawsRows(evaluate, "drawn line");
     const row = await evaluate('document.querySelector(".tg-terminal-screen .xterm-rows > div")?.getBoundingClientRect().height ?? 0');
-    return { gpu, shown, dom, onGpu, row, onDom: (await evaluate("Fixture.view()")).rowHeight };
+    return { gpu, shown, dom, drawn, onGpu, row, onDom: (await evaluate("Fixture.view()")).rowHeight };
   });
-  assert.deepEqual([seen.gpu, seen.shown, seen.dom], [true, true, true], JSON.stringify(seen));
+  assert.deepEqual([seen.gpu, seen.shown, seen.dom, seen.drawn], [true, true, true, true], JSON.stringify(seen));
   assert.ok(seen.row > 0, JSON.stringify(seen));
   assert.deepEqual([seen.onGpu, seen.onDom], [seen.row, seen.row], JSON.stringify(seen));
 });
