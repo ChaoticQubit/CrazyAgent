@@ -51,7 +51,7 @@ const TEMP_FOLDERS: [&str; 7] = [
     "/dev/shm",
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
-const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+pub(crate) const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The file name of the tmux the app ships beside the engine (DEC-157), which the name
 /// `tmux` finds before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
