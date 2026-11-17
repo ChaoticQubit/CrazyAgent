@@ -1530,6 +1530,12 @@ fn boundary_check(
             return Err("server_cant_start".into());
         }
     };
+    if let ServerSpec::Stdio { command, .. } = &launched
+        && std::fs::metadata(command)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err("server_command_not_found".into());
+    }
     let launched = crate::plugins::without_cmd_exe(root, launched).map_err(str::to_owned)?;
     let ServerSpec::Stdio { command, args } = &launched else {
         return Err("server_check_command_only".into());

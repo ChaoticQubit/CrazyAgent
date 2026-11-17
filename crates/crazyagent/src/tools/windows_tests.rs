@@ -125,6 +125,28 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     }
 }
 
+/// #341 addendum: npm's `npx.cmd` runs by its layout when its folder is off the engine's
+/// PATH, as a portable Node is, since `npx-cli.js` looks its `node` up beside npx.cmd only.
+#[test]
+fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
+    let (_folder, real, _places) = node_folder();
+    let npm = real.join("node_modules").join("npm").join("bin");
+    std::fs::create_dir_all(&npm).unwrap();
+    std::fs::write(npm.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
+    let npx = real.join("npx.cmd");
+    std::fs::write(&npx, "@ECHO off\r\n").unwrap();
+    let elsewhere = Places::new(Vec::new(), None);
+    let resolved = resolve_entry(&npx, &elsewhere).unwrap();
+    let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
+    assert_eq!(
+        resolved.argv(),
+        vec![
+            real_of(real.join("node.exe")),
+            real_of(npm.join("npx-cli.js"))
+        ]
+    );
+}
+
 /// #333 r1 sec F1: on Windows a launcher found under another spelling is still a launcher. A
 /// first line asking `env` for `Env` finds `env.exe`, which is refused as one, and the name
 /// check reads `.exe` and case away, so `ENV.EXE` and `BusyBox.exe` count and `node.exe` not.

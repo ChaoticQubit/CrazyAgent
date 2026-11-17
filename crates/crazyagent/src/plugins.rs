@@ -517,8 +517,8 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
 /// npm's `npx.cmd` as the tool resolver runs it ([`crate::tools::resolve_entry`]), kept only
 /// when the resolver mapped it by npx's layout ([`crate::tools::npx_real`]): `node.exe` with
 /// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
-/// command, its arguments and the places. Output: the spec, or `server_batch_file` for any
-/// other batch file.
+/// command, its arguments and the places. Output: the spec, `server_command_not_found` for
+/// an npx.cmd the resolver refuses, its cause logged (#341 code F1), or `server_batch_file`.
 #[cfg(windows)]
 fn npx_spec(
     command: &Path,
@@ -527,7 +527,14 @@ fn npx_spec(
 ) -> Result<ServerSpec, &'static str> {
     let other = "server_batch_file";
     let (node, cli) = crate::tools::npx_real(command).ok_or(other)?;
-    let tool = crate::tools::resolve_entry(command, places).map_err(|_| other)?;
+    let tool = crate::tools::resolve_entry(command, places).map_err(|missing| {
+        let why = missing.refused.as_ref().map(|refused| &refused.why);
+        eprintln!(
+            "plugin_server_npx_refused reason={:?} refused={why:?}",
+            missing.reason
+        );
+        "server_command_not_found"
+    })?;
     if tool.program != cli || tool.interpreter().map(|found| &found.program) != Some(&node) {
         return Err(other);
     }
@@ -1226,10 +1233,11 @@ mod windows_tests {
         }
     }
 
-    /// V243-WIN-MCP-NPX and #341 sec F1: npm's `npx.cmd`, found by its layout, runs as the
-    /// `node.exe` beside it with `npx-cli.js` before the approved arguments, in plain drive
-    /// spelling; any other `.cmd` or `.bat`, and a name with no extension or a dotted one with a
-    /// `.cmd` beside it, there or not, is left out; a `.exe` spec is unchanged.
+    /// V243-WIN-MCP-NPX and #341: npm's `npx.cmd`, found by its layout, runs as the `node.exe`
+    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling, and
+    /// one the resolver refuses is not found; any other `.cmd` or `.bat`, and a name with no
+    /// extension or a dotted one with a `.cmd` beside it, there or not, is left out; a `.exe`
+    /// spec is unchanged.
     #[test]
     fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
         let folder = tempfile::tempdir().unwrap();
@@ -1282,6 +1290,9 @@ mod windows_tests {
             without_cmd_exe(&real, spec("gone.exe")),
             Ok(spec("gone.exe"))
         );
+        std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env deno\n").unwrap();
+        let refused = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(refused, Err("server_command_not_found"));
         std::fs::remove_file(real.join("node.exe")).unwrap();
         let lone = npx_spec(&real.join("npx.cmd"), &args, &places);
         assert_eq!(lone, Err("server_batch_file"));

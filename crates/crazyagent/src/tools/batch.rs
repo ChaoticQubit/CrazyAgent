@@ -58,9 +58,10 @@ fn plain_part(part: &str) -> bool {
 /// npm's own `npx.cmd` as the `node.exe` and `npx-cli.js` beside it, read by where they sit
 /// and never by its text (leader 04:09); any other `.cmd` or `.bat` refused. A shim's
 /// target and npx's files pass every check an entry passes ([`entry_at`]), one level
-/// deeper, so a batch file leading to another stays bounded. Inputs: the entry, its checked
-/// real file, the places, the depth and how a refusal reads. Output: none when the real
-/// file is no batch file, else the tool or why it cannot run.
+/// deeper, so a batch file leading to another stays bounded; `npx-cli.js` looks its `node`
+/// up beside npx.cmd only, so npx runs off the engine's PATH too (#341). Inputs: the entry,
+/// its checked real file, the places, the depth and how a refusal reads. Output: none when
+/// the real file is no batch file, else the tool or why it cannot run.
 #[cfg(windows)]
 pub(super) fn entry(
     entry: &Path,
@@ -82,7 +83,11 @@ pub(super) fn entry(
             Ok(_) => return refuse(),
             Err(missing) => return Some(Err(missing)),
         };
-        return Some(entry_at(&cli, places, depth + 1).map(|script| Resolved {
+        let beside = Places {
+            folders: vec![folder.to_path_buf()],
+            ..places.clone()
+        };
+        return Some(entry_at(&cli, &beside, depth + 1).map(|script| Resolved {
             entry: entry.to_path_buf(),
             program: script.program,
             kind: Kind::Script {
