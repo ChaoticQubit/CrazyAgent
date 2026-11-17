@@ -442,7 +442,8 @@ fn each_refused_turn_setting_names_its_setting() {
 /// a fresh turn: every later call is refused and none panics.
 #[test]
 fn a_session_id_refused_after_a_turn_error_an_end_or_an_interrupt_fails_closed() {
-    let before: [(&str, fn(&mut JsonlTurn)); 3] = [
+    type Before = (&'static str, fn(&mut JsonlTurn));
+    let before: [Before; 3] = [
         ("turn error", |turns| {
             drop(events_of(
                 turns,
