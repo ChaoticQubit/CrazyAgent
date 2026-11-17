@@ -7,7 +7,7 @@ use serde_json::json;
 
 const TEAM: &str = "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1";
 
-type Row = (i64, i64, String, String, Vec<u8>);
+type LogRow = (i64, i64, String, String, Vec<u8>);
 
 /// Parks a used session behind a fresh live one and keeps a harness conversation for it
 /// whose record is not on disk, so its Delete has a team conversation row to drop. Input:
@@ -37,7 +37,7 @@ async fn parked_with_conversation(case: &Case) -> (SessionId, SessionId) {
 
 /// Every logged event as seq, revision, aggregate, kind and body, in seq order; none in a
 /// store whose log was never written. Input: the case. Output: the events.
-fn log_rows(case: &Case) -> Vec<Row> {
+fn log_rows(case: &Case) -> Vec<LogRow> {
     let db = case.db();
     let present: bool = db
         .query_row(
@@ -68,7 +68,7 @@ fn log_rows(case: &Case) -> Vec<Row> {
 }
 
 /// The body logged at one seq. Inputs: the events and the seq. Output: the body.
-fn body_at(rows: &[Row], seq: u64) -> Vec<u8> {
+fn body_at(rows: &[LogRow], seq: u64) -> Vec<u8> {
     rows.iter()
         .find(|row| row.0 as u64 == seq)
         .map(|row| row.4.clone())
@@ -204,7 +204,7 @@ async fn a_deleted_session_leaves_no_team_conversation_row_after_a_replay_of_the
         OwnerResult::Applied
     );
     assert_eq!(count(&case, TEAM, &parked), 0);
-    let deleted: Vec<Row> = log_rows(&case)
+    let deleted: Vec<LogRow> = log_rows(&case)
         .into_iter()
         .filter(|row| row.3 == SESSION_DELETED)
         .collect();
@@ -298,7 +298,7 @@ async fn a_delete_redacts_the_earlier_events_naming_its_session_and_keeps_the_re
         };
         assert_eq!(body_at(&after, *seq), expected, "event {index}");
     }
-    let own: Vec<&Row> = after
+    let own: Vec<&LogRow> = after
         .iter()
         .filter(|row| row.3 == SESSION_DELETED)
         .collect();
@@ -440,7 +440,7 @@ async fn deleting_a_deleted_session_again_logs_a_second_event_and_redacts_the_fi
     for id in ["delete-first", "delete-again"] {
         assert_eq!(case.delete(id, &parked).await, OwnerResult::Applied, "{id}");
     }
-    let deleted: Vec<Row> = log_rows(&case)
+    let deleted: Vec<LogRow> = log_rows(&case)
         .into_iter()
         .filter(|row| row.3 == SESSION_DELETED)
         .collect();
