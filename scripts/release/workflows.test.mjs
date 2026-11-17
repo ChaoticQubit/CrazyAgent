@@ -273,7 +273,7 @@ test("the Windows CI job is off until v2.2.1: an if that is always false skips i
 
 const RUST_CACHE = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0";
 
-test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust-cache action, saved even when the job fails; the release build, which holds the signing keys, runs no third-party cache action; and no job caches the whole target folder", async () => {
+test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust-cache action, saved only from master, even when the job fails, so a pull request or batch branch restores master's entry and adds none to the free 10 GB; the release build, which holds the signing keys, runs no third-party cache action; and no job caches the whole target folder", async () => {
   const ci = await workflow("ci.yml");
   const release = await workflow("release.yml");
   for (const [text, job, prefix] of [[ci, "linux", "ci-linux"], [ci, "macos", "ci-macos"], [ci, "windows", "ci-windows"]]) {
@@ -287,6 +287,7 @@ test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust
       "        with:",
       `          prefix-key: ${prefix}`,
       "          cache-on-failure: true",
+      "          save-if: ${{ github.ref == 'refs/heads/master' }}",
     ].join("\n"), job);
     assert(all.findIndex((step) => step.includes("- name: Install Rust toolchain")) < at, `${job} keys its cache on the installed toolchain`);
   }
@@ -767,23 +768,28 @@ function excluded(text, name) {
   return new Set([lines[start].slice(lines[start].indexOf(":") + 1), ...lines.slice(start + 1, end)].join(" ").split(/\s+/).filter((word) => word && word !== ">-"));
 }
 
-test("every Rust test target that needs the staged RCLI host is left out of CI, which stages none", async () => {
+test("every Rust test target that needs the staged RCLI host is left out of CI and the test farm, which stage none", async () => {
   const ci = await workflow("ci.yml");
+  const farm = await workflow("tests.yml");
   const root = new URL("../../", import.meta.url);
   let needing = 0;
-  for (const [folder, list] of [["crates/crazyagent/tests/", "ENGINE_TESTS_EXCLUDE"], ["apps/desktop/src-tauri/tests/", "DESKTOP_TESTS_EXCLUDE"]]) {
-    const skipped = excluded(ci, list);
+  for (const [folder, text, list] of [
+    ["crates/crazyagent/tests/", ci, "ENGINE_TESTS_EXCLUDE"], ["apps/desktop/src-tauri/tests/", ci, "DESKTOP_TESTS_EXCLUDE"],
+    ["crates/crazyagent/tests/", farm, "FARM_ENGINE_EXCLUDE"], ["apps/desktop/src-tauri/tests/", farm, "FARM_DESKTOP_EXCLUDE"],
+  ]) {
+    const skipped = excluded(text, list);
     for (const name of (await readdir(new URL(folder, root))).filter((name) => name.endsWith(".rs"))) {
       if (!(await readFile(new URL(folder + name, root), "utf8")).includes("CRAZYAGENT_RCLI")) continue;
       needing += 1;
       assert(skipped.has(name.slice(0, -3)), `${folder}${name} reads CRAZYAGENT_RCLI but is not in ${list}`);
     }
   }
-  assert(needing > 0, "the check found the tests that need the RCLI host");
+  assert(needing > 1, "the check found the tests that need the RCLI host");
 });
 
-test("every engine and desktop row or target CI leaves out, for all jobs or one, names a real test, so no exclusion goes stale", async () => {
+test("every engine and desktop row or target CI or the test farm leaves out, for all jobs or one, names a real test, so no exclusion goes stale", async () => {
   const ci = await workflow("ci.yml");
+  const farm = await workflow("tests.yml");
   const jobs = block(ci, 0, "jobs").join("\n");
   const job = (name) => block(jobs, 2, name).join("\n").replace(/^ {4}/gm, "");
   const root = new URL("../../", import.meta.url);
@@ -796,8 +802,8 @@ test("every engine and desktop row or target CI leaves out, for all jobs or one,
     return texts;
   };
   const crates = [
-    ["crates/crazyagent/", ["ENGINE_TESTS_EXCLUDE", ci], ["PLATFORM_TESTS_EXCLUDE", job("macos")], ["PLATFORM_TESTS_EXCLUDE", job("linux")]],
-    ["apps/desktop/src-tauri/", ["DESKTOP_TESTS_EXCLUDE", ci]],
+    ["crates/crazyagent/", ["ENGINE_TESTS_EXCLUDE", ci], ["PLATFORM_TESTS_EXCLUDE", job("macos")], ["PLATFORM_TESTS_EXCLUDE", job("linux")], ["FARM_ENGINE_EXCLUDE", farm]],
+    ["apps/desktop/src-tauri/", ["DESKTOP_TESTS_EXCLUDE", ci], ["FARM_DESKTOP_EXCLUDE", farm]],
   ];
   let rows = 0;
   for (const [crate, ...lists] of crates) {
@@ -820,14 +826,163 @@ test("every engine and desktop row or target CI leaves out, for all jobs or one,
   assert(rows > 20, "the check found the excluded rows");
 });
 
-test("every live Rust test target, named *_live, is left out of CI, which has no live accounts, harnesses or local models", async () => {
-  const skipped = excluded(await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE");
+test("every live Rust test target, named *_live, is left out of CI and the test farm, which have no live accounts, harnesses or local models", async () => {
   const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
   const live = (await readdir(folder)).filter((name) => name.endsWith("_live.rs")).map((name) => name.slice(0, -3));
   assert(live.includes("codex_bridge_live"), "the check found the live targets");
-  for (const name of live) {
-    assert(skipped.has(name), `crates/crazyagent/tests/${name}.rs is a live target but is not in ENGINE_TESTS_EXCLUDE`);
+  for (const [file, list] of [["ci.yml", "ENGINE_TESTS_EXCLUDE"], ["tests.yml", "FARM_ENGINE_EXCLUDE"]]) {
+    const skipped = excluded(await workflow(file), list);
+    for (const name of live) {
+      assert(skipped.has(name), `crates/crazyagent/tests/${name}.rs is a live target but is not in ${file} ${list}`);
+    }
   }
+});
+
+/**
+ * Lists the matrix entries of one job, read from its `include:` list in block form: an entry
+ * starts with `- key: value` at 10-space indent and goes on with `key: value` at 12.
+ * Inputs: the workflow text and the job name. Output: one object of strings per entry.
+ */
+function matrixEntries(workflowText, job) {
+  const lines = block(block(workflowText, 0, "jobs").join("\n"), 2, job);
+  const include = lines.findIndex((line) => line === "        include:");
+  assert(include >= 0, `${job} has a matrix include`);
+  const entries = [];
+  for (const line of lines.slice(include + 1)) {
+    const start = line.match(/^ {10}- ([a-z0-9_]+): (\S+)$/);
+    const more = line.match(/^ {12}([a-z0-9_]+): (\S+)$/);
+    if (start) entries.push({ [start[1]]: start[2] });
+    else if (more && entries.length > 0) entries.at(-1)[more[1]] = more[2];
+    else break;
+  }
+  assert(entries.length > 0, `${job} lists matrix entries`);
+  return entries;
+}
+
+test("the test farm runs on a pushed integration batch or on demand, never for a pull request, one run per ref with a newer push cancelling the older, with a read-only token, and every job refuses a self-hosted runner first (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  assert.deepEqual(block(farm, 0, "on").filter(Boolean), ["on:", "  push:", "    branches:", '      - "chore/v242-batch*"', '      - "chore/v25*"', '      - "test-farm/**"', "  workflow_dispatch:"]);
+  assert.doesNotMatch(farm, /pull_request|workflow_call/);
+  assert.deepEqual(block(farm, 0, "concurrency").filter(Boolean), ["concurrency:", "  group: tests-${{ github.ref }}", "  cancel-in-progress: true"]);
+  assert.deepEqual(block(farm, 0, "permissions").filter(Boolean), ["permissions:", "  contents: read"]);
+  assert.doesNotMatch(farm, /^ {4}permissions:/m, "no job widens the token");
+  const jobs = jobsOf(farm).map(({ name }) => name);
+  assert.deepEqual(jobs, ["build", "rust", "node", "typecheck", "report"]);
+  for (const job of jobs) {
+    const [first] = steps(farm, job);
+    assert(first.startsWith("      - name: Refuse a runner that is not GitHub-hosted\n"), job);
+    assert(first.includes('[ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::'), job);
+    assert.match(first, /exit 1; \}$/, job);
+  }
+});
+
+test("the test farm keeps one Rust cache per OS and lockfile, saved only from master, and no other cache, so it fits the free 10 GB beside ci.yml (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  assert.deepEqual(farm.split("\n").filter((line) => /uses: (Swatinem\/rust-cache|actions\/cache)@|^\s+cache(-dependency-path)?:/.test(line)).map((line) => line.trim()), ["- uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"]);
+  const cache = steps(farm, "build").find((step) => step.includes("Swatinem/rust-cache@"));
+  assert.deepEqual(cache.split("\n").slice(1).map((line) => line.trim()), ["with:", "prefix-key: farm", "shared-key: ${{ matrix.os }}", "add-job-id-key: false", "add-rust-environment-hash-key: false", "cache-bin: false", "save-if: ${{ github.ref == 'refs/heads/master' }}"]);
+  for (const step of steps(farm, "build").filter((text) => text.includes("actions/upload-artifact@"))) assert(step.includes("          retention-days: 1\n"), "a test archive lives one day");
+});
+
+test("every test farm part is one matrix entry that uploads one JUnit report, even when it crashed, and a run holds at most 5 macOS jobs and 20 jobs at once (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const builds = matrixEntries(farm, "build");
+  const rust = matrixEntries(farm, "rust");
+  const node = matrixEntries(farm, "node");
+  for (const entry of [...builds, ...rust, ...node]) assert.equal(entry.runner, RUNNERS[entry.os], JSON.stringify(entry));
+  assert.deepEqual(builds.map((entry) => entry.os), ["linux", "macos", "windows"]);
+  assert.deepEqual([...new Set(rust.map((entry) => entry.os))], ["linux", "macos", "windows"]);
+  for (const entries of [rust, node]) {
+    for (const os of new Set(entries.map((entry) => entry.os))) {
+      const mine = entries.filter((entry) => entry.os === os);
+      assert.deepEqual(mine.map((entry) => entry.part), mine.map((_, index) => String(index + 1)), `${os} parts are 1..N`);
+      assert(mine.every((entry) => entry.parts === String(mine.length)), `${os} parts name N = ${mine.length}`);
+    }
+  }
+  const parts = [...rust.map((entry) => `${entry.os}-rust-${entry.part}`), ...node.map((entry) => `${entry.os}-node-${entry.part}`), "linux-bun-1"];
+  assert.deepEqual([...excluded(farm, "FARM_PARTS")].sort(), parts.sort(), "the report expects exactly the parts the matrices run");
+  for (const [job, part] of [["rust", "${{ matrix.os }}-rust-${{ matrix.part }}"], ["node", "${{ matrix.os }}-node-${{ matrix.part }}"], ["typecheck", "linux-bun-1"]]) {
+    assert(block(block(farm, 0, "jobs").join("\n"), 2, job).includes(`      FARM_PART: ${part}`), job);
+    const all = steps(farm, job);
+    const keep = all.findIndex((step) => step.startsWith("      - name: Keep a JUnit report for this part\n        if: always()\n"));
+    assert(keep >= 0 && all[keep].includes('if [ ! -s "$FARM_JUNIT" ]; then'), `${job} writes a failing report when none was written`);
+    assert.match(all[keep + 1], /uses: actions\/upload-artifact@[0-9a-f]{40}\n {8}if: always\(\)\n {8}with:\n {10}name: farm-junit-\$\{\{ env\.FARM_PART \}\}\n/, job);
+  }
+  const count = (os) => [builds, rust, node].flat().filter((entry) => entry.os === os).length;
+  assert(count("macos") <= 5, "at most 5 macOS jobs, even if a build overlapped its shards");
+  assert(builds.length + rust.length + node.length + 2 <= 20, "at most 20 jobs at once, typecheck and report included");
+});
+
+test("the test farm report needs every other job and fails on any that did not succeed, so a red typecheck or build never reads green in the summary (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const others = jobsOf(farm).map(({ name }) => name).filter((name) => name !== "report");
+  assert(block(block(farm, 0, "jobs").join("\n"), 2, "report").includes(`    needs: [${others.join(", ")}]`));
+  const summary = steps(farm, "report").find((step) => step.includes("scripts/ci/junit-summary.mjs"));
+  assert(summary.includes("        env:\n          FARM_NEEDS: ${{ toJSON(needs) }}\n"), "the summary reads every needed job's result");
+});
+
+test("every test farm Rust shard installs the build job's toolchain, Windows SQLite and debug settings and fetches the locked crates before it runs, so rows that spawn the cargo that built them build offline (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const build = steps(farm, "build");
+  const rust = steps(farm, "rust");
+  const named = (all, name) => all.findIndex((step) => step.startsWith(`      - name: ${name}\n`));
+  const shard = rust.findIndex((step) => step.includes("bash scripts/ci/farm-rust-shard.sh "));
+  assert(shard >= 0, "the shard step exists");
+  for (const name of ["Install Rust toolchain", "Install SQLite for Windows", "Set debug info for the platform's disk", "Fetch Rust dependencies"]) {
+    const at = named(rust, name);
+    assert(at >= 0 && at < shard, `${name} runs before the shard`);
+    assert.equal(rust[at], build[named(build, name)], `${name} is the build job's own step`);
+  }
+  assert(rust[named(rust, "Fetch Rust dependencies")].endsWith("run: cargo fetch --locked"));
+  assert(named(rust, "Install Rust toolchain") < named(rust, "Fetch Rust dependencies"), "crates are fetched with the pinned cargo");
+});
+
+test("the test farm installs tmux only from pinned, checked sources: the Linux tarball by sha256, the macOS build by the release's pinned script, never from Homebrew (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  assert.doesNotMatch(farm, /brew install/);
+  const rust = steps(farm, "rust");
+  const linux = rust.find((step) => step.startsWith("      - name: Install tmux on Linux\n"));
+  assert(linux.includes('echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -'));
+  const macos = rust.find((step) => step.startsWith("      - name: Install tmux on macOS\n"));
+  assert(macos.includes("scripts/release/build-tmux.sh --target aarch64-apple-darwin "));
+  assert(macos.includes('test "$(tmux -V)" = "tmux $TMUX_VERSION"'));
+  const pinned = (await readFile(new URL("./build-tmux.sh", import.meta.url), "utf8")).match(/^TMUX_VERSION=(\S+)$/m)[1];
+  assert(farm.includes(`  TMUX_VERSION: "${pinned}"\n`), "the Linux build and the release script pin one tmux version");
+});
+
+test("the test farm macOS build gets the hosted job's 330-minute budget and two cargo jobs, logging memory and swap, and Windows leaves only the desktop crate out of its archive, whose test exe cannot load without the app manifest (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  assert(block(block(farm, 0, "jobs").join("\n"), 2, "build").includes("    timeout-minutes: ${{ matrix.os == 'macos' && 330 || 150 }}"));
+  const archive = steps(farm, "build").find((step) => step.startsWith("      - name: Build and archive every workspace test\n"));
+  assert(archive.includes('if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi'));
+  assert(archive.includes("export CARGO_BUILD_JOBS=2"));
+  assert(archive.includes("sysctl -n vm.swapusage"));
+  assert(archive.includes('cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline'));
+  assert.equal(farm.match(/--exclude /g).length, 1, "no other crate is left out of any archive");
+  const size = steps(farm, "build").find((step) => step.startsWith("      - name: Show the free disk, the target and the archive size\n"));
+  assert(size.includes("hw.memsize") && size.includes("free -g"), "every build prints its CPUs and memory");
+});
+
+test("every test farm node part installs what its rows run, tmux, the locked crates and the PDF Chrome, from the same pinned steps as the Rust jobs, and stops before the job limit so its JUnit is kept (DEC-191)", async () => {
+  const farm = await workflow("tests.yml");
+  const build = steps(farm, "build");
+  const rust = steps(farm, "rust");
+  const node = steps(farm, "node");
+  const named = (all, name) => all.findIndex((step) => step.startsWith(`      - name: ${name}\n`));
+  const run = named(node, "Run this share of the node suites");
+  assert(run >= 0, "the node run step exists");
+  for (const [source, name] of [[build, "Install Rust toolchain"], [build, "Fetch Rust dependencies"], [rust, "Install Linux packages"], [rust, "Install tmux on Linux"], [rust, "Install tmux on macOS"]]) {
+    const at = named(node, name);
+    assert(at >= 0 && at < run, `${name} runs before the node suites`);
+    assert.equal(node[at], source[named(source, name)], `${name} is the same step as in the Rust jobs`);
+  }
+  const shell = node[named(node, "Install the pinned Chrome headless shell for the PDF rows")];
+  assert(shell.includes('echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -'));
+  assert(shell.includes('echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"'));
+  for (const entry of matrixEntries(farm, "node")) assert.match(entry.headless_sha256, /^[0-9a-f]{64}$/, JSON.stringify(entry));
+  const job = Number(block(block(farm, 0, "jobs").join("\n"), 2, "node").find((line) => line.startsWith("    timeout-minutes: ")).split(": ")[1]);
+  const step = Number(node[run].match(/^ {8}timeout-minutes: (\d+)$/m)[1]);
+  assert(step + 10 <= job, `the node run stops at ${step} min, leaving the JUnit steps time before the ${job}-min job limit`);
 });
 
 test("CI runs the price snapshot script's check on Linux, so a bad refresh fails a pull request", async () => {

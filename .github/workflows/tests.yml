@@ -1,0 +1,668 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - "chore/v242-batch*"
+      - "chore/v25*"
+      - "test-farm/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  NODE_VERSION: "26.12.1"
+  BUN_VERSION: "1.4.3"
+  RCLI_SOURCE_REPOSITORY: Backboard-io/Backboard-R-CLI
+  RCLI_SOURCE_REVISION: 51bee17e02344de5fffd89523ce2b73d5042f216
+  TMUX_VERSION: "3.8"
+  TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
+  CLAUDE_CODE_VERSION: "2.1.309"
+  CODEX_VERSION: "0.164.0"
+  UV_VERSION: "0.13.5"
+  NEXTEST_VERSION: "0.9.152"
+  NEXTEST_PROFILE: farm
+  CHROME_VERSION: "151.0.7922.34"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+  FARM_ENGINE_EXCLUDE: >-
+    agents_live codex_app_server_live codex_bridge_live launch_context_live
+    acceptance_v2_rcli_usage accounts_binary harness_catalog_bundled_rcli
+    accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
+    harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
+    harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file
+    harness_launch/live_tools_on_turn_completes_inside_the_project_sandbox
+    github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
+    project_sandbox/an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run
+  FARM_DESKTOP_EXCLUDE: accounts_bridge/desktop_accounts_commands_reach_the_real_engine
+  NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
+  BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
+  FARM_PARTS: >-
+    linux-rust-1 linux-rust-2 linux-rust-3 linux-rust-4 macos-rust-1 macos-rust-2 macos-rust-3
+    windows-rust-1 windows-rust-2 windows-rust-3 linux-node-1 linux-node-2 macos-node-1 linux-bun-1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build the ${{ matrix.os }} test archive
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.os == 'macos' && 330 || 150 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-22.04
+          - os: macos
+            runner: macos-15
+          - os: windows
+            runner: windows-2022
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - name: Free disk on the Linux runner
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Free disk on the macOS runner
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          df -h /
+          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install Linux build packages
+        if: matrix.os == 'linux'
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install SQLite for Windows
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Set debug info for the platform's disk
+        run: |
+          set -euo pipefail
+          debug=0
+          if [ "$RUNNER_OS" = Linux ]; then debug=line-tables-only; fi
+          {
+            echo "CARGO_PROFILE_DEV_DEBUG=$debug"
+            echo "CARGO_PROFILE_TEST_DEBUG=$debug"
+          } >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          prefix-key: farm
+          shared-key: ${{ matrix.os }}
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install cargo-nextest
+        run: bash scripts/ci/install-nextest.sh
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+      - name: Build the engine binaries the tests run
+        run: |
+          set -euo pipefail
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then exe=.exe; fi
+          cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --locked --offline
+          mkdir -p target/debug/deps
+          cp "target/debug/crazyagent-landlock$exe" "target/debug/deps/crazyagent-landlock$exe"
+      - name: Build and archive every workspace test
+        run: |
+          set -euo pipefail
+          exclude=()
+          if [ "$RUNNER_OS" = Windows ]; then exclude=(--exclude crazyagent-desktop); fi
+          if [ "$RUNNER_OS" = macOS ]; then
+            export CARGO_BUILD_JOBS=2
+            (while sleep 300; do echo "memory $(date +%H:%M) $(sysctl -n vm.swapusage)"; done) &
+            sampler=$!
+            trap 'kill "$sampler" 2> /dev/null || true' EXIT
+          fi
+          cargo nextest archive --workspace ${exclude[@]+"${exclude[@]}"} --locked --offline --archive-file "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst"
+      - name: Show the free disk, the target and the archive size
+        if: always()
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS) echo "cpus $(sysctl -n hw.ncpu), memory $(( $(sysctl -n hw.memsize) / 1073741824 )) GiB, $(sysctl -n vm.swapusage)" ;;
+            Linux) echo "cpus $(nproc)"; free -g ;;
+            *) echo "cpus $(nproc)" ;;
+          esac
+          df -h .
+          if [ -d target ]; then du -sh target; fi
+          if [ -f "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst" ]; then du -h "$RUNNER_TEMP/farm-${{ matrix.os }}.tar.zst"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: farm-archive-${{ matrix.os }}
+          path: ${{ runner.temp }}/farm-${{ matrix.os }}.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  rust:
+    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    needs: build
+    if: ${{ !cancelled() }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-22.04
+            part: 1
+            parts: 4
+          - os: linux
+            runner: ubuntu-22.04
+            part: 2
+            parts: 4
+          - os: linux
+            runner: ubuntu-22.04
+            part: 3
+            parts: 4
+          - os: linux
+            runner: ubuntu-22.04
+            part: 4
+            parts: 4
+          - os: macos
+            runner: macos-15
+            part: 1
+            parts: 3
+          - os: macos
+            runner: macos-15
+            part: 2
+            parts: 3
+          - os: macos
+            runner: macos-15
+            part: 3
+            parts: 3
+          - os: windows
+            runner: windows-2022
+            part: 1
+            parts: 3
+          - os: windows
+            runner: windows-2022
+            part: 2
+            parts: 3
+          - os: windows
+            runner: windows-2022
+            part: 3
+            parts: 3
+    env:
+      FARM_JUNIT: target/nextest/farm/junit.xml
+      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install SQLite for Windows
+        if: matrix.os == 'windows'
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Set debug info for the platform's disk
+        run: |
+          set -euo pipefail
+          debug=0
+          if [ "$RUNNER_OS" = Linux ]; then debug=line-tables-only; fi
+          {
+            echo "CARGO_PROFILE_DEV_DEBUG=$debug"
+            echo "CARGO_PROFILE_TEST_DEBUG=$debug"
+          } >> "$GITHUB_ENV"
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+      - name: Install cargo-nextest
+        run: bash scripts/ci/install-nextest.sh
+      - name: Install Linux packages
+        if: matrix.os == 'linux'
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install tmux on Linux
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/tmux"
+          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
+          tar -xzf "$work/tmux.tar.gz" -C "$work"
+          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
+          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
+          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install uv on Linux
+        if: matrix.os == 'linux'
+        env:
+          UV_TARGET: x86_64-unknown-linux-gnu
+          UV_SHA256: f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/uv"
+          mkdir -p "$work/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+          echo "$UV_SHA256  $work/uv.tar.gz" | sha256sum -c -
+          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
+      - name: Install tmux on macOS
+        if: matrix.os == 'macos'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install Claude Code and Codex
+        if: matrix.os != 'windows'
+        run: bash scripts/ci/install-harnesses.sh
+      - name: Read the pinned IDE build
+        id: ide
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { appendFileSync, readFileSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
+            const { version } = manifest;
+            const build = manifest.builds["aarch64-apple-darwin"];
+            const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
+            const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
+              && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
+            if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
+            appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
+          '
+      - name: Provision the pinned IDE build
+        if: matrix.os == 'macos'
+        env:
+          IDE_VERSION: ${{ steps.ide.outputs.version }}
+          IDE_URL: ${{ steps.ide.outputs.url }}
+          IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
+          IDE_BYTES: ${{ steps.ide.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/vscodium-reh-web"
+          build=".local-state/ide-cache/vscodium-$IDE_VERSION"
+          mkdir -p "$work" "$build"
+          curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
+          test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
+          echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
+          tar -xzf "$work/vscodium.tgz" -C "$build"
+          test -f "$build/out/server-main.js"
+      - name: Install pinned graphify for the graph rows
+        if: matrix.os == 'macos'
+        env:
+          UV_TARGET: aarch64-apple-darwin
+          UV_SHA256: 743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/uv"
+          mkdir -p "$work/bin"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/uv.tar.gz" "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.tar.gz"
+          echo "$UV_SHA256  $work/uv.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
+          install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
+          test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+          venv="$RUNNER_TEMP/graphify"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
+          "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
+          "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
+          "$venv/bin/graphify" --help > /dev/null
+          echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
+      - name: Install the pinned context-mode for the shared-install rows
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          read -r version integrity < <(node -e '
+            const text = require("node:fs").readFileSync(process.argv[1], "utf8");
+            const entry = text.split("[[entries]]").find((block) => /^id = "context-mode"$/m.test(block));
+            const version = entry?.match(/^install = ".*\bcontext-mode@([0-9]+\.[0-9]+\.[0-9]+) /m)?.[1];
+            const integrity = entry?.match(/^integrity = "(sha512-[A-Za-z0-9+\/]+=*)"$/m)?.[1];
+            if (!version || !integrity) throw new Error("the default pack does not pin an exact context-mode");
+            console.log(version, integrity);
+          ' crates/crazyagent/src/setup/pack.toml)
+          test -n "$version" && test -n "$integrity"
+          install="$RUNNER_TEMP/context-mode"
+          mkdir -p "$install"
+          cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json "$install/"
+          locked="$(node -p 'const entry = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"]; `${entry.version} ${entry.integrity}`' "$install/package-lock.json")"
+          test "$locked" = "$version $integrity"
+          npm ci --prefix "$install" --ignore-scripts --no-audit --no-fund --no-update-notifier --loglevel=error
+          recorded="$(node -p 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).packages["node_modules/context-mode"].integrity' "$install/node_modules/.package-lock.json")"
+          test "$recorded" = "$integrity"
+          npm_config_build_from_source=true npm_config_nodedir="$(dirname "$(dirname "$(command -v node)")")" \
+            npm rebuild better-sqlite3 --prefix "$install" --no-audit --no-fund --no-update-notifier --loglevel=error
+          test -f "$install/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          test "$(node -p 'require(process.argv[1]).version' "$install/node_modules/context-mode/package.json")" = "$version"
+          echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=$install" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        continue-on-error: true
+        with:
+          name: farm-archive-${{ matrix.os }}
+          path: ${{ runner.temp }}/archive
+      - name: Run this slice of the workspace tests
+        run: bash scripts/ci/farm-rust-shard.sh "$RUNNER_TEMP/archive/farm-${{ matrix.os }}.tar.zst" "${{ matrix.part }}" "${{ matrix.parts }}"
+      - name: Keep a JUnit report for this part
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$FARM_JUNIT")"
+          if [ ! -s "$FARM_JUNIT" ]; then
+            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: farm-junit-${{ env.FARM_PART }}
+          path: ${{ env.FARM_JUNIT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  node:
+    name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-22.04
+            part: 1
+            parts: 2
+            chrome: linux64
+            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
+            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
+          - os: linux
+            runner: ubuntu-22.04
+            part: 2
+            parts: 2
+            chrome: linux64
+            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
+            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
+          - os: macos
+            runner: macos-15
+            part: 1
+            parts: 1
+            chrome: mac-arm64
+            chrome_sha256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
+            headless_sha256: cb46a336dbe3d6f1339c5039c3083e4e5dd8e4379710790e34f8f4a865e2452d
+    env:
+      FARM_JUNIT: ${{ github.workspace }}/farm-junit/node.xml
+      FARM_PART: ${{ matrix.os }}-node-${{ matrix.part }}
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
+          ref: ${{ env.RCLI_SOURCE_REVISION }}
+          path: .local-state/tools/rcli-source
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - id: bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install IDE extension dependencies
+        working-directory: apps/ide-extension
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install rcli source dependencies
+        working-directory: .local-state/tools/rcli-source
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: npm run build
+      - name: Install the pinned Chrome for Testing
+        env:
+          CHROME_PLATFORM: ${{ matrix.chrome }}
+          CHROME_SHA256: ${{ matrix.chrome_sha256 }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/chrome"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$CHROME_PLATFORM/chrome-$CHROME_PLATFORM.zip"
+          echo "$CHROME_SHA256  $work/chrome.zip" | shasum -a 256 -c -
+          if [ "$RUNNER_OS" = macOS ]; then
+            ditto -x -k "$work/chrome.zip" "$work"
+            chrome="$work/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+          else
+            unzip -q "$work/chrome.zip" -d "$work"
+            chrome="$work/chrome-linux64/chrome"
+          fi
+          "$chrome" --version
+          echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+      - name: Install Linux packages
+        if: matrix.os == 'linux'
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install tmux on Linux
+        if: matrix.os == 'linux'
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/tmux"
+          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
+          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
+          tar -xzf "$work/tmux.tar.gz" -C "$work"
+          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
+          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
+          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install tmux on macOS
+        if: matrix.os == 'macos'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Install the pinned Chrome headless shell for the PDF rows
+        env:
+          HEADLESS_PLATFORM: ${{ matrix.chrome }}
+          HEADLESS_SHA256: ${{ matrix.headless_sha256 }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/chrome-headless-shell"
+          mkdir -p "$work"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/headless.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$HEADLESS_PLATFORM/chrome-headless-shell-$HEADLESS_PLATFORM.zip"
+          echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -
+          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k "$work/headless.zip" "$work"; else unzip -q "$work/headless.zip" -d "$work"; fi
+          shell="$work/chrome-headless-shell-$HEADLESS_PLATFORM/chrome-headless-shell"
+          "$shell" --version
+          echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"
+      - name: Run this share of the node suites
+        timeout-minutes: 60
+        env:
+          BUN: ${{ steps.bun.outputs.bun-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$FARM_JUNIT")"
+          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT"
+      - name: Keep a JUnit report for this part
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$FARM_JUNIT")"
+          if [ ! -s "$FARM_JUNIT" ]; then
+            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: farm-junit-${{ env.FARM_PART }}
+          path: ${{ env.FARM_JUNIT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  typecheck:
+    name: Desktop typecheck and Bun suites
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      FARM_JUNIT: ${{ github.workspace }}/farm-junit/bun.xml
+      FARM_PART: linux-bun-1
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
+          ref: ${{ env.RCLI_SOURCE_REVISION }}
+          path: .local-state/tools/rcli-source
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - id: bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Typecheck desktop
+        working-directory: apps/desktop
+        run: npm run typecheck
+      - name: Install rcli source dependencies
+        if: always()
+        working-directory: .local-state/tools/rcli-source
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Run the Bun suites
+        if: always()
+        env:
+          BUN: ${{ steps.bun.outputs.bun-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$FARM_JUNIT")"
+          make test-bun BUN="$BUN" BUN_TEST_ARGS="--reporter=junit --reporter-outfile=$FARM_JUNIT"
+      - name: Keep a JUnit report for this part
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$FARM_JUNIT")"
+          if [ ! -s "$FARM_JUNIT" ]; then
+            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: farm-junit-${{ env.FARM_PART }}
+          path: ${{ env.FARM_JUNIT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  report:
+    name: Test farm report
+    needs: [build, rust, node, typecheck]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: farm-junit-*
+          path: ${{ runner.temp }}/junit
+      - name: Write the summary table
+        env:
+          FARM_NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/junit"
+          node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
