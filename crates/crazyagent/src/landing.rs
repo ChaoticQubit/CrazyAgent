@@ -519,6 +519,14 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+/// Shapes what engine git on this thread reports as its version for the rest of a row, so a
+/// row in landing or outside it can cross the git floor (W-GIT-FLOOR). Input: the line
+/// `git version` prints, or None for the real git's own.
+#[cfg(all(test, unix))]
+pub(crate) fn shape_git(printed: Option<&str>) {
+    git::VERSION_PRINTED.with(|shaped| *shaped.borrow_mut() = printed.map(str::to_owned));
+}
+
 /// Records one action on a change set in its project's activity at the time the set last
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
