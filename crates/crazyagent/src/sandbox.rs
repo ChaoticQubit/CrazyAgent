@@ -339,7 +339,6 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::ide::FOLDER,
     crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
     crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
-    #[cfg(unix)]
     "plugin-keys",
     #[cfg(unix)]
     crate::storage::migrations::BACKUPS,
