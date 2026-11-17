@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod e2e_support;
+#[path = "snapshot_v242/check.rs"]
+mod check;
 #[path = "snapshot_v242/workflow.rs"]
 mod workflow;
 
@@ -47,6 +49,7 @@ fn scenarios() -> Vec<Scenario> {
         name: "masking-example",
         capture: masking_example,
     }];
+    all.extend(check::scenarios());
     all.extend(workflow::scenarios());
     all
 }
