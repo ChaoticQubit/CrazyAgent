@@ -889,22 +889,13 @@ impl OwnerRuntimeHandle {
             }
         };
         let run = joined.map_err(|_| failure(THREAD_LOST))?;
+        opened?;
         let ListedRun {
             driven,
             stopped,
             lock,
             capture,
         } = run;
-        let project = prepared.session.project_id.as_str();
-        let by = leftovers::HoldBy {
-            project: Some(project.to_owned()),
-            who: "a listed master turn".to_owned(),
-        };
-        let account = Some(held.0.account().clone());
-        let stopped = listed_stop_settled(stopped, account, (held, lock), by, || {
-            leftovers::mode_of(Some(project))
-        });
-        opened?;
         let tokens = driven.as_ref().ok().and_then(|collected| collected.tokens);
         self.count_master_usage(prepared, None, tokens.unwrap_or_default())
             .await;
@@ -913,7 +904,15 @@ impl OwnerRuntimeHandle {
         } else {
             Ok(())
         };
-        stopped?;
+        let project = prepared.session.project_id.as_str();
+        let by = leftovers::HoldBy {
+            project: Some(project.to_owned()),
+            who: "a listed master turn".to_owned(),
+        };
+        let account = Some(held.0.account().clone());
+        listed_stop_settled(stopped, account, (held, lock), by, || {
+            leftovers::mode_of(Some(project))
+        })?;
         begun?;
         if let Some(error) = scope {
             return Err(error);
