@@ -370,8 +370,10 @@ pub fn findings(reply: &str, saved: &str) -> Vec<Finding> {
 }
 
 /// One cleanup to run: the engine's data folder, the two settings files, the installed
-/// harness executables, whose usage it counts as, the pool rule's inputs, the prompt and
-/// the agent name its usage shows under.
+/// harness executables, whose usage it counts as, the pool rule's inputs, the prompt, the
+/// agent name its usage shows under, and whether its caller holds one of the owner server's
+/// seats for long requests while it runs, as Edit with AI does and a publish draft on its
+/// own thread does not; only those count toward [`CLEANUPS_MAX`].
 pub struct Request<'a> {
     pub root: &'a Path,
     pub settings: (&'a Path, &'a Path),
@@ -381,6 +383,7 @@ pub struct Request<'a> {
     pub pool: Option<&'a CredentialRef>,
     pub prompt: &'a str,
     pub agent: &'a str,
+    pub holds_seat: bool,
 }
 
 /// The code an Edit with AI run ends with when its pool's model provider can't be reached,
@@ -426,12 +429,13 @@ mod run {
     static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
     /// One held slot: the engine data folder, the text it cleans up (a project's, or none
-    /// for the app text) and the stem of its run names.
+    /// for the app text), the stem of its run names and whether its caller holds a seat.
     #[derive(Clone, PartialEq, Eq)]
     struct Held {
         root: PathBuf,
         text: Option<ProjectId>,
         stem: String,
+        holds_seat: bool,
     }
 
     /// Holds the cleanup slot of one text in an engine data folder until dropped.
@@ -439,13 +443,15 @@ mod run {
 
     impl Slot {
         /// Takes the slot of one text in this engine data folder. Inputs: the canonical
-        /// folder, the project or none for the app text, and the run's stem from
-        /// [`run_stem`]. Output: the slot, `BUSY` while a cleanup of the same text runs, or
-        /// `FULL` while [`super::CLEANUPS_MAX`] cleanups run in the folder.
+        /// folder, the project or none for the app text, the run's stem from [`run_stem`]
+        /// and whether the caller holds a seat. Output: the slot, `BUSY` while a cleanup of
+        /// the same text runs, or `FULL` for a seat holder while [`super::CLEANUPS_MAX`]
+        /// seat holders run in the folder.
         pub(super) fn take(
             root: &Path,
             text: Option<&ProjectId>,
             stem: &str,
+            holds_seat: bool,
         ) -> Result<Self, &'static str> {
             assert!(stem.starts_with(NAME_PREFIX));
             let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -463,6 +469,7 @@ mod run {
                 root: root.to_path_buf(),
                 text: text.cloned(),
                 stem: stem.to_owned(),
+                holds_seat,
             };
             running.push(held.clone());
             assert!(running.len() <= RUNNING_MAX);
@@ -617,7 +624,7 @@ mod run {
         let pool = super::cleanup_pool(request.project, request.pool)?;
         let root = request.root.canonicalize().map_err(|_| UNAVAILABLE)?;
         let stem = run_stem(crate::team::now_ms());
-        let _slot = Slot::take(&root, request.project, &stem)?;
+        let _slot = Slot::take(&root, request.project, &stem, request.holds_seat)?;
         let home = private_folder(root.join(FOLDER)).ok_or(UNAVAILABLE)?;
         let state = private_folder(home.join("state")).ok_or(UNAVAILABLE)?;
         let empty = private_folder(home.join("empty")).ok_or(UNAVAILABLE)?;

@@ -1227,6 +1227,7 @@ async fn handle(
                     pool: pool.as_ref(),
                     prompt,
                     agent: "instructions-cleanup",
+                    holds_seat: true,
                 })
             })
             .map(Answer::Proposed)

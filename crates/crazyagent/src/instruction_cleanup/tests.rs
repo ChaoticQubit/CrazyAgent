@@ -283,6 +283,7 @@ fn a_run_checks_the_pool_rule_and_its_one_slot_before_it_touches_the_disk() {
         pool,
         prompt: "prompt",
         agent: "instructions-cleanup",
+        holds_seat: true,
     };
     assert_eq!(run(&request(None, None)).unwrap_err(), POOL_NEEDED);
     assert_eq!(
@@ -291,7 +292,7 @@ fn a_run_checks_the_pool_rule_and_its_one_slot_before_it_touches_the_disk() {
     );
     assert!(!root.join("instruction-cleanup").exists());
     {
-        let _held = super::run::Slot::take(&root, None, &super::run::run_stem(1)).unwrap();
+        let _held = super::run::Slot::take(&root, None, &super::run::run_stem(1), true).unwrap();
         assert_eq!(run(&request(None, Some(&picked))).unwrap_err(), BUSY);
         assert!(!root.join("instruction-cleanup").exists());
     }
@@ -333,6 +334,7 @@ fn a_run_refuses_a_linked_or_filled_work_folder() {
         pool: Some(&picked),
         prompt: "prompt",
         agent: "instructions-cleanup",
+        holds_seat: true,
     };
     let elsewhere = root.join("elsewhere");
     std::fs::create_dir(&elsewhere).unwrap();
@@ -433,9 +435,10 @@ fn edit_with_ai_on_one_project_runs_while_another_project_or_the_app_text_holds_
         pool,
         prompt: "prompt",
         agent: "instructions-cleanup",
+        holds_seat: true,
     };
     {
-        let _alpha = Slot::take(&root, Some(&alpha), &run_stem(1)).unwrap();
+        let _alpha = Slot::take(&root, Some(&alpha), &run_stem(1), true).unwrap();
         assert_eq!(
             run(&request(Some(&beta), None)).unwrap_err(),
             UNAVAILABLE,
@@ -453,7 +456,7 @@ fn edit_with_ai_on_one_project_runs_while_another_project_or_the_app_text_holds_
         );
     }
     {
-        let _app = Slot::take(&root, None, &run_stem(2)).unwrap();
+        let _app = Slot::take(&root, None, &run_stem(2), true).unwrap();
         assert_eq!(
             run(&request(None, Some(&picked))).unwrap_err(),
             BUSY,
@@ -463,9 +466,9 @@ fn edit_with_ai_on_one_project_runs_while_another_project_or_the_app_text_holds_
     }
     let other = tempfile::tempdir().unwrap();
     let other = other.path().canonicalize().unwrap();
-    let _held = Slot::take(&root, Some(&alpha), &run_stem(3)).unwrap();
+    let _held = Slot::take(&root, Some(&alpha), &run_stem(3), true).unwrap();
     assert!(
-        Slot::take(&other, Some(&alpha), &run_stem(4)).is_ok(),
+        Slot::take(&other, Some(&alpha), &run_stem(4), true).is_ok(),
         "another engine folder has its own slots"
     );
 }
@@ -490,10 +493,11 @@ fn a_third_cleanup_answers_full_while_two_run_in_the_engine() {
         pool,
         prompt: "prompt",
         agent: "instructions-cleanup",
+        holds_seat: true,
     };
     assert_eq!(CLEANUPS_MAX, 2);
-    let first = Slot::take(&root, Some(&alpha), &run_stem(1)).unwrap();
-    let _second = Slot::take(&root, Some(&beta), &run_stem(2)).unwrap();
+    let first = Slot::take(&root, Some(&alpha), &run_stem(1), true).unwrap();
+    let _second = Slot::take(&root, Some(&beta), &run_stem(2), true).unwrap();
     assert_eq!(
         run(&request(Some(&gamma), None)).unwrap_err(),
         FULL,
@@ -519,8 +523,54 @@ fn a_third_cleanup_answers_full_while_two_run_in_the_engine() {
     let other = tempfile::tempdir().unwrap();
     let other = other.path().canonicalize().unwrap();
     assert!(
-        Slot::take(&other, Some(&gamma), &run_stem(3)).is_ok(),
+        Slot::take(&other, Some(&gamma), &run_stem(3), true).is_ok(),
         "another engine folder counts its own"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn publish_drafts_never_count_toward_the_cap_and_never_answer_full() {
+    use super::run::{Slot, run_stem};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    let gamma = ProjectId::new("gamma").unwrap();
+    let delta = ProjectId::new("delta").unwrap();
+    let settings = (root.join("global.toml"), root.join("project.toml"));
+    let request = |project, holds_seat| Request {
+        root: &root,
+        settings: (&settings.0, &settings.1),
+        codex: None,
+        claude: None,
+        project,
+        pool: None,
+        prompt: "prompt",
+        agent: "instructions-cleanup",
+        holds_seat,
+    };
+    {
+        let _first = Slot::take(&root, Some(&alpha), &run_stem(1), false).unwrap();
+        let _second = Slot::take(&root, Some(&beta), &run_stem(2), false).unwrap();
+        assert_eq!(
+            run(&request(Some(&gamma), true)).unwrap_err(),
+            UNAVAILABLE,
+            "two publish drafts running leave Edit with AI free; the test engine has no harness"
+        );
+        assert_eq!(
+            run(&request(Some(&alpha), true)).unwrap_err(),
+            BUSY,
+            "Edit with AI on a project whose draft runs still waits for it"
+        );
+    }
+    let _first = Slot::take(&root, Some(&alpha), &run_stem(3), true).unwrap();
+    let _second = Slot::take(&root, Some(&beta), &run_stem(4), true).unwrap();
+    assert_eq!(run(&request(Some(&gamma), true)).unwrap_err(), FULL);
+    assert_eq!(
+        run(&request(Some(&delta), false)).unwrap_err(),
+        UNAVAILABLE,
+        "a publish draft holds no seat, so it starts while two Edit with AI runs go"
     );
 }
 
@@ -558,7 +608,7 @@ fn pruning_never_removes_the_folder_of_a_run_still_running() {
         std::fs::create_dir(agents.join(run_name(stem, 2))).unwrap();
     }
     let alpha = ProjectId::new("alpha").unwrap();
-    let _held = Slot::take(&root, Some(&alpha), &running).unwrap();
+    let _held = Slot::take(&root, Some(&alpha), &running, true).unwrap();
     prune(&agents, &Slot::running(&root));
     assert!(
         agents.join(run_name(&running, 1)).join("home").is_dir(),
