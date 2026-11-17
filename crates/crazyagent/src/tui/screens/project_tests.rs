@@ -1,5 +1,4 @@
 use super::new_project_view::{Look, Row};
-use super::planning_line::RETRY_UNAVAILABLE;
 use super::project::{
     JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, RemoveChoice, Tab,
     Transcript, memory_source, plain_problem, research_kind,
@@ -956,6 +955,7 @@ fn the_agent_activity_lists_only_what_the_engine_recorded() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     let steps = |job: &ResearchJob| -> Vec<(Option<i64>, String)> {
         activity(job, &look)
@@ -1057,7 +1057,6 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     ));
 
     let mut screen = ProjectScreen::new(project.clone(), String::new(), None);
-    screen.os = "macos";
     let start = 1_793_000_000_000;
     assert_eq!(
         settle(&mut screen, &mut controller, start).await,
@@ -1161,13 +1160,8 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
         "{shown}"
     );
     assert!(shown.contains("warning: slow network"), "{shown}");
-    assert_eq!(drawn.help[1], ("r", "Retry"));
-    screen.os = "windows";
-    let hidden = project_screen(&mut screen, 80, 24, &look);
-    assert!(hidden.help.iter().all(|(key, _)| *key != "r"));
-    assert_eq!(screen.key(key(KeyCode::Char('r'))), ProjectReply::Handled);
-    assert_eq!(screen.problem.as_deref(), Some(RETRY_UNAVAILABLE));
-    screen.os = "macos";
+    let runs_again = crate::project_setup::retryable(ResearchStatus::Cancelled);
+    assert_eq!(drawn.help.contains(&("r", "Retry")), runs_again);
     assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
     assert_eq!(
         screen.problem.as_deref(),
@@ -1186,6 +1180,25 @@ async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
     let ProjectReply::Change(action) = again else {
         unreachable!()
     };
+    if !runs_again {
+        let asked = SetupQuery::Change {
+            action: *action,
+            generation: 3,
+        };
+        let refused = serve(&mut controller, asked.clone()).await;
+        assert_eq!(
+            refused,
+            Ok(SetupView::Changed(OwnerResult::Rejected {
+                code: "research_unavailable_here".into()
+            }))
+        );
+        screen.apply(&asked, refused);
+        assert_eq!(
+            screen.problem.as_deref(),
+            Some("Research does not run on this computer in this version, so it cannot run again.")
+        );
+        return;
+    }
     send(
         &mut screen,
         &mut controller,
@@ -1256,6 +1269,7 @@ fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     assert_eq!(
         text(&[job_status(&limited, 0, 3_600, &look)]),
@@ -1498,6 +1512,7 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
         started_ms: Some(2_000),
         heartbeat_ms: Some(3_000),
         finished_ms: None,
+        retryable: false,
     }]);
     screen.open(Tab::Agents);
     let look = Look::plain();
@@ -1579,6 +1594,7 @@ fn a_queued_research_job_shows_why_it_waits_on_its_status() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     let look = Look::plain();
     let status = text(&[job_status(&queued, 0, 3_600, &look)]);
@@ -1652,6 +1668,7 @@ fn a_research_job_queued_again_shows_why_and_is_not_drawn_as_running() {
         started_ms: Some(2_000),
         heartbeat_ms: Some(3_000),
         finished_ms: None,
+        retryable: false,
     }]);
     screen.open(Tab::Agents);
     let look = Look::plain();

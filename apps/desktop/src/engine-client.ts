@@ -563,6 +563,7 @@ export interface ResearchJob {
   started_ms: number | null;
   heartbeat_ms: number | null;
   finished_ms: number | null;
+  retryable: boolean;
 }
 
 export interface ProjectContext {

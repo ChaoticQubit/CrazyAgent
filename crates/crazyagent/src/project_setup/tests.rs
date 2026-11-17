@@ -792,6 +792,25 @@ fn job_table_matches_the_research_runner_queue_columns() {
     assert!(jobs[0].cancel_requested);
 }
 
+/// Only a failed or stopped job can run again, and only on a system where the engine runs
+/// research at all: none can on Linux or Windows, where the runner refuses every job.
+#[test]
+fn only_a_failed_or_stopped_job_where_research_runs_can_run_again() {
+    let runs = crate::research::runner::confined_unavailable(std::env::consts::OS).is_none();
+    assert_eq!(runs, !cfg!(any(target_os = "linux", target_os = "windows")));
+    for status in [
+        ResearchStatus::Queued,
+        ResearchStatus::NeedsPool,
+        ResearchStatus::Running,
+        ResearchStatus::Done,
+    ] {
+        assert!(!retryable(status), "{status:?}");
+    }
+    for status in [ResearchStatus::Failed, ResearchStatus::Cancelled] {
+        assert_eq!(retryable(status), runs, "{status:?}");
+    }
+}
+
 #[test]
 fn a_rate_limited_wait_reads_back_the_minute_the_research_service_wrote() {
     let job = |status: ResearchStatus, detail: &str| ResearchJob {
@@ -813,6 +832,7 @@ fn a_rate_limited_wait_reads_back_the_minute_the_research_service_wrote() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     let mut checked = 0;
     for seconds in (0..4_102_444_800_u64)

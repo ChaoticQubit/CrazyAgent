@@ -614,6 +614,19 @@ pub struct ResearchJob {
     pub started_ms: Option<i64>,
     pub heartbeat_ms: Option<i64>,
     pub finished_ms: Option<i64>,
+    pub retryable: bool,
+}
+
+/// The code a retry gets where this engine runs no research ([`retryable`]).
+pub const RESEARCH_UNAVAILABLE_HERE: &str = "research_unavailable_here";
+
+/// Whether a job in this status can run again on this engine's system: a failed or stopped
+/// job, where the engine runs research at all ([`crate::research::runner::confined_unavailable`]),
+/// so no client offers a Retry that could only fail again. Input: the status. Output: the
+/// answer.
+pub fn retryable(status: ResearchStatus) -> bool {
+    matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled)
+        && crate::research::runner::confined_unavailable(std::env::consts::OS).is_none()
 }
 
 const RATE_LIMITED: &str = "rate_limited until ";
@@ -1675,6 +1688,7 @@ fn job(row: JobRow) -> Result<ResearchJob, EngineError> {
         started_ms,
         heartbeat_ms,
         finished_ms,
+        retryable: retryable(status),
     })
 }
 
@@ -2475,6 +2489,9 @@ fn retry_research(
         ResearchStatus::Failed | ResearchStatus::Cancelled
     ) {
         return Ok(rejected("research_job_not_retryable"));
+    }
+    if !retryable(job.status) {
+        return Ok(rejected(RESEARCH_UNAVAILABLE_HERE));
     }
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));

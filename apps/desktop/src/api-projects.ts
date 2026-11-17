@@ -94,6 +94,7 @@ export interface ResearchJob {
   started_ms: number | null;
   heartbeat_ms: number | null;
   finished_ms: number | null;
+  retryable: boolean;
 }
 
 export type ActivityKind =
@@ -300,6 +301,7 @@ const copy: Record<string, string> = {
   research_job_missing: "This research job no longer exists. The list was reloaded.",
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
+  research_unavailable_here: "Research does not run on this computer in this version, so it cannot run again.",
   planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
   roadmap_status_off: "Roadmap status is off in Project settings.",
   roadmap_status_unavailable: "The roadmap status could not be read or saved. Try again.",

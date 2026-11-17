@@ -11,7 +11,7 @@ const api = await import("../src/api-projects.ts");
 const job = (status, extra = {}) => ({
   id: 1, project_id: "p", kind: "market_research", kind_label: "Market research", status, status_label: "", report_path: "context/research/market_research.md",
   harness: "codex", tools: true, attempts: 0, claimer: null, error: null, cancel_requested: false, output_bytes: 0,
-  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, ...extra,
+  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, retryable: status === "failed" || status === "cancelled", ...extra,
 });
 
 test("elapsed time reads in seconds, minutes and hours", () => {
@@ -327,14 +327,6 @@ test("research agents offer Stop while running, Cancel while waiting and Try aga
   assert.deepEqual(actions("done", { started_ms: 1_000 }), { log: true, stop: null, retry: false });
   assert.deepEqual(actions("failed", { started_ms: 1_000 }), { log: true, stop: null, retry: true });
   assert.deepEqual(actions("cancelled"), { log: false, stop: null, retry: true });
-});
-
-test("research agents offer no Try again on Windows, where the engine runs none", () => {
-  for (const status of ["failed", "cancelled"]) {
-    assert.equal(research.researchActions(job(status, { started_ms: 1_000 }), "Win32").retry, false);
-    assert.equal(research.researchActions(job(status, { started_ms: 1_000 }), "MacIntel").retry, true);
-  }
-  assert.deepEqual(research.researchActions(job("running", { started_ms: 1_000 }), "Win32"), { log: true, stop: "Stop", retry: false });
 });
 
 test("the Overview keeps Needs you above the tabs and today's activity under the Activity tab", async () => {

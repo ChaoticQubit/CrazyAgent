@@ -680,6 +680,18 @@ fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
 }
 
+/// Whether a retry ran the job again: applied where this engine runs research, else refused
+/// with the code every client shows, after which a row has nothing left to check there.
+/// Input: the retry's response. Output: the answer.
+fn ran_again(response: OwnerResponse) -> bool {
+    if retryable(ResearchStatus::Failed) {
+        assert_eq!(result(response), OwnerResult::Applied);
+        return true;
+    }
+    assert_eq!(result(response), rejected(RESEARCH_UNAVAILABLE_HERE));
+    false
+}
+
 /// Adds a project removed from the dashboard again the way the owner does, by onboarding its
 /// own folder from Found (DEC-178 addendum 1). Inputs: the owner client, the project, its
 /// folder and the client generation. Output: none; it checks the engine gave the project its
@@ -1277,6 +1289,17 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
 
     let cancelled = owner.cancel_research(project.clone(), first, 2).await;
     assert_eq!(result(cancelled.unwrap()), OwnerResult::Applied);
+    let stopped = owner.research_jobs(project.clone()).await.unwrap();
+    assert_eq!(
+        stopped
+            .iter()
+            .map(|job| (job.id, job.retryable))
+            .collect::<Vec<_>>(),
+        vec![
+            (first, retryable(ResearchStatus::Cancelled)),
+            (second, false)
+        ]
+    );
     let again = owner.cancel_research(project.clone(), first, 3).await;
     assert_eq!(result(again.unwrap()), rejected("research_job_finished"));
     let waiting = owner.retry_research(project.clone(), second, 4).await;
@@ -1287,7 +1310,9 @@ async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     let unknown = owner.cancel_research(project.clone(), 9999, 5).await;
     assert_eq!(result(unknown.unwrap()), rejected("research_job_missing"));
     let retried = owner.retry_research(project.clone(), first, 6).await;
-    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    if !ran_again(retried.unwrap()) {
+        return;
+    }
     let job = owner
         .research_jobs(project.clone())
         .await
@@ -1456,7 +1481,9 @@ async fn a_retried_job_whose_research_was_turned_off_is_not_cancelled_by_the_nex
     assert_eq!(job.status, ResearchStatus::Cancelled);
 
     let retried = owner.retry_research(project.clone(), job.id, 4).await;
-    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    if !ran_again(retried.unwrap()) {
+        return;
+    }
     let after_retry = owner.project_setup(project.clone()).await.unwrap().unwrap();
     assert_eq!(
         after_retry.revision, 4,
@@ -1502,7 +1529,9 @@ async fn a_retried_job_whose_research_was_turned_off_is_not_cancelled_by_the_nex
     let stopped = owner.cancel_research(project.clone(), market.id, 7).await;
     assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
     let retried = owner.retry_research(project.clone(), market.id, 8).await;
-    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    if !ran_again(retried.unwrap()) {
+        return;
+    }
     assert_eq!(
         owner
             .project_setup(project.clone())
@@ -1560,7 +1589,9 @@ async fn a_job_run_again_after_the_rate_limit_cap_takes_a_limit_as_a_new_job_doe
     );
 
     let retried = owner.retry_research(project.clone(), market, 2).await;
-    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    if !ran_again(retried.unwrap()) {
+        return;
+    }
     assert_eq!(
         limited(),
         QueueStatus::Queued,
@@ -1684,7 +1715,9 @@ async fn a_job_run_again_does_not_wait_out_the_refusal_it_was_stopped_in() {
     let stopped = owner.cancel_research(project.clone(), market, 2).await;
     assert_eq!(result(stopped.unwrap()), OwnerResult::Applied);
     let retried = owner.retry_research(project.clone(), market, 3).await;
-    assert_eq!(result(retried.unwrap()), OwnerResult::Applied);
+    if !ran_again(retried.unwrap()) {
+        return;
+    }
     let claimed = store.claim("setup-pooled", "runner-test", 4).unwrap();
     assert_eq!(
         claimed.as_ref().map(|job| job.id),
