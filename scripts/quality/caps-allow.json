@@ -59,7 +59,6 @@
   "crates/crazyagent/src/harnesses/launch/tests.rs": 2098,
   "crates/crazyagent/src/harnesses/leftovers.rs": 3609,
   "crates/crazyagent/src/harnesses/terminal_session.rs": 1705,
-  "crates/crazyagent/src/harnesses/transcript.rs": 1726,
   "crates/crazyagent/src/harnesses/transcript/tests.rs": 1952,
   "crates/crazyagent/src/harnesses/update/tests.rs": 3269,
   "crates/crazyagent/src/ide/bridge/tests.rs": 2080,
