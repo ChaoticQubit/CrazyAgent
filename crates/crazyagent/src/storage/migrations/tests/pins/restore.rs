@@ -276,10 +276,11 @@ fn a_failed_restore_changes_nothing_and_keeps_no_copy() {
     assert_eq!(names(&root).len(), 1);
 }
 
-/// The names one of the engine root's key folders holds, sorted. Inputs: the root and the
-/// folder. Output: the names, none for a missing folder.
-fn key_files(root: &Root, folder: &str) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(root.path().join(folder)) else {
+/// The names one key folder holds, in the engine root or in a restore's dated copy, sorted.
+/// Inputs: the folder holding the key folders and the key folder. Output: the names, none
+/// for a missing folder.
+fn key_files(base: &Path, folder: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(base.join(folder)) else {
         return Vec::new();
     };
     let mut names: Vec<String> = entries
@@ -289,11 +290,13 @@ fn key_files(root: &Root, folder: &str) -> Vec<String> {
     names
 }
 
-/// V250-L5-N5: a restore deletes every key file only 2.5 rows named, a plugin key a 2.5
-/// binding held and a key of an account added after the upgrade, and the staged copies in
-/// both key folders, while the key of an account the 2.4 copy holds stays.
+/// V250-L5-N5: a restore moves every key file only 2.5 rows named, a plugin key a 2.5
+/// binding held and a key of an account added after the upgrade, into the same key folders
+/// of the dated copy it keeps of the 2.5 data (DEC-192), private as they were, and deletes
+/// the staged copies in both key folders, while the key of an account the 2.4 copy holds
+/// stays where it is.
 #[test]
-fn a_restore_deletes_the_keys_only_2_5_rows_name_and_keeps_a_2_4_accounts_key() {
+fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_accounts_key() {
     use crate::storage::accounts::{self, ACCOUNT_KEYS, KEY_FOLDERS, PLUGIN_KEYS};
     let start = SystemTime::now();
     let (root, _) = fixture();
@@ -343,18 +346,29 @@ fn a_restore_deletes_the_keys_only_2_5_rows_name_and_keeps_a_2_4_accounts_key() 
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     assert_eq!(
-        key_files(&root, PLUGIN_KEYS),
+        key_files(root.path(), PLUGIN_KEYS),
         [".replace-restore", "plugin-key-restore"]
     );
     assert_eq!(
-        key_files(&root, ACCOUNT_KEYS),
+        key_files(root.path(), ACCOUNT_KEYS),
         [".replace-restore", "restore-new-key", "restore-old-key"]
     );
 
-    restored(&root, start + HOUR).unwrap();
+    let copy = restored(&root, start + HOUR).unwrap();
 
     assert_eq!(version(&root.connection()).unwrap(), V24_VERSION_MAX);
-    assert!(key_files(&root, PLUGIN_KEYS).is_empty());
-    assert_eq!(key_files(&root, ACCOUNT_KEYS), ["restore-old-key"]);
+    assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["restore-old-key"]);
     assert_eq!(mode(&root.path().join(PLUGIN_KEYS)), 0o700);
+    assert_eq!(key_files(&copy, PLUGIN_KEYS), ["plugin-key-restore"]);
+    assert_eq!(key_files(&copy, ACCOUNT_KEYS), ["restore-new-key"]);
+    for (folder, name) in [
+        (PLUGIN_KEYS, "plugin-key-restore"),
+        (ACCOUNT_KEYS, "restore-new-key"),
+    ] {
+        let moved = copy.join(folder).join(name);
+        assert_eq!(mode(&copy.join(folder)), 0o700);
+        assert_eq!(mode(&moved), 0o600);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"sk-restore");
+    }
 }
