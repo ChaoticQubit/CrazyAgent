@@ -1,0 +1,54 @@
+diff --git a/crates/crazyagent/src/engine/owner/transport/plugins.rs b/crates/crazyagent/src/engine/owner/transport/plugins.rs
+index 7a6b2b626..eb9a3207f 100644
+--- a/crates/crazyagent/src/engine/owner/transport/plugins.rs
++++ b/crates/crazyagent/src/engine/owner/transport/plugins.rs
+@@ -1530,12 +1530,6 @@ fn boundary_check(
+             return Err("server_cant_start".into());
+         }
+     };
+-    if let ServerSpec::Stdio { command, .. } = &launched
+-        && std::fs::metadata(command)
+-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+-    {
+-        return Err("server_command_not_found".into());
+-    }
+     let launched = crate::plugins::without_cmd_exe(root, launched).map_err(str::to_owned)?;
+     let ServerSpec::Stdio { command, args } = &launched else {
+         return Err("server_check_command_only".into());
+diff --git a/crates/crazyagent/src/plugins.rs b/crates/crazyagent/src/plugins.rs
+index 1b63d5869..720fad7bb 100644
+--- a/crates/crazyagent/src/plugins.rs
++++ b/crates/crazyagent/src/plugins.rs
+@@ -527,14 +527,7 @@ fn npx_spec(
+ ) -> Result<ServerSpec, &'static str> {
+     let other = "server_batch_file";
+     let (node, cli) = crate::tools::npx_real(command).ok_or(other)?;
+-    let tool = crate::tools::resolve_entry(command, places).map_err(|missing| {
+-        let why = missing.refused.as_ref().map(|refused| &refused.why);
+-        eprintln!(
+-            "plugin_server_npx_refused reason={:?} refused={why:?}",
+-            missing.reason
+-        );
+-        "server_command_not_found"
+-    })?;
++    let tool = crate::tools::resolve_entry(command, places).map_err(|_| other)?;
+     if tool.program != cli || tool.interpreter().map(|found| &found.program) != Some(&node) {
+         return Err(other);
+     }
+diff --git a/crates/crazyagent/src/tools/batch.rs b/crates/crazyagent/src/tools/batch.rs
+index 1412d70c7..1cc4d22ca 100644
+--- a/crates/crazyagent/src/tools/batch.rs
++++ b/crates/crazyagent/src/tools/batch.rs
+@@ -83,11 +83,7 @@ pub(super) fn entry(
+             Ok(_) => return refuse(),
+             Err(missing) => return Some(Err(missing)),
+         };
+-        let beside = Places {
+-            folders: vec![folder.to_path_buf()],
+-            ..places.clone()
+-        };
+-        return Some(entry_at(&cli, &beside, depth + 1).map(|script| Resolved {
++        return Some(entry_at(&cli, places, depth + 1).map(|script| Resolved {
+             entry: entry.to_path_buf(),
+             program: script.program,
+             kind: Kind::Script {

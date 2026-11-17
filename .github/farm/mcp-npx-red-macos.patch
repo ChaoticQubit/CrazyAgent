@@ -1,0 +1,55 @@
+diff --git a/apps/desktop/src/engine-client.ts b/apps/desktop/src/engine-client.ts
+index 54d4da099..1ddd99391 100644
+--- a/apps/desktop/src/engine-client.ts
++++ b/apps/desktop/src/engine-client.ts
+@@ -307,7 +307,6 @@ export function errorMessage(error: unknown): string {
+     server_command_not_found: "Can't start: command not found.",
+     server_command_not_runnable: "Can't start: this file can't be run.",
+     server_cant_start: "The server can't start.",
+-    server_batch_file: "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
+     server_exited: "The server stopped before answering.",
+     server_check_timeout: "The server did not answer within 10 seconds.",
+     server_setting_up: "context-mode is still being set up. Check again in a minute.",
+diff --git a/crates/crazyagent/src/launch_context.rs b/crates/crazyagent/src/launch_context.rs
+index 9657f654c..2e24bdb45 100644
+--- a/crates/crazyagent/src/launch_context.rs
++++ b/crates/crazyagent/src/launch_context.rs
+@@ -1776,9 +1776,7 @@ fn tool_use_section(
+     if let Some(off) = context_mode_off.filter(|_| !context_mode) {
+         section.push_str(context_mode_off_line(off));
+     }
+-    if let Some(line) = batch_files_line(batch_files) {
+-        section.push_str(&line);
+-    }
++    let _ = batch_files;
+     section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
+     if let Some(name) = skill {
+         section.push_str(&match claude {
+diff --git a/crates/crazyagent/src/plugins.rs b/crates/crazyagent/src/plugins.rs
+index 1b63d5869..ea0efe874 100644
+--- a/crates/crazyagent/src/plugins.rs
++++ b/crates/crazyagent/src/plugins.rs
+@@ -737,10 +737,6 @@ const PROBLEMS: &[(&str, &str)] = &[
+         "Can't start: this file can't be run.",
+     ),
+     ("server_cant_start", "The server can't start."),
+-    (
+-        "server_batch_file",
+-        "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
+-    ),
+     (
+         "server_stored_spec_invalid",
+         "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
+diff --git a/crates/crazyagent/src/tools/batch.rs b/crates/crazyagent/src/tools/batch.rs
+index 1412d70c7..495e5c411 100644
+--- a/crates/crazyagent/src/tools/batch.rs
++++ b/crates/crazyagent/src/tools/batch.rs
+@@ -141,7 +141,7 @@ pub(crate) fn program_file(file: &Path) -> bool {
+ fn program_name(name: &str) -> bool {
+     let name = name.to_ascii_lowercase();
+     let name = name.trim_end_matches(['.', ' ']);
+-    !name.contains(':') && (name.ends_with(".exe") || name.ends_with(".com"))
++    !name.contains(':')
+ }
+ 
+ /// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.

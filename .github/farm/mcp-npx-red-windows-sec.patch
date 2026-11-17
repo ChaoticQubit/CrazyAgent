@@ -1,0 +1,16 @@
+diff --git a/crates/crazyagent/src/plugins.rs b/crates/crazyagent/src/plugins.rs
+index 1b63d5869..32634eaf3 100644
+--- a/crates/crazyagent/src/plugins.rs
++++ b/crates/crazyagent/src/plugins.rs
+@@ -503,11 +503,6 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
+             let places = crate::tools::Places::from_environment(Some(root));
+             return npx_spec(command, args, &places);
+         }
+-        let program = crate::tools::program_file(command)
+-            && real.as_deref().is_none_or(crate::tools::program_file);
+-        if !program {
+-            return Err("server_batch_file");
+-        }
+     }
+     #[cfg(not(windows))]
+     let _ = root;
