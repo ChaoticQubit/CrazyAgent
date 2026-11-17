@@ -597,13 +597,13 @@ fn a_fresh_install_reads_dont_read_and_a_due_step_makes_no_detail_call() {
     assert_eq!(ran(), 1, "a stored Through Claude Code asks it");
 }
 
-/// A pick of a reading source shows its free resets at once under an open Pools page: after
-/// Don't read the next step reads, a change between Through and As Claude Code reads again on
-/// the next step, and an unchanged source still rests `DETAIL_EVERY_MS` between reads
-/// (V243-RESETS-SETTING-REFRESH).
+/// A reading source picked after Don't read shows its free resets at once under an open Pools
+/// page: the next step reads, also within `DETAIL_EVERY_MS` of a read made before Don't read,
+/// while an unchanged source and a change between Through and As Claude Code, which make the
+/// same call, rest `DETAIL_EVERY_MS` between reads (V243-RESETS-SETTING-REFRESH).
 #[cfg(unix)]
 #[test]
-fn a_changed_claude_free_resets_source_reads_on_the_next_step() {
+fn a_claude_free_resets_source_picked_after_dont_read_reads_on_the_next_step() {
     use super::spend::{ResetsSource, SpendSettings};
     use std::os::unix::fs::PermissionsExt;
     let root = crate::harnesses::finding::outside_temp("ca-usage-");
@@ -656,8 +656,22 @@ fn a_changed_claude_free_resets_source_reads_on_the_next_step() {
     usage.step(NOW + 15_000).unwrap();
     assert_eq!(
         usage.detail_ms,
-        Some(NOW + 15_000),
-        "a change between reading sources reads again on the next step"
+        Some(NOW + 5_000),
+        "a change between Through and As makes the same call, so it rests"
+    );
+    pick(&usage, ResetsSource::Off);
+    usage.step(NOW + 20_000).unwrap();
+    assert_eq!(
+        usage.detail_ms,
+        Some(NOW + 5_000),
+        "Don't read stamps no read"
+    );
+    pick(&usage, ResetsSource::AsClaudeCode);
+    usage.step(NOW + 25_000).unwrap();
+    assert_eq!(
+        usage.detail_ms,
+        Some(NOW + 25_000),
+        "a pick after Don't read reads on the next step, within the rest of an earlier read"
     );
 }
 
