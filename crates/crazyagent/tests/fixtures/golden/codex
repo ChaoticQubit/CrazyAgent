@@ -3,6 +3,10 @@ case "$1" in
   --version) echo 'codex-cli 0.167.1'; exit 0 ;;
   app-server) exit 0 ;;
 esac
+limited=
+case "$*" in
+  */limited/*) limited=1 ;;
+esac
 d="$CODEX_HOME/sessions/2026/11/17"
 /bin/mkdir -p "$d" || exit 1
 id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
@@ -17,6 +21,13 @@ while IFS= read -r line; do
   said="$said $line"
   case "$line" in *"$e[201~"*) open=0 ;; esac
   [ "$open" = 1 ] && continue
+  if [ -n "$limited" ]; then
+    said=
+    printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+    printf '{"type":"event_msg","payload":{"type":"error","message":"429 Too Many Requests: usage limit reached"}}\n' >> "$f"
+    printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+    continue
+  fi
   case "$said" in
     *golden.md*) printf 'Apples are red.\n' > golden.md ;;
   esac
