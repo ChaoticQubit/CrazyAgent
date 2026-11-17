@@ -40,9 +40,14 @@ async fn a_worktree_head_naming_a_ref_of_its_own_folder_is_refused_at_once_for_e
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     assert_eq!(
@@ -65,7 +70,7 @@ async fn a_worktree_head_naming_a_ref_of_its_own_folder_is_refused_at_once_for_e
     let readmission = apply(
         &engine,
         "readmit",
-        4,
+        revision(&engine).await,
         Command::AdmitRepository {
             project_id: ProjectId::new("project").unwrap(),
             repository: repo.to_str().unwrap().into(),
@@ -121,9 +126,14 @@ async fn ordinary_remote_configuration_does_not_grant_network_authority() {
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     engine.close().await.unwrap();
@@ -170,9 +180,14 @@ async fn preexisting_branch_and_path_are_preserved() {
             _ => unreachable!(),
         }
         assert!(matches!(
-            apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-                .await
-                .outcome,
+            apply(
+                &engine,
+                "allocate",
+                revision(&engine).await,
+                allocate(&repo, "owner", None)
+            )
+            .await
+            .outcome,
             Outcome::Rejected { .. }
         ));
         assert!(leases(&engine).await.is_empty());
@@ -199,11 +214,12 @@ async fn interrupted_allocation_is_retained() {
         let root = PathBuf::from(root);
         let config = resolve_config(&root.join("global"), &root.join("project")).unwrap();
         let engine = Engine::open(&root.join("db"), config).await.unwrap();
+        engine.start_owner_runtime().await.unwrap();
         assert_eq!(
             apply(
                 &engine,
                 "interrupted",
-                3,
+                revision(&engine).await,
                 allocate(&root.join("repo"), "owner", Some("native-child"))
             )
             .await
@@ -239,7 +255,7 @@ async fn interrupted_allocation_is_retained() {
         Process::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "interrupted_allocation_is_retained",
+                "checkouts::interrupted_allocation_is_retained",
                 "--nocapture",
             ])
             .env("CRAZYAGENT_T6_INTERRUPT_ROOT", &root)
@@ -285,9 +301,14 @@ async fn interrupted_allocation_is_retained() {
         crazyagent::worktrees::LeaseState::Uncertain
     );
     assert!(matches!(
-        apply(&engine, "retry", 3, allocate(&repo, "other-owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "retry",
+            revision(&engine).await,
+            allocate(&repo, "other-owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Rejected { .. }
     ));
     assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
@@ -302,9 +323,14 @@ async fn missing_branch_and_replaced_repository_are_uncertain() {
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -326,9 +352,14 @@ async fn missing_branch_and_replaced_repository_are_uncertain() {
         crazyagent::worktrees::LeaseState::Uncertain
     );
     assert!(matches!(
-        apply(&engine, "other", 4, allocate(&repo, "other", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "other",
+            revision(&engine).await,
+            allocate(&repo, "other", None)
+        )
+        .await
+        .outcome,
         Outcome::Rejected { .. }
     ));
     assert_eq!(
@@ -420,9 +451,14 @@ async fn a_real_size_repository_gets_a_ready_lease_with_its_links_large_file_and
     let (engine, _) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -547,9 +583,14 @@ async fn submodule_entries_and_content_git_would_convert_retain_ownership_withou
             _ => unreachable!(),
         };
         assert_eq!(
-            apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-                .await
-                .outcome,
+            apply(
+                &engine,
+                "allocate",
+                revision(&engine).await,
+                allocate(&repo, "owner", None)
+            )
+            .await
+            .outcome,
             rejected(expected),
             "{kind}"
         );
@@ -557,9 +598,14 @@ async fn submodule_entries_and_content_git_would_convert_retain_ownership_withou
         assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Uncertain);
         assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
         assert!(matches!(
-            apply(&engine, "second", 3, allocate(&repo, "other", None))
-                .await
-                .outcome,
+            apply(
+                &engine,
+                "second",
+                revision(&engine).await,
+                allocate(&repo, "other", None)
+            )
+            .await
+            .outcome,
             Outcome::Rejected { .. }
         ));
         engine.close().await.unwrap();
@@ -677,9 +723,14 @@ async fn ready_lease(
     let (engine, config) = setup(root, &repo).await;
     admit(&engine, &repo).await;
     assert_eq!(
-        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "allocate",
+            revision(&engine).await,
+            allocate(&repo, "owner", None)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let lease = leases(&engine).await.remove(0);
@@ -702,11 +753,17 @@ async fn a_reboot_that_renumbers_the_volume_keeps_leases_and_admissions() {
     let engine = Engine::open(&root.join("db"), config.clone())
         .await
         .unwrap();
+    engine.start_owner_runtime().await.unwrap();
     assert_eq!(leases(&engine).await[0].state, LeaseState::RecoveryRequired);
     assert_eq!(
-        apply(&engine, "pin-second", 4, pin("second-task", &config))
-            .await
-            .outcome,
+        apply(
+            &engine,
+            "pin-second",
+            revision(&engine).await,
+            pin("second-task", &config)
+        )
+        .await
+        .outcome,
         Outcome::Applied
     );
     let second = Command::AllocateWorktree {
@@ -716,7 +773,9 @@ async fn a_reboot_that_renumbers_the_volume_keeps_leases_and_admissions() {
         native_descendant: None,
     };
     assert_eq!(
-        apply(&engine, "allocate-second", 5, second).await.outcome,
+        apply(&engine, "allocate-second", revision(&engine).await, second)
+            .await
+            .outcome,
         Outcome::Applied
     );
     let second_lease = leases_of(&engine, "second-task").await.remove(0);

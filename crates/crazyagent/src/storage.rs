@@ -1168,6 +1168,9 @@ impl Storage {
                         }
                     }
                 }
+                if let Some(stamp) = &owner_runtime {
+                    crate::state_log::fence::host_stopped(stamp);
+                }
             })
             .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
         let config = ready_receive.await.map_err(error)??;
