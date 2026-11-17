@@ -114,6 +114,7 @@ const REFUSALS: Record<string, string> = {
   changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
+  changes_git_old: "Landing changes needs Git 2.40 or newer, and the Git on this computer is older. Update Git, then try again.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
@@ -157,9 +158,14 @@ export function plainLine(text: string): string {
   return text.replace(UNSAFE, "\ufffd");
 }
 
-/** One plain sentence for a refused Changes request. Input: the engine code. Output: the
- * desktop's sentence, or the plain fallback naming the code. */
-export function refusal(code: string): string {
+/** The words for `changes_git_old` on a Mac, the desktop's own: the engine runs the Git of
+ * Xcode or its Command Line Tools, never Homebrew's, so only updating those helps. */
+export const GIT_OLD_MAC = "Landing changes needs Git 2.40 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then try again.";
+
+/** One plain sentence for a refused Changes request. Input: the engine code and whether this
+ * is a Mac. Output: the desktop's sentence, or the plain fallback naming the code. */
+export function refusal(code: string, mac: boolean = process.platform === "darwin"): string {
+  if (code === "changes_git_old" && mac) return GIT_OLD_MAC;
   return Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : `Something went wrong. Try again. (${plainLine(code)})`;
 }
 

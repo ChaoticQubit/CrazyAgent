@@ -197,7 +197,7 @@ impl CodexHostProcess {
         self.pid
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn observed_bytes(&self) -> (u64, u64) {
         match self.shared.state.lock() {
             Ok(state) => state.observed,
@@ -220,7 +220,7 @@ impl CodexHostProcess {
         assert!(self.shared.state.is_poisoned());
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn exit_status(&self) -> Option<ExitStatus> {
         match self.shared.state.lock() {
             Ok(state) => state.status,

@@ -494,6 +494,120 @@ pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineEr
 /// folder per server id.
 pub(crate) const CHECK_FOLDER: &str = "mcp-checks";
 
+/// The folder in the check folder that holds one sandbox profile per checked server.
+pub(crate) const CHECK_PROFILES: &str = "profiles";
+
+/// How many check profiles one engine start looks at, so a folder of many files cannot hold
+/// up the start; what is left is looked at by the next start.
+#[cfg(not(unix))]
+const CHECK_SWEEP_MAX: usize = 10_000;
+
+/// Names the sandbox profile file the checks of one server run under.
+/// Inputs: the engine's check folder and the server id. Output: the profile path.
+pub(crate) fn check_profile(checks: &Path, id: &str) -> PathBuf {
+    checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
+}
+
+/// Takes back what a server's check container holds, then deletes its check profile, so a
+/// release that stops keeps the profile and with it the record of what is left for a retry.
+/// Input: the check profile. A failure other than a missing profile is logged.
+pub(crate) fn withdraw_check_profile(profile: &Path) {
+    if grants_withdrawn(profile) {
+        match std::fs::remove_file(profile) {
+            Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
+                eprintln!("plugin_check_folder_not_removed cause={problem}");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Takes back every access entry the boundary helper granted a check container, read entries
+/// on the owner's folders included, drops its record and deletes the container with the
+/// folder Windows gave it ([`crazyagent_win_sandbox::release`]). Callers move the check folder
+/// aside first, so the entries on that folder, which is deleted whole, are not rewritten.
+/// Input: the check profile. Output: whether nothing is left, true for a missing profile.
+#[cfg(windows)]
+fn grants_withdrawn(profile: &Path) -> bool {
+    match std::fs::symlink_metadata(profile) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return true,
+        _ => {}
+    }
+    match crazyagent_win_sandbox::release(profile) {
+        Ok(()) => true,
+        Err(problem) => {
+            eprintln!("plugin_check_grants_not_withdrawn cause={problem}");
+            false
+        }
+    }
+}
+
+/// Reports nothing granted where checks run under a profile that grants no access entries.
+/// Input: the profile, unused. Output: true.
+#[cfg(not(windows))]
+fn grants_withdrawn(_profile: &Path) -> bool {
+    true
+}
+
+/// Releases, when the engine starts, each check container a crash left for a server no
+/// longer stored: its check folder moves aside, what its profile holds is taken back
+/// ([`withdraw_check_profile`]), then the folder and each copy moved aside are deleted. Only
+/// plain `<server id>.sb` files are read. Inputs: the engine connection and root. Output: any
+/// SQLite failure; a file failure is logged, and a profile whose release stops stays for the
+/// next start.
+#[cfg(not(unix))]
+pub(crate) fn sweep_check_containers(
+    connection: &Connection,
+    root: &Path,
+) -> Result<(), EngineError> {
+    let checks = root.join(CHECK_FOLDER);
+    let listed = match std::fs::read_dir(checks.join(CHECK_PROFILES)) {
+        Ok(listed) => listed,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(problem) => {
+            eprintln!("plugin_check_sweep_failed cause={problem}");
+            return Ok(());
+        }
+    };
+    let ids: Vec<String> = listed
+        .take(CHECK_SWEEP_MAX)
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(problem) => {
+                eprintln!("plugin_check_sweep_failed cause={problem}");
+                None
+            }
+        })
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let id = name.to_str()?.strip_suffix(".sb")?;
+            check_folder_name(id).ok().map(|()| id.to_owned())
+        })
+        .collect();
+    assert!(ids.len() <= CHECK_SWEEP_MAX);
+    for id in ids {
+        let stored: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE id=?1)",
+                [&id],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if stored {
+            continue;
+        }
+        if let Err(problem) = move_check_folder_aside(&checks, &id) {
+            eprintln!("plugin_check_folder_not_removed cause={}", problem.0);
+        }
+        withdraw_check_profile(&check_profile(&checks, &id));
+        if let Err(problem) = remove_check_folder(root, &id) {
+            eprintln!("plugin_check_folder_not_removed cause={}", problem.0);
+        }
+    }
+    Ok(())
+}
+
 /// The name prefix of a removed MCP server's check folder moved aside in the check folder
 /// to be deleted: `.removed-<server id>-<32 hex digits>`.
 const REMOVED_CHECK: &str = ".removed-";
@@ -520,10 +634,9 @@ pub(crate) fn move_check_folder_aside(
 }
 
 /// Deletes one removed MCP server's check folder with everything in it, and each copy of it
-/// moved aside for deletion that a crash left, for the start sweep. Inputs: the engine root
+/// moved aside for deletion that a crash left, for the start sweeps. Inputs: the engine root
 /// and the server id. Output: Ok when all are gone, including when already missing;
 /// `plugin_check_folder_invalid` for a name that is not one plain folder name.
-#[cfg(unix)]
 pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineError> {
     check_folder_name(id)?;
     let checks = root.join(CHECK_FOLDER);

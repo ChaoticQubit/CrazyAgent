@@ -211,6 +211,7 @@ impl Tally {
 
     /// Counts the documents a New Project copies, before the first. Input: the count.
     /// Output: Ok, or `home_add_cancelled` once a stop was asked.
+    #[cfg(any(unix, test))]
     pub(crate) fn documents(&self, total: u64) -> Result<(), EngineError> {
         self.go_on()?;
         assert_eq!(
@@ -224,6 +225,7 @@ impl Tally {
     }
 
     /// Counts one document a New Project copied.
+    #[cfg(any(unix, test))]
     pub(crate) fn document_copied(&self) {
         let total = self.documents_total.load(Ordering::SeqCst);
         let before = self.documents_done.fetch_add(1, Ordering::SeqCst);
@@ -515,8 +517,8 @@ fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<
 /// its path with the stamp it had when checked and whether that stamp is unproven, its
 /// modify time being within [`STAMP_SETTLE`] of the check. The move deletes only entries
 /// still carrying that stamp, so a file iCloud syncs in or changes after the check stays;
-/// an entry with an unproven stamp must also still equal its landed copy. Two paths
-/// sharing a hash keep one stamp, so the other entry stays too.
+/// an entry with an unproven stamp, or whose change time moved, must also still equal its
+/// landed copy. Two paths sharing a hash keep one stamp, so the other entry stays too.
 #[derive(Debug, Default)]
 struct Verified(HashMap<u64, (Stamp, bool)>);
 
@@ -533,11 +535,12 @@ impl Verified {
         }
     }
 
-    /// Tells whether a source entry may be deleted: it still carries the stamp the check
-    /// saw, and when that stamp is unproven its bytes, or its target for a link, still
-    /// equal the landed copy's, read now. Inputs: the entry, its own metadata with links
-    /// not followed, the source folder and the landed folder. Output: the answer; false
-    /// when anything cannot be read.
+    /// Tells whether a source entry may be deleted: it is still the entry the check stamped,
+    /// with its size and modify time ([`Stamp::same_entry`]), and when that stamp is
+    /// unproven or the entry's change time moved since, its bytes, or its target for a
+    /// link, still equal the landed copy's, read now. Inputs: the entry, its own metadata
+    /// with links not followed, the source folder and the landed folder. Output: the
+    /// answer; false when anything cannot be read.
     fn removable(
         &self,
         path: &Path,
@@ -550,10 +553,13 @@ impl Verified {
         let Some((checked, unproven)) = self.0.get(&Self::key(path)) else {
             return false;
         };
-        if stamp(metadata) != Some(*checked) {
+        let Some(now) = stamp(metadata) else {
+            return false;
+        };
+        if !now.same_entry(checked) {
             return false;
         }
-        if !unproven {
+        if !unproven && now == *checked {
             return true;
         }
         let Ok(below) = path.strip_prefix(source) else {

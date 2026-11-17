@@ -2632,12 +2632,12 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('h') if !self.hidden_seers().is_empty() => {
+            KeyCode::Char('R') if !self.hidden_seers().is_empty() => {
                 ProjectReply::TeamChange(Box::new(crate::team::TeamAction::RestartHiddenSeers {
                     project_id: self.project.clone(),
                 }))
             }
-            KeyCode::Char('k') => {
+            KeyCode::Char('k') if self.hidden_offered() => {
                 match &self.hidden_paths {
                     Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
@@ -2668,7 +2668,7 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('m') => {
+            KeyCode::Char('M') => {
                 self.confirm_move = true;
                 ProjectReply::Handled
             }
@@ -2752,14 +2752,25 @@ impl ProjectScreen {
             .map(|entry| entry.strategy)
     }
 
+    /// Whether the Settings tab offers hidden folders: until the engine's read says this
+    /// system has none (DEC-194), so the row shows while it loads. Takes the screen.
+    /// Returns the answer.
+    pub fn hidden_offered(&self) -> bool {
+        !self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| saved.unavailable)
+    }
+
     /// The running agents the team graph names as able to open a folder hidden after they
     /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
     /// their labels in graph order, none while nothing is hidden or the graph loads.
     pub fn hidden_seers(&self) -> Vec<&str> {
-        let hides = self
-            .hidden_paths
-            .as_ref()
-            .is_some_and(|saved| !saved.paths.is_empty());
+        let hides = self.hidden_offered()
+            && self
+                .hidden_paths
+                .as_ref()
+                .is_some_and(|saved| !saved.paths.is_empty());
         match self.team.ready() {
             Some(graph) if hides => graph
                 .nodes
@@ -3130,6 +3141,14 @@ pub(in crate::tui) fn overview_pending(overview: &crate::project_overview::Overv
     overview.running || waits
 }
 
+/// The plain sentence for a hidden folder refused as not plain, in this system's path form:
+/// a plain drive path on Windows, a path with no quote or backslash elsewhere.
+const HIDDEN_NOT_PLAIN: &str = if cfg!(windows) {
+    "A folder path must be a plain drive path such as C:\\Users\\you\\project\\secrets, with no quotes, / or control characters."
+} else {
+    "A folder path can't hold quotes, backslashes or control characters."
+};
+
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
 /// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
@@ -3205,9 +3224,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "hidden_path_outside_project" => {
             "A hidden folder must sit inside the project. Pick a folder within it."
         }
-        "hidden_path_not_plain" => {
-            "A folder path can't hold quotes, backslashes or control characters."
-        }
+        "hidden_path_not_plain" => HIDDEN_NOT_PLAIN,
         "hidden_path_tracked" => {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
@@ -3228,6 +3245,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "research_unavailable_here" => {
+            "Research does not run on this computer in this version, so it cannot run again."
+        }
         "planning_busy" => {
             "A roadmap is already being planned for this project. Wait for it to finish."
         }

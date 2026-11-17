@@ -3528,9 +3528,10 @@ impl ProjectSandbox {
     /// The Seatbelt rule that keeps an agent from planting a nested git repository inside a
     /// writable working tree, which the owner's own unsandboxed git (its terminal or the
     /// V2 IDE) would later enter as a submodule and run under the agent's own config (SM1).
-    /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
-    /// below a writable working tree, except that tree's own top-level `.git` and, only in a
-    /// profile built by [`Self::adding_worktrees`], the engine's worktree links, which any
+    /// No entry named `.git`, in every spelling a case-insensitive volume finds ([`any_case`]),
+    /// as a folder, file or link, may be created below a writable working tree, except that
+    /// tree's own top-level `.git` and, only in a profile built by [`Self::adding_worktrees`],
+    /// the engine's worktree links, given back by their exact name in either case, which any
     /// other process could point at git data of its own (SECAUDIT-WORKTREE-ADMIN-PLANT).
     /// The project's own `.git` and each worktree's own `.git` sit
     /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
@@ -3543,7 +3544,8 @@ impl ProjectSandbox {
     /// make, remove or point elsewhere, and which, moved with their bucket into a tree, git
     /// never enters or stages. Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
-        let dot_git = "\\.[gG][iI][tT]";
+        let dot_git = any_case(".git");
+        let own_git = "\\.[gG][iI][tT]";
         let (working, other) = self.git_deny_roots();
         let mut nested = String::new();
         for root in &working {
@@ -3560,19 +3562,19 @@ impl ProjectSandbox {
         let mut exempt = String::new();
         if self.adds_worktrees {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))"
+                "\n    (require-not (regex #\"^{checkouts}/{own_git}$\"))"
             ));
         }
         if let Some(clone) = &self.clone {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
+                "\n    (require-not (regex #\"^{}/{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(clone),
                 regex_escape(crate::agent_git::TEAMMATES_FOLDER)
             ));
         }
         if let Some(setup) = &self.setup {
             exempt.push_str(&format!(
-                "\n    (require-not (regex #\"^{}/[^/]+/{dot_git}$\"))",
+                "\n    (require-not (regex #\"^{}/[^/]+/{own_git}$\"))",
                 seatbelt_pattern(&setup.folder)
             ));
         }
@@ -5006,13 +5008,14 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in any
-/// letter case: the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
+/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in every
+/// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
 /// working tree (SM1-R). Input: the root. Output: the regex filter.
 fn any_depth_git(root: &Path) -> String {
     format!(
-        "(regex #\"^{}/(.+/)?\\.[gG][iI][tT](/.*)?$\")",
-        seatbelt_pattern(root)
+        "(regex #\"^{}/(.+/)?{}(/.*)?$\")",
+        seatbelt_pattern(root),
+        any_case(".git")
     )
 }
 
@@ -5263,7 +5266,7 @@ mod windows_path_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
     use crate::sandbox::elf::tests::executable;

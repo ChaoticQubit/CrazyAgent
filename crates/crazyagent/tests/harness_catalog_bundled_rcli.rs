@@ -87,10 +87,8 @@ async fn a_bundled_rcli_beside_the_engine_is_listed_without_path() {
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let (engine, host) = (bin.join("crazyagent"), bin.join("crazyagent-rcli"));
-    std::fs::hard_link(BIN, &engine)
-        .expect("the built engine is linked into the bundle folder on the same volume");
-    std::fs::hard_link(&bundle, &host)
-        .expect("the RCLI host is linked into the bundle folder on the same volume");
+    std::fs::copy(BIN, &engine).expect("the built engine is copied into the bundle folder");
+    std::fs::copy(&bundle, &host).expect("the RCLI host is copied into the bundle folder");
     let _running = start(&engine, &home, &owner);
     for kind in [OwnerClientKind::Tui, OwnerClientKind::Desktop] {
         let (client, _) = OwnerClient::discover(&home, kind, Duration::from_secs(5))

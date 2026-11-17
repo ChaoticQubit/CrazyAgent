@@ -3578,7 +3578,7 @@ impl Lifeline {
 
     /// Closes the lifeline's pipe without `done`, as the engine's death does, and waits
     /// until the lifeline has acted. For rows only.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     pub(crate) fn sever(&mut self) {
         drop(self.child.stdin.take());
         let _ = self.child.wait();
@@ -7898,7 +7898,7 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn a_read_only_run_on_windows_stops_with_the_plain_unavailable_line() {
+    fn a_research_runner_on_windows_does_not_start_and_says_why() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let engine = base.join("engine");
@@ -7909,25 +7909,15 @@ mod windows_tests {
         sqlite.close().map_err(|(_, error)| error).unwrap();
         let state = engine.join("research");
         fs::create_dir(&state).unwrap();
-        let runner =
-            ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "windows-model".into(),
-            key: None,
-        };
-        let run = ReadOnlyRun {
-            name: "onboard-m-windows",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-        };
-        assert_eq!(
-            runner.run_read_only(&run, &|| false).unwrap(),
-            ReadOnlyEnding::Failed(
-                "Team agents and research are not available on Windows in this version.".into()
-            )
-        );
-        assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
+        match ResearchRunner::without_codex(&database, &state, ResearchLimits::default()) {
+            Err(RunError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+                assert_eq!(error.to_string(), "research_runner_unavailable");
+            }
+            Err(other) => panic!("expected the unavailable refusal, got {other}"),
+            Ok(_) => panic!("a research runner started on Windows"),
+        }
+        assert!(!state.join("agents").exists());
     }
 }
 
