@@ -805,3 +805,26 @@ fn a_locked_tool_whose_environment_python_is_gone_is_installed_again() {
         Err(InstallError("setup_uv_missing"))
     );
 }
+
+/// R1: setup shows a tmux older than agent terminals support as too old, naming the version
+/// found and the one needed, so the owner updates it instead of every terminal running out
+/// of time; it is not located, so setup offers to install a new one.
+#[test]
+fn a_tmux_older_than_agent_terminals_support_shows_as_too_old() {
+    let root = private_root();
+    let system = root.path().join("system");
+    std::fs::create_dir_all(&system).unwrap();
+    let tmux = system.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.2a'\n").unwrap();
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let places = crate::tools::Places::new(vec![system], None);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
+    let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
+    assert_eq!(missing.reason, crate::tools::Reason::WrongVersion);
+    assert_eq!(
+        missing.line(),
+        "tmux 3.2a is too old for CrazyAgent; it needs 3.7 or newer. Update it, then try again."
+    );
+    assert_eq!(installer.find(Dependency::Tmux), Ok(None));
+    assert_eq!(installer.locate(Dependency::Tmux), None);
+}
