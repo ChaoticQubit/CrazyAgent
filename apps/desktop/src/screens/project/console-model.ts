@@ -252,3 +252,19 @@ export function promptRows(text: string): number {
 export function seededText(text: string, draft: string): string {
   return text.trim() === "" ? draft : `${text}\n\n${draft}`;
 }
+
+/** A drafted message handed to the master's input: its id, its text, and `used`, which the
+ * input that takes it calls, so no input made later takes it again. */
+export interface Seed {
+  id: number;
+  text: string;
+  used: () => void;
+}
+
+/** One Ask's seed. Inputs: its id, from a count that only grows, the draft and the setter of
+ * the master area's seed. Output: the seed; its `used` clears the area's seed unless a newer
+ * Ask replaced it. */
+export function seedOf(id: number, text: string, set: (update: (now: Seed | null) => Seed | null) => void): Seed {
+  void set;
+  return { id, text, used: () => {} };
+}

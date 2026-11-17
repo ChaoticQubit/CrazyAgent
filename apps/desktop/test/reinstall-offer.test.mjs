@@ -7,7 +7,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api-intake.ts");
 const { REINSTALL_SIGN_IN, ReinstallView, reinstallLine } = await import("../src/screens/project/reinstall.tsx");
-const { seededText } = await import("../src/screens/project/console-model.ts");
+const { seedOf, seededText } = await import("../src/screens/project/console-model.ts");
+const io = await import("../src/screens/team/terminal-io.ts");
 const intake = await import("../src/screens/intake/intake.ts");
 
 const noop = () => {};
@@ -60,4 +61,33 @@ test("slice 3: Home offers Reinstall in the project only for a done project move
   assert.deepEqual(intake.jobActions(job({ left: [], left_more: { folders: 2, files: null } })), ["reinstall", "dismiss"]);
   assert.deepEqual(intake.jobActions(job({ left: [] })), ["dismiss"]);
   assert.deepEqual(intake.jobActions(job({ kind: "add", project_id: null })), ["dismiss"]);
+});
+
+test("slice 3 F1: an Ask's seed is taken once: used clears it, unless a newer Ask replaced it", () => {
+  let state = null;
+  const set = (update) => { state = update(state); };
+  state = seedOf(1, "Reinstall.", set);
+  const first = state;
+  first.used();
+  assert.equal(state, null);
+  state = seedOf(2, "Again.", set);
+  first.used();
+  assert.equal(state?.id, 2, "an older seed's use leaves a newer one");
+  state.used();
+  assert.equal(state, null);
+});
+
+test("slice 3 F1: a terminal takes the draft's line breaks only inside a bracketed paste", () => {
+  const draft = "Please reinstall:\n- `./node_modules`\r\n- `./api/.venv`";
+  assert.equal(io.seedText(draft, true), draft);
+  assert.equal(io.seedText(draft, false), "Please reinstall: - `./node_modules` - `./api/.venv`");
+  assert.equal(io.seedText("a\n\n\x1b[31mb", false), "a [31mb");
+});
+
+test("slice 3 F1: the console and the master's terminal each mark the seed used once they took it", () => {
+  const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  assert.match(source("../src/screens/team/terminal-panel.tsx"),
+    /terminal\.paste\(seedText\(seed\.text, terminal\.modes\.bracketedPasteMode\)\);[\s\S]{0,80}seed\.used\(\);/);
+  assert.match(source("../src/screens/project/console.tsx"), /setText\(seededText\(text, seed\.text\)\);[\s\S]{0,80}seed\.used\(\);/);
+  assert.match(source("../src/screens/project/live-master.tsx"), /setSeed\(seedOf\(asks\.current, text, setSeed\)\)/);
 });
