@@ -73,11 +73,6 @@ fn moved(db: &Connection) -> (i64, i64) {
     (revision, events)
 }
 
-/// The refusal code of a result, none when it succeeded. Input: the result. Output: the code.
-fn code<T>(result: Result<T, EngineError>) -> Option<String> {
-    result.err().map(|error| error.0)
-}
-
 /// Runs one owner request's memory writes and closes it at the next revision, as
 /// `owner_apply_with` does before it persists the request's event. Inputs: the store and
 /// the writes. Output: none.
