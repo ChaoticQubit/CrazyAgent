@@ -11397,11 +11397,13 @@ fn turn_proposals(
 
 /// Tells a master without team tools how to hand a task to a sub-agent: one
 /// `crazyagent-task` block per task, a JSON object the engine reads through the same
-/// schema as the `delegate` tool (L6). Output: the text, ending in a line break.
+/// schema as the `delegate` tool (L6), and what each task holds, as in the team tools'
+/// task fields (#388 F1). Output: the text, ending in a line break.
 fn block_text() -> String {
     format!(
-        "To hand a task to a sub-agent, put a block like this on lines of its own in your reply, one task per block, with harness and role only if you choose them:\n{}\n{{\"task\": \"<the task>\", \"harness\": \"<harness>\", \"role\": \"<short-role>\"}}\n```\nThe engine reads only these blocks, never other text of your reply.\n",
-        tool::BLOCK_FENCE
+        "To hand a task to a sub-agent, put a block like this on lines of its own in your reply, one task per block, with harness and role only if you choose them:\n{}\n{{\"task\": \"<the task>\", \"harness\": \"<harness>\", \"role\": \"<short-role>\"}}\n```\nEach task: {}\nThe engine reads only these blocks, never other text of your reply.\n",
+        tool::BLOCK_FENCE,
+        tool::HAND_OFF_TASK
     )
 }
 
