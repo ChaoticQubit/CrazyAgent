@@ -1235,12 +1235,11 @@ fn dropping_a_chatgpt_relay_during_a_renewal_returns_promptly() {
     let provider = Provider::json();
     let calls = Arc::new(AtomicUsize::new(0));
     let counting = Arc::clone(&calls);
+    let (called, call) = std::sync::mpsc::sync_channel(1);
     let renew: chatgpt::Renew = Box::new(move |_: Duration, halted: &dyn Fn() -> bool| {
         counting.fetch_add(1, Ordering::SeqCst);
-        let waited = Instant::now();
-        while !halted() && waited.elapsed() < WAIT {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let _ = called.try_send(());
+        let _ = crate::poll_support::poll_until(Instant::now() + WAIT, halted);
         Err(EngineError("native_profile_renewal_stopped".into()))
     });
     let source = Arc::new(chatgpt::ChatGptSource::new(
@@ -1262,10 +1261,7 @@ fn dropping_a_chatgpt_relay_during_a_renewal_returns_promptly() {
         let mut reply = Vec::new();
         let _ = stream.read_to_end(&mut reply);
     });
-    let started = Instant::now();
-    while calls.load(Ordering::SeqCst) == 0 && started.elapsed() < Duration::from_secs(5) {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let _ = call.recv_timeout(Duration::from_secs(5));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let dropping = Instant::now();
     drop(relay);

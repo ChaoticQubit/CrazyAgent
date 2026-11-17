@@ -765,18 +765,15 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess-listed"}}'
 exec /bin/sleep 60
 "#;
 
-    /// Kills one process group after `after` unless `done` is set first, so a row whose
-    /// engine is held in a write to that group's harness fails by its assertions instead of
-    /// hanging. Inputs: the group, the wait and the flag.
-    fn watchdog(group: u32, after: Duration, done: Arc<AtomicBool>) {
+    /// Kills one process group after `after` unless the row sends on `done` first, so a row
+    /// whose engine is held in a write to that group's harness fails by its assertions
+    /// instead of hanging; a row that panics first drops its sender and the group is killed.
+    /// Inputs: the group, the wait and the receiving end.
+    fn watchdog(group: u32, after: Duration, done: std::sync::mpsc::Receiver<()>) {
         use rustix::process::{Pid, Signal, kill_process_group};
         let group = Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         std::thread::spawn(move || {
-            let until = Instant::now() + after;
-            while !done.load(Ordering::SeqCst) && Instant::now() < until {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            if !done.load(Ordering::SeqCst) {
+            if done.recv_timeout(after).is_err() {
                 let _ = kill_process_group(group, Signal::KILL);
             }
         });
@@ -792,9 +789,9 @@ exec /bin/sleep 60
         let turn = turn(false);
         std::fs::write(&turn.request.executable, DEAF_ACP).unwrap();
         let (mut session, _state, _folder) = started(turn);
-        let done = Arc::new(AtomicBool::new(false));
+        let (done, watching) = std::sync::mpsc::channel();
         let group = session.process_group();
-        watchdog(group, Duration::from_secs(10), Arc::clone(&done));
+        watchdog(group, Duration::from_secs(10), watching);
         let prompt = "\u{1}".repeat(20_000);
         let framed = serde_json::to_string(&prompt).unwrap();
         assert!(framed.len() > 2 * 65_536, "{}", framed.len());
@@ -802,7 +799,7 @@ exec /bin/sleep 60
         let stop = || began.elapsed() >= Duration::from_secs(1);
         let driven = drive(&mut session, &prompt, &stop);
         let waited = began.elapsed();
-        done.store(true, Ordering::SeqCst);
+        let _ = done.send(());
         assert!(driven.is_ok(), "{:?}", driven.as_ref().err());
         assert_eq!(driven.unwrap().ended, Some(Err(CANCELLED)));
         assert!(waited < Duration::from_secs(8), "{waited:?}");
@@ -839,20 +836,20 @@ exec /bin/sleep 60
         assert!(opened.is_ok(), "{:?}", opened.as_ref().err());
         let (group, _) = opened.unwrap();
         thread.go.send(true).unwrap();
-        let until = Instant::now() + Duration::from_secs(10);
-        while !state.join("turns").exists() {
-            assert!(Instant::now() < until, "the stand-in never began its turn");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        let began =
+            crate::poll_support::poll_until(Instant::now() + Duration::from_secs(10), || {
+                state.join("turns").exists()
+            });
+        assert!(began, "the stand-in never began its turn");
 
         drop(thread);
 
         let group = rustix::process::Pid::from_raw(i32::try_from(group).unwrap()).unwrap();
         let until = Instant::now() + grace + Duration::from_secs(5);
-        while rustix::process::test_kill_process_group(group).is_ok() {
-            assert!(Instant::now() < until, "it outlived its dropped turn");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let gone = crate::poll_support::poll_until(until, || {
+            rustix::process::test_kill_process_group(group).is_err()
+        });
+        assert!(gone, "it outlived its dropped turn");
     }
 }
 
@@ -938,18 +935,22 @@ fn a_listed_master_stop_that_left_processes_holds_them() {
     assert!(held_in(project).is_empty());
     let mut sleeper = crate::spawn_gate::spawn(
         Command::new("/usr/bin/perl")
-            .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; sleep 60"])
+            .args([
+                "-mPOSIX",
+                "-e",
+                "POSIX::setsid() > 0 or exit 1; $| = 1; print qq(left\\n); sleep 60",
+            ])
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null()),
     )
     .unwrap();
     let pid = rustix::process::Pid::from_child(&sleeper);
-    let until = Instant::now() + Duration::from_secs(10);
-    while rustix::process::getsid(Some(pid)) != Ok(pid) {
-        assert!(Instant::now() < until, "the sleeper never left its session");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let mut line = String::new();
+    let mut out = std::io::BufReader::new(sleeper.stdout.take().unwrap());
+    std::io::BufRead::read_line(&mut out, &mut line).unwrap();
+    assert_eq!(line, "left\n", "the sleeper never left its session");
+    assert_eq!(rustix::process::getsid(Some(pid)), Ok(pid));
 
     let left = Lineage::of_sandboxed(sleeper.id(), None).and_then(Lineage::settle);
     let stopped = listed_stop_settled(left, None, (), by(), keep);

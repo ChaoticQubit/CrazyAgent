@@ -622,3 +622,61 @@ async fn without_the_socket_variable_the_bridge_finds_the_engine_at_the_default_
     assert!(cleanup.is_ok(), "real engine cleanup failed");
     assert!(connected.unwrap().connected);
 }
+
+/// V250-OWN-RETRY-BIND-QUERY desktop red row: the owner inspects a baseline, a settings read
+/// replaces the bridge's last read at the same revision, another window approves the same
+/// baseline, and the owner's approval is refused stale rather than resent, because the
+/// resend checks the inspected baseline, which changed, not the settings read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approval_is_checked_against_its_inspected_baseline_not_a_later_read() {
+    use crazyagent::engine::owner::{OwnerApplied, OwnerRead, OwnerResponse, OwnerResult};
+    use crazyagent_desktop::bridge::ActionOutcome;
+    let root = tempfile::Builder::new()
+        .prefix("ca-desktop-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let (initial, _) = inspect_fixture(root.path()).await.unwrap();
+    let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+    bridge.connect().await.unwrap();
+    let inspected = bridge.inspect(&initial.id).await.unwrap();
+    bridge.quit_settings().await.unwrap();
+    let client = Client::new(root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+    let (_, mut other) = OwnerController::attach_configured(client, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let baseline_id = BaselineId::new(&initial.id).unwrap();
+    other
+        .read(OwnerRead::Baseline {
+            baseline_id: baseline_id.clone(),
+        })
+        .await
+        .unwrap();
+    other
+        .begin_mutation(OwnerMutation::ApproveBaseline { baseline_id }, 1)
+        .unwrap();
+    let theirs = other.send_pending().await.unwrap();
+    assert!(
+        matches!(
+            theirs,
+            OwnerResponse::Applied {
+                operation: OwnerApplied {
+                    result: OwnerResult::Applied,
+                    ..
+                }
+            }
+        ),
+        "{theirs:?}"
+    );
+    let approval = bridge.approve(&inspected.ticket).await.unwrap();
+    assert_eq!(approval.outcome, ActionOutcome::Rejected);
+    assert!(!approval.pending);
+    drop(bridge);
+    drop(other);
+    service.shutdown().await.unwrap();
+}

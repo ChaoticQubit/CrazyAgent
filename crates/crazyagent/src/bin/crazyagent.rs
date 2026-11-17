@@ -1394,4 +1394,5 @@ fn write_report(source: &str, profile: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[path = "crazyagent/tests.rs"]
 mod tests;

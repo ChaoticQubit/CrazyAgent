@@ -172,6 +172,7 @@ pub struct OwnerController {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingMutation {
     request: OwnerRequest,
+    basis: (OwnerRead, OwnerReadReply),
     hash: String,
     identity: OwnerConnectionIdentity,
     generation: u64,
@@ -468,13 +469,42 @@ impl OwnerController {
         Ok(())
     }
 
-    /// Prepares one exact mutation from a fresh authoritative read.
+    /// Prepares one exact mutation from a fresh authoritative read and keeps that read as the
+    /// one the change was built from, which a stale resend checks: call it right after the
+    /// read the form shows. A flow whose form came from an earlier read names that read with
+    /// [`Self::begin_mutation_on`].
     /// Takes validated typed content and its submitted native generation.
     /// Returns immutable retained intent before any mutation I/O.
     pub fn begin_mutation(
         &mut self,
         mutation: OwnerMutation,
         generation: u64,
+    ) -> Result<&PendingMutation, EngineError> {
+        self.begin(mutation, generation, None)
+    }
+
+    /// Prepares one exact mutation like [`Self::begin_mutation`], but keeps as the read the
+    /// change was built from the query and reply the form showed, read before the fresh view,
+    /// so a stale resend checks what the owner saw. Inputs: the content, its generation and
+    /// that read. Output: the retained intent, or `controller_stale_view` when that read is
+    /// newer than the view.
+    pub fn begin_mutation_on(
+        &mut self,
+        mutation: OwnerMutation,
+        generation: u64,
+        basis: (OwnerRead, OwnerReadReply),
+    ) -> Result<&PendingMutation, EngineError> {
+        self.begin(mutation, generation, Some(basis))
+    }
+
+    /// Prepares one exact mutation from the fresh view, with the read it was built from: the
+    /// given one, or else the view's own. Inputs: the content, its generation and the read, if
+    /// named. Output: the retained intent, or the refusal code.
+    fn begin(
+        &mut self,
+        mutation: OwnerMutation,
+        generation: u64,
+        basis: Option<(OwnerRead, OwnerReadReply)>,
     ) -> Result<&PendingMutation, EngineError> {
         if self.pending.is_some() || self.pending_account_profile.is_some() {
             return Err(EngineError("controller_pending_intent".into()));
@@ -487,6 +517,10 @@ impl OwnerController {
             .as_ref()
             .filter(|v| v.fresh)
             .ok_or_else(|| EngineError("controller_stale_view".into()))?;
+        let basis = basis.unwrap_or_else(|| (view.query.clone(), view.state.clone()));
+        if basis.1.revision.value() > view.state.revision.value() {
+            return Err(EngineError("controller_stale_view".into()));
+        }
         let request = OwnerRequest {
             protocol_version: PROTOCOL_VERSION,
             request_id: RequestId::new(crate::engine::owner::random_id()?)
@@ -497,6 +531,7 @@ impl OwnerController {
         let hash = request.mutation_hash()?;
         self.pending = Some(PendingMutation {
             request,
+            basis,
             hash,
             identity: self.identity.clone(),
             generation,
@@ -530,11 +565,18 @@ impl OwnerController {
             .pending
             .as_ref()
             .filter(|pending| !pending.uncertain)
-            .map(|pending| (pending.request.clone(), pending.generation));
+            .map(|pending| {
+                (
+                    pending.request.clone(),
+                    pending.generation,
+                    pending.basis.clone(),
+                )
+            });
         let response = self.send_exact().await?;
         match first {
-            Some((request, generation)) if stale_refusal(&response) => {
-                self.resend_stale(request, generation, response).await
+            Some((request, generation, basis)) if stale_refusal(&response) => {
+                self.resend_stale(request, generation, basis, response)
+                    .await
             }
             _ => Ok(response),
         }
@@ -542,16 +584,17 @@ impl OwnerController {
 
     /// Sends a first-send change the engine refused `stale_revision` once more, under a new
     /// request id and the engine's current revision, when only an unrelated write moved that
-    /// revision: the view it was built from is still the last read, that read is the form's
-    /// own (not `Capabilities`, which carries no form data), and reading the same query again
-    /// gives a newer revision with the same config and data. The change itself is sent as it
-    /// was, so a version inside it is never refreshed and a real conflict stays refused; an
-    /// unmoved revision means such a version refused it. Inputs: the refused request, its
-    /// generation and the refusal. Output: the resend's answer, or the refusal.
+    /// revision: reading again the query the change was built from (never `Capabilities`,
+    /// which carries no form data) gives a newer revision with the config and data that read
+    /// gave, whatever the controller read since. The change itself is sent as it was, so a
+    /// version inside it is never refreshed and a real conflict stays refused; an unmoved
+    /// revision means such a version refused it. Inputs: the refused request, its generation,
+    /// the read it was built from and the refusal. Output: the resend's answer, or the refusal.
     async fn resend_stale(
         &mut self,
         refused: OwnerRequest,
         generation: u64,
+        basis: (OwnerRead, OwnerReadReply),
         refusal: OwnerResponse,
     ) -> Result<OwnerResponse, EngineError> {
         assert!(
@@ -561,17 +604,19 @@ impl OwnerController {
         let OwnerOperation::Apply { mutation } = refused.operation else {
             unreachable!("a pending change is an owner mutation");
         };
-        let Some(before) = self.view.clone().filter(|view| {
-            view.state.revision == refused.expected_revision
-                && !matches!(view.query, OwnerRead::Capabilities)
-        }) else {
+        let (query, shown) = basis;
+        assert!(
+            shown.revision.value() <= refused.expected_revision.value(),
+            "a change is built from a read no newer than its revision"
+        );
+        if matches!(query, OwnerRead::Capabilities) {
             return Ok(self.refused(refusal));
-        };
-        let after = match self.read(before.query.clone()).await {
+        }
+        let after = match self.read(query).await {
             Ok(after)
                 if after.revision.value() > refused.expected_revision.value()
-                    && after.config_id == before.state.config_id
-                    && after.data == before.state.data =>
+                    && after.config_id == shown.config_id
+                    && after.data == shown.data =>
             {
                 after
             }
