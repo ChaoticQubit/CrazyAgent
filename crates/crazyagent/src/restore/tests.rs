@@ -80,13 +80,35 @@ fn the_record_reads_back_as_each_state_and_nothing_else() {
 #[test]
 fn a_client_starts_no_engine_while_a_restore_is_pending_or_done_and_does_after_a_failure() {
     let dir = root();
-    assert_eq!(blocks_start(dir.path()), None);
+    assert_eq!(blocks_start(dir.path(), true), None);
+    assert_eq!(blocks_start(dir.path(), false), None);
     record(dir.path(), "pending", 0o600);
-    assert_eq!(blocks_start(dir.path()), Some(ENGINE_RESTORING));
+    assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORING));
     record(dir.path(), "restored replaced-20261117T001500000Z", 0o600);
-    assert_eq!(blocks_start(dir.path()), Some(ENGINE_RESTORED));
+    assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORED));
+    assert_eq!(blocks_start(dir.path(), false), Some(ENGINE_RESTORED));
     record(dir.path(), "failed storage_restore_busy", 0o600);
-    assert_eq!(blocks_start(dir.path()), None);
+    assert_eq!(blocks_start(dir.path(), true), None);
+    assert_eq!(blocks_start(dir.path(), false), None);
+}
+
+/// A pending record whose engine process is gone was left by a restore that died, not one
+/// that runs: holding every start on it would strand the owner, and the start that follows
+/// clears it. One whose process still runs holds even the owner's explicit restart, which
+/// would stop the process in the middle of the copy.
+#[test]
+fn a_pending_record_holds_starts_only_while_its_engine_process_still_runs() {
+    let dir = root();
+    record(dir.path(), "pending", 0o600);
+    assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORING));
+    assert_eq!(blocks_start(dir.path(), false), None);
+    assert!(holds_restart(dir.path(), true));
+    assert!(!holds_restart(dir.path(), false));
+    record(dir.path(), "restored replaced-20261117T001500000Z", 0o600);
+    assert!(
+        !holds_restart(dir.path(), true),
+        "restart is the owner's way back to 2.5"
+    );
 }
 
 #[test]
@@ -124,5 +146,5 @@ fn a_restore_that_cannot_run_records_its_code_alone_and_changes_nothing() {
     };
     assert!(code.starts_with("storage_restore_"), "{code}");
     assert!(!code.contains('/'), "{code}");
-    assert_eq!(blocks_start(dir.path()), None);
+    assert_eq!(blocks_start(dir.path(), true), None);
 }
