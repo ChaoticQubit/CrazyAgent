@@ -1105,7 +1105,12 @@ test("a soft engine refusal asks again only when the override for it was not sen
 
 const icloudProps = (extra = {}) => ({
   open: true, name: "shop", source: "/Users/mira/Desktop/shop", placeholders: 3, way: "move", downloading: false, progress: null, stopping: false,
-  onDownload: noop, onStop: noop, onCancel: noop, ...extra,
+  skipped: [], everything: false, onEverything: noop, onDownload: noop, onStop: noop, onCancel: noop, ...extra,
+});
+const SKIPPED = [{ path: "node_modules", files: 57108 }, { path: "web/.venv", files: null }];
+const dialogParts = (dialog) => [].concat(dialog.props.children).flat(Infinity).flatMap(function walk(node) {
+  if (!node || typeof node !== "object") return [];
+  return [node, ...[].concat(node.props?.children ?? []).flat(Infinity).flatMap(walk)];
 });
 const footerButtons = (dialog) => {
   const footer = dialog.props.footer;
@@ -1125,6 +1130,70 @@ test("the iCloud question names the files, the download and what a move does on 
   assert.equal(footerButton(ICloudDialog(icloudProps({ way: "copy" })), "Download and copy").props.variant, "primary");
   assert.match(html(ICloudDialog, icloudProps({ placeholders: null })), /Some files are only in iCloud/);
   assert.equal(html(ICloudDialog, icloudProps({ open: false })), "");
+});
+
+test("V243-ICLOUD-MOVE-ZERO: the iCloud question names the rebuildable folders it leaves, with file counts, and where they stay", () => {
+  const page = html(ICloudDialog, icloudProps({ skipped: SKIPPED }));
+  assert.match(page, /3 files are only in iCloud/);
+  assert.match(page, /Left in iCloud, as they can be rebuilt:/);
+  assert.match(page, /node_modules \(57108 files\)/);
+  assert.match(page, /web\/\.venv \(files not counted\)/);
+  assert.match(page, /They stay in \/Users\/mira\/Desktop\/shop; reinstall them in the project after the add\./);
+  assert.match(page, /role="switch"[^>]*aria-checked="false"/);
+  assert.match(page, /Download everything \(slow\)/);
+  assert.doesNotMatch(html(ICloudDialog, icloudProps()), /role="switch"|Left in iCloud/, "no switch without a folder to leave");
+});
+
+test("V243-ICLOUD-MOVE-ZERO: Download everything counts the left folders in, and its switch reports the owner's choice", () => {
+  const counted = [{ path: "node_modules", files: 57108 }];
+  const on = html(ICloudDialog, icloudProps({ skipped: counted, everything: true }));
+  assert.match(on, /57111 files are only in iCloud/);
+  assert.match(on, /Downloaded too:/);
+  assert.doesNotMatch(on, /They stay in/);
+  assert.match(on, /role="switch"[^>]*aria-checked="true"/);
+  assert.match(html(ICloudDialog, icloudProps({ skipped: SKIPPED, everything: true })), /Some files are only in iCloud/);
+  const calls = [];
+  const dialog = ICloudDialog(icloudProps({ skipped: counted, onEverything: (on) => calls.push(on) }));
+  const toggle = dialogParts(dialog).find((part) => part.props?.label === "Download everything (slow)");
+  toggle.props.onChecked(true);
+  assert.deepEqual(calls, [true]);
+});
+
+test("V243-ICLOUD-MOVE-ZERO: a folder whose only iCloud files sit in left folders still asks, and offers Move or Copy without a download", () => {
+  const only = icloudProps({ placeholders: 0, skipped: [{ path: "node_modules", files: 2 }] });
+  const page = html(ICloudDialog, only);
+  assert.match(page, /Some of shop stays in iCloud/);
+  assert.doesNotMatch(page, /only in iCloud;/);
+  assert.ok(footerButton(ICloudDialog(only), "Move") && footerButton(ICloudDialog(only), "Copy"));
+  assert.equal(footerButton(ICloudDialog(only), "Download and move"), undefined);
+  const all = icloudProps({ placeholders: 0, skipped: [{ path: "node_modules", files: 2 }], everything: true });
+  assert.match(html(ICloudDialog, all), /Download shop from iCloud first\?/);
+  assert.match(html(ICloudDialog, all), /2 files are only in iCloud/);
+  assert.ok(footerButton(ICloudDialog(all), "Download and move"));
+});
+
+test("V243-ICLOUD-MOVE-ZERO: the add asks about iCloud for left folders alone, and Download everything rides as an override", () => {
+  const read = (value) => ({ kind: "ok", value: { bytes: 1, ...value } });
+  assert.deepEqual(intake.icloudSkipped(read({ skipped: SKIPPED })), SKIPPED);
+  assert.deepEqual(intake.icloudSkipped(read({})), []);
+  assert.deepEqual(intake.icloudSkipped({ kind: "loading" }), []);
+  assert.equal(intake.icloudAsks(read({ placeholders: 0, skipped: SKIPPED })), true);
+  assert.equal(intake.icloudAsks(read({ placeholders: 2 })), true);
+  assert.equal(intake.icloudAsks(read({ placeholders: 0 })), false);
+  assert.equal(intake.icloudWanted(3, SKIPPED, false), 3);
+  assert.equal(intake.icloudWanted(3, SKIPPED, true), null);
+  assert.equal(intake.icloudWanted(3, SKIPPED.slice(0, 1), true), 57111);
+  assert.equal(intake.icloudWanted(null, [], false), null);
+  assert.deepEqual(intake.withEverything(["worktrees"], true), ["worktrees", "download_everything"]);
+  assert.deepEqual(intake.withEverything(["worktrees"], false), ["worktrees"]);
+  assert.deepEqual(intake.withEverything(["download_everything"], true), ["download_everything"]);
+});
+
+test("V243-ICLOUD-MOVE-ZERO: a job waiting on a soft refusal keeps its Download everything in the answer", () => {
+  const waiting = { id: "add-1", kind: "add", source: "/Users/mira/Desktop/shop", mode: "move", overrides: ["download_everything"], stopping: false,
+    state: { state: "needs_answer", code: "home_move_worktrees" } };
+  const { overrides } = intake.jobQuestion(waiting, { kind: "ok", value: { bytes: 1, worktrees: 1, worktree_paths: ["/w"], movable: false, git_link: "worktrees" } });
+  assert.deepEqual(overrides, ["worktrees", "download_everything"]);
 });
 
 test("Download and move in the iCloud question downloads, then moves", () => {
@@ -1150,7 +1219,7 @@ test("a running iCloud download shows its progress and only Stop download, which
   const calls = [];
   const props = icloudProps({ downloading: true, progress: { total: 3, done: 1 }, onStop: () => calls.push("stop") });
   const page = html(ICloudDialog, props);
-  assert.match(page, /Downloading from iCloud: 1 of 3 files/);
+  assert.match(page, /macOS is downloading: 1 of 3 files/);
   assert.doesNotMatch(page, /Download and move|Download and copy/);
   const dialog = ICloudDialog(props);
   assert.equal(dialog.props.busy, true);

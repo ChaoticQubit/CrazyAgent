@@ -12,9 +12,27 @@ const copying = (copied, checked = 0) => ({ state: "copying", copied, checked })
 const failed = (code, phase) => ({ state: "failed", code, phase });
 const WAITING = { state: "waiting", behind: "garden" };
 
+test("V243-ICLOUD-MOVE-ZERO: the download line says macOS downloads, with files and bytes landed", () => {
+  const landing = (done, total, bytes_done, bytes_total) => ({ state: "downloading", progress: { done, total, bytes_done, bytes_total } });
+  assert.equal(intake.jobLine(job(landing(556, 127940, 31 * 1024 * 1024, 2 * 1024 ** 3))), "macOS is downloading shop: 556 of 127940 files (31 MB of 2 GB)");
+  assert.equal(intake.jobLine(job(landing(1, 2, 0, 0))), "macOS is downloading shop: 1 of 2 files");
+  assert.equal(intake.jobLine(job(landing(1, 2, 9, 4))), "macOS is downloading shop: 1 of 2 files", "bytes past their total are left out");
+});
+
+test("V243-ICLOUD-MOVE-ZERO: a done add says which rebuildable folders it left in iCloud and where", () => {
+  const left = [{ path: "node_modules", files: 57108 }, { path: ".venv", files: null }];
+  assert.equal(intake.jobLine(job({ state: "done" }, { left })),
+    `shop is in your projects folder. Set it up from Home. node_modules and .venv stayed in ${SOURCE}; reinstall them in the project.`);
+  assert.equal(intake.jobLine(job({ state: "done" }, { left: left.slice(0, 1), mode: "copy" })),
+    "shop is in your projects folder. Set it up from Home. node_modules was not copied; reinstall it in the project.");
+  const many = ["a", "b", "c", "d", "e"].map((name) => ({ path: `${name}/node_modules`, files: 1 }));
+  assert.match(intake.jobLine(job({ state: "done" }, { left: many, mode: "copy" })), / a\/node_modules, b\/node_modules, c\/node_modules and 2 more were not copied;/);
+  assert.equal(intake.jobLine(job({ state: "done" }, { left: [] })), "shop is in your projects folder. Set it up from Home.");
+});
+
 test("an intake job line says what it does now, with counts as files land", () => {
   assert.equal(intake.jobLine(job(downloading(0, 0))), "Downloading shop from iCloud...");
-  assert.equal(intake.jobLine(job(downloading(12, 3000))), "Downloading shop from iCloud: 12 of 3000 files");
+  assert.equal(intake.jobLine(job(downloading(12, 3000))), "macOS is downloading shop: 12 of 3000 files");
   assert.throws(() => intake.jobLine(job(downloading(4, 3))));
   assert.equal(intake.jobLine(job(copying(0))), "Moving shop...");
   assert.equal(intake.jobLine(job(copying(0), { mode: "copy" })), "Copying shop...");
@@ -154,7 +172,7 @@ const buttons = (markup) => [...markup.matchAll(/<button[^>]*>(?:<[^>]+>)*([^<]*
 
 test("Home's job row shows the job's line and only the actions its state allows", () => {
   const running = jobRow(downloading(12, 3000));
-  assert.match(running, /Downloading shop from iCloud: 12 of 3000 files/);
+  assert.match(running, /macOS is downloading shop: 12 of 3000 files/);
   assert.match(running, /role="status"/);
   assert.deepEqual(buttons(running), ["Stop"]);
   assert.deepEqual(buttons(jobRow({ state: "clearing" })), []);
