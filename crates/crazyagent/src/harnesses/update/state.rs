@@ -1056,11 +1056,12 @@ mod windows_tests {
         let places = crate::tools::Places::new(vec![node.clone()], None);
         assert!(version_if_runs(&script, &home, &places).is_some());
 
-        let granted = std::process::Command::new("icacls")
-            .arg(&node)
-            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"])
-            .output()
-            .unwrap();
+        let granted = crate::spawn_gate::output(
+            std::process::Command::new("icacls")
+                .arg(&node)
+                .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
+        )
+        .unwrap();
         assert!(granted.status.success(), "{granted:?}");
         assert!(crate::tools::resolve_entry(&script, &places).is_ok());
         assert_eq!(version_if_runs(&script, &home, &places), None);
