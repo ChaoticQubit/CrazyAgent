@@ -5,6 +5,15 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod e2e_support;
+
+#[path = "snapshot_v242/harness.rs"]
+mod harness;
+#[path = "snapshot_v242/launch.rs"]
+mod launch;
+#[path = "snapshot_v242/provider.rs"]
+mod provider;
+
 /// The golden folders below tests/snapshots/v242, one per surface kind of the 2.5 plan's
 /// section 2.0, plus `runner` for the runner's own example. A scenario names one of these.
 const KINDS: [&str; 10] = [
@@ -38,11 +47,15 @@ struct Scenario {
 /// Lists every scenario: the runner's own example, then each kind's drivers.
 /// Output: the scenarios in the order the snapshot row runs them.
 fn scenarios() -> Vec<Scenario> {
-    vec![Scenario {
+    let mut all = vec![Scenario {
         kind: "runner",
         name: "masking-example",
         capture: masking_example,
-    }]
+    }];
+    all.extend(harness::scenarios());
+    all.extend(launch::scenarios());
+    all.extend(provider::scenarios());
+    all
 }
 
 /// Captures a fixed surface that holds one of every value the normalisation list masks: an
@@ -135,9 +148,12 @@ const PORT_HOSTS: [&str; 4] = ["127.0.0.1:", "localhost:", "0.0.0.0:", "[::1]:"]
 /// The shortest lowercase hex run masked as an id: engine ids are 24, 32 or 64 characters.
 const HEX_ID_MIN: usize = 16;
 
-/// The first names below the owner home that the engine's own sandbox rules use (sandbox.rs
-/// `OWNER_SECRET_PATHS` at 2.4.2). A golden may name `<owner-home>/` only followed by one.
-const OWNER_HOME_NAMES: [&str; 15] = [
+/// The first names below the owner home that the engine's own sandbox rules use at 2.4.2:
+/// sandbox.rs `OWNER_SECRET_PATHS` and the toolchain homes `ToolHomes::owner` grants
+/// (toolchains.rs rustup, `NODE_HOMES`, `PYTHON_HOMES` and graphify's uv tool, all of
+/// whose `.local/share/...` homes start with `.local`). A golden may name `<owner-home>/`
+/// only followed by one.
+const OWNER_HOME_NAMES: [&str; 20] = [
     "Library",
     ".ssh",
     ".gnupg",
@@ -153,6 +169,11 @@ const OWNER_HOME_NAMES: [&str; 15] = [
     ".cargo",
     ".npmrc",
     ".pypirc",
+    ".rustup",
+    ".nvm",
+    ".volta",
+    ".local",
+    ".pyenv",
 ];
 
 /// The placeholders the normalisation writes; `<path-` and `<id-` take a number and `>`.
@@ -1028,5 +1049,29 @@ fn a_failure_line_with_private_text_is_withheld_and_keeps_its_scenario() {
             names.1
         ),
         "role/master: failure text withheld, it names a folder below the owner home outside the engine's rules"
+    );
+}
+
+#[test]
+fn the_toolchain_homes_the_sandbox_grants_may_be_named_below_the_owner_home() {
+    let names = (Some("/Users/owner"), Some("owner"));
+    for granted in [
+        "\"<owner-home>/.rustup/toolchains\"",
+        "\"<owner-home>/.rustup/settings.toml\"",
+        "\"<owner-home>/.nvm\"",
+        "\"<owner-home>/.volta\"",
+        "\"<owner-home>/.local/share/fnm\"",
+        "\"<owner-home>/.pyenv\"",
+        "\"<owner-home>/.local/share/uv/python\"",
+    ] {
+        assert_eq!(
+            refuse_private(granted, names.0, names.1),
+            Ok(()),
+            "{granted}"
+        );
+    }
+    assert_eq!(
+        refuse_private("\"<owner-home>/Projects/app\"", names.0, names.1),
+        Err("names a folder below the owner home outside the engine's rules".to_owned())
     );
 }
