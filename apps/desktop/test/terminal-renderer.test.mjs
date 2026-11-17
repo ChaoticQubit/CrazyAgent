@@ -8,13 +8,15 @@ const harnessPanel = await bundle(new URL("./fixtures/terminal-harnesses.mjs", i
 const harness = JSON.stringify(coord.COORD_HARNESSES[0]);
 
 /** Opens the real panel on a page that offers WebGL2 or not, under a saved Terminal renderer
- * choice when one is given, waits for it to go live and prints a line into it. Inputs:
- * `evaluate`, whether WebGL2 is offered, the renderer the GPU reports as a page expression
- * and the choice. Output: none. */
-async function live(evaluate, offered, { renderer = "Fixture.HARDWARE", choice = null } = {}) {
+ * choice (GPU unless named) or, with `platform`, under that platform's default with nothing
+ * saved, waits for it to go live and prints a line into it. Inputs: `evaluate`, whether
+ * WebGL2 is offered, the renderer the GPU reports as a page expression, the choice and the
+ * platform. Output: none. */
+async function live(evaluate, offered, { renderer = "Fixture.HARDWARE", choice = "gpu", platform = null } = {}) {
   await evaluate(harnessPanel);
   await evaluate(`Fixture.offerGpu(${offered}, ${renderer})`);
-  if (choice) await evaluate(`Fixture.choose(${JSON.stringify(choice)})`);
+  if (platform) await evaluate(`Fixture.startOn(${JSON.stringify(platform)})`);
+  else await evaluate(`Fixture.choose(${JSON.stringify(choice)})`);
   await evaluate(`Fixture.open("master", ${harness})`);
   assert.equal(await evaluate("Fixture.until(() => Fixture.view().live)"), true, "the terminal went live");
   await evaluate('Fixture.output("drawn line\\r\\n")');
@@ -61,6 +63,16 @@ test("V243-TERMINAL-SLOW: a terminal whose WebGL context is lost goes back to DO
   });
   assert.deepEqual(seen, { gpu: true, lost: true, back: true, shown: true });
 });
+
+for (const [platform, drawn] of [["MacIntel", "webgl"], ["Win32", "webgl"], ["Linux x86_64", "dom"]]) {
+  test(`#358 r2 (NOTE-1215): with nothing chosen, a GPU machine on ${platform} draws with ${drawn}`, async () => {
+    const seen = await withPage(async ({ evaluate }) => {
+      await live(evaluate, true, { platform });
+      return { drawn: await drawnWith(evaluate, drawn), shown: await shows(evaluate, "drawn line"), renderer: await evaluate("Fixture.renderer()") };
+    });
+    assert.deepEqual(seen, { drawn: true, shown: true, renderer: drawn });
+  });
+}
 
 test("#358 r2: under GPU, a machine whose WebGL is a software renderer keeps DOM rows", async () => {
   const seen = await withPage(async ({ evaluate }) => {

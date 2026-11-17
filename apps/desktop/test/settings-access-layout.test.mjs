@@ -467,9 +467,13 @@ test("choosing Both saves it under the Terminal input key alone and it reads bac
   assert.deepEqual(seen, { saved: [["crazyagent.terminal-input", "both"]], chosen: ["Both"] });
 });
 
-test("#358 r2: Terminal renderer offers its three choices and starts on GPU", async () => {
-  const seen = await onProfile({}, (page) => page.evaluate(`[...document.querySelectorAll('[role=radiogroup][aria-label="Terminal renderer"] button')].map((button) => [button.textContent.trim(), button.getAttribute("aria-checked")])`));
-  assert.deepEqual(seen, [["GPU", "true"], ["Automatic", "false"], ["Standard", "false"]]);
+test("#358 r2: Terminal renderer offers its three choices and starts on the platform's default", async () => {
+  const seen = await onProfile({}, async (page) => ({
+    platform: await page.evaluate("navigator.platform"),
+    buttons: await page.evaluate(`[...document.querySelectorAll('[role=radiogroup][aria-label="Terminal renderer"] button')].map((button) => [button.textContent.trim(), button.getAttribute("aria-checked")])`),
+  }));
+  const gpu = /^(Mac|Win)/i.test(seen.platform);
+  assert.deepEqual(seen.buttons, [["GPU", String(gpu)], ["Automatic", "false"], ["Standard", String(!gpu)]], seen.platform);
 });
 
 test("#358 r2: choosing Standard saves it under the Terminal renderer key alone and it reads back when Profile opens again", async () => {

@@ -2,15 +2,27 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import "./load-source.mjs";
 
-const { RENDERER_CHOICES, RENDERER_DEFAULT, gpuWanted, rendererChoice } = await import("../src/screens/team/terminal-renderer.ts");
+const { RENDERER_CHOICES, gpuWanted, rendererChoice, rendererDefault } = await import("../src/screens/team/terminal-renderer.ts");
 
 const HARDWARE = { webgl2: true, identity: "Google Inc. (Apple) ANGLE (Apple, ANGLE Metal Renderer: Apple M2 Max, Unspecified Version)", wayland: false };
 
-test("#358 r2: Terminal renderer offers GPU, Automatic and Standard, GPU by default, and reads anything else as GPU", () => {
+test("#358 r2: Terminal renderer offers GPU, Automatic and Standard, and reads anything else as the platform's default", () => {
   assert.deepEqual(RENDERER_CHOICES.map((choice) => [choice.value, choice.label]), [["gpu", "GPU"], ["auto", "Automatic"], ["standard", "Standard"]]);
-  assert.equal(RENDERER_DEFAULT, "gpu");
-  for (const stored of [null, "", "webgl", "GPU", "dom"]) assert.equal(rendererChoice(stored), "gpu", String(stored));
-  for (const stored of ["gpu", "auto", "standard"]) assert.equal(rendererChoice(stored), stored);
+  for (const stored of [null, "", "webgl", "GPU", "dom"]) {
+    assert.equal(rendererChoice(stored, "MacIntel"), "gpu", String(stored));
+    assert.equal(rendererChoice(stored, "Linux x86_64"), "standard", String(stored));
+  }
+  for (const stored of ["gpu", "auto", "standard"]) {
+    for (const platform of ["MacIntel", "Win32", "Linux x86_64"]) assert.equal(rendererChoice(stored, platform), stored, `${stored} on ${platform}`);
+  }
+});
+
+test("#358 r2 (NOTE-1215): the default is GPU on macOS and on Windows, and Standard on Linux, where WebKit hides a software renderer", () => {
+  assert.equal(rendererDefault("MacIntel"), "gpu");
+  assert.equal(rendererDefault("Win32"), "gpu");
+  assert.equal(rendererDefault("Linux x86_64"), "standard");
+  assert.equal(rendererDefault("Linux aarch64"), "standard");
+  assert.equal(rendererDefault(""), "standard", "an unknown platform draws without the GPU");
 });
 
 test("#358 r2: which choice draws on the GPU on which machine", () => {
