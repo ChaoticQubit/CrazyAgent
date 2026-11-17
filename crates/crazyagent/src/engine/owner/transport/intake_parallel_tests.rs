@@ -1,8 +1,11 @@
 use super::*;
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
+use crate::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crate::projects_home::job::{JobState, JobSubject, JobView};
+use crate::projects_home::reinstall::{self, Hint, Kept, Left};
 use crate::projects_home::{AddMode, AddOverride};
+use crate::protocol::{ProjectId, ProjectSpec};
 use std::os::unix::fs::PermissionsExt;
 
 const ENGINE_WAIT: Duration = Duration::from_secs(10);
@@ -96,6 +99,25 @@ impl Jobs {
             .try_send(Job::Hold(held))
             .unwrap();
         release
+    }
+
+    /// Keeps a reinstall offer at a folder as a done job does, through the engine's storage.
+    /// Inputs: the folder and the record. Output: none.
+    async fn keep_offer(&self, landed: PathBuf, kept: Kept) {
+        self.service
+            .owner_runtime()
+            .unwrap()
+            .engine
+            .owner_job(|reply| Job::HomeReinstallKeep(landed, None, kept, reply))
+            .await
+            .unwrap();
+    }
+
+    /// Reads the record kept at a folder straight from the engine's database. Input: the
+    /// folder. Output: the record, or None.
+    fn offer_at(&self, folder: &Path) -> Option<Kept> {
+        let db = crate::landing::open(self.root.path()).unwrap();
+        crate::storage::reinstall::at(&db, folder).unwrap()
     }
 
     /// Starts an add of `path` under the request id `id`. Inputs: the id, the folder and the
@@ -698,5 +720,90 @@ async fn a_start_counts_the_claim_a_stopped_waiting_job_still_holds() {
         JobState::Cancelled { .. }
     ));
     assert!(!jobs.home().join("past").exists());
+    jobs.stop().await;
+}
+
+/// DEC-198 slice 3: a done add keeps the offer for the folder it landed in, so an add that
+/// left nothing in iCloud clears an offer kept there before; the record follows the job's
+/// own landed folder, not one worked out again from its source.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_done_add_that_left_nothing_clears_the_offer_kept_at_its_landed_folder() {
+    let mut jobs = Jobs::start().await;
+    let source = jobs.folder("garden", "seeds");
+    let landed = jobs.home().join("garden");
+    let kept = Kept {
+        left: vec![Left {
+            path: "node_modules".into(),
+            hint: None,
+        }],
+        more: 0,
+    };
+    jobs.keep_offer(landed.clone(), kept.clone()).await;
+    assert_eq!(jobs.offer_at(&landed), Some(kept));
+    jobs.add("add-garden", &source, AddMode::Copy)
+        .await
+        .unwrap();
+    assert_eq!(jobs.ended("add-garden").await.state, JobState::Done);
+    assert_eq!(note(&landed), "seeds");
+    assert_eq!(jobs.offer_at(&landed), None);
+    jobs.stop().await;
+}
+
+/// DEC-198 slice 3: an offer kept at a project's folder reads by the project's id, with the
+/// draft the master gets, until the owner dismisses it; an unknown project has none, a
+/// second dismiss finds none, and removing the project forgets an offer kept again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projects_offer_reads_by_its_id_until_dismissed_and_goes_with_the_project() {
+    let mut jobs = Jobs::start().await;
+    let project = ProjectId::new("reading").unwrap();
+    let setup = ProjectSetup {
+        about: "Tracks reading lists.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: "Reading list".into(),
+        repositories: vec![],
+    };
+    let set = jobs
+        .owner
+        .setup_project(project.clone(), spec, setup, 2)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&set, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{set:?}"
+    );
+    let folder = jobs.home().join("reading-list");
+    assert!(folder.is_dir());
+    let kept = Kept {
+        left: vec![Left {
+            path: "web/node_modules".into(),
+            hint: Some(Hint::NpmCi),
+        }],
+        more: 1,
+    };
+    jobs.keep_offer(folder.clone(), kept.clone()).await;
+    let read = jobs.owner.reinstall_offer(project.clone()).await.unwrap();
+    assert_eq!(read, Some(reinstall::offer(&kept)));
+    let nobody = ProjectId::new("nobody").unwrap();
+    assert_eq!(jobs.owner.reinstall_offer(nobody).await.unwrap(), None);
+    assert!(jobs.owner.reinstall_dismiss(project.clone()).await.unwrap());
+    assert_eq!(
+        jobs.owner.reinstall_offer(project.clone()).await.unwrap(),
+        None
+    );
+    assert!(!jobs.owner.reinstall_dismiss(project.clone()).await.unwrap());
+    jobs.keep_offer(folder.clone(), kept).await;
+    let removed = jobs.owner.remove_project(project, 3).await.unwrap();
+    assert!(
+        matches!(&removed, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{removed:?}"
+    );
+    assert_eq!(jobs.offer_at(&folder), None);
     jobs.stop().await;
 }
