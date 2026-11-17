@@ -1119,8 +1119,6 @@ fn step_11_lets_the_delete_record_hold_run_names_of_the_recorded_width_keeping_i
     assert_eq!(tables, 0, "no record is made for a store that had none");
 }
 
-/// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
-/// still refuses a kind it does not know.
 /// Fails unless the database holds the three app plugin store tables, each empty. Input:
 /// the connection. Output: none.
 fn empty_app_plugin_tables(db: &Connection) {
@@ -1164,6 +1162,8 @@ async fn step_12_and_a_new_database_both_hold_the_empty_app_plugin_store_tables(
     empty_app_plugin_tables(&fresh);
 }
 
+/// Step 9: a version 8 trash takes the two account file kinds, keeps each pending note and
+/// still refuses a kind it does not know.
 #[test]
 fn an_upgrade_from_eight_lets_the_trash_hold_account_files_keeping_every_note() {
     let root = Root::new();
