@@ -407,7 +407,7 @@ fn the_first_run_puts_landing_rows_from_before_the_log_on_it() {
     let kinds: Vec<String> = events(&db).into_iter().map(|(kind, _)| kind).collect();
     assert_eq!(
         kinds.len(),
-        9,
+        12,
         "a chunk per table and the closing event: {kinds:?}"
     );
     assert_eq!(landing_rows(&db), live, "the run changes no row");
