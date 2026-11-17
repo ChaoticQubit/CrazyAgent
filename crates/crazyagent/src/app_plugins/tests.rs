@@ -46,6 +46,53 @@ fn a_problem_names_its_line_or_field_or_stands_alone() {
 }
 
 #[test]
+fn a_harness_manifest_and_an_embedding_manifest_go_through_the_one_yaml_reader() {
+    let heads = [
+        "schema: 1\nkind: harness\nid: probe\n",
+        "schema: 1\nkind: embedding\nname: probe\n",
+    ];
+    let mut checked = 0;
+    for head in heads {
+        let cases = [
+            (
+                format!("{head}title: a\n\ttitle: b\n"),
+                "app_plugin_yaml_tab",
+                5,
+            ),
+            (
+                format!("{head}title: a\ntitle: b\n"),
+                "app_plugin_yaml_duplicate_key",
+                5,
+            ),
+            (
+                format!("{head}# {}\n", "x".repeat(yaml::BYTES_MAX)),
+                "app_plugin_yaml_too_large",
+                0,
+            ),
+        ];
+        for (text, code, line) in cases {
+            let reader = yaml::parse_bytes(text.as_bytes()).expect_err("the reader refuses it");
+            assert_eq!((reader.code, reader.line), (code, line), "{head}");
+            let harness = crate::harnesses::manifest::parse(text.as_bytes())
+                .expect_err("the harness manifest is refused");
+            assert_eq!(harness.code, crate::harnesses::manifest::YAML, "{head}");
+            assert_eq!(harness.message, reader.message(), "{head}");
+            let embedding = manifest::parse(&text).expect_err("the embedding manifest is refused");
+            assert_eq!(embedding, reader.problem(), "{head}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 6);
+    let tab = format!("{}title: a\n\ttitle: b\n", heads[0]);
+    assert_eq!(
+        crate::harnesses::manifest::parse(tab.as_bytes())
+            .unwrap_err()
+            .message,
+        "Line 5: use spaces, not tabs, to indent."
+    );
+}
+
+#[test]
 fn the_content_hash_is_the_lowercase_hex_sha256_of_the_exact_bytes() {
     assert_eq!(
         sha256_hex(b"abc"),
