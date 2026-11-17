@@ -80,6 +80,9 @@ pub mod socket_address;
 /// The one place this crate starts child processes and creates sockets, so no child
 /// inherits a pipe or socket another thread has not marked close-on-exec yet.
 pub mod spawn_gate;
+/// The engine's ordered event log in engine.db (v2.5 L1): one `seq` per event, the
+/// transaction's revision, a closed aggregate, and snapshot runs in chunks.
+pub mod state_log;
 pub mod storage;
 pub mod team;
 pub mod terminal;
