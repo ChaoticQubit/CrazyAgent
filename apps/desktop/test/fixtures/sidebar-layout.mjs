@@ -114,3 +114,35 @@ export function contrast(selector) {
   const [high, low] = [luminance(getComputedStyle(node).color), luminance(backdrop(node))].sort((one, two) => two - one);
   return (high + 0.05) / (low + 0.05);
 }
+
+/**
+ * The color one token paints in the mounted theme, as the browser computes it.
+ * Input: the token name without its dashes. Output: an rgb() string.
+ */
+function token(name) {
+  const probe = document.createElement("span");
+  probe.style.color = `var(--${name})`;
+  document.body.append(probe);
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}
+
+/**
+ * Reads the nav and footer look against the tokens they should take. Output: the tokens,
+ * the current and one other App link's fill, color and weight, and the footer initial's and
+ * name's weights.
+ */
+export function navLook() {
+  const read = (node) => {
+    const style = getComputedStyle(node);
+    return { background: style.backgroundColor, color: style.color, weight: style.fontWeight };
+  };
+  return {
+    tokens: Object.fromEntries(["surface-3", "text", "text-2"].map((name) => [name, token(name)])),
+    current: read(document.querySelector('.app-nav .nav-item[aria-current="page"]')),
+    other: read(document.querySelector(".app-nav .nav-item:not([aria-current])")),
+    avatar: getComputedStyle(document.querySelector(".sidebar-foot .avatar")).fontWeight,
+    name: getComputedStyle(document.querySelector(".sidebar-foot .me")).fontWeight,
+  };
+}

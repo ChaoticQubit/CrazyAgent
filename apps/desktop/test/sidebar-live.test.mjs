@@ -157,3 +157,13 @@ test("a failed read or a stopped engine claims no agent is working and keeps the
     assert.deepEqual(stopped.shown, { alerts: [["a", 4]], working: [] }, "a stopped engine has nothing working");
   });
 });
+
+for (const theme of ["light", "dark"]) {
+  test(`in the ${theme} theme the working dot paints --running, the working state's color`, async () => {
+    const projects = JSON.stringify([{ id: "a", name: "Larkspur", working: 2 }]);
+    const seen = await onSidebar(`${projects}, ${JSON.stringify(theme)}`, 1180, async ({ evaluate }) => ({
+      dot: (await evaluate("Fixture.firstRowParts()")).dot, running: await evaluate("Fixture.running()"),
+    }));
+    assert.equal(seen.dot, seen.running);
+  });
+}
