@@ -4544,6 +4544,12 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         screen.problem.as_deref(),
         Some("Several folders are already waiting. Wait for one to finish on Home.")
     );
+    screen.job_refused("job_same_folder");
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This folder is already being moved or added. See it on Home."),
+        "a move whose folder a running add holds says so"
+    );
     screen.job_refused("home_add_in_progress");
     assert_eq!(
         screen.problem.as_deref(),

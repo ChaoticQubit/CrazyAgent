@@ -3700,6 +3700,68 @@ fn home_keeps_the_picked_project_when_the_job_card_comes_and_goes() {
     );
 }
 
+/// DEC-197: a picked job card follows its job as other jobs' cards come after it or go from
+/// before it, and a picked project stays picked as job cards come and go, so Enter never
+/// acts on another job.
+#[test]
+fn home_keeps_the_picked_job_or_project_as_other_job_cards_come_and_go() {
+    let mut ctx = ctx(120, 30);
+    let alpha = crate::tui::seam::ProjectCard {
+        id: ProjectId::new("project-alpha").unwrap(),
+        name: "alpha".into(),
+        about: String::new(),
+        platforms: Vec::new(),
+        pool: None,
+        pool_id: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    };
+    ctx.store.projects = Load::Ready(vec![alpha]);
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let stop = |job: &JobView| IntakeQuery::JobStop { id: job.id.clone() };
+    let shop = shop_job(JobState::Copying {
+        copied: 1,
+        checked: 0,
+    });
+    let garden = JobView {
+        id: RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..shop_job(JobState::Waiting {
+            behind: "shop".into(),
+        })
+    };
+    job_read(&mut shell, vec![shop.clone()]);
+    shell.key(Key::Home);
+    job_read(&mut shell, vec![shop.clone(), garden.clone()]);
+    shell.key(Key::Enter);
+    assert_eq!(job_asks(&mut shell), [stop(&shop)], "a card after it");
+
+    shell.key(Key::Down);
+    job_read(&mut shell, vec![garden.clone()]);
+    shell.key(Key::Enter);
+    assert_eq!(
+        job_asks(&mut shell),
+        [stop(&garden)],
+        "a card before it went"
+    );
+
+    shell.key(Key::Down);
+    job_read(&mut shell, vec![garden.clone(), shop.clone()]);
+    let rows = render(&mut shell, 120, 30);
+    assert!(shows(&rows, "Enter Open"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: ProjectId::new("project-alpha").unwrap(),
+            name: "alpha".into(),
+            tab: ProjectTab::Overview,
+        })
+    );
+}
+
 /// Confirms a review page as the owner left it: the stored setup at revision 7 arrives,
 /// then Tab moves from the name to Confirm and Enter sends the change. Input: the page.
 /// Output: the setup the confirm sends.
