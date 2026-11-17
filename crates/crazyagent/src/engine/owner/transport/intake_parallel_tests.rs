@@ -116,7 +116,7 @@ impl Jobs {
     /// Reads the record kept at a folder straight from the engine's database. Input: the
     /// folder. Output: the record, or None.
     fn offer_at(&self, folder: &Path) -> Option<Kept> {
-        let db = crate::landing::open(self.root.path()).unwrap();
+        let db = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
         crate::storage::reinstall::at(&db, folder).unwrap()
     }
 

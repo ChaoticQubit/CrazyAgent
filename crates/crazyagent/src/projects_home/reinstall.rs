@@ -131,7 +131,9 @@ pub fn kept(
     let left: Vec<Left> = skipped
         .listed
         .iter()
-        .filter(|folder| Path::new(&folder.path).file_name() != Some("__pycache__".as_ref()))
+        .filter(|folder| {
+            Path::new(&folder.path).file_name() != Some(std::ffi::OsStr::new("__pycache__"))
+        })
         .map(|folder| Left {
             path: folder.path.clone(),
             hint: hint(landed, &folder.path, look),
