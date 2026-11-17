@@ -137,7 +137,8 @@ test("Go to reads the open project's files and agents only while it is open, fil
   assert.match(source, /useOpenAgents\(open \? project : null\)/);
   assert.match(read("app.tsx"), /<GoToLayer projects=\{projects \?\? \[\]\} project=\{page\.name === "project" \? page\.id : null\} \/>/);
   assert.match(read("screens/project/index.tsx"), /<IdeTab key=\{data\.id\} projectId=\{projectId\} reveal=\{sectionFile\(settingsSection\)\}/);
-  assert.match(read("screens/project/agents.tsx"), /<TeamPanel [^>]*opened=\{sectionAgent\(section\)\}/);
+  assert.match(read("screens/project/agents.tsx"), /const agent = sectionAgent\(section\);/);
+  assert.match(read("screens/project/agents.tsx"), /<TeamPanel [^>]*opened=\{agent\}/);
 });
 
 test("Go to ranks a prefix first, then a match inside, then letters in order, like the TUI", () => {

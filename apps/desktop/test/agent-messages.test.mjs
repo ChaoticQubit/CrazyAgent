@@ -9,6 +9,7 @@ const api = await import("../src/api-messages.ts");
 const messages = await import("../src/screens/team/agent-messages.tsx");
 const team = await import("../src/screens/project/team.tsx");
 const settings = await import("../src/screens/project/settings.tsx");
+const agentsTab = await import("../src/screens/project/agents.tsx");
 
 const AT = 1_800_000_000_000;
 const NAME = "Ada (@charts)";
@@ -216,6 +217,21 @@ test("an agent Go to opened shows its Messages row open in the Team view, and no
   const panel = renderToStaticMarkup(createElement(team.TeamPanel, { data, team: read, filter: "all", harnesses: null, accounts: [], reload() {}, opened: "agent-3" }));
   assert.match(panel, /aria-label="Messages for Sub-agent 3" aria-expanded="true"/u);
   assert.match(panel, /aria-label="Messages for Ada \(@charts\)" aria-expanded="false"/u);
+});
+
+test("an agent Go to opened opens the Agents and tasks section its Messages row sits in, which stays closed otherwise", () => {
+  const data = {
+    id: "p", name: "Harbor Notes", setup: undefined, research: { kind: "ok", value: { project_id: "p", jobs: [] } }, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate() {}, notify() {}, reload() {}, reloadPools() {},
+    team: { result: undefined, at: 0 }, reloadTeam() {},
+  };
+  const stack = (section) => {
+    const found = renderToStaticMarkup(createElement(agentsTab.AgentsTab, { data, section })).match(/<details class="pj-stack-s" aria-label="Agents and tasks"( open="")?>/u);
+    assert.ok(found, "the Agents and tasks section is on the Team view");
+    return found[1] ?? null;
+  };
+  assert.equal(stack("agent:agent-3"), ' open=""');
+  assert.equal(stack(undefined), null);
 });
 
 test("the open graph card shows its sub-agent's Messages beside its instructions, and the master's card none", () => {

@@ -151,6 +151,9 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
   const opened = agentsView(section);
   const [shownView, setShownView] = useState<"team" | "settings">(opened.view);
   useEffect(() => { setShownView(opened.view); }, [section]);
+  const agent = sectionAgent(section);
+  const [stackOpen, setStackOpen] = useState(agent !== null);
+  useEffect(() => { if (agent !== null) setStackOpen(true); }, [agent]);
   const [filter, setFilter] = useState<"running" | "all">("running");
   const [stopping, setStopping] = useState<ResearchJob | null>(null);
   const [note, setNote] = useState("");
@@ -233,10 +236,10 @@ export function AgentsTab({ data, section }: { data: ProjectData; section?: stri
     {team.result?.kind === "ok" && <LeftoversPanel projectId={data.id} status={team.result.value} nowMs={data.now} reload={data.reloadTeam} />}
     <TeamGraphView projectId={data.id} perWindow={perWindow} name={data.name} open={terminal} onOpen={setTerminal} harness={(id) => harnessName(harnesses, id)}
       {...bar} />
-    <details className="pj-stack-s" aria-label="Agents and tasks">
+    <details className="pj-stack-s" aria-label="Agents and tasks" open={stackOpen} onToggle={(event) => setStackOpen(event.currentTarget.open)}>
       <summary><strong>Agents and tasks</strong> <span className="pj-small pj-muted">Stop all, Hand a task, the team's agents and tasks, wake rules and usage.</span></summary>
       {team.result?.kind === "ok" && <TeamActions projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
-      <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} opened={sectionAgent(section)} />
+      <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} opened={agent} />
       {team.result?.kind === "ok" && <WakeRulesPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
       <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     </details>
