@@ -1006,8 +1006,8 @@ fn plist_keys(text: &str, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// The gate starts the engine as the app's login service does: the same arguments and only
-/// the PATH the service definition sets, plus what launchd itself adds, so a change to the
+/// The gate starts the engine as the app's login service does: the same arguments, the PATH
+/// and HOME the service definition sets and what launchd itself adds, so a change to the
 /// service definition fails here until the gate follows it.
 #[test]
 fn the_gate_starts_the_engine_with_the_login_service_arguments_and_environment() {
