@@ -16,7 +16,7 @@
     "src/screens/skill-tag.css": 4,
     "src/screens/team/agent-messages.css": 2,
     "src/screens/team/team-graph.css": 11,
-    "src/style.css": 32
+    "src/style.css": 26
   },
   "weight600": {
     "src/screens/demo/demo.css": 1,
@@ -46,6 +46,6 @@
     "src/screens/team/agent-messages.css": 4,
     "src/screens/team/team-graph.css": 17,
     "src/screens/terminals/terminals.css": 5,
-    "src/style.css": 38
+    "src/style.css": 37
   }
 }
