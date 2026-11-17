@@ -12738,6 +12738,93 @@ fn own_turn_outliving(
     }
 }
 
+/// DEC-200 (V243-AGENT-ORDERS-RECV): while a kept native lead's own turn runs, a stop order
+/// reaches `next_lead_turn` as it is sent, not after an `ORDER_WAIT` sleep. The order goes a
+/// fixed 15 ms after the worker starts, so a sleep step would hold it about 85 ms.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_order_reaches_a_lead_whose_own_turn_runs_without_the_order_sleep() {
+    let fixture = Fixture::new(1);
+    let base = fixture.base.join("own-order-wait");
+    let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
+    for path in [&home, &work, &bin] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let executable = bin.join("claude");
+    std::fs::write(
+        &executable,
+        OWN_BACKGROUND_CLAUDE.replace("/bin/sleep SECS\n", "/bin/sleep 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = base.join("agent.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work.canonicalize().unwrap(),
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let host = fixture.host();
+    let mut session = AgentSession::Terminal(Box::new(
+        TerminalSession::start(
+            host.clone(),
+            AgentId::new("own-order-wait").unwrap(),
+            request,
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(matches!(
+        session.next_event(Duration::from_secs(5)).unwrap(),
+        Some(LaunchEvent::Ready { .. })
+    ));
+    session.follow_own_turns();
+    let (order, orders) = channel();
+    let (reports, _reported) = channel();
+    let (started, start) = channel();
+    let cancel = AtomicBool::new(false);
+    let mut own = OwnTurn {
+        running: true,
+        ..OwnTurn::default()
+    };
+    let mut rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let (lead, cancel_flag, own_state, rules) = (&mut session, &cancel, &mut own, &mut rules);
+    let (next, took) = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            started.send(()).unwrap();
+            next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, rules)
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        let sent = Instant::now();
+        order.send(Order::Stop).unwrap();
+        let next = worker.join().unwrap();
+        (next, sent.elapsed())
+    });
+    assert!(matches!(next, Next::Stop));
+    assert!(
+        took < ORDER_WAIT * 9 / 20,
+        "the stop order waited {took:?}, about the rest of an {ORDER_WAIT:?} sleep"
+    );
+    session.stop().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// N-E9 (OP-26): under Wait, a turn a kept native lead's app takes by itself that ends while
 /// a command it started in the background still runs stays open until the app's turn on
 /// the command's end notification ends; its result has both replies, the command finished
@@ -28094,6 +28181,57 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
         error.as_deref(),
         Some("The owner stopped this teammate. (harness_cleanup_uncertain)")
     );
+    team.shutdown().unwrap();
+}
+
+/// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
+/// unknown agent leaves its row to a later tick, so its end thread does not wake the team
+/// loop; a wake there would run the loop back to back for as long as the error lasts. The
+/// host here has no tmux, so every end the owner's stop pass starts fails the same way.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
+    const PASSES: u64 = 40;
+    let fixture = Fixture::new(1);
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+
+    let before = wakes_seen();
+    for _ in 0..PASSES {
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let woken = wakes_seen().wrapping_sub(before);
+    assert!(
+        woken < PASSES / 2,
+        "{woken} wakes in {PASSES} stop passes over an end that keeps failing"
+    );
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
     team.shutdown().unwrap();
 }
 

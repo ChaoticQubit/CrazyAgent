@@ -3001,6 +3001,123 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
     until("the last process group to be gone", || !alive(group));
 }
 
+/// DEC-200 (V243-TEAM-THREAD-WAKE): the owner's stop of a team sub-agent from the agent
+/// register acts at once on an idle team thread, not at its next tick. The team ticks every
+/// 4 s here and the stop is asked right after the tick that started the agent, so waiting
+/// for the tick would take about 4 s. macOS only, as every team agent (DEC-094).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_register_stop_of_a_team_agent_acts_without_waiting_for_the_next_tick() {
+    use crate::agents::AgentState;
+    use crate::agents::tests::{alive, until};
+    let tick = std::time::Duration::from_secs(4);
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-wake",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.team.min_agents = 2;
+    setup.folder = folder.to_str().unwrap().into();
+    let row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-wake", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::KeepWarm {
+                project_id: setup.project_id.clone(),
+                on: true,
+                version: settings_version(&tx, &setup.project_id).unwrap(),
+            }
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let executable = harness(&base, b"#!/bin/sh\nexec /bin/sleep 300\n");
+    let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
+    let source = pool.clone();
+    let team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::from([("codex", executable)]),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone());
+    let service = runtime::TeamService::start(team, tick);
+    let project = setup.project_id.clone();
+    let running = || {
+        agents
+            .list(Some(&project), 0, crate::agents::LIST_MAX)
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.state == AgentState::Running)
+    };
+    let group = |connection: &Connection| {
+        status(connection, &setup)
+            .unwrap()
+            .agents
+            .iter()
+            .find_map(|agent| agent.process_group)
+    };
+    until("the warm sub-agent to start", || {
+        running().is_some() && group(&connection).is_some()
+    });
+    let id = running().unwrap().id;
+    let group = group(&connection).unwrap() as i32;
+    assert!(alive(group));
+
+    let asked = std::time::Instant::now();
+    let stopped = agents.stop(&id).unwrap();
+    let took = asked.elapsed();
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert!(
+        took < tick / 4,
+        "the register stop waited {took:?}, about the rest of a {tick:?} tick"
+    );
+
+    service.stop();
+    until("the process group to be gone", || !alive(group));
+}
+
 fn project_rows(connection: &Connection, table: &str, project: &str) -> Vec<i64> {
     let mut statement = connection
         .prepare(&format!(
