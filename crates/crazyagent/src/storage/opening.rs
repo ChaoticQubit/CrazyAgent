@@ -10,6 +10,7 @@ pub struct Opening {
 impl Opening {
     /// The proof for one storage open. Input: the open's clock, in ms since the epoch.
     /// Output: the proof.
+    #[cfg(any(unix, test))]
     pub(in crate::storage) fn new(at_ms: u64) -> Self {
         assert!(at_ms > 0, "an opening reads the clock");
         let opening = Self { at_ms };
