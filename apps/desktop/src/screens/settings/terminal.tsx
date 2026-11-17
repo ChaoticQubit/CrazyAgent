@@ -1,15 +1,17 @@
-import { useState } from "react";
-import { readTerminalInput, readTerminalRenderer, saveTerminalInput, saveTerminalRenderer } from "../../state";
+import { useEffect, useState } from "react";
+import { onTerminalInput, onTerminalRenderer, readTerminalInput, readTerminalRenderer, saveTerminalInput, saveTerminalRenderer } from "../../state";
 import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
 import { RENDERER_CHOICES, type RendererChoice } from "../team/terminal-renderer";
 import { Segmented, SettingLine, SettingSection } from "../../ui";
 
 /** The Terminal input and Terminal renderer lines, each read from and saved to its one stored
- * choice, so Settings > Terminal and Profile's Appearance show and change the same setting.
- * Output: the two lines. */
+ * choice and following every later save, so Settings > Terminal and Profile's Appearance,
+ * mounted at once under a dialog, show and change the same setting. Output: the two lines. */
 export function TerminalLines() {
   const [input, setInput] = useState<InputChoice>(readTerminalInput);
   const [renderer, setRenderer] = useState<RendererChoice>(readTerminalRenderer);
+  useEffect(() => onTerminalInput(() => setInput(readTerminalInput())), []);
+  useEffect(() => onTerminalRenderer(() => setRenderer(readTerminalRenderer())), []);
   return <>
     <SettingLine label="Terminal input" help="Where you type to the master and every agent, on every screen: straight into the terminal, in a message box under it that sends your text as one message, or both. Kept in this app only.">
       <Segmented label="Terminal input" value={input} onValue={(value) => { setInput(value); saveTerminalInput(value); }} options={INPUT_CHOICES} />

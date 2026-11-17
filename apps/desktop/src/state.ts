@@ -96,13 +96,51 @@ export function readTerminalInput(): InputChoice {
   }
 }
 
-/** Remembers where the owner types to every agent's terminal. Input: the choice. Output: none. */
+/** The listeners of one choice kept in this app: a save in this window tells them at once,
+ * and the storage event tells them of a save in another window. Input: the stored key.
+ * Output: `tell`, called after a save, and `listen`, which returns the call that stops it. */
+function choiceListeners(key: string): { tell: () => void; listen: (listener: () => void) => () => void } {
+  const heard = new Set<() => void>();
+  let watched = false;
+  const tell = () => {
+    for (const listener of [...heard]) listener();
+  };
+  return {
+    tell,
+    listen: (listener) => {
+      if (!watched) {
+        watched = true;
+        window.addEventListener("storage", (event) => {
+          if (event.key === key) tell();
+        });
+      }
+      heard.add(listener);
+      return () => {
+        heard.delete(listener);
+      };
+    },
+  };
+}
+
+const inputHeard = choiceListeners(TERMINAL_INPUT_KEY);
+
+/** Remembers where the owner types to every agent's terminal and tells this window's
+ * listeners at once; other windows hear it through the storage event. Input: the choice.
+ * Output: none. */
 export function saveTerminalInput(choice: InputChoice): void {
   try {
     window.localStorage.setItem(TERMINAL_INPUT_KEY, choice);
   } catch {
     return;
   }
+  inputHeard.tell();
+}
+
+/** Calls `listener` after each Terminal input choice, made in this window or in another
+ * window of the app, so every copy of the setting shows the stored choice (#406 F1). Input:
+ * the listener. Output: the call that stops it. */
+export function onTerminalInput(listener: () => void): () => void {
+  return inputHeard.listen(listener);
 }
 
 /** Reads how every terminal draws, as kept in this app (not in the engine). Output: the
@@ -115,8 +153,7 @@ export function readTerminalRenderer(): RendererChoice {
   }
 }
 
-const rendererHeard = new Set<() => void>();
-let rendererWatched = false;
+const rendererHeard = choiceListeners(TERMINAL_RENDERER_KEY);
 
 /** Remembers how every terminal draws and tells this window's listeners at once; other
  * windows hear it through the storage event. Input: the choice. Output: none. */
@@ -126,23 +163,13 @@ export function saveTerminalRenderer(choice: RendererChoice): void {
   } catch {
     return;
   }
-  for (const listener of [...rendererHeard]) listener();
+  rendererHeard.tell();
 }
 
 /** Calls `listener` after each Terminal renderer choice, made in this window or in another
  * window of the app. Input: the listener. Output: the call that stops it. */
 export function onTerminalRenderer(listener: () => void): () => void {
-  if (!rendererWatched) {
-    rendererWatched = true;
-    window.addEventListener("storage", (event) => {
-      if (event.key !== TERMINAL_RENDERER_KEY) return;
-      for (const heard of [...rendererHeard]) heard();
-    });
-  }
-  rendererHeard.add(listener);
-  return () => {
-    rendererHeard.delete(listener);
-  };
+  return rendererHeard.listen(listener);
 }
 
 /** Reads the owner's appearance choice kept in this app (not in the engine profile).

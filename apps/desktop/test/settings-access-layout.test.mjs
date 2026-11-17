@@ -520,6 +520,16 @@ test("V243-TERMINAL-SETTINGS-PLACE: a Terminal input and renderer chosen in Sett
   });
 });
 
+test("#406 F1: a Terminal input and renderer chosen in the Profile dialog over Settings > Terminal show on the page under it at once", async () => {
+  const seen = await onTerminal({ over: "profile" }, async (page) => {
+    await page.evaluate(`Object.defineProperty(window, "localStorage", { configurable: true, value: (() => { const kept = new Map(); return { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) }; })() }); true`);
+    await press(page, '.user-dialog [role=radiogroup][aria-label="Terminal input"] button', "Both");
+    await press(page, '.user-dialog [role=radiogroup][aria-label="Terminal renderer"] button', "Standard");
+    return page.evaluate(`["Terminal input", "Terminal renderer"].map((label) => [...document.querySelectorAll('.settings-content [role=radiogroup][aria-label="' + label + '"] button[aria-checked="true"]')].map((button) => button.textContent.trim()))`);
+  });
+  assert.deepEqual(seen, [["Both"], ["Standard"]]);
+});
+
 test("Theme changes the app's look from its line", async () => {
   await onProfile({}, async (page) => {
     await press(page, '[role=radiogroup][aria-label="Theme"] button', "Dark");
