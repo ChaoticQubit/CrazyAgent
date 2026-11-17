@@ -1011,7 +1011,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     }
     assert!(program.is_absolute());
     #[cfg(windows)]
-    if let Some(mapped) = batch::entry(entry, &program, places, depth, &refused) {
+    if let Some(mapped) = batch::entry(entry, &program, places, depth, refused) {
         return mapped;
     }
     let shebang = match shebang(&program) {
