@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::e2e_support::{Engine, Owner, TMUX, profile, scratch, stop_tmux};
+use crate::e2e_support::{Engine, Owner, TMUX, git, profile, repository, scratch, stop_tmux};
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::engine::owner::{
     ModelAccessCollection, OwnerData, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_millis(100);
 const ONBOARD_TIME: Duration = Duration::from_secs(120);
+const README: &str = "# Fruit stand\n\nSells fruit.\n";
 const WAIT_MAX: Duration = Duration::from_secs(300);
 const STEPS_MAX: usize = 64;
 const RECORDS: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/golden");
@@ -206,6 +207,26 @@ impl Drop for Golden {
             stop_tmux(tmux, &self.engine.path().join(FOLDER).join(SOCKET));
         }
     }
+}
+
+/// Makes an owner repository: a git repository on main with a README in one commit, and the
+/// owner's Git name and email stored in it when given, as an Accept needs to commit a landed
+/// set. Inputs: the folder, made if missing, and the identity as [name, email], if any.
+/// Output: the first commit.
+pub fn owner_repo(folder: &Path, identity: Option<[&str; 2]>) -> String {
+    repository(folder, "README.md", README);
+    if let Some([name, email]) = identity {
+        assert!(!name.is_empty() && !email.is_empty());
+    }
+    git_text(folder, &["rev-parse", "HEAD"])
+}
+
+/// Runs git in a folder as `e2e_support::git` does and reads what it printed.
+/// Inputs: the folder and git's arguments.
+/// Output: its trimmed stdout; a failing git fails the flow.
+pub fn git_text(folder: &Path, args: &[&str]) -> String {
+    let output = git(folder, args);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 /// Opens a loopback port that takes connections and closes each unanswered, for the

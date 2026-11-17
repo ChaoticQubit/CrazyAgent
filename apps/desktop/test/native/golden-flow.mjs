@@ -112,17 +112,28 @@ export async function stopGolden(run) {
   assert.deepEqual(left, [], "no tmux server outlives the golden engine");
 }
 
-/** Makes an owner repository: a git repository on main with a README in one commit.
- * Input: an empty folder, made first if missing.
- * Output: none. */
-export function ownerRepo(folder) {
+/** Makes an owner repository: a git repository on main with a README in one commit, and the
+ * owner's Git name and email stored in it when given, as an Accept needs to commit a landed set.
+ * Inputs: an empty folder, made first if missing, and the identity as [name, email], if any.
+ * Output: the first commit. */
+export function ownerRepo(folder, { identity = null } = {}) {
+  assert.ok(identity === null || (identity.length === 2 && identity.every((part) => part.length > 0)));
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   writeFileSync(join(folder, "README.md"), "# Fruit stand\n\nSells fruit.\n");
-  const identity = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
-  for (const args of [["init", "-q", "-b", "main"], ["add", "."], [...identity, "commit", "-q", "-m", "Start the fruit stand"]]) {
-    const result = spawnSync(GIT, ["-c", "commit.gpgsign=false", ...args], { cwd: folder, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: folder, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
-    assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
-  }
+  const author = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
+  git(folder, "init", "-q", "-b", "main");
+  git(folder, "add", ".");
+  git(folder, ...author, "commit", "-q", "-m", "Start the fruit stand");
+  return git(folder, "rev-parse", "HEAD");
+}
+
+/** Runs git in a folder with no system or user config, so only the repository's own counts.
+ * Inputs: the folder and git's arguments.
+ * Output: git's trimmed stdout; a failing git fails the flow. */
+export function git(folder, ...args) {
+  const result = spawnSync(GIT, ["-c", "commit.gpgsign=false", ...args], { cwd: folder, encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: folder, GIT_CONFIG_NOSYSTEM: "1", LANG: "C" } });
+  assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
 }
 
 /** Makes an owner repository a project as onboarding does, then gives it the golden pool and
