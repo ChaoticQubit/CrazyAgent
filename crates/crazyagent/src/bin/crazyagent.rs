@@ -750,7 +750,10 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
         let shutdown = shutdown_requested()?;
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let signal = tokio::spawn(async move {
-            shutdown.await;
+            tokio::select! {
+                () = shutdown => {}
+                () = crazyagent::restore::stop_asked() => {}
+            }
             stop.send_replace(true);
         });
         let result = async {
@@ -958,7 +961,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     eprintln!("agent terminals left running ({problem})");
                 }
             }
-            result
+            result.and_then(|()| crazyagent::restore::after_stop(runtime_dir, &global, &project))
         }
         .await;
         signal.abort();
