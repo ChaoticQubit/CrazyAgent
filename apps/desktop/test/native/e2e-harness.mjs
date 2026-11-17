@@ -201,7 +201,9 @@ export async function setUpProject(bridge, spec, setup) {
   while (job?.id === started.id && job.state.state === "building") {
     assert.ok(Date.now() < deadline, `${spec.name}'s New Project job never ended: ${JSON.stringify(job)}`);
     await pause(POLL_MS);
-    job = await value(bridge, "desktop_intake_status");
+    const jobs = await value(bridge, "desktop_intake_status");
+    assert.ok(Array.isArray(jobs), `status lists the jobs: ${JSON.stringify(jobs)}`);
+    job = jobs.find((listed) => listed.id === started.id);
   }
   assert.equal(job?.id, started.id, `${spec.name}'s New Project job is the one read: ${JSON.stringify(job)}`);
   assert.equal(job.state.state, "done", `${spec.name} is made: ${JSON.stringify(job)}`);
