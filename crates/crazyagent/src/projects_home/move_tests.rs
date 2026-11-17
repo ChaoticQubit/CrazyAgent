@@ -915,6 +915,49 @@ fn a_project_stored_through_the_data_volume_moves_into_the_home() {
     assert!(case.target().join("README").is_file());
 }
 
+/// #433 F1 (rv-sec2 18:57): a project stored by its /System/Volumes/Data spelling still sees
+/// another project stored short inside its folder, so its move is refused in both modes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_stored_through_the_data_volume_sees_a_short_stored_project_inside_it() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let packages = short.join("packages");
+    std::fs::create_dir(&packages).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut registered = case.registered();
+    registered.push(Registered {
+        project_id: ProjectId::new("second").unwrap(),
+        name: "second".into(),
+        folder: packages,
+        repositories: vec![],
+        onboarding: false,
+    });
+    for mode in [AddMode::Move, AddMode::Copy] {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let refused = plan(
+            &tx,
+            &case.database,
+            &case.engine,
+            &registered,
+            &Asked {
+                project: &project,
+                mode,
+                overrides: &[],
+                request: "request-7",
+                exchange: EXCHANGE,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(refused.0, "home_move_project", "{mode:?}");
+    }
+}
+
 /// A planned move holds launches in the project's folder and refuses a second move until
 /// it is finished or forgotten; a move of another exchange is not forgotten.
 #[test]
