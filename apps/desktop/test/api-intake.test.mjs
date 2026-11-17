@@ -164,7 +164,7 @@ test("each Move anyway and Copy anyway warning reads exactly as the owner asked"
 
 test("an add anyway sends the overrides with the add and a bad override reads as a plain sentence", () => {
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
-  assert.match(client, /export type AddOverride = "worktrees" \| "linked_checkout" \| "too_large";/);
+  assert.match(client, /export type AddOverride = "worktrees" \| "linked_checkout" \| "too_large" \| "download_everything";/);
   assert.match(client, /invoke<IntentReceipt>\("desktop_add_existing_folder", \{ source, mode, overrides, generation \}\)/);
   assert.equal(api.intakeCopy("home_override_invalid"), "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.");
 });
