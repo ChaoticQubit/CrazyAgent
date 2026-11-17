@@ -1985,7 +1985,9 @@ fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_i
 /// find, a versions read never asks the harness for its version, so the Settings and first-run
 /// reads that wait on Node start nothing however often they come; the first read after the
 /// resolver finds Node asks once, through the `node` beside the entry that `env` takes, which
-/// vid 1's vetted runs because it is Node (update.rs:874).
+/// vid 1's vetted runs because it is Node (update.rs:874). That `node` is planted only then:
+/// the resolver takes the one in a script's own npm prefix first (d69c2d0a6), so one there
+/// from the start would end the need on the first read.
 #[test]
 fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_resolver_finds_it() {
     let machine = Machine::new();
@@ -1998,13 +2000,6 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
     let codex = machine.root.path().join("node/bin/codex");
     std::os::unix::fs::symlink(&real, &codex).unwrap();
     let asked = machine.root.path().join("asked");
-    executable(
-        &machine.root.path().join("node/bin/node"),
-        &format!(
-            "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
-            asked.display()
-        ),
-    );
     assert!(matches!(
         method("codex", &real, &machine.roots()),
         Method::Npm { .. }
@@ -2026,7 +2021,13 @@ fn a_harness_that_still_needs_a_program_is_never_asked_its_version_until_the_res
         !asked.exists(),
         "a harness that still needs its program is never run for its version"
     );
-    case.machine.program("setup/bin/node", 0o755);
+    executable(
+        &case.machine.root.path().join("node/bin/node"),
+        &format!(
+            "#!/bin/sh\necho asked >> {}\necho 'codex-cli 0.167.1'\n",
+            asked.display()
+        ),
+    );
     let versions = case.versions(false);
     assert_eq!(versions.needs, None);
     assert_eq!(versions.installed.as_deref(), Some("0.167.1"));
