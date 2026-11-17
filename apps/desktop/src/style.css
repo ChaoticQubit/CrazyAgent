@@ -43,17 +43,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .brand-mark:not(.large) .brand-glyph.reduced { display: block; }
 }
 
-.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--radius-control); border: 1px solid var(--border-input); background: var(--surface); color: var(--text); font-weight: 500; cursor: pointer; white-space: nowrap; text-decoration: none; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--radius-control); border: 1px solid var(--border); background: var(--surface); color: var(--text); font-weight: var(--weight-ui); cursor: pointer; white-space: nowrap; text-decoration: none; transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
 .btn:hover { background: var(--surface-2); }
 .btn:active { transform: translateY(1px); }
-.btn.primary { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
-.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-.btn.quiet { border-color: transparent; background: transparent; color: var(--accent-text); }
-.btn.quiet:hover { background: var(--accent-soft); }
+.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.btn.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+.btn.quiet { border-color: transparent; background: transparent; color: var(--text-2); }
+.btn.quiet:hover { background: var(--surface-2); }
 .btn.danger { background: var(--danger-solid); border-color: var(--danger-solid); color: var(--on-danger); }
 .btn.danger-text { color: var(--danger); border-color: transparent; background: transparent; }
 .btn.danger-text:hover { background: var(--danger-soft); }
-.btn.small { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn.small { height: 28px; padding: 0 10px; font-size: var(--font-secondary); }
 .btn.large { height: 36px; padding: 0 16px; }
 .btn.icon-only { width: 28px; height: 28px; padding: 0; border-color: transparent; background: transparent; color: var(--text-2); }
 .btn.icon-only:hover { background: var(--surface-2); }
