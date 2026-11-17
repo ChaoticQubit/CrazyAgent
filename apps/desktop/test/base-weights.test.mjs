@@ -6,13 +6,16 @@ import { bundle, withPage } from "./browser.mjs";
 const fixture = await bundle(new URL("./fixtures/base-weights.mjs", import.meta.url).pathname);
 const sheet = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 
-test("DEC-192 on a bare page: h1 and h2 stay at 600, h3, strong and b sit at 500, inside a project page too", async () => {
+test("DEC-192 on a bare page: h1 and h2 stay at 600 with their bold words, h3, strong and b sit at 500, inside a project page too", async () => {
   const seen = await withPage(async (page) => {
     await page.evaluate(fixture);
     await page.evaluate("Fixture.mount()");
     return page.evaluate("Fixture.look()");
   });
-  assert.deepEqual(seen, { h1: "600", h2: "600", h3: "500", strong: "500", b: "500", "pj-h2": "600", "pj-h3": "500", "pj-strong": "500" });
+  assert.deepEqual(seen, {
+    h1: "600", "h1-strong": "600", h2: "600", "h2-b": "600", h3: "500", strong: "500", b: "500",
+    "pj-h2": "600", "pj-h2-strong": "600", "pj-h3": "500", "pj-strong": "500",
+  });
 });
 
 test("no screen rule restates the h3 or strong weight the base rules now set", () => {
