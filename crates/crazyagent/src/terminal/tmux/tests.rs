@@ -1,4 +1,5 @@
 use super::*;
+use crate::terminal::PASTE_CLOSE;
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
@@ -24,17 +25,7 @@ fn typed_bytes_go_as_send_keys_commands_of_at_most_256_bytes_in_order() {
     assert!(send_keys_lines("%7", &[]).is_empty());
     for length in [1, 255, 256, 257, 512, 1000, INPUT_BYTES_MAX] {
         let bytes: Vec<u8> = (0..length).map(|at| (at * 7 % 256) as u8).collect();
-        let runs: Vec<Vec<u8>> = send_keys_lines("%7", &bytes)
-            .iter()
-            .map(|line| {
-                let keys = line
-                    .strip_prefix("send-keys -t %7 -H ")
-                    .expect("send-keys -H for %7");
-                keys.split(' ')
-                    .map(|key| u8::from_str_radix(key, 16).unwrap())
-                    .collect()
-            })
-            .collect();
+        let runs = typed_runs(&send_keys_lines("%7", &bytes));
         assert_eq!(
             runs.len(),
             length.div_ceil(SEND_KEYS_BYTES_MAX),
@@ -51,6 +42,57 @@ fn typed_bytes_go_as_send_keys_commands_of_at_most_256_bytes_in_order() {
             "{length} bytes arrive once each, in order"
         );
     }
+}
+
+/// #359 r1 F1, RV-DS241-69 one layer down: no `send-keys` run ends inside a UTF-8
+/// character or inside the closing paste marker that ends the input, which `paste()` and
+/// the TUI keep whole for a program that reads them per read.
+#[test]
+fn a_send_keys_run_never_cuts_a_character_or_the_paste_end_marker() {
+    let character = "\u{1f600}".as_bytes();
+    let lengths = [
+        INPUT_BYTES_MAX,
+        2 * SEND_KEYS_BYTES_MAX + 3,
+        5 * SEND_KEYS_BYTES_MAX + 1,
+    ];
+    for length in lengths {
+        for at in SEND_KEYS_BYTES_MAX - 3..SEND_KEYS_BYTES_MAX {
+            let mut bytes = vec![b'x'; length - PASTE_CLOSE.len()];
+            bytes[at..at + character.len()].copy_from_slice(character);
+            bytes.extend_from_slice(PASTE_CLOSE);
+            let runs = typed_runs(&send_keys_lines("%7", &bytes));
+            let case = format!("{length} bytes, a character at {at}");
+            assert_eq!(runs.concat(), bytes, "{case}");
+            assert!(
+                runs.iter().all(|run| run.len() <= SEND_KEYS_BYTES_MAX),
+                "{case}"
+            );
+            assert!(
+                runs.iter().all(|run| std::str::from_utf8(run).is_ok()),
+                "{case}: a run cuts the character"
+            );
+            assert!(
+                runs.last().is_some_and(|run| run.ends_with(PASTE_CLOSE)),
+                "{case}: a run cuts the marker"
+            );
+        }
+    }
+}
+
+/// Reads typed bytes back out of `send-keys -H` commands for `%7`. Input: the commands.
+/// Output: each command's bytes, in order.
+fn typed_runs(lines: &[String]) -> Vec<Vec<u8>> {
+    lines
+        .iter()
+        .map(|line| {
+            let keys = line
+                .strip_prefix("send-keys -t %7 -H ")
+                .expect("send-keys -H for %7");
+            keys.split(' ')
+                .map(|key| u8::from_str_radix(key, 16).unwrap())
+                .collect()
+        })
+        .collect()
 }
 
 /// V243-PASTE-CHUNKS: a full input request typed into a real pane arrives whole and in
