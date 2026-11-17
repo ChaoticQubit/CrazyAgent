@@ -238,11 +238,14 @@ fn admit(held: &mut [Held]) {
     assert!(running <= JOBS_RUNNING_MAX);
 }
 
-/// Whether a job's source fits the bound its view counts on: at most `PATH_BYTES_MAX`
-/// bytes with no control character, so JSON writes it in at most twice its bytes (#380 N3).
-/// Input: the source. Output: the answer.
-fn bounded(source: &str) -> bool {
-    source.len() <= crate::projects_home::PATH_BYTES_MAX && !source.chars().any(char::is_control)
+/// Whether a job's source fits the bound its view counts on: an add's or a move's folder,
+/// which a retry uses whole, holds at most `PATH_BYTES_MAX` bytes and no control character;
+/// a delete's or a New Project's name is only a label, which its view cuts (#380 N3).
+/// Inputs: the job's kind and source. Output: the answer.
+fn bounded(kind: JobKind, source: &str) -> bool {
+    matches!(kind, JobKind::Delete | JobKind::Setup)
+        || (source.len() <= crate::projects_home::PATH_BYTES_MAX
+            && !source.chars().any(char::is_control))
 }
 
 impl Intake {
@@ -258,8 +261,8 @@ impl Intake {
     /// runs as a client change, the waiting list is full, or `JOBS_ENDED_MAX` kept ends wait
     /// for a client; `home_add_in_progress` for a move while an add that is no job of this
     /// engine holds the home (a move behind add jobs waits its turn); `job_request_invalid`
-    /// for a source past the bound a view counts on; or the folder, override or move check's
-    /// code.
+    /// for an add's or a move's folder past the bound a view counts on; or the folder,
+    /// override or move check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -344,7 +347,7 @@ impl Intake {
             }
         };
         assert!(real.is_absolute());
-        if !bounded(&source) {
+        if !bounded(asked.subject.kind(), &source) {
             return Err(failure("job_request_invalid"));
         }
         let mut held = authority.intake.lock();
@@ -513,7 +516,7 @@ impl Intake {
             jobs.extend(setup);
         }
         jobs.retain(|(job, _)| {
-            let kept = bounded(job.source());
+            let kept = bounded(job.kind(), job.source());
             if !kept {
                 eprintln!("intake_job_not_restored cause=source_bounds");
             }

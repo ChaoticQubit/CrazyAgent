@@ -446,12 +446,13 @@ impl IntakeJob {
         matches!(*stage, Stage::Ended(_))
     }
 
-    /// The job as a client sees it now.
+    /// The job as a client sees it now, within `JOB_VIEW_BYTES_MAX`: a delete's or a New
+    /// Project's name, the job a waiting job names and an ended job's code are shown cut.
     pub fn view(&self) -> JobView {
         let stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
         let state = match &*stage {
             Stage::Waiting(behind) => JobState::Waiting {
-                behind: shown(behind),
+                behind: shown(behind, JOB_TEXT_BYTES_MAX),
             },
             Stage::Downloading | Stage::Copying if self.kind == JobKind::Setup => {
                 let (done, total) = self.tally.building();
@@ -470,12 +471,12 @@ impl IntakeJob {
                 },
             },
             Stage::Ended(JobState::Failed { code, phase }) => JobState::Failed {
-                code: shown(code),
+                code: shown(code, JOB_TEXT_BYTES_MAX),
                 phase: *phase,
             },
-            Stage::Ended(JobState::NeedsAnswer { code }) => {
-                JobState::NeedsAnswer { code: shown(code) }
-            }
+            Stage::Ended(JobState::NeedsAnswer { code }) => JobState::NeedsAnswer {
+                code: shown(code, JOB_TEXT_BYTES_MAX),
+            },
             Stage::Ended(state) => state.clone(),
         };
         assert!(!matches!(state, JobState::Stopping { agents_left: 0 }));
@@ -483,7 +484,10 @@ impl IntakeJob {
             id: self.id.clone(),
             kind: self.kind,
             project_id: self.project.clone(),
-            source: self.source.clone(),
+            source: match self.kind {
+                JobKind::Add | JobKind::MoveProject => self.source.clone(),
+                JobKind::Delete | JobKind::Setup => shown(&self.source, PATH_BYTES_MAX),
+            },
             mode: self.mode,
             overrides: self.overrides.clone(),
             stopping: self.tally.stopped(),
@@ -541,10 +545,10 @@ fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobSta
 }
 
 /// A job's text as a client sees it: control characters as spaces, cut at a character
-/// boundary to `JOB_TEXT_BYTES_MAX` bytes, so JSON writes it in at most twice that.
-/// Input: the text. Output: the text shown.
-fn shown(text: &str) -> String {
-    let mut end = text.len().min(JOB_TEXT_BYTES_MAX);
+/// boundary to `bytes`, so JSON writes it in at most twice that.
+/// Inputs: the text and its most bytes. Output: the text shown.
+fn shown(text: &str, bytes: usize) -> String {
+    let mut end = text.len().min(bytes);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -552,7 +556,7 @@ fn shown(text: &str) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    assert!(shown.len() <= JOB_TEXT_BYTES_MAX);
+    assert!(shown.len() <= bytes);
     shown
 }
 
