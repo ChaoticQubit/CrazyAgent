@@ -70,7 +70,7 @@
   "crates/crazyagent/src/landing.rs": 2368,
   "crates/crazyagent/src/landing/flow.rs": 2798,
   "crates/crazyagent/src/landing/owner.rs": 2834,
-  "crates/crazyagent/src/landing/tests.rs": 17844,
+  "crates/crazyagent/src/landing/tests.rs": 17843,
   "crates/crazyagent/src/launch_context.rs": 3499,
   "crates/crazyagent/src/launch_context/tests.rs": 5294,
   "crates/crazyagent/src/master_sessions.rs": 5981,

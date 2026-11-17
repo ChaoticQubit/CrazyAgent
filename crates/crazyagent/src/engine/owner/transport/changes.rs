@@ -1126,7 +1126,7 @@ mod tests {
         ]);
         std::fs::write(worktree.join("NEW"), "new\n").unwrap();
         let project = crate::protocol::ProjectId::new("project-1").unwrap();
-        let db = landing::open(&root).unwrap();
+        let db = crate::landing_log::seeded(landing::open(&root).unwrap());
         let workspace = landing::Workspace {
             project: project.clone(),
             agent: landing::ChangeAgent {
@@ -1174,8 +1174,9 @@ mod tests {
         );
     }
     /// Makes an owner repository under an engine root with one agent worktree whose turn
-    /// added a file, recorded as a change set. Input: the root. Output: the workspace and
-    /// the change set.
+    /// added a file, recorded as a change set in a store with a running engine host, as a
+    /// logged save needs (v2.5 L9). Input: the root. Output: the workspace and the change
+    /// set.
     #[cfg(unix)]
     fn recorded(root: &Path) -> (landing::Workspace, ChangeSetId) {
         let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
@@ -1228,7 +1229,7 @@ mod tests {
             turn: "turn-1".into(),
             prompt_line: "Add a file".into(),
         };
-        let db = landing::open(root).unwrap();
+        let db = crate::landing_log::seeded(landing::open(root).unwrap());
         let id = landing::record_turn_end(&db, &workspace, &turn)
             .unwrap()
             .unwrap();

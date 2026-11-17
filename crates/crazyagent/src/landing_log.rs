@@ -644,7 +644,7 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
         let key = serde_json::json!(requested.request);
         return upsert_kept(db, RULE_REQUESTS, &key, &requested.project, &requested.row).map(drop);
     }
-    let unavailable = |_| failure("changes_unavailable");
+    let unavailable = |error: rusqlite::Error| store_refusal(change, &error);
     if let Some(schema) = change.schema() {
         db.execute_batch(schema).map_err(unavailable)?;
     }
@@ -656,6 +656,19 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
         "a landing change stays in its row bound"
     );
     Ok(())
+}
+
+/// The refusal of a change whose table write the store failed: a verification change keeps
+/// the store's error text, as verification refused before the log, and every other landing
+/// change the fixed `changes_unavailable` its readers match. Inputs: the change and the store
+/// error. Output: the refusal.
+fn store_refusal(change: &Change, error: &rusqlite::Error) -> EngineError {
+    let refusal = match change {
+        Change::BaselineApproved(_) => EngineError(error.to_string()),
+        _ => failure("changes_unavailable"),
+    };
+    assert!(!refusal.0.is_empty(), "a refusal names its cause");
+    refusal
 }
 
 /// Runs one landing change's statements. Inputs: the connection and the change. Output:
