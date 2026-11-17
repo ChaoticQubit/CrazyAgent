@@ -1,5 +1,5 @@
 use super::Scenario;
-use super::e2e_support::{Engine, Owner, stop_tmux};
+use super::e2e_support::{Engine, Owner, TMUX, stop_tmux};
 use super::harness::{home_files, recorded, set_level};
 use super::provider::{Recorder, as_owner, engine, with_owner};
 use crazyagent::accounts::{AccountDraft, Provider, SignInMethod};
@@ -285,15 +285,13 @@ pub(super) struct Team {
     pub(super) project: ProjectId,
     target: String,
     projects: PathBuf,
-    tmux: Option<PathBuf>,
+    tmux: PathBuf,
     recorder: Recorder,
 }
 
 impl Drop for Team {
     fn drop(&mut self) {
-        if let Some(tmux) = &self.tmux {
-            stop_tmux(tmux, &self.engine.path().join(FOLDER).join(SOCKET));
-        }
+        stop_tmux(&self.tmux, &self.engine.path().join(FOLDER).join(SOCKET));
     }
 }
 
@@ -437,7 +435,8 @@ impl Team {
     /// for Codex, a connected Anthropic Messages account for Claude Code), its pool, the
     /// project with its team plan and its agent access level. Inputs: the scratch folder,
     /// the harness, the level and whether the agents run with tools. Output: the team, or
-    /// the first step that was refused.
+    /// the first step that was refused; UNAVAILABLE without tmux, since the engine then runs
+    /// the agents headless and a headless launch is not the 2.4.2 pane launch.
     pub(super) fn start_with(
         scratch: &Path,
         harness: Harness,
@@ -457,7 +456,9 @@ impl Team {
             scratch,
             Some((harness.flag(), folder.join(harness.program()))),
         )?;
-        let tmux = installed(engine.path());
+        let Some(tmux) = installed(engine.path()) else {
+            return Err(TMUX.to_owned());
+        };
         let project = ProjectId::new(PROJECT).map_err(|error| error.to_string())?;
         let url = match harness {
             Harness::Codex => format!("http://127.0.0.1:{}/v1", recorder.port),
