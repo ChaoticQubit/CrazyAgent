@@ -133,7 +133,6 @@
   "crates/crazyagent/src/tui/screens/home.rs": 2479,
   "crates/crazyagent/src/tui/screens/intake_tests.rs": 3755,
   "crates/crazyagent/src/tui/screens/new_project.rs": 2021,
-  "crates/crazyagent/src/tui/screens/new_project_view.rs": 1768,
   "crates/crazyagent/src/tui/screens/process.rs": 2260,
   "crates/crazyagent/src/tui/screens/process/tests.rs": 2598,
   "crates/crazyagent/src/tui/screens/project.rs": 3286,
