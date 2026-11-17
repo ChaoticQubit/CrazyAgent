@@ -131,6 +131,41 @@ jobs:
           ref: ${{ env.RCLI_SOURCE_REVISION }}
           path: .local-state/tools/rcli-source
           persist-credentials: false
+      - name: Find an Xcode whose actool builds the app icon
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          shim="$GITHUB_WORKSPACE/scripts/release/actool-xcode26/actool"
+          default="$(xcode-select -p 2>/dev/null || true)"
+          best=""
+          best_version=""
+          best_major=0
+          best_minor=0
+          for developer in "$default" /Applications/Xcode*.app/Contents/Developer; do
+            [ -n "$developer" ] || continue
+            case "$developer" in *[Bb]eta*) continue ;; esac
+            [ -x "$developer/usr/bin/actool" ] || continue
+            out="$(CRAZYAGENT_ACTOOL_XCODE="$developer" "$shim" --version --output-format=human-readable-text 2>/dev/null)" || continue
+            version="$(sed -n 's/^short-bundle-version: *//p' <<< "$out")"
+            [[ "$version" =~ ^([0-9]+)(\.([0-9]+))? ]] || continue
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[3]:-0}"
+            echo "$developer: actool $version"
+            [ "$major" -ge 26 ] || continue
+            if [ "$developer" = "$default" ]; then best="$developer"; best_version="$version"; break; fi
+            if [ -z "$best" ] || [ "$major" -gt "$best_major" ] || { [ "$major" -eq "$best_major" ] && [ "$minor" -gt "$best_minor" ]; }; then
+              best="$developer"
+              best_version="$version"
+              best_major="$major"
+              best_minor="$minor"
+            fi
+          done
+          if [ -z "$best" ]; then
+            echo "::error::no Xcode on this runner has actool 26 or newer; icons/AppIcon.icon needs it for Assets.car and its dark look (DEC-181), default Xcode is '${default:-none}'"
+            exit 1
+          fi
+          echo "CRAZYAGENT_ACTOOL_XCODE=$best" >> "$GITHUB_ENV"
+          echo "app icon actool $best_version from $best; the desktop compile, tmux and rcli keep the default Xcode"
       - if: runner.environment == 'github-hosted'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -471,6 +506,7 @@ jobs:
             export TMPDIR="$RUNNER_TEMP/macos-tmp"
             mkdir -p "$TMPDIR"
             export PATH="$GITHUB_WORKSPACE/scripts/release/hdiutil-retry:$PATH"
+            export PATH="$GITHUB_WORKSPACE/scripts/release/actool-xcode26:$PATH"
           fi
           if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then
             security_line() { printf '%s\n' "$1" | security -i; }
