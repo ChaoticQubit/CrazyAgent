@@ -227,9 +227,30 @@ pub(super) fn stand_in() -> Result<PathBuf, String> {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
             .map_err(|error| error.to_string())?;
         assert!(program.is_file());
+        if passed_over_as_agents(&program) {
+            return Err(format!(
+                "the engine's tool resolver passes over the {} stand-in as one agents can \
+                 write, so 2.4.2 would refuse every launch with its text withheld: a folder \
+                 above the cargo target folder holds .crazyagent; build with \
+                 CARGO_TARGET_DIR outside it",
+                harness.program()
+            ));
+        }
     }
     assert!(folder.is_absolute());
     Ok(folder)
+}
+
+/// Whether the engine's own tool resolver passes over a stand-in as a file agents can write,
+/// as it does below any folder that holds `.crazyagent` (tools.rs `in_project`). The places
+/// name no HOME, so every folder above the file counts, as in an engine on a fixture HOME.
+/// Input: the stand-in. Output: the answer; any other refusal is not this one.
+pub(super) fn passed_over_as_agents(program: &Path) -> bool {
+    let places = crazyagent::tools::Places::new(Vec::new(), None);
+    crazyagent::tools::resolve_entry(program, &places)
+        .err()
+        .and_then(|missing| missing.refused)
+        .is_some_and(|refused| refused.why == crazyagent::tools::Refusal::AgentsCanWrite)
 }
 
 /// The canonical cargo target folder, parent of cargo's per-target temp folder and an
@@ -1051,5 +1072,22 @@ fn the_target_folder_is_replaced_only_as_a_whole_path_prefix() {
         ),
     ] {
         assert_eq!(without_target(text, target), read, "{text}");
+    }
+}
+
+#[test]
+fn a_stand_in_below_a_crazyagent_folder_is_passed_over_and_one_outside_is_not() {
+    let scratch = super::e2e_support::scratch("ca-snap-standin-");
+    let root = scratch.path().canonicalize().unwrap();
+    for (folder, marked) in [(root.join("marked"), true), (root.join("plain"), false)] {
+        let bin = folder.join("target").join("snapshot-v242");
+        std::fs::create_dir_all(&bin).unwrap();
+        if marked {
+            std::fs::create_dir(folder.join(".crazyagent")).unwrap();
+        }
+        let program = bin.join("codex");
+        std::fs::write(&program, STAND_IN).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(passed_over_as_agents(&program), marked, "{marked}");
     }
 }

@@ -6,7 +6,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod e2e_support;
+mod keychain_support;
 
+#[path = "snapshot_v242/caseless.rs"]
+mod caseless;
 #[path = "snapshot_v242/check.rs"]
 mod check;
 #[path = "snapshot_v242/harness.rs"]
@@ -19,6 +22,8 @@ mod launch;
 mod packs;
 #[path = "snapshot_v242/provider.rs"]
 mod provider;
+#[path = "snapshot_v242/random_names.rs"]
+mod random_names;
 #[path = "snapshot_v242/role.rs"]
 mod role;
 #[path = "snapshot_v242/storage.rs"]
@@ -195,9 +200,11 @@ const OWNER_HOME_NAMES: [&str; 20] = [
 ];
 
 /// The placeholders the normalisation writes; `<path-` and `<id-` take a number and `>`.
-const PLACEHOLDERS: [&str; 8] = [
+const PLACEHOLDERS: [&str; 10] = [
     "<owner-home>",
     "<temp>",
+    "<keychain-lock>",
+    "<generation>",
     "<t>",
     "<pid>",
     "<port>",
@@ -222,6 +229,8 @@ const KEPT_WORDS: [&str; 12] = [
 struct Masks {
     temp_spellings: Vec<String>,
     temp_groups: Vec<String>,
+    parent_spellings: Vec<String>,
+    parent_marks: Vec<String>,
     homes: Vec<String>,
     ids: Vec<String>,
     paths: Vec<String>,
@@ -267,10 +276,16 @@ impl Masks {
                 .all(|(spelling, group)| absolute(spelling) && absolute(group))
         );
         assert!(homes.iter().all(absolute));
+        let real_temp = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let (parent_spellings, parent_marks) = temp_parents(&real_temp).into_iter().unzip();
         let (temp_spellings, temp_groups) = roots.into_iter().unzip();
         Masks {
             temp_spellings,
             temp_groups,
+            parent_spellings,
+            parent_marks,
             homes,
             ids: Vec::new(),
             paths: Vec::new(),
@@ -291,11 +306,14 @@ impl Masks {
                 _ => value.clone(),
             }),
             Value::String(text) => Ok(Value::from(self.text(text))),
-            Value::Array(items) => items
-                .iter()
-                .map(|item| self.value(key, item))
-                .collect::<Result<Vec<_>, _>>()
-                .map(Value::Array),
+            Value::Array(items) => {
+                let mut masked = items
+                    .iter()
+                    .map(|item| self.value(key, item))
+                    .collect::<Result<Vec<_>, _>>()?;
+                random_names::sort_socket_places(&mut masked);
+                Ok(Value::Array(masked))
+            }
             Value::Object(map) => {
                 let mut keys: Vec<&String> = map.keys().collect();
                 keys.sort();
@@ -313,23 +331,37 @@ impl Masks {
         }
     }
 
-    /// Masks one string: line endings to LF, then temp paths, the owner home, RFC 3339 times,
-    /// ids, ports and tmux pane ids. Input: the raw string. Output: the masked string.
+    /// Masks one string: line endings to LF, then temp paths, the owner home, the same in a
+    /// Seatbelt rule's caseless spelling, keychain lock files, socket generation folders,
+    /// RFC 3339 times, ids, ports and tmux pane ids. Input: the raw string. Output: the masked
+    /// string.
     fn text(&mut self, raw: &str) -> String {
         let lf = raw.replace("\r\n", "\n").replace('\r', "\n");
         let groups = &self.temp_groups;
         let paths = &mut self.paths;
         let pathed = replace_folders(&lf, &self.temp_spellings, |which, after| {
             let tail = after.strip_prefix('/').unwrap_or("");
-            let entry_len = tail.find(|c: char| !path_char(c)).unwrap_or(tail.len());
+            let (name, entry_len) = caseless::escaped_name(tail);
             if entry_len == 0 {
                 return (0, "<temp>".to_owned());
             }
-            let entry = format!("{}/{}", groups[which], &tail[..entry_len]);
-            (1 + entry_len, format!("<path-{}>", number(paths, &entry)))
+            let entry = format!("{}/{name}", groups[which]);
+            (
+                1 + entry_len,
+                format!("<path-{}>", number(paths, &entry.to_ascii_lowercase())),
+            )
         });
-        let homed = replace_folders(&pathed, &self.homes, |_, _| (0, "<owner-home>".to_owned()));
-        let timed = replace_matches(&homed, |rest| {
+        let marks = &self.parent_marks;
+        let parented = replace_folders(&pathed, &self.parent_spellings, |which, _| {
+            (0, marks[which].clone())
+        });
+        let homed = replace_folders(&parented, &self.homes, |_, _| {
+            (0, "<owner-home>".to_owned())
+        });
+        let folded = self.caseless(&homed);
+        let locked = replace_matches(&folded, random_names::keychain_lock_len);
+        let generated = replace_matches(&locked, random_names::generation_len);
+        let timed = replace_matches(&generated, |rest| {
             rfc3339_len(rest.as_bytes()).map(|len| (len, "<t>".to_owned()))
         });
         let ids = &mut self.ids;
@@ -345,6 +377,118 @@ impl Masks {
         let ported = replace_matches(&named, port_len);
         replace_matches(&ported, pane_len)
     }
+
+    /// Masks the temp folders, their per-user parents and the owner home where a Seatbelt
+    /// rule spells them in any letter case ([`caseless::unspell`]), with the placeholders the
+    /// plain spellings get, a temp entry numbered as its plain spelling is, then a caseless
+    /// path component that is an id or a socket generation folder. Input: text the plain
+    /// passes masked. Output: the text with each caseless spelling masked.
+    fn caseless(&mut self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut index = 0;
+        while index < text.len() {
+            let rest = &text[index..];
+            let slash = rest.starts_with('/');
+            let start = slash && !out.chars().next_back().is_some_and(caseless::inside_path);
+            let found = start.then(|| self.caseless_at(rest)).flatten().or_else(|| {
+                let below_temp = random_names::ends_in_temp(&out);
+                slash.then(|| self.caseless_component(rest, below_temp))?
+            });
+            if let Some((taken, placeholder)) = found {
+                assert!(taken > 0 && rest.is_char_boundary(taken));
+                out.push_str(&placeholder);
+                index += taken;
+                continue;
+            }
+            let next = rest.chars().next().expect("index is on a char boundary");
+            out.push(next);
+            index += next.len_utf8();
+        }
+        out
+    }
+
+    /// Reads a caseless spelling of a masked folder at the start of `rest`, longest first:
+    /// a temp folder with its entry, a temp parent, then the owner home. Input: text starting
+    /// with `/`. Output: the bytes it takes and its placeholder, or none.
+    fn caseless_at(&mut self, rest: &str) -> Option<(usize, String)> {
+        let read = caseless::unspell(rest);
+        if !read.folded {
+            return None;
+        }
+        let plain: String = read.plain.iter().collect();
+        let names = |spelling: &str| {
+            let spelling = spelling.to_ascii_lowercase();
+            let tail = plain.strip_prefix(spelling.as_str())?;
+            (tail.is_empty() || tail.starts_with('/')).then_some(spelling.len())
+        };
+        let taken = |chars: usize| read.ends[chars - 1];
+        for (which, spelling) in self.temp_spellings.iter().enumerate() {
+            let Some(len) = names(spelling) else {
+                continue;
+            };
+            assert!(plain.is_char_boundary(len) && plain[..len].is_ascii());
+            let tail = plain[len..].strip_prefix('/').unwrap_or("");
+            let entry_len = tail.find(|c: char| !path_char(c)).unwrap_or(tail.len());
+            if entry_len == 0 {
+                return Some((taken(len), "<temp>".to_owned()));
+            }
+            let entry = format!("{}/{}", self.temp_groups[which], &tail[..entry_len]);
+            let number = number(&mut self.paths, &entry.to_ascii_lowercase());
+            return Some((taken(len + 1 + entry_len), format!("<path-{number}>")));
+        }
+        for (spelling, mark) in self.parent_spellings.iter().zip(&self.parent_marks) {
+            if let Some(len) = names(spelling) {
+                return Some((taken(len), mark.clone()));
+            }
+        }
+        let home = self.homes.iter().find_map(|home| names(home))?;
+        Some((taken(home), "<owner-home>".to_owned()))
+    }
+
+    /// Reads a caseless path component ([`caseless::component`]) that differs on every run: a
+    /// hex id, numbered in the plain id table so it reads as its plain spelling does, or a
+    /// socket generation folder right below a temp entry. Inputs: text starting with `/` and
+    /// whether a temp placeholder is right before it. Output: the bytes it takes and its mark.
+    fn caseless_component(&mut self, rest: &str, below_temp: bool) -> Option<(usize, String)> {
+        let (name, taken) = caseless::component(rest)?;
+        if hex_run_len(name.as_bytes()) == Some(name.len()) {
+            let number = number(&mut self.ids, &name);
+            return Some((taken, format!("/<id-{number}>")));
+        }
+        (below_temp && random_names::is_generation(&name))
+            .then(|| (taken, "/o<generation>".to_owned()))
+    }
+}
+
+/// The per-user folders above the temp folder that differ on every Mac and user: each parent
+/// of the canonical temp folder strictly below /private/var/folders, in that spelling and the
+/// /var/folders one, longest first, with the mark it reads as, `<temp>/..` one level up and
+/// `<temp>/../..` two. Input: the canonical temp folder. Output: the spellings and marks,
+/// none when the temp folder is not below /private/var/folders.
+fn temp_parents(real_temp: &Path) -> Vec<(String, String)> {
+    let base = Path::new("/private/var/folders");
+    let mut parents = Vec::new();
+    for (level, folder) in real_temp.ancestors().skip(1).enumerate() {
+        if folder == base || !folder.starts_with(base) {
+            break;
+        }
+        let mark = format!("<temp>{}", "/..".repeat(level + 1));
+        let text = folder.to_string_lossy().into_owned();
+        let short = text
+            .strip_prefix("/private")
+            .expect("below /private/var/folders")
+            .to_owned();
+        parents.push((text, mark.clone()));
+        parents.push((short, mark));
+    }
+    parents.sort_by_key(|(spelling, _)| std::cmp::Reverse(spelling.len()));
+    assert!(parents.len() <= 8);
+    assert!(parents.iter().all(|(spelling, mark)| {
+        spelling.starts_with("/")
+            && spelling.contains("/var/folders/")
+            && mark.starts_with("<temp>/..")
+    }));
+    parents
 }
 
 /// Replaces each folder spelling that starts and ends at a path boundary. Inputs: the string,
@@ -663,10 +807,13 @@ fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<
             return Err("holds a user path".to_owned());
         }
     }
+    if let Some(kind) = caseless::private(text) {
+        return Err(kind);
+    }
     for (start, _) in text.match_indices("<owner-home>/") {
         let below = &text[start + "<owner-home>/".len()..];
-        let first = below.split(|c: char| !path_char(c)).next().unwrap_or("");
-        if !OWNER_HOME_NAMES.contains(&first) {
+        let (first, _) = caseless::escaped_name(below);
+        if !OWNER_HOME_NAMES.contains(&first.as_str()) {
             return Err(
                 "names a folder below the owner home outside the engine's rules".to_owned(),
             );
@@ -861,6 +1008,51 @@ fn orphans(scenarios: &[Scenario]) -> Vec<String> {
     found
 }
 
+/// Writes both normalised captures of a scenario whose two captures differ to the folder
+/// `SNAPSHOT_V242_DIFF_DIR` names, so the whole difference is readable, each line that holds
+/// a private value replaced by `<withheld>` ([`redacted`]). Inputs: the scenario's `kind/name`
+/// and both texts. Output: a note for the failure line, empty when no folder is named.
+fn dump_differing(at: &str, first: &str, second: &str) -> String {
+    let Some(folder) = std::env::var_os("SNAPSHOT_V242_DIFF_DIR").map(PathBuf::from) else {
+        return String::new();
+    };
+    let home = std::env::var("HOME").ok();
+    let user = std::env::var("USER").ok();
+    let texts = [first, second].map(|text| redacted(text, home.as_deref(), user.as_deref()));
+    for text in &texts {
+        if let Err(kind) = refuse_private(text, home.as_deref(), user.as_deref()) {
+            return format!("; not dumped: {kind}");
+        }
+    }
+    let withheld: usize = texts
+        .iter()
+        .map(|text| text.matches("<withheld>").count())
+        .sum();
+    let file = at.replace('/', "-");
+    let written = std::fs::create_dir_all(&folder).and_then(|()| {
+        std::fs::write(folder.join(format!("{file}.a.json")), &texts[0])?;
+        std::fs::write(folder.join(format!("{file}.b.json")), &texts[1])
+    });
+    match written {
+        Ok(()) => format!("; both captures dumped, {withheld} lines withheld"),
+        Err(error) => format!("; not dumped: {}", error.kind()),
+    }
+}
+
+/// Replaces each line of golden text that `refuse_private` refuses with `<withheld>`, so a
+/// capture that cannot become a golden is still readable. Inputs: the text, the home folder
+/// and the user name. Output: the text with only those lines replaced.
+fn redacted(text: &str, home: Option<&str>, user: Option<&str>) -> String {
+    let lines: Vec<&str> = text
+        .split('\n')
+        .map(|line| match refuse_private(line, home, user) {
+            Ok(()) => line,
+            Err(_) => "<withheld>",
+        })
+        .collect();
+    lines.join("\n")
+}
+
 /// Checks one scenario against its golden, or captures it when `write` is set and none exists.
 /// Inputs: the scenario and the write switch. Output: nothing when it matches, else a failure
 /// line (a capture written for review also fails, so a writing run is never green).
@@ -874,8 +1066,9 @@ fn check(scenario: &Scenario, write: bool) -> Result<(), String> {
             let again = capture_text(scenario).map_err(|error| format!("{at}: {error}"))?;
             if again != text {
                 return Err(format!(
-                    "{at}: two captures differ, {}",
-                    compare(again.as_bytes(), &text).unwrap_err()
+                    "{at}: two captures differ, {}{}",
+                    compare(again.as_bytes(), &text).unwrap_err(),
+                    dump_differing(&at, &text, &again)
                 ));
             }
             write_missing(&path, &text).map_err(|error| format!("{at}: {error}"))?;
@@ -1077,6 +1270,43 @@ fn a_sandbox_rule_widened_to_its_parent_fails_after_normalisation() {
     let widened = normalise(&rule(whole)).unwrap();
     assert!(widened.contains("\"<temp>\""), "{widened}");
     assert!(compare(bare.as_bytes(), &widened).is_err(), "{widened}");
+}
+
+#[test]
+fn the_temp_folder_s_per_user_parents_read_as_steps_up_from_temp() {
+    let up = |mark: &str| mark.to_owned();
+    assert_eq!(
+        temp_parents(Path::new("/private/var/folders/ab/cd123/T")),
+        vec![
+            ("/private/var/folders/ab/cd123".to_owned(), up("<temp>/..")),
+            ("/private/var/folders/ab".to_owned(), up("<temp>/../..")),
+            ("/var/folders/ab/cd123".to_owned(), up("<temp>/..")),
+            ("/var/folders/ab".to_owned(), up("<temp>/../..")),
+        ]
+    );
+    assert!(temp_parents(Path::new("/private/tmp")).is_empty());
+    assert!(temp_parents(Path::new("/private/var/folders/ab")).is_empty());
+    let kept = normalise(&json!({"root": "/private", "folders": "/private/var/folders"})).unwrap();
+    assert!(
+        kept.contains("\"/private\"") && kept.contains("\"/private/var/folders\""),
+        "{kept}"
+    );
+    let real = std::env::temp_dir().canonicalize().unwrap();
+    if let Some((parent, _)) = temp_parents(&real)
+        .into_iter()
+        .find(|(_, mark)| mark == "<temp>/..")
+    {
+        let text = normalise(&json!({
+            "parent": parent,
+            "beside": format!("{parent}/C/cache"),
+            "temp": real.to_string_lossy(),
+        }))
+        .unwrap();
+        assert!(text.contains("\"<temp>/..\""), "{text}");
+        assert!(text.contains("\"<temp>/../C/cache\""), "{text}");
+        assert!(text.contains("\"<temp>\""), "{text}");
+        assert!(!text.contains("/var/folders/"), "{text}");
+    }
 }
 
 #[test]

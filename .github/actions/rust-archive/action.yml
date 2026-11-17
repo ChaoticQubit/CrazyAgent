@@ -70,6 +70,10 @@ runs:
         cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline
         mkdir -p target/debug/deps
         cp "target/debug/crazyagent-landlock$exe" "target/debug/deps/crazyagent-landlock$exe"
+        if [ "$RUNNER_OS" = Windows ]; then
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked --offline
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
+        fi
     - name: Build and archive every workspace test
       shell: bash
       run: |

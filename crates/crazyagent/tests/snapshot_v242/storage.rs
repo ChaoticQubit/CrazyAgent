@@ -1,5 +1,6 @@
 use super::{Masks, Scenario, compare, normalise, refuse_private, snapshots_root, withheld};
 use crate::e2e_support::{self, Engine, Owner};
+use crate::keychain_support::TemporaryKeychain;
 use crazyagent::cleanup_settings::{CleanupMode, CleanupSettings};
 use crazyagent::engine::owner::{AccountSecret, OwnerResponse, OwnerResult, SavedText};
 use crazyagent::github::GitHubPromptAnswer;
@@ -169,29 +170,39 @@ fn settings(_scratch: &Path) -> Result<Value, String> {
     settled(dump(&stopped.engine.path().join("engine.db"))?)
 }
 
-/// A real engine stopped after its owner requests, with the fixture HOME and the scratch disk
-/// its folders live on kept until the dump is read.
+/// A real engine stopped after its owner requests, with the fixture HOME, its temporary
+/// keychain when it had one and the scratch disk its folders live on kept until the dump is
+/// read.
 struct Stopped {
     engine: Engine,
     _home: tempfile::TempDir,
+    _keychain: Option<TemporaryKeychain>,
     _disk: tempfile::TempDir,
 }
 
 /// Starts the engine on a fixture HOME and a fixed PATH, with no git variable of this shell,
 /// attaches as the TUI, sends the settings requests when asked, then stops it; a panic on the
-/// way prints through the runner's guard. Inputs: a scratch prefix and whether to seed the
-/// settings. Output: the stopped engine, or the request that failed.
+/// way prints through the runner's guard. The settings seed runs on the home of a temporary
+/// keychain made its default, never the owner's, since its GitHub publish prompt opens the
+/// credential store. Inputs: a scratch prefix and whether to seed the settings. Output: the
+/// stopped engine, or the request that failed.
 fn seeded(prefix: &str, with_settings: bool) -> Result<Stopped, String> {
     super::guard_panics();
-    let home = e2e_support::scratch("ca-p5-home-");
-    fs::write(home.path().join(".gitconfig"), OWNER_GIT).map_err(said)?;
+    let bare = e2e_support::scratch("ca-p5-home-");
+    let keychain = with_settings.then(TemporaryKeychain::create);
+    let home = keychain
+        .as_ref()
+        .map_or(bare.path(), TemporaryKeychain::home)
+        .to_path_buf();
+    assert!(home.is_absolute() && home.is_dir());
+    fs::write(home.join(".gitconfig"), OWNER_GIT).map_err(said)?;
     let disk = e2e_support::scratch("ca-p5-disk-");
     let projects = disk.path().join("Projects");
     fs::create_dir(&projects).map_err(said)?;
     let folders = plugin_folders(disk.path())?;
     let project = ProjectId::new(PROJECT).map_err(debug)?;
     let mut engine = Engine::new(prefix);
-    engine.home = Some(home.path().to_path_buf());
+    engine.home = Some(home);
     engine.env.push(("PATH", FIXTURE_PATH.into()));
     super::hermetic(&mut engine);
     engine.launch();
@@ -213,7 +224,8 @@ fn seeded(prefix: &str, with_settings: bool) -> Result<Stopped, String> {
     seeding?;
     Ok(Stopped {
         engine,
-        _home: home,
+        _home: bare,
+        _keychain: keychain,
         _disk: disk,
     })
 }

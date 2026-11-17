@@ -296,9 +296,10 @@ impl AgentFilesRule {
         } else {
             state.clone()
         };
-        let agents = format!("^{root}{layout}/{}", super::any_case("worktrees"));
+        let agents = format!("{root}{layout}/{}", super::any_case("worktrees"));
         format!(
-            "(deny {operation}\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n(deny file-write-unlink\n  (regex #\"{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n"
+            "(deny {operation}\n  {})\n(deny file-write-unlink\n  (regex #\"^{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n",
+            super::at_or_below(&format!("{agents}/[^/]+"))
         )
     }
 }

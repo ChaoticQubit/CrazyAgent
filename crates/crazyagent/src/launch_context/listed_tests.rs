@@ -637,14 +637,18 @@ fn install_finds_a_terminal_only_listed_harness_by_the_registry() {
     assert!(installed.is_ok(), "{:?}", installed.as_ref().err());
 }
 
+#[cfg(target_os = "macos")]
 const SAVED_KEY: &str = "sk-saved-key-never-in-the-agent-0123456789";
 
+#[cfg(target_os = "macos")]
 const KEYLESS_URL: &str = "http://127.0.0.1:11434/v1";
 
+#[cfg(target_os = "macos")]
 const KEYED_URL: &str = "https://api.example.org/v1";
 
 /// One pool account in the stand-in ACP harness's wire format, as the engine stores it.
 /// Inputs: its address and whether a key was saved with it. Output: the connection.
+#[cfg(target_os = "macos")]
 fn openai_chat(url: &str, keyed: bool) -> crate::config::ModelConnection {
     let auth = if keyed {
         serde_json::json!({"method": "api_key", "credential_ref": "row-key"})
@@ -665,6 +669,7 @@ fn openai_chat(url: &str, keyed: bool) -> crate::config::ModelConnection {
 }
 
 /// The stand-in ACP harness as the test registry lists it. Output: the harness.
+#[cfg(target_os = "macos")]
 fn standin_acp() -> &'static crate::harnesses::registry::Harness {
     crate::harnesses::registry::registry()
         .get("standin-acp")
@@ -673,6 +678,7 @@ fn standin_acp() -> &'static crate::harnesses::registry::Harness {
 
 /// A working folder and a project profile for one ACP launch row. Output: the guards,
 /// the canonical working folder and the profile path.
+#[cfg(target_os = "macos")]
 fn work_and_profile() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, PathBuf) {
     let work = tempfile::tempdir().unwrap();
     let working = work.path().canonicalize().unwrap();
@@ -685,6 +691,7 @@ fn work_and_profile() -> (tempfile::TempDir, tempfile::TempDir, PathBuf, PathBuf
 /// The stand-in's ACP launch request on one account binding, inside a project profile, or
 /// at Full access when none is given. Inputs: the working folder, the profile and the
 /// binding. Output: the request.
+#[cfg(target_os = "macos")]
 fn acp_request(
     working: &Path,
     profile: Option<PathBuf>,
@@ -705,6 +712,7 @@ fn acp_request(
 }
 
 /// The variables a built command sets, by name. Input: the command. Output: the map.
+#[cfg(target_os = "macos")]
 fn variables(command: &std::process::Command) -> std::collections::BTreeMap<String, String> {
     command
         .get_envs()

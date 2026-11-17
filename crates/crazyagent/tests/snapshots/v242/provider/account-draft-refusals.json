@@ -1,0 +1,228 @@
+{
+  "fields": {
+    "api-key-without-key": {
+      "refused": "account_key_required"
+    },
+    "api-key-without-model": {
+      "refused": "account_model_required"
+    },
+    "compatible-metadata-port": {
+      "refused": "account_url_port_refused"
+    },
+    "compatible-plain-http-remote": {
+      "refused": "account_url_invalid"
+    },
+    "key-on-subscription": {
+      "refused": "account_key_not_allowed"
+    },
+    "local-url-not-loopback": {
+      "refused": "account_local_url_required"
+    },
+    "model-invalid": {
+      "refused": "account_model_invalid"
+    },
+    "model-on-subscription": {
+      "refused": "account_model_not_allowed"
+    },
+    "name-with-direction-control": {
+      "refused": "account_name_invalid"
+    },
+    "nonce-too-short": {
+      "refused": "account_identity_unavailable"
+    },
+    "url-on-subscription": {
+      "refused": "account_url_not_allowed"
+    }
+  },
+  "pairs": [
+    {
+      "bare": {
+        "connection": {
+          "account_ref": "chatgpt-login-<id-1>",
+          "auth": {
+            "method": "native_managed",
+            "profile_ref": "chatgpt-profile-<id-1>"
+          },
+          "endpoint": {
+            "kind": "native"
+          },
+          "harness": "codex",
+          "id": "chatgpt-account-<id-1>",
+          "model": {
+            "author": "openai",
+            "id": "native-default"
+          },
+          "protocol": "native",
+          "provider": "openai"
+        },
+        "details": {
+          "name": "ChatGPT / Codex",
+          "provider": "chatgpt"
+        }
+      },
+      "method": "subscription",
+      "provider": "chatgpt"
+    },
+    {
+      "bare": {
+        "refused": "account_model_required"
+      },
+      "method": "api_key",
+      "provider": "chatgpt"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "url",
+      "provider": "chatgpt"
+    },
+    {
+      "bare": {
+        "connection": {
+          "account_ref": "claude-login-<id-1>",
+          "auth": {
+            "method": "native_managed",
+            "profile_ref": "claude-profile-<id-1>"
+          },
+          "endpoint": {
+            "kind": "native"
+          },
+          "harness": "claude",
+          "id": "claude-account-<id-1>",
+          "model": {
+            "author": "anthropic",
+            "id": "native-default"
+          },
+          "protocol": "native",
+          "provider": "anthropic"
+        },
+        "details": {
+          "name": "Claude",
+          "provider": "claude"
+        }
+      },
+      "method": "subscription",
+      "provider": "claude"
+    },
+    {
+      "bare": {
+        "refused": "account_model_required"
+      },
+      "method": "api_key",
+      "provider": "claude"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "url",
+      "provider": "claude"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "subscription",
+      "provider": "openrouter"
+    },
+    {
+      "bare": {
+        "refused": "account_model_required"
+      },
+      "method": "api_key",
+      "provider": "openrouter"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "url",
+      "provider": "openrouter"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "subscription",
+      "provider": "openai_api"
+    },
+    {
+      "bare": {
+        "refused": "account_model_required"
+      },
+      "method": "api_key",
+      "provider": "openai_api"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "url",
+      "provider": "openai_api"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "subscription",
+      "provider": "anthropic_api"
+    },
+    {
+      "bare": {
+        "refused": "account_model_required"
+      },
+      "method": "api_key",
+      "provider": "anthropic_api"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "url",
+      "provider": "anthropic_api"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "subscription",
+      "provider": "openai_compatible"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "api_key",
+      "provider": "openai_compatible"
+    },
+    {
+      "bare": {
+        "refused": "account_url_required"
+      },
+      "method": "url",
+      "provider": "openai_compatible"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "subscription",
+      "provider": "local"
+    },
+    {
+      "bare": {
+        "refused": "account_method_unavailable"
+      },
+      "method": "api_key",
+      "provider": "local"
+    },
+    {
+      "bare": {
+        "refused": "account_model_required"
+      },
+      "method": "url",
+      "provider": "local"
+    }
+  ]
+}

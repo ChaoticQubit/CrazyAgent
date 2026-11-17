@@ -1,0 +1,31 @@
+{
+  "arguments": [
+    "report",
+    "--source-revision",
+    "<id-1>",
+    "--profile-id",
+    "snapshot-profile"
+  ],
+  "names_source": true,
+  "names_version": true,
+  "status": 0,
+  "stderr": "",
+  "stdout": {
+    "artifacts": [],
+    "gaps": [
+      "confinement: native/runtime evidence not collected",
+      "live_recovery: native/runtime evidence not collected",
+      "native_auth: native/runtime evidence not collected",
+      "child_control: native/runtime evidence not collected"
+    ],
+    "profile_id": "snapshot-profile",
+    "results": {
+      "child_control": "unavailable",
+      "confinement": "unavailable",
+      "live_recovery": "unavailable",
+      "native_auth": "unavailable"
+    },
+    "source_revision": "<id-1>",
+    "versions": {}
+  }
+}
