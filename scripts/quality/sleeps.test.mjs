@@ -368,12 +368,15 @@ test("the command exits 1 with the problems on a planted sleep and 0 on a clean 
   const planted = repository({ "apps/desktop/test/a.mjs": `${awaited("sleep")}\n`, ...allow });
   const clean = repository({ "apps/desktop/test/a.mjs": "export const ok = 1;\n", ...allow });
   const pipes = { stdio: ["ignore", "pipe", "pipe"] };
+  const problem =
+    "apps/desktop/test/a.mjs: 1 new sleep in test code (line 1); " +
+    "wait on an event or the one shared waitUntil helper";
   try {
     assert.throws(
       () => execFileSync(process.execPath, [script, planted], pipes),
       (error) =>
         error.status === 1 &&
-        String(error.stderr).includes("apps/desktop/test/a.mjs: 1 new sleep in test code (line 1)"),
+        String(error.stderr).includes(problem),
     );
     const output = execFileSync(process.execPath, [script, clean], { ...pipes, encoding: "utf8" });
     assert.equal(output, "no new sleeps in test code\n");

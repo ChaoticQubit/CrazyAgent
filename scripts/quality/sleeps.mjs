@@ -13,8 +13,8 @@ const SHOWN_LINES_MAX = 20;
 /** The largest `git ls-files` listing read, far above the repository's size. */
 const LISTING_BYTES_MAX = 64 * 1024 * 1024;
 
-/** What a new sleep should become instead, named in each new-sleep problem. */
-const ADVICE = "wait on an event or the one shared wait_until helper";
+/** What a new sleep should become instead; each new-sleep problem ends it with its helper. */
+const ADVICE = "wait on an event or the one shared";
 
 /**
  * Raw sleep calls by kind; each pattern's first group is the callee, where the site sits.
@@ -403,7 +403,8 @@ export function check(found, allow) {
     helpers[kind].push(...result.helpers.map((line) => `${file}:${line}`));
     if (result.lines.length > 0 && !Object.hasOwn(allow, file)) {
       const count = sleeps(result.lines.length, "new ");
-      problems.push(`${file}: ${count} in test code (${shown(result.lines)}); ${ADVICE}`);
+      const advice = `${ADVICE} ${LANGUAGE[kind].helper} helper`;
+      problems.push(`${file}: ${count} in test code (${shown(result.lines)}); ${advice}`);
     }
   }
   for (const [kind, places] of Object.entries(helpers)) {
