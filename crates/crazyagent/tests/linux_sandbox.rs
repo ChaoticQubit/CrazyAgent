@@ -2639,7 +2639,10 @@ fn a_loopback_only_nested_agent_reaches_its_port_on_this_computer_and_on_no_othe
     let port = served.local_addr().unwrap().port();
     let other = outward_address();
     std::thread::spawn(move || {
-        for mut asked in served.incoming().flatten().take(16) {
+        for mut asked in crazyagent::spawn_gate::incoming_tcp_std(&served)
+            .flatten()
+            .take(16)
+        {
             let _ = asked.write_all(b"pong\n");
         }
     });
@@ -2773,7 +2776,10 @@ fn pong_everywhere() -> u16 {
     let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
     let port = served.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for mut asked in served.incoming().flatten().take(16) {
+        for mut asked in crazyagent::spawn_gate::incoming_tcp_std(&served)
+            .flatten()
+            .take(16)
+        {
             let _ = asked.write_all(b"pong\n");
         }
     });
@@ -3245,7 +3251,7 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
     );
     let case = case();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let mut check = helper_command();
     check.arg("--probe-supervised").arg(&port).arg(&case.tmp);
@@ -3290,7 +3296,7 @@ print('wide=' + (str(ctypes.get_errno()) if refused else 'ok'))
 #[test]
 fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_host() {
     let case = case();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let limited = ["--limit-network", "--connect", &port];
     let guarded = [&limited[..], &["--guard-loopback", &port][..]].concat();

@@ -14,6 +14,7 @@ fn refused_page(name: &str) -> NewProjectPage {
         view: View::default(),
         creation: None,
         checking: false,
+        reading_github: false,
         asked: false,
         carried: false,
     }
