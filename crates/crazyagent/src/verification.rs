@@ -510,6 +510,10 @@ fn propose(
         )
         .map_err(db_error)?;
     assert_eq!(changed, 1);
+    assert!(
+        baseline(tx, &id)?.0 == *draft,
+        "the stored draft is the proposed one"
+    );
     written.push((BASELINES, id.as_str().to_owned(), false));
     Ok(Outcome::Applied)
 }

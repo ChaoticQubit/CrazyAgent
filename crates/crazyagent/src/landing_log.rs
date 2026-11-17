@@ -763,13 +763,8 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
         let project = Some(requested.project.as_str());
         return upsert_kept(db, RULE_REQUESTS, &key, project, &requested.row).map(drop);
     }
-    if let Change::VerificationSaved(saved) = change {
-        let table = VERIFICATION_TABLES
-            .into_iter()
-            .find(|table| *table == saved.table)
-            .ok_or_else(|| failure("landing_log_row"))?;
-        let key = serde_json::json!(saved.id);
-        return upsert_kept(db, table, &key, saved.project.as_deref(), &saved.row).map(drop);
+    if let Change::VerificationSaved(_) | Change::VerificationForgotten(_) = change {
+        return apply_verification(db, change);
     }
     let unavailable = |error: rusqlite::Error| store_refusal(change, &error);
     if let Some(schema) = change.schema() {
@@ -785,15 +780,39 @@ pub fn apply(db: &Connection, change: &Change) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// The refusal of a change whose table write the store failed: a verification change keeps
-/// the store's error text, as verification refused before the log, and every other landing
-/// change the fixed `changes_unavailable` its readers match. Inputs: the change and the store
-/// error. Output: the refusal.
+/// Applies a logged verification row write: a save upserts the row from its kept text,
+/// skipped when a later write released it, and a prune deletes the row. Inputs: the
+/// connection and the change. Output: Ok, `landing_log_row` for a table that is not one of
+/// the three, or the store's refusal with its text, as verification refused before the log.
+fn apply_verification(db: &Connection, change: &Change) -> Result<(), EngineError> {
+    let (name, id) = match change {
+        Change::VerificationSaved(saved) => (&saved.table, &saved.id),
+        Change::VerificationForgotten(gone) => (&gone.table, &gone.id),
+        _ => unreachable!("apply hands over only a verification change"),
+    };
+    let table = VERIFICATION_TABLES
+        .into_iter()
+        .find(|table| *table == name.as_str())
+        .ok_or_else(|| failure("landing_log_row"))?;
+    let key = serde_json::json!(id);
+    if let Change::VerificationSaved(saved) = change {
+        return upsert_kept(db, table, &key, saved.project.as_deref(), &saved.row).map(drop);
+    }
+    let deleted = db
+        .execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])
+        .map_err(|error| EngineError(error.to_string()))?;
+    assert!(deleted <= 1, "a prune deletes at most its row");
+    assert!(VERIFICATION_TABLES.contains(&table));
+    Ok(())
+}
+
+/// The refusal of a change whose table write the store failed: an approval keeps the store's
+/// error text, as verification refused before the log, and every other landing change the
+/// fixed `changes_unavailable` its readers match. Inputs: the change and the store error.
+/// Output: the refusal.
 fn store_refusal(change: &Change, error: &rusqlite::Error) -> EngineError {
     let refusal = match change {
-        Change::BaselineApproved(_)
-        | Change::VerificationSaved(_)
-        | Change::VerificationForgotten(_) => EngineError(error.to_string()),
+        Change::BaselineApproved(_) => EngineError(error.to_string()),
         _ => failure("changes_unavailable"),
     };
     assert!(!refusal.0.is_empty(), "a refusal names its cause");
@@ -869,16 +888,8 @@ fn statements(db: &Connection, change: &Change) -> rusqlite::Result<usize> {
              ON CONFLICT(project) DO UPDATE SET never = 1",
             [&never.project],
         ),
-        Change::VerificationForgotten(gone) => match VERIFICATION_TABLES
-            .into_iter()
-            .find(|table| *table == gone.table)
-        {
-            Some(table) => db.execute(&format!("DELETE FROM {table} WHERE id=?1"), [&gone.id]),
-            None => Err(rusqlite::Error::InvalidParameterName(gone.table.clone())),
-        },
-        Change::ChangeSetSaved(_) | Change::RuleRequestSaved(_) | Change::VerificationSaved(_) => {
-            unreachable!("apply runs a kept row's save on its own")
-        }
+        Change::ChangeSetSaved(_) | Change::RuleRequestSaved(_) => unreachable!("apply keeps it"),
+        Change::VerificationSaved(_) | Change::VerificationForgotten(_) => unreachable!("apply"),
     }
 }
 

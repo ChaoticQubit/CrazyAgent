@@ -2,13 +2,11 @@ use super::{Chunk, SNAPSHOT_ROWS_MAX, cell, failure, has};
 use crate::engine::EngineError;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-/// Keeps a kept table's stored row, its cells by column name, as an owner text in parts
-/// under the row's part holders, releasing every part an earlier write kept past them.
-/// A table without a project column, such as verification candidates and attempts, keeps
-/// its row with no project (QUESTION-1132 A). Inputs: the writer's transaction, the table
-/// and the row's id. Output: the row's project and the part digests, none without the row,
-/// `landing_log_change_set_too_large` past 64 MiB, `landing_log_row` or the owner text's
-/// refusal.
+/// Keeps a kept table's row, its cells by column name, as an owner text in parts under the
+/// row's part holders, releasing every part an earlier write kept past them; a table with no
+/// project column keeps none (QUESTION-1132 A). Inputs: the writer's transaction, the table
+/// and the id. Output: the project and part digests, none without the row, or the refusal
+/// (`landing_log_change_set_too_large` past 64 MiB, `landing_log_row`, the owner text's).
 pub(super) fn keep_row(
     tx: &Transaction<'_>,
     table: &str,
@@ -270,9 +268,8 @@ pub(super) fn table_columns(db: &Connection, table: &str) -> Result<Vec<String>,
     Ok(columns)
 }
 
-/// Every row of a kept table as a snapshot carries it: its id, project (null for a table
-/// without one) and the part digests
-/// of its row, kept in the run's transaction; a row past 64 MiB is left out by code, never
+/// Every row of a kept table as a snapshot carries it: its id, project (null without one) and
+/// part digests, kept in the run's transaction; a row past 64 MiB is left out by code, never
 /// refused, so the store opens; a store without the table has none. Inputs: the run's
 /// transaction and the table. Output: the rows by id, `landing_log_snapshot_rows` past
 /// [`SNAPSHOT_ROWS_MAX`], or the refusal of [`keep_row`].

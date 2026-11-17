@@ -379,6 +379,74 @@ async fn verification_writes_log_their_rows_and_a_rebuild_equals_the_live_rows()
     assert_eq!(verification_rows(&db), live);
 }
 
+/// V250-L9 (QUESTION-1132 A): the 128-row cap's prunes are logged: the 129th candidate of a
+/// task prunes the oldest and its attempt, each a VerificationForgotten that released the
+/// row's kept text, so a rebuild equals the live rows with or without those events, and a
+/// rebuild that skips the last save leaves its row out.
+#[tokio::test]
+async fn a_pruned_row_is_logged_and_released_and_a_skipped_save_changes_the_rebuild() {
+    let mut h = Harness::open().await;
+    h.setup().await;
+    let verify = OwnerVerification::Verify {
+        candidate_id: id("candidate"),
+        attempt_id: id("attempt"),
+    };
+    assert_eq!(h.owner(verify).await, Outcome::Applied);
+    for n in 1..=128 {
+        let register = OwnerVerification::Register {
+            id: id(&format!("candidate-{n:03}")),
+            task_id: TaskId::new("task").unwrap(),
+            snapshot: snapshot(),
+            environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+        };
+        assert_eq!(h.owner(register).await, Outcome::Applied, "register {n}");
+    }
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let kind = crazyagent::landing_log::VERIFICATION_FORGOTTEN;
+    let forgotten: Vec<serde_json::Value> = db
+        .prepare("SELECT body FROM state_log WHERE aggregate='landing' AND kind=?1 ORDER BY seq")
+        .unwrap()
+        .query_map([kind], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| serde_json::from_slice(&body.unwrap()).unwrap())
+        .collect();
+    let pruned = [
+        serde_json::json!({"table": "verification_candidates", "id": "candidate"}),
+        serde_json::json!({"table": "verification_attempts", "id": "attempt"}),
+    ];
+    assert_eq!(forgotten, pruned);
+    let live = verification_rows(&db);
+    assert_eq!(live[1].len(), 128, "the cap holds 128 candidates");
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    assert_eq!(verification_rows(&db), live);
+    let skipped = db
+        .execute(
+            "DELETE FROM state_log WHERE aggregate='landing' AND kind=?1",
+            [kind],
+        )
+        .unwrap();
+    assert_eq!(skipped, 2);
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    assert_eq!(
+        verification_rows(&db),
+        live,
+        "the prune released the rows' texts"
+    );
+    let saved = crazyagent::landing_log::VERIFICATION_SAVED;
+    let last = db
+        .execute(
+            "DELETE FROM state_log WHERE seq=(SELECT MAX(seq) FROM state_log \
+             WHERE aggregate='landing' AND kind=?1)",
+            [saved],
+        )
+        .unwrap();
+    assert_eq!(last, 1);
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    let replayed = verification_rows(&db);
+    assert_eq!(replayed[1].len(), 127, "a skipped save leaves its row out");
+}
+
 /// V250-L9 (QUESTION-1132 A): a register or a Verify the store refuses as a duplicate
 /// prunes nothing, even at the 128-row cap, since a refusal moves no revision and a prune
 /// there would change rows no landing event records.
