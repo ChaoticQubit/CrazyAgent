@@ -4622,6 +4622,19 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     let project = ProjectId::new("kept").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
+    screen.setup_missing = true;
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert!(
+        !screen.confirm_move,
+        "a project with no saved setup has no folder to move"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(plain_problem("project_setup_missing").as_str()),
+        "#383 code F1 r2 (rv-code2 F1): the same sentence as g, not Still loading"
+    );
+    screen.setup_missing = false;
+    screen.problem = None;
     assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
     assert!(
         !screen.confirm_move,
