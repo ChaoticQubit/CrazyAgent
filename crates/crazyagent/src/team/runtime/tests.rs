@@ -21234,6 +21234,68 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     );
 }
 
+/// V243-GIT-FLOOR-SWEEP door 5: on git 2.39 an idle linked lead's pass does not try to land a
+/// resting teammate's work, which an Accept on that git refuses `changes_git_old`: the set
+/// waits for the owner as it was, where each pass kept that refusal as its landing result and
+/// logged `teammate_landing_failed`. On 2.40 the same pass lands it.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_git_2_39_an_idle_lead_leaves_a_resting_teammate_s_work_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let waiting = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+    let kept = || {
+        let (_, set) = crate::landing::change_set(&db, &waiting.id)
+            .unwrap()
+            .expect("greet's change set is kept");
+        (set.state, set.landing_result)
+    };
+
+    crate::landing::shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "nothing lands on git 2.39"
+    );
+    assert_eq!(
+        kept(),
+        (waiting.state, waiting.landing_result),
+        "the set waits for the owner as it was, with no refusal kept"
+    );
+
+    crate::landing::shape_git(Some("git version 2.40.0"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_ne!(
+        linked.tip(&linked.branch),
+        start,
+        "greet's work lands on 2.40"
+    );
+    assert_eq!(kept().0, crate::landing::ChangeState::Accepted);
+    crate::landing::shape_git(None);
+}
+
 /// OP9B-C5: when the lead's change set cannot be recorded after its teammates' work landed
 /// on its task branch, the lead is not told to finish over work the owner cannot see yet, and
 /// the engine records it again at a later pass while the lead stays idle, instead of leaving

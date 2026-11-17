@@ -2062,7 +2062,8 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
 /// The paths a change set's work conflicts on with the tip it lands on (OS-8): git's own
 /// three-way merge of its head onto that tip from where the work is measured, with no
 /// merge driver, run in the owner repository only. None while the tip cannot be read or
-/// already lies in the head's history. A path it changes that carries an owner-configured
+/// already lies in the head's history, and none on a git older than 2.40, which cannot merge
+/// again, so the set waits for the owner. A path it changes that carries an owner-configured
 /// filter or merge driver, which that merge would run, is refused before it runs, as
 /// `update` refuses it. Inputs: the store and the change set. Output: the conflicting
 /// paths, empty for a clean merge, `changes_git_unsupported`, or the plain git code.
@@ -2071,6 +2072,9 @@ pub(super) fn conflicts_with_tip(
     record: &Record,
 ) -> Result<Vec<String>, EngineError> {
     let owner = Repo::open(&record.repository, &record.repository.join(".git"), None)?;
+    if owner.old_git() {
+        return Ok(Vec::new());
+    }
     let Some(tip) = landing_tip(
         db,
         &owner,

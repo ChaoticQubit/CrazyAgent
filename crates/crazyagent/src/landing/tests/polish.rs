@@ -547,12 +547,6 @@ fn an_untracked_owner_file_where_the_set_adds_one_is_never_committed() {
     };
 }
 
-/// Shapes what engine git on this thread reports as its version for the rest of a row.
-/// Input: the line `git version` prints, or None for the real git's own.
-fn shape_git(printed: Option<&str>) {
-    git::VERSION_PRINTED.with(|shaped| *shaped.borrow_mut() = printed.map(str::to_owned));
-}
-
 /// W-GIT-FLOOR: on the git 2.39 of Xcode 16 and its Command Line Tools, a turn still records
 /// its change set and the list and diff still read it, while Accept, which needs
 /// `merge-tree --merge-base` and `check-attr --source`, refuses with `changes_git_old` and

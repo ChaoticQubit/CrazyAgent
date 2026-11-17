@@ -1567,17 +1567,14 @@ fn boundary_check(
     private.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
-    let mut folders = Vec::with_capacity(3);
-    for name in ["project", "home", "tmp"] {
-        let folder = checks.join(id).join(name);
-        private.create(&folder).map_err(|error| refused(&error))?;
-        let plain = canonical(&checks.join(id))
-            .map_err(|error| refused(&error))?
-            .join(name);
-        if canonical(&folder).map_err(|error| refused(&error))? != plain {
+    private.create(&checks).map_err(|error| refused(&error))?;
+    let folders = crate::storage::plugins::check_sandbox_folders(&checks, id)
+        .map_err(|error| refused(&error))?;
+    for folder in &folders {
+        private.create(folder).map_err(|error| refused(&error))?;
+        if canonical(folder).map_err(|error| refused(&error))? != *folder {
             return Err(refused(&"check folder is not the plain folder the engine made").into());
         }
-        folders.push(plain);
     }
     let profiles = checks.join(CHECK_PROFILES);
     private.create(&profiles).map_err(|error| refused(&error))?;
