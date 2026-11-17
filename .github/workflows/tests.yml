@@ -83,7 +83,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   version-grandchild:
-    name: Version run grandchild row and PowerShell start probe on ${{ matrix.runner }}
+    name: Version run and check grandchild rows and PowerShell start probe on ${{ matrix.runner }}
     needs: build-windows
     if: ${{ !cancelled() }}
     strategy:
@@ -142,7 +142,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $alphabet = [char[]]'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
           $secrets = @{}
-          foreach ($user in @('castd', 'castd2')) {
+          foreach ($user in @('castd', 'castd2', 'castd3')) {
             $password = (-join (1..24 | ForEach-Object { $alphabet | Get-Random })) + 'aZ7!'
             net user $user $password /add /y | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "net user $user failed with $LASTEXITCODE" }
@@ -183,15 +183,19 @@ jobs:
             return $process.ExitCode
           }
           $row = @('harnesses::update::run::windows_tests::a_version_run_past_its_limit_ends_with_every_process_it_started', '--exact', '--nocapture', '--test-threads', '1')
+          $silent = @('plugins::check::windows_tests::a_silent_server_times_out_and_every_process_it_started_ends_with_it', '--exact', '--nocapture', '--test-threads', '1')
           $pwsh = (Get-Command pwsh).Source
           $probe = Join-Path $env:GITHUB_WORKSPACE '.github\farm\grandchild-probe.ps1'
           $red = 0
           if ((Invoke-As 'castd' 'row-castd-first' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD $row) -ne 0) { $red = 1 }
           if ((Invoke-As 'castd' 'row-castd-second' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD $row) -ne 0) { $red = 1 }
+          if ((Invoke-As 'castd3' 'silent-castd3-first' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD $silent) -ne 0) { $red = 1 }
+          if ((Invoke-As 'castd3' 'silent-castd3-second' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD $silent) -ne 0) { $red = 1 }
           Invoke-As 'castd2' 'probe-castd2-first' $pwsh $env:GITHUB_WORKSPACE @('-NoProfile', '-File', $probe, 'first') | Out-Null
           Invoke-As 'castd2' 'probe-castd2-second' $pwsh $env:GITHUB_WORKSPACE @('-NoProfile', '-File', $probe, 'second') | Out-Null
           Invoke-As '' 'probe-runner' $pwsh $env:GITHUB_WORKSPACE @('-NoProfile', '-File', $probe, 'runner') | Out-Null
           if ((Invoke-As '' 'row-runner' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD $row) -ne 0) { $red = 1 }
+          if ((Invoke-As '' 'silent-runner' $env:SBX_ENGINE_EXE $env:SBX_ENGINE_CWD $silent) -ne 0) { $red = 1 }
           $rows = $script:codes.GetEnumerator() | ForEach-Object { "| $($_.Key) | $($_.Value) |" }
           @('| run | exit (time) |', '| --- | --- |') + $rows | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
           exit $red
