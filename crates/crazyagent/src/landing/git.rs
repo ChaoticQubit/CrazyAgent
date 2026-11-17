@@ -623,10 +623,13 @@ impl Repo {
     /// This repository with its git calls run under [`WORK_TREE_PROFILE`], for a step on a
     /// linked agent worktree whose agent may still be changing it. Git reads a path with no
     /// check it can hold, so a link swapped in during the step is stopped here. A reading step
-    /// may run on the engine's private index ([`Self::places`]), which it alone writes.
+    /// may run on the engine's private index ([`Self::places`]), which it alone writes. The
+    /// step's git, the Command Line Tools one where installed, need not be the git
+    /// [`Self::open`] checked, so its own version is read under the profile and held to the
+    /// same floors, and kept for the merge check (V243-CONFINED-GIT-FLOOR).
     /// Input: what the step may write. Output: the repository, `changes_workspace_invalid` for
-    /// one that is not a linked worktree's, or `changes_git_unsupported` where no toolchain
-    /// git is found.
+    /// one that is not a linked worktree's, `changes_git_old` for a git older than 2.39, or
+    /// `changes_git_unsupported` where no toolchain git is found or it names no version.
     #[cfg(target_os = "macos")]
     pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
         use std::ffi::OsString;
@@ -679,10 +682,17 @@ impl Repo {
             OsString::from(WORK_TREE_PROFILE),
             git.into_os_string(),
         ]);
-        Ok(Self {
+        let step = Self {
             confinement,
             excludes: Some(setting),
+            version: None,
             ..self.clone()
+        };
+        let found = step.found_version()?;
+        refuse_older(&found, OPEN_VERSION_MIN)?;
+        Ok(Self {
+            version: found.first().copied().zip(found.get(1).copied()),
+            ..step
         })
     }
 
