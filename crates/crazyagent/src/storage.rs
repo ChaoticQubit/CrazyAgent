@@ -1299,13 +1299,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::demo::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
-    crate::sandbox_settings::initialize(connection)?;
-    crate::cleanup_settings::initialize(connection)?;
-    crate::quit_settings::initialize(connection)?;
-    crate::provider_retry::initialize(connection)?;
-    crate::master_step_limit::initialize(connection)?;
-    crate::master_time_limit::initialize(connection)?;
-    crate::master_frame_limit::initialize(connection)?;
+    crate::settings_log::initialize(connection)?;
     crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
@@ -1313,9 +1307,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;
     crate::activity::initialize(connection)?;
-    crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
-    crate::roadmap_status::initialize(connection)?;
     crate::project_overview::initialize(connection)?;
     plugins::initialize(connection)?;
     crate::app_plugins::store::initialize(connection)?;

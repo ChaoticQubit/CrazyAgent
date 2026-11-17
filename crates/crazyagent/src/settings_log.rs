@@ -424,8 +424,8 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
     appender.snapshot(Aggregate::Settings, at_ms, chunks)
 }
 
-/// Makes every settings table that is missing, as the engine's open makes them, so a store
-/// whose open never made one still replays and snapshots all of them. Input: the
+/// Makes every settings table that is missing. The engine's open calls it after its schema
+/// steps, so every store holds all of them, and step 14 calls it before its run. Input: the
 /// connection. Output: Ok, or the first table's refusal.
 #[cfg(any(unix, test))]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
@@ -444,8 +444,8 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 
 /// The first snapshot run of every settings table, for the schema step that puts settings
 /// on the log (step 14): rows written before the log reach replay through it, through the
-/// open's proof. The step makes any settings table missing first, so one table no open made
-/// cannot skip the run. A store without the `state` table has no log to write, and one with
+/// open's proof. The step runs before the open makes the tables, so it makes any one an older
+/// engine never made first. A store without the `state` table has no log to write, and one with
 /// no settings row needs no run, so it moves no revision. Inputs: the step's transaction and
 /// the open's proof. Output: whether a run was appended, or the first refusal.
 #[cfg(any(unix, test))]
