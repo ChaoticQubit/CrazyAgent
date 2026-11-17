@@ -434,7 +434,8 @@ fn a_line_outside_a_turn_or_over_the_bound_or_not_one_object_gives_nothing() {
 #[test]
 fn a_session_id_that_is_not_plain_fails_the_conversation_for_good() {
     let long = "s".repeat(SESSION_BYTES_MAX + 1);
-    let states: [(&str, fn() -> JsonlRpc); 3] = [
+    type State = (&'static str, fn() -> JsonlRpc);
+    let states: [State; 3] = [
         ("idle", || begin(true)),
         ("running", || running(true)),
         ("interrupted", || {
