@@ -1856,7 +1856,7 @@ fn execute(
             code: "settings_read_only".into(),
         }),
         Command::OwnerConversation { mutation } => {
-            crate::conversation::apply(tx, mutation, revision)
+            crate::sessions_log::conversation(tx, mutation, revision)
         }
         Command::OwnerProfile { .. }
         | Command::OwnerSandbox { .. }

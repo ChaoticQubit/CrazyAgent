@@ -901,7 +901,7 @@ fn save_session(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(),
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
-    Ok(())
+    crate::sessions_log::mark_session(tx, session.project_id.as_str(), session.session_id.as_str())
 }
 
 fn cancel_turn(
@@ -1357,6 +1357,7 @@ fn persist_runtime(
         &ClientId::new("master-runtime").map_err(error)?,
         next,
     )?;
+    crate::sessions_log::close_engine(tx, next)?;
     assert!(!tx.is_autocommit());
     Ok(())
 }
@@ -5022,6 +5023,7 @@ fn start_waiting(
         &ClientId::new("master-runtime").map_err(error)?,
         next,
     )?;
+    crate::sessions_log::close_engine(tx, next)?;
     let turn = load_turn(tx, &session, &id, next)?.ok_or_else(|| error("master_turn_missing"))?;
     Ok(Some(turn))
 }
@@ -5157,6 +5159,7 @@ fn execute(
         };
         let changed = tx.execute("INSERT INTO master_sessions(id,project,created,version,phase,body) VALUES (?1,?2,?3,?3,'configured',?4)", params![session.session_id.as_str(), project_id.as_str(), signed(next)?, encode(&session)?]).map_err(error)?;
         assert_eq!(changed, 1);
+        crate::sessions_log::mark_session(tx, project_id.as_str(), session.session_id.as_str())?;
         return Ok(Outcome::Applied);
     }
     let (project, id) = match action {
@@ -5397,6 +5400,8 @@ pub(super) fn apply(
                         session_id,
                     )?;
                 }
+                let at = provenance.revision_after.value();
+                crate::sessions_log::close_owner(&tx, at, admission)?;
                 if let Some(project) = touched(action) {
                     crate::master_sessions::touch(&tx, project, now_ms()?)?;
                 }

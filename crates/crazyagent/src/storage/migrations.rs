@@ -111,6 +111,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 14,
         run: settings_step::settings_on_the_log,
     },
+    Step {
+        to: 15,
+        run: settings_step::sessions_on_the_log,
+    },
 ];
 
 /// Step 13 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written
