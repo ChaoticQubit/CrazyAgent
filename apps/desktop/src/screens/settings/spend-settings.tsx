@@ -37,6 +37,18 @@ export function resetsSourceHelp(value: ResetsSource): string {
   return RESETS_SOURCE_HELP[value];
 }
 
+/** The waits after a usage read shows another Claude free resets source at which Pools reads
+ * the free resets again, so the engine's read on its next step shows within seconds: four
+ * reads over 30 s, as the terminal's Pools (V243-RESETS-SETTING-REFRESH). */
+export const SOURCE_REREAD_MS: readonly number[] = [6_000, 12_000, 20_000, 30_000];
+
+/** The free resets rereads one usage read calls for. Inputs: the source the read before named
+ * and the one this read names, each undefined when not read. Output: `SOURCE_REREAD_MS` when
+ * both are known and differ, else none. */
+export function sourceRereads(before: ResetsSource | undefined, after: ResetsSource | undefined): readonly number[] {
+  return before !== undefined && after !== undefined && before !== after ? SOURCE_REREAD_MS : [];
+}
+
 const CONFIRM_HELP: Record<SpendConfirm, string> = {
   confirm_each: "Each free reset asks you before CrazyAgent uses it.",
   one_click: "A free reset is used as soon as you click.",
