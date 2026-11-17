@@ -8832,8 +8832,9 @@ impl TeamRuntime {
     /// task branch for `land_teammates`, and that of each one that ended before it rested,
     /// whose saved edits no rest lands (team-20 r1 M1), telling the lead the files of one
     /// that conflicts; on a git older than 2.40 none is tried and each waits for the owner.
-    /// Takes the project, the lead and its repository, worktree and git folder. Returns the names of the teammates whose work landed and the branch, None when
-    /// none landed, or a SQLite or coordination failure.
+    /// Takes the project, the lead and its repository, worktree and git folder. Returns the
+    /// names of the teammates whose work landed and the branch, None when none landed, or a
+    /// SQLite or coordination failure.
     fn accept_resting(
         &mut self,
         project: &ProjectId,
