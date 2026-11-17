@@ -267,7 +267,7 @@ impl ModelProxy {
     }
 
     /// How many passes the accept thread has made over its listeners. Output: the count.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn serve_passes(&self) -> u64 {
         self.shared.serve_passes.load(Ordering::SeqCst)
     }
