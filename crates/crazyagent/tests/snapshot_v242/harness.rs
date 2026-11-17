@@ -260,8 +260,9 @@ pub(super) fn home_files(home: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
-/// The headless launch spec of one built command: program, arguments, variable names,
-/// working folder and the files below the account home. Inputs: the command and the home.
+/// The headless launch spec of one built command: program, arguments, variable names
+/// without `SDKROOT` and whether it came as the engine gives it on this Mac, working folder
+/// and the files below the account home. Inputs: the command and the home.
 /// Output: the surface as JSON.
 fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
     let argv = built
@@ -273,6 +274,7 @@ fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
         .map(|(name, _)| utf8(name))
         .collect::<Result<Vec<String>, String>>()?;
     env_names.sort();
+    let sdkroot = super::launch::sdkroot_fact(&mut env_names)?;
     let cwd = built
         .get_current_dir()
         .map(|dir| utf8(dir.as_os_str()))
@@ -281,6 +283,7 @@ fn headless_spec(built: &Command, home: &Path) -> Result<Value, String> {
         "program": utf8(built.get_program())?,
         "argv": argv,
         "env_names": env_names,
+        "sdkroot": sdkroot,
         "cwd": cwd,
         "home_files": home_files(home)?,
     }))
@@ -471,11 +474,12 @@ fn headless_refusals(scratch: &Path) -> Result<Value, String> {
 }
 
 /// The pane spec of one built interactive command: argv, working folder, variable names in
-/// the order the pane gets them, where the harness records its session (by kind, as a place
+/// the order the pane gets them without `SDKROOT` and whether it came as the engine gives it, where the harness records its session (by kind, as a place
 /// below the account home) and the files below the home. Inputs: the command and the home.
 /// Output: the surface as JSON.
 fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
-    let env_names: Vec<&str> = built.env.iter().map(|(name, _)| name.as_str()).collect();
+    let mut env_names: Vec<String> = built.env.iter().map(|(name, _)| name.clone()).collect();
+    let sdkroot = super::launch::sdkroot_fact(&mut env_names)?;
     let transcript = match &built.transcript {
         Transcript::CodexRollouts { sessions } => json!({
             "kind": "codex_rollouts",
@@ -496,6 +500,7 @@ fn pane_spec(built: &InteractiveCommand, home: &Path) -> Result<Value, String> {
         "argv": built.argv,
         "cwd": utf8(built.cwd.as_os_str())?,
         "env_names": env_names,
+        "sdkroot": sdkroot,
         "transcript": transcript,
         "home_files": home_files(home)?,
     }))

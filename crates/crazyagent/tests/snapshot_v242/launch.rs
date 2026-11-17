@@ -1,3 +1,4 @@
+use super::Scenario;
 use super::e2e_support::{Engine, Owner, stop_tmux};
 use super::harness::{home_files, recorded, set_level};
 use super::provider::{Recorder, as_owner, engine, with_owner};
@@ -18,6 +19,45 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Lists the engine launch scenarios: one Codex sub agent, tools off, delegated by the owner
+/// at each access level, captured as the engine itself launched it.
+pub(super) fn scenarios() -> Vec<Scenario> {
+    let scenario = |name: &'static str, capture: fn(&Path) -> Result<Value, String>| Scenario {
+        kind: "harness",
+        name,
+        capture,
+    };
+    vec![
+        scenario("engine-codex-sub-sandboxed", engine_codex_sub_sandboxed),
+        scenario("engine-codex-sub-own-branch", engine_codex_sub_own_branch),
+        scenario("engine-codex-sub-full-access", engine_codex_sub_full_access),
+    ]
+}
+
+/// Captures the launch of the Codex sub agent the owner delegates one task to, tools off,
+/// at one access level. Inputs: the scratch folder and the level. Output: the capture.
+fn engine_codex_sub(scratch: &Path, access: AgentAccess) -> Result<Value, String> {
+    let team = Team::start(scratch, access, false)?;
+    team.act(TeamAction::Delegate {
+        project_id: team.project.clone(),
+        harness: Some(HARNESS.to_owned()),
+        prompt: "Reply with the single word done.".to_owned(),
+    })?;
+    team.launched(AgentRole::Sub)
+}
+
+fn engine_codex_sub_sandboxed(scratch: &Path) -> Result<Value, String> {
+    engine_codex_sub(scratch, AgentAccess::Sandboxed)
+}
+
+fn engine_codex_sub_own_branch(scratch: &Path) -> Result<Value, String> {
+    engine_codex_sub(scratch, AgentAccess::OwnBranch)
+}
+
+fn engine_codex_sub_full_access(scratch: &Path) -> Result<Value, String> {
+    engine_codex_sub(scratch, AgentAccess::Full)
+}
 
 /// The project every engine launch scenario sets up.
 const PROJECT: &str = "snapshot-p2-team";
@@ -332,8 +372,9 @@ impl Team {
 
     /// Captures one launch: the arguments and variable names the stand-in was started
     /// with, the files in the agent's own home and the Seatbelt profile the engine
-    /// installed for it, with the stand-in's folder read as [`HARNESS_TOKEN`], the rules
-    /// naming this Mac's own tool installs taken out and stable facts in their place.
+    /// installed for it (none when it installed none), with the stand-in's folder read as
+    /// [`HARNESS_TOKEN`], the rules naming this Mac's own tool installs taken out and stable
+    /// facts in their place.
     /// Input: the agent id. Output: the capture.
     fn capture(&self, id: i64) -> Result<Value, String> {
         let record = self.record(id);
@@ -350,15 +391,20 @@ impl Team {
         let sdkroot = sdkroot_fact(&mut env_names)?;
         let state = self.state();
         let home = crazyagent::team::runtime::agent_home(&state, id);
-        let profile = bounded(&crazyagent::team::runtime::agent_profile(&state, id))?
-            .replace(&self.stand_in, HARNESS_TOKEN);
-        let (profile, machine_reads) = without_machine_reads(&profile, &machine_folders()?);
+        let installed = crazyagent::team::runtime::agent_profile(&state, id);
+        let (profile, machine_reads) = if installed.exists() {
+            let text = bounded(&installed)?.replace(&self.stand_in, HARNESS_TOKEN);
+            let (text, facts) = without_machine_reads(&text, &machine_folders()?);
+            (Some(text), facts)
+        } else {
+            (None, Value::Null)
+        };
         Ok(json!({
             "argv": argv,
             "env_names": env_names,
             "sdkroot": sdkroot,
             "home_files": home_files(&home)?,
-            "profile": profile.lines().collect::<Vec<&str>>(),
+            "profile": profile.as_deref().map(|text| text.lines().collect::<Vec<&str>>()),
             "machine_reads": machine_reads,
         }))
     }

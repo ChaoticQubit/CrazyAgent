@@ -53,6 +53,7 @@ fn scenarios() -> Vec<Scenario> {
         capture: masking_example,
     }];
     all.extend(harness::scenarios());
+    all.extend(launch::scenarios());
     all.extend(provider::scenarios());
     all
 }
