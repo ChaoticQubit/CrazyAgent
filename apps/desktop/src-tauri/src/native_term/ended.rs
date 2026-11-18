@@ -10,12 +10,15 @@ pub const FINAL_CODES: [&str; 6] = [
     "native_terminal_gpu",
 ];
 
-/// Whether a view's end is final, so a view that follows its agent stops opening it again.
-/// Input: the plain code. Output: the answer.
+/// Whether a view's end is final, so a view that follows its agent stops opening it again:
+/// true for `FINAL_CODES`; false for an agent that ended, restarted or has not started, a
+/// lost connection or any other code, which the page retries up to its cap as the xterm
+/// panel retries every end. Input: the plain code. Output: the answer.
 pub fn ended_final(code: &str) -> bool {
     assert!(!code.is_empty());
-    let _ = FINAL_CODES;
-    false
+    let last = FINAL_CODES.contains(&code);
+    assert!(!last || code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
+    last
 }
 
 #[cfg(test)]

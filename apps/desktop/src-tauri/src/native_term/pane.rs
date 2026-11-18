@@ -84,6 +84,27 @@ pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
     text.into_bytes()
 }
 
+/// Makes each run of carriage returns and line feeds one space, as the xterm panel's seed
+/// does for an app without bracketed paste. Input: the text. Output: the text with no line
+/// break, never longer.
+fn flat_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut breaking = false;
+    for c in text.chars() {
+        let line_break = c == '\r' || c == '\n';
+        if line_break && !breaking {
+            out.push(' ');
+        }
+        if !line_break {
+            out.push(c);
+        }
+        breaking = line_break;
+    }
+    assert!(out.len() <= text.len());
+    assert!(!out.contains(['\r', '\n']));
+    out
+}
+
 /// One input to a native view from its host. Cells are column and line on the visible
 /// screen; `option` is the Option key, which forces a local selection while the pane reads
 /// the mouse; `clicks` is the click count, which selects a word on 2 and a line on 3. Text
@@ -140,20 +161,21 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// A mirror with no terminal until its attach comes. Inputs: the view id and whether its
+    /// A mirror with no terminal until its attach comes, its keys on or off from the start,
+    /// so no input before a later keys call can type. Inputs: the view id and whether its
     /// keys go through. Output: the pane.
     pub fn new(view: u64, keys: bool) -> Pane {
         assert!(view > 0);
-        let _ = keys;
         let pane = Pane {
             view,
             term: None,
             parser: Processor::new(),
             dirty: false,
             button_down: false,
-            keys: true,
+            keys,
         };
         assert!(!pane.ready());
+        assert_eq!(pane.keys, keys);
         pane
     }
 
@@ -337,15 +359,36 @@ impl Pane {
         Action::Local
     }
 
-    /// Takes a drafted message as a paste. Input: the text. Output: the paste, or a code.
+    /// Takes a drafted message as the owner's paste, as the xterm panel's console seed does:
+    /// only with keys on, and with each run of line breaks made one space unless the app reads
+    /// pastes bracketed, since a bare line break would press Enter. Input: the text. Output:
+    /// the paste, nothing for empty text, or a plain code.
     pub fn seed(&mut self, text: &str) -> Result<Action, &'static str> {
         if !self.ready() {
             return Err("native_terminal_view_unknown");
         }
-        assert!(text.len() <= PASTE_BYTES_MAX * 2);
-        Ok(Action::Paste {
-            text: text.to_owned(),
-        })
+        if !self.keys {
+            return Err("native_terminal_keys_off");
+        }
+        if text.len() > PASTE_BYTES_MAX {
+            return Err("native_terminal_paste_too_large");
+        }
+        if text.is_empty() {
+            return Ok(Action::Nothing);
+        }
+        let bracketed = self
+            .term
+            .as_ref()
+            .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
+        let text = if bracketed {
+            text.to_owned()
+        } else {
+            flat_lines(text)
+        };
+        self.snap_bottom();
+        assert!(!text.is_empty() && text.len() <= PASTE_BYTES_MAX);
+        assert!(bracketed || !text.contains(['\r', '\n']));
+        Ok(Action::Paste { text })
     }
 
     fn paste(&mut self, text: String) -> Action {
