@@ -2129,3 +2129,133 @@ async fn rejected_account_not_waited() {
     .await
     .expect("the rejected account case exceeded 60 seconds");
 }
+
+/// A Claude stand-in whose sign-out always fails and whose status still reads signed in, the
+/// harness left signed in by a sign-out that could not finish.
+const CLAUDE_SIGN_OUT_FAILS: &str = r#"#!/bin/sh
+case "$2" in
+login) exit 0 ;;
+logout) exit 1 ;;
+status)
+  printf '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","configDirectory":"%s"}' "$CLAUDE_CONFIG_DIR"
+  exit 0 ;;
+esac
+exit 2
+"#;
+
+impl Restart {
+    /// Whether the stand-in ran a harness sign-out, which leaves its marker file.
+    /// Output: true once the marker exists.
+    fn harness_signed_out(&self) -> bool {
+        self.root.path().join("claude.logged-out").exists()
+    }
+
+    /// Swaps the stand-in for one whose sign-out always fails, before the next engine run.
+    /// Output: none; the next run registers the failing stand-in.
+    fn fail_sign_out(&self) {
+        assert!(!self.installed);
+        std::fs::write(&self.claude, CLAUDE_SIGN_OUT_FAILS).unwrap();
+        std::fs::set_permissions(&self.claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+impl Run {
+    /// Asks for a sign-out while storage holds every job at its claim, so it outlasts its
+    /// bound and is pending, then lets the storage worker die at its next claim, as the
+    /// engine does when it dies with the sign-out pending. Input: the case. Output: none.
+    async fn sign_out_then_die(&self, restart: &Restart) {
+        let scope = self.scope(restart.config().id).await;
+        let path = std::fs::canonicalize(restart.root.path())
+            .unwrap()
+            .join("engine.db");
+        let hold = crate::storage::hold_claims(&path);
+        let sent = self
+            .client()
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout-pending"),
+                scope,
+            })
+            .await;
+        assert_eq!(
+            sent.map(|reply| reply.fact.action).map_err(|error| error.0),
+            Err("access_change_pending".to_owned()),
+            "the sign-out outlasts its bound and is pending"
+        );
+        crate::storage::die_at_claim(&path);
+        drop(hold);
+    }
+
+    /// Stops a run whose storage worker died, whatever its stop reports.
+    /// Output: none once the run's task ended.
+    async fn stop_dead(self) {
+        self.stop.send_replace(true);
+        let Run { handle, task, .. } = self;
+        drop(handle);
+        let _ = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("a run whose storage died still stops within 10 seconds");
+    }
+}
+
+/// V243-NARROWING-DURABLE: a sign-out still pending when the engine dies takes effect at the
+/// next start. The profile never launches again on its old sign-in, the engine-start re-proof
+/// runs the harness sign-out, and the account reads Not signed in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_pending_when_the_engine_dies_signs_the_profile_out_at_the_next_start() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        assert_eq!(restart.launch(), Ok(()));
+        first.sign_out_then_die(&restart).await;
+        first.stop_dead().await;
+        let second = restart.start().await;
+        assert!(cleared(&second.handle.reproving()).await);
+        assert!(
+            restart.launch().is_err(),
+            "the leftover sign-out is lost: the profile launches on its old sign-in"
+        );
+        assert!(
+            restart.harness_signed_out(),
+            "the engine-start re-proof runs the harness sign-out"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the leftover sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE: a leftover sign-out whose harness sign-out fails at the next start
+/// keeps the profile from launching although the harness still reads signed in, and the
+/// Accounts page says why the sign-out did not finish.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_leftover_sign_out_the_harness_cannot_finish_keeps_the_profile_blocked_and_says_why() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        first.sign_out_then_die(&restart).await;
+        first.stop_dead().await;
+        restart.fail_sign_out();
+        let second = restart.start().await;
+        assert!(cleared(&second.handle.reproving()).await);
+        assert!(
+            restart.launch().is_err(),
+            "a failed harness sign-out leaves the profile blocked"
+        );
+        let account = second.account().await;
+        assert_eq!(account.status, AccountStatus::NotSignedIn);
+        assert!(
+            account
+                .status_label
+                .strip_prefix("Sign-out not finished: ")
+                .is_some_and(|reason| !reason.is_empty()),
+            "the Accounts page says why the sign-out did not finish: {:?}",
+            account.status_label
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the failed leftover sign-out case exceeded 60 seconds");
+}
