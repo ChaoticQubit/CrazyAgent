@@ -626,7 +626,11 @@ mod run {
     /// is written, and that keeps fewer than [`KEPT_RUNS_MAX`] earlier finished runs.
     pub(crate) fn run(request: &Request<'_>) -> Result<String, &'static str> {
         let pool = super::cleanup_pool(request.project, request.pool)?;
-        let root = request.root.canonicalize().map_err(|_| UNAVAILABLE)?;
+        let root = request
+            .root
+            .canonicalize()
+            .map(crate::projects_home::one_spelling)
+            .map_err(|_| UNAVAILABLE)?;
         let stem = run_stem(crate::team::now_ms());
         let _slot = Slot::take(&root, request.project, &stem, request.holds_seat)?;
         let home = private_folder(root.join(FOLDER)).ok_or(UNAVAILABLE)?;
