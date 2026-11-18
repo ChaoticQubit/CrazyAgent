@@ -194,45 +194,19 @@ fn the_codex_system_skills_flag_deny_compiles_clean_and_holds_for_every_spelling
             "{path}"
         );
     }
-    let (flagged, pid) = run(
-        &sandbox,
-        &profile,
-        "/usr/bin/chflags",
-        &["uchg", kept.to_str().unwrap()],
-    );
-    pids.push(pid);
-    assert!(!flagged, "a file the next launch keeps takes no flag");
-    assert_eq!(fs::metadata(&kept).unwrap().st_flags() & UF_IMMUTABLE, 0);
-    let (flagged, pid) = run(
-        &sandbox,
-        &profile,
-        "/usr/bin/chflags",
-        &["uchg", homed.to_str().unwrap()],
-    );
-    pids.push(pid);
-    assert!(
-        flagged,
-        "a plain file in the agent's home takes one, so copies that keep flags work there"
-    );
-    assert_eq!(
-        fs::metadata(&homed).unwrap().st_flags() & UF_IMMUTABLE,
-        UF_IMMUTABLE
-    );
-    let (flagged, pid) = run(
-        &sandbox,
-        &profile,
-        "/usr/bin/chflags",
-        &["uchg", own.to_str().unwrap()],
-    );
-    pids.push(pid);
-    assert!(
-        flagged,
-        "a plain file in the agent's own worktree still takes one"
-    );
-    assert_eq!(
-        fs::metadata(&own).unwrap().st_flags() & UF_IMMUTABLE,
-        UF_IMMUTABLE
-    );
+    for (path, takes) in [(&kept, false), (&homed, true), (&own, true)] {
+        let shown = path.display();
+        let (flagged, pid) = run(
+            &sandbox,
+            &profile,
+            "/usr/bin/chflags",
+            &["uchg", path.to_str().unwrap()],
+        );
+        pids.push(pid);
+        assert_eq!(flagged, takes, "{shown}");
+        let set = fs::metadata(path).unwrap().st_flags() & UF_IMMUTABLE;
+        assert_eq!(set == UF_IMMUTABLE, takes, "{shown}");
+    }
     log_caught_up(&case.profiles);
     let errors = compile_errors(&pids);
     assert!(errors.is_empty(), "{errors:#?}");
