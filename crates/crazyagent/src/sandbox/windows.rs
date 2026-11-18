@@ -73,7 +73,7 @@ impl WindowsSandbox {
     /// profile its next launch uses; the existing `grants` folder, where the helper records
     /// what it grants each container, must lie outside them too. Inputs: the policy, the
     /// helper, the profile path and the grants folder. Output: the sandbox, `Unavailable` for
-    /// a missing helper or an endpoint limit, `Unreadable` for a read root no app container
+    /// a missing helper or a loopback limit, `Unreadable` for a read root no app container
     /// may read and this user cannot change ([`crazyagent_win_sandbox::unreadable_root`]),
     /// which the helper could not open to the agent, or `Invalid` for an unsafe path or
     /// policy. Before the profile, it makes each missing guarded folder (see
