@@ -177,13 +177,32 @@ pub fn reads_tree(acl: &[u8], sid: &[u8]) -> bool {
     reads(acl, sid) && passes(OBJECT_INHERIT) && passes(CONTAINER_INHERIT)
 }
 
+/// Whether the list lets `sid` read a read root: a folder with what lies below it
+/// ([`reads_tree`]), a file itself ([`reads`]) (V244-WIN-ROLE-READS-TREE). Inputs: the access
+/// list bytes, the SID bytes and whether the root is a folder. Output: true when it does;
+/// false for a malformed list.
+pub fn reads_root(acl: &[u8], sid: &[u8], folder: bool) -> bool {
+    if folder {
+        reads_tree(acl, sid)
+    } else {
+        reads(acl, sid)
+    }
+}
+
 /// Whether the boundary refuses a read root before its helper runs: neither ALL APPLICATION
-/// PACKAGES nor the container reads the path itself ([`reads`]), so the helper would add the
+/// PACKAGES nor the container reads the root ([`reads_root`]), so the helper would write the
 /// container's entry, and this user cannot change the list, so that write fails. `changeable`
-/// is asked only for such a root. Inputs: the list, the container SID and the change probe.
-/// Output: true to refuse.
-pub fn read_root_refused(acl: &[u8], container: &[u8], changeable: impl FnOnce() -> bool) -> bool {
-    !reads(acl, &ALL_APPLICATION_PACKAGES) && !reads(acl, container) && !changeable()
+/// is asked only for such a root. Inputs: the list, the container SID, whether the root is a
+/// folder and the change probe. Output: true to refuse.
+pub fn read_root_refused(
+    acl: &[u8],
+    container: &[u8],
+    folder: bool,
+    changeable: impl FnOnce() -> bool,
+) -> bool {
+    !reads_root(acl, &ALL_APPLICATION_PACKAGES, folder)
+        && !reads_root(acl, container, folder)
+        && !changeable()
 }
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
@@ -969,7 +988,7 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         let unprobed = || -> bool { panic!("a root every package reads was probed") };
-        assert!(!read_root_refused(&packages, &CONTAINER, unprobed));
+        assert!(!read_root_refused(&packages, &CONTAINER, false, unprobed));
         let admins_only = acl(&[
             ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
             ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &SYSTEM),
@@ -983,8 +1002,10 @@ mod tests {
         let mut malformed = packages.clone();
         malformed[16] = 2;
         for list in [&admins_only, &inherit_only, &malformed] {
-            assert!(read_root_refused(list, &CONTAINER, || false));
-            assert!(!read_root_refused(list, &CONTAINER, || true));
+            for folder in [false, true] {
+                assert!(read_root_refused(list, &CONTAINER, folder, || false));
+                assert!(!read_root_refused(list, &CONTAINER, folder, || true));
+            }
         }
     }
 
@@ -998,8 +1019,40 @@ mod tests {
             ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &CONTAINER),
         ]);
         let unprobed = || -> bool { panic!("a root the container reads was probed") };
-        assert!(!read_root_refused(&own, &CONTAINER, unprobed));
-        assert!(read_root_refused(&own, &TEAMMATE, || false));
+        assert!(!read_root_refused(&own, &CONTAINER, false, unprobed));
+        assert!(read_root_refused(&own, &TEAMMATE, false, || false));
+    }
+
+    /// V244-WIN-ROLE-READS-TREE: a read root folder counts as read only through entries that
+    /// pass read and run on to its files and subfolders, so one every package or the container
+    /// reads for that folder only is refused when this user cannot change it, while the same
+    /// list on a file, the `C:\Program Files` split and a whole inheritable grant are not.
+    #[test]
+    fn a_read_root_folder_read_only_for_itself_is_refused_when_this_user_cannot_change_it() {
+        const AAP: [u8; 16] = ALL_APPLICATION_PACKAGES;
+        let unprobed = || -> bool { panic!("a root that is read was probed") };
+        for sid in [&AAP[..], &CONTAINER[..]] {
+            let folder_only = acl(&[ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, sid)]);
+            assert!(reads_root(&folder_only, sid, false));
+            assert!(!reads_root(&folder_only, sid, true));
+            assert!(!read_root_refused(
+                &folder_only,
+                &CONTAINER,
+                false,
+                unprobed
+            ));
+            assert!(read_root_refused(&folder_only, &CONTAINER, true, || false));
+            assert!(!read_root_refused(&folder_only, &CONTAINER, true, || true));
+        }
+        let program_files = acl(&[
+            ace(ACCESS_ALLOWED, 0x0b, 0xa000_0000, &AAP),
+            ace(ACCESS_ALLOWED, 0x10, READ_EXECUTE, &AAP),
+        ]);
+        let granted = acl(&[ace(ACCESS_ALLOWED, 0x03, READ_EXECUTE, &CONTAINER)]);
+        for list in [&program_files, &granted] {
+            assert!(!read_root_refused(list, &CONTAINER, true, unprobed));
+        }
+        assert!(read_root_refused(&granted, &TEAMMATE, true, || false));
     }
 
     const TEAMMATE: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];
