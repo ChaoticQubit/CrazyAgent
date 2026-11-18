@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerClientKind;
 use crate::engine::owner::native_auth::NativeAuthLogout;
-use crate::protocol::RequestId;
+use crate::protocol::{CredentialRef, RequestId};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -30,8 +30,10 @@ pub(crate) struct Intent {
     pub(crate) change: Change,
 }
 
-/// The narrowing change an intent keeps: a client revoked at the epoch the owner saw, or a
-/// sign-out of one managed profile. No kind that widens access can be written or read.
+/// The narrowing change an intent keeps: a client revoked at the epoch the owner saw, a
+/// sign-out of one managed profile, an account removed, the key file of an account whose key
+/// was replaced, or one secret detached from an MCP server by its name. No kind that widens
+/// access can be written or read, and none holds a secret value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub(crate) enum Change {
@@ -41,6 +43,17 @@ pub(crate) enum Change {
         expected_epoch: i64,
     },
     Logout(NativeAuthLogout),
+    RemoveAccount {
+        id: CredentialRef,
+    },
+    KeyReplaced {
+        id: CredentialRef,
+        credential: CredentialRef,
+    },
+    DetachSecret {
+        id: String,
+        name: String,
+    },
 }
 
 #[cfg(unix)]
@@ -90,14 +103,22 @@ pub(crate) struct Listing {
     pub(crate) refused: usize,
 }
 
-/// Whether an intent's fields are in bounds: a database id of 64 lowercase hex digits, and a
-/// sign-out scoped to that same database. Input: the intent. Output: the verdict.
+/// Whether an intent's fields are in bounds: a database id of 64 lowercase hex digits, a
+/// sign-out scoped to that same database, and an MCP server id and secret name as storage
+/// keeps them. Account ids and key references are checked as they are read.
+/// Input: the intent. Output: the verdict.
 #[cfg(unix)]
 fn valid(intent: &Intent) -> bool {
     crate::engine::owner::is_hex_id(&intent.db_instance)
         && match &intent.change {
             Change::Revoke { expected_epoch, .. } => *expected_epoch >= 1,
             Change::Logout(logout) => logout.scope.expected_database_instance == intent.db_instance,
+            Change::RemoveAccount { .. } | Change::KeyReplaced { .. } => true,
+            Change::DetachSecret { id, name } => {
+                (1..=64).contains(&id.len())
+                    && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && crate::plugins::validate_secret_name(name).is_ok()
+            }
         }
 }
 

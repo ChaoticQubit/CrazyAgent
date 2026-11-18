@@ -535,11 +535,30 @@ impl SettingsSources {
     }
 }
 
+/// Who journaled a settings publication: an owner's request, or the open's replay of a kept
+/// account removal, which has no owner and may only remove that one connection. Only a
+/// replay's journal names its origin, so an owner's journal reads as before this field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Origin {
+    #[default]
+    Owner,
+    NarrowingReplay,
+}
+
+impl Origin {
+    fn is_owner(&self) -> bool {
+        *self == Self::Owner
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pending {
     request: OwnerRequest,
     admission: Admission,
+    #[serde(default, skip_serializing_if = "Origin::is_owner")]
+    origin: Origin,
     revision: u64,
     old: SourceState,
     new_global: String,
@@ -876,6 +895,7 @@ pub(super) fn apply(
             Pending {
                 request: request.clone(),
                 admission: a.clone(),
+                origin: Origin::Owner,
                 revision,
                 old,
                 new_global,

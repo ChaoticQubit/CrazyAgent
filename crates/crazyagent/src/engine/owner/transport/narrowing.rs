@@ -6,6 +6,50 @@ use std::collections::VecDeque;
 const DRAIN_FIRST_WAIT: Duration = Duration::from_millis(100);
 const DRAIN_LONGEST_WAIT: Duration = Duration::from_secs(2);
 
+#[cfg(all(test, unix))]
+static DRAIN_HELD: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Holds the drainer of the engine at `root` before it lands its next change, until the
+/// returned guard drops, so a row orders an owner change before a drained one. Keyed by the
+/// root, so the drainers of other rows run on. Input: the engine root. Output: the guard.
+#[cfg(all(test, unix))]
+pub(super) fn hold_drain(root: &Path) -> DrainHold {
+    let mut held = DRAIN_HELD.lock().unwrap();
+    assert!(!held.iter().any(|other| other == root));
+    held.push(root.to_path_buf());
+    DrainHold(root.to_path_buf())
+}
+
+/// A hold from [`hold_drain`]; dropping it lets that drainer go on.
+#[cfg(all(test, unix))]
+pub(super) struct DrainHold(PathBuf);
+
+#[cfg(all(test, unix))]
+impl Drop for DrainHold {
+    fn drop(&mut self) {
+        let mut held = DRAIN_HELD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = held.len();
+        held.retain(|other| *other != self.0);
+        assert_eq!(held.len() + 1, before);
+    }
+}
+
+/// Waits while a row holds the drainer of the engine at `root`, polling every 20 ms.
+/// Input: the engine root. Output: none once no hold names it.
+#[cfg(all(test, unix))]
+async fn wait_while_drain_held(root: &Path) {
+    while DRAIN_HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|other| other == root)
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A narrowing change whose submit storage refused while the engine runs, kept on disk and
 /// queued for the one drainer, which submits the same job again until storage takes it. Each
 /// carries its intent's name: storage ends a revocation's by it, and runs a sign-out only
@@ -163,6 +207,8 @@ impl OwnerRuntimeHandle {
                     }
                 }
             };
+            #[cfg(all(test, unix))]
+            wait_while_drain_held(&self.authority.root.path).await;
             self.land(next).await;
             if let Ok(mut drain) = self.authority.drain.lock() {
                 drain.pending.pop_front();

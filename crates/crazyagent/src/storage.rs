@@ -131,40 +131,59 @@ fn wait_while_held(path: &Path, stage: Stage) {
     }
 }
 
+/// A point where a row makes the storage worker stop as the worker of an engine that dies
+/// does: at the claim of its next job, or right after an MCP secret attach commits, before
+/// it answers or ends anything that attach supersedes.
 #[cfg(all(test, unix))]
-static DYING: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Death {
+    Claim,
+    AttachCommitted,
+}
+
+#[cfg(all(test, unix))]
+static DYING: std::sync::Mutex<Vec<(std::path::PathBuf, Death)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Marks the storage worker of the database at `path` to stop at its next claim, running
 /// neither that job nor any queued after it, as the worker of an engine that dies does.
 /// Input: the path given to `Storage::open`. Output: none; the mark is used up once.
 #[cfg(all(test, unix))]
 pub(crate) fn die_at_claim(path: &Path) {
-    let mut dying = DYING.lock().unwrap();
-    assert!(!dying.iter().any(|other| other == path));
-    dying.push(path.to_path_buf());
+    die_at(path, Death::Claim);
 }
 
-/// Whether the mark [`die_at_claim`] left for `path` is still unused, so a row waits until
-/// the worker stopped before it opens the same database again. Input: the database path.
-/// Output: true while the mark waits for a claim.
+/// Marks the storage worker of the database at `path` to stop at `death`, running nothing
+/// after it, as the worker of an engine that dies there does. One mark per database.
+/// Inputs: the path given to `Storage::open` and the point. Output: none; used up once.
+#[cfg(all(test, unix))]
+pub(crate) fn die_at(path: &Path, death: Death) {
+    let mut dying = DYING.lock().unwrap();
+    assert!(!dying.iter().any(|(other, _)| other == path));
+    dying.push((path.to_path_buf(), death));
+}
+
+/// Whether a mark [`die_at`] left for `path` is still unused, so a row waits until the
+/// worker stopped before it opens the same database again. Input: the database path.
+/// Output: true while the mark waits for its point.
 #[cfg(all(test, unix))]
 pub(crate) fn dying(path: &Path) -> bool {
     DYING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .any(|other| other == path)
+        .any(|(other, _)| other == path)
 }
 
-/// Takes the mark [`die_at_claim`] left for `path`. Input: the database path.
-/// Output: true once for a marked worker, which then stops.
+/// Takes the mark [`die_at`] left for `path` at `death`. Inputs: the database path and the
+/// point the worker reached. Output: true once for a worker marked there, which then stops.
 #[cfg(all(test, unix))]
-fn dies(path: &Path) -> bool {
+fn dies(path: &Path, death: Death) -> bool {
     let mut dying = DYING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let before = dying.len();
-    dying.retain(|other| other != path);
+    dying.retain(|other| *other != (path.to_path_buf(), death));
     assert!(before - dying.len() <= 1);
     before != dying.len()
 }
@@ -804,7 +823,7 @@ impl Storage {
                             #[cfg(all(test, unix))]
                             wait_while_held(&path, Stage::Claim);
                             #[cfg(all(test, unix))]
-                            if dies(&path) {
+                            if dies(&path, Death::Claim) {
                                 break;
                             }
                             if !claim.decide(TAKEN) {
@@ -1559,6 +1578,8 @@ impl Storage {
                             let _ = reply.send(runner_read(&mut connection, &config, &path, &command));
                         }
                         Job::Plugins(command, reply) => {
+                            #[cfg(all(test, unix))]
+                            let attach = matches!(command, plugins::Command::AttachSecret { .. });
                             let result = if readonly {
                                 Err(error("plugins_readonly"))
                             } else {
@@ -1567,6 +1588,10 @@ impl Storage {
                                     None => Err(error("plugin_store_unavailable")),
                                 }
                             };
+                            #[cfg(all(test, unix))]
+                            if attach && result.is_ok() && dies(&path, Death::AttachCommitted) {
+                                break;
+                            }
                             let _ = reply.send(result);
                         }
                         Job::Setup(command, reply) => {
@@ -3436,6 +3461,9 @@ fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
             narrowing::Change::Logout(logout) => {
                 native_auth::replay_logout(db, &intent.db_instance, logout)
             }
+            narrowing::Change::RemoveAccount { .. }
+            | narrowing::Change::KeyReplaced { .. }
+            | narrowing::Change::DetachSecret { .. } => Err(error("narrowing_replay_unbuilt")),
         };
         match replayed {
             Ok(outcome) => {

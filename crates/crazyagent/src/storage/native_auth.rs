@@ -1901,7 +1901,10 @@ pub(crate) fn superseded_sign_outs(
         .filter(|(_, intent)| intent.db_instance == begun.fact.binding.database_instance)
         .filter_map(|(id, intent)| match &intent.change {
             super::narrowing::Change::Logout(logout) => Some((id, logout)),
-            super::narrowing::Change::Revoke { .. } => None,
+            super::narrowing::Change::Revoke { .. }
+            | super::narrowing::Change::RemoveAccount { .. }
+            | super::narrowing::Change::KeyReplaced { .. }
+            | super::narrowing::Change::DetachSecret { .. } => None,
         })
         .collect();
     if logouts.is_empty() {
