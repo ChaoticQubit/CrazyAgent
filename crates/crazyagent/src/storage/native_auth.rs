@@ -1883,7 +1883,7 @@ fn newest_facts(
             newest.insert(fact.binding.connection.id.clone(), fact);
         }
     }
-    assert!(newest.len() <= OPERATIONS_MAX + 1);
+    assert!(i64::try_from(newest.len()).is_ok_and(|count| count <= OPERATIONS_MAX + 1));
     Ok(newest)
 }
 
