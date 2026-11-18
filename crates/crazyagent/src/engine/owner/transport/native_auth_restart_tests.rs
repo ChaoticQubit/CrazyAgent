@@ -2287,3 +2287,155 @@ async fn a_leftover_sign_out_the_harness_cannot_finish_keeps_the_profile_blocked
     .await
     .expect("the failed leftover sign-out case exceeded 60 seconds");
 }
+
+impl Restart {
+    /// The engine's intent store, opened beside its database the way storage opens it.
+    /// Output: the store.
+    fn intents(&self) -> crate::storage::narrowing::Intents {
+        crate::storage::narrowing::Intents::open(&std::fs::canonicalize(self.root.path()).unwrap())
+            .unwrap()
+            .expect("the intent store opens on unix")
+    }
+
+    /// How many intents the engine keeps on disk now. Output: the count.
+    fn kept(&self) -> usize {
+        let listing = self.intents().list().unwrap();
+        assert_eq!(listing.refused, 0);
+        listing.intents.len()
+    }
+}
+
+impl Run {
+    /// Keeps a sign-out of the account on disk the way the engine keeps one storage has not
+    /// taken yet. Inputs: the case and the request name. Output: the sign-out and its intent.
+    async fn keep_sign_out(
+        &self,
+        restart: &Restart,
+        name: &str,
+    ) -> (NativeAuthLogout, crate::storage::narrowing::IntentId) {
+        let logout = NativeAuthLogout {
+            request_id: request(name),
+            scope: self.scope(restart.config().id).await,
+        };
+        let id = restart
+            .intents()
+            .write(&crate::storage::narrowing::Intent {
+                db_instance: self.admission().db_instance,
+                change: crate::storage::narrowing::Change::Logout(logout.clone()),
+            })
+            .unwrap();
+        (logout, id)
+    }
+}
+
+/// V243-NARROWING-DURABLE r2: a sign-out storage refuses by name is a final answer. Its
+/// intent ends with the refusal, so the next start never signs the profile out for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_storage_refuses_keeps_no_intent_and_the_profile_launches_after_a_restart() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let refused = first
+            .client()
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout-stale"),
+                scope,
+            })
+            .await;
+        assert_eq!(
+            refused
+                .map(|reply| reply.fact.action)
+                .map_err(|error| error.0),
+            Err("native_profile_source_conflict".to_owned()),
+            "storage refuses a sign-out of settings that changed"
+        );
+        assert_eq!(restart.kept(), 0, "a refused sign-out keeps no intent");
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(
+            restart.launch(),
+            Ok(()),
+            "a refused sign-out never signs the profile out at the next start"
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the refused sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: an owner's new sign-in ends the kept sign-outs of its
+/// profile, so neither the drainer nor the next open signs the newer sign-in out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_owner_sign_in_ends_the_kept_sign_outs_of_its_profile_so_a_restart_keeps_it() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        first.keep_sign_out(&restart, "restart-logout-older").await;
+        assert_eq!(restart.kept(), 1);
+        first
+            .sign_in_to(&restart, connection(), "restart-sign-in-newer")
+            .await;
+        assert_eq!(
+            restart.kept(),
+            0,
+            "the owner's new sign-in ends the kept sign-out of its profile"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(
+            restart.launch(),
+            Ok(()),
+            "the next start never signs the newer sign-in out"
+        );
+        second.stop().await;
+    })
+    .await
+    .expect("the newer sign-in case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: a drained sign-out whose intent is gone, as after a newer
+/// owner sign-in ended it, is refused, so the sign-in stays and the profile launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_sign_out_whose_intent_is_gone_is_refused_and_the_sign_in_stays() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let (logout, id) = first.keep_sign_out(&restart, "restart-logout-gone").await;
+        restart.intents().remove(&id).unwrap();
+        let admission = first.admission();
+        let drained = first
+            .handle
+            .engine
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    admission,
+                    crate::engine::owner::native_auth::Command::Logout(logout),
+                    crate::storage::NativeAuthAsk::Drained(id),
+                    reply,
+                )
+            })
+            .await;
+        assert_eq!(
+            drained
+                .map(|begun| begun.reply.fact.action)
+                .map_err(|error| error.0),
+            Err("native_auth_sign_out_superseded".to_owned()),
+            "a drained sign-out whose intent is gone is refused"
+        );
+        assert_eq!(
+            restart.latest_phase(),
+            NativeAuthPhase::AuthenticatedObserved
+        );
+        assert_eq!(restart.launch(), Ok(()), "the sign-in stays");
+        first.stop().await;
+    })
+    .await
+    .expect("the drained sign-out case exceeded 60 seconds");
+}

@@ -1015,3 +1015,30 @@ async fn a_revocation_refused_at_the_barrier_lands_at_the_next_open_when_the_eng
     assert!(!tui_registration(restarted.runtime()).active);
     restarted.stop().await;
 }
+
+/// V243-NARROWING-DURABLE r2, pre-existing: an engine whose TUI client storage holds
+/// revoked still starts, since its start probe asks only the clients it holds active, and
+/// the revoked TUI stays refused while the Desktop client is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_engine_whose_tui_is_revoked_starts_and_refuses_the_tui() {
+    let owner = Usage::start().await;
+    let epoch = owner.runtime().epoch(OwnerClientKind::Tui).unwrap();
+    assert!(!revoke_settled(&owner, "revoke-before-restart").await.active);
+    let restarted = owner.restarted().await;
+    assert_eq!(
+        stored_tui(restarted.root.path()),
+        (epoch + 1, "revoked".to_owned())
+    );
+    let runtime = restarted.runtime();
+    assert!(!tui_registration(runtime).active);
+    let root = &runtime.authority.root.path;
+    let tui = OwnerClient::attach(root, OwnerClientKind::Tui, Duration::from_secs(2)).unwrap();
+    let desktop =
+        OwnerClient::attach(root, OwnerClientKind::Desktop, Duration::from_secs(2)).unwrap();
+    assert!(!admitted(runtime, &tui), "the revoked TUI stays refused");
+    assert!(
+        admitted(runtime, &desktop),
+        "the active Desktop client is admitted"
+    );
+    restarted.stop().await;
+}
