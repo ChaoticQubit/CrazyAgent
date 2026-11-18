@@ -559,23 +559,14 @@ jobs:
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
 
   firmlink-macos:
-    name: Firmlink D1-D6 clippy, green and red on macos-15
+    name: Firmlink D8 clippy, green and red on macos-15
     runs-on: macos-15
     timeout-minutes: 180
     env:
-      RED_SHA: 4116c6132
-      FIX_FILES: >-
-        crates/crazyagent/src/sandbox.rs crates/crazyagent/src/harnesses/launch.rs
-        crates/crazyagent/src/tools.rs crates/crazyagent/src/engine/bootstrap/native_profiles/agent_copy.rs
-        crates/crazyagent/src/landing/clone.rs crates/crazyagent/src/onboarding/draft/documents.rs
-      ROWS: >-
-        a_home_named_through_the_data_volume_settles_to_its_short_name
-        an_owner_folder_named_through_the_data_volume_is_no_account_home
-        temp_folders_named_through_the_data_volume_are_still_temp
-        a_profile_home_named_through_the_data_volume_is_inside_the_profiles
-        an_agent_clone_inside_git_is_refused_under_either_data_volume_name
-        a_hidden_folder_named_through_the_data_volume_never_reaches_the_prompt
-      MODULES: "test(/^(sandbox|tools|harnesses|engine::bootstrap::native_profiles|landing|onboarding::draft::documents)::/)"
+      RED_SHA: b95f5d096
+      FIX_FILES: crates/crazyagent/src/harnesses/finding.rs
+      ROWS: a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused
+      MODULES: "test(/^harnesses::/)"
       CRAZYAGENT_TEST_NATIVE_AUTH_HOST: ${{ github.workspace }}/target/debug/crazyagent
     steps:
       - name: Refuse a runner that is not GitHub-hosted
@@ -701,7 +692,7 @@ jobs:
           retention-days: 14
 
   firmlink-linux-clippy:
-    name: Firmlink D1-D6 clippy on ubuntu-22.04
+    name: Firmlink D8 clippy on ubuntu-22.04
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -732,7 +723,7 @@ jobs:
         run: cargo clippy -p crazyagent --lib --tests --locked -- -D warnings
 
   firmlink-windows-clippy:
-    name: Firmlink D1-D6 clippy on windows-2022
+    name: Firmlink D8 clippy on windows-2022
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
