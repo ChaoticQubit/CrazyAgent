@@ -5692,75 +5692,10 @@ mod sessions_tests;
 mod rcli_configured_tests;
 
 #[cfg(test)]
-mod sign_in_gap_tests {
-    use super::sign_in_gap;
-    use crate::engine::owner::native_auth::NativeAuthPhase;
-
-    #[test]
-    fn a_finished_sign_in_without_an_account_reads_as_not_signed_in() {
-        for phase in [
-            NativeAuthPhase::UnauthenticatedObserved,
-            NativeAuthPhase::Failed,
-            NativeAuthPhase::Cancelled,
-            NativeAuthPhase::Unavailable,
-        ] {
-            assert_eq!(
-                sign_in_gap(phase),
-                Some("master_authentication_unknown"),
-                "{phase:?}"
-            );
-        }
-        for phase in [
-            NativeAuthPhase::Starting,
-            NativeAuthPhase::AwaitingOwner,
-            NativeAuthPhase::CheckingAccount,
-            NativeAuthPhase::Cancelling,
-            NativeAuthPhase::Uncertain,
-        ] {
-            assert_eq!(
-                sign_in_gap(phase),
-                Some("master_authentication_stale"),
-                "{phase:?}"
-            );
-        }
-        assert_eq!(sign_in_gap(NativeAuthPhase::AuthenticatedObserved), None);
-    }
-}
+mod sign_in_gap_tests;
 
 #[cfg(all(test, unix))]
-mod activity_store_tests {
-    use super::*;
-    use crate::master_session::MasterActivityLine;
-
-    #[test]
-    #[should_panic(expected = "master turn activity is never stored")]
-    fn a_turn_read_with_its_live_activity_is_never_saved_back() {
-        let db = Connection::open_in_memory().unwrap();
-        let tx = db.unchecked_transaction().unwrap();
-        let turn = MasterTurnView {
-            id: RequestId::new("turn-1").unwrap(),
-            session_id: SessionId::new("session-1").unwrap(),
-            ordinal: 1,
-            input_cursor: Cursor::new(1),
-            phase: MasterTurnPhase::Running,
-            reason: None,
-            attempt: None,
-            runtime: None,
-            reply: None,
-            accounts: Vec::new(),
-            tasks: Vec::new(),
-            changes: None,
-            engine_request: None,
-            activity: vec![MasterActivityLine {
-                at_ms: 1,
-                text: "Reading src/app.ts".into(),
-            }],
-            detail: None,
-            cause: None,
-        };
-        let _ = save_turn(&tx, &turn);
-    }
-}
+mod activity_store_tests;
 
 #[cfg(all(test, unix))]
 mod schema_tests;
