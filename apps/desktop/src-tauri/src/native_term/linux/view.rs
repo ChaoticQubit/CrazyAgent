@@ -3,12 +3,13 @@ use std::rc::Rc;
 
 use gtk::gdk::keys::Key;
 use gtk::gdk::keys::constants as key;
-use gtk::gdk::{EventKey, ModifierType};
+use gtk::gdk::{self, EventKey, EventType, ModifierType, ScrollDirection};
 use gtk::glib::{Propagation, SignalHandlerId, WeakRef};
 use gtk::prelude::*;
 
 use super::keys;
-use crate::native_term::event::{Sink, ViewEvent};
+use super::surface::Rect;
+use crate::native_term::event::{MouseKind, Sink, ViewEvent};
 use crate::native_term::pane::Input;
 
 /// The modifiers a chord is read against; Lock, Num Lock, the pointer buttons and the
@@ -101,6 +102,11 @@ impl Focus {
         self.native
     }
 
+    /// Whether a page element covers the view. Output: the answer.
+    pub fn is_covered(self) -> bool {
+        self.covered
+    }
+
     /// Gives or takes native focus; a covered view refuses it. Input: on or off. Output:
     /// the new activity when it changed.
     pub fn native(&mut self, on: bool) -> Option<bool> {
@@ -131,182 +137,333 @@ impl Focus {
     }
 }
 
-/// Edits a view's shared focus. Inputs: the focus and the edit. Output: the new activity
-/// when it changed.
-fn edit(focus: &Cell<Focus>, change: impl FnOnce(&mut Focus) -> Option<bool>) -> Option<bool> {
-    let mut next = focus.get();
-    let changed = change(&mut next);
-    focus.set(next);
-    changed
-}
-
-/// Moves the input method's focus with the view's and tells the host; losing activity
-/// cancels any open preedit first. Callers store the new focus before this runs, so a
-/// commit the reset makes is dropped. Inputs: the change, the context, the view id and
-/// the sink. Output: none.
-fn apply(change: Option<bool>, im: &gtk::IMMulticontext, id: u64, sink: Sink) {
-    let Some(active) = change else {
-        return;
-    };
-    if active {
-        im.focus_in();
-    } else {
-        release(im);
-    }
-    sink(id, ViewEvent::Focus(active));
-}
-
 /// Cancels the context's preedit and takes its focus. Input: the context. Output: none.
 fn release(im: &gtk::IMMulticontext) {
     im.reset();
     im.focus_out();
 }
 
-/// Takes one key press while the view is active, ahead of the webview: a chord becomes
-/// its command, the input method gets the key next, and a key it does not take goes to
-/// the key map. Inputs: the context, the focus, the view id, the sink and the event.
-/// Output: whether the key goes on to the page, which it does only while inactive.
-fn press(
-    im: &gtk::IMMulticontext,
-    focus: &Cell<Focus>,
-    id: u64,
-    sink: Sink,
-    event: &EventKey,
-) -> Propagation {
-    if !focus.get().active() {
-        return Propagation::Proceed;
-    }
-    let (keyval, state) = (event.keyval(), event.state());
-    if let Some(command) = chord(keyval, state) {
-        sink(id, command);
-        return Propagation::Stop;
-    }
-    if im.filter_keypress(event) {
-        return Propagation::Stop;
-    }
-    if let Some(input) = keys::key_input(keyval, state) {
-        sink(id, ViewEvent::Key(input));
-    }
-    Propagation::Stop
+/// The most clicks a press reports: 1 places the cursor, 2 a word, 3 a line, as on macOS.
+const CLICKS_MAX: u8 = 3;
+
+/// Points one GDK smooth scroll unit stands for on a touchpad: GDK's Wayland backend
+/// divides the compositor's pixels by ten.
+pub const TOUCHPAD_POINTS_PER_UNIT: f64 = 10.0;
+
+/// The double-click limits from GTK's settings: the most milliseconds and points between
+/// two left presses that make one more click.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DoubleClick {
+    pub time_ms: u32,
+    pub distance: f64,
 }
 
-/// The Linux side of one native terminal view's input: it takes the toplevel's keys
-/// ahead of the webview while active, through its own input method context, and hands
-/// each key, commit and focus change to the host's sink with the view's id. Native focus
-/// takes GTK focus off the page, as the macOS view takes first responder, and gives it
-/// back on release; the page taking GTK focus releases native focus.
-pub struct View {
-    id: u64,
-    sink: Sink,
-    im: gtk::IMMulticontext,
-    focus: Rc<Cell<Focus>>,
-    toplevel: gtk::Window,
-    page: RefCell<Option<WeakRef<gtk::Widget>>>,
-    handlers: Vec<SignalHandlerId>,
-    commit: Option<SignalHandlerId>,
+impl DoubleClick {
+    /// The limits from GTK's default settings, bounded, or GTK's own defaults (400 ms and
+    /// 5 points) without settings. Output: the limits.
+    fn from_settings() -> DoubleClick {
+        let (time, distance) = gtk::Settings::default()
+            .map(|settings| {
+                (
+                    settings.gtk_double_click_time(),
+                    settings.gtk_double_click_distance(),
+                )
+            })
+            .unwrap_or((400, 5));
+        let double = DoubleClick {
+            time_ms: u32::try_from(time.clamp(1, 5_000)).unwrap_or(400),
+            distance: f64::from(distance.clamp(0, 100)),
+        };
+        assert!(double.time_ms >= 1 && double.distance >= 0.0);
+        double
+    }
 }
 
-impl View {
-    /// Wires a view to a realized toplevel, without native focus. Inputs: the toplevel,
-    /// the view id and the sink. Output: the view, or
-    /// `native_terminal_surface_unavailable` when the toplevel has no GDK window.
-    pub fn new(toplevel: &gtk::Window, id: u64, sink: Sink) -> Result<View, &'static str> {
-        assert!(id > 0);
-        let gdk = toplevel
-            .window()
-            .ok_or("native_terminal_surface_unavailable")?;
-        let im = gtk::IMMulticontext::new();
-        im.set_client_window(Some(&gdk));
-        let focus = Rc::new(Cell::new(Focus::new(toplevel.has_toplevel_focus())));
-        let commit = {
-            let focus = Rc::clone(&focus);
-            im.connect_commit(move |_, text| {
-                if let Some(event) = commit_event(focus.get(), text) {
-                    sink(id, event);
-                }
-            })
+/// Where one pointer event goes: on to the page, or to the view, which takes native focus
+/// first when `focus` is set and then hands `event`, if any, to its host.
+#[derive(Debug, PartialEq)]
+pub enum Route {
+    Page,
+    View {
+        focus: bool,
+        event: Option<ViewEvent>,
+    },
+}
+
+/// One left press, kept to count the next one.
+#[derive(Clone, Copy, Debug)]
+struct Click {
+    time: u32,
+    at: (f64, f64),
+    count: u8,
+}
+
+/// Pointer routing for one view, in the toplevel's logical coordinates. A press inside
+/// the placed, uncovered rectangle starts a press the view holds until that button's
+/// release, wherever the pointer goes; any other event outside a held press goes to the
+/// page, and so does everything while the view is covered or unplaced.
+#[derive(Debug, Default)]
+pub struct Pointer {
+    rect: Option<Rect>,
+    pressing: Option<u32>,
+    clicks: u8,
+    last: Option<Click>,
+}
+
+impl Pointer {
+    /// An unplaced router. Output: it.
+    pub const fn new() -> Pointer {
+        Pointer {
+            rect: None,
+            pressing: None,
+            clicks: 0,
+            last: None,
+        }
+    }
+
+    /// Places the view's rectangle, or unplaces it, which drops a held press. Input: the
+    /// rectangle in the toplevel's logical coordinates. Output: none.
+    pub fn place(&mut self, rect: Option<Rect>) {
+        self.rect = rect;
+        if rect.is_none() {
+            self.pressing = None;
+        }
+    }
+
+    /// Drops a held press, as a cover does, so the rest of it goes to the page. Output:
+    /// none.
+    pub fn cover(&mut self) {
+        self.pressing = None;
+    }
+
+    /// Routes a button press: the left button presses with a click count and takes focus,
+    /// the right opens the menu, others are held without events. Inputs: the button, the
+    /// point, the event time in ms, whether Alt is held, whether the view is covered and
+    /// the double-click limits. Output: the route.
+    pub fn press(
+        &mut self,
+        button: u32,
+        at: (f64, f64),
+        time: u32,
+        option: bool,
+        covered: bool,
+        double: DoubleClick,
+    ) -> Route {
+        if self.pressing.is_some() {
+            return Route::View {
+                focus: false,
+                event: None,
+            };
+        }
+        let Some(point) = self.inside(at).filter(|_| !covered) else {
+            return Route::Page;
         };
-        let on_press = {
-            let (im, focus) = (im.clone(), Rc::clone(&focus));
-            toplevel.connect_key_press_event(move |_, event| press(&im, &focus, id, sink, event))
+        self.pressing = Some(button);
+        let event = match button {
+            1 => {
+                self.clicks = self.count(time, at, double);
+                Some(ViewEvent::Mouse {
+                    kind: MouseKind::Press,
+                    point,
+                    option,
+                    clicks: self.clicks,
+                })
+            }
+            3 => Some(ViewEvent::Menu { point }),
+            _ => None,
         };
-        let on_release = {
-            let (im, focus) = (im.clone(), Rc::clone(&focus));
-            toplevel.connect_key_release_event(move |_, event| {
-                if !focus.get().active() {
-                    return Propagation::Proceed;
-                }
-                im.filter_keypress(event);
-                Propagation::Stop
-            })
+        if button != 1 {
+            self.last = None;
+        }
+        Route::View {
+            focus: button == 1,
+            event,
+        }
+    }
+
+    /// Routes GDK's extra double and triple press events, which follow a press the
+    /// router already counted. Output: held while a press is held, else the page's.
+    pub fn repeat(&self) -> Route {
+        match self.pressing {
+            Some(_) => Route::View {
+                focus: false,
+                event: None,
+            },
+            None => Route::Page,
+        }
+    }
+
+    /// Routes pointer motion: a drag while the left button is held, nothing while another
+    /// is held, the page's otherwise. Inputs: the point and whether Alt is held. Output:
+    /// the route.
+    pub fn motion(&mut self, at: (f64, f64), option: bool) -> Route {
+        match self.pressing {
+            None => Route::Page,
+            Some(1) => Route::View {
+                focus: false,
+                event: self.mouse(MouseKind::Drag, at, option),
+            },
+            Some(_) => Route::View {
+                focus: false,
+                event: None,
+            },
+        }
+    }
+
+    /// Routes a button release: the held button's release ends the press. Inputs: the
+    /// button, the point and whether Alt is held. Output: the route.
+    pub fn release(&mut self, button: u32, at: (f64, f64), option: bool) -> Route {
+        let Some(held) = self.pressing else {
+            return Route::Page;
         };
-        let on_focus_in = {
-            let (im, focus) = (im.clone(), Rc::clone(&focus));
-            toplevel.connect_focus_in_event(move |_, _| {
-                apply(edit(&focus, |f| f.toplevel(true)), &im, id, sink);
-                Propagation::Proceed
-            })
+        if held != button {
+            return Route::View {
+                focus: false,
+                event: None,
+            };
+        }
+        self.pressing = None;
+        let event = (button == 1)
+            .then(|| self.mouse(MouseKind::Release, at, option))
+            .flatten();
+        Route::View {
+            focus: false,
+            event,
+        }
+    }
+
+    /// Routes a vertical scroll inside the uncovered rectangle: lines for a mouse,
+    /// points for a touchpad, up positive as on macOS. Inputs: the point, GDK's vertical
+    /// delta with down positive, whether a touchpad made it and whether the view is
+    /// covered. Output: the route; a zero or non-finite delta is held without an event.
+    pub fn scroll(&self, at: (f64, f64), dy: f64, touchpad: bool, covered: bool) -> Route {
+        let Some(point) = self.inside(at).filter(|_| !covered) else {
+            return Route::Page;
         };
-        let on_focus_out = {
-            let (im, focus) = (im.clone(), Rc::clone(&focus));
-            toplevel.connect_focus_out_event(move |_, _| {
-                apply(edit(&focus, |f| f.toplevel(false)), &im, id, sink);
-                Propagation::Proceed
-            })
+        if !dy.is_finite() || dy == 0.0 {
+            return Route::View {
+                focus: false,
+                event: None,
+            };
+        }
+        let (delta, precise) = if touchpad {
+            (-dy * TOUCHPAD_POINTS_PER_UNIT, true)
+        } else {
+            (-dy, false)
         };
-        let on_page_focus = {
-            let (im, focus) = (im.clone(), Rc::clone(&focus));
-            toplevel.connect_set_focus(move |_, widget| {
-                if widget.is_some() && focus.get().is_native() {
-                    apply(edit(&focus, |f| f.native(false)), &im, id, sink);
-                }
-            })
-        };
-        Ok(View {
-            id,
-            sink,
-            im,
-            focus,
-            toplevel: toplevel.clone(),
-            page: RefCell::new(None),
-            handlers: vec![
-                on_press,
-                on_release,
-                on_focus_in,
-                on_focus_out,
-                on_page_focus,
-            ],
-            commit: Some(commit),
+        Route::View {
+            focus: false,
+            event: Some(ViewEvent::Wheel {
+                point,
+                delta,
+                precise,
+            }),
+        }
+    }
+
+    fn local(&self, at: (f64, f64)) -> Option<(f64, f64)> {
+        let rect = self.rect?;
+        let point = (at.0 - f64::from(rect.x), at.1 - f64::from(rect.y));
+        (point.0.is_finite() && point.1.is_finite()).then_some(point)
+    }
+
+    fn inside(&self, at: (f64, f64)) -> Option<(f64, f64)> {
+        let rect = self.rect?;
+        let point = self.local(at)?;
+        let fits = (0.0..f64::from(rect.w)).contains(&point.0)
+            && (0.0..f64::from(rect.h)).contains(&point.1);
+        fits.then_some(point)
+    }
+
+    fn mouse(&self, kind: MouseKind, at: (f64, f64), option: bool) -> Option<ViewEvent> {
+        let point = self.local(at)?;
+        assert!((1..=CLICKS_MAX).contains(&self.clicks));
+        Some(ViewEvent::Mouse {
+            kind,
+            point,
+            option,
+            clicks: self.clicks,
         })
     }
 
-    /// Gives or takes native focus, as a click in the host rectangle or the page asks;
-    /// refused while covered. Input: on or off. Output: none.
-    pub fn focus(&self, on: bool) {
-        self.moving(|f| f.native(on));
+    fn count(&mut self, time: u32, at: (f64, f64), double: DoubleClick) -> u8 {
+        let count = match self.last {
+            Some(last)
+                if time.wrapping_sub(last.time) <= double.time_ms
+                    && (at.0 - last.at.0).hypot(at.1 - last.at.1) <= double.distance =>
+            {
+                (last.count + 1).min(CLICKS_MAX)
+            }
+            _ => 1,
+        };
+        assert!((1..=CLICKS_MAX).contains(&count));
+        self.last = Some(Click { time, at, count });
+        count
+    }
+}
+
+/// The vertical scroll of a GDK scroll event in GDK's units, down positive, and whether a
+/// touchpad made it; a horizontal scroll is zero. Input: the event. Output: them.
+fn scroll_dy(event: &gdk::Event) -> (f64, bool) {
+    let touchpad = event
+        .source_device()
+        .is_some_and(|device| device.source() == gdk::InputSource::Touchpad);
+    let dy = match event.scroll_direction() {
+        Some(ScrollDirection::Up) => -1.0,
+        Some(ScrollDirection::Down) => 1.0,
+        Some(ScrollDirection::Smooth) => event.scroll_deltas().map_or(0.0, |(_, dy)| dy),
+        _ => 0.0,
+    };
+    (dy, touchpad)
+}
+
+/// The state one view's signal handlers share.
+struct Inner {
+    id: u64,
+    sink: Sink,
+    im: gtk::IMMulticontext,
+    focus: Cell<Focus>,
+    toplevel: gtk::Window,
+    page: RefCell<Option<WeakRef<gtk::Widget>>>,
+    pointer: RefCell<Pointer>,
+    double: DoubleClick,
+}
+
+impl Inner {
+    fn send(&self, event: ViewEvent) {
+        assert!(self.id > 0);
+        (self.sink)(self.id, event);
     }
 
-    /// Covers or uncovers the view as the page reports an element over it; covering
-    /// releases native focus, so keys go back to the page. Input: covered or not.
-    /// Output: none.
-    pub fn cover(&self, covered: bool) {
-        self.moving(|f| f.cover(covered));
-    }
-
-    /// Applies a focus change, moving GTK focus off the page before the view's input
-    /// method takes focus, and back to it after the view's lets go. Input: the change.
-    /// Output: none.
-    fn moving(&self, change: impl FnOnce(&mut Focus) -> Option<bool>) {
-        let was = self.focus.get().is_native();
-        let mut next = self.focus.get();
+    /// Applies a focus change: GTK focus leaves the page before the view's input method
+    /// takes focus, the new focus is stored before a lost activity resets the input
+    /// method (so a commit the reset makes is dropped), and a cover drops a held press.
+    /// Inputs: the change and whether losing native focus gives GTK focus back to the
+    /// widget that had it. Output: none.
+    fn moving(&self, change: impl FnOnce(&mut Focus) -> Option<bool>, restore: bool) {
+        let before = self.focus.get();
+        let mut next = before;
         let changed = change(&mut next);
-        if !was && next.is_native() {
+        if !before.is_native() && next.is_native() {
             self.take_page_focus();
         }
         self.focus.set(next);
-        apply(changed, &self.im, self.id, self.sink);
-        if was && !next.is_native() {
-            self.give_page_focus();
+        if next.is_covered() && !before.is_covered() {
+            self.pointer.borrow_mut().cover();
+        }
+        if let Some(active) = changed {
+            if active {
+                self.im.focus_in();
+            } else {
+                release(&self.im);
+            }
+            self.send(ViewEvent::Focus(active));
+        }
+        if before.is_native() && !next.is_native() {
+            let page = self.page.borrow_mut().take();
+            if restore {
+                self.give_page_focus(page);
+            }
         }
     }
 
@@ -320,19 +477,221 @@ impl View {
         assert!(self.toplevel.focused_widget().is_none());
     }
 
-    fn give_page_focus(&self) {
-        let Some(page) = self
-            .page
-            .borrow_mut()
-            .take()
-            .and_then(|weak| weak.upgrade())
-        else {
+    fn give_page_focus(&self, page: Option<WeakRef<gtk::Widget>>) {
+        let Some(page) = page.and_then(|weak| weak.upgrade()) else {
             return;
         };
         let toplevel: &gtk::Widget = self.toplevel.upcast_ref();
         if page.toplevel().as_ref() == Some(toplevel) {
             page.grab_focus();
         }
+    }
+
+    /// Takes one key press while the view is active, ahead of the webview: a chord becomes
+    /// its command, the input method gets the key next, and a key it does not take goes
+    /// to the key map. Input: the event. Output: whether the key goes on to the page,
+    /// which it does only while inactive.
+    fn key_press(&self, event: &EventKey) -> Propagation {
+        if !self.focus.get().active() {
+            return Propagation::Proceed;
+        }
+        let (keyval, state) = (event.keyval(), event.state());
+        if let Some(command) = chord(keyval, state) {
+            self.send(command);
+            return Propagation::Stop;
+        }
+        if self.im.filter_keypress(event) {
+            return Propagation::Stop;
+        }
+        if let Some(input) = keys::key_input(keyval, state) {
+            self.send(ViewEvent::Key(input));
+        }
+        Propagation::Stop
+    }
+
+    fn key_release(&self, event: &EventKey) -> Propagation {
+        if !self.focus.get().active() {
+            return Propagation::Proceed;
+        }
+        self.im.filter_keypress(event);
+        Propagation::Stop
+    }
+
+    /// Routes one pointer event in GTK's capture phase, ahead of the webview. A press
+    /// the page gets releases native focus. Input: the event. Output: whether it goes on
+    /// to the page.
+    fn pointer_event(&self, event: &gdk::Event) -> Propagation {
+        let kind = event.event_type();
+        let pointer_kind = matches!(
+            kind,
+            EventType::ButtonPress
+                | EventType::DoubleButtonPress
+                | EventType::TripleButtonPress
+                | EventType::ButtonRelease
+                | EventType::MotionNotify
+                | EventType::Scroll
+        );
+        if !pointer_kind {
+            return Propagation::Proceed;
+        }
+        let Some(at) = self.toplevel_point(event) else {
+            return Propagation::Proceed;
+        };
+        let covered = self.focus.get().is_covered();
+        let option = event
+            .state()
+            .is_some_and(|state| state.contains(ModifierType::MOD1_MASK));
+        let button = event.button().unwrap_or(0);
+        let route = {
+            let mut pointer = self.pointer.borrow_mut();
+            match kind {
+                EventType::ButtonPress => {
+                    pointer.press(button, at, event.time(), option, covered, self.double)
+                }
+                EventType::DoubleButtonPress | EventType::TripleButtonPress => pointer.repeat(),
+                EventType::ButtonRelease => pointer.release(button, at, option),
+                EventType::MotionNotify => pointer.motion(at, option),
+                _ => {
+                    let (dy, touchpad) = scroll_dy(event);
+                    pointer.scroll(at, dy, touchpad, covered)
+                }
+            }
+        };
+        match route {
+            Route::Page => {
+                if kind == EventType::ButtonPress && self.focus.get().is_native() {
+                    self.moving(|f| f.native(false), true);
+                }
+                Propagation::Proceed
+            }
+            Route::View { focus, event } => {
+                if focus {
+                    self.moving(|f| f.native(true), true);
+                }
+                if let Some(event) = event {
+                    self.send(event);
+                }
+                Propagation::Stop
+            }
+        }
+    }
+
+    fn toplevel_point(&self, event: &gdk::Event) -> Option<(f64, f64)> {
+        let (root_x, root_y) = event.root_coords()?;
+        let (_, x, y) = self.toplevel.window()?.origin();
+        let at = (root_x - f64::from(x), root_y - f64::from(y));
+        (at.0.is_finite() && at.1.is_finite()).then_some(at)
+    }
+}
+
+/// The Linux side of one native terminal view's input. It takes the toplevel's keys
+/// ahead of the webview while active, through its own input method context, and the
+/// pointer events of its rectangle in GTK's capture phase, and hands each key, commit,
+/// pointer event and focus change to the host's sink with the view's id. Native focus
+/// takes GTK focus off the page, as the macOS view takes first responder, and gives it
+/// back on release; the page taking GTK focus releases native focus.
+pub struct View {
+    inner: Rc<Inner>,
+    handlers: Vec<SignalHandlerId>,
+    commit: Option<SignalHandlerId>,
+}
+
+impl View {
+    /// Wires a view to a realized toplevel, unplaced and without native focus. Inputs: the
+    /// toplevel, the view id and the sink. Output: the view, or
+    /// `native_terminal_surface_unavailable` when the toplevel has no GDK window.
+    pub fn new(toplevel: &gtk::Window, id: u64, sink: Sink) -> Result<View, &'static str> {
+        assert!(id > 0);
+        let gdk = toplevel
+            .window()
+            .ok_or("native_terminal_surface_unavailable")?;
+        let im = gtk::IMMulticontext::new();
+        im.set_client_window(Some(&gdk));
+        let inner = Rc::new(Inner {
+            id,
+            sink,
+            im,
+            focus: Cell::new(Focus::new(toplevel.has_toplevel_focus())),
+            toplevel: toplevel.clone(),
+            page: RefCell::new(None),
+            pointer: RefCell::new(Pointer::new()),
+            double: DoubleClick::from_settings(),
+        });
+        let commit = {
+            let me = Rc::clone(&inner);
+            inner.im.connect_commit(move |_, text| {
+                if let Some(event) = commit_event(me.focus.get(), text) {
+                    me.send(event);
+                }
+            })
+        };
+        let me = || Rc::clone(&inner);
+        let handlers = vec![
+            {
+                let me = me();
+                toplevel.connect_key_press_event(move |_, event| me.key_press(event))
+            },
+            {
+                let me = me();
+                toplevel.connect_key_release_event(move |_, event| me.key_release(event))
+            },
+            {
+                let me = me();
+                toplevel.connect_focus_in_event(move |_, _| {
+                    me.moving(|f| f.toplevel(true), false);
+                    Propagation::Proceed
+                })
+            },
+            {
+                let me = me();
+                toplevel.connect_focus_out_event(move |_, _| {
+                    me.moving(|f| f.toplevel(false), false);
+                    Propagation::Proceed
+                })
+            },
+            {
+                let me = me();
+                toplevel.connect_set_focus(move |_, widget| {
+                    if widget.is_some() && me.focus.get().is_native() {
+                        me.moving(|f| f.native(false), false);
+                    }
+                })
+            },
+            {
+                let me = me();
+                toplevel.connect_local("captured-event", false, move |values| {
+                    let stop = values
+                        .get(1)
+                        .and_then(|value| value.get::<gdk::Event>().ok())
+                        .is_some_and(|event| matches!(me.pointer_event(&event), Propagation::Stop));
+                    Some(stop.to_value())
+                })
+            },
+        ];
+        Ok(View {
+            inner,
+            handlers,
+            commit: Some(commit),
+        })
+    }
+
+    /// Places the view's rectangle in the toplevel's logical coordinates, or unplaces it,
+    /// for the pointer. Input: the rectangle. Output: none.
+    pub fn place(&self, rect: Option<Rect>) {
+        self.inner.pointer.borrow_mut().place(rect);
+    }
+
+    /// Gives or takes native focus, as a click in the host rectangle or the page asks;
+    /// refused while covered. Input: on or off. Output: none.
+    pub fn focus(&self, on: bool) {
+        self.inner.moving(|f| f.native(on), true);
+    }
+
+    /// Covers or uncovers the view as the page reports an element over it; covering
+    /// releases native focus and drops a held press, so keys and the pointer go back to
+    /// the page. Input: covered or not. Output: none.
+    pub fn cover(&self, covered: bool) {
+        self.inner.moving(|f| f.cover(covered), true);
     }
 }
 
@@ -341,19 +700,21 @@ impl Drop for View {
     /// releases the context and gives GTK focus back to the page if the view held native
     /// focus. Output: none.
     fn drop(&mut self) {
-        let native = self.focus.get().is_native();
+        let inner = &self.inner;
+        let native = inner.focus.get().is_native();
         for handler in self.handlers.drain(..) {
-            self.toplevel.disconnect(handler);
+            inner.toplevel.disconnect(handler);
         }
         if let Some(commit) = self.commit.take() {
-            self.im.disconnect(commit);
+            inner.im.disconnect(commit);
         }
-        if self.focus.get().active() {
-            release(&self.im);
+        if inner.focus.get().active() {
+            release(&inner.im);
         }
-        self.im.set_client_window(None::<&gtk::gdk::Window>);
+        inner.im.set_client_window(None::<&gtk::gdk::Window>);
         if native {
-            self.give_page_focus();
+            let page = inner.page.borrow_mut().take();
+            inner.give_page_focus(page);
         }
     }
 }
