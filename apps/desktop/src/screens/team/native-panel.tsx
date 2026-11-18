@@ -6,7 +6,7 @@ import { Button, Icon, NotReady } from "../../ui";
 import { displayText } from "../conversation";
 import { keyId, type Held, type KeptKey } from "./kept-terminals";
 import {
-  closeNativeTerminal, copyNativeTerminal, coverNativeTerminal, focusNativeTerminal, jumpNativeTerminal, openNativeTerminal, pasteNativeTerminal,
+  closeNativeTerminal, copyNativeTerminal, coverNativeTerminal, focusNativeTerminal, jumpNativeTerminal, keysNativeTerminal, openNativeTerminal, pasteNativeTerminal,
   placeNativeTerminal, styleNativeTerminals,
   type NativeCopy, type NativeEvent, type NativeRect, type NativeStyle, type NativeTheme,
 } from "./native-terminal";
@@ -28,6 +28,7 @@ const FOLLOWED = new Set(["terminal_ended", "terminal_unavailable", "terminal_cl
 
 /** The note when a prompt stopped reaching the agent. */
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
+const SEED_REFUSED = "The drafted message wasn't pasted.";
 
 const THEME_KEYS: readonly (keyof NativeTheme)[] = [
   "background", "foreground", "cursor", "cursorAccent", "selectionBackground", "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
@@ -41,9 +42,9 @@ type View = { kind: "connecting"; reason?: string; tries?: number } | { kind: "l
 type NativeState = { view: View; behind: boolean; mouse: boolean; menu: { x: number; y: number } | null };
 
 /** One open of a native view: its id once the desktop answers, whether it ended or was let
- * go, when its ready event came (it is live once both are in), and its own prompt queue,
- * which stops for good with the open. */
-type Opened = { id: number | null; ended: boolean; closed: boolean; liveAt: number | null; send: (job: () => Promise<boolean>) => boolean };
+ * go, when its ready event came (it is live once both are in), whether the desktop lets its
+ * keys through, and its own prompt queue, which stops for good with the open. */
+type Opened = { id: number | null; ended: boolean; closed: boolean; liveAt: number | null; keys: boolean; send: (job: () => Promise<boolean>) => boolean };
 
 const IDLE: NativeState = { view: { kind: "connecting" }, behind: false, mouse: false, menu: null };
 
@@ -115,6 +116,8 @@ export class NativeView implements Held {
   private open: Opened | null = null;
   private started = false;
   private told = true;
+  private wantsFocus = false;
+  private keys = inputMode(readTerminalInput()).keys;
   private placed = "";
   private tries = 0;
   private dropped = false;
@@ -162,15 +165,18 @@ export class NativeView implements Held {
   }
 
   /** Shows the view over a panel's screen: opens it there on first use, or places and
-   * uncovers the open one; a view that ended opens again, as a panel opened anew would.
-   * Input: the screen element. Output: none. */
+   * uncovers the open one and gives it the keyboard if live; a view that ended opens again,
+   * as a panel opened anew would. Input: the screen element. Output: none. */
   show(screen: HTMLElement): void {
     assert(!this.dropped, "a view let go is never shown");
     this.shown = true;
     this.screen = screen;
     if (this.state.view.kind === "ended") this.reopen();
     else if (!this.started) this.connect();
-    else this.watch();
+    else {
+      this.watch();
+      this.focus();
+    }
   }
 
   private again(): void {
@@ -182,6 +188,7 @@ export class NativeView implements Held {
   /** Hides the view: covers it, keeping its terminal and output live. Output: none. */
   hide(): void {
     this.shown = false;
+    this.wantsFocus = false;
     this.unwatch();
     this.screen = null;
     const id = this.open?.id ?? null;
@@ -192,10 +199,37 @@ export class NativeView implements Held {
     this.set({ menu: null });
   }
 
-  /** Scrolls the view to the latest output. Output: none. */
+  /** Scrolls the view to the latest output and gives it the keyboard. Output: none. */
   latest(): void {
     const id = this.open?.id ?? null;
-    if (id !== null) void jumpNativeTerminal(id);
+    if (id === null) return;
+    void jumpNativeTerminal(id);
+    this.focus();
+  }
+
+  /** Gives the shown live view the keyboard, as the web panel focuses its terminal: at once
+   * when uncovered, else once a page overlay stops covering it if the view is still live; a
+   * hidden view gets nothing. Output: none. */
+  focus(): void {
+    const id = this.open?.id ?? null;
+    if (!this.shown || id === null || this.state.view.kind !== "live") return;
+    this.wantsFocus = this.told;
+    if (!this.told) void focusNativeTerminal(id);
+  }
+
+  /** Lets the owner's typed keys through to the view or not, per the Terminal input choice;
+   * each open carries it, and an open view is told again on every change. Input: whether keys
+   * go through. Output: none. */
+  setKeys(on: boolean): void {
+    this.keys = on;
+    this.tellKeys();
+  }
+
+  private tellKeys(): void {
+    const open = this.open;
+    if (open === null || open.id === null || open.ended || open.keys === this.keys) return;
+    open.keys = this.keys;
+    void keysNativeTerminal(open.id, this.keys);
   }
 
   /** Copies the view's selection or whole output. Input: what to copy. Output: the note to
@@ -217,7 +251,7 @@ export class NativeView implements Held {
     const result = await pasteNativeTerminal(id, text);
     if (result.kind === "not_ready") return "The terminal is not ready yet.";
     if (result.kind === "error") return result.message;
-    void focusNativeTerminal(id);
+    this.focus();
     return null;
   }
 
@@ -227,12 +261,15 @@ export class NativeView implements Held {
   }
 
   /** Sends a prompt to the agent as one message while the view is live, after any sent
-   * before it. Input: the text. Output: whether it was queued. */
+   * before it, then gives the view the keyboard. Input: the text. Output: whether it was
+   * queued. */
   prompt(text: string): boolean {
     const open = this.open;
     if (this.state.view.kind !== "live" || open === null) return false;
     const { terminal, pane } = this.key;
-    return open.send(async () => (await promptTerminal(terminal, text, pane)).kind === "ok");
+    if (!open.send(async () => (await promptTerminal(terminal, text, pane)).kind === "ok")) return false;
+    this.focus();
+    return true;
   }
 
   /** Opens a new view after the owner's Open again, with the follow count started afresh.
@@ -283,14 +320,14 @@ export class NativeView implements Held {
     assert(!covered || this.size !== null, "a covered open knows its size");
     if (screen) this.keepSize(screen);
     const rect = screen ? rectOf(screen) : { x: 0, y: 0, width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
-    const open: Opened = { id: null, ended: false, closed: false, liveAt: null, send: () => false };
+    const open: Opened = { id: null, ended: false, closed: false, liveAt: null, keys: this.keys, send: () => false };
     open.send = jobQueue(() => this.stopTyping(open));
     this.open = open;
     this.told = covered;
     this.placed = `${rect.x},${rect.y},${rect.width},${rect.height}`;
     const events = new Channel<NativeEvent>((event) => this.heardEvent(open, event));
-    const { terminal: name, pane } = this.key;
-    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered }).then((result) => {
+    const { terminal: name, pane, project } = this.key;
+    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys, project }).then((result) => {
       if (open.closed) {
         if (result.kind === "ok" && !open.ended) void closeNativeTerminal(result.value);
         return;
@@ -298,12 +335,13 @@ export class NativeView implements Held {
       if (result.kind === "ok") {
         open.id = result.value;
         if (open.ended) return;
-        if (open.liveAt !== null) this.set({ view: { kind: "live" } });
+        this.tellKeys();
         if (this.shown) this.watch();
         else if (!this.told) {
           this.told = true;
           void coverNativeTerminal(result.value, true);
         }
+        if (open.liveAt !== null) this.goLive();
       } else if (open.ended || open !== this.open) {
         return;
       } else if (result.kind === "not_ready") {
@@ -319,11 +357,16 @@ export class NativeView implements Held {
     if (open !== this.open || open.ended || open.closed) return;
     if (event.type === "ready") {
       open.liveAt = performance.now();
-      if (open.id !== null) this.set({ view: { kind: "live" } });
+      if (open.id !== null) this.goLive();
     } else if (event.type === "menu") this.set({ menu: { x: event.x, y: event.y } });
     else if (event.type === "mouse") this.set({ mouse: event.on });
     else if (event.type === "behind") this.set({ behind: event.behind });
     else this.end(open, endCopy(event.code), event.final);
+  }
+
+  private goLive(): void {
+    this.set({ view: { kind: "live" } });
+    this.focus();
   }
 
   private end(open: Opened, copy: string, final: boolean): void {
@@ -405,6 +448,10 @@ export class NativeView implements Held {
       this.told = covered;
       void coverNativeTerminal(id, covered);
     }
+    if (!covered && this.wantsFocus) {
+      this.wantsFocus = false;
+      if (this.state.view.kind === "live") void focusNativeTerminal(id);
+    }
   }
 }
 
@@ -423,6 +470,8 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
   const box = useRef<HTMLTextAreaElement>(null);
   const following = useRef(follow);
   following.current = follow;
+  const keys = useRef(mode.keys);
+  keys.current = mode.keys;
   const screen = useRef<HTMLDivElement>(null);
   const name = node.terminal;
   const pane = teammatePane(node);
@@ -441,14 +490,15 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
   useEffect(() => { opened.current?.(open); }, [open]);
   useEffect(() => () => opened.current?.(false), []);
   const [copied, setCopied] = useState<string | null>(null);
+  const [refused, setRefused] = useState<string | null>(null);
   const pasted = useRef<number | null>(null);
   useEffect(() => {
     const shown = current.current;
     if (seed === null || !open || shown === null || pasted.current === seed.id) return;
     pasted.current = seed.id;
     void shown.paste(seed.text).then((reason) => {
-      if (reason === null) seed.used();
-      else setCopied(reason);
+      seed.used();
+      if (reason !== null) setRefused(`${SEED_REFUSED} ${reason}`);
     });
   }, [seed, open]);
 
@@ -462,9 +512,15 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
     current.current?.closeMenu();
     if (note) setCopied(note);
   }).current;
+  const backToView = useRef((note: string | null) => {
+    closeMenu(note);
+    current.current?.focus();
+  }).current;
 
   useLayoutEffect(() => {
-    if (entry) entry.follow = following.current;
+    if (!entry) return;
+    entry.follow = following.current;
+    entry.setKeys(keys.current);
   });
 
   useLayoutEffect(() => {
@@ -472,6 +528,7 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
     if (!key || !element) return;
     const shown = tile ? new NativeView(key, node.label) : keptNativeView(key, node.label);
     shown.follow = following.current;
+    shown.setKeys(keys.current);
     shown.show(element);
     if (shown !== current.current) setMade(shown);
     return () => {
@@ -492,8 +549,12 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
       <span>{view.copy}</span>
       <Button size="small" icon="refresh-cw" onClick={() => entry?.reopen()}>Open again</Button>
     </div>}
+    {refused && <div className="tg-terminal-state" role="alert">
+      <span>{refused}</span>
+      <Button size="small" onClick={() => setRefused(null)}>Dismiss</Button>
+    </div>}
     <div className="tg-terminal-screen tg-terminal-native" ref={screen} hidden={!name || view.kind === "not_ready"} data-native-terminal={name ?? undefined} />
-    {state.menu && entry && <CopyMenu at={state.menu} selection copy={(what) => entry.copy(what)} back={closeMenu} onDone={closeMenu} />}
+    {state.menu && entry && <CopyMenu at={state.menu} selection copy={(what) => entry.copy(what)} back={backToView} onDone={closeMenu} />}
     {view.kind === "live" && <div className="tg-terminal-note">
       <span role="status">{copied ?? liveNote(node, input, state.mouse)}</span>
       {state.behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => entry?.latest()}>Jump to latest</Button>}

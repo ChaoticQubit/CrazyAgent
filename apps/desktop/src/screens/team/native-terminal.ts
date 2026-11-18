@@ -51,9 +51,10 @@ export type NativeEvent =
 export type NativeCopy = "selection" | "output";
 
 /** One native view to open: the agent's terminal name (`node.terminal`), the teammate pane it
- * shows or null, the label the screen reader says ("<label> terminal"), its place, its style,
- * whether it opens covered (a kept view preloaded with no host yet: it attaches and keeps its
- * terminal live but draws nothing until `cover(false)`) and the channel its events arrive on. */
+ * shows or null, the label the screen reader says, its place, its style, whether it opens
+ * covered (a preloaded kept view: live, drawn only after `cover(false)`), whether typed keys go
+ * through (the Terminal input), the project the terminal is in or null (a wall window is
+ * refused without one) and the channel its events arrive on. */
 export type NativeOpen = {
   name: string;
   pane: string | null;
@@ -61,6 +62,8 @@ export type NativeOpen = {
   rect: NativeRect;
   style: NativeStyle;
   covered: boolean;
+  keys: boolean;
+  project: string | null;
   events: Channel<NativeEvent>;
 };
 
