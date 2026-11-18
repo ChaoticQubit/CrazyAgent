@@ -751,7 +751,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
 fn proof_boxed_node_reads_its_own_real_path() {
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
-    let script = "const fs = require('fs'); for (const [name, real] of [['js', fs.realpathSync], ['native', fs.realpathSync.native]]) { try { console.log(name + ' ok ' + real(process.execPath)); } catch (error) { console.log(name + ' ' + error.code + ' ' + error.message); } }";
+    let script = "const fs = require('fs'); const path = require('path'); const exe = process.execPath; const root = path.parse(exe).root; const programs = path.dirname(path.dirname(exe)); const calls = [['js', () => fs.realpathSync(exe)], ['native', () => fs.realpathSync.native(exe)], ['lstat-root', () => fs.lstatSync(root).isDirectory()], ['stat-root', () => fs.statSync(root).isDirectory()], ['lstat-programs', () => fs.lstatSync(programs).isDirectory()], ['lstat-exe', () => fs.lstatSync(exe).size > 0]]; for (const [name, call] of calls) { try { console.log(name + ' ok ' + call()); } catch (error) { console.log(name + ' ' + error.code + ' ' + error.message); } }";
     let bin = system_bin();
     let directory = tempfile::tempdir().unwrap();
     let base = crate::sandbox::canonical(directory.path()).unwrap();
