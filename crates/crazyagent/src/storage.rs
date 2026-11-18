@@ -243,7 +243,7 @@ pub(crate) enum Job {
     ),
     HomeAddPlan(
         Admission,
-        Cursor,
+        Option<Cursor>,
         RequestId,
         String,
         crate::projects_home::AddMode,
@@ -325,7 +325,7 @@ pub(crate) enum Job {
     HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeProjectMovePlan(
         Admission,
-        Cursor,
+        Option<Cursor>,
         ProjectId,
         crate::projects_home::AddMode,
         Vec<crate::projects_home::AddOverride>,
@@ -341,6 +341,7 @@ pub(crate) enum Job {
     DeletePlan(
         Admission,
         Box<OwnerRequest>,
+        Option<Cursor>,
         u64,
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
@@ -355,6 +356,7 @@ pub(crate) enum Job {
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
+        Option<Cursor>,
         oneshot::Sender<Result<Result<crate::project_setup::NewProjectPlan, String>, EngineError>>,
     ),
     SetupRecord(
@@ -987,7 +989,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &request, &source, mode, &overrides)
+                                projects_home::add_plan(&mut connection, &path, &admission, expected.as_ref(), &request, &source, mode, &overrides)
                             };
                             let _ = reply.send(result);
                         }
@@ -1148,7 +1150,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::project_move_plan(&mut connection, &path, &admission, &expected, &project, mode, &overrides, &request, exchange)
+                                projects_home::project_move_plan(&mut connection, &path, &admission, expected.as_ref(), &project, mode, &overrides, &request, exchange)
                             };
                             let _ = reply.send(result);
                         }
@@ -1176,11 +1178,11 @@ impl Storage {
                                 home_watch.restart(&connection);
                             }
                         }
-                        Job::DeletePlan(admission, request, exchange, reply) => {
+                        Job::DeletePlan(admission, request, expected, exchange, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                projects_home::delete_plan(&mut connection, &path, &admission, &request, exchange)
+                                projects_home::delete_plan(&mut connection, &path, &admission, &request, expected.as_ref(), exchange)
                             };
                             let _ = reply.send(result);
                         }
@@ -1214,11 +1216,11 @@ impl Storage {
                             }
                             let _ = reply.send(result);
                         }
-                        Job::SetupPlan(admission, request, reply) => {
+                        Job::SetupPlan(admission, request, expected, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                setup_plan(&mut connection, &config, &path, &admission, &request)
+                                setup_plan(&mut connection, &config, &path, &admission, &request, expected.as_ref())
                             };
                             let _ = reply.send(result);
                         }
@@ -2822,6 +2824,16 @@ fn owner_stop(db: &mut Connection, host: &HostStamp) -> Result<(), EngineError> 
     tx.commit().map_err(error)
 }
 
+/// Whether a plan's expected revision is behind the engine's: a client's request names the
+/// revision it read; a job names none and plans at the current one. Input: the transaction
+/// and the revision, if any. Output: true when a named revision is not the current one.
+fn behind(tx: &Transaction<'_>, expected: Option<&Cursor>) -> Result<bool, EngineError> {
+    Ok(match expected {
+        Some(expected) => owner_revision(tx)? != expected.value(),
+        None => false,
+    })
+}
+
 fn owner_revision(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let n: i64 = tx
         .query_row("SELECT revision FROM state WHERE id=1", [], |r| r.get(0))
@@ -2947,9 +2959,9 @@ pub(crate) fn delete_recheck(
 }
 
 /// Plans a New Project before the owner transport builds its folder.
-/// Input: the connection, config, database path, owner admission and the
-/// SetupProject request. Output: the checked plan, or the refusal code the
-/// owner sees (`stale_revision` when the engine moved on); nothing on disk
+/// Input: the connection, config, database path, owner admission, the SetupProject request
+/// and the revision a client saw, none for a job. Output: the checked plan, or the refusal
+/// code the owner sees (`stale_revision` when the engine moved on); nothing on disk
 /// changes. An engine failure is an error, not a refusal.
 fn setup_plan(
     db: &mut Connection,
@@ -2957,6 +2969,7 @@ fn setup_plan(
     path: &Path,
     a: &Admission,
     request: &OwnerRequest,
+    expected: Option<&Cursor>,
 ) -> Result<Result<crate::project_setup::NewProjectPlan, String>, EngineError> {
     let OwnerOperation::Apply { mutation } = &request.operation else {
         return Err(error("owner_mutation_required"));
@@ -2966,7 +2979,7 @@ fn setup_plan(
     };
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
-    if owner_revision(&tx)? != request.expected_revision.value() {
+    if behind(&tx, expected)? {
         return Ok(Err("stale_revision".into()));
     }
     let OwnerMutation::CreateDemo { pool, .. } = mutation else {
