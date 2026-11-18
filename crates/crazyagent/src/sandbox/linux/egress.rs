@@ -1,6 +1,11 @@
 use super::super::REMOTES_MAX;
 use super::bridge::UNSHARE_NET;
-use super::{BWRAP_PATHS, HelperRequest, NEST_ARGS, die_with_parent, trusted_file};
+use super::{
+    BWRAP_PATHS, FS_ABI, HelperRequest, NEST_ARGS, accepted, die_with_parent, trusted_file,
+};
+use landlock::{
+    Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError, path_beneath_rules,
+};
 use rustix::fs::FileType;
 use rustix::thread::{CapabilitySet, CapabilitySets, LinkNameSpaceType};
 use std::ffi::{OsStr, OsString};
@@ -9,6 +14,7 @@ use std::fs;
 use std::io::{PipeReader, PipeWriter, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::str::FromStr;
@@ -16,6 +22,20 @@ use std::time::Duration;
 
 pub(super) const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
+pub(super) const SLIRP: &str = "--slirp";
+/// What slirp4netns reads under its rules ([`confine_slirp`]): its program and libraries,
+/// the loader cache, the resolver file it forwards names to, whose rule binds the file a
+/// link there points to, and the random source, as a trace on the farm runner showed (V243
+/// linux routed r1, arm C). A path missing on this computer adds no rule.
+const SLIRP_READ: &[&str] = &[
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/etc/ld.so.cache",
+    RESOLV_CONF,
+    "/dev/urandom",
+];
+const TUN: &str = "/dev/net/tun";
 /// The flag stage 1 writes right after this helper's name in a routed nest: the descriptor
 /// the setup child's go byte reaches stage 2 on ([`started`]).
 pub(super) const ROUTE_FD: &str = "--route-fd";
@@ -458,8 +478,8 @@ fn build(child: u32, ports: &[u16]) -> Result<Slirp, String> {
     if (own.dev(), own.ino()) == (theirs.dev(), theirs.ino()) {
         return Err(NETWORK_SHARED.into());
     }
-    let slirp = tools()?;
-    let slirp = start_slirp(slirp, child)?;
+    tools()?;
+    let slirp = start_slirp(child)?;
     let joined = |kind: LinkNameSpaceType, file: &fs::File| {
         rustix::thread::move_into_link_name_space(file.as_fd(), Some(kind))
             .map_err(|error| format!("the agent's namespaces: {error}"))
@@ -475,15 +495,21 @@ fn build(child: u32, ports: &[u16]) -> Result<Slirp, String> {
     Ok(slirp)
 }
 
-/// Finds the tools at their fixed places, each a file [`trusted_file`] accepts, with both
-/// restore programs on the nf_tables backend ([`nf_tables`]). No input. Output: the
-/// slirp4netns path, or the reason.
-fn tools() -> Result<&'static str, String> {
-    let slirp = SLIRP_PATHS
+/// Finds slirp4netns at its fixed place, a file [`trusted_file`] accepts. No input.
+/// Output: its path, or the reason.
+fn slirp_path() -> Result<&'static str, String> {
+    SLIRP_PATHS
         .iter()
         .copied()
         .find(|path| trusted_file(Path::new(path)).is_some())
-        .ok_or("slirp4netns is not at its fixed place or others may change it")?;
+        .ok_or_else(|| "slirp4netns is not at its fixed place or others may change it".into())
+}
+
+/// Finds the tools at their fixed places, each a file [`trusted_file`] accepts, with both
+/// restore programs on the nf_tables backend ([`nf_tables`]). No input. Output: Ok, or the
+/// reason.
+fn tools() -> Result<(), String> {
+    slirp_path()?;
     for path in IPTABLES_PATHS {
         if trusted_file(Path::new(path)).is_none() {
             return Err(format!("{path} is not there or others may change it"));
@@ -503,36 +529,28 @@ fn tools() -> Result<&'static str, String> {
             return Err(format!("{restore} is not the nf_tables iptables"));
         }
     }
-    Ok(slirp)
+    Ok(())
 }
 
-/// Starts slirp4netns for the agent's network, from this computer's network, and waits up
-/// to [`READY_TIME`] for its ready byte. Its input is the read end of its exit pipe; its
-/// ready end is the only other descriptor it inherits. Inputs: its path and the agent's
-/// process id. Output: slirp4netns, or the reason.
-fn start_slirp(slirp: &str, child: u32) -> Result<Slirp, String> {
+/// Starts slirp4netns for the agent's network, from this computer's network, through this
+/// helper's [`SLIRP`] mode, which confines it first ([`slirp`]), and waits up to
+/// [`READY_TIME`] for its ready byte. Its input is the read end of its exit pipe; its ready
+/// end is the only other descriptor it inherits. Input: the agent's process id. Output:
+/// slirp4netns, or the reason.
+fn start_slirp(child: u32) -> Result<Slirp, String> {
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
+    let helper = std::env::current_exe().map_err(failed)?;
     let (exit_read, exit_write) = std::io::pipe().map_err(failed)?;
     let (ready, handed) = crate::spawn_gate::unix_pair_std().map_err(failed)?;
     ready.set_read_timeout(Some(READY_TIME)).map_err(failed)?;
     let handed = OwnedFd::from(handed);
     let fd = handed.as_raw_fd();
     assert!(fd > 2);
-    let mut command = Command::new(slirp);
+    let mut command = Command::new(helper);
     command
-        .args([
-            "--configure",
-            "--mtu=65520",
-            "--disable-host-loopback",
-            "--enable-sandbox",
-            "--enable-seccomp",
-            "--netns-type=path",
-        ])
-        .arg(format!("--userns-path=/proc/{child}/ns/user"))
-        .arg("--exit-fd=0")
-        .arg(format!("--ready-fd={fd}"))
-        .arg(format!("/proc/{child}/ns/net"))
-        .arg(TAP)
+        .arg(SLIRP)
+        .arg(child.to_string())
+        .arg(fd.to_string())
         .env_clear()
         .stdin(Stdio::from(exit_read))
         .stdout(Stdio::null())
@@ -551,13 +569,110 @@ fn start_slirp(slirp: &str, child: u32) -> Result<Slirp, String> {
 }
 
 /// Opens the agent's user and network namespaces, then confines this thread and what it
-/// starts to the files slirp4netns needs, with no new privileges. Input: the agent's
-/// process id. Output: the two open namespaces, user first, or the reason.
+/// starts to the files slirp4netns needs, with no new privileges: it reads beneath
+/// [`SLIRP_READ`] and reads and writes [`TUN`], nothing else. The namespaces are opened
+/// first, as Landlock refuses a confined process the agent's `/proc` entries. Input: the
+/// agent's process id. Output: the two open namespaces, user first, or the reason.
 pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
+    assert!(child > 1);
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
     let user = fs::File::open(format!("/proc/{child}/ns/user")).map_err(failed)?;
     let net = fs::File::open(format!("/proc/{child}/ns/net")).map_err(failed)?;
+    let refused = |error: RulesetError| format!("slirp4netns's rules: {error}");
+    let status = Ruleset::default()
+        .handle_access(AccessFs::from_all(FS_ABI))
+        .map_err(refused)?
+        .create()
+        .map_err(refused)?
+        .add_rules(path_beneath_rules(SLIRP_READ, AccessFs::from_read(FS_ABI)))
+        .map_err(refused)?
+        .add_rules(path_beneath_rules([TUN], AccessFs::from_all(FS_ABI)))
+        .map_err(refused)?
+        .restrict_self()
+        .map_err(refused)?;
+    if !accepted(&status.ruleset, status.no_new_privs) {
+        return Err(format!(
+            "this kernel cannot hold slirp4netns's rules ({:?})",
+            status.ruleset
+        ));
+    }
     Ok([user.into(), net.into()])
+}
+
+/// The helper's [`SLIRP`] mode, the setup child's hop to slirp4netns: it confines itself
+/// ([`confine_slirp`]), lets the two namespaces through exec, and becomes slirp4netns, which
+/// joins them by those descriptors with its own seccomp filter and no sandbox of its own (a
+/// user who is not root cannot start it). Inputs: the agent's process id and the ready
+/// descriptor. Output: 3 when it cannot be confined, 126 when slirp4netns cannot start.
+pub(super) fn slirp(child: u32, ready: RawFd) -> ExitCode {
+    assert!(child > 1 && ready > 2);
+    let threads = fs::read_dir("/proc/self/task").map(Iterator::count);
+    assert!(
+        threads.is_ok_and(|threads| threads == 1),
+        "the rules hold the whole slirp process"
+    );
+    let confined = slirp_path().and_then(|program| {
+        let namespaces = confine_slirp(child)?;
+        for namespace in &namespaces {
+            rustix::io::fcntl_setfd(namespace, rustix::io::FdFlags::empty())
+                .map_err(|error| format!("slirp4netns: {error}"))?;
+        }
+        Ok((program, namespaces))
+    });
+    let (program, [user, net]) = match confined {
+        Ok(confined) => confined,
+        Err(reason) => {
+            eprintln!("crazyagent-landlock: {reason}");
+            return ExitCode::from(3);
+        }
+    };
+    let error = Command::new(program)
+        .args(slirp_args(user.as_raw_fd(), net.as_raw_fd(), ready))
+        .exec();
+    eprintln!("crazyagent-landlock: cannot start {program}: {error}");
+    ExitCode::from(126)
+}
+
+/// The arguments slirp4netns starts with: the agent's namespaces by this process's
+/// descriptors, its exit on the input pipe, its ready byte on `ready`, its seccomp filter,
+/// and no `--enable-sandbox`. Inputs: the user and network namespace descriptors and the
+/// ready descriptor. Output: the arguments.
+fn slirp_args(user: RawFd, net: RawFd, ready: RawFd) -> Vec<String> {
+    assert!(user > 2 && net > 2 && ready > 2);
+    vec![
+        "--configure".into(),
+        "--mtu=65520".into(),
+        "--disable-host-loopback".into(),
+        "--enable-seccomp".into(),
+        "--netns-type=path".into(),
+        format!("--userns-path=/proc/self/fd/{user}"),
+        "--exit-fd=0".into(),
+        format!("--ready-fd={ready}"),
+        format!("/proc/self/fd/{net}"),
+        TAP.into(),
+    ]
+}
+
+/// Reads the slirp mode's arguments, `--slirp` first: the agent's process id above 1, then
+/// the ready descriptor above 2, digits alone. Input: the helper arguments. Output: the
+/// request, or the reason they are refused.
+pub(super) fn slirp_request(args: Vec<OsString>) -> Result<HelperRequest, String> {
+    assert!(args.first().is_some_and(|flag| flag == SLIRP));
+    let refused = || format!("{SLIRP} takes a process id above 1, then a descriptor above 2");
+    let [_, child, ready] = args.as_slice() else {
+        return Err(refused());
+    };
+    let child = child
+        .to_str()
+        .and_then(number::<u32>)
+        .filter(|child| *child > 1 && i32::try_from(*child).is_ok())
+        .ok_or_else(refused)?;
+    let ready = ready
+        .to_str()
+        .and_then(number::<RawFd>)
+        .filter(|ready| *ready > 2)
+        .ok_or_else(refused)?;
+    Ok(HelperRequest::Slirp { child, ready })
 }
 
 /// Raises exactly [`ambient_wanted`] into the ambient set, after keeping only those in the
