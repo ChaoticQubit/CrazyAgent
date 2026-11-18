@@ -1,10 +1,8 @@
-use super::WindowsSandbox;
-use crate::sandbox::{ProjectSandbox, SandboxError};
-#[cfg(test)]
-use crate::sandbox::{SandboxNetwork, canonical};
-#[cfg(test)]
+use super::{WindowsSandbox, container_for};
+use crate::sandbox::{
+    AGENT_HOME_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical, invalid,
+};
 use std::ffi::OsStr;
-#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +11,8 @@ use std::process::Command;
 /// temp folder and its boundary profile.
 pub const OWNER_GIT_FOLDER: &str = "owner-git";
 
-#[cfg(test)]
+const PROGRAM_FOLDERS: [&str; 2] = ["cmd", "bin"];
+const PLATFORM_FOLDERS: [&str; 3] = ["mingw64", "clangarm64", "mingw32"];
 const GLOBAL_CONFIG: &str = "GIT_CONFIG_GLOBAL";
 
 /// Where owner git keeps its files for one project: its home and temp folder, the only
@@ -26,51 +25,145 @@ pub struct OwnerGitPlaces {
     pub profile: PathBuf,
 }
 
-/// The places owner git uses for `project` under `folder` (red: not built yet).
-pub fn places(_folder: &Path, _project: &Path) -> OwnerGitPlaces {
-    todo!("V244-WIN-GIT-UNC-SIBLINGS slice 2: places")
+/// The places owner git uses for `project` under `folder`: a folder named from the project
+/// alone, so every git of that project shares one container and its grants, holding `home`
+/// and `tmp`, and beside it the profile `<name>.sb`. Inputs: the canonical owner-git folder
+/// and the canonical project. Output: the places.
+pub fn places(folder: &Path, project: &Path) -> OwnerGitPlaces {
+    let name = container_for(project, folder);
+    let own = folder.join(&name);
+    let places = OwnerGitPlaces {
+        home: own.join("home"),
+        tmp: own.join("tmp"),
+        profile: folder.join(format!("{name}.sb")),
+    };
+    assert!(!places.profile.starts_with(&own));
+    places
 }
 
-/// Git for Windows' install folder for its program (red: not built yet).
-pub fn install_root(_git: &Path) -> Option<&Path> {
-    todo!("V244-WIN-GIT-UNC-SIBLINGS slice 2: install_root")
+/// Git for Windows' install folder for its program: the folder above `cmd` or `bin`, or above
+/// a platform folder's `bin` such as `mingw64\bin`, so the program the launcher starts and its
+/// libraries are readable too. Input: git's absolute program. Output: the folder, or none for a
+/// program outside those layouts.
+pub fn install_root(git: &Path) -> Option<&Path> {
+    let named = |path: &Path, names: &[&str]| {
+        path.file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| names.iter().any(|known| name.eq_ignore_ascii_case(known)))
+    };
+    let folder = git.parent()?;
+    if !git.is_absolute() || !named(folder, &PROGRAM_FOLDERS) {
+        return None;
+    }
+    let above = folder.parent()?;
+    let root = if named(folder, &["bin"]) && named(above, &PLATFORM_FOLDERS) {
+        above.parent()?
+    } else {
+        above
+    };
+    root.file_name()?;
+    assert!(git.starts_with(root) && root != folder);
+    Some(root)
 }
 
-/// The policy owner git runs under for one project (red: not built yet).
+/// The policy owner git runs under for one project: no network, the project and its own home
+/// and temp folder writable, nothing guarded in the project, since publish's `git init` makes
+/// `.git` and its config there, and Git for Windows' install folder readable. Inputs: the
+/// canonical project, git's program and the places. Output: the policy, or the refusal.
 pub fn policy(
-    _project: &Path,
-    _git: &Path,
-    _places: &OwnerGitPlaces,
+    project: &Path,
+    git: &Path,
+    places: &OwnerGitPlaces,
 ) -> Result<ProjectSandbox, SandboxError> {
-    todo!("V244-WIN-GIT-UNC-SIBLINGS slice 2: policy")
+    let root = install_root(git)
+        .ok_or_else(|| invalid("git is not in a Git for Windows install folder"))?;
+    ProjectSandbox::new(
+        project,
+        &places.home,
+        &places.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )?
+    .as_job_folder()
+    .allow_read(&canonical(root)?)
 }
 
-/// The owner's git for one project, run inside an AppContainer of its own (red: not built yet).
+/// The owner's git for one project, run inside an AppContainer of its own with no capability
+/// (owner option 1, V244-WIN-GIT-UNC-SIBLINGS), so a `.git` that points git at a share or a
+/// folder outside the project reaches nothing. Every command reuses the profile written once.
 #[derive(Debug)]
 pub struct OwnerGit {
-    _boundary: WindowsSandbox,
+    boundary: WindowsSandbox,
+    git: PathBuf,
 }
 
 impl OwnerGit {
-    /// Writes the project's boundary profile (red: not built yet).
+    /// Makes the project's places under `folder` and writes its boundary profile there for
+    /// `git`, bound to `helper` and recording grants in `grants`. Inputs: the owner-git folder,
+    /// the project, git's absolute program, the helper and the grants folder. Output: owner
+    /// git, or the refusal: a project or git no boundary can hold, or a missing helper.
     pub fn install(
-        _folder: &Path,
-        _project: &Path,
-        _git: &Path,
-        _helper: &Path,
-        _grants: &Path,
+        folder: &Path,
+        project: &Path,
+        git: &Path,
+        helper: &Path,
+        grants: &Path,
     ) -> Result<Self, SandboxError> {
-        todo!("V244-WIN-GIT-UNC-SIBLINGS slice 2: install")
+        fs::create_dir_all(folder)?;
+        let folder = canonical(folder)?;
+        let project = canonical(project)?;
+        let places = places(&folder, &project);
+        fs::create_dir_all(&places.home)?;
+        fs::create_dir_all(&places.tmp)?;
+        let policy = policy(&project, git, &places)?;
+        let boundary = WindowsSandbox::install(policy, helper, &places.profile, grants)?;
+        assert_eq!(boundary.profile(), places.profile);
+        Ok(Self {
+            boundary,
+            git: git.to_path_buf(),
+        })
     }
 
-    /// The installed boundary profile (red: not built yet).
+    /// The installed boundary profile every wrapped command names.
     pub fn profile(&self) -> &Path {
-        todo!("V244-WIN-GIT-UNC-SIBLINGS slice 2: profile")
+        self.boundary.profile()
     }
 
-    /// Wraps one git command built for the project (red: not built yet).
-    pub fn wrap(&self, _git: &Command) -> Result<Command, SandboxError> {
-        todo!("V244-WIN-GIT-UNC-SIBLINGS slice 2: wrap")
+    /// Wraps one git command built for the project: the same program, arguments, folder and
+    /// variables but `GIT_CONFIG_GLOBAL`, which the boundary sets to the null device for every
+    /// process ([`AGENT_HOME_ENV`]), so the command must name the null device too. The wrapped
+    /// command has default stdio: the caller sets it again. Input: the command. Output: the
+    /// wrapped command, or `Invalid` for another program, global config or starting folder.
+    pub fn wrap(&self, git: &Command) -> Result<Command, SandboxError> {
+        if Path::new(git.get_program()) != self.git {
+            return Err(invalid(
+                "owner git runs only the git its boundary was installed for",
+            ));
+        }
+        let mut bare = Command::new(&self.git);
+        bare.args(git.get_args());
+        if let Some(folder) = git.get_current_dir() {
+            bare.current_dir(folder);
+        }
+        for (name, value) in git.get_envs() {
+            if name.eq_ignore_ascii_case(GLOBAL_CONFIG) {
+                if value != Some(OsStr::new(crate::github::NULL_DEVICE)) {
+                    return Err(invalid("owner git reads no global git config"));
+                }
+                continue;
+            }
+            match value {
+                Some(value) => bare.env(name, value),
+                None => bare.env_remove(name),
+            };
+        }
+        let wrapped = self.boundary.wrap(&bare)?;
+        assert!(AGENT_HOME_ENV.contains(&(GLOBAL_CONFIG, "/dev/null")));
+        assert!(
+            wrapped.get_envs().any(
+                |(name, value)| name == GLOBAL_CONFIG && value == Some(OsStr::new("/dev/null"))
+            )
+        );
+        Ok(wrapped)
     }
 }
 
