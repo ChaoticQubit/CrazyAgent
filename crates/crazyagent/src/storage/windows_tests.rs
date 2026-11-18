@@ -16,10 +16,12 @@ fn fixture() -> (tempfile::TempDir, PathBuf, crate::config::EffectiveConfig) {
 /// Grants authenticated users inheritable modify on a folder through icacls. Input: the
 /// folder.
 fn open_to_other_users(folder: &Path) {
-    let status = std::process::Command::new("icacls")
-        .args([folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"])
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+        folder.to_str().unwrap(),
+        "/grant",
+        "*S-1-5-11:(OI)(CI)(M)",
+    ]))
+    .unwrap();
     assert!(status.success());
 }
 
@@ -115,10 +117,12 @@ async fn a_settings_file_other_users_may_read_is_refused() {
     let data = path.parent().unwrap().to_path_buf();
     let global = data.join("global.toml");
     std::fs::write(&global, "").unwrap();
-    let status = std::process::Command::new("icacls")
-        .args([global.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+        global.to_str().unwrap(),
+        "/grant",
+        "*S-1-5-11:(R)",
+    ]))
+    .unwrap();
     assert!(status.success());
     let Err(error) =
         Storage::open_with_settings_sources(&path, &global, &data.join("project.toml")).await
@@ -147,6 +151,68 @@ fn layout_prepare_makes_every_entry_private_and_refuses_an_open_root() {
     assert!(crate::paths::Layout::new(open).unwrap().prepare().is_err());
 }
 
+/// The mandatory label that applies to an open folder or file itself. Input: the object.
+/// Output: the level and policy, None when it has none.
+fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
+    let facts = private::facts(object).unwrap();
+    facts
+        .label
+        .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap())
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): on a data folder `Layout::prepare` makes, engine.db
+/// and the side files SQLite makes beside it, and the MCP secrets folder, carry the medium
+/// no-read-up label; the data root itself, its logs and the plugin store carry none, so a
+/// root the engine makes there for an AppContainer starts unlabelled.
+#[tokio::test]
+async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_label() {
+    use super::plugins;
+    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    let root = tempfile::tempdir().unwrap();
+    let layout = crate::paths::Layout::new(root.path().join("data")).unwrap();
+    layout.prepare().unwrap();
+    let data = layout.root().to_path_buf();
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let storage = Storage::open(&data.join("engine.db"), config, false)
+        .await
+        .unwrap();
+    let secrets = plugins::store_folder(&data, &[plugins::SECRETS]).unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let file = private::file(&data.join(name), false).unwrap();
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+    }
+    assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_NO_UP);
+    for folder in [data.clone(), layout.logs(), data.join(plugins::STORE)] {
+        let held = private::dir(&folder).unwrap();
+        assert_eq!(own_label(&held), None, "{}", folder.display());
+    }
+    drop(storage);
+}
+
+/// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW): a data root the update
+/// channel save made before the first `Layout::prepare` still hands the medium no-read-up
+/// label to engine.db and its side files, as `prepare` labels the root whatever made it.
+#[tokio::test]
+async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
+    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    crate::update::save_channel(&data, crate::update::Channel::Dev).unwrap();
+    let layout = crate::paths::Layout::new(data.clone()).unwrap();
+    layout.prepare().unwrap();
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let storage = Storage::open(&data.join("engine.db"), config, false)
+        .await
+        .unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let file = private::file(&data.join(name), false).unwrap();
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+    }
+    drop(storage);
+}
+
 /// W1c D5: an MCP server secret round-trips through the Windows plugin key store as a W1
 /// private file, a secret file other users may read is refused as unsafe, and a removed
 /// secret is gone.
@@ -166,10 +232,12 @@ fn a_plugin_secret_round_trips_privately_and_an_open_one_is_refused() {
         .unwrap()
         .join(&reference);
     private::check(&private::read_only(&file).unwrap()).unwrap();
-    let status = std::process::Command::new("icacls")
-        .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+        file.to_str().unwrap(),
+        "/grant",
+        "*S-1-5-11:(R)",
+    ]))
+    .unwrap();
     assert!(status.success());
     assert_eq!(
         plugins::read_secret(&data, &reference).unwrap_err().0,
@@ -201,10 +269,12 @@ fn an_account_key_is_read_privately_and_an_open_one_is_refused() {
         .unwrap();
     let key = read_key_file(&data, &reference).unwrap().unwrap();
     assert_eq!(key.expose(), "sk-ant-test-key");
-    let status = std::process::Command::new("icacls")
-        .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
-        .status()
-        .unwrap();
+    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+        file.to_str().unwrap(),
+        "/grant",
+        "*S-1-5-11:(R)",
+    ]))
+    .unwrap();
     assert!(status.success());
     assert_eq!(
         read_key_file(&data, &reference).unwrap_err().0,

@@ -156,6 +156,35 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
         })
     })
 }
+
+/// Whether the list lets `sid` read and run a folder and what lies below it: the folder itself
+/// ([`reads`]), and its files and its subfolders through allow entries that pass read and run
+/// on to every level, inherit-only or generic ones included, as `C:\Program Files` splits them
+/// (rv-code4 #541 F1). Inputs: the access list bytes and the SID bytes. Output: true when it
+/// does; false for a malformed list.
+pub fn reads_tree(acl: &[u8], sid: &[u8]) -> bool {
+    let passes = |inherit: u8| {
+        entries(acl).is_ok_and(|found| {
+            found.iter().any(|entry| {
+                entry.allows
+                    && entry.sid == sid
+                    && entry.flags & inherit == inherit
+                    && entry.flags & NO_PROPAGATE == 0
+                    && specific(entry.mask) & READ_EXECUTE == READ_EXECUTE
+            })
+        })
+    };
+    reads(acl, sid) && passes(OBJECT_INHERIT) && passes(CONTAINER_INHERIT)
+}
+
+/// Whether the boundary refuses a read root before its helper runs: neither ALL APPLICATION
+/// PACKAGES nor the container reads the path itself ([`reads`]), so the helper would add the
+/// container's entry, and this user cannot change the list, so that write fails. `changeable`
+/// is asked only for such a root. Inputs: the list, the container SID and the change probe.
+/// Output: true to refuse.
+pub fn read_root_refused(acl: &[u8], container: &[u8], changeable: impl FnOnce() -> bool) -> bool {
+    !reads(acl, &ALL_APPLICATION_PACKAGES) && !reads(acl, container) && !changeable()
+}
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 /// The SID `S-1-5-32-544` (the Administrators group) as bytes.
@@ -168,6 +197,9 @@ pub const TRUSTED_INSTALLER: [u8; 32] = [
 ];
 /// The SID `S-1-3-4` (OWNER RIGHTS) as bytes, which stands for whoever owns the object.
 pub const OWNER_RIGHTS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+/// The SID `S-1-3-0` (CREATOR OWNER) as bytes, which an inherited entry turns into whoever
+/// creates the child.
+pub const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 
 const WRITE_DATA: u32 = 0x0000_0002;
 const APPEND_DATA: u32 = 0x0000_0004;
@@ -251,6 +283,42 @@ pub fn other_writer<'a>(
             Some(_) => {}
             None if DENY_TYPES.contains(&kind) => {}
             None => return Err("the access list holds an allow entry this check cannot read"),
+        }
+    }
+    Ok(None)
+}
+
+/// The first SID other than SYSTEM, the administrators, TrustedInstaller, CREATOR OWNER,
+/// OWNER RIGHTS and the user that a folder's allow entry hands any right on what is made in
+/// it (object or container inherit, inherit-only or not); an inheritable allow entry this
+/// reader cannot parse is an error. Inputs: the list bytes and the user's SID bytes. Output:
+/// that SID, none, or the reason the list is malformed or unreadable.
+pub fn inherited_grantee<'a>(acl: &'a [u8], user: &[u8]) -> Result<Option<&'a [u8]>, &'static str> {
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    let allowed = [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        &CREATOR_OWNER[..],
+        &OWNER_RIGHTS[..],
+        user,
+    ];
+    for span in spans(acl)? {
+        let kind = acl[span.range.start];
+        if acl[span.range.start + 1] & (OBJECT_INHERIT | CONTAINER_INHERIT) == 0 {
+            continue;
+        }
+        match span.entry {
+            Some(entry) if entry.allows && entry.mask != 0 && !allowed.contains(&entry.sid) => {
+                return Ok(Some(entry.sid));
+            }
+            Some(_) => {}
+            None if DENY_TYPES.contains(&kind) => {}
+            None => {
+                return Err(
+                    "the access list holds an inheritable allow entry this check cannot read",
+                );
+            }
         }
     }
     Ok(None)
@@ -566,14 +634,45 @@ pub fn allowing(sids: &[&[u8]], flags: u8, mask: u32) -> Vec<u8> {
     list
 }
 
+/// A system access list holding one mandatory label entry with `flags`: integrity `level`,
+/// the label SID's last part, and the `policy` bits, in the layout Windows reads. Inputs:
+/// the level, the policy and the entry flags. Output: the list bytes.
+pub fn labelled(level: u32, policy: u32, flags: u8) -> Vec<u8> {
+    let mut sid = vec![1, 1];
+    sid.extend(LABEL_AUTHORITY);
+    sid.extend(level.to_le_bytes());
+    let ace = ace_bytes(MANDATORY_LABEL, flags, policy, &sid);
+    let list = list_from(&[ACL_REVISION, 0, 0, 0, 0, 0, 0, 0], &[ace]).expect("one label fits");
+    let applies = flags & INHERIT_ONLY == 0;
+    assert_eq!(label(&list), Ok(applies.then_some((level, policy))));
+    list
+}
+
 /// The mandatory label a system access list holds for the object itself: the integrity
 /// level, the label SID's last part, and the policy bits. Inherit-only labels are skipped.
 /// Input: the list bytes Windows copied out with the label asked for. Output: the level and
 /// policy, None when no label applies, or the reason the list or a label is malformed.
 pub fn label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
+    first_label(sacl, |flags| flags & INHERIT_ONLY == 0)
+}
+
+/// The mandatory label a folder's system access list hands what is made in it, an entry with
+/// object or container inherit, inherit-only or not, read as [`label`] reads its own.
+/// Input: the list bytes. Output: the level and policy, None when no label is handed down,
+/// or the reason the list or a label is malformed.
+pub fn inherited_label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
+    first_label(sacl, |flags| {
+        flags & (OBJECT_INHERIT | CONTAINER_INHERIT) != 0
+    })
+}
+
+/// The first mandatory label entry whose flags `wanted` accepts, as its level and policy.
+/// Inputs: the system list bytes and the flag test. Output: the level and policy, None when
+/// no such label exists, or the reason the list or the label is malformed.
+fn first_label(sacl: &[u8], wanted: fn(u8) -> bool) -> Result<Option<(u32, u32)>, &'static str> {
     for span in spans(sacl)? {
         let at = span.range.start;
-        if sacl[at] != MANDATORY_LABEL || sacl[at + 1] & INHERIT_ONLY != 0 {
+        if sacl[at] != MANDATORY_LABEL || !wanted(sacl[at + 1]) {
             continue;
         }
         let policy = u32::from_le_bytes([sacl[at + 4], sacl[at + 5], sacl[at + 6], sacl[at + 7]]);
@@ -820,6 +919,87 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(!reads(&denied, &ALL_APPLICATION_PACKAGES));
+    }
+
+    /// rv-code4 #541 F1: a folder is read with what lies below it only when entries for the
+    /// SID also pass read and run on to files and subfolders at every level, split or whole.
+    #[test]
+    fn reads_tree_needs_read_and_run_passed_on_to_files_and_subfolders() {
+        const AAP: [u8; 16] = ALL_APPLICATION_PACKAGES;
+        let program_files = acl(&[
+            ace(ACCESS_ALLOWED, 0x0b, 0xa000_0000, &AAP),
+            ace(ACCESS_ALLOWED, 0x10, READ_EXECUTE, &AAP),
+        ]);
+        assert!(reads_tree(&program_files, &AAP));
+        let inherited = acl(&[ace(ACCESS_ALLOWED, 0x13, READ_EXECUTE, &CONTAINER)]);
+        assert!(reads_tree(&inherited, &CONTAINER));
+        let halves = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x09, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0a, 0x1000_0000, &AAP),
+        ]);
+        assert!(reads_tree(&halves, &AAP));
+        let folder_only = acl(&[ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP)]);
+        assert!(reads(&folder_only, &AAP) && !reads_tree(&folder_only, &AAP));
+        for flags in [0x01, 0x02, 0x07] {
+            let short = acl(&[ace(ACCESS_ALLOWED, flags, READ_EXECUTE, &AAP)]);
+            assert!(!reads_tree(&short, &AAP), "{flags:#04x}");
+        }
+        let other = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0b, READ_EXECUTE, &CONTAINER),
+        ]);
+        assert!(!reads_tree(&other, &AAP));
+        let write_only = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0b, 0x4000_0000, &AAP),
+        ]);
+        assert!(!reads_tree(&write_only, &AAP));
+        assert!(!reads_tree(&program_files[..7], &AAP));
+    }
+
+    /// A read root is refused before the helper runs only when no app container may read it
+    /// and this user cannot change its list, and the change probe runs only for such a root.
+    #[test]
+    fn a_read_root_is_refused_only_when_no_package_reads_it_and_this_user_cannot_change_it() {
+        let packages = acl(&[ace(
+            ACCESS_ALLOWED,
+            0x10,
+            READ_EXECUTE,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        let unprobed = || -> bool { panic!("a root every package reads was probed") };
+        assert!(!read_root_refused(&packages, &CONTAINER, unprobed));
+        let admins_only = acl(&[
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &SYSTEM),
+        ]);
+        let inherit_only = acl(&[ace(
+            ACCESS_ALLOWED,
+            0x0b,
+            READ_EXECUTE,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        let mut malformed = packages.clone();
+        malformed[16] = 2;
+        for list in [&admins_only, &inherit_only, &malformed] {
+            assert!(read_root_refused(list, &CONTAINER, || false));
+            assert!(!read_root_refused(list, &CONTAINER, || true));
+        }
+    }
+
+    /// V244-WIN-NPM r2 F1: a read root the container's own entry already reads is left to the
+    /// helper, which names the root if it still has to write there, so the pre-check neither
+    /// probes nor refuses it; another container's entry does not count.
+    #[test]
+    fn a_read_root_the_container_already_reads_is_left_to_the_helper() {
+        let own = acl(&[
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &CONTAINER),
+        ]);
+        let unprobed = || -> bool { panic!("a root the container reads was probed") };
+        assert!(!read_root_refused(&own, &CONTAINER, unprobed));
+        assert!(read_root_refused(&own, &TEAMMATE, || false));
     }
 
     const TEAMMATE: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];

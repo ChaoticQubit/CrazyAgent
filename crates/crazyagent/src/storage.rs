@@ -1244,7 +1244,7 @@ fn open_actor_database(
     let parent = path
         .parent()
         .ok_or_else(|| error("database parent missing"))?;
-    let folder = private::dir(parent)
+    let folder = private::store_dir(parent, private::Store::Database)
         .map_err(|e| error(format!("database requires private owner directory: {e}")))?;
     if !readonly {
         match private::file(path, true) {

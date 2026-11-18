@@ -1030,7 +1030,9 @@ fn start_cause(error: &RunError) -> String {
         RunError::Jobs(JobError::NotHeld) => "job_not_held".to_owned(),
         RunError::Jobs(JobError::Storage(_)) => "job_storage".to_owned(),
         RunError::Sandbox(SandboxError::Invalid(_)) => "sandbox_refused".to_owned(),
-        RunError::Sandbox(SandboxError::Unavailable(_)) => "sandbox_unavailable".to_owned(),
+        RunError::Sandbox(SandboxError::Unavailable(_) | SandboxError::Unreadable(_)) => {
+            "sandbox_unavailable".to_owned()
+        }
         RunError::Sandbox(SandboxError::Io(error)) => io_cause("sandbox_io", error),
         RunError::Context(_) => "context_refused".to_owned(),
         RunError::Account(_) => "account_unavailable".to_owned(),

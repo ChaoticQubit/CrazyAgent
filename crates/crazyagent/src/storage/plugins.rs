@@ -266,11 +266,18 @@ fn new_id(prefix: &str) -> Result<String, EngineError> {
 }
 
 /// Creates or opens one folder of the private plugin store as a W1 private folder on Windows
-/// (DESIGN-0256 D1). Input: the folder path. Output: Ok, `plugin_store_unsafe` for a folder
-/// W1's check refuses, or `plugin_store_unavailable`.
+/// (DESIGN-0256 D1), the MCP secrets folder as a secret store with the no-read-up label
+/// (#524 r3). Inputs: the folder path and whether it is the secrets folder. Output: Ok,
+/// `plugin_store_unsafe` for a folder W1's check refuses, or `plugin_store_unavailable`.
 #[cfg(windows)]
-fn private_directory(path: &Path) -> Result<(), EngineError> {
-    match crazyagent_win_sandbox::private::dir(path) {
+fn private_directory(path: &Path, secrets: bool) -> Result<(), EngineError> {
+    use crazyagent_win_sandbox::private;
+    let held = if secrets {
+        private::store_dir(path, private::Store::Secret)
+    } else {
+        private::dir(path)
+    };
+    match held {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             Err(error("plugin_store_unsafe"))
@@ -280,7 +287,7 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
 }
 
 #[cfg(unix)]
-fn private_directory(path: &Path) -> Result<(), EngineError> {
+fn private_directory(path: &Path, _secrets: bool) -> Result<(), EngineError> {
     let unavailable = || error("plugin_store_unavailable");
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -301,11 +308,11 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
 /// Input: the engine root and the folders below `plugins`. Output: the folder path.
 pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, EngineError> {
     let mut path = root.join(STORE);
-    private_directory(&path)?;
+    private_directory(&path, false)?;
     for part in parts {
         assert!(crate::protocol::single_component(part));
         path.push(part);
-        private_directory(&path)?;
+        private_directory(&path, parts == [SECRETS])?;
     }
     Ok(path)
 }

@@ -640,7 +640,6 @@ fn folded(name: &str) -> String {
 /// Tells whether a path part opens a `.git` entry on a case-insensitive volume, compared as
 /// [`folded`] compares names, so `.GIT`, `.g\u{200c}it` on HFS+ and `.g\u{131}t` on NTFS all
 /// count (RV-DS241-148). Input: the part. Output: true for one.
-#[cfg(unix)]
 pub(crate) fn names_git(part: &str) -> bool {
     folded(part) == ".git"
 }
@@ -1663,10 +1662,12 @@ mod windows_tests {
         let file = root.path().join("AGENTS.md");
         std::fs::write(&file, "# rules").unwrap();
         assert_eq!(super::owned_text(&file).unwrap(), "# rules");
-        let status = std::process::Command::new("icacls")
-            .args([file.to_str().unwrap(), "/setowner", "*S-1-5-32-545"])
-            .status()
-            .unwrap();
+        let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+            file.to_str().unwrap(),
+            "/setowner",
+            "*S-1-5-32-545",
+        ]))
+        .unwrap();
         assert!(status.success());
         assert_eq!(
             super::owned_text(&file).unwrap_err(),

@@ -46,8 +46,8 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
 }
 
 /// The network the install's npm may reach on Windows: open, for this step only, because the
-/// AppContainer refuses every endpoint limit (`FIREWALL_RULE_MISSING`) and the pinned program
-/// needs npm's dependencies. Scripts stay off and both pins are checked before it runs.
+/// pinned program needs npm's dependencies and the AppContainer widens any host limit to the
+/// internet client anyway (DESIGN-0256 O2a). Scripts stay off and both pins are checked first.
 pub(super) fn npm_network() -> SandboxNetwork {
     SandboxNetwork::Open
 }
@@ -182,7 +182,8 @@ pub(super) fn npm_invocation(bin: &Path, cwd: &Path) -> Command {
 /// Builds the install's npm command inside its installed boundary, the AppContainer and job
 /// the helper starts. No PATH is added: `node.exe` and `npm-cli.js` are absolute and scripts
 /// are off. Inputs: the boundary, the engine root, the profile path, npx's folder and npm's
-/// working folder. Output: the command, or the refusal.
+/// working folder. Output: the command, or the refusal, Node.js's own code when npx's folder
+/// is one no app container may read and this user cannot change.
 pub(super) fn npm_wrap(
     sandbox: ProjectSandbox,
     root: &Path,
@@ -192,7 +193,9 @@ pub(super) fn npm_wrap(
 ) -> Result<Command, InstallError> {
     let settings = boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict).map_err(refused)?;
+    let real = crate::sandbox::canonical(bin).map_err(refused)?;
+    let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict)
+        .map_err(|error| super::boundary_refused(&real, error))?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)
 }
 

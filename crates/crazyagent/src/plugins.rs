@@ -407,16 +407,17 @@ pub struct LaunchServer {
 }
 
 /// Why a launch left the default pack's context-mode server out rather than run its npx
-/// spec: the engine's shared install is still being set up, setting it up failed or cannot
-/// run, the installed files did not match the pinned hashes, the Node.js beside npx is older
-/// than context-mode needs, or the npx a spec only shaped like that launch names is not one
-/// the engine's tool resolver finds.
+/// spec: the shared install is still being set up, setting it up failed or cannot run, the
+/// installed files did not match the pinned hashes, the Node.js beside npx is too old or sits
+/// in a folder Windows sandboxes cannot read and this user cannot open to them, or the tool
+/// resolver does not find that npx.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
     Failed,
     Mismatch,
     NodeTooOld,
+    NodeFolderUnreadable,
     NpxNotFound,
 }
 
@@ -807,6 +808,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
     ),
     (
+        "server_node_folder_unreadable",
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.",
+    ),
+    (
         "server_output_too_large",
         "The server sent too much output.",
     ),
@@ -889,7 +894,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 pub const CHECK_REFUSED: &str = "server_check_refused:";
 
 /// The longest boundary reason a recorded check problem carries.
-const CHECK_REASON_BYTES_MAX: usize = 1024;
+pub const CHECK_REASON_BYTES_MAX: usize = 1024;
 
 /// Records a boundary refusal of a server check with the boundary's reason. Input: the plain
 /// reason, never empty. Output: the problem to record, which [`check_problem`] shows.
@@ -899,6 +904,22 @@ pub fn check_refused(reason: &str) -> String {
     let problem = format!("{CHECK_REFUSED}{reason}");
     assert!(check_problem(&problem).contains(reason.trim_end_matches('.')));
     problem
+}
+
+/// Why a server check is not run on Windows under a network that names hosts or ports: the
+/// AppContainer holds no such limit, so the check would reach the whole internet, which the
+/// owner accepted for agents only (#519 F1).
+const WINDOWS_CHECK_LIMIT: &str = "limiting a Windows agent's network to a few ports needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
+
+/// The refusal of a server check whose network names hosts or ports on Windows (#519 F1).
+/// Inputs: the OS and the check's network. Output: the problem to record, or None when the
+/// check may run.
+pub fn check_network_refused(os: &str, network: &crate::sandbox::SandboxNetwork) -> Option<String> {
+    let limited = matches!(
+        network,
+        crate::sandbox::SandboxNetwork::Only(remotes) if !remotes.is_empty()
+    );
+    (os == "windows" && limited).then(|| check_refused(WINDOWS_CHECK_LIMIT))
 }
 
 /// The start of a recorded check problem for a failed context-mode shared install, followed
@@ -1117,6 +1138,42 @@ mod tests {
     }
 
     #[test]
+    fn a_windows_check_under_a_host_or_port_limit_is_refused_with_the_firewall_reason() {
+        use crate::sandbox::policy::AgentNetwork;
+        use crate::sandbox::{SandboxNetwork, SandboxRemote};
+        let https = AgentNetwork::Https.sandbox(None);
+        assert_eq!(
+            https,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+        );
+        let refused = check_network_refused("windows", &https).expect("refused on Windows");
+        assert_eq!(refused, check_refused(WINDOWS_CHECK_LIMIT));
+        assert_eq!(
+            check_problem(&refused),
+            format!("CrazyAgent did not run the check: {WINDOWS_CHECK_LIMIT}.")
+        );
+        let loopback = SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)]);
+        assert!(check_network_refused("windows", &loopback).is_some());
+        for open in [
+            AgentNetwork::Open.sandbox(None),
+            AgentNetwork::None.sandbox(None),
+        ] {
+            assert!(
+                check_network_refused("windows", &open).is_none(),
+                "{open:?}"
+            );
+        }
+        for os in ["macos", "linux"] {
+            for network in [&https, &loopback] {
+                assert!(
+                    check_network_refused(os, network).is_none(),
+                    "{os} {network:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_check_the_boundary_refused_shows_the_boundary_reason() {
         let reason = "port 40000 is kept free for the owner's apps, a local model or a model \
              proxy, and this Linux hands out ports 32768 to 60999 by itself";
@@ -1257,6 +1314,24 @@ mod tests {
             known_code("server_npx_not_found"),
             Some("server_npx_not_found")
         );
+    }
+
+    /// V244-WIN-NPM: a check whose context-mode install met a Node.js folder no Windows
+    /// sandbox may read, and only an administrator can open, reads one sentence of its own,
+    /// a code the desktop knows; a boundary reason that names a folder shows that folder.
+    #[test]
+    fn a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence() {
+        let words = "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.";
+        assert_eq!(check_problem("server_node_folder_unreadable"), words);
+        assert_eq!(plain_problem("server_node_folder_unreadable"), Some(words));
+        assert_eq!(
+            known_code("server_node_folder_unreadable"),
+            Some("server_node_folder_unreadable")
+        );
+        let folder = std::path::Path::new(r"C:\Program Files\nodejs");
+        let reason = crate::sandbox::unreadable_reason(folder);
+        assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
+        assert!(check_problem(&check_refused(&reason)).contains(&reason));
     }
 
     /// RV-DS241-153: the pinned context-mode launch is read from the full npx path that

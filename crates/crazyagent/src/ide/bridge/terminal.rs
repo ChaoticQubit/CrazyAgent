@@ -198,7 +198,9 @@ pub(super) fn terminal_level(
 /// (RESET-WALK-CODE code r1 F1), else `ide_terminal_refused`.
 pub(super) fn shell_refusal(error: SandboxError) -> EngineError {
     match error {
-        SandboxError::Unavailable(_) => failure("ide_terminal_unavailable"),
+        SandboxError::Unavailable(_) | SandboxError::Unreadable(_) => {
+            failure("ide_terminal_unavailable")
+        }
         SandboxError::Io(error) if crate::team::cleanup::walk_too_long_io(&error) => {
             failure(crate::team::cleanup::WALK_TOO_LONG)
         }
