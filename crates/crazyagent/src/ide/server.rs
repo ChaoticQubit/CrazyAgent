@@ -1270,14 +1270,15 @@ fn retire(tmp: &Path) -> Option<PathBuf> {
 }
 
 /// Removes one folder [`retire`] moved aside, with all it holds and never following a link,
-/// on a thread of its own; one that is no longer such a folder is left, and one that cannot
-/// be removed is logged and left for the next engine-start sweep ([`sweep_retired`]).
-/// Input: the folder.
+/// on a thread of its own, as an agent's tree goes ([`crate::team::cleanup::remove_agent_tree`]),
+/// so a folder its session shut or a file it made immutable never keeps it; one that is no
+/// longer such a folder is left, and one that cannot be removed is logged and left for the
+/// next engine-start sweep ([`sweep_retired`]). Input: the folder.
 fn remove_in_background(gone: PathBuf) {
     let spawned = std::thread::Builder::new()
         .name("ide-tmp-gone".into())
         .spawn(move || {
-            if retired(&gone) && fs::remove_dir_all(&gone).is_err() {
+            if retired(&gone) && crate::team::cleanup::remove_agent_tree(&gone).is_err() {
                 eprintln!("ide_server_tmp_left");
             }
         });
@@ -1314,8 +1315,9 @@ fn retired(path: &Path) -> bool {
 }
 
 /// Removes, on a thread of its own, the folders [`retire`] moved aside that an earlier
-/// engine left when it stopped before their removal ended, looking at no more than `limit`
-/// entries of the system temp folder. The owner server starts it once at engine start
+/// engine left when it stopped before their removal ended, or could not remove, each as an
+/// agent's tree goes ([`crate::team::cleanup::remove_agent_tree`]), looking at no more than
+/// `limit` entries of the system temp folder. The owner server starts it once at engine start
 /// ([`Servers::sweep_left`]). Input: the limit. Output: the sweep's thread, whose result
 /// is how many it removed, or none when no thread could start.
 fn sweep_retired(limit: usize) -> Option<std::thread::JoinHandle<usize>> {
@@ -1331,7 +1333,7 @@ fn sweep_retired(limit: usize) -> Option<std::thread::JoinHandle<usize>> {
                 if !retired(&path) {
                     continue;
                 }
-                match fs::remove_dir_all(&path) {
+                match crate::team::cleanup::remove_agent_tree(&path) {
                     Ok(()) => removed += 1,
                     Err(_) => eprintln!("ide_server_tmp_left"),
                 }
