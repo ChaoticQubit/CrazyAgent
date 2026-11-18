@@ -20,7 +20,8 @@ mod tests;
 /// inside it.
 pub(crate) const BACKUPS: &str = "backups";
 
-/// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
+/// How many upgrade backups of this user stay on disk: the new one and the newest others.
+/// Older ones are removed once a new one exists; another account's folders are never touched.
 pub(crate) const BACKUPS_KEPT: usize = 5;
 const _: () = assert!(BACKUPS_KEPT >= 1);
 
@@ -517,9 +518,10 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 }
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
-/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), then keeps
-/// only the newest BACKUPS_KEPT backups. Inputs: the connection, its path, the settings
-/// sources and both versions. Output: the new backup folder.
+/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), then keeps it and
+/// the newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the
+/// connection, its path, the settings sources and both versions. Output: the new backup
+/// folder.
 fn backup(
     db: &Connection,
     path: &Path,
