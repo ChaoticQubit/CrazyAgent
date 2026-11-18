@@ -1557,6 +1557,7 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 const GIT_DEADLINE: &str = "git_deadline";
 /// The code of a lease check refused for a git older than the 2.39 floor. It says the
 /// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
+#[cfg(unix)]
 const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
