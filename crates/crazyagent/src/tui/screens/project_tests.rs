@@ -3096,6 +3096,16 @@ fn a_hidden_folder_refused_as_not_plain_is_told_in_this_systems_path_form() {
     assert_eq!(plain_problem("hidden_path_not_plain"), wanted);
 }
 
+/// #590 (leader 10:34): a hidden folder refused because its path holds non-English letters
+/// is told that cause in plain words, the same words the desktop app shows.
+#[test]
+fn a_hidden_folder_refused_for_its_non_english_name_is_told_why() {
+    assert_eq!(
+        plain_problem("hidden_path_name_unchecked"),
+        "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();

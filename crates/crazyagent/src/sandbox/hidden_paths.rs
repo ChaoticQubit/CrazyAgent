@@ -629,10 +629,11 @@ mod tests {
         any_tracked(project_root, &[folder.to_path_buf()])
     }
 
-    /// V243-WIN-HIDDEN-GIT (leader 09:21): git's answer counts only when every line is whole and
-    /// falls in an asked folder, itself or below it; an empty line, a line in no asked folder
-    /// (a sibling sharing the name's start, another case), or one cut short before the read cap
-    /// is unchecked. Past the cap the cut tail is dropped and the whole lines still count.
+    /// V243-WIN-HIDDEN-GIT (leader 09:21, #590): git's answer counts only when every line is
+    /// whole and falls in an asked folder, itself or below it, ASCII case ignored as git's
+    /// `icase` does; an empty line, a line in no asked folder (a sibling sharing the name's
+    /// start), or one cut short before the read cap is unchecked. Past the cap the cut tail is
+    /// dropped and the whole lines still count.
     #[test]
     fn an_answer_line_cut_short_or_in_no_asked_folder_is_unchecked() {
         let specs = ["secret".to_owned(), "conf/keys".to_owned()];
@@ -641,10 +642,11 @@ mod tests {
         assert_eq!(answer(b"", &specs, false), unchecked);
         assert_eq!(answer(b"secret/key.txt\0", &specs, true), Ok(true));
         assert_eq!(answer(b"conf/keys\0secret/a/b\0", &specs, false), Ok(true));
+        assert_eq!(answer(b"Secret/x\0CONF/Keys/y\0", &specs, true), Ok(true));
         for doubt in [
             &b"secrets/key.txt\0"[..],
             &b"conf/key\0"[..],
-            &b"secret/key.txt\0Secret/x\0"[..],
+            &b"Secrets/x\0"[..],
             &b"secret/key.txt\0\0"[..],
             &b"secret/key.txt"[..],
             &b"\0"[..],
@@ -738,6 +740,51 @@ mod tests {
             let typed = path.join("CONF").join("Secret");
             assert_eq!(git_tracks(&path, &typed), Ok(true));
         }
+    }
+
+    /// #590 (rv-sec3 F1): a folder renamed on disk to another case without git, so the index
+    /// still holds its old case, is found tracked; a folder whose name reads as a pattern
+    /// (`[s]ecret`) matches only itself, so the tracked `secret` beside it stays out of its
+    /// answer.
+    #[test]
+    fn a_folder_the_index_tracks_under_another_case_is_found_and_a_pattern_name_is_literal() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        let (tracked, _) = tracked_and_untracked(&path);
+        let pattern = path.join("[s]ecret");
+        std::fs::create_dir(&pattern).unwrap();
+        std::fs::write(pattern.join("tmp.txt"), "t\n").unwrap();
+        assert_eq!(git_tracks(&path, &pattern), Ok(false));
+        let renamed = path.join("Secret");
+        std::fs::rename(&tracked, &renamed).unwrap();
+        assert_eq!(git_tracks(&path, &renamed), Ok(true));
+        assert_eq!(none_tracked(&path, &[renamed]), Err("hidden_path_tracked"));
+    }
+
+    /// #590 (leader 10:34): git's `icase` folds ASCII letters only, while Windows and macOS
+    /// folder names also fold other letters, so there a folder path with any non-ASCII
+    /// character in a git project is refused as unchecked by name; with no repository, and on
+    /// Linux, where names match byte for byte, it is checked as before.
+    #[test]
+    fn a_non_ascii_folder_name_in_a_git_project_is_unchecked_where_names_fold_case() {
+        let plain = project();
+        let plain_path = canonical(plain.path()).unwrap();
+        let loose = plain_path.join("clé");
+        std::fs::create_dir(&loose).unwrap();
+        assert_eq!(git_tracks(&plain_path, &loose), Ok(false));
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        let _ = tracked_and_untracked(&path);
+        let folder = path.join("clé");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("tmp.txt"), "t\n").unwrap();
+        let wanted = if cfg!(any(windows, target_os = "macos")) {
+            Err("hidden_path_name_unchecked")
+        } else {
+            Ok(false)
+        };
+        assert_eq!(git_tracks(&path, &folder), wanted);
+        assert_eq!(none_tracked(&path, &[folder]), wanted.map(|_| ()));
     }
 
     /// V243-WIN-HIDDEN-GIT (leader 09:21): a saved list of several folders costs one git run,

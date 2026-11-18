@@ -286,9 +286,13 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
   assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<HiddenSection data=\{data\} \/>/);
-  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked"]) {
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked", "hidden_path_name_unchecked"]) {
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
+  const nonEnglish = "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another.";
+  assert.equal(api.knownError("hidden_path_name_unchecked"), nonEnglish);
+  const tuiProject = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project.rs", import.meta.url), "utf8");
+  assert.ok(tuiProject.includes(`"${nonEnglish}"`));
 });
 
 test("Settings says beside the toolchain switches that turning one off stops agents, research jobs and master turns running with it, in both UIs", () => {
