@@ -93,8 +93,8 @@ pub(super) fn capabilities(list: &[Capability]) -> Result<Vec<Words>, BoundaryEr
 /// `pause` apart; any other result is taken at once. Inputs: the call and the pause. Output:
 /// the first other result, or the race after the last try, which the caller refuses.
 fn retried<T>(mut create: impl FnMut() -> Result<T, i32>, pause: Duration) -> Result<T, i32> {
+    const { assert!(CREATE_TRIES >= 2) };
     assert!(pause <= CREATE_PAUSE);
-    assert!(CREATE_TRIES >= 2);
     let mut tries = 1;
     let mut result = create();
     while tries < CREATE_TRIES && matches!(result, Err(PROFILE_RACED)) {
@@ -222,7 +222,6 @@ mod tests {
         let pause = Duration::from_millis(20);
         let started = Instant::now();
         let (result, calls) = scripted(&[Err(PROFILE_RACED)], pause);
-        assert_eq!(CREATE_TRIES, 3);
         assert_eq!((result, calls), (Err(PROFILE_RACED), 3));
         assert!(started.elapsed() >= pause * (CREATE_TRIES - 1));
     }
