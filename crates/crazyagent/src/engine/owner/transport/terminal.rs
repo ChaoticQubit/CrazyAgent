@@ -526,11 +526,10 @@ fn paste(host: &Arc<dyn Host>, agent: &AgentId, keys: Vec<u8>) -> Sending {
 }
 
 /// Tells whether an input-only view's terminal is gone, read on a blocking thread through
-/// the call its keys take, routed as they are, so a teammate the engine adopted onto its
-/// lead's server, which the host's agent list never names, counts while its pane lives.
-/// Gone once that call answers the terminal or the pane ended, or fails while the host no
-/// longer lists the agent; a host that cannot tell leaves the view open. Takes the host and
-/// the agent. Returns the answer.
+/// the call its keys take, routed as they are, so an adopted teammate counts while its pane
+/// lives: gone once that call answers ended, or fails while the host no longer lists the
+/// agent; a host that cannot tell leaves the view open. Takes the host and the agent.
+/// Returns the answer.
 #[cfg(unix)]
 async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId) -> bool {
     let host = host.clone();
@@ -575,14 +574,11 @@ fn send(
     })
 }
 
-/// The attach handshake, all of it bounded by the attach deadline: checks the peer and the
-/// owner grant, reads the `Attach`, `AttachPane`, `AttachSized` or `AttachInput` request,
-/// sizes the window first for the last two, and attaches to the agent terminal or that one
-/// pane of its window, or for `AttachInput` checks the terminal answers and attaches no
-/// viewer. Takes the connection, its packet, the engine and the authority. Writes nothing,
-/// so a refusal can still be sent whole. Returns the admission, the view, its host and the
-/// team agent the owner's prompts and typing count for, none for a pane, which is not that
-/// agent's own app.
+/// The attach handshake within the attach deadline: checks the peer and the grant, reads one
+/// attach request, sizes the window for a sized or input-only one, then attaches a viewer, or
+/// none for input-only. Writes nothing, so a refusal can still be sent whole. Takes the
+/// connection, its packet, the engine and the authority. Returns the admission, the view,
+/// its host and the team agent its typing counts for, none for a pane.
 async fn open(
     stream: &mut UnixStream,
     packet: &[u8; 37],
@@ -911,14 +907,11 @@ impl Viewing for Grant<'_> {
     }
 }
 
-/// Streams one attached view until it ends: output as it comes, a fresh viewer after it fell
-/// behind, and the owner's requests in order, each sent only while the grant allows it. One
-/// send runs at a time beside the output; the next request is read once it answered, and a
-/// send running when the view ends is finished first, so a prompt taken is recorded as heard.
-/// An input-only view has no output and ends once its agent is gone. A paste's chunks come
-/// back to back: any other request inside an open paste, or a paste out of bounds, ends the
-/// view as an invalid request. Takes the writer, the view, the request queue, the host and
-/// the grant. Returns why it ended.
+/// Streams one view until it ends: output and a fresh viewer after falling behind, and the
+/// owner's requests in order while the grant allows, one send at a time, finished at the end
+/// so a prompt taken is heard. A paste's chunks come back to back or the view ends invalid;
+/// an input-only view ends once its terminal is gone. Takes the writer, the view, the
+/// request queue, the host and the grant. Returns why it ended.
 #[cfg(unix)]
 async fn pump(
     writer: &mut (impl AsyncWrite + Unpin),

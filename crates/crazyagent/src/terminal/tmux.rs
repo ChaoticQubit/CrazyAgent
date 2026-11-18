@@ -862,12 +862,11 @@ impl Tmux {
         pasted
     }
 
-    /// Pastes one owner paste into one tmux target (T7): `set-buffer` pieces of at most
-    /// `INPUT_BYTES_MAX` bytes into a buffer no other paste uses, each piece after the first
-    /// appended, then `paste-buffer -d -p -r -S`, which brackets the whole only when the
-    /// pane's app turned bracketed paste on and deletes the buffer; on a failure a
-    /// best-effort `delete-buffer` follows. Takes the control client, the target and keys
-    /// from `paste_keys`. Returns once tmux took them all, or `terminal_paste_bounds`.
+    /// Pastes one owner paste into one tmux target through `owner_paste_lines` (T7), which
+    /// brackets it only when the pane asked, with a best-effort `delete-buffer` on a failure.
+    /// Takes the control client, the target and 1 to `PASTE_BYTES_MAX` keys from
+    /// `paste_keys`, without a NUL. Returns once tmux took them all, `terminal_paste_bounds`,
+    /// or tmux's refusal.
     fn send_paste(control: &Control, target: &str, keys: &[u8]) -> Result<(), HostError> {
         if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0) {
             return Err(failure("terminal_paste_bounds"));
@@ -893,11 +892,12 @@ impl Tmux {
     /// Reads one format of one tmux target. `display-message` answers for the current pane,
     /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
     /// and window, and one of them must be the target. Takes the control client, a `%N` pane
-    /// or `session:=window` target and a format without spaces in its text. Returns the
+    /// or `session:=window` target, whose names hold no space, and the format. Returns the
     /// format's text, or `terminal_agent_unknown` once the target is gone.
     fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
+        let named = "#{pane_id} #{session_name}:=#{window_name}";
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{pane_id}} #{{session_name}}:=#{{window_name}} {format}{FORMAT_END}'"
+            "display-message -p -t {target} '{named} {format}{FORMAT_END}'"
         ))?;
         let unread = || failure("terminal_command_failed");
         let line = lines

@@ -1359,9 +1359,6 @@ pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
 /// full-screen app reads in place of a scroll; they are typed as `Input` is but never count
 /// as the owner typing, which holds engine input to a live master back. A `Scroll` holding
 /// anything but up and down arrow keys and mouse or focus reports counts as `Input` does.
-/// `AttachInput` opens a sized view that sends no output, for a viewer drawing the pane from
-/// elsewhere; `Paste` chunks of at most `INPUT_BYTES_MAX` bytes, the last one marked, carry
-/// one owner paste of at most `PASTE_BYTES_MAX` that the engine filters and pastes once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalRequest {
@@ -1378,6 +1375,8 @@ pub enum TerminalRequest {
         cols: u16,
         rows: u16,
     },
+    /// Opens a view of the agent's terminal, or one pane of its window, sized to `cols` by
+    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere.
     AttachInput {
         agent_id: AgentId,
         pane: Option<String>,
@@ -1387,6 +1386,8 @@ pub enum TerminalRequest {
     Input {
         bytes: Vec<u8>,
     },
+    /// One chunk of 1 to `INPUT_BYTES_MAX` bytes of an owner paste of at most
+    /// `PASTE_BYTES_MAX`, the last one marked; the engine filters the whole and pastes it once.
     Paste {
         bytes: Vec<u8>,
         last: bool,
