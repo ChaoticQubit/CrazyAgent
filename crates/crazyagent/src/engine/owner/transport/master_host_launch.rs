@@ -1396,6 +1396,54 @@ mod tests {
         )
     }
 
+    /// V243-FIRMLINK-LAUNCH-ROOT (rv-sec2 19:24): a master turn of a project stored under the
+    /// data volume's long name builds its sandbox on the short name, while a worktree reached
+    /// through a link is still refused, never followed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_master_turn_takes_the_long_name_of_its_folders_but_never_follows_a_link() {
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        let temporary = private_root();
+        let base = owner_generation(&temporary);
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let linked = base.join("worktrees").join("linked");
+        std::os::unix::fs::symlink(&worktree, &linked).unwrap();
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let build = |repository: &Path, worktree: &Path| {
+            let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                repository,
+                worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                &[],
+            )
+            .is_ok()
+        };
+        assert!(long(&worktree).is_dir());
+        assert!(
+            build(&long(&repository), &long(&worktree)),
+            "a long-named project must build its master sandbox"
+        );
+        assert!(
+            !build(&repository, &linked),
+            "a linked worktree must be refused, not followed"
+        );
+    }
+
     /// A master reads its sandbox settings from the engine database in the engine root, the
     /// folder around its owner generation, as the real layout has it; the generation holds
     /// no database and none is made there. Linux reads them before every master boundary.

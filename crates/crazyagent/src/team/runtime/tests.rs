@@ -34515,9 +34515,9 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
     let project = fixture.base.join("project");
     assert!(long(&project).is_dir());
     std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
-    let secret = project.join("secret");
-    std::fs::create_dir(&secret).unwrap();
-    std::fs::write(secret.join("key.txt"), "key\n").unwrap();
+    let drafts = project.join("drafts");
+    std::fs::create_dir(&drafts).unwrap();
+    std::fs::write(drafts.join("plan.txt"), "plan\n").unwrap();
     fixture.setup.folder = long(&project).to_str().unwrap().into();
     fixture
         .connection
@@ -34526,7 +34526,7 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
             params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
         )
         .unwrap();
-    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&secret)]).unwrap();
+    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&drafts)]).unwrap();
     let access = fixture.access.clone();
     let runtime = TeamRuntime::open(
         &fixture.base.join("engine.db"),
@@ -34566,12 +34566,12 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
     let quoted = |path: &Path| format!("'{}'", path.display());
     let script = format!(
         "(cat {owner} >/dev/null) 2>/dev/null && echo owner=read || echo owner=refused\n\
-         (cat {key} >/dev/null) 2>/dev/null && echo key=read || echo key=refused\n\
-         (cat {long_key} >/dev/null) 2>/dev/null && echo long_key=read || echo long_key=refused\n\
+         (cat {plan} >/dev/null) 2>/dev/null && echo plan=read || echo plan=refused\n\
+         (cat {long_plan} >/dev/null) 2>/dev/null && echo long_plan=read || echo long_plan=refused\n\
          (echo mine > mine.txt) 2>/dev/null && echo wrote || echo write=refused\n",
         owner = quoted(&project.join("owner.txt")),
-        key = quoted(&secret.join("key.txt")),
-        long_key = quoted(&long(&secret).join("key.txt")),
+        plan = quoted(&drafts.join("plan.txt")),
+        long_plan = quoted(&long(&drafts).join("plan.txt")),
     );
     let output = crate::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
@@ -34590,7 +34590,7 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
     .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "owner=read\nkey=refused\nlong_key=refused\nwrote\n",
+        "owner=read\nplan=refused\nlong_plan=refused\nwrote\n",
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
