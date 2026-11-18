@@ -2921,9 +2921,9 @@ fn a_run_and_its_own_fix_ending_in_one_read_lead_with_the_fix_outcome() {
 /// after that read.
 fn run_and_fix_in_one_read(first: bool, serena: bool, ended: DependencyState) -> Shell {
     let mut shell = if first {
-        first_run(120, 36)
+        first_run(80, 24)
     } else {
-        settings(120, 36)
+        settings(80, 24)
     };
     shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
         crate::setup::RefusedTool::FixButton,
@@ -2955,41 +2955,52 @@ fn run_and_fix_in_one_read(first: bool, serena: bool, ended: DependencyState) ->
 }
 
 /// V243-SETUP-TUI-SAME-READ (#523 rv-code r2 F1): when one read ends this screen's own fix and
-/// a run that left items uninstalled, the fix's line leads and the run's failure stays under
-/// it as a warning that does not clear, whether the fix worked or the tool is still not used.
+/// a run that left items uninstalled, the fix's line leads and the run's count of failed items
+/// follows it on the one message row, whole at 80 columns, in a tone that does not clear: a
+/// warning whether the fix worked or the tool is still not used, an error when the fix failed.
 #[test]
 fn a_fix_ending_with_a_run_that_left_items_keeps_the_run_failure_under_its_line() {
+    use crate::tui::frame::Tone;
     let missing = DependencyState::Missing {
         line: String::new(),
     };
     let fixed = installed_status().dependencies[2].state.clone();
+    let mut refused = refused_status(crate::setup::RefusedTool::FixButton).dependencies[2]
+        .state
+        .clone();
+    let DependencyState::Refused { fix_failed, .. } = &mut refused else {
+        panic!("the refused fixture reads Refused");
+    };
+    *fix_failed = Some("The fix could not change /h/py.".into());
     let changed = "Permissions changed, but Graphify command is still not used.";
     let works = "Permissions fixed. Graphify command can run now.";
-    for (first, ended, line, rest) in [
+    let broke = "The fix could not change /h/py.";
+    for (first, ended, line, rest, tone) in [
         (
             true,
             missing.clone(),
             changed,
-            "Setup finished, but 1 item did not install. See the reasons below.",
+            "1 item failed.",
+            Tone::Warning,
         ),
-        (
-            false,
-            missing,
-            changed,
-            "Setup finished, but 2 items did not install. See the reasons below.",
-        ),
-        (
-            false,
-            fixed,
-            works,
-            "Setup finished, but 1 item did not install. See the reasons below.",
-        ),
+        (false, missing, changed, "2 items failed.", Tone::Warning),
+        (false, fixed, works, "1 item failed.", Tone::Warning),
+        (false, refused, broke, "1 item failed.", Tone::Error),
     ] {
-        let shell = run_and_fix_in_one_read(first, !first, ended);
+        let mut shell = run_and_fix_in_one_read(first, !first, ended);
         let said = shell.ctx.message().expect("a message shows").clone();
-        assert_eq!(said.lead, line, "first run {first}");
-        assert_eq!(said.rest, rest, "first run {first}, lead {line}");
-        assert_eq!(said.tone, crate::tui::frame::Tone::Warning, "{said:?}");
+        assert_eq!(
+            (said.lead.as_str(), said.rest.as_str(), said.tone),
+            (line, rest, tone),
+            "first run {first}"
+        );
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("{line} {rest}"))),
+            "first run {first}:\n{}",
+            rows.join("\n")
+        );
     }
 }
 
