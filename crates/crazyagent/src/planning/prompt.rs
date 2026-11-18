@@ -226,11 +226,12 @@ pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
         .open(path)
 }
 
-/// Opens a file for reading where no no-follow open exists; the caller checked it is no link.
+/// Opens a file for reading as itself, a link or junction swapped in at its name included,
+/// never its target ([`crate::platform::open_plain`]); the caller keeps only a regular file.
 /// Takes the path. Returns the open file or the failure.
 #[cfg(not(unix))]
 pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
-    std::fs::File::open(path)
+    crate::platform::open_plain(path)
 }
 
 #[cfg(all(test, windows))]

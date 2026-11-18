@@ -794,10 +794,7 @@ pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
 
 #[cfg(not(unix))]
 pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
-    if !std::fs::symlink_metadata(path).ok()?.is_file() {
-        return None;
-    }
-    let file = File::open(path).ok()?;
+    let file = crate::platform::open_plain(path).ok()?;
     let metadata = file.metadata().ok()?;
     let identity = crazyagent_win_sandbox::file_id(&file).ok()?;
     metadata
