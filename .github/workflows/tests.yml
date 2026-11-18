@@ -43,6 +43,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 5
+      - name: Drop the Microsoft apt source the farm does not use
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -name '*microsoft*' -print -delete
       - name: Install Linux build packages
         timeout-minutes: 25
         run: bash scripts/ci/linux-packages.sh
