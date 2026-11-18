@@ -106,7 +106,7 @@ jobs:
           git log --oneline -1 | tee "$out"
           rows=("$UNKNOWN_ROW")
           if [ "$SIDE" = green ]; then read -ra more <<< "$MINIMUM_ROWS"; rows+=("${more[@]}"); fi
-          cargo +"$RUST_TOOLCHAIN" test -p crazyagent --locked --test e2e_tui -- --exact "${rows[@]}" --test-threads 1 --nocapture 2>&1 | tee -a "$out"
+          cargo +"$RUST_TOOLCHAIN" test -p crazyagent --locked --test e2e_tui -- --exact "${rows[@]}" --test-threads 1 2>&1 | tee -a "$out"
           unknown=$(grep -E "^test $UNKNOWN_ROW \.\.\. " "$out" | sed -E 's/.* \.\.\. //')
           case "$SIDE" in
             blind) want=ok ;;
