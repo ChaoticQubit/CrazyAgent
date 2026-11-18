@@ -353,13 +353,11 @@ struct Surfaces {
 }
 
 impl Surfaces {
-    /// Crops the surface to the part on screen inside the buffer its next commit carries and
-    /// places the subsurface there, all pending until the next commits. With no such part
-    /// the surface is one pixel under the toplevel's surface at the page's top left, where
-    /// the opaque page covers it. The crop never reaches past that buffer, since
-    /// wp_viewport's out_of_buffer error would end GTK's connection, and before the first
-    /// buffer only the place is sent. Inputs: the placement, that buffer, none before the
-    /// first present, and the page's area. Output: none.
+    /// Crops the surface to the part on screen within the buffer its next commit carries, never
+    /// past it (out_of_buffer ends GTK's connection), and places the subsurface there; with no
+    /// such part, one pixel under the toplevel's surface at the page's top left. Before the
+    /// first buffer only the place is sent. Inputs: the placement, that buffer and the page's
+    /// area. Output: none.
     fn crop(&self, placement: &Placement, buffer: Option<Buffer>, bounds: Option<Rect>) {
         let rect = placement.rect;
         let shown = placement.part.and_then(|part| match buffer {
@@ -520,13 +518,11 @@ impl Crop {
         page.visible(toplevel)
     }
 
-    /// Applies what the child shows now: its part inside the webview while on screen, else
-    /// nothing. X11 shapes the window to the part and maps it, or unmaps it. Wayland crops
-    /// the surface's buffer through its viewport and commits the surface; the subsurface's
-    /// place takes effect with the toplevel's next commit, made here, or, from the page's
-    /// size-allocate, GTK's commit of the frame it is laying out, since a commit inside
-    /// GTK's layout could carry GTK's acked size with its old buffer. Input: whether to
-    /// commit the toplevel's surface. Output: none.
+    /// Shows the child's part inside the webview while on screen, else nothing: X11 shapes and
+    /// maps or unmaps the window; Wayland crops and commits the surface, then commits the
+    /// toplevel's surface, or from size-allocate leaves that to GTK's commit of the frame, and
+    /// has GTK redraw the toplevel when the part changed. Input: whether to commit the
+    /// toplevel's surface. Output: none.
     fn apply(&self, commit_toplevel: bool) {
         let mut pacing = self.pacing.get();
         if pacing.is_gone() {
@@ -552,7 +548,7 @@ impl Crop {
                 if commit_toplevel {
                     surfaces.parent.commit();
                 }
-                if !commit_toplevel || (was.is_some() && placement.part.is_none()) {
+                if !commit_toplevel || was != placement.part {
                     self.toplevel.queue_draw();
                 }
                 flush(&surfaces.conn, &self.pacing);
@@ -592,12 +588,11 @@ impl Crop {
     }
 }
 
-/// A child surface of a GTK toplevel that wgpu draws a terminal into: an X11 child window
-/// with an empty input shape, or a desynced Wayland subsurface with an empty input region,
-/// on GTK's own display connection so it stacks with the toplevel. Clicks pass through to
-/// the toplevel. Only the part of its rectangle inside the webview shows. Once the toplevel
-/// unmaps the child never presents again; the host makes a new one. The host drops the wgpu
-/// surface before the child.
+/// A child surface of a GTK toplevel that wgpu draws a terminal into, on GTK's own display
+/// connection: an X11 child window or a desynced Wayland subsurface, with an empty input
+/// shape so clicks reach the toplevel. Only its part inside the webview shows. Once the
+/// toplevel unmaps it never presents again and the host makes a new one; the host drops the
+/// wgpu surface first.
 pub struct Child {
     native: Native,
     crop: Rc<Crop>,
@@ -920,8 +915,9 @@ impl Drop for Child {
 }
 
 /// Makes an X11 child window of the toplevel with an empty input shape, unmapped until its
-/// crop shows a part of it, and paced to the toplevel's monitor refresh. Inputs: GDK's X11 display, the toplevel's GDK
-/// window and the device rectangle. Output: the child, or the plain code.
+/// crop shows a part of it, and paced to the toplevel's monitor refresh. Inputs: GDK's X11
+/// display, the toplevel's GDK window and the device rectangle. Output: the child, or the
+/// plain code.
 fn x11_child(
     gdk: &gdkx11::X11Display,
     toplevel: &Window,
@@ -988,11 +984,10 @@ fn x11_child(
 }
 
 /// Makes a desynced subsurface of the toplevel's surface on GDK's own Wayland connection,
-/// with its own event queue, an empty input region, the toplevel's buffer scale and a
-/// viewport; a compositor without wp_viewporter gets the plain code. The
-/// toplevel's surface pointer is borrowed from GDK, which destroys it on unmap; the child's
-/// unmap handler marks it gone before any later use. Inputs: GDK's display, the toplevel's
-/// GDK window, the logical rectangle and the scale. Output: the subsurface, or the code.
+/// with its own event queue, an empty input region, the toplevel's scale and a viewport. The
+/// toplevel's surface is borrowed from GDK, which destroys it on unmap; the unmap handler
+/// marks the child gone first. Inputs: GDK's display, the toplevel's GDK window, the logical
+/// rectangle and the scale. Output: the subsurface, or the code, also with no wp_viewporter.
 fn wayland_child(
     gdk: &Display,
     toplevel: &Window,
