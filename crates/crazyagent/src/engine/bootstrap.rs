@@ -965,7 +965,12 @@ impl EngineService {
             ordinary_socket,
         )?;
         drop(stream);
-        for kind in [OwnerClientKind::Tui, OwnerClientKind::Desktop] {
+        let kinds = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .active_kinds()?;
+        for kind in kinds {
             let client = OwnerClient::attach(&generation, kind, self.timeout)?;
             capabilities(&client).await?;
             cancelled(shutdown)?;

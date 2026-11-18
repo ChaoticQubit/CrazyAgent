@@ -1146,6 +1146,24 @@ impl OwnerRuntimeHandle {
         self.authority.host.clone()
     }
 
+    /// The owner client kinds this engine run holds active, the ones an owner can sign in
+    /// as; a revoked kind stays refused. Output: the kinds, in registration order, or
+    /// `owner_authority_unavailable`.
+    #[cfg(unix)]
+    pub(crate) fn active_kinds(&self) -> Result<Vec<OwnerClientKind>, EngineError> {
+        let slots = self
+            .authority
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_authority_unavailable"))?;
+        assert!(slots.len() <= KEYS.len());
+        Ok(slots
+            .iter()
+            .filter(|slot| slot.registration.active)
+            .map(|slot| slot.registration.kind)
+            .collect())
+    }
+
     pub fn epoch(&self, kind: OwnerClientKind) -> Result<i64, EngineError> {
         let slots = self
             .authority
