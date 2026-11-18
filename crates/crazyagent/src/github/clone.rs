@@ -491,7 +491,8 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(argv.contains(&format!("core.hooksPath={NULL_DEVICE}")));
+        let hooks = format!("core.hooksPath={}", crate::research::runner::no_program());
+        assert!(argv.contains(&hooks), "{argv:?}");
         assert!(argv.contains(&"core.askPass=".to_owned()));
         assert!(
             argv.iter()
