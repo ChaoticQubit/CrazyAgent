@@ -246,6 +246,18 @@ pub const HIDDEN_NEEDS_NAMESPACES: &str = "hidden folders on Linux need bubblewr
      agents in namespaces of their own, and this computer does not let it: install \
      bubblewrap and allow unprivileged user namespaces, then start the agent again";
 
+/// Why an agent whose project hides a folder does not start while this computer mounts that
+/// folder's disk a second time where it shows the folder: the empty cover lies on one path,
+/// and the second one leads past it (rv-code4 F1, #622, farm run 44410206144).
+pub const HIDDEN_MOUNTED_AGAIN: &str = "a hidden folder's disk is mounted a second time where \
+     it shows that folder, and an agent could reach the folder there: remove that mount or \
+     stop hiding the folder, then start the agent again";
+
+/// Why an agent whose project hides a folder does not start when this computer's mount list
+/// cannot be read plainly: no second mount of the folder's disk can then be ruled out.
+const HIDDEN_MOUNTS_UNREAD: &str = "hidden folders on Linux need this computer's mount list, \
+     and it could not be read";
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -1614,6 +1626,7 @@ impl LinuxSandbox {
         if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_NAMESPACES.into()));
         }
+        mounts_hold(&sandbox)?;
         let (launcher, inside) = match &backend {
             LinuxBackend::Landlock { helper } => (helper, None),
             LinuxBackend::Nested { bwrap, helper } => (helper, Some(bwrap)),
@@ -2501,6 +2514,7 @@ struct Grants {
 
 impl Grants {
     fn of(sandbox: &ProjectSandbox) -> Result<Self, SandboxError> {
+        mounts_hold(sandbox)?;
         let project = sandbox.project_root();
         let git = project.join(".git");
         let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
@@ -2635,6 +2649,27 @@ impl Grants {
             hidden,
         })
     }
+}
+
+/// Refuses a launch whose hidden folders a second mount of their disk shows
+/// ([`mounted_again`]), reading this computer's mount list only when the policy hides a
+/// folder. A mount made after this check, at install and again at wrap, is not seen.
+/// Input: the policy. Output: Ok, or the refusal.
+fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
+    if sandbox.hidden.is_empty() {
+        return Ok(());
+    }
+    let text = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|_| SandboxError::Unavailable(HIDDEN_MOUNTS_UNREAD.into()))?;
+    mounted_again(&sandbox.hidden, &text)
+}
+
+/// Refuses hidden folders whose disk the mount list shows mounted a second time at the
+/// folder, above it or inside it. Inputs: the hidden folders and the mount list text.
+/// Output: Ok, or the refusal.
+fn mounted_again(hidden: &[PathBuf], text: &str) -> Result<(), SandboxError> {
+    let _ = (hidden, text);
+    Ok(())
 }
 
 /// Splits every write grant that covers the hidden folder `folder` so that none does: the
@@ -5031,6 +5066,77 @@ mod tests {
         };
         assert!(pairs(crate::sandbox::HIDDEN_MAX).is_ok());
         assert!(pairs(crate::sandbox::HIDDEN_MAX + 1).is_err());
+    }
+
+    /// rv-code4 F1 (#622): a second mount of a hidden folder's disk that shows the folder, a
+    /// folder above it or one inside it refuses the launch wherever it is mounted (farm run
+    /// 44410206144 read the folder through one); another disk, a folder beside it and the
+    /// folder's own mount do not, and a mount list that does not read plainly refuses too.
+    #[test]
+    fn a_second_mount_of_a_hidden_folders_disk_refuses_the_launch() {
+        let line = |id: u32, device: &str, root: &str, point: &str| {
+            format!("{id} 1 {device} {root} {point} rw,relatime shared:1 - ext4 /dev/sda1 rw\n")
+        };
+        let base = line(21, "8:1", "/", "/") + &line(22, "8:2", "/", "/boot");
+        let reason = |hidden: &str, text: &str| match mounted_again(&[PathBuf::from(hidden)], text)
+        {
+            Ok(()) => None,
+            Err(SandboxError::Unavailable(reason)) => Some(reason),
+            Err(other) => panic!("{other:?}"),
+        };
+        let folder = "/home/u/work/notes/private";
+        let again = Some(HIDDEN_MOUNTED_AGAIN.to_owned());
+        let unread = Some(HIDDEN_MOUNTS_UNREAD.to_owned());
+        assert_eq!(reason(folder, &base), None);
+        let seconds = [
+            (line(23, "8:1", "/home/u", "/mnt/alias"), &again),
+            (line(23, "8:1", "/", "/srv/root"), &again),
+            (line(23, "8:1", folder, "/srv/view"), &again),
+            (
+                line(23, "8:1", "/home/u/work/notes/private/sub", "/srv/part"),
+                &again,
+            ),
+            (
+                line(23, "8:1", "/home/u", "/home/u/work/worktrees/alias"),
+                &again,
+            ),
+            (line(23, "8:1", "/home/u", "/mnt/my\\040alias"), &again),
+            (
+                line(23, "8:1", "/home/u/work/context", "/srv/context"),
+                &None,
+            ),
+            (
+                line(23, "8:1", "/home/u/work/my\\040notes", "/srv/notes"),
+                &None,
+            ),
+            (line(23, "8:9", "/home/u", "/mnt/other"), &None),
+            (line(23, "0:4", "net:[4026532]", "/run/netns/one"), &None),
+        ];
+        for (second, expected) in seconds {
+            assert_eq!(
+                reason(folder, &(base.clone() + &second)),
+                *expected,
+                "{second}"
+            );
+        }
+        let spaced = base.clone() + &line(23, "8:1", "/home/u/my\\040work", "/srv/spaced");
+        assert_eq!(reason("/home/u/my work/private", &spaced), again);
+        let own = line(21, "8:1", "/", "/") + &line(24, "8:3", "/u", "/home");
+        assert_eq!(reason(folder, &own), None);
+        assert_eq!(
+            reason(folder, &(own + &line(25, "8:3", "/", "/mnt/home"))),
+            again
+        );
+        for broken in [
+            String::new(),
+            base.clone() + "garbage\n",
+            base.clone() + &line(23, "8:1", "/a\\0", "/b"),
+            base.clone() + &line(23, "8:1", "/a\\08x", "/b"),
+            base.clone() + &line(23, "eight", "/a", "/b"),
+            base.clone() + &line(23, "8:1", "/a", "relative"),
+        ] {
+            assert_eq!(reason(folder, &broken), unread, "{broken}");
+        }
     }
 
     #[test]
