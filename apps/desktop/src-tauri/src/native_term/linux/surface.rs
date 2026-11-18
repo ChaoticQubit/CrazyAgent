@@ -360,10 +360,7 @@ impl Surfaces {
     /// area. Output: none.
     fn crop(&self, placement: &Placement, buffer: Option<Buffer>, bounds: Option<Rect>) {
         let rect = placement.rect;
-        let shown = placement.part.and_then(|part| match buffer {
-            Some(buffer) => part.visible(buffer.at(rect.x, rect.y)),
-            None => Some(part),
-        });
+        let shown = placement.shown(buffer);
         if let Some(buffer) = buffer {
             let (source, size) = shown.map_or(((0, 0), (1, 1)), |shown| {
                 assert!(shown.x >= rect.x && shown.y >= rect.y);
@@ -487,6 +484,19 @@ struct Placement {
     part: Option<Rect>,
 }
 
+impl Placement {
+    /// The part of the rectangle a buffer shows: the part on screen within that buffer's
+    /// area, or the whole part before the first buffer. Input: the buffer. Output: the
+    /// part shown, or none while off screen or outside the buffer.
+    fn shown(&self, buffer: Option<Buffer>) -> Option<Rect> {
+        let rect = self.rect;
+        self.part.and_then(|part| match buffer {
+            Some(buffer) => part.visible(buffer.at(rect.x, rect.y)),
+            None => Some(part),
+        })
+    }
+}
+
 /// The page widget's area in its toplevel's logical pixels, inside the toplevel, which a
 /// child's crop and a view's focus both read. Inputs: the page and the toplevel. Output:
 /// the area, or none while the page is not realized or has no area.
@@ -564,9 +574,10 @@ impl Crop {
     }
 
     /// Crops a Wayland surface for the buffer the host is about to present, so the
-    /// present's commit carries both. Input: the buffer's size in device pixels, at least
-    /// one logical pixel each way. Output: none.
-    fn drawing(&self, size: (u32, u32)) {
+    /// present's commit carries both. Inputs: the buffer's size in device pixels, at least
+    /// one logical pixel each way at its scale, and the scale it was drawn at. Output: none.
+    fn drawing(&self, size: (u32, u32), scale: i32) {
+        assert!((1..=SCALE_MAX).contains(&scale));
         let mut placement = self.placement.get();
         let buffer = Buffer {
             width: size.0,
@@ -737,10 +748,17 @@ impl Child {
     }
 
     /// Moves the child to a new host rectangle at the toplevel's current scale and owes a
-    /// frame; the host resizes the wgpu surface when `size` changed. Only the part inside
-    /// the webview shows. Input: the rectangle. Output: none.
+    /// frame; the host reconfigures the wgpu surface when `size` or `scale` changed. Only
+    /// the part inside the webview shows. Input: the rectangle. Output: none.
     pub fn place(&mut self, rect: Rect) {
         let scale = self.crop.toplevel.scale_factor();
+        self.place_scaled(rect, scale);
+    }
+
+    /// Moves the child to a host rectangle at a scale, which a row sets apart from the
+    /// toplevel's to stand in for a rescale; a scale outside 1 to 8 leaves it in place.
+    /// Inputs: the rectangle and the scale. Output: none.
+    fn place_scaled(&mut self, rect: Rect, scale: i32) {
         if self.pacing.get().is_gone() || !(1..=SCALE_MAX).contains(&scale) {
             return;
         }
@@ -816,11 +834,12 @@ impl Child {
     }
 
     /// Notes a present about to happen, right before the host draws into its wgpu surface.
-    /// On Wayland it asks for the frame callback that the present's commit carries, and
-    /// crops the surface for that buffer in the same commit, so the crop holds even before
-    /// the host resizes to `size`. Input: the wgpu surface's configured size in device
-    /// pixels. Output: none.
-    pub fn presenting(&mut self, size: (u32, u32)) {
+    /// On Wayland it asks for the frame callback the present's commit carries, and crops
+    /// and labels the surface for that buffer in the same commit, so both hold before the
+    /// host reconfigures for a new place. Inputs: the wgpu surface's configured size in
+    /// device pixels and the scale it was configured at, 1 to 8. Output: none.
+    pub fn presenting(&mut self, size: (u32, u32), scale: i32) {
+        assert!((1..=SCALE_MAX).contains(&scale));
         let mut pacing = self.pacing.get();
         pacing.presenting();
         self.pacing.set(pacing);
@@ -831,7 +850,7 @@ impl Child {
                 let _callback = wayland.surfaces.surface.frame(&wayland.queue.handle(), ());
             }
         }
-        self.crop.drawing(size);
+        self.crop.drawing(size, scale);
     }
 
     /// Notes that the host's present went out. On Wayland it then commits the toplevel's
@@ -1295,8 +1314,9 @@ mod tests {
         surface: &mut Surface,
         frame: &Frame,
         size: (u32, u32),
+        scale: i32,
     ) -> f64 {
-        child.presenting(size);
+        child.presenting(size, scale);
         let started = Instant::now();
         shared.draw(surface, frame).expect("a present");
         let took = ms(started);
@@ -1418,17 +1438,18 @@ mod tests {
     }
 
     /// Presents until the child has shown a frame, then lets the compositor show it.
-    /// Inputs: the child, its terminal and the wgpu surface's size.
+    /// Inputs: the child, its terminal and the wgpu surface's size and scale.
     fn show_frame(
         child: &mut Child,
         shared: &mut Shared,
         surface: &mut Surface,
         frame: &Frame,
         size: (u32, u32),
+        scale: i32,
     ) {
         for _ in 0..3 {
             wait_ready(child);
-            present(child, shared, surface, frame, size);
+            present(child, shared, surface, frame, size, scale);
             child.changed();
         }
         pump_for(Duration::from_millis(200));
@@ -1437,16 +1458,17 @@ mod tests {
     /// Presents once at the wgpu surface's old size after a place, as a host that has not
     /// resized yet does. X11 may refuse the present; on Wayland the crop stays inside the
     /// old buffer, so GTK's connection and the child live on. Inputs: the child, its
-    /// terminal and the old size.
+    /// terminal and the old size and scale.
     fn present_unresized(
         child: &mut Child,
         shared: &mut Shared,
         surface: &mut Surface,
         frame: &Frame,
         size: (u32, u32),
+        scale: i32,
     ) {
         wait_ready(child);
-        child.presenting(size);
+        child.presenting(size, scale);
         match shared.draw(surface, frame) {
             Ok(()) => child.presented(),
             Err(_) => child.not_presented(),
@@ -1473,9 +1495,9 @@ mod tests {
 
     /// A child past the page's and the toplevel's right and bottom edges, over a blue toplevel:
     /// only its part inside the page shows. The page shrinks, shrinks out of the rect and grows
-    /// back through size-allocate alone, the child never presenting with no part; it then moves
-    /// to a larger and a smaller rect, each shown first with its old buffer. Under
-    /// NATIVE_ROW_DIR the farm checks pixels in, beside and outside the part at each step.
+    /// back through size-allocate alone, the child never presenting with no part; it moves to a
+    /// larger and a smaller rect and, on Wayland, to twice the scale, each shown first with its
+    /// old buffer. Under NATIVE_ROW_DIR the farm checks pixels in, beside and outside the part.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
     fn a_child_shows_only_its_part_inside_the_webview_and_reclips_on_size_allocate() {
@@ -1497,7 +1519,8 @@ mod tests {
         let mut child = Child::new(&window, page.upcast_ref(), rect).expect("a child surface");
         let (mut shared, mut surface, frame) = green_terminal(&child);
         let size = child.size();
-        show_frame(&mut child, &mut shared, &mut surface, &frame, size);
+        let scale = child.scale();
+        show_frame(&mut child, &mut shared, &mut surface, &frame, size, scale);
         clip_checkpoint("cropped", &child);
         assert_eq!(child.part(), part(100, 100));
 
@@ -1520,7 +1543,7 @@ mod tests {
         clip_checkpoint("none", &child);
 
         resize_page(&page, (400, 300));
-        show_frame(&mut child, &mut shared, &mut surface, &frame, size);
+        show_frame(&mut child, &mut shared, &mut surface, &frame, size, scale);
         clip_checkpoint("back", &child);
         assert_eq!(child.part(), part(100, 100));
 
@@ -1540,11 +1563,18 @@ mod tests {
         pump_for(Duration::from_millis(200));
         clip_checkpoint("larger_old", &child);
         assert_eq!(child.part(), larger_part);
-        present_unresized(&mut child, &mut shared, &mut surface, &frame, size);
+        present_unresized(&mut child, &mut shared, &mut surface, &frame, size, scale);
         let larger_size = child.size();
         shared.resize(&mut surface, larger_size.0, larger_size.1);
         child.changed();
-        show_frame(&mut child, &mut shared, &mut surface, &frame, larger_size);
+        show_frame(
+            &mut child,
+            &mut shared,
+            &mut surface,
+            &frame,
+            larger_size,
+            scale,
+        );
         clip_checkpoint("larger", &child);
         assert_eq!(child.part(), larger_part);
 
@@ -1561,9 +1591,54 @@ mod tests {
         let smaller_size = child.size();
         shared.resize(&mut surface, smaller_size.0, smaller_size.1);
         child.changed();
-        show_frame(&mut child, &mut shared, &mut surface, &frame, smaller_size);
+        show_frame(
+            &mut child,
+            &mut shared,
+            &mut surface,
+            &frame,
+            smaller_size,
+            scale,
+        );
         clip_checkpoint("smaller", &child);
         assert_eq!(child.part(), Some(smaller));
+
+        if matches!(child.native, Native::Wayland(_)) {
+            child.place_scaled(smaller, scale * 2);
+            pump_for(Duration::from_millis(200));
+            assert_eq!(child.part(), Some(smaller));
+            wait_ready(&mut child);
+            present(
+                &mut child,
+                &mut shared,
+                &mut surface,
+                &frame,
+                smaller_size,
+                scale,
+            );
+            pump_for(Duration::from_millis(200));
+            clip_checkpoint("rescaled_old", &child);
+            let placement = child.crop.placement.get();
+            assert_eq!(
+                placement.shown(placement.attached),
+                Some(smaller),
+                "a present at the old size and scale shows the whole part after a rescale"
+            );
+            let rescaled_size = child.size();
+            assert_eq!(rescaled_size, (smaller_size.0 * 2, smaller_size.1 * 2));
+            shared.resize(&mut surface, rescaled_size.0, rescaled_size.1);
+            child.changed();
+            show_frame(
+                &mut child,
+                &mut shared,
+                &mut surface,
+                &frame,
+                rescaled_size,
+                scale * 2,
+            );
+            clip_checkpoint("rescaled", &child);
+            let placement = child.crop.placement.get();
+            assert_eq!(placement.shown(placement.attached), Some(smaller));
+        }
 
         drop(surface);
         drop(child);
@@ -1603,12 +1678,20 @@ mod tests {
         let mut child = Child::new(&window, page.upcast_ref(), placed).expect("a child surface");
         let (mut shared, mut surface, frame) = green_terminal(&child);
         let size = child.size();
+        let scale = child.scale();
 
         let mut presents = Vec::with_capacity(FRAMES);
         let mut waits = Vec::with_capacity(FRAMES);
         while presents.len() < FRAMES {
             waits.push(wait_ready(&mut child));
-            presents.push(present(&mut child, &mut shared, &mut surface, &frame, size));
+            presents.push(present(
+                &mut child,
+                &mut shared,
+                &mut surface,
+                &frame,
+                size,
+                scale,
+            ));
             child.changed();
         }
         pump_for(Duration::from_millis(200));
@@ -1627,7 +1710,7 @@ mod tests {
 
         child.show();
         let shown_wait = wait_ready(&mut child);
-        let shown_present = present(&mut child, &mut shared, &mut surface, &frame, size);
+        let shown_present = present(&mut child, &mut shared, &mut surface, &frame, size, scale);
         pump_for(Duration::from_millis(200));
         checkpoint("shown", &child);
 
