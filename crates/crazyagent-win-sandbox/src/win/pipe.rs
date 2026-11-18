@@ -27,8 +27,8 @@ use windows_sys::Win32::System::Pipes::{
 };
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::Threading::{
-    GetCurrentThread, GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
-    OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, GetCurrentThread, GetProcessId, GetProcessTimes, OpenProcess,
+    OpenProcessToken, OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 /// The local pipe namespace every engine pipe name starts with.
@@ -195,6 +195,14 @@ pub fn pin_of(process: BorrowedHandle<'_>) -> io::Result<Pin> {
     let created = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
     assert_ne!(created, 0, "a running process has a creation time");
     Ok(Pin { pid, created })
+}
+
+/// Pins this process, the engine serving its own pipes, for the D7 pipes file its clients
+/// read the expected server from (DESIGN-0256 D10 step 1). Output: the pin, or the error.
+pub fn own_pin() -> io::Result<Pin> {
+    let pin = pin_of(unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) })?;
+    assert_eq!(pin.pid, std::process::id());
+    Ok(pin)
 }
 
 /// The integrity level of a pipe's mandatory label (DESIGN-0256 D10 step 3). Input: a
