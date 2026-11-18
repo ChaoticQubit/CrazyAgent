@@ -519,13 +519,56 @@ test("V243-NATIVE-SEED-REFUSED: a console seed the desktop refuses is marked use
     const shown = await F.until(() => F.shown("a").alerts.includes(line + "Dismiss"));
     await pause(2500);
     const kept = F.shown("a").alerts.includes(line + "Dismiss");
-    const alert = [...document.querySelectorAll("#a [role=alert]")].find((element) => element.textContent.startsWith(line)).getBoundingClientRect();
+    const alert = [...document.querySelectorAll("#a [role=alert]")].find((element) => element.textContent.startsWith(line))?.getBoundingClientRect() ?? null;
     const screen = F.screenRect("a");
-    const clear = alert.height > 0 && (alert.bottom <= screen.y || alert.top >= screen.y + screen.height);
+    const clear = alert !== null && alert.height > 0 && (alert.bottom <= screen.y || alert.top >= screen.y + screen.height);
     const used = window.seedUsed;
     const dismissed = F.press("a", "Dismiss");
     const gone = await F.until(() => !F.shown("a").alerts.some((text) => text.startsWith(line)));
     return { shown, kept, clear, used, dismissed, gone, pastes: F.calls("desktop_native_terminal_paste").length };
   `);
   assert.deepEqual(seen, { shown: true, kept: true, clear: true, used: 1, dismissed: true, gone: true, pastes: 1 }, "clear: the alert sits outside the screen the native view covers");
+});
+
+test("V243-NATIVE-INPUT r2 (#509 F1): a focus waiting under a page dialog is dropped when the view ends, so the view Open again makes gets the keyboard only once it is live", async () => {
+  const seen = await page(`
+    await F.stage();
+    const focus = () => F.calls("desktop_native_terminal_focus").map((entry) => entry.args);
+    F.dialog(true);
+    F.mount("a", ${MASTER});
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.event(1, { type: "ready", cols: 80, rows: 24 });
+    await F.until(() => document.querySelector("#a .tg-terminal-note") !== null);
+    await pause(200);
+    const covered = focus().length;
+    F.event(1, { type: "ended", code: "terminal_attach_failed", final: true });
+    await F.until(() => F.shown("a").buttons.includes("Open again"));
+    F.dialog(false);
+    await pause(200);
+    F.press("a", "Open again");
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 2);
+    await pause(300);
+    const beforeReady = focus();
+    F.event(2, { type: "ready", cols: 80, rows: 24 });
+    await F.until(() => focus().length > beforeReady.length);
+    await pause(100);
+    return { covered, beforeReady, after: focus() };
+  `);
+  assert.equal(seen.covered, 0, "nothing while the dialog covers the live view");
+  assert.deepEqual(seen.beforeReady, [], "the view Open again made is not focused while it connects");
+  assert.deepEqual(seen.after, [{ view: 2 }], "it gets the keyboard once, when it goes live");
+});
+
+test("V243-NATIVE-INPUT r2 (#509 F2): while a following view connects again after a terminal_closed end, its status line gives the cause and no instruction to open it again", async () => {
+  const seen = await page(`
+    await F.stage();
+    const view = await F.live("a", ${MASTER}, { follow: true });
+    F.event(view, { type: "ended", code: "terminal_closed", final: false });
+    const ended = F.words("x", "terminal_closed").ended;
+    const connecting = await F.until(() => F.shown("a").status.some((line) => line.startsWith("Connecting to the terminal again, try 1 of 30. Last try: ")));
+    return { connecting, ended, line: F.shown("a").status.find((line) => line.startsWith("Connecting")) ?? null };
+  `);
+  assert.equal(seen.connecting, true);
+  assert.equal(seen.line, "Connecting to the terminal again, try 1 of 30. Last try: " + seen.ended);
+  assert.ok(!/open it again/i.test(seen.line), seen.line);
 });
