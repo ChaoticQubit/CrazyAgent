@@ -127,6 +127,7 @@ jobs:
         include:
           - runner: windows-2022
           - runner: windows-2025
+          - runner: ubuntu-22.04
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -135,6 +136,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Install SQLite for Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -145,16 +155,37 @@ jobs:
           set -euo pipefail
           cargo clippy -p crazyagent-win-sandbox --all-targets --locked -- -D warnings
       - name: W1 rows in crazyagent-win-sandbox
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --lib -- --test-threads 1
           cargo test -p crazyagent-win-sandbox --locked --test private_judge --test private_windows -- --test-threads 1
       - name: W2 P2 pipe rows with their probe lines
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --test pipe_windows -- --test-threads 1 --show-output
+      - name: Clippy on the crazyagent library
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo clippy -p crazyagent --lib --locked -- -D warnings
+      - name: Build the crazyagent library rows
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent --lib --locked --no-run
+      - name: D6 ipc row on Windows
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 ipc::
+      - name: D6 owner-class rows on Linux
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent --lib --locked -- ipc:: engine::tests:: engine::owner::transport:: engine::bootstrap:: tui::client::
 
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
