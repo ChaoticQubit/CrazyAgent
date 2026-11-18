@@ -55,6 +55,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -86,6 +87,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -114,6 +116,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -146,7 +149,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -193,7 +196,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -255,7 +258,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -301,6 +304,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -464,6 +468,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -528,7 +533,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -553,3 +558,112 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+  g1-macos-env:
+    name: G1 macOS env rows, uv and graphify on PATH and npm under the install sandbox
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          tip=6885138da0945e4dad7ae1d816f8f6a683f5f694
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Install Claude Code and Codex as the shard does
+        shell: bash
+        run: bash scripts/ci/install-harnesses.sh
+      - name: Run the shard action's macOS uv and context-mode steps as it writes them
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in "Install pinned graphify for the graph rows" "Install the pinned context-mode for the shared-install rows"; do
+            ruby -ryaml -rshellwords -e 'step = YAML.load_file(".github/actions/rust-shard/action.yml")["runs"]["steps"].find { |s| s["name"] == ARGV[0] } or abort("no step #{ARGV[0]}"); abort("not macOS") unless step["if"] == "inputs.os == '"'"'macos'"'"'"; (step["env"] || {}).each { |k, v| puts "export #{k}=#{Shellwords.escape(v.to_s)}" }; puts step["run"]' "$name" > "$RUNNER_TEMP/step.sh"
+            echo "== $name"
+            bash -euo pipefail "$RUNNER_TEMP/step.sh"
+          done
+          echo "GITHUB_PATH now:"
+          cat "$GITHUB_PATH"
+      - name: Rows, the npm sandbox denials, and the same npm rows with Node outside HOME
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "uv $(command -v uv || echo MISSING)"
+          echo "node $(command -v node) $(node -v), npm $(command -v npm) $(npm -v)"
+          ls -l "$(command -v npm)"
+          echo "npm real $(realpath "$(command -v npm)")"
+          echo "HOME $HOME RUNNER_TOOL_CACHE ${RUNNER_TOOL_CACHE:-}"
+          python3 -I - <<'PY'
+          p = "crates/crazyagent/src/setup/process.rs"
+          t = open(p).read()
+          a = "        .stderr(Stdio::null())\n        .process_group(0);\n"
+          assert t.count(a) == 1, "the run_command stderr line moved"
+          open(p, "w").write(t.replace(a, "        .stderr(Stdio::inherit())\n        .process_group(0);\n"))
+          print("farm only: install steps' stderr shown")
+          PY
+          cargo test -p crazyagent --lib --locked --no-run || exit 2
+          cargo test -p crazyagent --test project_sandbox --locked --no-run || exit 2
+          cargo test -p crazyagent --test onboarding --locked --no-run || exit 2
+          cargo test -p crazyagent --test e2e_add_existing --locked --no-run || exit 2
+          summary="$RUNNER_TEMP/summary.txt"
+          row() {
+            local label=$1
+            shift
+            cargo test -p crazyagent --locked "$@" 2>&1 | tee "$RUNNER_TEMP/$label.txt"
+            echo "== $label rc=${PIPESTATUS[0]} $(grep -m1 'test result' "$RUNNER_TEMP/$label.txt")" | tee -a "$summary"
+          }
+          m2=(context_mode::tests::npm_starts_under_the_install_sandbox_profile context_mode::tests::no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_against_the_pin engine::owner::transport::plugins::tests::the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx)
+          row m1-pinned --lib -- a_locked_tool_installs_only_files_whose_sha256_its_lock_lists --test-threads 1
+          row m1-uv-marker --test project_sandbox -- the_uv_marker_cannot_be_changed_and_a_moved_bucket_stages_as_plain_files --test-threads 1
+          row m1-uv-tool --lib -- setup::pinned::tests::a_tool_the_previous_build_installed_with_uv_tool_install_updates_to_its_lock --test-threads 1
+          row m1-landing --lib -- landing::tests::real_uv_rewrites_a_clashing_uv_lock --test-threads 1
+          echo "graphify on PATH: $(command -v graphify || echo MISSING) -> $(realpath "$(command -v graphify)" 2>/dev/null)"
+          echo "codex $(command -v codex || echo MISSING) claude $(command -v claude || echo MISSING)"
+          m3() {
+            row "$1-engine-lookup" --test onboarding -- an_engine_started_without_codex_builds_the_graph_and_reports_codex_missing --test-threads 1
+            row "$1-onboarding" --test onboarding -- agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a_new_onboarding without_codex_or_claude_mapping_fails_before_any_account_is_picked --test-threads 1
+            row "$1-e2e" --test e2e_add_existing -- existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its_steps --test-threads 1
+          }
+          m3 m3-path
+          if grep -E '^== m3-path-[a-z-]+ rc=[1-9]' "$summary"; then
+            mkdir -p "$HOME/.local/bin"
+            ln -sf "$RUNNER_TEMP/graphify/bin/graphify" "$HOME/.local/bin/graphify"
+            m3 m3-local-bin
+          fi
+          start=$(date -u '+%Y-%m-%d %H:%M:%S')
+          row m2-toolcache --lib -- "${m2[@]}" --test-threads 1
+          echo "== sandbox denials during m2-toolcache"
+          sudo log show --start "$start" --timezone UTC --style compact --predicate 'eventMessage CONTAINS "deny("' 2>/dev/null | grep -E "node|npm" | sed -E 's/^[^ ]+ [^ ]+ //' | sort | uniq -c | sort -rn | head -40
+          prefix=$(dirname "$(dirname "$(realpath "$(command -v node)")")")
+          sudo mkdir -p /opt/v243-node
+          sudo cp -R "$prefix/." /opt/v243-node/
+          sudo chown -R root:wheel /opt/v243-node
+          ls -l /opt/v243-node/bin
+          PATH="/opt/v243-node/bin:$PATH" row m2-outside-home --lib -- "${m2[@]}" --test-threads 1
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          cat "$summary"
+          rc=0
+          for label in m1-pinned m1-uv-marker m1-uv-tool m1-landing m3-path-engine-lookup m3-path-onboarding m3-path-e2e; do
+            grep -q "== $label rc=0 " "$summary" || { echo "::error::$label red"; rc=1; }
+          done
+          exit "$rc"
