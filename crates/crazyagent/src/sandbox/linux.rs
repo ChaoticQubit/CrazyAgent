@@ -19,7 +19,7 @@ use seccompiler::{
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, RawFd};
@@ -1703,7 +1703,7 @@ impl LinuxSandbox {
             }
         }
         let flags: Vec<OsString> = probe.get_args().map(OsStr::to_os_string).collect();
-        let failed = probe_failure(&mut probe);
+        let failed = probe_failure(&mut probe, &mut std::io::stderr());
         if failed.is_none() {
             let helper = helper.to_path_buf();
             let nest = bwraps
@@ -1892,20 +1892,22 @@ fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> b
     held
 }
 
-/// Runs a probe ([`probe_said`]) and, when it failed, logs what it said ([`probe_log`]).
-/// Input: the probe command. Output: none when it ran and exited 0, else its reason
-/// ([`probe_reason`]).
-fn probe_failure(probe: &mut Command) -> Option<String> {
+/// Runs a probe ([`probe_said`]) and, when it failed, writes what it said to `log` as one
+/// line ([`probe_log`]). A log that cannot take the line is passed over, since the refusal
+/// still names the reason. Inputs: the probe command and the log, the engine's stderr.
+/// Output: none when it ran and exited 0, else its reason ([`probe_reason`]).
+fn probe_failure(probe: &mut Command, log: &mut impl Write) -> Option<String> {
     let (said, ended) = probe_said(probe)?;
     let flags: Vec<&OsStr> = probe.get_args().collect();
-    eprintln!("{}", probe_log(&flags, &ended, &said));
+    let _ = writeln!(log, "{}", probe_log(&flags, &ended, &said));
     Some(probe_reason(&said, &ended))
 }
 
 /// Runs a probe with no environment and no input, keeping at most [`PROBE_SAID_MAX`] bytes of
 /// what it says on stderr. The pipe closes before the wait, so a probe that says more gets
-/// `EPIPE` and ends rather than blocking. Input: the probe command. Output: none when it ran
-/// and exited 0, else its stderr and how it ended.
+/// `EPIPE`, or `SIGPIPE` where it keeps that signal's default, and ends rather than blocking.
+/// Input: the probe command. Output: none when it ran and exited 0, else its stderr and how
+/// it ended.
 fn probe_said(probe: &mut Command) -> Option<(String, String)> {
     let started = crate::spawn_gate::spawn(
         probe
@@ -3719,6 +3721,35 @@ mod tests {
             line.contains(r"first\nsecond\u{7}\u{1b}[31m red\r"),
             "{line:?}"
         );
+    }
+
+    /// V243-LINUX-PROBE-STDERR-CAP (#592 F1): what a failed probe that says far too much
+    /// writes to the log is one line, built from at most [`PROBE_SAID_MAX`] bytes, with its
+    /// control characters escaped. Writing what it said raw fails this row.
+    #[test]
+    fn a_failed_probe_writes_one_escaped_line_to_the_log() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let talker = temp.path().join("talker");
+        let says = "yes \"$(printf 'first\\033[31m red\\r')\" | head -c 1048576 >&2";
+        fs::write(&talker, format!("#!/bin/sh\n{says}\nexit 3\n")).unwrap();
+        fs::set_permissions(&talker, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut log = Vec::new();
+        let reason = probe_failure(Command::new(&talker).arg("--probe"), &mut log);
+        assert_eq!(reason.as_deref(), Some("first[31m red"));
+        let line = String::from_utf8(log).unwrap();
+        let body = line
+            .strip_suffix('\n')
+            .expect("the log line ends in a newline");
+        let start: String = body.chars().take(120).collect();
+        assert!(!body.chars().any(char::is_control), "{start:?}");
+        assert!(
+            body.starts_with(
+                r#"linux_probe_failed: ["--probe"] exit status: 3: "first\u{1b}[31m red\r\n"#
+            ),
+            "{start:?}"
+        );
+        assert!(body.len() <= 6 * PROBE_SAID_MAX + 64, "{}", body.len());
     }
 
     #[test]
