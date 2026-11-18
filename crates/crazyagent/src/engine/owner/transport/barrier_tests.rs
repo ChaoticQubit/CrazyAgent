@@ -151,6 +151,20 @@ fn hold_storage(owner: &Usage) -> oneshot::Sender<()> {
     release
 }
 
+/// Waits up to 5 s for the storage queue to hold exactly `count` jobs the worker has not
+/// received yet. Inputs: the engine and the count. Output: whether it did.
+async fn storage_queue_reaches(owner: &Usage, count: usize) -> bool {
+    let sender = &owner.runtime().engine.storage.sender;
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while sender.max_capacity() - sender.capacity() != count {
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    true
+}
+
 /// Waits until storage has answered every job queued before this call, so a change it ran
 /// after the owner stopped waiting is committed. Input: the engine.
 async fn storage_settled(owner: &Usage) {
@@ -627,6 +641,129 @@ async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves
     assert!(
         source.join("main.rs").is_file() && !home.join("kept").exists(),
         "a refused add moves nothing"
+    );
+    drop(controller);
+    owner.stop().await;
+}
+
+/// A New Project whose seed is done but whose record waits behind the owner barrier and busy
+/// storage until the post-disk cut drops its wait still lands once storage is free: the owner
+/// hears unknown, which stays true, and the project folder replaces its staging folder
+/// (V243-STORAGE-BUSY-ROWS, #629 F1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_project_record_its_cut_drops_lands_once_storage_is_free() {
+    let owner = Usage::start().await;
+    let runtime = owner.runtime();
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    std::fs::create_dir(&home).unwrap();
+    let names = |staging: bool| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| match staging {
+                true => name.starts_with(".crazyagent-new-"),
+                false => !name.starts_with('.'),
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let mut controller = OwnerController::attach(
+        owner.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            },
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        controller.send_pending().await.unwrap(),
+        OwnerResponse::Applied { .. }
+    ));
+    controller.project_catalog(None, Vec::new()).await.unwrap();
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::SetupProject {
+                project_id: ProjectId::new("books").unwrap(),
+                spec: crate::protocol::ProjectSpec {
+                    name: "Books".into(),
+                    repositories: Vec::new(),
+                },
+                setup: crate::project_setup::ProjectSetup {
+                    about: "Tracks the books I want to read.".into(),
+                    tech_stack: vec!["rust".into()],
+                    platforms: vec![crate::project_setup::Platform::Website],
+                    research: Vec::new(),
+                    pool: None,
+                    team: None,
+                    documents: Vec::new(),
+                },
+            },
+            2,
+        )
+        .unwrap();
+    let visible = names(false);
+
+    let first = runtime.engine.owner_egress.write().await;
+    let mut answered = Box::pin(tokio::time::timeout(
+        Duration::from_secs(20),
+        controller.send_pending(),
+    ));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut answered)
+            .await
+            .is_err(),
+        "the planned project waits for the owner barrier at its grant check"
+    );
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let mut again = Box::pin(runtime.engine.owner_egress.write());
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut again).await.is_err(),
+        "the test waits for the barrier behind the grant check"
+    );
+    drop(first);
+    let second = again.await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), &mut answered)
+            .await
+            .is_err(),
+        "the seeded project waits for the barrier the test holds"
+    );
+    assert_eq!(names(true).len(), 1, "the seed ran into its staging folder");
+    drop(second);
+    assert!(
+        storage_queue_reaches(&owner, 1).await,
+        "the record is queued behind the hold"
+    );
+    let answered = answered.await.unwrap();
+    assert!(
+        matches!(&answered, Ok(OwnerResponse::OutcomeUnknown { .. })),
+        "the cut answered unknown: {answered:?}"
+    );
+    assert_eq!(names(false), visible, "the record has not landed yet");
+
+    drop(release);
+    storage_settled(&owner).await;
+    assert!(
+        names(true).is_empty() && names(false).len() == visible.len() + 1,
+        "the record landed once storage was free, so the project folder replaced its staging \
+         folder: staging {:?}, visible {:?}",
+        names(true),
+        names(false)
     );
     drop(controller);
     owner.stop().await;
