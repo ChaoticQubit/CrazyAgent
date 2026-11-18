@@ -519,9 +519,10 @@ pub fn rebuilds_itself(path: &str) -> bool {
 
 impl SkippedFolders {
     /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted. Once the
-    /// names are full, a folder that needs a reinstall takes the place of the first named one
+    /// names are full, a folder that needs a reinstall takes the slot of the first named one
     /// that rebuilds itself, which is counted instead, so a reinstall offer sees every folder
-    /// it needs. Input: the folder. Output: none.
+    /// it needs and a job's line, which names the first few, names it before those. Input: the
+    /// folder. Output: none.
     pub fn push(&mut self, folder: Skipped) {
         if self.listed.len() < SKIPPED_LISTED_MAX {
             self.listed.push(folder);
@@ -531,8 +532,7 @@ impl SkippedFolders {
                 .iter()
                 .position(|named| rebuilds_itself(&named.path))
         {
-            let freed = self.listed.remove(at);
-            self.listed.push(folder);
+            let freed = std::mem::replace(&mut self.listed[at], folder);
             self.count(SkippedMore {
                 folders: 1,
                 files: freed.files,
