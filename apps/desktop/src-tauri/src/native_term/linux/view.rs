@@ -451,6 +451,22 @@ mod tests {
         assert_eq!(focus.native(true), Some(true));
     }
 
+    #[test]
+    fn a_commit_lands_only_while_the_view_is_active() {
+        let mut focus = Focus::new(true);
+        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(focus.native(true), Some(true));
+        assert_eq!(commit_event(focus, "a"), Some(text(b"a")));
+        assert_eq!(commit_event(focus, ""), None);
+        assert_eq!(focus.toplevel(false), Some(false));
+        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(focus.toplevel(true), Some(true));
+        assert_eq!(focus.cover(true), Some(false));
+        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(focus.cover(false), None);
+        assert_eq!(commit_event(focus, "a"), None);
+    }
+
     fn page_text(page: &webkit2gtk::WebView) -> String {
         page.title()
             .map(|title| title.to_string())
@@ -463,8 +479,9 @@ mod tests {
 
     /// A WebKit page's textarea has focus and takes typed and composed text; then the
     /// view takes native focus and gets each key and each input method commit once, while
-    /// the page gets none; a cover sends keys back to the page. Spike run 3 left open
-    /// whether the view composes on sway after the page composed; this is that red row.
+    /// the page gets none; a cover sends keys back to the page, and a preedit open at a
+    /// cover or a close never commits into the view. Spike run 3 left open whether the
+    /// view composes on sway after the page composed; this is that red row.
     #[test]
     #[ignore = "needs a display, IBus and the farm's typing: the farm runs it under Xvfb and sway"]
     fn a_focused_view_takes_keys_and_commits_after_the_page_had_them() {
@@ -533,8 +550,17 @@ mod tests {
         assert_eq!(take_seen(), vec![text("á".as_bytes())]);
         assert_eq!(page_text(&page), "v:xyé");
 
+        step("native-preedit");
+        pump_for(Duration::from_millis(300));
+        assert_eq!(take_seen(), Vec::new(), "an open preedit commits nothing");
         view.cover(true);
         assert_eq!(take_seen(), vec![ViewEvent::Focus(false)]);
+        pump_for(Duration::from_millis(500));
+        assert_eq!(
+            take_seen(),
+            Vec::new(),
+            "no commit lands in the view after a cover"
+        );
         assert!(page.is_focus(), "a cover gives GTK focus back to the page");
         view.focus(true);
         assert_eq!(
@@ -545,6 +571,23 @@ mod tests {
         step("covered");
         pump_until("covered typing", || page_text(&page) == "v:xyéz");
         assert_eq!(take_seen(), Vec::new());
+
+        view.cover(false);
+        view.focus(true);
+        assert_eq!(take_seen(), vec![ViewEvent::Focus(true)]);
+        step("close-preedit");
+        pump_for(Duration::from_millis(300));
+        assert_eq!(take_seen(), Vec::new(), "an open preedit commits nothing");
         drop(view);
+        pump_for(Duration::from_millis(500));
+        assert_eq!(
+            take_seen(),
+            Vec::new(),
+            "no commit lands in the view after a close"
+        );
+        assert!(page.is_focus(), "a close gives GTK focus back to the page");
+        step("closed");
+        pump_until("typing after close", || page_text(&page) == "v:xyézy");
+        assert_eq!(take_seen(), Vec::new());
     }
 }
