@@ -63,7 +63,11 @@ pub fn judge(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
 /// object is a folder. Output: the list bytes.
 pub fn list(user: &[u8], folder: bool) -> Vec<u8> {
     let flags = if folder { FOLDER_INHERIT } else { 0 };
-    let planned = allowing(&[user, &SYSTEM, &ADMINISTRATORS], flags, FULL_ACCESS);
+    let planned = allowing(
+        &[user, &SYSTEM[..], &ADMINISTRATORS[..]],
+        flags,
+        FULL_ACCESS,
+    );
     assert!(planned.len() > 8);
     planned
 }
