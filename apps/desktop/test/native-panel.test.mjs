@@ -310,3 +310,33 @@ test("V243-NATIVE-ONLY: an agent with no terminal yet opens no native view, and 
   assert.equal(seen.shown.webview, 0);
   assert.equal(seen.shown.xterms, 0);
 });
+
+test("V243-NATIVE-ONLY: a native view in a panel of fractional size is remembered at a whole-pixel size, so the next app start still reads it (#498 F2)", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.slot("a", "640.5px", "420.25px");
+    const view = await F.live("a", ${MASTER});
+    const rect = F.screenRect("a");
+    const kept = await F.until(() => F.saved().length === 1 && F.saved()[0].size !== null);
+    return { view, rect, kept, saved: F.saved(), stored: window.localStorage.getItem("crazyagent.kept-terminals") };
+  `);
+  assert.equal(seen.view, 1);
+  assert.ok(!Number.isInteger(seen.rect.width) || !Number.isInteger(seen.rect.height), JSON.stringify(seen.rect));
+  assert.equal(seen.kept, true, seen.stored);
+  assert.deepEqual(seen.saved[0].key, { project: "p1", terminal: "team-1", pane: null });
+  assert.ok(Number.isInteger(seen.saved[0].size.width) && Number.isInteger(seen.saved[0].size.height), JSON.stringify(seen.saved));
+  assert.ok(Math.abs(seen.saved[0].size.width - seen.rect.width) <= 1 && Math.abs(seen.saved[0].size.height - seen.rect.height) <= 1, JSON.stringify(seen));
+});
+
+test("V243-NATIVE-ONLY: the app's toast over the native view covers it until the toast goes (#498 F3)", async () => {
+  const seen = await page(`
+    await F.stage();
+    const view = await F.live("a", ${MASTER});
+    F.toast(true);
+    const covered = await F.until(() => F.calls("desktop_native_terminal_cover").at(-1)?.args.covered === true);
+    F.toast(false);
+    const uncovered = await F.until(() => F.calls("desktop_native_terminal_cover").at(-1)?.args.covered === false);
+    return { view, covered, uncovered };
+  `);
+  assert.deepEqual(seen, { view: 1, covered: true, uncovered: true });
+});

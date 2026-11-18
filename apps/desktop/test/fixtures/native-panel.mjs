@@ -91,19 +91,25 @@ export function agent(role, label, terminal) {
   return { id: `node-${label}`, kind: role, parent: master ? null : "m", label, harness: "claude", status: "working", status_label: "Working", account: null, terminal, agent: 1 };
 }
 
-/** Mounts the real terminal panel in a slot of its own, 640 by 420 px. Inputs: the slot name,
- * the node and the panel's other props. Output: none. */
-export function mount(slot, node, props = {}) {
-  let host = document.getElementById(slot);
-  if (host === null) {
-    host = document.createElement("div");
-    host.id = slot;
-    host.className = "pj-tab-panel";
-    host.style.cssText = "width:640px;height:420px;display:flex;flex-direction:column";
-    document.getElementById("slots").append(host);
-  }
+/** Makes a slot for a panel, 640 by 420 px unless a size is given. Inputs: the slot name and
+ * the width and height in CSS, such as "640.5px". Output: the slot element. */
+export function slot(name, width = "640px", height = "420px") {
+  const found = document.getElementById(name);
+  if (found !== null) return found;
+  const host = document.createElement("div");
+  host.id = name;
+  host.className = "pj-tab-panel";
+  host.style.cssText = `width:${width};height:${height};display:flex;flex-direction:column`;
+  document.getElementById("slots").append(host);
+  return host;
+}
+
+/** Mounts the real terminal panel in its slot, made first when missing. Inputs: the slot
+ * name, the node and the panel's other props. Output: none. */
+export function mount(name, node, props = {}) {
+  const host = slot(name);
   const root = createRoot(host);
-  roots.set(slot, root);
+  roots.set(name, root);
   flushSync(() => root.render(createElement(TerminalPanel, { node, projectId: "p1", ...props })));
 }
 
@@ -265,6 +271,20 @@ export async function live(slot, node, props = {}) {
  * calls at the mark. Output: the command names. */
 export function callsOn(view, from) {
   return desk.calls.slice(from).filter((entry) => entry.args?.view === view).map((entry) => entry.command);
+}
+
+/** Puts the app's toast over the whole window, or takes it away, as a notice does. Input:
+ * whether it shows. Output: none. */
+export function toast(open) {
+  document.getElementById("toast")?.remove();
+  if (!open) return;
+  const element = document.createElement("div");
+  element.id = "toast";
+  element.className = "toast";
+  element.setAttribute("role", "status");
+  element.textContent = "Saved.";
+  element.style.cssText = "left:0;top:0;right:auto;bottom:auto;width:100vw;max-width:none;height:100vh";
+  document.body.append(element);
 }
 
 /** Puts a page dialog over the whole window, or takes it away. Input: whether it shows.
