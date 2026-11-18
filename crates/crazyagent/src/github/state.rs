@@ -3,10 +3,11 @@ use super::rules::{GitHubRule, RepoRecord};
 use super::{CLIENT_ID, GitHubMethod};
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-#[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -18,7 +19,6 @@ const RECORDS: &str = "github-repos";
 const JOBS: &str = "github-publish";
 const DEFAULTS: &str = "github-defaults.json";
 const JOB_BYTES_MAX: u64 = 8 << 20;
-#[cfg(unix)]
 const FILE_BYTES_MAX: u64 = 4096;
 const CLIENT_ID_BYTES_MAX: usize = 64;
 
@@ -43,50 +43,40 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.to_owned())
 }
 
-/// Refuses GitHub config and sign-in files where their Unix owner and mode cannot be
-/// checked. Takes the path, unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-fn read_private(_path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
-    Err(failure("github_state_unavailable"))
-}
-
-/// Refuses a private file where its Unix owner and mode cannot be checked. Takes the path
-/// and bound, both unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-fn read_private_within(_path: &Path, _max: u64) -> Result<Option<Vec<u8>>, EngineError> {
-    Err(failure("github_state_unavailable"))
-}
-
 /// Reads a private file of at most `FILE_BYTES_MAX`, as [`read_private_within`] does.
 /// Input: the path. Output: the bytes, None when there is no file, or
 /// `github_config_unsafe`.
-#[cfg(unix)]
 fn read_private(path: &Path) -> Result<Option<Vec<u8>>, EngineError> {
     read_private_within(path, FILE_BYTES_MAX)
 }
 
 /// Reads a private file: a plain file the engine's user owns, open to no one else, with
-/// one link and at most `max` bytes, opened without following a link. Inputs: the path
-/// and the bound. Output: the bytes, None when there is no file, or `github_config_unsafe`.
-#[cfg(unix)]
+/// one link and at most `max` bytes, opened without following a link; on Windows W1's
+/// private read checks the same. Inputs: the path and the bound. Output: the bytes, None
+/// when there is no file, or `github_config_unsafe`.
 fn read_private_within(path: &Path, max: u64) -> Result<Option<Vec<u8>>, EngineError> {
     let unsafe_file = || failure("github_config_unsafe");
-    let file = match std::fs::OpenOptions::new()
+    #[cfg(unix)]
+    let opened = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-    {
+        .open(path);
+    #[cfg(windows)]
+    let opened = private::read_only(path);
+    let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(unsafe_file()),
     };
     let metadata = file.metadata().map_err(|_| unsafe_file())?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-        || metadata.nlink() != 1
-        || metadata.len() > max
-    {
+    #[cfg(unix)]
+    let owned = metadata.is_file()
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && metadata.mode() & 0o077 == 0
+        && metadata.nlink() == 1;
+    #[cfg(windows)]
+    let owned = true;
+    if !owned || metadata.len() > max {
         return Err(unsafe_file());
     }
     let mut bytes = Vec::new();
@@ -149,7 +139,6 @@ pub(super) fn forget(root: &Path) -> Result<(), EngineError> {
 
 /// Saves the sign-in as a private 0600 file, replaced in one rename.
 /// Inputs: the engine root and what to remember.
-#[cfg(unix)]
 pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
     let bytes = serde_json::to_vec(saved).map_err(|_| failure("github_state_unavailable"))?;
     write_private(root, STATE, &bytes)
@@ -158,7 +147,6 @@ pub(super) fn save(root: &Path, saved: &Saved) -> Result<(), EngineError> {
 /// Writes a private file of at most `FILE_BYTES_MAX`, as [`write_private_within`] does.
 /// Inputs: the folder, the file name and the bytes. Output: Ok, or
 /// `github_state_unavailable`.
-#[cfg(unix)]
 fn write_private(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
     write_private_within(folder, name, bytes, FILE_BYTES_MAX)
 }
@@ -166,7 +154,6 @@ fn write_private(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), EngineEr
 /// Writes a private 0600 file in a private folder, replaced in one rename, so a reader
 /// sees the old file or the new one. Inputs: the folder, the file name, the bytes and
 /// their bound. Output: Ok, or `github_state_unavailable`.
-#[cfg(unix)]
 fn write_private_within(
     folder: &Path,
     name: &str,
@@ -180,14 +167,18 @@ fn write_private_within(
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let temporary = folder.join(format!(".{name}.{suffix}"));
     let written = (|| {
+        #[cfg(unix)]
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
             .open(&temporary)?;
+        #[cfg(windows)]
+        let mut file = private::file(&temporary, true)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        drop(file);
         std::fs::rename(&temporary, folder.join(name))
     })();
     if written.is_err() {
@@ -212,22 +203,11 @@ pub(super) fn load_defaults(root: &Path) -> Result<BTreeSet<GitHubRule>, EngineE
 /// Saves the rules a new repository starts with as the private 0600
 /// `github-defaults.json` in the engine root, replaced in one rename. Inputs: the engine
 /// root and the rules on. Output: Ok, or `github_state_unavailable`.
-#[cfg(unix)]
 pub(super) fn save_defaults(root: &Path, rules: &BTreeSet<GitHubRule>) -> Result<(), EngineError> {
     let defaults = Defaults { on: rules.clone() };
     let bytes = serde_json::to_vec(&defaults).map_err(|_| failure("github_state_unavailable"))?;
     assert!(bytes.len() as u64 <= FILE_BYTES_MAX);
     write_private(root, DEFAULTS, &bytes)
-}
-
-/// Refuses to save the defaults where no owner-only file can be made. Takes the engine
-/// root and the rules, both unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn save_defaults(
-    _root: &Path,
-    _rules: &BTreeSet<GitHubRule>,
-) -> Result<(), EngineError> {
-    Err(failure("github_state_unavailable"))
 }
 
 /// The folder and file that hold what CrazyAgent remembers about one repository: the file
@@ -261,7 +241,6 @@ pub(super) fn load_record(root: &Path, full_name: &str) -> Result<RepoRecord, En
 /// root's private `github-repos` folder, made 0700 when missing. Inputs: the engine root,
 /// `owner/name` and the record. Output: Ok, or `github_config_unsafe` for a folder that is
 /// a link or open to others, or `github_state_unavailable`.
-#[cfg(unix)]
 pub(super) fn save_record(
     root: &Path,
     full_name: &str,
@@ -295,6 +274,20 @@ fn private_folder(folder: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Makes a W1 private folder in the engine root when it is missing and checks the one there
+/// (DESIGN-0256 D1). Input: the folder. Output: Ok, `github_config_unsafe` for a folder W1's
+/// check refuses, or `github_state_unavailable`.
+#[cfg(windows)]
+fn private_folder(folder: &Path) -> Result<(), EngineError> {
+    match private::dir(folder) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(failure("github_config_unsafe"))
+        }
+        Err(_) => Err(failure("github_state_unavailable")),
+    }
+}
+
 /// The folder and file that hold one project's publish job: the file is named by the
 /// SHA-256 of the project folder's path. Inputs: the engine root and the project folder.
 /// Output: the folder and the file name.
@@ -326,7 +319,6 @@ pub(super) fn load_job(
 /// Saves one project's publish job as a private file in the engine root's private
 /// `github-publish` folder, replaced in one rename. Inputs: the engine root and the job.
 /// Output: Ok, or `github_config_unsafe`, `github_state_unavailable`.
-#[cfg(unix)]
 pub(super) fn save_job(root: &Path, job: &GitHubPublishJob) -> Result<(), EngineError> {
     let (folder, name) = job_file(root, &job.project);
     private_folder(&folder)?;
@@ -337,16 +329,8 @@ pub(super) fn save_job(root: &Path, job: &GitHubPublishJob) -> Result<(), Engine
     write_private_within(&folder, &name, &bytes, JOB_BYTES_MAX)
 }
 
-/// Refuses to save a publish job where no owner-only file can be made. Takes the engine
-/// root and the job, both unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn save_job(_root: &Path, _job: &GitHubPublishJob) -> Result<(), EngineError> {
-    Err(failure("github_state_unavailable"))
-}
-
 /// Removes one project's publish job, as Discard does. Inputs: the engine root and the
 /// project folder. Output: Ok, also when no job is saved, or `github_state_unavailable`.
-#[cfg(unix)]
 pub(super) fn remove_job(root: &Path, project: &Path) -> Result<(), EngineError> {
     let (folder, name) = job_file(root, project);
     match std::fs::remove_file(folder.join(name)) {
@@ -356,27 +340,32 @@ pub(super) fn remove_job(root: &Path, project: &Path) -> Result<(), EngineError>
     }
 }
 
-/// Refuses to remove a publish job where none can be saved. Takes the engine root and the
-/// project folder, both unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn remove_job(_root: &Path, _project: &Path) -> Result<(), EngineError> {
-    Err(failure("github_state_unavailable"))
-}
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
 
-/// Refuses to save a repository record where no owner-only file can be made. Takes the
-/// engine root, name and record, all unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn save_record(
-    _root: &Path,
-    _full_name: &str,
-    _record: &RepoRecord,
-) -> Result<(), EngineError> {
-    Err(failure("github_state_unavailable"))
-}
-
-/// Refuses to save the sign-in where no owner-only 0600 no-follow file can be made.
-/// Takes the engine root and sign-in, both unused. Returns `github_state_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn save(_root: &Path, _saved: &Saved) -> Result<(), EngineError> {
-    Err(failure("github_state_unavailable"))
+    /// W1c D5: the GitHub defaults round-trip on Windows as a W1 private file, a records
+    /// folder is made private, and a state file other users may read is refused as unsafe.
+    #[test]
+    fn github_state_round_trips_privately_and_an_open_file_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let rules = GitHubRule::defaults();
+        save_defaults(&data, &rules).unwrap();
+        assert_eq!(load_defaults(&data).unwrap(), rules);
+        let file = data.join(DEFAULTS);
+        private::check(&private::read_only(&file).unwrap()).unwrap();
+        private_folder(&data.join(RECORDS)).unwrap();
+        private::check(&private::dir(&data.join(RECORDS)).unwrap()).unwrap();
+        let status = std::process::Command::new("icacls")
+            .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let Err(error) = load_defaults(&data) else {
+            panic!("defaults other users may read were loaded");
+        };
+        assert_eq!(error.0, "github_config_unsafe");
+    }
 }

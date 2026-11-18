@@ -585,17 +585,26 @@ fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Creates `<root>/backups` as a W1 private folder when missing, or opens and checks the one
-/// there (DESIGN-0256 D5). A folder that is not private is refused as unsafe; repairing it
-/// the way Unix does is W1c. Input: the engine root. Output: the backups folder path.
+/// there, and makes a local folder of this user there private again when an older build or
+/// a copy left it open to others (F36, DESIGN-0256 D5). A link, a file or a folder of another
+/// user is refused as unsafe. Input: the engine root. Output: the backups folder path.
 #[cfg(windows)]
 fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     let folder = root.join(BACKUPS);
     match private::dir(&folder) {
         Ok(_) => Ok(folder),
-        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => Err(error(format!(
-            "{BACKUP_UNSAFE}: {} must be a private folder of this user",
-            folder.display()
-        ))),
+        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => {
+            match private::repair(&folder) {
+                Ok(_) => {
+                    eprintln!("storage_backup_folder_made_private");
+                    Ok(folder)
+                }
+                Err(_) => Err(error(format!(
+                    "{BACKUP_UNSAFE}: {} must be a private folder of this user",
+                    folder.display()
+                ))),
+            }
+        }
         Err(cause) => Err(backup_failed(cause)),
     }
 }
@@ -819,4 +828,62 @@ fn civil(days: i64) -> (i64, u32, u32) {
     let year = yoe + era * 400 + i64::from(month <= 2);
     assert!((1..=12).contains(&month) && (1..=31).contains(&day));
     (year, month, day)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crazyagent_win_sandbox::private;
+    use std::path::Path;
+
+    /// Runs a Windows tool and fails the test when it fails. Inputs: the program and its
+    /// arguments.
+    fn run(program: &str, args: &[&str]) {
+        let status = std::process::Command::new(program)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{program} {args:?} failed: {status}");
+    }
+
+    /// Lets authenticated users change a folder and what it will hold. Input: the folder.
+    fn open_to_other_users(folder: &Path) {
+        run(
+            "icacls",
+            &[folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"],
+        );
+    }
+
+    /// W1c D5 (F36): a backups folder of this user that other users may change is made
+    /// private again, the twin of the Unix chmod, and a junction in its place is refused as
+    /// unsafe.
+    #[test]
+    fn an_open_backups_folder_is_repaired_and_a_junction_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = data.join(super::BACKUPS);
+        std::fs::create_dir(&backups).unwrap();
+        open_to_other_users(&backups);
+        assert!(private::dir(&backups).is_err());
+        assert_eq!(super::backups_folder(&data).unwrap(), backups);
+        private::check(&private::dir(&backups).unwrap()).unwrap();
+        std::fs::remove_dir(&backups).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        open_to_other_users(&elsewhere);
+        run(
+            "cmd",
+            &[
+                "/C",
+                "mklink",
+                "/J",
+                backups.to_str().unwrap(),
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        let refused = super::backups_folder(&data).unwrap_err();
+        assert!(refused.0.starts_with(super::BACKUP_UNSAFE), "{}", refused.0);
+        assert!(private::dir(&elsewhere).is_err());
+        std::fs::remove_dir(&backups).unwrap();
+    }
 }

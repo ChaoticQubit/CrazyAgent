@@ -290,3 +290,42 @@ fn a_private_file_with_a_low_label_is_refused() {
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// W1c D5 (F36): an existing folder of this user that other users may change is made
+/// private again by repair, keeping what it holds, and a junction in place of such a folder
+/// is refused and its target left as it was.
+#[test]
+fn repair_makes_an_open_folder_of_this_user_private_and_refuses_a_junction() {
+    let folder = scratch("repair");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("kept"), "x").unwrap();
+    grant(&folder, "S-1-5-11", "M");
+    assert!(private::dir(&folder).is_err());
+    let user = private::user_sid().unwrap();
+    let held = private::repair(&folder).unwrap();
+    let facts = private::facts(&held).unwrap();
+    only_trusted(facts.list.as_deref().unwrap(), &user);
+    assert_eq!(private::judge(&facts, &user), Ok(()));
+    drop(held);
+    drop(private::dir(&folder).unwrap());
+    assert_eq!(std::fs::read_to_string(folder.join("kept")).unwrap(), "x");
+    let target = scratch("repair-target");
+    std::fs::create_dir(&target).unwrap();
+    grant(&target, "S-1-5-11", "M");
+    let junction = scratch("repair-junction");
+    run(
+        "cmd",
+        &[
+            "/C",
+            "mklink",
+            "/J",
+            junction.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    );
+    assert!(private::repair(&junction).is_err());
+    assert!(private::dir(&target).is_err());
+    std::fs::remove_dir(&junction).unwrap();
+    std::fs::remove_dir_all(&target).unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+}
