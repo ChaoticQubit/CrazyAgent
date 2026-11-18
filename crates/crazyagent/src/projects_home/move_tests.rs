@@ -911,7 +911,8 @@ fn a_project_stored_through_the_data_volume_moves_into_the_home() {
     tx.commit().unwrap();
     assert_eq!(
         case.move_project(AddMode::Move, &[]).unwrap(),
-        Finished::Moved { repointed: 1 }
+        Finished::Moved { repointed: 0 },
+        "the case holds no agent copy to re-point"
     );
     assert_eq!(case.stored_folder(), case.target());
     assert!(case.target().join("README").is_file());
