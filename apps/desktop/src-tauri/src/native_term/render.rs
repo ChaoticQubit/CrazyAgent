@@ -429,12 +429,16 @@ impl Shared {
 
     fn rect_bytes(&self, frame: &Frame) -> Vec<f32> {
         let (cw, ch) = self.cell;
-        let mut out = Vec::with_capacity((frame.fills.len() + 1) * 8);
-        for fill in frame.fills.iter().take(RECTS_MAX - 1) {
+        let mut out = Vec::with_capacity((frame.fills.len() + 2) * 8);
+        for fill in frame.fills.iter().take(RECTS_MAX - 2) {
             let x = self.pad + fill.column as f32 * cw;
             let y = self.pad + fill.row as f32 * ch;
             out.extend_from_slice(&[x, y, fill.width as f32 * cw, ch]);
             out.extend_from_slice(&linear_rgba(fill.color, 1.0));
+        }
+        if let Some(preedit) = frame.preedit {
+            out.extend_from_slice(&underline(preedit, self.cell, self.pad, self.scale));
+            out.extend_from_slice(&linear_rgba(FOREGROUND, 1.0));
         }
         if let Some((row, column)) = frame.cursor {
             let x = self.pad + column as f32 * cw;
@@ -585,8 +589,14 @@ fn span_attrs(span: &Span) -> Attrs<'static> {
 /// bottom of its row, `UNDERLINE_POINTS` thick and never under one pixel. Inputs: the marked
 /// cells, the cell size, the padding and the display scale. Output: x, y, width, height.
 pub fn underline(preedit: Preedit, cell: (f32, f32), pad: f32, scale: f32) -> [f32; 4] {
-    let _ = (preedit, cell, pad, scale, UNDERLINE_POINTS);
-    [0.0; 4]
+    assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0);
+    assert!((1.0..=4.0).contains(&scale) && preedit.cells >= 1);
+    let thick = (UNDERLINE_POINTS * scale).max(1.0);
+    let x = pad + preedit.column as f32 * cell.0;
+    let y = pad + (preedit.row + 1) as f32 * cell.1 - thick;
+    let rect = [x, y, preedit.cells as f32 * cell.0, thick];
+    assert!(rect[2] > 0.0 && rect[3] >= 1.0);
+    rect
 }
 
 #[cfg(test)]
