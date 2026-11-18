@@ -825,6 +825,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "linux_harness_unchecked" => Some(
             "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
         ),
+        "sandbox_full_unavailable_windows" => Some(
+            "Full access isn't available on Windows: agents there always run in the Windows sandbox. Pick Sandboxed or Own branch.",
+        ),
+        "model_loopback_unavailable_windows" => Some(
+            "A model on this computer, such as a local server or the relay, can't be reached by agents on Windows in this version, so this agent does not start. Use a model that runs elsewhere.",
+        ),
         "linux_sandbox_not_full" => Some(
             "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
         ),

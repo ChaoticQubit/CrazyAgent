@@ -1991,10 +1991,8 @@ impl ResearchRunner {
     }
 
     /// Refuses a read-only run on Windows before any agent state is made: V1 runs no such
-    /// agent there, so the run fails with the owner's plain line. Past that line, the
-    /// AppContainer boundary refuses the endpoint-only reach until its firewall rule exists.
-    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, the plain failure,
-    /// or the boundary's `Unavailable` refusal.
+    /// agent there, so the run fails with the owner's plain line. Takes the run and `stop`,
+    /// unused. Returns `Invalid` for a bad run, else the plain failure.
     #[cfg(windows)]
     pub(crate) fn run_read_only(
         &self,
@@ -2004,13 +2002,9 @@ impl ResearchRunner {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
         }
-        if let Some(line) = confined_unavailable(std::env::consts::OS) {
-            return Ok(ReadOnlyEnding::Failed(line.into()));
-        }
-        let network = SandboxNetwork::Only(vec![model_remote(run.account)?]);
-        let refusal = crate::sandbox::windows::capabilities(&network)
-            .expect_err("an endpoint limit needs the AppContainer firewall rule");
-        Err(RunError::Sandbox(refusal))
+        let line = confined_unavailable(std::env::consts::OS)
+            .expect("V1 runs no read-only agent on Windows");
+        Ok(ReadOnlyEnding::Failed(line.into()))
     }
 }
 

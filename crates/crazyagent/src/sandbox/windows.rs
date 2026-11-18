@@ -1,6 +1,6 @@
 use super::{
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, agent_env, canonical, clean_absolute,
-    invalid,
+    MODEL_LOOPBACK_WINDOWS_LINE, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
+    SandboxRemote, agent_env, canonical, clean_absolute, invalid,
 };
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
@@ -17,9 +17,6 @@ pub const HELPER_NAME: &str = "crazyagent-win-boundary.exe";
 
 /// Why a Windows launch is refused when the boundary helper is missing, in plain words.
 pub const APPCONTAINER_MISSING: &str = "Windows agents start through crazyagent-win-boundary.exe next to the engine, which is missing, so no agent starts unconfined";
-
-/// Why a Windows agent whose network is limited to a few ports is refused, in plain words.
-pub const FIREWALL_RULE_MISSING: &str = "limiting a Windows agent's network to a few ports needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
 
 /// Why a Seatbelt profile is refused on Windows, in plain words.
 pub const SEATBELT_MISSING: &str =
@@ -237,15 +234,24 @@ pub fn agent_command<'a>(
     Ok(command)
 }
 
-/// The AppContainer capabilities for a network reach: the internet client capability when
-/// the network is open, none when no endpoint is allowed, and `Unavailable` with
-/// [`FIREWALL_RULE_MISSING`] for any endpoint limit, which is never widened to open.
-/// Input: the network. Output: the capabilities, or the refusal.
+/// The AppContainer capabilities for a network reach (DESIGN-0256 O2a): the internet client
+/// when open or limited to ports on any host, a limit the AppContainer cannot hold and so
+/// widens; none when no endpoint is allowed; and [`MODEL_LOOPBACK_WINDOWS_LINE`] for any
+/// loopback port, which it cannot reach (P6). Input: the network. Output: the list or refusal.
 pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, SandboxError> {
     match network {
         SandboxNetwork::Open => Ok(vec![Capability::InternetClient]),
         SandboxNetwork::Only(remotes) if remotes.is_empty() => Ok(Vec::new()),
-        SandboxNetwork::Only(_) => Err(SandboxError::Unavailable(FIREWALL_RULE_MISSING.into())),
+        SandboxNetwork::Only(remotes)
+            if remotes
+                .iter()
+                .any(|remote| matches!(remote, SandboxRemote::Loopback(_))) =>
+        {
+            Err(SandboxError::Unavailable(
+                MODEL_LOOPBACK_WINDOWS_LINE.into(),
+            ))
+        }
+        SandboxNetwork::Only(_) => Ok(vec![Capability::InternetClient]),
     }
 }
 

@@ -46,8 +46,8 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
 }
 
 /// The network the install's npm may reach on Windows: open, for this step only, because the
-/// AppContainer refuses every endpoint limit (`FIREWALL_RULE_MISSING`) and the pinned program
-/// needs npm's dependencies. Scripts stay off and both pins are checked before it runs.
+/// pinned program needs npm's dependencies and the AppContainer widens any host limit to the
+/// internet client anyway (DESIGN-0256 O2a). Scripts stay off and both pins are checked first.
 pub(super) fn npm_network() -> SandboxNetwork {
     SandboxNetwork::Open
 }
