@@ -13,6 +13,8 @@ const REPLY_BYTES_MAX: usize = 48 * 1024;
 const LISTING_BYTES_MAX: u64 = 32 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(2);
 const CONFIG_BYTES_MAX: u64 = 1024 * 1024;
+/// The most entries [`redirected`] looks through in one `.git` folder before it refuses it.
+const GIT_ENTRIES_MAX: usize = 100_000;
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.into())
@@ -219,15 +221,21 @@ fn git_path(folder: &Path) -> std::path::PathBuf {
 }
 
 /// True when a `.git` folder points git at another place, which Git for Windows would open as
-/// the owner, a share among them: a `commondir` entry of any kind, or an `include` or
-/// `includeIf` section in its config or worktree config, or either file that is a link, over
-/// 1 MiB or unreadable (rv-sec2 #492 F1). Input: the `.git` folder. Output: the answer.
-fn redirected(git_dir: &Path) -> bool {
+/// the owner, a share among them: a `commondir` or `objects\info` alternates entry of any kind,
+/// a link at any depth or more than [`GIT_ENTRIES_MAX`] entries ([`linked_within`]), or an
+/// include in its config or worktree config, or either file over 1 MiB or unreadable (rv-sec2
+/// #492 F1). Input: the `.git` folder. Output: the answer.
+pub(crate) fn redirected(git_dir: &Path) -> bool {
     use std::io::Read;
     let absent = |found: std::io::Result<std::fs::Metadata>| {
         found.is_err_and(|problem| problem.kind() == std::io::ErrorKind::NotFound)
     };
+    let info = git_dir.join("objects").join("info");
     !absent(std::fs::symlink_metadata(git_dir.join("commondir")))
+        || ["alternates", "http-alternates"]
+            .iter()
+            .any(|name| !absent(std::fs::symlink_metadata(info.join(name))))
+        || linked_within(git_dir, GIT_ENTRIES_MAX)
         || ["config", "config.worktree"].iter().any(|name| {
             let file = match crate::platform::open_plain(&git_dir.join(name)) {
                 Ok(file) => file,
@@ -245,6 +253,34 @@ fn redirected(git_dir: &Path) -> bool {
                     .windows(b"[include".len())
                     .any(|part| part == b"[include")
         })
+}
+
+/// True when a folder holds a link, a junction among them, at any depth, an entry that cannot
+/// be read, or more than `entries_max` entries; no link is followed, and each entry's kind comes
+/// from the listing itself. Inputs: the folder and the bound. Output: the answer.
+fn linked_within(folder: &Path, entries_max: usize) -> bool {
+    let mut folders = vec![folder.to_path_buf()];
+    let mut seen = 0_usize;
+    while let Some(next) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            return true;
+        };
+        for entry in entries {
+            seen += 1;
+            let Ok((kind, path)) = entry.and_then(|entry| Ok((entry.file_type()?, entry.path())))
+            else {
+                return true;
+            };
+            if seen > entries_max || kind.is_symlink() {
+                return true;
+            }
+            if kind.is_dir() {
+                folders.push(path);
+            }
+        }
+    }
+    assert!(seen <= entries_max);
+    false
 }
 
 /// A step a test runs inside `list`, given the `.git` folder.
@@ -785,5 +821,15 @@ mod windows_tests {
         listed.sort();
         assert_eq!(listed, ["README.md", "notes.txt"]);
         assert!(!redirected(&repo.join(".git")));
+    }
+
+    #[test]
+    fn the_git_folder_walk_passes_at_its_bound_and_refuses_past_it() {
+        let place = tempfile::tempdir().unwrap();
+        let folder = place.path().join("git");
+        fs::create_dir_all(folder.join("refs").join("heads")).unwrap();
+        fs::write(folder.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(!linked_within(&folder, 3), "three entries, at the bound");
+        assert!(linked_within(&folder, 2), "three entries, past the bound");
     }
 }
