@@ -4673,10 +4673,7 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
 #[cfg(target_os = "windows")]
 fn owner_home() -> Result<PathBuf, SandboxError> {
     let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
-    if !clean_absolute(&home) {
-        return Err(invalid("owner home must be absolute"));
-    }
-    Ok(canonical(&home).unwrap_or(home))
+    settled_home(home)
 }
 
 #[cfg(unix)]
@@ -4684,11 +4681,18 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .map_err(|error| SandboxError::Io(io::Error::from(error)))?
         .ok_or_else(|| invalid("owner account is unknown"))?;
-    let home = user.dir;
+    settled_home(user.dir)
+}
+
+/// The owner's home as the sandbox compares it: refused unless absolute and clean, then
+/// [`canonical`] when it resolves, so a home named through the macOS data volume has the
+/// short spelling every sandbox root has. Input: the home the account names. Output: the
+/// folder, or `Invalid` for a relative or unclean one.
+fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
     if !clean_absolute(&home) {
         return Err(invalid("owner home must be absolute"));
     }
-    Ok(home.canonicalize().unwrap_or(home))
+    Ok(canonical(&home).unwrap_or(home))
 }
 
 /// Names the credential files and folders the sandbox guards as they appear in a path: the
@@ -5259,6 +5263,25 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
         return Ok(PathBuf::from(plain));
     }
     Ok(crate::projects_home::one_spelling(resolved))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod owner_home_tests {
+    use super::settled_home;
+    use std::path::PathBuf;
+
+    /// V243-FIRMLINK-SWEEP D1: an owner home the account names through /System/Volumes/Data
+    /// settles to its short name, the spelling every sandbox root has, so the owner home and
+    /// secret denies built from it still match.
+    #[test]
+    fn a_home_named_through_the_data_volume_settles_to_its_short_name() {
+        let base = tempfile::tempdir().unwrap();
+        let short = base.path().canonicalize().unwrap();
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", short.display()));
+        assert!(long.is_dir());
+        assert_eq!(settled_home(long).unwrap(), short);
+        assert_eq!(settled_home(short.clone()).unwrap(), short);
+    }
 }
 
 #[cfg(test)]
