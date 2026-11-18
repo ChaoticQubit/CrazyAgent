@@ -923,6 +923,11 @@ fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
             .collect();
         let logged = git(&signed.root, &env, &["log", "-1", "--format=%s"]);
         assert!(
+            !marker.exists(),
+            "{armor:?}: the IDE's git ran the path's false"
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        assert!(
             logged.status.success(),
             "{armor:?}: {}",
             String::from_utf8_lossy(&logged.stderr)
@@ -932,11 +937,6 @@ fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
             format!("{SUBJECT}\n"),
             "{armor:?}"
         );
-        assert!(
-            !marker.exists(),
-            "{armor:?}: the IDE's git ran the path's false"
-        );
-        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
     }
 }
 
