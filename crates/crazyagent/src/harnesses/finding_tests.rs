@@ -137,6 +137,57 @@ fn a_chosen_file_inside_the_engine_folder_or_an_agent_temp_folder_is_refused() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", agent.display()));
+    assert!(long.is_file());
+    assert_eq!(case.check("codex", &agent), Err(PATH_AGENT_SPACE.into()));
+    assert_eq!(case.check("codex", &long), Err(PATH_AGENT_SPACE.into()));
+}
+
+/// The data volume's name for a path. Input: an absolute path. Output: the long name.
+#[cfg(target_os = "macos")]
+fn data_volume_name(path: &Path) -> PathBuf {
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long.exists(), "no data volume name for {}", path.display());
+    long
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_outside_a_long_named_engine_folder_to_its_agent_file_spelled_long_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let link = case.root.join("tools/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(data_volume_name(&agent), &link).unwrap();
+    let space = finding::AgentSpace::open(&data_volume_name(&case.engine)).unwrap();
+    let checked = finding::check("codex", &link, &space, Some(&case.home));
+    assert_eq!(
+        checked.map_err(|error| error.0),
+        Err(PATH_AGENT_SPACE.into())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_under_a_folder_link_spelled_long_into_a_long_named_engine_folder_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let folder = case.root.join("tools");
+    std::os::unix::fs::symlink(data_volume_name(agent.parent().unwrap()), &folder).unwrap();
+    let path = folder.join("codex");
+    let space = finding::AgentSpace::open(&data_volume_name(&case.engine)).unwrap();
+    let checked = finding::check("codex", &path, &space, Some(&case.home));
+    assert_eq!(
+        checked.map_err(|error| error.0),
+        Err(PATH_AGENT_SPACE.into())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_chosen_file_in_a_folder_other_users_can_change_is_refused() {
     let case = Case::new();
     let shared = case.root.join("shared");
