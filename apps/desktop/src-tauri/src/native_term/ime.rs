@@ -1,9 +1,13 @@
 use super::pane::Input;
 use super::view::key_input;
+use unicode_width::UnicodeWidthChar;
 
 /// The most UTF-16 units of marked text a view keeps; an input method never composes this
 /// much, and a longer marked text is kept cut at a character boundary.
 pub const MARKED_UNITS_MAX: usize = 1024;
+
+/// Apple's private-use range for function keys, which never reaches a pane as text.
+const FUNCTION_CHARS: std::ops::RangeInclusive<char> = '\u{F700}'..='\u{F8FF}';
 
 /// The modifier keys of one key event that decide its route.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,23 +33,67 @@ pub enum Route {
 /// rest go through it. Inputs: the modifiers and whether marked text was shown before the
 /// key. Output: the route.
 pub fn route(mods: Mods, composing: bool) -> Route {
-    let _ = (mods, composing);
-    Route::Interpret
+    let route = if mods.command {
+        Route::Ignore
+    } else if composing {
+        Route::Interpret
+    } else if mods.control {
+        Route::Bypass
+    } else if mods.option {
+        Route::Meta
+    } else {
+        Route::Interpret
+    };
+    assert!(!mods.command || route == Route::Ignore);
+    assert!(!composing || matches!(route, Route::Ignore | Route::Interpret));
+    route
 }
 
 /// The Meta input of an Option key: Escape before its text, or its named key unchanged.
 /// Input: the characters ignoring modifiers (Shift still applied). Output: the input, or
 /// none for keys that send nothing.
 pub fn meta_input(bare: &str) -> Option<Input> {
-    key_input(bare, bare)
+    match key_input(bare, bare)? {
+        Input::Text(bytes) => {
+            assert!(!bytes.is_empty());
+            let mut meta = Vec::with_capacity(bytes.len() + 1);
+            meta.push(0x1b);
+            meta.extend_from_slice(&bytes);
+            assert_eq!(meta.len(), bytes.len() + 1);
+            Some(Input::Text(meta))
+        }
+        other => Some(other),
+    }
 }
 
 /// The text inputs one committed text makes: Apple's private-use function characters
 /// dropped, the rest cut at character boundaries into inputs of at most `TEXT_BYTES_MAX`
-/// bytes, so nothing is lost. Input: the text. Output: the inputs, none for an empty text.
+/// bytes, so nothing is lost up to `PASTE_BYTES_MAX` in all; text past that bound is not
+/// sent. Input: the text. Output: the inputs, none for an empty text.
 pub fn text_inputs(text: &str) -> Vec<Input> {
-    let _ = text;
-    Vec::new()
+    let chunk_max = super::TEXT_BYTES_MAX;
+    let mut inputs = Vec::new();
+    let mut chunk = String::new();
+    let mut total = 0usize;
+    for c in text.chars().filter(|c| !FUNCTION_CHARS.contains(c)) {
+        if total + c.len_utf8() > super::PASTE_BYTES_MAX {
+            break;
+        }
+        if chunk.len() + c.len_utf8() > chunk_max {
+            inputs.push(Input::Text(std::mem::take(&mut chunk).into_bytes()));
+        }
+        chunk.push(c);
+        total += c.len_utf8();
+    }
+    if !chunk.is_empty() {
+        inputs.push(Input::Text(chunk.into_bytes()));
+    }
+    assert!(total <= super::PASTE_BYTES_MAX);
+    assert!(inputs.iter().all(|input| matches!(
+        input,
+        Input::Text(bytes) if !bytes.is_empty() && bytes.len() <= chunk_max
+    )));
+    inputs
 }
 
 /// The UTF-16 length of a text, the unit of every AppKit text range. Input: the text.
@@ -58,8 +106,30 @@ pub fn units(text: &str) -> usize {
 /// characters. Inputs: the text and the location and length. Output: the slice and the
 /// range it covers, or none when the location is past the end, or at the end with a length.
 pub fn slice_units(text: &str, range: (usize, usize)) -> Option<(String, (usize, usize))> {
-    let _ = (text, range);
-    None
+    let total = units(text);
+    let (location, length) = range;
+    if location > total || (location == total && length > 0) {
+        return None;
+    }
+    let end = location.saturating_add(length).min(total);
+    let mut out = String::new();
+    let (mut first, mut last) = (location, location);
+    let mut at = 0usize;
+    for c in text.chars() {
+        let next = at + c.len_utf16();
+        if next > location && at < end {
+            if out.is_empty() {
+                first = at;
+            }
+            out.push(c);
+            last = next;
+        }
+        at = next;
+    }
+    assert_eq!(at, total);
+    assert!(first <= location && last >= end);
+    assert_eq!(units(&out), last - first);
+    Some((out, (first, last - first)))
 }
 
 /// One view's marked text: what the input method composes, and the part of it the input
@@ -85,54 +155,88 @@ impl Ime {
     /// with nothing sent. Inputs: the text and the selected UTF-16 range inside it. Output:
     /// whether marked text is shown after.
     pub fn set_marked(&mut self, text: &str, selected: (usize, usize)) -> bool {
-        let _ = (text, selected);
-        false
+        let mut kept = String::new();
+        let mut total = 0usize;
+        for c in text.chars() {
+            if total + c.len_utf16() > MARKED_UNITS_MAX {
+                break;
+            }
+            kept.push(c);
+            total += c.len_utf16();
+        }
+        assert_eq!(units(&kept), total);
+        let location = selected.0.min(total);
+        let length = selected.1.min(total - location);
+        self.marked = kept;
+        self.selected = (location, length);
+        assert!(self.selected.0 + self.selected.1 <= total);
+        self.composing()
     }
 
     /// Commits a text the input method inserted, ending any composition. Input: the text.
     /// Output: the inputs to send.
     pub fn commit(&mut self, text: &str) -> Vec<Input> {
-        let _ = text;
-        Vec::new()
+        self.cancel();
+        assert!(!self.composing());
+        text_inputs(text)
     }
 
     /// Commits the marked text itself (the input method asked to unmark it). Output: the
     /// inputs to send, none when not composing.
     pub fn unmark(&mut self) -> Vec<Input> {
-        Vec::new()
+        let marked = std::mem::take(&mut self.marked);
+        self.selected = (0, 0);
+        assert!(!self.composing());
+        text_inputs(&marked)
     }
 
     /// Drops the marked text with nothing sent (the view lost focus, hid, closed or was
     /// clicked). Output: whether it was composing.
     pub fn cancel(&mut self) -> bool {
-        false
+        let was = self.composing();
+        self.marked.clear();
+        self.selected = (0, 0);
+        assert!(!self.composing());
+        was
     }
 
     /// The marked range of the view's document, which is the marked text alone. Output:
     /// (0, length in UTF-16 units), or none when not composing.
     pub fn marked_range(&self) -> Option<(usize, usize)> {
-        None
+        self.composing().then(|| (0, units(&self.marked)))
     }
 
     /// The selected range inside the marked text. Output: the UTF-16 location and length,
     /// or none when not composing.
     pub fn selected_range(&self) -> Option<(usize, usize)> {
-        None
+        self.composing().then_some(self.selected)
     }
 
     /// The part of the marked text a range asks for, clamped to it. Input: the UTF-16
     /// location and length. Output: the text and the range it covers, or none when the range
     /// misses the marked text.
     pub fn substring(&self, range: (usize, usize)) -> Option<(String, (usize, usize))> {
-        let _ = range;
-        None
+        if !self.composing() {
+            return None;
+        }
+        slice_units(&self.marked, range)
     }
 
     /// How many terminal cells the marked text before a UTF-16 offset takes, so the input
-    /// method's candidate window follows the composition. Input: the offset. Output: cells.
+    /// method's candidate window follows the composition; a character the offset falls inside
+    /// counts whole. Input: the offset. Output: cells.
     pub fn cells_before(&self, offset: usize) -> usize {
-        let _ = offset;
-        0
+        let mut at = 0usize;
+        let mut cells = 0usize;
+        for c in self.marked.chars() {
+            if at >= offset {
+                break;
+            }
+            at += c.len_utf16();
+            cells += c.width().unwrap_or(0);
+        }
+        assert!(cells <= 2 * units(&self.marked));
+        cells
     }
 }
 
@@ -200,6 +304,9 @@ mod tests {
             joined.extend_from_slice(bytes);
         }
         assert_eq!(joined, long.as_bytes());
+        let huge = "a".repeat(super::super::PASTE_BYTES_MAX + 10);
+        let sent: usize = text_inputs(&huge).iter().map(|part| text(part).len()).sum();
+        assert_eq!(sent, super::super::PASTE_BYTES_MAX);
     }
 
     #[test]

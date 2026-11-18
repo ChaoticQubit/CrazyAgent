@@ -1,6 +1,8 @@
 use super::ime::{slice_units, units};
 use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::term::cell::Flags;
 
 /// The most zero-width characters one cell gives the accessibility text; more are dropped.
 pub const ZERO_WIDTH_MAX: usize = 4;
@@ -50,14 +52,118 @@ pub struct Text {
 /// cursor cell even while the cursor is hidden (input methods and screen readers follow
 /// it), and the selection clamped to the screen. Input: the terminal. Output: the grid.
 pub fn visible(term: &Term<VoidListener>) -> Grid {
-    let _ = term;
-    Grid::default()
+    let content = term.renderable_content();
+    let (lines, columns) = (term.screen_lines(), term.columns());
+    assert!(lines > 0 && columns > 0);
+    let offset = content.display_offset as i32;
+    let blank = Glyph {
+        text: " ".to_owned(),
+        spacer: false,
+    };
+    let mut rows = vec![vec![blank; columns]; lines];
+    for indexed in content.display_iter {
+        let row = usize::try_from(indexed.point.line.0 + offset).unwrap_or(usize::MAX);
+        let column = indexed.point.column.0;
+        assert!(
+            row < lines && column < columns,
+            "display cell inside the screen"
+        );
+        let cell = indexed.cell;
+        let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+        let mut text = String::new();
+        if !spacer {
+            let leading = cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER);
+            text.push(if leading { ' ' } else { cell.c });
+            let marks = cell.zerowidth().unwrap_or(&[]);
+            text.extend(marks.iter().take(ZERO_WIDTH_MAX));
+        }
+        rows[row][column] = Glyph { text, spacer };
+    }
+    let last = lines as i32 - 1;
+    let point = content.cursor.point;
+    let cursor_row = point.line.0 + offset;
+    let cursor = (0..=last)
+        .contains(&cursor_row)
+        .then(|| (cursor_row as usize, point.column.0.min(columns - 1)));
+    let selection = content.selection.and_then(|range| {
+        let (start, end) = (range.start.line.0 + offset, range.end.line.0 + offset);
+        if end < 0 || start > last {
+            return None;
+        }
+        let first = if start < 0 {
+            (0, 0)
+        } else {
+            (start as usize, range.start.column.0)
+        };
+        let final_cell = if end > last {
+            (lines - 1, columns - 1)
+        } else {
+            (end as usize, range.end.column.0)
+        };
+        Some((first, final_cell))
+    });
+    assert!(cursor.is_none_or(|(row, column)| row < lines && column < columns));
+    Grid {
+        rows,
+        columns,
+        cursor,
+        selection,
+    }
 }
 
 /// Builds the accessibility text of a grid. Input: the grid. Output: the text.
 pub fn build(grid: &Grid) -> Text {
-    let _ = grid;
-    Text::default()
+    let lines = grid.rows.len();
+    assert!(lines <= super::pane::GRID_MAX && grid.columns <= super::pane::GRID_MAX);
+    let mut text = Text {
+        starts: Vec::with_capacity(lines),
+        offsets: Vec::with_capacity(lines),
+        ..Text::default()
+    };
+    for (row, glyphs) in grid.rows.iter().enumerate() {
+        assert_eq!(glyphs.len(), grid.columns);
+        let cursor_end = grid
+            .cursor
+            .filter(|cell| cell.0 == row)
+            .map_or(0, |cell| cell.1);
+        let content_end = glyphs
+            .iter()
+            .rposition(|glyph| glyph.spacer || glyph.text != " ")
+            .map_or(0, |column| column + 1);
+        let keep = content_end.max(cursor_end).min(grid.columns);
+        let mut offsets = Vec::with_capacity(grid.columns + 1);
+        let mut local = 0usize;
+        for (column, glyph) in glyphs.iter().enumerate() {
+            if column >= keep {
+                offsets.push(local);
+            } else if glyph.spacer {
+                offsets.push(offsets.last().copied().unwrap_or(local));
+            } else {
+                offsets.push(local);
+                text.string.push_str(&glyph.text);
+                local += units(&glyph.text);
+            }
+        }
+        offsets.push(local);
+        text.starts.push(text.units);
+        text.units += local;
+        if row + 1 < lines {
+            text.string.push('\n');
+            text.units += 1;
+        }
+        text.offsets.push(offsets);
+    }
+    assert_eq!(units(&text.string), text.units);
+    assert!(text.units <= lines * (grid.columns * (2 + 2 * ZERO_WIDTH_MAX) + 1));
+    text.cursor = grid
+        .cursor
+        .map_or(text.units, |(row, column)| text.index_at(row, column));
+    text.selection = grid.selection.map(|(first, last)| {
+        let start = text.index_at(first.0, first.1);
+        let end = text.index_at(last.0, (last.1 + 1).min(grid.columns));
+        (start, end.max(start) - start)
+    });
+    text
 }
 
 impl Text {
@@ -70,22 +176,41 @@ impl Text {
     /// index its text starts at. Inputs: the row and the column (the column count is the
     /// row's end). Output: the UTF-16 index.
     pub fn index_at(&self, row: usize, column: usize) -> usize {
-        let _ = (row, column);
-        0
+        assert!(row < self.offsets.len());
+        assert!(column < self.offsets[row].len());
+        let index = self.starts[row] + self.offsets[row][column];
+        assert!(index <= self.units);
+        index
+    }
+
+    /// The column an index inside a row falls on: the first column of the character holding
+    /// it. Inputs: the row and the UTF-16 index from the row's start. Output: the column.
+    fn column_at(&self, row: usize, local: usize) -> usize {
+        let offsets = &self.offsets[row];
+        let count = offsets.partition_point(|offset| *offset <= local);
+        assert!(count >= 1, "a row starts at offset 0");
+        let target = offsets[count - 1];
+        let column = offsets.partition_point(|offset| *offset < target);
+        assert!(column < offsets.len() && offsets[column] == target);
+        column
     }
 
     /// The line an index is on; an index past the end is on the last line. Input: the
     /// UTF-16 index. Output: the line.
     pub fn line_for_index(&self, index: usize) -> usize {
-        let _ = index;
-        0
+        let count = self.starts.partition_point(|start| *start <= index);
+        let line = count.saturating_sub(1);
+        assert!(self.starts.is_empty() || line < self.starts.len());
+        line
     }
 
     /// The range of one line with its newline. Input: the line. Output: the UTF-16 location
     /// and length, or none past the last line.
     pub fn range_for_line(&self, line: usize) -> Option<(usize, usize)> {
-        let _ = line;
-        None
+        let start = *self.starts.get(line)?;
+        let end = self.starts.get(line + 1).copied().unwrap_or(self.units);
+        assert!(start <= end && end <= self.units);
+        Some((start, end - start))
     }
 
     /// The text of a range, clamped and widened to whole characters. Input: the UTF-16
@@ -98,8 +223,19 @@ impl Text {
     /// location and length. Output: the row and the first and past-the-last column, at
     /// least one cell wide, or none past the end.
     pub fn cells_for_range(&self, range: (usize, usize)) -> Option<(usize, usize, usize)> {
-        let _ = range;
-        None
+        if range.0 > self.units || self.starts.is_empty() {
+            return None;
+        }
+        let row = self.line_for_index(range.0);
+        let columns = self.offsets[row].len() - 1;
+        let start = self.starts[row];
+        let column = self.column_at(row, range.0 - start).min(columns - 1);
+        let row_end = start + self.offsets[row][columns];
+        let end = range.0.saturating_add(range.1).min(row_end).max(range.0) - start;
+        let past = self.offsets[row].partition_point(|offset| *offset < end);
+        let past = past.max(column + 1).min(columns);
+        assert!(column < past && past <= columns);
+        Some((row, column, past))
     }
 }
 
@@ -112,8 +248,14 @@ pub fn cell_rect(
     column: usize,
     width: usize,
 ) -> (f64, f64, f64, f64) {
-    let _ = (geometry, row, column, width);
-    (0.0, 0.0, 0.0, 0.0)
+    let Geometry { cell, pad, scale } = geometry;
+    assert!((1.0..=4.0).contains(&scale));
+    assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0 && width >= 1);
+    let x = (pad + column as f64 * cell.0) / scale;
+    let y = (pad + row as f64 * cell.1) / scale;
+    let rect = (x, y, width as f64 * cell.0 / scale, cell.1 / scale);
+    assert!(rect.2 > 0.0 && rect.3 > 0.0);
+    rect
 }
 
 #[cfg(test)]
