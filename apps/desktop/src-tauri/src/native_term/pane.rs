@@ -296,7 +296,7 @@ impl Pane {
         action
     }
 
-    fn to_bottom(&mut self) {
+    fn snap_bottom(&mut self) {
         if let Some(term) = self.term.as_mut()
             && term.grid().display_offset() > 0
         {
@@ -310,7 +310,7 @@ impl Pane {
         if !self.keys || bytes.is_empty() {
             return Action::Nothing;
         }
-        self.to_bottom();
+        self.snap_bottom();
         Action::Input {
             bytes,
             wheel: false,
@@ -339,7 +339,7 @@ impl Pane {
         if !self.keys || text.is_empty() || text.len() > codec::COPY_BYTES_MAX {
             return Action::Nothing;
         }
-        self.to_bottom();
+        self.snap_bottom();
         assert!(!text.is_empty());
         Action::Paste { text }
     }

@@ -11,16 +11,15 @@ pub fn unescape(escaped: &[u8]) -> Vec<u8> {
         let byte = escaped[at];
         let digits = escaped.get(at + 1..at + 4);
         let octal = digits.filter(|d| d.iter().all(|b| (b'0'..=b'7').contains(b)));
-        if byte == b'\\' {
-            if let Some(d) = octal {
-                let value = u32::from(d[0] - b'0') * 64
-                    + u32::from(d[1] - b'0') * 8
-                    + u32::from(d[2] - b'0');
-                if let Ok(decoded) = u8::try_from(value) {
-                    out.push(decoded);
-                    at += 4;
-                    continue;
-                }
+        if byte == b'\\'
+            && let Some(d) = octal
+        {
+            let value =
+                u32::from(d[0] - b'0') * 64 + u32::from(d[1] - b'0') * 8 + u32::from(d[2] - b'0');
+            if let Ok(decoded) = u8::try_from(value) {
+                out.push(decoded);
+                at += 4;
+                continue;
             }
         }
         out.push(byte);

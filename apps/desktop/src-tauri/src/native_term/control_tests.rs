@@ -273,28 +273,37 @@ impl Server {
     }
 
     fn run(&self, arguments: &[&str]) {
-        let done = Command::new(&self.tmux)
+        let mut command = Command::new(&self.tmux);
+        command
             .args(["-u", "-f", "/dev/null", "-S"])
             .arg(&self.socket)
             .args(arguments)
             .env_clear()
             .env("PATH", CLIENT_PATH)
             .stdin(Stdio::null())
-            .output()
-            .expect("tmux runs");
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let done = crazyagent::spawn_gate::output(&mut command).expect("tmux runs");
         assert!(done.status.success(), "tmux {arguments:?}: {done:?}");
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = Command::new(&self.tmux)
+        let mut command = Command::new(&self.tmux);
+        command
             .args(["-u", "-f", "/dev/null", "-S"])
             .arg(&self.socket)
             .arg("kill-server")
             .env_clear()
             .stdin(Stdio::null())
-            .output();
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let killed = crazyagent::spawn_gate::output(&mut command);
+        assert!(
+            killed.is_ok() || std::thread::panicking(),
+            "tmux kill-server: {killed:?}"
+        );
     }
 }
 

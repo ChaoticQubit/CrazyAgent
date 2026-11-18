@@ -138,7 +138,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("engine.db"), &socket).expect("link");
         assert_eq!(engine_socket(root), Err("native_terminal_socket_invalid"));
         std::fs::remove_file(&socket).expect("remove link");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).expect("bind");
         assert_eq!(engine_socket(root), Ok(socket.clone()));
     }
 

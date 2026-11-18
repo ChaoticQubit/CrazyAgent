@@ -446,12 +446,9 @@ impl Shared {
             .map(Some)
             .collect();
         let mut next: Vec<Option<Row>> = (0..lines).map(|_| None).collect();
-        for index in 0..lines.min(old.len()) {
-            if old[index]
-                .as_ref()
-                .is_some_and(|row| row.key == frame.keys[index])
-            {
-                next[index] = old[index].take();
+        for ((slot, key), held) in next.iter_mut().zip(&frame.keys).zip(old.iter_mut()) {
+            if held.as_ref().is_some_and(|row| row.key == *key) {
+                *slot = held.take();
             }
         }
         let mut by_key: HashMap<u64, Vec<usize>> = HashMap::with_capacity(old.len());

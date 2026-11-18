@@ -389,7 +389,8 @@ impl Control {
             .parent()
             .ok_or_else(|| io::Error::other("socket has no folder"))?;
         let session = format!("={}", crazyagent::terminal::tmux::SESSION);
-        let mut child = Command::new(tmux)
+        let mut command = Command::new(tmux);
+        command
             .args(["-u", "-f", "/dev/null", "-N", "-S"])
             .arg(socket)
             .args(["-C", "attach-session", "-t", &session, "-f", "ignore-size"])
@@ -398,8 +399,8 @@ impl Control {
             .current_dir(folder)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        let mut child = crazyagent::spawn_gate::spawn(&mut command)?;
         let stdin = child
             .stdin
             .take()
