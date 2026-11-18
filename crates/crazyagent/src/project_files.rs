@@ -34,11 +34,11 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Lists, for `@` tags, the tracked and unignored files whose relative path holds the query in
-/// any case, never `.git`, a link or a file reached through one, via git with no outside
-/// config, hooks or fsmonitor and `.git` as its common folder, so a planted `commondir`
-/// redirects nothing. Stops at the limit, 48 KiB or `stop`. Inputs: the absolute folder,
-/// query, limit and stop time. Output: the paths in git's order, or a `project_files_*` code.
+/// Lists, for `@` tags, tracked files and untracked files git does not ignore whose path holds
+/// the query in any case, never `.git`, a link or a file reached through a link out of the
+/// folder, via git with no outside config, hooks or fsmonitor and `.git` as its common folder,
+/// so a planted `commondir` redirects nothing. Inputs: the absolute folder, query, limit, stop
+/// time. Output: git's paths found by the limit, 48 KiB or `stop`, or a `project_files_*` code.
 #[cfg(unix)]
 pub(crate) fn list(
     folder: &Path,
