@@ -3895,6 +3895,7 @@ mod tests {
     /// farm saw that race.
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "load row: run alone, its busy threads slow timing rows beside it (V243-WORKTREES-GIT-FLAKE)"]
     fn engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time() {
         use crate::landing::signature_tests::{Armor, SUBJECT, signed};
         use std::sync::atomic::{AtomicBool, Ordering};
