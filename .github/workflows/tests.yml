@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,9 +115,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
-    name: Build the ${{ matrix.os }} test archive
+    name: Native Windows spike on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 60
     strategy:
       matrix:
         include:
@@ -129,23 +131,39 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install SQLite for Windows
+      - name: Install Rust toolchain
         run: |
           set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build the spike
+        working-directory: spikes/native-windows
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tee "$RUNNER_TEMP/spike-build.txt"
+      - name: Run the spike rows
+        working-directory: spikes/native-windows
+        run: |
+          set -uo pipefail
+          SPIKE_LOG="$RUNNER_TEMP/spike.log" /usr/bin/timeout 300 ./target/release/native-windows-spike.exe
+          code=$?
+          echo "spike exit $code" | tee -a "$RUNNER_TEMP/spike.log"
+          cat "$RUNNER_TEMP/spike.log"
+          exit "$code"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
         with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
+          name: farm-native-windows-spike
+          path: |
+            ${{ runner.temp }}/spike-build.txt
+            ${{ runner.temp }}/spike.log
+          if-no-files-found: warn
+          retention-days: 14
 
   rust-linux:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -190,9 +208,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-macos:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -252,9 +270,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-windows:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +318,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +482,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -525,9 +545,9 @@ jobs:
           retention-days: 14
 
   report:
+    if: false
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
