@@ -218,8 +218,13 @@ fn the_draft_shows_hidden_characters_plainly_and_fits_its_bound() {
         more: u64::MAX,
     };
     let text = draft(&widest);
-    assert!(text.lines().count() > SKIPPED_LISTED_MAX, "{}", text.len());
     assert!(text.len() <= DRAFT_BYTES_MAX, "{}", text.len());
+    assert!(
+        text.lines().last().is_some_and(
+            |rest| rest.starts_with("CrazyAgent also counted 18446744073709551615 more")
+        ),
+        "{text}"
+    );
 }
 
 /// Slice 3: a client's offer names the first three folders, shown plain, counts the rest
@@ -244,4 +249,62 @@ fn an_offer_names_three_folders_counts_the_rest_and_carries_the_draft() {
     assert_eq!(offer.more, 9);
     assert_eq!(offer.draft, draft(&record));
     assert!(bounded(&record));
+}
+
+/// #419 F3: a listing whose first 32 folders are `__pycache__` still keeps the
+/// `node_modules` found after them, with the command its neighbours name.
+#[test]
+fn a_folder_to_reinstall_past_32_pycache_folders_is_still_kept() {
+    let (_dir, root) = landed();
+    let mut skipped = SkippedFolders::default();
+    for at in 0..SKIPPED_LISTED_MAX {
+        skipped.push(left(&format!("py/p{at}/__pycache__"), Some(1)));
+    }
+    skipped.push(left("web/node_modules", Some(5)));
+    let record = kept(&root, &skipped, &look);
+    let web = Left {
+        path: "web/node_modules".into(),
+        hint: Some(Hint::NpmCi),
+    };
+    assert_eq!(record.left, vec![web]);
+    assert_eq!(record.more, 1);
+}
+
+/// NOTE-1845 and #428 sec N3: a draft of many long paths fits in half the master's message
+/// bound, so `a` or Ask never cuts it and the owner's own text keeps the other half; it names
+/// the folders that fit and counts the rest with the record's own count.
+#[test]
+fn a_long_draft_names_what_fits_in_half_a_message_and_counts_the_rest() {
+    let long = |n: usize| {
+        format!(
+            "{n:02}{}/node_modules",
+            "x".repeat(SKIPPED_PATH_MAX - 2 - "/node_modules".len())
+        )
+    };
+    let record = Kept {
+        left: (0..SKIPPED_LISTED_MAX)
+            .map(|n| Left {
+                path: long(n),
+                hint: Some(Hint::NpmCi),
+            })
+            .collect(),
+        more: 5,
+    };
+    assert!(bounded(&record));
+    let text = draft(&record);
+    assert!(
+        text.len() <= crate::team::MESSAGE_BYTES_MAX / 2,
+        "{}",
+        text.len()
+    );
+    let named = text.lines().filter(|line| line.starts_with("- ")).count();
+    assert!((1..SKIPPED_LISTED_MAX).contains(&named), "{named}");
+    let counted = SKIPPED_LISTED_MAX - named + 5;
+    assert!(
+        text.ends_with(&format!(
+            "CrazyAgent also counted {counted} more rebuildable folders it did not name; check \
+             the project for those too."
+        )),
+        "{text}"
+    );
 }

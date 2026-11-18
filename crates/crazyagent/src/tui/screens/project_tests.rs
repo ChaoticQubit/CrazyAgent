@@ -5578,3 +5578,51 @@ fn the_reinstall_line_counts_like_the_desktop_and_the_draft_keeps_typed_text() {
         "Hello\n\nReinstall."
     );
 }
+
+/// NOTE-1845: a notice naming folders with long paths takes at most half the rows the master
+/// tab has free, its sentence cut short, so on an 80 by 24 terminal its keys and the master's
+/// input row stay drawn.
+#[test]
+fn a_long_reinstall_notice_keeps_its_keys_and_the_input_on_a_small_terminal() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let long = |name: &str| format!("{}/{name}", "deep".repeat(60));
+    screen.reinstall = Some(crate::projects_home::reinstall::Offer {
+        folders: vec![long("node_modules"), long("dist"), long(".venv")],
+        more: 4,
+        draft: "Please reinstall them.".into(),
+    });
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    assert!(
+        words(&drawn.rows)
+            .contains("Press a to put the drafted message in your input, d to dismiss this."),
+        "{shown}"
+    );
+    assert!(shown.contains("> Message the master"), "{shown}");
+    assert!(shown.contains("deepdeep"), "{shown}");
+    assert!(!shown.contains("can be rebuilt"), "{shown}");
+}
+
+/// NOTE-1845: when the owner's text and the draft together pass the master's message bound,
+/// a leaves the input as typed and says why, instead of cutting the draft off in the input.
+#[test]
+fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let typed = "x".repeat(8180);
+    screen.input.set(&typed);
+    assert_eq!(screen.input.value(), typed);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), typed);
+    assert!(!screen.typing);
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| problem.contains("don't fit in one message")),
+        "{:?}",
+        screen.problem
+    );
+}
