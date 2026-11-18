@@ -1427,10 +1427,15 @@ async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
     bench.stop().await;
 }
 
-/// The installed graphify, or a BLOCKED panic naming the missing tool.
+/// The graphify the graph rows run, found as the library rows find it: the file
+/// `CRAZYAGENT_GRAPHIFY` names, as CI installs it pinned in its own state, else the one this
+/// machine has. Output: the canonical file, or a BLOCKED panic naming what is missing.
 #[cfg(target_os = "macos")]
 fn graphify() -> PathBuf {
-    installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
+    std::env::var_os("CRAZYAGENT_GRAPHIFY")
+        .map(|named| std::fs::canonicalize(named).expect("CRAZYAGENT_GRAPHIFY names a file"))
+        .or_else(installed_graphify)
+        .expect("BLOCKED: graphify not installed (CRAZYAGENT_GRAPHIFY, ~/.local/bin or Homebrew)")
 }
 
 /// Panics BLOCKED unless the engine at `root` finds a graphify the way its graph step
