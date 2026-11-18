@@ -590,6 +590,27 @@ test("every Rust test target that needs the staged RCLI host is left out of CI a
   assert(needing > 1, "the check found the tests that need the RCLI host");
 });
 
+test("every Rust test that reads the leader-verified srt path is left out of CI and the test farm, which set no CRAZYAGENT_SRT", async () => {
+  const lists = [[await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE"], [await workflow("tests.yml"), "FARM_ENGINE_EXCLUDE"]];
+  const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
+  let needing = 0;
+  for (const name of (await readdir(folder)).filter((name) => name.endsWith(".rs"))) {
+    const text = await readFile(new URL(name, folder), "utf8");
+    const target = name.slice(0, -3);
+    for (const { index } of text.matchAll(/CRAZYAGENT_SRT/g)) {
+      needing += 1;
+      const before = text.slice(0, index);
+      const fn = [...before.matchAll(/^(?:async )?fn (\w+)\(/gm)].at(-1);
+      const row = fn && /#\[(?:tokio::)?test[^\]\n]*\]\s*$/.test(before.slice(0, fn.index)) ? `${target}/${fn[1]}` : undefined;
+      for (const [workflowText, list] of lists) {
+        const skipped = excluded(workflowText, list);
+        assert(skipped.has(target) || (row !== undefined && skipped.has(row)), `${name} reads CRAZYAGENT_SRT ${row ? `in ${row}` : "outside a test row, so the whole target"} but is not in ${list}`);
+      }
+    }
+  }
+  assert(needing > 1, "the check found the tests that read CRAZYAGENT_SRT");
+});
+
 test("every engine and desktop row or target CI or the test farm leaves out, for all jobs or one, names a real test, so no exclusion goes stale", async () => {
   const ci = await workflow("ci.yml");
   const farm = await workflow("tests.yml");
