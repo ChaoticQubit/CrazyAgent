@@ -340,3 +340,43 @@ test("V243-NATIVE-ONLY: the app's toast over the native view covers it until the
   `);
   assert.deepEqual(seen, { view: 1, covered: true, uncovered: true });
 });
+
+test("V243-NATIVE-ONLY: a console seed is pasted into the native view once it is live, through the view's paste, and only then marked used (DEC-203 seed exception)", async () => {
+  const seen = await page(`
+    await F.stage();
+    window.seedUsed = 0;
+    const seed = { id: 7, text: "check the build\\nthen report", used: () => { window.seedUsed += 1; } };
+    F.mount("a", ${MASTER}, { seed });
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    await pause(300);
+    const beforeReady = { pastes: F.calls("desktop_native_terminal_paste").length, used: window.seedUsed };
+    F.event(1, { type: "ready", cols: 80, rows: 24 });
+    const pasted = await F.until(() => F.calls("desktop_native_terminal_paste").length === 1 && window.seedUsed === 1);
+    F.rerender("a", ${MASTER}, { seed });
+    await pause(300);
+    return { beforeReady, pasted, pastes: F.calls("desktop_native_terminal_paste").map((entry) => entry.args), used: window.seedUsed, webview: F.shown("a").webview };
+  `);
+  assert.deepEqual(seen.beforeReady, { pastes: 0, used: 0 }, "nothing is pasted before the view is live");
+  assert.equal(seen.pasted, true);
+  assert.deepEqual(seen.pastes, [{ view: 1, text: "check the build\nthen report" }], "the page sends the draft as is; the desktop flattens it for an unbracketed pane");
+  assert.equal(seen.used, 1, "used fires once, after the paste was taken");
+  assert.equal(seen.webview, 0);
+});
+
+test("V243-NATIVE-ONLY: a native view whose ready event comes before the desktop answers its open goes live only with the answer, so copy, jump and paste always name a view", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.hold();
+    F.mount("a", ${MASTER});
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.event(1, { type: "ready", cols: 80, rows: 24 });
+    await pause(300);
+    const early = document.querySelector("#a .tg-terminal-note") !== null;
+    F.release();
+    const live = await F.until(() => document.querySelector("#a .tg-terminal-note") !== null);
+    F.press("a", "Copy output");
+    const copied = await F.until(() => F.calls("desktop_native_terminal_copy").length === 1);
+    return { early, live, copied, copy: F.calls("desktop_native_terminal_copy")[0]?.args ?? null };
+  `);
+  assert.deepEqual(seen, { early: false, live: true, copied: true, copy: { view: 1, what: "output" } });
+});
