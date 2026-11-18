@@ -358,10 +358,12 @@ mod windows_tests {
         private::check(&private::read_only(&file).unwrap()).unwrap();
         private_folder(&data.join(RECORDS)).unwrap();
         private::check(&private::dir(&data.join(RECORDS)).unwrap()).unwrap();
-        let status = std::process::Command::new("icacls")
-            .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
-            .status()
-            .unwrap();
+        let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+            file.to_str().unwrap(),
+            "/grant",
+            "*S-1-5-11:(R)",
+        ]))
+        .unwrap();
         assert!(status.success());
         let Err(error) = load_defaults(&data) else {
             panic!("defaults other users may read were loaded");

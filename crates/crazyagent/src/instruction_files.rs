@@ -1662,10 +1662,12 @@ mod windows_tests {
         let file = root.path().join("AGENTS.md");
         std::fs::write(&file, "# rules").unwrap();
         assert_eq!(super::owned_text(&file).unwrap(), "# rules");
-        let status = std::process::Command::new("icacls")
-            .args([file.to_str().unwrap(), "/setowner", "*S-1-5-32-545"])
-            .status()
-            .unwrap();
+        let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+            file.to_str().unwrap(),
+            "/setowner",
+            "*S-1-5-32-545",
+        ]))
+        .unwrap();
         assert!(status.success());
         assert_eq!(
             super::owned_text(&file).unwrap_err(),
