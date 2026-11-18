@@ -18,7 +18,6 @@ pub(crate) const GENERATED_HOME: &str = "generated_home";
 #[cfg(unix)]
 const SWEEP_MAX: i64 = 10_000;
 
-#[cfg(unix)]
 macro_rules! trash_columns {
     () => {
         "(
