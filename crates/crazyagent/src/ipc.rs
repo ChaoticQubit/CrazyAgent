@@ -396,6 +396,18 @@ mod windows_tests {
         );
     }
 
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-code2 #554 N4, leader 08:08): a staged pipes file an
+    /// earlier start left behind, private to this user, is swept at the next publish, while a
+    /// file of any other name in the root is kept.
+    #[test]
+    fn a_staged_pipes_file_an_earlier_start_left_is_swept_at_publish() {
+        let (_temp, root) = private_root();
+        drop(private::secret_file(&root.join("pipes.0123456789abcdef.new")).unwrap());
+        drop(private::secret_file(&root.join("pipes.keep")).unwrap());
+        publish(&root, "engine.sock").unwrap();
+        assert_eq!(entries(&root), ["pipes", "pipes.keep"]);
+    }
+
     /// D7 (leader 07:46): a pipes file already in the root that another account owns is
     /// refused and left as it was, never replaced, and nothing is staged beside it.
     #[test]
