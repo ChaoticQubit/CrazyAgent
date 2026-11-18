@@ -2756,6 +2756,40 @@ fn a_descriptor_the_engine_inherited_reaches_no_harness() {
     }
 }
 
+/// A guard, V243-FD-SWEEP-EXIT3-ROW: a helper that cannot list the descriptors it inherited
+/// starts nothing and exits 3 with that reason, shown under bubblewrap with an empty `/proc`.
+/// Skipped where this machine cannot nest.
+#[test]
+fn a_helper_that_cannot_list_its_inherited_descriptors_starts_nothing() {
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let case = case();
+    let ran = case.tmp.join("ran");
+    let (shared, proc) = NEST_ARGS.split_last_chunk::<2>().unwrap();
+    assert_eq!(proc, &["--proc", "/proc"]);
+    let mut nest = Command::new(bwrap);
+    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+        nest.env_remove(name);
+    }
+    let output = crazyagent::spawn_gate::collected(
+        nest.args(shared)
+            .args(["--tmpfs", "/proc", "--", HELPER, "--read", "/", "--write"])
+            .arg(&case.tmp)
+            .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
+            .arg(&ran)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{said}");
+    assert!(
+        said.contains("crazyagent-landlock: inherited descriptors:"),
+        "{said}"
+    );
+    assert!(!ran.exists(), "nothing started without the descriptor list");
+}
+
 /// Tells whether a broker that carries a port runs on this machine, by its arguments.
 /// Input: the port. Output: true when one does.
 fn broker_runs(port: u16) -> bool {
@@ -2888,6 +2922,28 @@ fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_ho
         "any=pong\nother=refused\nloopback=pong\n"
     );
     assert_eq!(bash(&sandbox, &case, &gateway), "gateway=refused\n");
+}
+
+/// V243-LINUX-EGRESS-REJECT: a routed agent's refused connect, to another host's port and to
+/// slirp's gateway, fails at once instead of waiting out its SYN retries, about 127 s each.
+/// The bound covers the whole run, the routed network's start included.
+#[test]
+fn a_refused_connect_from_a_routed_agent_fails_at_once() {
+    let case = case();
+    let other = outward_address();
+    let (any, port) = (pong_everywhere(), pong_everywhere());
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(any)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    for host in [other.to_string(), "10.0.2.2".to_owned()] {
+        let refused =
+            format!("(exec 4<>/dev/tcp/{host}/{port}) 2>/dev/null && echo reached || echo refused");
+        let started = Instant::now();
+        assert_eq!(bash(&sandbox, &case, &refused), "refused\n", "{host}");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(30), "{host}: {took:?}");
+    }
 }
 
 #[test]

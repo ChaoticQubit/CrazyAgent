@@ -109,6 +109,12 @@ const CHAINS: &str = concat!(
     ":OUTPUT DROP [0:0]\n",
     "-A OUTPUT -o lo -j ACCEPT\n",
 );
+/// How the IPv4 rules refuse a packet: with an answer, so an agent's refused connect fails
+/// at once with "connection refused" instead of waiting out its SYN retries, written as
+/// `iptables-save` prints it so the read-back matches (V243-LINUX-EGRESS-REJECT).
+const REFUSE: &str = "-j REJECT --reject-with icmp-port-unreachable";
+/// How the IPv6 rules refuse a packet, as [`REFUSE`] does for IPv4.
+const REFUSE_V6: &str = "-j REJECT --reject-with icmp6-port-unreachable";
 
 /// Reads a decimal number written with digits alone, so no sign, space or other spelling
 /// passes. Input: the text. Output: the number, or none.
@@ -571,9 +577,9 @@ fn start_slirp(child: u32) -> Result<Slirp, String> {
 
 /// Opens the agent's user and network namespaces while Landlock still lets it, then confines
 /// this thread and its children under no new privileges: read and execute beneath
-/// [`SLIRP_READ`], all rights on [`TUN`], signals scoped to its domain where the kernel can,
-/// and no Unix-domain socket, the way to the engine's sockets by path. Input: the agent's
-/// process id. Output: the two namespaces, user first, or the reason.
+/// [`SLIRP_READ`], all rights on [`TUN`], signals scoped where the kernel can, and no new
+/// Unix-domain socket through `socket(2)`; a socket pair, which reaches no path, still opens.
+/// Input: the agent's process id. Output: the two namespaces, user first, or the reason.
 pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
     assert!(child > 1);
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
@@ -798,7 +804,8 @@ fn stop(parent: u32, child: u32) {
 /// resolver alone, then nothing to slirp's network ([`SLIRP_NETWORK`]), a loopback address
 /// off `lo` ([`LOOPBACK_NETWORK`]), a link-local one ([`LINK_LOCAL_NETWORK`]) or a cloud's
 /// metadata service outside it ([`crate::sandbox::CLOUD_METADATA`], each IPv4 one, in order),
-/// then out through `tap0` to each port. Input: the ports on any host. Output: the rules.
+/// then out through `tap0` to each port; every refused packet is answered ([`REFUSE`]).
+/// Input: the ports on any host. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
     assert!(!any.contains(&0));
@@ -807,19 +814,19 @@ fn egress_rules(any: &[u16]) -> String {
         rules,
         "-A OUTPUT -d {SANDBOX_RESOLVER}/32 -o {TAP} -p tcp -m tcp --dport 53 -j ACCEPT"
     );
-    let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} -j DROP");
-    let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} -j DROP");
-    let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} -j DROP");
+    let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} {REFUSE}");
+    let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} {REFUSE}");
+    let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} {REFUSE}");
     let mut metadata = 0;
     for address in crate::sandbox::CLOUD_METADATA {
         if let std::net::IpAddr::V4(address) = address {
-            let _ = writeln!(rules, "-A OUTPUT -d {address}/32 -j DROP");
+            let _ = writeln!(rules, "-A OUTPUT -d {address}/32 {REFUSE}");
             metadata += 1;
         }
     }
     assert!(metadata > 0);
     assert_eq!(rules.matches(" -j ACCEPT\n").count(), 2);
-    assert_eq!(rules.matches(" -j DROP\n").count(), 3 + metadata);
+    assert_eq!(rules.matches(REFUSE).count(), 3 + metadata);
     assert_eq!(rules.matches(SANDBOX_RESOLVER).count(), 1);
     for port in any {
         let _ = writeln!(
@@ -827,14 +834,18 @@ fn egress_rules(any: &[u16]) -> String {
             "-A OUTPUT -o {TAP} -p tcp -m tcp --dport {port} -j ACCEPT"
         );
     }
+    let _ = writeln!(rules, "-A OUTPUT {REFUSE}");
+    assert_eq!(rules.matches(REFUSE).count(), 4 + metadata);
+    assert!(!rules.contains(" -j DROP\n"));
     rules.push_str("COMMIT\n");
     rules
 }
 
 /// The IPv6 rules inside the agent's network: out over loopback only, since slirp4netns
-/// runs without IPv6. No input. Output: the rules.
+/// runs without IPv6, and every other packet answered ([`REFUSE_V6`]). No input. Output:
+/// the rules.
 fn egress_rules_v6() -> String {
-    format!("{CHAINS}COMMIT\n")
+    format!("{CHAINS}-A OUTPUT {REFUSE_V6}\nCOMMIT\n")
 }
 
 /// The rules as the read-back compares them: the table, chain policy and `-A` lines and
@@ -1035,12 +1046,13 @@ mod tests {
         ":OUTPUT DROP [0:0]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
-        "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
-        "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
-        "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
-        "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
-        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
+        "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
+        "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n",
         "COMMIT\n",
     );
 
@@ -1050,6 +1062,7 @@ mod tests {
         ":FORWARD DROP [0:0]\n",
         ":OUTPUT DROP [0:0]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
+        "-A OUTPUT -j REJECT --reject-with icmp6-port-unreachable\n",
         "COMMIT\n",
     );
 
@@ -1061,12 +1074,13 @@ mod tests {
         ":OUTPUT DROP [12:720]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
-        "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
-        "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
-        "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
-        "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
-        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
+        "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
+        "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n",
         "COMMIT\n",
         "# Completed on Sun Nov 15 23:10:00 2026\n",
     );
@@ -1084,11 +1098,9 @@ mod tests {
     #[test]
     fn the_rules_let_an_agent_out_only_through_its_ports_and_tcp_53_to_the_sandbox_resolver() {
         assert_eq!(egress_rules(&[443]), ONE_PORT);
-        let second = "-A OUTPUT -o tap0 -p tcp -m tcp --dport 8443 -j ACCEPT\nCOMMIT\n";
-        assert_eq!(
-            egress_rules(&[443, 8443]),
-            ONE_PORT.replace("COMMIT\n", second)
-        );
+        let last = "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n";
+        let second = format!("-A OUTPUT -o tap0 -p tcp -m tcp --dport 8443 -j ACCEPT\n{last}");
+        assert_eq!(egress_rules(&[443, 8443]), ONE_PORT.replace(last, &second));
         assert_eq!(egress_rules_v6(), V6);
         for rules in [
             egress_rules(&[443]),
@@ -1114,11 +1126,12 @@ mod tests {
     fn no_route_port_rule_reaches_the_slirp_network_or_loopback_and_only_dns_reaches_its_resolver()
     {
         let dns = "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT";
-        let fence = "-A OUTPUT -d 10.0.2.0/24 -j DROP";
-        let belt = "-A OUTPUT -d 127.0.0.0/8 -j DROP";
-        let link = "-A OUTPUT -d 169.254.0.0/16 -j DROP";
-        let metadata = "-A OUTPUT -d 100.100.100.200/32 -j DROP";
-        let wire = "-A OUTPUT -d 168.63.129.16/32 -j DROP";
+        let fence = "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable";
+        let belt = "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable";
+        let link = "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable";
+        let metadata =
+            "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable";
+        let wire = "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable";
         for ports in [&[443][..], &[53, 443], &[1, 8443, 65535]] {
             let rules = egress_rules(ports);
             let lines: Vec<&str> = rules.lines().collect();
@@ -1149,6 +1162,42 @@ mod tests {
         }
     }
 
+    /// V243-LINUX-EGRESS-REJECT: every rule that refuses a packet answers it, so an agent's
+    /// refused connect fails at once instead of waiting out its SYN retries, about 127 s
+    /// each. A last rule answers whatever no rule let out, and the DROP policy stays behind it.
+    #[test]
+    fn a_refused_packet_is_answered_so_a_refused_connect_fails_at_once() {
+        for (rules, refuse) in [
+            (
+                egress_rules(&[443]),
+                "-j REJECT --reject-with icmp-port-unreachable",
+            ),
+            (
+                egress_rules(&[443, 8443]),
+                "-j REJECT --reject-with icmp-port-unreachable",
+            ),
+            (
+                egress_rules_v6(),
+                "-j REJECT --reject-with icmp6-port-unreachable",
+            ),
+        ] {
+            let output: Vec<&str> = rules
+                .lines()
+                .filter(|line| line.starts_with("-A OUTPUT "))
+                .collect();
+            assert!(
+                output.iter().all(|line| !line.ends_with(" -j DROP")),
+                "{rules}"
+            );
+            assert_eq!(
+                output.last().copied(),
+                Some(format!("-A OUTPUT {refuse}").as_str()),
+                "{rules}"
+            );
+            assert!(rules.contains("\n:OUTPUT DROP [0:0]\n"), "{rules}");
+        }
+    }
+
     #[test]
     fn the_read_back_drops_comments_and_counters_and_keeps_every_policy_and_rule() {
         let canonical = concat!(
@@ -1158,22 +1207,27 @@ mod tests {
             ":OUTPUT DROP\n",
             "-A OUTPUT -o lo -j ACCEPT\n",
             "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
-            "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
-            "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
-            "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
-            "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
-            "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
+            "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable\n",
             "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
+            "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n",
             "COMMIT\n",
         );
         assert_eq!(canonical_rules(ONE_PORT), canonical);
         assert_eq!(canonical_rules(SAVED), canonical);
+        let without = |rule: &str| SAVED.replace(&format!("-A OUTPUT {rule}\n"), "");
         let widened = SAVED.replace(":OUTPUT DROP [12:720]", ":OUTPUT ACCEPT [12:720]");
         let added = SAVED.replace("COMMIT\n", "-A OUTPUT -o tap0 -p udp -j ACCEPT\nCOMMIT\n");
-        let dropped = SAVED.replace("-A OUTPUT -d 10.0.2.0/24 -j DROP\n", "");
-        let reached = SAVED.replace("-A OUTPUT -d 100.100.100.200/32 -j DROP\n", "");
-        let wired = SAVED.replace("-A OUTPUT -d 168.63.129.16/32 -j DROP\n", "");
-        for changed in [widened, added, dropped, reached, wired] {
+        let dropped = without(&format!("-d 10.0.2.0/24 {REFUSE}"));
+        let reached = without(&format!("-d 100.100.100.200/32 {REFUSE}"));
+        let wired = without(&format!("-d 168.63.129.16/32 {REFUSE}"));
+        let silent = without(REFUSE);
+        let hung = SAVED.replace(&format!("-A OUTPUT {REFUSE}\n"), "-A OUTPUT -j DROP\n");
+        for changed in [widened, added, dropped, reached, wired, silent, hung] {
+            assert_ne!(changed, SAVED);
             assert_ne!(canonical_rules(&changed), canonical, "{changed}");
         }
         assert_eq!(
