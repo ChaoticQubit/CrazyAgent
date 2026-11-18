@@ -1628,6 +1628,11 @@ mod tests {
                 Some(smaller),
                 "a present at the old size and scale shows the whole part after a rescale"
             );
+            assert_eq!(
+                placement.attached.map(|buffer| buffer.scale),
+                Some(scale),
+                "a present at the old size keeps the scale it was drawn at"
+            );
             let rescaled_size = child.size();
             assert_eq!(rescaled_size, (smaller_size.0 * 2, smaller_size.1 * 2));
             shared
@@ -1645,6 +1650,11 @@ mod tests {
             clip_checkpoint("rescaled", &child);
             let placement = child.crop.placement.get();
             assert_eq!(placement.shown(placement.attached), Some(smaller));
+            assert_eq!(
+                placement.attached.map(|buffer| buffer.scale),
+                Some(scale * 2),
+                "a present at the new size carries the new scale"
+            );
         }
 
         drop(surface);
