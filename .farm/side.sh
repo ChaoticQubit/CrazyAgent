@@ -3,6 +3,9 @@ case "$SIDE" in
   base)
     git checkout "$RED_COMMIT" -- crates/crazyagent/src
     ;;
+  mutant)
+    ruby .farm/mutant.rb crates/crazyagent/src/team/cleanup.rs
+    ;;
   tip) ;;
   *) echo "::error::unknown side $SIDE"; exit 1 ;;
 esac

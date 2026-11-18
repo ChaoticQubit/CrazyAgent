@@ -10,6 +10,24 @@ if [ "$PLATFORM" = linux ]; then
   cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
   ls -l target/debug/deps/crazyagent-landlock
 fi
+if [ "$SIDE" = mutant ]; then
+  SWAP_ROWS="$MUTANT_ROWS" bash .farm/swap.sh
+  swaps="$RUNNER_TEMP/open-up-swap-$SIDE.txt"
+  verdict=pass
+  read -ra mutants <<< "$MUTANT_ROWS"
+  { echo "| side | row | failed | failed as opened up | runs |"; echo "| --- | --- | --- | --- | --- |"; } >> "$GITHUB_STEP_SUMMARY"
+  for row in "${mutants[@]}"; do
+    line=$(grep -E "^SWAP $SIDE $row " "$swaps")
+    failed=$(sed -E "s/.* failed=([0-9]+) .*/\1/" <<< "$line")
+    opened=$(sed -E "s/.* failed_opened_up=([0-9]+) .*/\1/" <<< "$line")
+    [ "${failed:-0}" = "$SWAP_RUNS" ] && [ "${opened:-0}" = "$SWAP_RUNS" ] || verdict=fail
+    echo "| $SIDE | $row | ${failed:-none} | ${opened:-none} | $SWAP_RUNS |" >> "$GITHUB_STEP_SUMMARY"
+    echo "mutant row $row: failed=${failed:-none} failed_opened_up=${opened:-none} of $SWAP_RUNS"
+  done
+  echo "VERDICT $PLATFORM $SIDE verdict=$verdict"
+  [ "$verdict" = pass ]
+  exit
+fi
 if [ "$PLATFORM" = linux ]; then list="$LINUX_MODULES"; else list="$MODULES"; fi
 read -ra modules <<< "$list"
 cargo +"$RUST_TOOLCHAIN" test -p crazyagent --locked --lib -- "${modules[@]}" 2>&1 | tee -a "$out"

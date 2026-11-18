@@ -1313,6 +1313,58 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
     }
 }
 
+/// RV-DS241-204 pinned (w-v3-ka NOTE-1535): the swap the row above races for, run at a fixed
+/// point of [`open_up`]: as it starts and just before it changes the mode, a process left in
+/// a terminal swaps a cache folder at mode 000 for a link to an owner folder at 0555 under a
+/// deny entry. Neither look nor mode change follows that link, so the owner's folder keeps
+/// its mode and ACL every time, and a walk that follows it fails the row every time.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_at_open_up() {
+    use std::os::unix::fs::PermissionsExt;
+    for point in [OpenUpPoint::Start, OpenUpPoint::BeforeMode] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let account = root.join("account");
+        std::fs::create_dir_all(account.join(".cargo/git/db")).unwrap();
+        std::fs::create_dir_all(account.join(".cargo/registry/cache")).unwrap();
+        let owned = root.join("owner").join("c00");
+        std::fs::create_dir_all(&owned).unwrap();
+        let _owned = AclCleared(owned.clone());
+        add_acl("everyone deny delete", std::slice::from_ref(&owned));
+        let shut = root.join("ide/home/.cargo/git/p00/c00");
+        write(&shut.join("f"), b"left by a terminal\n");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let (moved, held, target) = (shut.clone(), shut.with_file_name("c00.held"), owned.clone());
+        let swap: Box<dyn FnOnce()> = Box::new(move || {
+            std::fs::rename(&moved, &held).unwrap();
+            std::os::unix::fs::symlink(&target, &moved).unwrap();
+        });
+        OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"c00".to_owned(), swap)));
+        let homes = crate::sandbox::toolchains::ToolHomes::at(&account);
+
+        let _ = crate::sandbox::toolchains::prepare_cargo_home(&root.join("ide/home"), &homes);
+        let swapped = OPEN_UP_STEP.with(|slot| slot.borrow_mut().take().is_none());
+        let mode = std::fs::symlink_metadata(&owned)
+            .unwrap()
+            .permissions()
+            .mode();
+        let _ = std::fs::set_permissions(
+            shut.with_file_name("c00.held"),
+            std::fs::Permissions::from_mode(0o700),
+        );
+
+        assert!(swapped, "{point:?}: the swap never ran");
+        assert!(denies(&owned), "{point:?}: the owner's folder lost its ACL");
+        assert_eq!(
+            mode & 0o777,
+            0o555,
+            "{point:?}: the owner's folder was opened up"
+        );
+    }
+}
+
 /// rv-sec3 F1 (B12, RV-DS241-204's flag leg): an agent-home entry at mode 000 that will not
 /// open has its immutable flag cleared through its parent's open handle, never on a path, so
 /// a process that swaps its folder for a link to an owner folder holding an entry of the same
