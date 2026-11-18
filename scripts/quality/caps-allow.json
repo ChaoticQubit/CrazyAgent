@@ -28,7 +28,7 @@
   "apps/desktop/test/native/questions-flow.mjs": 1017,
   "apps/desktop/test/native/recovery-flow.mjs": 797,
   "apps/desktop/test/native/remove-project.e2e.mjs": 708,
-  "apps/desktop/test/overview-tabs.test.mjs": 874,
+  "apps/desktop/test/overview-tabs.test.mjs": 853,
   "apps/desktop/test/process.test.mjs": 1008,
   "apps/desktop/test/project-page.test.mjs": 1290,
   "crates/crazyagent/src/adapters/codex.rs": 1934,

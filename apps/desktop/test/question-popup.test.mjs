@@ -193,6 +193,23 @@ test("a question answered on the Questions tab is gone from the pop-up as its ta
   assert.equal(seen.after.live, "", "nothing is announced as waiting");
 });
 
+test("v2.5 S4: an agent asks a question and the open pop-up shows it on the engine's watch, with no poll", { timeout: 120_000 }, async () => {
+  const fixture = await bundle(READS);
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(true)");
+    const before = await evaluate("Fixture.seen()");
+    await evaluate("Fixture.agentAsks()");
+    const unheard = await evaluate("Fixture.seen()");
+    await evaluate("Fixture.teamChanged()");
+    return { before, unheard, after: await evaluate("Fixture.seen()") };
+  });
+  assert.deepEqual([seen.before.open, seen.before.reads], [false, 1], "one read at mount finds nothing waiting");
+  assert.deepEqual([seen.unheard.open, seen.unheard.reads], [false, 1], "nothing is read again before the engine says the team changed");
+  assert.deepEqual([seen.after.open, seen.after.title, seen.after.reads], [true, "A question for you", 2],
+    "the team change reads the questions once and offers the new one");
+});
+
 test("the pop-up and the Questions tab answer through one path: the same read, answer and dismiss commands", () => {
   const source = readFileSync(new URL("../src/screens/project/question-popup.tsx", import.meta.url), "utf8");
   const tab = readFileSync(new URL("../src/screens/project/questions.tsx", import.meta.url), "utf8");
