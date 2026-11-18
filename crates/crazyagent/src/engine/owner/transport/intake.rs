@@ -126,9 +126,10 @@ impl Held {
         !self.job.ended()
     }
 
-    /// Whether the job waits for its turn: its task has not been let go.
+    /// Whether the job waits for its turn: it has not ended and its task has not been let
+    /// go. A job its task's guard ended before its turn, as an abort does, waits no more.
     fn waiting(&self) -> bool {
-        self.turn.is_some()
+        self.turn.is_some() && self.live()
     }
 
     /// Whether the job runs: let go and not ended.
@@ -209,12 +210,20 @@ fn found(
 /// not run beside is still waiting, so a job running alone is never passed for good. Every
 /// job left waiting names the job it waits behind. Input: the held jobs.
 fn admit(held: &mut [Held]) {
+    admit_with(held, |_| {});
+}
+
+/// Admits as [`admit`] does, calling `between` on each job found waiting before it is let
+/// go or told to wait, where a row ends the job as its task's guard can at that moment.
+/// Inputs: the held jobs and the call. Output: none.
+fn admit_with(held: &mut [Held], mut between: impl FnMut(&Held)) {
     for at in 0..held.len() {
         if !held[at].waiting() {
             continue;
         }
         let (before, rest) = held.split_at_mut(at);
         let (current, after) = rest.split_first_mut().expect("the job at `at` is held");
+        between(&*current);
         let others = || before.iter().chain(after.iter());
         let running = others().filter(|other| other.running()).count();
         let blocker = others()
@@ -1099,4 +1108,78 @@ fn applied(reply: Result<OwnerReply, EngineError>) -> Result<(), EngineError> {
     };
     assert!(!matches!(&result, Err(e) if e.0.is_empty()));
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A held add job of the folder `real` under the request id `id`, holding `turn` while it
+    /// waits. Inputs: the id, the folder and the turn. Output: the held job.
+    fn held(id: &str, real: &str, turn: Option<oneshot::Sender<()>>) -> Held {
+        let job = IntakeJob::new(
+            RequestId::new(id).unwrap(),
+            JobKind::Add,
+            None,
+            real.to_owned(),
+            AddMode::Copy,
+            Vec::new(),
+        );
+        Held {
+            job: Arc::new(job),
+            real: PathBuf::from(real),
+            task: None,
+            turn,
+            seen: false,
+        }
+    }
+
+    /// V243-INTAKE-WAIT-ASSERT: a waiting job whose task was dropped before its turn, as an
+    /// abort or the runtime's end does, is ended by its task's guard while its turn is still
+    /// held. A later admit passes it: it neither waits again behind the running job of the
+    /// same name nor counts as waiting or running, and that job keeps running.
+    #[test]
+    fn an_admit_passes_a_waiting_job_its_guard_ended_before_its_turn() {
+        let (turn, turned) = oneshot::channel();
+        drop(turned);
+        let mut jobs = vec![
+            held("add-running", "/outside/notes", None),
+            held("add-ended", "/elsewhere/notes", Some(turn)),
+        ];
+        let ended = Arc::clone(&jobs[1].job);
+        assert!(ended.stop());
+        ended.end(Err(failure(ended.interrupted())));
+        admit(&mut jobs);
+        assert!(jobs[1].job.ended());
+        assert!(!jobs[1].waiting());
+        assert!(!jobs[1].running());
+        assert!(jobs[0].running());
+        assert_eq!(jobs.iter().filter(|current| current.waiting()).count(), 0);
+    }
+
+    /// V243-INTAKE-WAIT-ASSERT r2 (#574 F1): the guard ends a job outside the held lock, so
+    /// its end can land after admit found the job waiting and before admit tells it to wait
+    /// behind the running job of the same name. That wait leaves the ended job as it is, with
+    /// no panic, and the running job keeps running.
+    #[test]
+    fn a_job_its_guard_ends_while_admit_runs_stays_ended() {
+        let (turn, _turned) = oneshot::channel();
+        let mut jobs = vec![
+            held("add-running", "/outside/notes", None),
+            held("add-waiting", "/elsewhere/notes", Some(turn)),
+        ];
+        let waiting = Arc::clone(&jobs[1].job);
+        let mut ended = 0;
+        admit_with(&mut jobs, |current| {
+            assert!(Arc::ptr_eq(&current.job, &waiting));
+            assert!(current.job.stop());
+            current.job.end(Err(failure(current.job.interrupted())));
+            ended += 1;
+        });
+        assert_eq!(ended, 1);
+        assert!(waiting.ended());
+        assert!(!jobs[1].waiting());
+        assert!(!jobs[1].running());
+        assert!(jobs[0].running());
+    }
 }
