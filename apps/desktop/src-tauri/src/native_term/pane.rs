@@ -6,7 +6,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
-use crazyagent::terminal::{INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN};
+use crazyagent::terminal::{INPUT_BYTES_MAX, PASTE_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 
 /// The largest pane side accepted, in cells: the engine transport's own bound.
 pub const GRID_MAX: usize = SIZE_MAX as usize;
@@ -140,9 +140,11 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// A mirror with no terminal until its attach comes. Input: the view id. Output: the pane.
-    pub fn new(view: u64) -> Pane {
+    /// A mirror with no terminal until its attach comes. Inputs: the view id and whether its
+    /// keys go through. Output: the pane.
+    pub fn new(view: u64, keys: bool) -> Pane {
         assert!(view > 0);
+        let _ = keys;
         let pane = Pane {
             view,
             term: None,
@@ -333,6 +335,17 @@ impl Pane {
         self.dirty = true;
         assert_eq!(term.grid().display_offset(), after);
         Action::Local
+    }
+
+    /// Takes a drafted message as a paste. Input: the text. Output: the paste, or a code.
+    pub fn seed(&mut self, text: &str) -> Result<Action, &'static str> {
+        if !self.ready() {
+            return Err("native_terminal_view_unknown");
+        }
+        assert!(text.len() <= PASTE_BYTES_MAX * 2);
+        Ok(Action::Paste {
+            text: text.to_owned(),
+        })
     }
 
     fn paste(&mut self, text: String) -> Action {

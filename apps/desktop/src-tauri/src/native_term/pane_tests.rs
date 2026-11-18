@@ -1,10 +1,54 @@
 use super::*;
 
 fn attached(output: &[u8]) -> Pane {
-    let mut pane = Pane::new(7);
+    let mut pane = Pane::new(7, true);
     assert!(pane.on_attached(20, 4));
     assert!(pane.on_output(output));
     pane
+}
+
+#[test]
+fn a_pane_opened_with_keys_off_sends_nothing_from_its_first_key_click_or_paste() {
+    let mut pane = Pane::new(5, false);
+    assert!(pane.on_attached(20, 4));
+    assert!(pane.on_output(b"\x1b[?1000h\x1b[?1006h"));
+    assert!(pane.mouse_mode());
+    assert_eq!(pane.apply(Input::Text(b"y\r".to_vec())), Action::Nothing);
+    let up = Input::Key {
+        key: Named::Up,
+        mods: 0,
+    };
+    assert_eq!(pane.apply(up), Action::Nothing);
+    let click = Input::Press {
+        cell: (1, 1),
+        option: false,
+        clicks: 1,
+    };
+    assert_eq!(pane.apply(click), Action::Local);
+    let paste = Input::Paste { text: "y".into() };
+    assert_eq!(pane.apply(paste), Action::Nothing);
+    assert_eq!(pane.seed("y"), Err("native_terminal_keys_off"));
+}
+
+#[test]
+fn a_seed_flattens_line_breaks_unless_the_pane_reads_pastes_bracketed() {
+    let mut early = Pane::new(6, true);
+    assert_eq!(early.seed("a"), Err("native_terminal_view_unknown"));
+    let mut pane = attached(b"");
+    let flat = Action::Paste {
+        text: "a b c d".into(),
+    };
+    assert_eq!(pane.seed("a\r\n\r\nb\rc\nd"), Ok(flat));
+    assert_eq!(pane.seed(""), Ok(Action::Nothing));
+    let over = "x".repeat(PASTE_BYTES_MAX + 1);
+    assert_eq!(pane.seed(&over), Err("native_terminal_paste_too_large"));
+    let full = "x".repeat(PASTE_BYTES_MAX);
+    assert!(matches!(pane.seed(&full), Ok(Action::Paste { .. })));
+    assert!(pane.on_output(b"\x1b[?2004h"));
+    let kept = Action::Paste {
+        text: "a\r\nb".into(),
+    };
+    assert_eq!(pane.seed("a\r\nb"), Ok(kept));
 }
 
 #[test]
@@ -36,7 +80,7 @@ fn modified_and_function_keys_match_the_xterm_panel() {
 
 #[test]
 fn nothing_applies_before_the_attach_and_sizes_are_bounded() {
-    let mut pane = Pane::new(1);
+    let mut pane = Pane::new(1, true);
     assert_eq!(pane.apply(Input::Text(b"a".to_vec())), Action::Nothing);
     assert!(!pane.on_output(b"x"));
     assert!(!pane.on_attached(1, 24));
@@ -234,7 +278,7 @@ fn copy_takes_the_selection_or_the_whole_output() {
 
 #[test]
 fn resize_reports_only_a_change() {
-    let mut pane = Pane::new(3);
+    let mut pane = Pane::new(3, true);
     assert_eq!(pane.resize((80, 24)), None);
     assert!(pane.on_attached(80, 24));
     assert_eq!(pane.resize((80, 24)), None);

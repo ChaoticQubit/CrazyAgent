@@ -1,6 +1,7 @@
 mod a11y;
 mod codec;
 mod control;
+mod ended;
 mod ime;
 mod keymap;
 mod pane;
@@ -98,6 +99,31 @@ pub fn window_name(name: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_native_file_activates_the_app_or_makes_a_window_key() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
+        let needles = [
+            ["acti", "vate"].concat(),
+            ["make", "KeyWindow"].concat(),
+            ["make", "KeyAndOrderFront"].concat(),
+            ["order", "FrontRegardless"].concat(),
+        ];
+        let mut read = 0;
+        for entry in std::fs::read_dir(&folder).expect("native_term folder") {
+            let path = entry.expect("folder entry").path();
+            if path.extension() != Some(OsStr::new("rs")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source file");
+            for needle in &needles {
+                let shown = path.display();
+                assert!(!text.contains(needle.as_str()), "{shown} names {needle}");
+            }
+            read += 1;
+        }
+        assert!(read >= 14, "read {read} files");
+    }
 
     #[test]
     fn only_an_engine_socket_shape_passes() {
