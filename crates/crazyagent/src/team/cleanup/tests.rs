@@ -2624,3 +2624,41 @@ fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_w
         }
     }
 }
+
+/// #611 code F1: a folder an agent shut at mode 000 under its own ACL that denies this user
+/// reading its attributes or its ACL refuses every look at it by name, so removing the
+/// agent's tree clears that ACL by name, looks again and still removes the folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_clears_an_acl_that_refuses_a_look_at_a_shut_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let agent = root.join("agent");
+    let mut shut = Vec::new();
+    for (name, entry) in [
+        ("attributes", "everyone deny readattr"),
+        ("security", "everyone deny readsecurity"),
+    ] {
+        let folder = agent.join(name);
+        write(&folder.join("inner"), b"left by an agent\n");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+        add_acl(entry, std::slice::from_ref(&folder));
+        shut.push(folder);
+    }
+    let refused = shut
+        .iter()
+        .all(|folder| std::fs::symlink_metadata(folder).is_err());
+
+    let removed = remove_agent_tree(&agent);
+    let left = agent.exists();
+    for folder in &shut {
+        drop(AclCleared(folder.clone()));
+        let _ = std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700));
+    }
+    let _ = remove_agent_tree(&agent);
+
+    assert!(refused, "a look at a shut folder was not refused");
+    assert_eq!(removed, Ok(()));
+    assert!(!left, "the tree stayed");
+}
