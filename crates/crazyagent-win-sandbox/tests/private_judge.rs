@@ -28,6 +28,8 @@ const OBJECT_ALLOW: u8 = 5;
 const LABEL: u8 = 0x11;
 const NO_WRITE_UP: u32 = 0x1;
 const NO_READ_UP: u32 = 0x2;
+const NO_EXECUTE_UP: u32 = 0x4;
+const FULL_POLICY: u32 = NO_WRITE_UP | NO_READ_UP | NO_EXECUTE_UP;
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
 const INHERITABLE: u8 = 0x03;
@@ -152,21 +154,26 @@ fn a_folder_handing_another_account_access_to_what_is_made_in_it_is_refused() {
     assert_eq!(judge_folder(&facts(Some(list(&USER, true))), &USER), Ok(()));
 }
 
-/// #512 r2 (rv-sec2 F1): a folder whose label entry for what is made in it is below medium,
-/// or lacks no-write-up, hands that label to SQLite's side files, so the folder is refused,
-/// though its own label (none here) is fine; a high inheritable label stays private.
+/// #512 r2 (rv-sec2 F1), V244-WIN-STORE-LABEL-NX (leader 09:14): a folder whose label entry
+/// for what is made in it is below medium, or lacks any of no-write-up, no-read-up and
+/// no-execute-up, hands that label to SQLite's side files, so the folder is refused, though
+/// its own label (none here) is fine; a high inheritable label with the full policy passes.
 #[test]
 fn a_folder_handing_a_low_label_to_what_is_made_in_it_is_refused() {
     let mut object = facts(Some(private_list(&[])));
     let handed = |policy: u32, level: &[u8]| {
         Some(acl(&[(LABEL, INHERITABLE | INHERIT_ONLY, policy, level)]))
     };
-    object.label = handed(NO_WRITE_UP, &LOW);
+    object.label = handed(FULL_POLICY, &LOW);
     assert_eq!(judge(&object, &USER), Ok(()));
     assert!(judge_folder(&object, &USER).is_err());
-    object.label = handed(0, &MEDIUM);
-    assert!(judge_folder(&object, &USER).is_err());
+    for policy in [0, NO_WRITE_UP, NO_WRITE_UP | NO_READ_UP] {
+        object.label = handed(policy, &MEDIUM);
+        assert!(judge_folder(&object, &USER).is_err(), "{policy}");
+    }
     object.label = handed(NO_WRITE_UP, &HIGH);
+    assert!(judge_folder(&object, &USER).is_err());
+    object.label = handed(FULL_POLICY, &HIGH);
     assert_eq!(judge_folder(&object, &USER), Ok(()));
 }
 
@@ -235,17 +242,22 @@ fn trusted_installer_as_owner_and_an_owner_rights_entry_are_private() {
     assert_eq!(judge(&owner_rights, &USER), Ok(()));
 }
 
-/// W1 D1 (rv-sec3 N4): a mandatory label below medium, or one that lets a lower integrity
-/// process write up, is refused; no label, which Windows reads as medium, and a medium or
-/// high label that keeps lower writers out are private.
+/// W1 D1 (rv-sec3 N4), V244-WIN-STORE-LABEL-NX (leader 09:14): a mandatory label below
+/// medium, or one that lets a lower integrity process write, read or execute up, is refused,
+/// as #562 F1 saw such a process hold a file opened for execute only; no label, which
+/// Windows reads as medium, and a medium or high label with the full policy are private.
 #[test]
 fn a_label_that_lets_a_lower_integrity_process_write_is_refused() {
     for (level, policy, private) in [
-        (&LOW, NO_WRITE_UP, false),
+        (&LOW, FULL_POLICY, false),
         (&MEDIUM, 0, false),
         (&HIGH, 0, false),
-        (&MEDIUM, NO_WRITE_UP, true),
-        (&HIGH, NO_WRITE_UP, true),
+        (&MEDIUM, NO_WRITE_UP, false),
+        (&MEDIUM, NO_WRITE_UP | NO_READ_UP, false),
+        (&MEDIUM, NO_WRITE_UP | NO_EXECUTE_UP, false),
+        (&HIGH, NO_WRITE_UP, false),
+        (&MEDIUM, FULL_POLICY, true),
+        (&HIGH, FULL_POLICY, true),
     ] {
         let mut object = facts(Some(private_list(&[])));
         object.label = Some(acl(&[(LABEL, 0, policy, &level[..])]));
@@ -280,13 +292,13 @@ fn the_planned_list_is_private_and_names_only_the_trusted_accounts() {
     }
 }
 
-/// #524 r3 (rv-code4 F2, leader 05:45): only the secret stores carry the medium label with
-/// no-write-up and no-read-up. A secret folder labels itself and all made in it; the database
-/// folder, the data root, labels only the files made directly in it, never itself or a folder
-/// below, which may be a root granted to an AppContainer. Both forms pass the folder judge.
+/// #524 r3 (rv-code4 F2, leader 05:45), V244-WIN-STORE-LABEL-NX: only the stores carry the
+/// medium label with no-write-up, no-read-up and no-execute-up. A secret folder labels itself
+/// and all made in it; the database folder, the data root, labels only the files made directly
+/// in it, never itself or a folder below, which may be a root granted to an AppContainer.
 #[test]
 fn a_store_label_reaches_only_what_the_store_holds() {
-    let both = Ok(Some((0x2000, NO_WRITE_UP | NO_READ_UP)));
+    let both = Ok(Some((0x2000, FULL_POLICY)));
     let mut secret = facts(Some(list(&USER, true)));
     secret.label = Some(label_list(Store::Secret));
     let sacl = secret.label.as_deref().unwrap();
