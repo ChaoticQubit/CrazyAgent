@@ -169,6 +169,24 @@ pub enum HookInput {
     Release { x: f64, y: f64, option: bool },
     Copy,
     Paste { text: String },
+    Marked { text: String, at: usize },
+    Insert { text: String },
+    Unmark,
+    Access,
+}
+
+impl HookInput {
+    /// Whether the input is a text operation the view's own selectors run (marked text,
+    /// insert, unmark, accessibility read) rather than a timed input. Output: true for those.
+    pub fn text_op(&self) -> bool {
+        matches!(
+            self,
+            HookInput::Marked { .. }
+                | HookInput::Insert { .. }
+                | HookInput::Unmark
+                | HookInput::Access
+        )
+    }
 }
 
 /// One test-hook event: its sequence number, the page's dispatch time (wall ms), the text
@@ -223,6 +241,11 @@ impl HookEvent {
             | HookInput::Release { x, y, .. } => point(*x) && point(*y),
             HookInput::Copy => true,
             HookInput::Paste { text } => text.len() <= PASTE_BYTES_MAX,
+            HookInput::Marked { text, at } => {
+                text.len() <= TEXT_BYTES_MAX && *at <= text.encode_utf16().count()
+            }
+            HookInput::Insert { text } => text.len() <= TEXT_BYTES_MAX,
+            HookInput::Unmark | HookInput::Access => true,
         };
         self.t0.is_finite() && expect && input
     }
@@ -236,6 +259,8 @@ pub enum Report {
     Ready,
     #[cfg(target_os = "macos")]
     Probe(pane::Probe),
+    #[cfg(target_os = "macos")]
+    Access(view_text::AccessReport),
     Ended {
         code: String,
     },

@@ -6,6 +6,7 @@ use super::pane::{self, Effect, Input, Named, Pane, Probe};
 use super::render::{Shared, Surface};
 use super::screen;
 use super::view::{MouseKind, TermView};
+use super::view_text;
 use super::{HookEvent, HookInput, Rect, Report};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -542,6 +543,9 @@ pub fn input(
     event: HookEvent,
 ) -> Result<(), String> {
     assert!(event.valid());
+    if event.input.text_op() {
+        return text_op(app, window, id, event.input);
+    }
     if event
         .expect
         .as_ref()
@@ -637,6 +641,10 @@ impl Native {
                     option,
                 }),
             ),
+            HookInput::Marked { .. }
+            | HookInput::Insert { .. }
+            | HookInput::Unmark
+            | HookInput::Access => unreachable!("text operations go through text_op"),
         }
     }
 }
@@ -712,6 +720,33 @@ pub fn close(app: &tauri::AppHandle, window: String, id: Option<u64>) -> Result<
             assert!(native.views.keys().all(|key| !ids.contains(key)));
         })
         .ok_or_else(|| "native_terminal_main_busy".to_owned())
+    })?
+}
+
+/// Runs a hook text operation (marked text, insert, unmark, accessibility read) through a
+/// view's own selectors, outside the native state, so the inputs it makes reach the pane the
+/// way AppKit's would. Inputs: the app, the window label, the view id and the operation.
+/// Output: unit, or a plain code.
+fn text_op(
+    app: &tauri::AppHandle,
+    window: String,
+    id: u64,
+    input: HookInput,
+) -> Result<(), String> {
+    assert!(input.text_op());
+    on_main(app, move |_| {
+        let found = with_native(|native| {
+            let view = native.views.get(&id).filter(|view| view.window == window)?;
+            Some((view.ns.clone(), view.output.clone()))
+        })
+        .ok_or_else(|| "native_terminal_main_busy".to_owned())?;
+        let Some((ns, output)) = found else {
+            return Err("native_terminal_view_unknown".to_owned());
+        };
+        if let Some(report) = view_text::hook_text(&ns, &input) {
+            let _ = output.send(Report::Access(report));
+        }
+        Ok(())
     })?
 }
 
