@@ -8,6 +8,10 @@ pub const VERSION: u32 = 1;
 /// strict volume paths or canonical SIDs, repeated or too many.
 pub const RECORD_MALFORMED: &str = "admin_record_malformed";
 
+/// The refusal to count one more account in a record that already holds the most a
+/// record keeps.
+pub const RECORD_FULL: &str = "admin_record_full";
+
 /// The one refusal for a command line that is not exactly one of the binary's roles.
 pub const ARGUMENTS_REFUSED: &str = "admin_arguments_refused";
 
@@ -54,8 +58,8 @@ impl Record {
     }
 
     /// The record after `user` applied: counted once, and the version brought up to this
-    /// build's. Input: a canonical SID. Output: the new record.
-    pub fn with_user(&self, user: &str) -> Record {
+    /// build's. Input: a canonical SID. Output: the new record, or [`RECORD_FULL`].
+    pub fn with_user(&self, user: &str) -> Result<Record, &'static str> {
         let _ = user;
         todo!("B2")
     }
@@ -535,24 +539,39 @@ mod tests {
     fn an_account_is_counted_once_and_dropped_alone() {
         let mut older = record(&[OTHER]);
         older.version = VERSION;
-        let added = older.with_user(OWNER);
+        let added = older.with_user(OWNER).unwrap();
         assert_eq!(added.users, strings(&[OTHER, OWNER]));
         assert_eq!(added.drives, older.drives);
         assert!(added.done_for(OWNER) && added.done_for(OTHER));
         assert_eq!(
             added.with_user(OWNER),
-            added,
+            Ok(added.clone()),
             "a second apply counts nothing more"
         );
         let mut newer = added.clone();
         newer.version = VERSION + 1;
-        assert_eq!(newer.with_user(OWNER).version, VERSION + 1, "never lowered");
+        assert_eq!(
+            newer.with_user(OWNER).unwrap().version,
+            VERSION + 1,
+            "never lowered"
+        );
         let dropped = added.without_user(OWNER);
         assert_eq!(dropped.users, strings(&[OTHER]));
         assert_eq!(dropped.drives, added.drives);
         assert!(dropped.device_task);
         assert_eq!(dropped.without_user(OWNER), dropped);
         assert!(!dropped.done_for(OWNER));
+
+        let mut full = record(&[]);
+        for n in 0..64 {
+            full = full
+                .with_user(&format!("S-1-5-21-1-2-3-{}", 1000 + n))
+                .unwrap();
+        }
+        assert_eq!(full.users.len(), 64);
+        assert_eq!(parsed(&full.values()), Ok(full.clone()));
+        assert_eq!(full.with_user(OWNER), Err(RECORD_FULL));
+        assert_eq!(full.with_user("S-1-5-21-1-2-3-1000"), Ok(full.clone()));
     }
 
     #[test]
