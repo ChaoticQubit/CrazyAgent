@@ -69,6 +69,14 @@ test("an engine that did not start because its upgrade backup failed says so pla
   assert.notEqual(failed.message, api.plainError("engine_start_failed"));
 });
 
+test("an engine that did not start because Windows names a system folder git can't be kept safe with says so plainly (#598 sec N1)", () => {
+  const failed = api.classifyFailure({ code: "git_safe_unavailable" });
+  assert.equal(failed.code, "git_safe_unavailable");
+  assert.equal(failed.message,
+    "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.");
+  assert.notEqual(failed.message, api.plainError("engine_start_failed"));
+});
+
 test("a connect refused by a locator a stopped engine left reads one plain line, the same as the TUI's (F35)", async () => {
   const { readFileSync } = await import("node:fs");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/bootstrap.rs", import.meta.url), "utf8");

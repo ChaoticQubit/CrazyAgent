@@ -2,7 +2,7 @@ use super::GitHubRule;
 use super::clone;
 use crate::engine::EngineError;
 use crate::project_setup::SECRET_PREFIXES;
-use crate::research::runner::GIT_SAFE;
+use crate::research::runner::git_safe;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,6 +14,8 @@ use std::time::Duration;
 
 #[cfg(all(test, target_os = "macos"))]
 mod publish_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 const SCAN_FILES_MAX: usize = 20_000;
 const SCAN_BYTES_MAX: u64 = 200 << 20;
@@ -274,7 +276,7 @@ fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
         .args(OUTSIDE_FILES_OFF)
         .env("GIT_DIR", project.join(".git"))
         .env("GIT_WORK_TREE", project)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     command
@@ -1483,7 +1485,7 @@ pub(super) fn configured_author(git: &Path, owner_home: &Path, project: &Path) -
             .env_remove("GIT_CONFIG_GLOBAL")
             .current_dir(project)
             .env("GIT_DIR", project.join(".git"))
-            .args(GIT_SAFE)
+            .args(git_safe())
             .args(["config", "--get", key])
             .stdin(Stdio::null())
             .stderr(Stdio::null());
@@ -1831,7 +1833,7 @@ pub(super) fn push(
     let stage = home.join(STAGE);
     let reference = format!("refs/heads/{branch}");
     let mut init = clone::git_command(git, home);
-    init.args(GIT_SAFE)
+    init.args(git_safe())
         .args(["init", "--bare", "-q", "--template="]);
     if commit.len() == 64 {
         init.arg("--object-format=sha256");
@@ -1850,7 +1852,7 @@ pub(super) fn push(
         .map_err(|_| failed())?;
     let staged = run(clone::git_command(git, home)
         .env("GIT_DIR", &stage)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .args(["update-ref", reference.as_str(), commit.as_str()])
         .stdin(Stdio::null())
         .stderr(Stdio::null()))?;

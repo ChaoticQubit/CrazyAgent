@@ -9,6 +9,7 @@ mod owner;
 pub(crate) mod pipe;
 pub(crate) mod private;
 mod record;
+mod system;
 mod tree;
 
 pub use file_id::file_id;
@@ -17,6 +18,7 @@ pub use name::final_name;
 pub use owner::{
     changeable_part, owner_only, unreadable_drive_root, unreadable_read_root, unreadable_root,
 };
+pub use system::system_folder;
 pub use tree::ProcessTree;
 
 use crate::plan::{nested_read_roots, plan};

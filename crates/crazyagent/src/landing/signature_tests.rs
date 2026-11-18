@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 /// The commit time of every signed commit these rows make, as git prints `%ct`.
 const SIGNED_AT: &str = "1700000000";
 /// The subject of every signed commit these rows make.
-const SUBJECT: &str = "Signed subject";
+pub(crate) const SUBJECT: &str = "Signed subject";
 /// The signature programs a signed repository names, each writing its marker when run.
 const PROGRAMS: [(&str, &str); 4] = [
     ("gpg.program", "gpg"),
@@ -179,19 +179,21 @@ fn engine_git_shows_a_signed_owner_tip_and_runs_no_signature_program() {
 }
 
 /// The engine's setup git, asked outright for the signature of a commit in any armor,
-/// runs none of the repository's signature programs (RV-DS241-39).
+/// runs none of the repository's signature programs and ends well (RV-DS241-39): a git
+/// killed by SIGPIPE would read as `Ok(false)` (V243-WORKTREES-GIT-FLAKE).
 #[test]
 fn engine_setup_git_runs_no_repository_signature_program_in_any_armor() {
     for armor in Armor::ALL {
         let signed = signed(armor);
         let tmp = signed.base.join("tmp");
         fs::create_dir_all(&tmp).unwrap();
-        crate::research::runner::engine_git(
+        let ended_well = crate::research::runner::engine_git(
             &signed.root,
             &tmp,
             &["log", "--show-signature", "-1", "--format=%s"],
         )
         .unwrap();
+        assert!(ended_well, "{armor:?}: the engine's setup git failed");
         assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
     }
 }

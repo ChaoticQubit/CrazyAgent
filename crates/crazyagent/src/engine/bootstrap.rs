@@ -152,6 +152,13 @@ pub fn stale_engine_text(code: &str) -> Option<&'static str> {
         .then_some(STALE_ENGINE_TEXT)
 }
 
+/// Refuses an engine start, before it opens anything, on a computer where its gits can't
+/// name a program that never runs (#598 sec N1), so no engine and no git runs there.
+/// Input: [`crate::research::runner::git_safe_refusal`]'s answer. Output: Ok, or that code.
+pub(crate) fn refuse_unsafe_git(refusal: Option<&'static str>) -> Result<(), EngineError> {
+    refusal.map_or(Ok(()), |code| Err(fail(code)))
+}
+
 fn fail(code: &str) -> EngineError {
     EngineError(code.into())
 }
@@ -814,6 +821,7 @@ impl EngineService {
         shutdown: &watch::Receiver<bool>,
     ) -> Result<Self, EngineError> {
         cancelled(shutdown)?;
+        refuse_unsafe_git(crate::research::runner::git_safe_refusal())?;
         socket_name(ordinary)?;
         let anchor = Anchor::open(input)?;
         check_path_length(&anchor.path.join(ordinary))?;
@@ -839,6 +847,7 @@ impl EngineService {
         shutdown: &watch::Receiver<bool>,
     ) -> Result<Self, EngineError> {
         cancelled(shutdown)?;
+        refuse_unsafe_git(crate::research::runner::git_safe_refusal())?;
         socket_name(ordinary)?;
         let anchor = Anchor::open(input)?;
         check_path_length(&anchor.path.join(ordinary))?;

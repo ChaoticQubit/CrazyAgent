@@ -2750,3 +2750,23 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         "read in a later second, it is kept"
     );
 }
+
+#[test]
+fn an_unusable_system_folder_refuses_the_start_and_is_named_before_every_other_cause() {
+    use crate::engine::bootstrap::refuse_unsafe_git;
+    use crate::research::runner::GIT_SAFE_UNAVAILABLE;
+    assert!(refuse_unsafe_git(None).is_ok());
+    assert_eq!(
+        refuse_unsafe_git(Some(GIT_SAFE_UNAVAILABLE)).map_err(|error| error.0),
+        Err(GIT_SAFE_UNAVAILABLE.to_owned())
+    );
+    for backup_failed in [false, true] {
+        assert_eq!(
+            failure_code(Some(GIT_SAFE_UNAVAILABLE), backup_failed),
+            GIT_SAFE_UNAVAILABLE,
+            "the TUI and the desktop name the refusal first, backup failed {backup_failed}"
+        );
+    }
+    assert_eq!(failure_code(None, true), "engine_backup_failed");
+    assert_eq!(failure_code(None, false), "engine_start_failed");
+}

@@ -36,38 +36,130 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
-/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
-/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
-/// program the repository names (RV-DS241-39), and no signature check on a log or show at
-/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
-/// what the engine reads (RV-DS241-39 r2 F2).
-pub(crate) const GIT_SAFE: [&str; 18] = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "submodule.recurse=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
-    "gpg.program=/usr/bin/false",
-    "-c",
-    "gpg.x509.program=/usr/bin/false",
-    "-c",
-    "gpg.ssh.program=/usr/bin/false",
-    "-c",
-    "log.showSignature=false",
-];
+/// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
+/// (RV-DS241-39 r2 F2), and [`no_program`] for the hook folder and every signature program
+/// the repository could name (RV-DS241-39). Output: the nine `-c` pairs, built once.
+pub(crate) fn git_safe() -> &'static [String; GIT_SAFE_LEN] {
+    static SAFE: LazyLock<[String; GIT_SAFE_LEN]> = LazyLock::new(|| safe_settings(no_program()));
+    LazyLock::force(&SAFE)
+}
+
+/// How many arguments [`git_safe`] holds: nine `-c` pairs.
+const GIT_SAFE_LEN: usize = 18;
+
+/// The [`git_safe`] arguments, naming `program` for the hook folder and every signature
+/// program. Input: the value. Output: the nine `-c` pairs.
+fn safe_settings(program: &str) -> [String; GIT_SAFE_LEN] {
+    [
+        "-c".to_owned(),
+        format!("core.hooksPath={program}"),
+        "-c".to_owned(),
+        "core.fsmonitor=false".to_owned(),
+        "-c".to_owned(),
+        "core.pager=cat".to_owned(),
+        "-c".to_owned(),
+        "submodule.recurse=false".to_owned(),
+        "-c".to_owned(),
+        "protocol.allow=never".to_owned(),
+        "-c".to_owned(),
+        format!("gpg.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.x509.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.ssh.program={program}"),
+        "-c".to_owned(),
+        "log.showSignature=false".to_owned(),
+    ]
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Unix: `/dev/null`, which git cannot start and goes on without, where a
+/// started `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with
+/// SIGPIPE (V243-WORKTREES-GIT-FLAKE). Output: the value.
+#[cfg(unix)]
+pub(crate) fn no_program() -> &'static str {
+    "/dev/null"
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Windows: [`windows_value`] of the system folder, read once, where a
+/// drive-relative `/dev/null` reached a hook any user can plant under `C:\dev\null`
+/// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; the engine start refuses an
+/// unusable folder first ([`git_safe_refusal`]), so the `expect` asserts that gate.
+#[cfg(windows)]
+pub(crate) fn no_program() -> &'static str {
+    WINDOWS_VALUE
+        .as_deref()
+        .expect("the engine start refuses git_safe_unavailable before any git runs")
+}
+
+/// [`no_program`]'s Windows value, read once and kept as a Result, so an unusable folder
+/// never panics inside the lock and poisons it for every later git (#598 sec N1).
+#[cfg(windows)]
+static WINDOWS_VALUE: LazyLock<Result<String, &'static str>> =
+    LazyLock::new(|| windows_value(crazyagent_win_sandbox::system_folder()));
+
+/// The code an engine start refuses with when this computer cannot give [`no_program`] its
+/// value, so no engine and no git runs there (#598 sec N1).
+pub const GIT_SAFE_UNAVAILABLE: &str = "git_safe_unavailable";
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Unix it always can. Output: None.
+#[cfg(unix)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    None
+}
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Windows not when the system folder can't be read or
+/// [`windows_no_program`] refuses it. Output: [`GIT_SAFE_UNAVAILABLE`], or None.
+#[cfg(windows)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    WINDOWS_VALUE.as_ref().err().copied()
+}
+
+/// The Windows value from the system folder GetSystemDirectoryW gave, as
+/// [`windows_no_program`] builds it. Input: the folder, or the read's error. Output: the
+/// value, or [`GIT_SAFE_UNAVAILABLE`] for an error or an unusable folder.
+#[cfg(any(windows, test))]
+fn windows_value(folder: io::Result<PathBuf>) -> Result<String, &'static str> {
+    folder
+        .ok()
+        .and_then(|folder| windows_no_program(&folder))
+        .ok_or(GIT_SAFE_UNAVAILABLE)
+}
+
+/// The Windows value for a hook folder or a program no git may run: `folder` with forward
+/// slashes, the shape Git for Windows starts without a shell, then `/crazyagent-none`.
+/// Input: the system folder. Output: the value, or None unless the folder is `<letter>:\`
+/// and parts of letters, digits, `.`, `_` and `-`, none empty, `.` or `..`.
+#[cfg(any(windows, test))]
+fn windows_no_program(folder: &Path) -> Option<String> {
+    let text = folder.to_str()?.replace('\\', "/");
+    let (drive, rest) = text.split_at_checked(3)?;
+    let mut drive = drive.chars();
+    let lettered = drive
+        .next()
+        .is_some_and(|letter| letter.is_ascii_alphabetic())
+        && drive.as_str() == ":/";
+    let plain = !rest.is_empty()
+        && rest.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    (lettered && plain).then(|| format!("{text}/crazyagent-none"))
+}
 /// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
 /// partial clone lacks, so a repository's own promisor remote never runs a command on a read
 /// (RV-DS241-71), no system config or attributes and no prompt.
@@ -2757,7 +2849,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         command.process_group(0);
     }
     command
-        .args(GIT_SAFE)
+        .args(git_safe())
         .args(arguments)
         .current_dir(root)
         .env_clear()
@@ -3105,14 +3197,14 @@ fn real_git() -> Option<PathBuf> {
 }
 
 /// A git command for the engine's own worktree steps under the agent's installed profile:
-/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// no global config, no lazy fetch and the [`git_safe`] settings, with no input or output.
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .envs(GIT_SAFE_ENV)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(setup_debug_stderr());
@@ -3132,8 +3224,8 @@ pub(crate) struct AgentGit {
 
 /// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
 /// K5b): under its installed profile, as the worktree setup steps run, with the
-/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
-/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// [`git_safe`] settings, the editor `:` git never starts (no path lookup) and the caller's
+/// extra variables, within the setup time limit. Output is read while it runs. Takes the
 /// agent's sandbox, its installed profile, the folder, the arguments, the variables and
 /// the most output bytes kept. Returns how it ended, or the spawn failure.
 #[cfg(unix)]
@@ -3147,7 +3239,7 @@ pub(crate) fn agent_git(
 ) -> Result<AgentGit, RunError> {
     let mut command = worktree_git(sandbox, profile);
     command
-        .env("GIT_EDITOR", "true")
+        .env("GIT_EDITOR", ":")
         .envs(variables.iter().copied())
         .arg("-C")
         .arg(folder)
@@ -8071,6 +8163,9 @@ mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_engine_tests.rs"]
 pub(crate) mod live_engine_tests;
+#[cfg(test)]
+#[path = "runner/program_tests.rs"]
+mod program_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/warden_tests.rs"]
 mod warden_tests;

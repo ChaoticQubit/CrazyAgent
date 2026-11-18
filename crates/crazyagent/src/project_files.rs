@@ -93,7 +93,7 @@ pub(crate) fn list(
         .env("GIT_COMMON_DIR", git_root.join(".git"))
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .args(["-c", "core.untrackedCache=false", "-c"])
         .arg(format!("core.excludesFile={}", crate::github::NULL_DEVICE))
         .arg("--git-dir")

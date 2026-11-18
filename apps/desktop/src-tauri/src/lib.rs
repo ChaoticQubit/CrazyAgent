@@ -226,18 +226,7 @@ async fn start_engine(
     }
     crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
         .await
-        .map_err(|_| engine_failure(start_failure(layout)))
-}
-
-/// The code of an engine start that did not answer: `engine_backup_failed` when the engine's
-/// record says its upgrade backup failed (F36), else `engine_start_failed`. Input: the
-/// layout. Output: the code.
-fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
-    if crazyagent::service::backup_failure(layout).is_some() {
-        "engine_backup_failed"
-    } else {
-        "engine_start_failed"
-    }
+        .map_err(|_| engine_failure(crazyagent::service::start_failure(layout)))
 }
 
 /// Set once this app run has taken its one replacement of an older engine, so a swap that
