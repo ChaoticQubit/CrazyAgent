@@ -2,8 +2,8 @@ use crate::config::EffectiveConfig;
 #[cfg(unix)]
 use crate::config::validate_settings;
 #[cfg(unix)]
-use crate::platform::unix_socket::UnixListener;
-use crate::platform::unix_socket::UnixStream;
+use crate::ipc::Listener;
+use crate::ipc::Stream;
 use crate::protocol::*;
 use crate::storage::{Job, Storage};
 use std::collections::{BTreeMap, BTreeSet};
@@ -154,10 +154,10 @@ impl Client {
         }
         verify_endpoint(&self.socket)?;
         tokio::time::timeout(self.timeout, async {
-            let mut stream = crate::spawn_gate::connect_unix(&self.socket)
+            let mut stream = crate::ipc::owner_connect(&self.socket)
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if let Some(binding) = &self.binding {
                 binding.verify()?;
             }
@@ -197,7 +197,7 @@ impl Server {
 
 #[cfg(unix)]
 pub struct Server {
-    listener: UnixListener,
+    listener: Listener,
     engine: std::sync::Arc<Engine>,
     timeout: Duration,
     clients_max: usize,
@@ -226,7 +226,7 @@ impl Server {
             _ => return Err(EngineError("socket_path_already_exists".into())),
         }
         let directory = std::fs::symlink_metadata(socket.parent().unwrap()).map_err(io_error)?;
-        let listener = crate::spawn_gate::bind_unix(socket).map_err(io_error)?;
+        let listener = crate::ipc::owner_listener(socket).map_err(io_error)?;
         let metadata = std::fs::symlink_metadata(socket).map_err(io_error)?;
         let checked = (|| {
             if !metadata.file_type().is_socket()
@@ -283,8 +283,8 @@ impl Server {
                 result = clients.join_next(), if !clients.is_empty() => {
                     if let Some(Err(error)) = result && error.is_panic() { eprintln!("engine_client_panicked"); }
                 }
-                accepted = crate::spawn_gate::accept_unix(&self.listener) => {
-                    let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
+                accepted = crate::ipc::owner_accept(&self.listener) => {
+                    let stream = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
                     if clients.len() >= self.clients_max { drop(stream); continue; }
                     let engine = self.engine.clone();
                     let timeout = self.timeout;
@@ -399,26 +399,17 @@ fn verify_endpoint(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Checks the peer of a stream where Unix domain sockets do not exist.
-/// Takes the stream, which cannot exist here. Unreachable by construction.
-#[cfg(not(unix))]
-fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
-    match *stream {}
+/// The server side's check of an accepted owner-class stream: its client runs as this user.
+/// Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error reading the peer.
+fn verify_client(stream: &Stream) -> Result<(), EngineError> {
+    crate::ipc::verify_client(stream).map_err(io_error)
 }
 
-#[cfg(unix)]
-fn verify_peer(stream: &UnixStream) -> Result<(), EngineError> {
-    #[cfg(target_os = "macos")]
-    let uid = nix::unistd::getpeereid(stream)
-        .map_err(io_error)?
-        .0
-        .as_raw();
-    #[cfg(not(target_os = "macos"))]
-    let uid = stream.peer_cred().map_err(io_error)?.uid();
-    if uid != rustix::process::getuid().as_raw() {
-        return Err(EngineError("peer_owner_mismatch".into()));
-    }
-    Ok(())
+/// The client side's check right after connect, before any byte is written: the server
+/// runs as this user. Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error
+/// reading the peer.
+fn verify_server(stream: &Stream) -> Result<(), EngineError> {
+    crate::ipc::verify_server(stream).map_err(io_error)
 }
 
 pub(crate) async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
@@ -437,9 +428,9 @@ pub(crate) async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
 }
 
 #[cfg(unix)]
-async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, timeout: Duration) {
+async fn serve_client(mut stream: Stream, engine: std::sync::Arc<Engine>, timeout: Duration) {
     let exchange = async {
-        verify_peer(&stream)?;
+        verify_client(&stream)?;
         let frame = read_frame(&mut stream).await?;
         #[cfg(test)]
         if frame[4..] == *b"test_panic" {
@@ -828,8 +819,9 @@ mod tests {
     async fn peer_without_kernel_credentials_is_rejected() {
         let stream = crate::spawn_gate::unconnected_unix_stream().unwrap();
         stream.set_nonblocking(true).unwrap();
-        let stream = UnixStream::from_std(stream).unwrap();
-        assert!(verify_peer(&stream).is_err());
+        let stream = Stream::from_std(stream).unwrap();
+        assert!(verify_client(&stream).is_err());
+        assert!(verify_server(&stream).is_err());
     }
 
     #[test]
@@ -905,7 +897,7 @@ mod tests {
         let (stop, stopped) = oneshot::channel();
         let service = tokio::spawn(server.run(stopped));
 
-        let mut panicking = crate::spawn_gate::connect_unix(&socket).await.unwrap();
+        let mut panicking = crate::ipc::owner_connect(&socket).await.unwrap();
         let mut frame = 10u32.to_be_bytes().to_vec();
         frame.extend_from_slice(b"test_panic");
         panicking.write_all(&frame).await.unwrap();
