@@ -327,7 +327,7 @@ pub(crate) fn pending(connection: &Connection) -> Result<Option<Pending>, Engine
 /// the spelling the change set stores, since landing work takes its hold by that. Inputs:
 /// an engine connection, the project and its real folder. Output: the roots, or
 /// `move_project_unavailable` (also for more than [`LANDING_REPOSITORIES_MAX`]).
-fn landing_repositories(
+pub(super) fn landing_repositories(
     db: &Connection,
     project: &ProjectId,
     origin: &Path,

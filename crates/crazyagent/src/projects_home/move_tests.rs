@@ -915,6 +915,75 @@ fn a_project_stored_through_the_data_volume_moves_into_the_home() {
     assert!(case.target().join("README").is_file());
 }
 
+/// V243-FIRMLINK-MOVE-ORIGIN (#435 r2 code F1): the move of a project stored by its
+/// /System/Volumes/Data spelling asks again under its hold with the stored spelling, so a
+/// master session that took a working copy under the stored folder after the plan refuses
+/// the move with nothing moved.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_stored_through_the_data_volume_rechecks_its_stored_folder_before_it_moves() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    assert!(case.repo.starts_with("/System/Volumes/Data"));
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO worktree_leases(task,repository,path,body) VALUES ('task-1',?1,?2,?3)",
+            params![
+                text(&case.repo),
+                text(&case.engine.join("lease-1")),
+                r#"{"lease":{"state":"Reserved"}}"#
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        planned
+            .run_with(Duration::ZERO, &super::Tally::default())
+            .unwrap_err()
+            .0,
+        "move_project_master_session"
+    );
+    assert_eq!(case.finish(false), Some(Finished::Left));
+    assert!(case.repo.join("README").is_file());
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN: the landing holds of a project stored by its
+/// /System/Volumes/Data spelling take a change set's repository recorded under the short
+/// spelling, since landing work takes its hold by the spelling the change set stores.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_holds_a_change_set_recorded_under_the_short_spelling() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let worktree = case.worktree(7);
+    case.db
+        .execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,
+             base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES ('set-9',?1,'sub','7','Agent 7',?2,?3,?4,'base','head','pending','succeeded','turn-1',
+             'Add a page',1,1,0,'[]',1,1)",
+            params![
+                PROJECT,
+                text(&short),
+                text(&worktree),
+                text(&crate::agent_git::git_dir(&worktree))
+            ],
+        )
+        .unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let roots = super::move_project::landing_repositories(&case.db, &project, &case.repo).unwrap();
+    assert!(roots.contains(&short), "{roots:?}");
+}
+
 /// #433 F1 (rv-sec2 18:57): a project stored by its /System/Volumes/Data spelling still sees
 /// another project stored short inside its folder, so its move is refused in both modes.
 #[cfg(target_os = "macos")]
