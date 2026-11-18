@@ -143,6 +143,16 @@ pub(super) struct NativeAuthHostRegistration {
     disabled: bool,
 }
 
+#[cfg(all(test, unix))]
+impl NativeAuthHostRegistration {
+    /// Whether host registration is frozen, for the owner rows that check a sign-out keeps
+    /// the freeze while its storage job is pending. Output: the flag, read only, so a row
+    /// can never thaw the host through it.
+    pub(super) fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+}
+
 impl NativeAuthHostRegistration {
     /// The Codex and Claude Code executables registered for this engine, for a confined
     /// model run outside a team. Output: the two, none for a harness that is not installed

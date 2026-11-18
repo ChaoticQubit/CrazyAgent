@@ -2487,7 +2487,7 @@ async fn a_sign_out_that_outlasts_its_bound_is_pending_and_runs_while_the_host_s
             .native_auth_host
             .lock()
             .unwrap()
-            .frozen
+            .is_frozen()
     };
     assert!(
         frozen(),
