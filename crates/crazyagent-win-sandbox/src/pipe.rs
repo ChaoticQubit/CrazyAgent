@@ -1,5 +1,5 @@
 #[cfg(windows)]
-pub use crate::win::pipe::{INSTANCES_MAX, client, create, pin_of, server};
+pub use crate::win::pipe::{INSTANCES_MAX, client, create, own_pin, pin_of, server};
 
 const MEDIUM_LEVEL: u32 = 0x2000;
 /// Windows' ERROR_NO_TOKEN: the thread holds no token of its own.
