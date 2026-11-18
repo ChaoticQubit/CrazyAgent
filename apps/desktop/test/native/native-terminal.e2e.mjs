@@ -14,6 +14,9 @@ const MASTER_MS = 180000;
 const END_MS = 20000;
 const QUIET_MS = 4000;
 const SHORT_TURN_MS = 6000;
+/** How long a stand-in turn for a line with "long" in it may hold the next line: its
+ * TURN_S of 90 seconds in master-switch.wdio.conf.mjs, with room for a loaded machine. */
+const LONG_TURN_MS = 120000;
 const RUNNING = ["starting", "idle", "working"];
 const READ = { kind: "read" };
 const RETURN = { kind: "key", characters: "\r", code: 36 };
@@ -158,6 +161,26 @@ describe("Native terminal views in the real window", () => {
     await close(shown.view);
   });
 
+  it("the message box's prompt is typed into a direct view's terminal as one submission (#632)", async () => {
+    const shown = await open(false);
+    const seen = await ready(shown);
+    assert.equal(seen.direct, true, "the prompt goes through a direct view");
+    const base = turns(seen);
+    const send = (text) => invoke("desktop_terminal_prompt", { agent: master, text, pane: null });
+    await send("w5 message box prompt");
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 1, UI_MS, "the message box's prompt never reached the terminal");
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 1, "the prompt was one submission, one turn");
+    await send("w5 message box long prompt");
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 2, UI_MS, "the second prompt never reached the terminal");
+    await send("w5 message box prompt again");
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 2, "the prompt's text was typed: its long turn holds the next prompt");
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 3, LONG_TURN_MS, "the held prompt never ran after the long turn");
+    await pause(SHORT_TURN_MS);
+    await close(shown.view);
+  });
+
   it("an input method commit and Return with keys off never reach the terminal (#517)", async () => {
     const shown = await open(false);
     const base = turns(await ready(shown));
@@ -211,18 +234,6 @@ describe("Native terminal views in the real window", () => {
     }
     await until(async () => (await probe(shown.view, READ)) && paneWidth() === width, UI_MS,
       `the pane never came back to ${width} columns at the window's own scale`);
-    await close(shown.view);
-  });
-
-  it("the message box's prompt reaches a direct view's terminal as one submission (#632)", async () => {
-    const shown = await open(false);
-    const seen = await ready(shown);
-    assert.equal(seen.direct, true, "the prompt goes through a direct view");
-    const base = turns(seen);
-    await invoke("desktop_terminal_prompt", { agent: master, text: "w5 message box prompt", pane: null });
-    await seenWhen(shown.view, (seen) => turns(seen) === base + 1, UI_MS, "the message box's prompt never reached the terminal");
-    await pause(SHORT_TURN_MS);
-    assert.equal(turns(await probe(shown.view, READ)), base + 1, "the prompt was one submission, one turn");
     await close(shown.view);
   });
 
