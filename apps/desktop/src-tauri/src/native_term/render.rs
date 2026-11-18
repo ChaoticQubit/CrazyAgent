@@ -388,11 +388,11 @@ impl Shared {
         )
     }
 
-    /// Makes one view's surface on its NSView through `surface_raw`. Inputs: the NSView
-    /// pointer, which must stay a live view until the surface is dropped, width and height.
-    /// Output: the surface, or the setup error.
+    /// Makes one view's surface on its NSView through `surface_raw`. Safety: `view` must
+    /// point to a live NSView that outlives the returned surface. Inputs: the NSView pointer,
+    /// width and height. Output: the surface, or the setup error.
     #[cfg(target_os = "macos")]
-    pub fn surface(
+    pub unsafe fn surface(
         &mut self,
         view: *mut c_void,
         width: u32,
