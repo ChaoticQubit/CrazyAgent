@@ -54,7 +54,7 @@ const KEYS: usize = 50;
 /// Characters in the clipboard round trip, the size of a long copied selection.
 const CLIP_CHARS: usize = 64 * 1024;
 
-/// The popover's centre in page pixels (dist/index.html `#pop`), inside the terminal box.
+/// The popover's centre in page pixels (page/index.html `#pop`), inside the terminal box.
 const POP_CENTER_CSS: (f64, f64) = (530.0, 280.0);
 
 /// The view's clear colour as a screen COLORREF (0x00BBGGRR): pure green.

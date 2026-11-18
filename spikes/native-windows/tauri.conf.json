@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "identifier": "dev.crazyagent.nativewindowsspike",
   "build": {
-    "frontendDist": "dist"
+    "frontendDist": "page"
   },
   "app": {
     "withGlobalTauri": true,
