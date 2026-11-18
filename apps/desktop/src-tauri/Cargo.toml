@@ -50,6 +50,11 @@ rustix = { version = "=1.1.5", features = ["process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "=0.18.2"
+gdkx11 = "=0.18.2"
+gdkwayland-sys = "=0.18.2"
+x11-dl = "=2.21.0"
+wayland-client = "=0.31.15"
+wayland-backend = { version = "=0.3.17", features = ["client_system"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 wgpu = "=25.0.2"

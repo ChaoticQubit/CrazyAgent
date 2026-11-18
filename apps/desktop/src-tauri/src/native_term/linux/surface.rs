@@ -1,3 +1,703 @@
+use std::cell::Cell;
+use std::ffi::c_void;
+use std::io::ErrorKind;
+use std::ops::RangeInclusive;
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+use gtk::gdk::{Display, Window};
+use gtk::glib::SignalHandlerId;
+use gtk::glib::translate::ToGlibPtr;
+use gtk::prelude::*;
+use raw_window_handle::{
+    RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
+    XlibDisplayHandle, XlibWindowHandle,
+};
+use wayland_backend::client::{Backend, ObjectId, WaylandError};
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::wl_callback::{self, WlCallback};
+use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_region::WlRegion;
+use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
+use wayland_client::protocol::wl_subsurface::WlSubsurface;
+use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop};
+
+/// The plain code for a toplevel no child surface can be made in: not mapped, a display
+/// that is neither X11 nor Wayland, or a server without the parts a child needs.
+const UNAVAILABLE: &str = "native_terminal_surface_unavailable";
+
+/// The largest host rectangle edge, origin or webview offset, in logical pixels.
+pub const RECT_MAX: i32 = 16_384;
+
+/// The largest display scale a child is made at.
+const SCALE_MAX: i32 = 8;
+
+/// The X11 Shape extension's input shape kind, which XFixes empties so clicks reach the
+/// toplevel.
+const SHAPE_INPUT: i32 = 2;
+
+/// The refresh rate an X11 child paces to when GDK reports none, in millihertz.
+const REFRESH_MHZ_DEFAULT: i32 = 60_000;
+
+/// The refresh rates an X11 child paces to, in millihertz: 1 Hz to 1 kHz.
+const REFRESH_MHZ: RangeInclusive<i32> = 1_000..=1_000_000;
+
+/// A host rectangle in the toplevel's logical pixels: where the child sits and its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Rect {
+    /// The rectangle in device pixels. Input: the display scale, 1 to 8. Output: x, y,
+    /// width and height.
+    pub fn device(self, scale: i32) -> (i32, i32, u32, u32) {
+        assert!(
+            (1..=SCALE_MAX).contains(&scale),
+            "a display scale of 1 to {SCALE_MAX}, got {scale}"
+        );
+        assert!(self.w >= 1 && self.h >= 1);
+        let width = u32::try_from(self.w * scale).expect("a positive width");
+        let height = u32::try_from(self.h * scale).expect("a positive height");
+        (self.x * scale, self.y * scale, width, height)
+    }
+}
+
+/// The host rectangle from the page's CSS pixels, which are GTK logical pixels at zoom 1,
+/// and the webview's offset in its toplevel. Inputs: x, y, width and height, and the
+/// offset. Output: the rectangle, or `native_terminal_rect_invalid` for a value that is not
+/// finite, is out of bounds, or a size under one pixel.
+pub fn rect(page: (f64, f64, f64, f64), offset: (i32, i32)) -> Result<Rect, &'static str> {
+    let (x, y, w, h) = page;
+    let max = f64::from(RECT_MAX);
+    let bounded = [x, y, w, h]
+        .iter()
+        .all(|value| value.is_finite() && value.abs() <= max);
+    let offset_bounded = offset.0.abs() <= RECT_MAX && offset.1.abs() <= RECT_MAX;
+    if !bounded || !offset_bounded || w < 1.0 || h < 1.0 {
+        return Err("native_terminal_rect_invalid");
+    }
+    let rect = Rect {
+        x: x.round() as i32 + offset.0,
+        y: y.round() as i32 + offset.1,
+        w: w.round() as i32,
+        h: h.round() as i32,
+    };
+    assert!((1..=RECT_MAX).contains(&rect.w) && (1..=RECT_MAX).contains(&rect.h));
+    Ok(rect)
+}
+
+/// When a child may present: only while shown, only with a change to draw, never before
+/// the last present's frame callback, and never after its toplevel unmapped. A FIFO present
+/// waits for the last present's callback, which a hidden or unmapped surface may never get
+/// (spike run 3: a present after a null-buffer hide blocked the main thread 40 s).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pacing {
+    shown: bool,
+    waiting: bool,
+    dirty: bool,
+    gone: bool,
+}
+
+impl Pacing {
+    /// A new child's pacing: shown, with its first frame owed. Output: it.
+    const fn new() -> Pacing {
+        Pacing {
+            shown: true,
+            waiting: false,
+            dirty: true,
+            gone: false,
+        }
+    }
+
+    /// Whether a present may happen now. Output: the answer.
+    fn ready(&self) -> bool {
+        self.shown && self.dirty && !self.waiting && !self.gone
+    }
+
+    /// Notes a change to draw: output, a size or a style.
+    fn changed(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Notes a present about to happen; the next waits for its frame callback.
+    fn presenting(&mut self) {
+        assert!(self.ready(), "a present only when ready: {self:?}");
+        self.dirty = false;
+        self.waiting = true;
+    }
+
+    /// Notes a present that did not happen, so its frame is owed again.
+    fn not_presented(&mut self) {
+        self.waiting = false;
+        self.dirty = true;
+    }
+
+    /// Notes the last present's frame callback.
+    fn frame_done(&mut self) {
+        self.waiting = false;
+    }
+
+    /// Notes the child leaving the screen.
+    fn hide(&mut self) {
+        self.shown = false;
+    }
+
+    /// Notes the child back on screen; an X11 window lost its pixels, so it is redrawn.
+    fn show(&mut self) {
+        self.shown = true;
+        self.dirty = true;
+    }
+
+    /// Notes the toplevel unmapping, after which the child never presents again.
+    fn gone(&mut self) {
+        self.gone = true;
+    }
+
+    /// Whether the toplevel unmapped. Output: the answer.
+    fn is_gone(&self) -> bool {
+        self.gone
+    }
+}
+
+/// Marks a child gone from its toplevel's unmap or unrealize handler. Input: the shared
+/// pacing. Output: none.
+fn mark_gone(pacing: &Cell<Pacing>) {
+    let mut next = pacing.get();
+    next.gone();
+    pacing.set(next);
+}
+
+/// The Wayland queue state: whether the last present's frame callback has come.
+#[derive(Default)]
+struct Frames {
+    done: bool,
+}
+
+delegate_noop!(Frames: WlCompositor);
+delegate_noop!(Frames: WlSubcompositor);
+delegate_noop!(Frames: WlSubsurface);
+delegate_noop!(Frames: WlRegion);
+delegate_noop!(Frames: ignore WlSurface);
+
+impl Dispatch<WlRegistry, GlobalListContents> for Frames {
+    /// Ignores registry changes after the first roundtrip. Input: the event. Output: none.
+    fn event(
+        _: &mut Self,
+        _: &WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WlCallback, ()> for Frames {
+    /// Notes a frame callback's done event. Input: the event. Output: none.
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.done = true;
+        }
+    }
+}
+
+/// An X11 child window on GDK's own Xlib display.
+struct X11 {
+    xlib: x11_dl::xlib::Xlib,
+    gdk: gdkx11::X11Display,
+    display: *mut x11_dl::xlib::Display,
+    screen: i32,
+    window: u64,
+}
+
+impl X11 {
+    /// Runs Xlib calls on the child window under a GDK error trap, so a window the server
+    /// already destroyed never reaches GDK's fatal X error handler. Input: the calls, given
+    /// the library, display and window. Output: none.
+    fn trapped(&self, calls: impl FnOnce(&x11_dl::xlib::Xlib, *mut x11_dl::xlib::Display, u64)) {
+        self.gdk.error_trap_push();
+        calls(&self.xlib, self.display, self.window);
+        unsafe { (self.xlib.XFlush)(self.display) };
+        self.gdk.error_trap_pop_ignored();
+    }
+
+    /// Moves the child to the root, unmapped, before GDK destroys the toplevel, so the
+    /// server keeps the window wgpu still draws into until the host drops both. Output:
+    /// none.
+    fn to_root(&self) {
+        self.trapped(|xlib, display, window| unsafe {
+            let root = (xlib.XDefaultRootWindow)(display);
+            (xlib.XUnmapWindow)(display, window);
+            (xlib.XReparentWindow)(display, window, root, 0, 0);
+        });
+    }
+}
+
+/// A desynced Wayland subsurface of the toplevel's surface, made on GTK's own connection
+/// with its own event queue for the frame callbacks of its presents.
+struct Wayland {
+    _gdk: Display,
+    display: NonNull<c_void>,
+    conn: Connection,
+    queue: EventQueue<Frames>,
+    frames: Frames,
+    surface: WlSurface,
+    subsurface: WlSubsurface,
+    parent: WlSurface,
+}
+
+impl Wayland {
+    /// Reads this queue's events without blocking and dispatches them. Output: whether the
+    /// last present's frame callback has come, or none when the connection broke.
+    fn frame_done(&mut self) -> Option<bool> {
+        self.queue.dispatch_pending(&mut self.frames).ok()?;
+        if let Some(guard) = self.queue.prepare_read() {
+            match guard.read() {
+                Ok(_) => {}
+                Err(WaylandError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(_) => return None,
+            }
+        }
+        self.queue.dispatch_pending(&mut self.frames).ok()?;
+        Some(self.frames.done)
+    }
+}
+
+/// Sends queued Wayland requests; a broken connection leaves the child gone. Inputs: the
+/// connection and the pacing. Output: none.
+fn flush(conn: &Connection, pacing: &Cell<Pacing>) {
+    match conn.flush() {
+        Ok(()) => {}
+        Err(WaylandError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
+        Err(_) => mark_gone(pacing),
+    }
+}
+
+/// The platform window of a child.
+enum Native {
+    X11 {
+        x11: Rc<X11>,
+        interval: Duration,
+        presented: Option<Instant>,
+    },
+    Wayland(Box<Wayland>),
+}
+
+/// A child surface of a GTK toplevel that wgpu draws a terminal into: an X11 child window
+/// with an empty input shape, or a desynced Wayland subsurface with an empty input region,
+/// on GTK's own display connection so it stacks with the toplevel. Clicks pass through to
+/// the toplevel. Once the toplevel unmaps the child never presents again; the host makes a
+/// new one. The host drops the wgpu surface before the child.
+pub struct Child {
+    native: Native,
+    pacing: Rc<Cell<Pacing>>,
+    toplevel: gtk::Window,
+    handlers: Vec<SignalHandlerId>,
+    rect: Rect,
+    scale: i32,
+}
+
+impl Child {
+    /// Makes a child over a host rectangle of a mapped toplevel, shown and owing its first
+    /// frame. Inputs: the toplevel and the rectangle. Output: the child, or
+    /// `native_terminal_surface_unavailable`.
+    pub fn new(toplevel: &gtk::Window, rect: Rect) -> Result<Child, &'static str> {
+        let gdk = toplevel.window().ok_or(UNAVAILABLE)?;
+        let scale = toplevel.scale_factor();
+        if !gdk.is_viewable() || !(1..=SCALE_MAX).contains(&scale) {
+            return Err(UNAVAILABLE);
+        }
+        let display = gdk.display();
+        let native = if let Some(x11) = display.downcast_ref::<gdkx11::X11Display>() {
+            x11_child(x11, &gdk, rect.device(scale))?
+        } else if display.type_().name() == "GdkWaylandDisplay" {
+            Native::Wayland(Box::new(wayland_child(&display, &gdk, rect, scale)?))
+        } else {
+            return Err(UNAVAILABLE);
+        };
+        let pacing = Rc::new(Cell::new(Pacing::new()));
+        let unmap = {
+            let pacing = Rc::clone(&pacing);
+            toplevel.connect_unmap(move |_| mark_gone(&pacing))
+        };
+        let root = match &native {
+            Native::X11 { x11, .. } => Some(Rc::clone(x11)),
+            Native::Wayland(_) => None,
+        };
+        let unrealize = {
+            let pacing = Rc::clone(&pacing);
+            toplevel.connect_unrealize(move |_| {
+                mark_gone(&pacing);
+                if let Some(x11) = &root {
+                    x11.to_root();
+                }
+            })
+        };
+        let child = Child {
+            native,
+            pacing,
+            toplevel: toplevel.clone(),
+            handlers: vec![unmap, unrealize],
+            rect,
+            scale,
+        };
+        assert!(child.pacing.get().ready());
+        Ok(child)
+    }
+
+    /// The raw handles wgpu draws through, for `Shared::surface_raw`; both stay valid until
+    /// the child drops. Output: the display and window handles.
+    pub fn handles(&self) -> (RawDisplayHandle, RawWindowHandle) {
+        match &self.native {
+            Native::X11 { x11, .. } => (
+                RawDisplayHandle::Xlib(XlibDisplayHandle::new(
+                    NonNull::new(x11.display.cast::<c_void>()),
+                    x11.screen,
+                )),
+                RawWindowHandle::Xlib(XlibWindowHandle::new(x11.window)),
+            ),
+            Native::Wayland(wayland) => {
+                let surface = NonNull::new(wayland.surface.id().as_ptr().cast::<c_void>())
+                    .expect("a live surface until the child drops");
+                (
+                    RawDisplayHandle::Wayland(WaylandDisplayHandle::new(wayland.display)),
+                    RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)),
+                )
+            }
+        }
+    }
+
+    /// The display scale the child draws at. Output: 1 to 8.
+    pub fn scale(&self) -> i32 {
+        self.scale
+    }
+
+    /// The child's place in the toplevel, in device pixels. Output: x, y, width, height.
+    pub fn device_rect(&self) -> (i32, i32, u32, u32) {
+        self.rect.device(self.scale)
+    }
+
+    /// The size a wgpu surface on the child takes. Output: width and height in device
+    /// pixels.
+    pub fn size(&self) -> (u32, u32) {
+        let (_, _, width, height) = self.device_rect();
+        (width, height)
+    }
+
+    /// Moves the child to a new host rectangle at the toplevel's current scale and owes a
+    /// frame; the host resizes the wgpu surface when `size` changed. Input: the rectangle.
+    /// Output: none.
+    pub fn place(&mut self, rect: Rect) {
+        let scale = self.toplevel.scale_factor();
+        if self.pacing.get().is_gone() || !(1..=SCALE_MAX).contains(&scale) {
+            return;
+        }
+        let rescaled = scale != self.scale;
+        self.rect = rect;
+        self.scale = scale;
+        match &self.native {
+            Native::X11 { x11, .. } => {
+                let (x, y, width, height) = rect.device(scale);
+                x11.trapped(|xlib, display, window| unsafe {
+                    (xlib.XMoveResizeWindow)(display, window, x, y, width, height);
+                });
+            }
+            Native::Wayland(wayland) => {
+                wayland.subsurface.set_position(rect.x, rect.y);
+                if rescaled {
+                    wayland.surface.set_buffer_scale(scale);
+                }
+                wayland.parent.commit();
+                flush(&wayland.conn, &self.pacing);
+            }
+        }
+        self.changed();
+    }
+
+    /// Takes the child off screen: X11 unmaps it, Wayland places it below the toplevel's
+    /// surface, whose opaque page then covers it (spike run 3: passes on weston and sway).
+    /// Output: none.
+    pub fn hide(&mut self) {
+        let mut pacing = self.pacing.get();
+        if pacing.is_gone() {
+            return;
+        }
+        pacing.hide();
+        self.pacing.set(pacing);
+        match &self.native {
+            Native::X11 { x11, .. } => x11.trapped(|xlib, display, window| unsafe {
+                (xlib.XUnmapWindow)(display, window);
+            }),
+            Native::Wayland(wayland) => {
+                wayland.subsurface.place_below(&wayland.parent);
+                wayland.parent.commit();
+                flush(&wayland.conn, &self.pacing);
+            }
+        }
+    }
+
+    /// Puts the child back on screen and owes a frame. Output: none.
+    pub fn show(&mut self) {
+        let mut pacing = self.pacing.get();
+        if pacing.is_gone() {
+            return;
+        }
+        pacing.show();
+        self.pacing.set(pacing);
+        match &self.native {
+            Native::X11 { x11, .. } => x11.trapped(|xlib, display, window| unsafe {
+                (xlib.XMapRaised)(display, window);
+            }),
+            Native::Wayland(wayland) => {
+                wayland.subsurface.place_above(&wayland.parent);
+                wayland.parent.commit();
+                flush(&wayland.conn, &self.pacing);
+            }
+        }
+    }
+
+    /// Notes a change to draw. Output: none.
+    pub fn changed(&mut self) {
+        let mut pacing = self.pacing.get();
+        pacing.changed();
+        self.pacing.set(pacing);
+    }
+
+    /// Whether the host may present now, after reading the last present's frame callback
+    /// without blocking: on Wayland from this queue, on X11 one refresh after the present.
+    /// Output: the answer.
+    pub fn ready(&mut self) -> bool {
+        let mut pacing = self.pacing.get();
+        if pacing.waiting && !pacing.is_gone() {
+            let done = match &mut self.native {
+                Native::X11 {
+                    interval,
+                    presented,
+                    ..
+                } => Some(presented.is_some_and(|at| at.elapsed() >= *interval)),
+                Native::Wayland(wayland) => wayland.frame_done(),
+            };
+            match done {
+                Some(true) => pacing.frame_done(),
+                Some(false) => {}
+                None => pacing.gone(),
+            }
+            self.pacing.set(pacing);
+        }
+        pacing.ready()
+    }
+
+    /// Notes a present about to happen, right before the host draws; on Wayland it asks
+    /// for the frame callback that the present's commit carries. Output: none.
+    pub fn presenting(&mut self) {
+        let mut pacing = self.pacing.get();
+        pacing.presenting();
+        self.pacing.set(pacing);
+        match &mut self.native {
+            Native::X11 { presented, .. } => *presented = Some(Instant::now()),
+            Native::Wayland(wayland) => {
+                wayland.frames.done = false;
+                let _callback = wayland.surface.frame(&wayland.queue.handle(), ());
+            }
+        }
+    }
+
+    /// Notes that the host's draw failed before presenting, so the frame is owed again.
+    /// Output: none.
+    pub fn not_presented(&mut self) {
+        let mut pacing = self.pacing.get();
+        pacing.not_presented();
+        self.pacing.set(pacing);
+    }
+}
+
+#[cfg(test)]
+impl Child {
+    /// Where the child sits on the X11 root, for the farm's pixel checks. Output: the root
+    /// origin, or none on Wayland, where the toplevel sits at the output's origin.
+    fn root_origin(&self) -> Option<(i32, i32)> {
+        let Native::X11 { x11, .. } = &self.native else {
+            return None;
+        };
+        let (mut x, mut y, mut over) = (0, 0, 0);
+        let found = unsafe {
+            let root = (x11.xlib.XDefaultRootWindow)(x11.display);
+            (x11.xlib.XTranslateCoordinates)(
+                x11.display,
+                x11.window,
+                root,
+                0,
+                0,
+                &mut x,
+                &mut y,
+                &mut over,
+            )
+        };
+        (found != 0).then_some((x, y))
+    }
+}
+
+impl Drop for Child {
+    /// Disconnects the toplevel handlers and destroys the window or subsurface; a gone
+    /// Wayland toplevel's surface is not committed, since GDK destroyed it. Output: none.
+    fn drop(&mut self) {
+        for handler in self.handlers.drain(..) {
+            self.toplevel.disconnect(handler);
+        }
+        let gone = self.pacing.get().is_gone();
+        match &self.native {
+            Native::X11 { x11, .. } => x11.trapped(|xlib, display, window| unsafe {
+                (xlib.XDestroyWindow)(display, window);
+            }),
+            Native::Wayland(wayland) => {
+                wayland.subsurface.destroy();
+                wayland.surface.destroy();
+                if !gone {
+                    wayland.parent.commit();
+                }
+                flush(&wayland.conn, &self.pacing);
+            }
+        }
+    }
+}
+
+/// Makes an X11 child window of the toplevel with an empty input shape, mapped on top, and
+/// paced to the toplevel's monitor refresh. Inputs: GDK's X11 display, the toplevel's GDK
+/// window and the device rectangle. Output: the child, or the plain code.
+fn x11_child(
+    gdk: &gdkx11::X11Display,
+    toplevel: &Window,
+    device: (i32, i32, u32, u32),
+) -> Result<Native, &'static str> {
+    let parent = toplevel
+        .downcast_ref::<gdkx11::X11Window>()
+        .ok_or(UNAVAILABLE)?
+        .xid();
+    let raw: *mut gdkx11::ffi::GdkX11Display = gdk.to_glib_none().0;
+    let display =
+        unsafe { gdkx11::ffi::gdk_x11_display_get_xdisplay(raw) }.cast::<x11_dl::xlib::Display>();
+    if display.is_null() {
+        return Err(UNAVAILABLE);
+    }
+    let xlib = x11_dl::xlib::Xlib::open().map_err(|_| UNAVAILABLE)?;
+    let xfixes = x11_dl::xfixes::Xlib::open().map_err(|_| UNAVAILABLE)?;
+    gdk.error_trap_push();
+    let (screen, window) = unsafe {
+        let screen = (xlib.XDefaultScreen)(display);
+        let (x, y, width, height) = device;
+        let window = (xlib.XCreateSimpleWindow)(display, parent, x, y, width, height, 0, 0, 0);
+        if window != 0 {
+            let region = (xfixes.XFixesCreateRegion)(display, std::ptr::null_mut(), 0);
+            (xfixes.XFixesSetWindowShapeRegion)(display, window, SHAPE_INPUT, 0, 0, region);
+            (xfixes.XFixesDestroyRegion)(display, region);
+            (xlib.XMapRaised)(display, window);
+        }
+        (screen, window)
+    };
+    let failed = gdk.error_trap_pop() != 0;
+    let x11 = Rc::new(X11 {
+        xlib,
+        gdk: gdk.clone(),
+        display,
+        screen,
+        window,
+    });
+    if window == 0 || failed {
+        if window != 0 {
+            x11.trapped(|xlib, display, window| unsafe {
+                (xlib.XDestroyWindow)(display, window);
+            });
+        }
+        return Err(UNAVAILABLE);
+    }
+    let refresh = gdk
+        .upcast_ref::<Display>()
+        .monitor_at_window(toplevel)
+        .map_or(REFRESH_MHZ_DEFAULT, |monitor| monitor.refresh_rate());
+    let refresh = if REFRESH_MHZ.contains(&refresh) {
+        refresh
+    } else {
+        REFRESH_MHZ_DEFAULT
+    };
+    let interval =
+        Duration::from_micros(1_000_000_000 / u64::try_from(refresh).expect("a positive rate"));
+    assert!(interval >= Duration::from_millis(1) && interval <= Duration::from_secs(1));
+    Ok(Native::X11 {
+        x11,
+        interval,
+        presented: None,
+    })
+}
+
+/// Makes a desynced subsurface of the toplevel's surface on GDK's own Wayland connection,
+/// with its own event queue, an empty input region and the toplevel's buffer scale. The
+/// toplevel's surface pointer is borrowed from GDK, which destroys it on unmap; the child's
+/// unmap handler marks it gone before any later use. Inputs: GDK's display, the toplevel's
+/// GDK window, the logical rectangle and the scale. Output: the subsurface, or the code.
+fn wayland_child(
+    gdk: &Display,
+    toplevel: &Window,
+    rect: Rect,
+    scale: i32,
+) -> Result<Wayland, &'static str> {
+    let raw_display: *mut gtk::gdk::ffi::GdkDisplay = gdk.to_glib_none().0;
+    let raw_window: *mut gtk::gdk::ffi::GdkWindow = toplevel.to_glib_none().0;
+    let display =
+        unsafe { gdk_wayland_sys::gdk_wayland_display_get_wl_display(raw_display.cast()) };
+    let parent = unsafe { gdk_wayland_sys::gdk_wayland_window_get_wl_surface(raw_window.cast()) };
+    let display = NonNull::new(display.cast::<c_void>()).ok_or(UNAVAILABLE)?;
+    if parent.is_null() {
+        return Err(UNAVAILABLE);
+    }
+    let backend = unsafe { Backend::from_foreign_display(display.as_ptr().cast()) };
+    let conn = Connection::from_backend(backend);
+    let (globals, mut queue) = registry_queue_init::<Frames>(&conn).map_err(|_| UNAVAILABLE)?;
+    let handle = queue.handle();
+    let compositor: WlCompositor = globals.bind(&handle, 3..=4, ()).map_err(|_| UNAVAILABLE)?;
+    let subcompositor: WlSubcompositor =
+        globals.bind(&handle, 1..=1, ()).map_err(|_| UNAVAILABLE)?;
+    let parent = unsafe { ObjectId::from_ptr(WlSurface::interface(), parent.cast()) }
+        .map_err(|_| UNAVAILABLE)?;
+    let parent = WlSurface::from_id(&conn, parent).map_err(|_| UNAVAILABLE)?;
+    let surface = compositor.create_surface(&handle, ());
+    let subsurface = subcompositor.get_subsurface(&surface, &parent, &handle, ());
+    subcompositor.destroy();
+    subsurface.set_position(rect.x, rect.y);
+    subsurface.set_desync();
+    let region = compositor.create_region(&handle, ());
+    surface.set_input_region(Some(&region));
+    region.destroy();
+    surface.set_buffer_scale(scale);
+    surface.commit();
+    parent.commit();
+    let mut frames = Frames::default();
+    queue.roundtrip(&mut frames).map_err(|_| UNAVAILABLE)?;
+    Ok(Wayland {
+        _gdk: gdk.clone(),
+        display,
+        conn,
+        queue,
+        frames,
+        surface,
+        subsurface,
+        parent,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
