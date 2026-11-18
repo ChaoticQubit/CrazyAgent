@@ -232,3 +232,24 @@ pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
 pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
     std::fs::File::open(path)
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_prompt_file_swapped_for_a_link_opens_as_the_link_and_is_no_regular_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.md");
+        std::fs::write(&target, "owner text").unwrap();
+        let link = folder.path().join("brief.md");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        let regular = open_no_follow(&link)
+            .and_then(|file| file.metadata())
+            .map(|metadata| metadata.is_file());
+        assert!(
+            !matches!(regular, Ok(true)),
+            "the open followed the link to its target"
+        );
+    }
+}

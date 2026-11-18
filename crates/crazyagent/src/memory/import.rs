@@ -157,3 +157,19 @@ pub fn without_frontmatter(text: &str) -> &str {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_memory_file_that_is_a_link_is_not_read() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.md");
+        std::fs::write(&target, "owner text").unwrap();
+        let link = folder.path().join("note.md");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert_eq!(read_file(&target).as_deref(), Some("owner text"));
+        assert_eq!(read_file(&link), None);
+    }
+}
