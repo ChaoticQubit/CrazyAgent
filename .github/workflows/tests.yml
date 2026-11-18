@@ -53,502 +53,257 @@ defaults:
     shell: bash
 
 jobs:
-  build-linux:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
+  admin-a-linux:
+    name: 3a A Linux, pure ACL rows red then green, wording and context-mode rows at the tip
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
       - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
       - name: Free disk on the Linux runner
+        shell: bash
         run: |
           set -euo pipefail
-          df -h /
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
           df -h /
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          tip=431a10752439c4b528a66bcb35788a41ea1e5df8
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
       - name: Install Linux build packages
         timeout-minutes: 10
+        shell: bash
         run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-macos:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 330
-    strategy:
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the macOS runner
-        run: |
-          set -euo pipefail
-          df -h /
-          case "${ANDROID_HOME:-}" in "$HOME"/?*) rm -rf "$ANDROID_HOME" ;; *) echo "no Android SDK under $HOME" ;; esac
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  build-windows:
-    name: Build the ${{ matrix.os }} test archive
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    strategy:
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
-        with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-linux:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-linux
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 3
-            parts: 4
-          - os: linux
-            runner: ubuntu-22.04
-            part: 4
-            parts: 4
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install Linux packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-macos:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-macos
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 2
-            parts: 3
-          - os: macos
-            runner: macos-15
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install tmux on macOS
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Select Xcode 26.3, whose git the engine runs
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.3.app
-          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
-          version="$("$git" --version)"
-          echo "engine git $git: $version"
-          IFS=. read -r major minor _ <<< "${version#git version }"
-          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
-          echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  rust-windows:
-    name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    needs: build-windows
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows
-            runner: windows-2022
-            part: 1
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 2
-            parts: 3
-          - os: windows
-            runner: windows-2022
-            part: 3
-            parts: 3
-    env:
-      FARM_JUNIT: target/nextest/farm/junit.xml
-      FARM_PART: ${{ matrix.os }}-rust-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-shard
-        with:
-          os: ${{ matrix.os }}
-          part: ${{ matrix.part }}
-          parts: ${{ matrix.parts }}
-          node-version: ${{ env.NODE_VERSION }}
-
-  node:
-    name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-22.04
-            part: 1
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: linux
-            runner: ubuntu-22.04
-            part: 2
-            parts: 2
-            chrome: linux64
-            chrome_sha256: ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8
-            headless_sha256: 3cfc2bd00d1bafcf8a68dc74c9c92bb7150ddc8d26ade948a776316e1cec4f14
-          - os: macos
-            runner: macos-15
-            part: 1
-            parts: 1
-            chrome: mac-arm64
-            chrome_sha256: 01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef
-            headless_sha256: cb46a336dbe3d6f1339c5039c3083e4e5dd8e4379710790e34f8f4a865e2452d
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/node.xml
-      FARM_PART: ${{ matrix.os }}-node-${{ matrix.part }}
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install IDE extension dependencies
-        working-directory: apps/ide-extension
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Install rcli source dependencies
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Build desktop frontend
-        working-directory: apps/desktop
-        run: npm run build
-      - name: Install the pinned Chrome for Testing
-        env:
-          CHROME_PLATFORM: ${{ matrix.chrome }}
-          CHROME_SHA256: ${{ matrix.chrome_sha256 }}
-        run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/chrome"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/chrome.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$CHROME_PLATFORM/chrome-$CHROME_PLATFORM.zip"
-          echo "$CHROME_SHA256  $work/chrome.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then
-            ditto -x -k "$work/chrome.zip" "$work"
-            chrome="$work/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-          else
-            unzip -q "$work/chrome.zip" -d "$work"
-            chrome="$work/chrome-linux64/chrome"
-          fi
-          "$chrome" --version
-          echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
       - name: Install Rust toolchain
+        shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Install Linux packages
-        if: matrix.os == 'linux'
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install tmux on Linux
-        if: matrix.os == 'linux'
+          echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+      - name: Install Claude Code and Codex as the shard does
+        shell: bash
+        run: bash scripts/ci/install-harnesses.sh
+      - name: Pure ACL rows red at the red commit, green at the tip
+        id: pure
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          red=d35e24e37
+          rows="with_allow_adds_one_24_byte_entry_after_the_explicit_entries_and_keeps_every_other_byte holds_allow_counts_a_plain_allow_on_the_object_itself_that_covers_the_rights without_allow_takes_out_only_the_entries_byte_equal_to_the_added_one with_allow_then_without_allow_gives_back_the_original_bytes with_allow_refuses_a_list_that_would_pass_the_size_limit"
+          git checkout "$red" -- crates/crazyagent-win-sandbox || exit 1
+          cargo test -p crazyagent-win-sandbox --lib --locked --no-run || { echo "RED BUILD FAILED"; exit 1; }
+          cargo test -p crazyagent-win-sandbox --lib --locked dacl::tests:: > "$RUNNER_TEMP/red.txt" 2>&1
+          rc=$?
+          tail -40 "$RUNNER_TEMP/red.txt"
+          [ "$rc" -ne 0 ] || { echo "RED RUN PASSED, expected failures"; exit 1; }
+          for row in $rows; do
+            grep -q "dacl::tests::$row \.\.\. FAILED" "$RUNNER_TEMP/red.txt" || { echo "RED: $row did not fail"; exit 1; }
+          done
+          echo "red ok: 5 rows failed at $red"
+          git checkout HEAD -- crates/crazyagent-win-sandbox || exit 1
+          git diff --quiet HEAD || exit 1
+          cargo test -p crazyagent-win-sandbox --lib --locked --no-run || exit 1
+          cargo test -p crazyagent-win-sandbox --lib --locked > "$RUNNER_TEMP/green.txt" 2>&1
+          rc=$?
+          grep -E "^test result|FAILED|panicked" "$RUNNER_TEMP/green.txt" | head -20
+          [ "$rc" -eq 0 ] || exit 1
+          for row in $rows; do
+            grep -q "dacl::tests::$row \.\.\. ok" "$RUNNER_TEMP/green.txt" || { echo "GREEN: $row not ok"; exit 1; }
+          done
+          echo "green ok: win-sandbox lib at the tip"
+      - name: Build the engine library tests
+        id: lib
+        if: ${{ !cancelled() }}
+        timeout-minutes: 90
+        shell: bash
         run: |
           set -euo pipefail
-          sudo chmod go-w /usr/local/bin
-          test -z "$(find /usr/local/bin -maxdepth 0 -perm /022)"
-          work="$RUNNER_TEMP/tmux"
-          prefix="$RUNNER_TEMP/tmux-$TMUX_VERSION"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/tmux.tar.gz" "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz"
-          echo "$TMUX_SHA256  $work/tmux.tar.gz" | sha256sum -c -
-          tar -xzf "$work/tmux.tar.gz" -C "$work"
-          (cd "$work/tmux-$TMUX_VERSION" && ./configure --prefix="$prefix" && make -j"$(nproc)" && make install)
-          sudo install -m 0755 "$prefix/bin/tmux" /usr/local/bin/tmux
-          test "$(/usr/local/bin/tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install tmux on macOS
-        if: matrix.os == 'macos'
-        timeout-minutes: 20
+          date -u '+lib build start %H:%M:%S'
+          cargo test -p crazyagent --lib --locked --no-run
+          date -u '+lib build end %H:%M:%S'
+      - name: Engine rows at the tip, wording and context-mode
+        id: engine
+        if: ${{ !cancelled() && steps.lib.outcome == 'success' }}
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -uo pipefail
+          cargo test -p crazyagent --lib --locked -- plugins::tests::a_check_on_a tui::screens::settings_plugins::tests::a_check_on_a launch_context::tests::a_launch_that_left_context_mode_out_says_why_in_its_tools_section > "$RUNNER_TEMP/engine.txt" 2>&1
+          rc=$?
+          grep -E "^test |^test result|panicked" "$RUNNER_TEMP/engine.txt" | grep -v " ok$" | head -40
+          grep -c " \.\.\. ok$" "$RUNNER_TEMP/engine.txt"
+          for row in plugins::tests::a_check_on_a_drive_root_windows_sandboxes_cannot_read_names_the_administrator_step plugins::tests::a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence tui::screens::settings_plugins::tests::a_check_on_a_drive_root_windows_sandboxes_cannot_read_reads_the_engine_words tui::screens::settings_plugins::tests::a_check_on_a_node_folder_windows_sandboxes_cannot_read_reads_the_engine_words launch_context::tests::a_launch_that_left_context_mode_out_says_why_in_its_tools_section; do
+            grep -q "^test $row \.\.\. ok" "$RUNNER_TEMP/engine.txt" || { echo "ROW NOT OK: $row"; rc=1; }
+          done
+          exit "$rc"
+
+  admin-a-win-sandbox:
+    name: 3a A win-sandbox ${{ matrix.runner }}, drive-root check rows red then green
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+          - runner: windows-2025
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install the pinned Chrome headless shell for the PDF rows
-        env:
-          HEADLESS_PLATFORM: ${{ matrix.chrome }}
-          HEADLESS_SHA256: ${{ matrix.headless_sha256 }}
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        shell: bash
         run: |
           set -euo pipefail
-          work="$RUNNER_TEMP/chrome-headless-shell"
-          mkdir -p "$work"
-          curl -fsSL --proto '=https' --tlsv1.2 -o "$work/headless.zip" "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$HEADLESS_PLATFORM/chrome-headless-shell-$HEADLESS_PLATFORM.zip"
-          echo "$HEADLESS_SHA256  $work/headless.zip" | shasum -a 256 -c -
-          if [ "$RUNNER_OS" = macOS ]; then ditto -x -k "$work/headless.zip" "$work"; else unzip -q "$work/headless.zip" -d "$work"; fi
-          shell="$work/chrome-headless-shell-$HEADLESS_PLATFORM/chrome-headless-shell"
-          "$shell" --version
-          echo "CRAZYAGENT_PDF_CHROME=$shell" >> "$GITHUB_ENV"
-      - name: Run this share of the node suites
+          tip=431a10752439c4b528a66bcb35788a41ea1e5df8
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
+      - name: Show the system drive root's list
+        shell: pwsh
+        run: |
+          icacls "$env:SystemDrive\"
+          Write-Host "USERNAME $env:USERNAME"
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
+      - name: Drive-root rows red at the red commit, green at the tip
         timeout-minutes: 60
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
+        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          limit=""
-          if [ "$RUNNER_OS" = macOS ]; then limit="--test-timeout=$NODE_TEST_TIMEOUT_MACOS_MS"; fi
-          make test-node BUN="$BUN" NODE_TEST_ARGS="--test-shard=${{ matrix.part }}/${{ matrix.parts }} --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FARM_JUNIT $limit"
-      - name: Keep a JUnit report for this part
-        if: always()
-        run: |
-          set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
+          set -uo pipefail
+          red=e6e1b3579
+          rows="a_paths_drive_root_is_its_last_ancestor_in_the_same_form the_system_drive_keeps_access_lists_asked_by_either_root a_list_without_read_attributes_for_every_app_container_keeps_them_out the_drive_root_check_names_a_root_whose_list_keeps_app_containers_out"
+          git checkout "$red" -- crates/crazyagent-win-sandbox || exit 1
+          cargo test -p crazyagent-win-sandbox --lib --locked --no-run || { echo "RED BUILD FAILED"; exit 1; }
+          cargo test -p crazyagent-win-sandbox --lib --locked win::owner::tests:: > "$RUNNER_TEMP/red.txt" 2>&1
+          rc=$?
+          tail -40 "$RUNNER_TEMP/red.txt"
+          [ "$rc" -ne 0 ] || { echo "RED RUN PASSED, expected failures"; exit 1; }
+          for row in $rows; do
+            grep -q "win::owner::tests::$row \.\.\. FAILED" "$RUNNER_TEMP/red.txt" || { echo "RED: $row did not fail"; exit 1; }
+          done
+          echo "red ok: 4 rows failed at $red"
+          git checkout HEAD -- crates/crazyagent-win-sandbox || exit 1
+          git diff --quiet HEAD || exit 1
+          cargo test -p crazyagent-win-sandbox --lib --locked --no-run || exit 1
+          cargo test -p crazyagent-win-sandbox --lib --locked -- --nocapture --test-threads 1 win::owner::tests:: dacl::tests:: > "$RUNNER_TEMP/green.txt" 2>&1
+          rc=$?
+          grep -E "^test result|FAILED|panicked|system drive root keeps" "$RUNNER_TEMP/green.txt" | head -30
+          [ "$rc" -eq 0 ] || exit 1
+          for row in $rows; do
+            grep -q "win::owner::tests::$row \.\.\. ok" "$RUNNER_TEMP/green.txt" || { echo "GREEN: $row not ok"; exit 1; }
+          done
+          cargo test -p crazyagent-win-sandbox --lib --locked > "$RUNNER_TEMP/all.txt" 2>&1
+          rc=$?
+          grep -E "^test result|FAILED|panicked" "$RUNNER_TEMP/all.txt" | head -20
+          exit "$rc"
 
-  typecheck:
-    name: Desktop typecheck and Bun suites
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      FARM_JUNIT: ${{ github.workspace }}/farm-junit/bun.xml
-      FARM_PART: linux-bun-1
+  admin-a-windows-engine:
+    name: 3a A Windows engine, context-mode rows and the drive-root refusal with the runner's Node.js
+    runs-on: windows-2022
+    timeout-minutes: 200
     steps:
       - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: ${{ env.RCLI_SOURCE_REPOSITORY }}
-          ref: ${{ env.RCLI_SOURCE_REVISION }}
-          path: .local-state/tools/rcli-source
-          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          tip=431a10752439c4b528a66bcb35788a41ea1e5df8
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
+      - name: Install SQLite for Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - id: bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-      - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Typecheck desktop
-        working-directory: apps/desktop
-        run: npm run typecheck
-      - name: Install rcli source dependencies
-        if: always()
-        working-directory: .local-state/tools/rcli-source
-        run: bun install --frozen-lockfile --ignore-scripts
-      - name: Run the Bun suites
-        if: always()
-        env:
-          BUN: ${{ steps.bun.outputs.bun-path }}
+      - name: Install Rust toolchain
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          make test-bun BUN="$BUN" BUN_TEST_ARGS="--reporter=junit --reporter-outfile=$FARM_JUNIT"
-      - name: Keep a JUnit report for this part
-        if: always()
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
+      - name: Build the boundary helper beside the tests, as the shard archive does
+        timeout-minutes: 30
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$(dirname "$FARM_JUNIT")"
-          if [ ! -s "$FARM_JUNIT" ]; then
-            printf '<testsuites><testcase classname="farm" name="%s wrote no JUnit report"><failure/></testcase></testsuites>\n' "$FARM_PART" > "$FARM_JUNIT"
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-junit-${{ env.FARM_PART }}
-          path: ${{ env.FARM_JUNIT }}
-          if-no-files-found: error
-          retention-days: 14
-
-  report:
-    name: Test farm report
-    needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          mkdir -p target/debug/deps
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
+      - name: Build the engine library tests
+        id: lib
+        timeout-minutes: 120
+        shell: bash
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          pattern: farm-junit-*
-          path: ${{ runner.temp }}/junit
-      - name: Write the summary table
-        env:
-          FARM_NEEDS: ${{ toJSON(needs) }}
+          date -u '+lib build start %H:%M:%S'
+          cargo test -p crazyagent --lib --locked --no-run
+          date -u '+lib build end %H:%M:%S'
+      - name: Context-mode rows and the drive-root refusal
+        if: ${{ !cancelled() && steps.lib.outcome == 'success' }}
+        timeout-minutes: 30
+        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/junit"
-          node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+          set -uo pipefail
+          icacls "$SYSTEMDRIVE\\" || true
+          echo "node $(command -v node) $(node -v)"
+          cargo test -p crazyagent --lib --locked -- context_mode:: plugins::tests::a_check_on_a > "$RUNNER_TEMP/rows.txt" 2>&1
+          rc=$?
+          grep -E "^test |^test result|panicked" "$RUNNER_TEMP/rows.txt" | grep -v " ok$" | head -40
+          grep -c " \.\.\. ok$" "$RUNNER_TEMP/rows.txt"
+          cargo test -p crazyagent --lib --locked -- --ignored --exact --nocapture context_mode::windows_tests::a_drive_root_no_app_container_reads_refuses_the_install_by_its_own_code > "$RUNNER_TEMP/drive.txt" 2>&1
+          drive=$?
+          grep -E "^test |^test result|panicked|context_mode_drive_root_refused|assert" "$RUNNER_TEMP/drive.txt" | head -20
+          [ "$drive" -eq 0 ] || rc=1
+          grep -q "a_drive_root_no_app_container_reads_refuses_the_install_by_its_own_code \.\.\. ok" "$RUNNER_TEMP/drive.txt" || rc=1
+          exit "$rc"
