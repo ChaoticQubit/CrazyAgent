@@ -1296,16 +1296,37 @@ fn sole_own_link(_file: &File, metadata: &fs::Metadata) -> bool {
     metadata.nlink() == 1 && metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-/// Tells whether an open file has one link and the engine's user as owner, both read from
-/// the handle on Windows (DESIGN-0256 C6). Inputs: the open file and its metadata, unused
-/// here. Output: true only then; a handle whose owner or links cannot be read is false.
+/// Tells whether an open file on Windows has one link and an owner W1's judge trusts.
+/// Inputs: the open file and its metadata, unused here. Output: true only then; a handle
+/// whose owner or links cannot be read is false.
 #[cfg(windows)]
 fn sole_own_link(file: &File, _metadata: &fs::Metadata) -> bool {
-    use crazyagent_win_sandbox::private;
-    match (private::facts(file), private::user_sid()) {
-        (Ok(facts), Ok(user)) => facts.links == 1 && facts.owner == user,
-        _ => false,
-    }
+    sole_trusted_link(file).unwrap_or(false)
+}
+
+/// Reads from an open file's handle on Windows whether it has one link and an owner W1's
+/// judge trusts: the engine's user, SYSTEM, the administrators or TrustedInstaller, as an
+/// elevated user's new files are owned by the administrators (DESIGN-0256 C6). Input: the
+/// open file. Output: the answer, or the Windows error.
+#[cfg(windows)]
+fn sole_trusted_link(file: &File) -> std::io::Result<bool> {
+    use crazyagent_win_sandbox::{dacl, private};
+    let facts = private::facts(file)?;
+    Ok(facts.links == 1 && dacl::trusted_owner(&facts.owner, &private::user_sid()?))
+}
+
+/// Tells whether a home entry kept as a file on Windows has one link and a trusted owner,
+/// opened as itself, never a link's target. Input: the entry. Output: the answer, false for
+/// an entry gone meanwhile, or `agent_home_unwritable` when it cannot be opened or read, so
+/// a failed open never removes a kept file.
+#[cfg(windows)]
+fn kept_file(path: &Path) -> Result<bool, AgentHomeError> {
+    let file = match crate::platform::open_plain(path) {
+        Ok(file) => file,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(failure("agent_home_unwritable")),
+    };
+    sole_trusted_link(&file).map_err(|_| failure("agent_home_unwritable"))
 }
 
 fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
@@ -1751,10 +1772,7 @@ fn keep_only(
                 .find(|(known, _)| name == *known)
                 .map(|(_, kind)| *kind);
             match wanted {
-                Some(Kept::File)
-                    if metadata.is_file()
-                        && crate::platform::open_plain(&path)
-                            .is_ok_and(|file| sole_own_link(&file, &metadata)) => {}
+                Some(Kept::File) if metadata.is_file() && kept_file(&path)? => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
                 Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
                 Some(Kept::Transcripts) if metadata.is_dir() => clear_memory(&path)?,

@@ -1585,14 +1585,16 @@ fn owned(_file: &fs::File, metadata: &fs::Metadata) -> bool {
     metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-/// Tells whether the engine's user owns an open file, its owner SID read from the handle on
-/// Windows (DESIGN-0256 C6). Inputs: the open file and its metadata, unused here. Output:
-/// true only then; a handle whose owner cannot be read is false.
+/// Tells whether an open file on Windows has an owner W1's judge trusts, read from the
+/// handle: the engine's user, SYSTEM, the administrators or TrustedInstaller, as an elevated
+/// user's new files are owned by the administrators (DESIGN-0256 C6). Inputs: the open file
+/// and its metadata, unused here. Output: true only then; a handle whose owner cannot be
+/// read is false.
 #[cfg(windows)]
 fn owned(file: &fs::File, _metadata: &fs::Metadata) -> bool {
-    use crazyagent_win_sandbox::private;
+    use crazyagent_win_sandbox::{dacl, private};
     match (private::facts(file), private::user_sid()) {
-        (Ok(facts), Ok(user)) => facts.owner == user,
+        (Ok(facts), Ok(user)) => dacl::trusted_owner(&facts.owner, &user),
         _ => false,
     }
 }
@@ -1652,17 +1654,17 @@ mod tests;
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    /// C6 (DESIGN-0256): owner text on Windows is a file the engine's user owns, read from
-    /// the open file; a file whose owner is the administrators group is unsafe, as a file of
+    /// C6 (DESIGN-0256): owner text on Windows is a file whose owner W1's judge trusts, read
+    /// from the open file; a file whose owner is the Users group is unsafe, as a file of
     /// another uid is on Unix. Setting that owner needs the elevated runner (P0).
     #[test]
-    fn owner_text_is_a_file_this_user_owns() {
+    fn owner_text_is_a_file_with_a_trusted_owner() {
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("AGENTS.md");
         std::fs::write(&file, "# rules").unwrap();
         assert_eq!(super::owned_text(&file).unwrap(), "# rules");
         let status = std::process::Command::new("icacls")
-            .args([file.to_str().unwrap(), "/setowner", "*S-1-5-32-544"])
+            .args([file.to_str().unwrap(), "/setowner", "*S-1-5-32-545"])
             .status()
             .unwrap();
         assert!(status.success());
