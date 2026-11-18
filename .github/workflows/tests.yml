@@ -146,6 +146,7 @@ jobs:
           set -euo pipefail
           cargo clippy -p crazyagent-win-sandbox --all-targets --locked -- -D warnings
       - name: W1a rows in crazyagent-win-sandbox
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --lib --test private_judge --test private_windows -- --test-threads 1
