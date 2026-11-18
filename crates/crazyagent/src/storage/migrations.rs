@@ -8,6 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod memory_step;
 mod settings_step;
 #[cfg(test)]
 mod tests;
@@ -113,6 +114,10 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 15,
+        run: memory_step::memory_on_the_log,
+    },
+    Step {
+        to: 16,
         run: settings_step::sessions_on_the_log,
     },
 ];

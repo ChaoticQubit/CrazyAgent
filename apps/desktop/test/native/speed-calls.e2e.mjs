@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { setTimeout as pause } from "node:timers/promises";
 import { withPage } from "../browser.mjs";
 import { INTERNALS, STEP_MS, closedPort, endTerminals, owner, required, serveApp, start as launch, stop } from "./e2e-harness.mjs";
+import { callBudgets, cpuMs } from "./speed-absolute.mjs";
 import { countFindings } from "./speed-budget.mjs";
 import { seedSide, speedSettings } from "./speed-seed.mjs";
 
@@ -93,9 +94,29 @@ function counted(log, mark) {
   return counts;
 }
 
+/** Reads the engine's CPU time, keeping a failed read as its message, so a budget-only reading
+ * never stops the C1 walk (#239 r1 F2). Input: the run. Output: the ms, or the message. */
+function engineCpu(run) {
+  try {
+    return cpuMs(run.engine.pid);
+  } catch (error) {
+    return `CPU read failed: ${error.message}`;
+  }
+}
+
+/** The CPU ms spent between two reads, or the first failed read's message, which the budget
+ * check then refuses. Inputs: the two reads. Output: the ms, or the message. */
+function spent(before, after) {
+  if (typeof before === "string") return before;
+  if (typeof after === "string") return after;
+  return after - before;
+}
+
 /** Walks one side's page the owner's way and counts its bridge calls per scenario: the start
- * on Home, each sidebar or tab switch, and a minute idle on Home and on the project. Input: the
- * running side. Output: `{ scenario: { cmd: count } }`. */
+ * on Home, each sidebar or tab switch, and a minute idle on Home and on the project, reading the
+ * engine's CPU time across each idle minute. Input: the running side. Output: `{ counts:
+ * { scenario: { cmd: count } }, cpu: { idle scenario: engine CPU ms, or a failed read's
+ * message } }`. */
 async function walk(run, evidence) {
   return withPage(async ({ evaluate, send }) => {
     const me = owner({ evaluate, send }, evidence);
@@ -118,22 +139,26 @@ async function walk(run, evidence) {
       counts[`switch:${page}`] = counted(run.log, mark);
     }
     mark = run.log.calls.length;
+    let before = engineCpu(run);
     await pause(IDLE_MS);
     counts["idle:home"] = counted(run.log, mark);
+    const cpu = { "idle:home": spent(before, engineCpu(run)) };
     const project = await evaluate(`document.querySelector(${JSON.stringify(SWITCHES[0][1])}).getAttribute("href")`);
     await me.follow(SWITCHES[0][1]);
     await usable(evaluate, project);
     await pause(SETTLE_MS);
     mark = run.log.calls.length;
+    before = engineCpu(run);
     await pause(IDLE_MS);
     counts["idle:project"] = counted(run.log, mark);
+    cpu["idle:project"] = spent(before, engineCpu(run));
     await me.capture(`${run.label}-speed-calls-end`);
     assert.deepEqual(await evaluate("window.__e2eErrors"), [], `${run.label}: the page raised no errors`);
-    return counts;
+    return { counts, cpu };
   });
 }
 
-test("C1: the candidate makes no bridge call 2.3.2 never made and none more than once beyond it, at start, on each page switch and in a minute idle (DEC-169)", { timeout: 900000 }, async () => {
+test("one walk of each side for C1 (DEC-169) and the candidate's absolute call budgets (v2.5 S1)", { timeout: 900000 }, async (t) => {
   const base = artifacts("SPEED_BASE");
   const candidate = artifacts("SPEED_CANDIDATE");
   assert.notEqual(base.sha256, candidate.sha256, "the base and the candidate are different engines");
@@ -141,12 +166,16 @@ test("C1: the candidate makes no bridge call 2.3.2 never made and none more than
   const kept = process.env.E2E_EVIDENCE && isAbsolute(process.env.E2E_EVIDENCE) ? process.env.E2E_EVIDENCE : null;
   const evidence = kept ?? realpathSync(mkdtempSync(join(tmpdir(), "ca-sc-evidence-")));
   const counts = {};
+  const idle = {};
+  const timed = {};
   for (const [label, side] of [["base", base], ["candidate", candidate]]) {
     const run = newRun(label);
     try {
       await boot(run, side, evidence);
-      counts[label] = await walk(run, evidence);
-      writeFileSync(join(evidence, `calls-${label}.json`), JSON.stringify({ engine_sha256: side.sha256, folder: side.folder, counts: counts[label], calls: run.log.calls }, null, 1));
+      ({ counts: counts[label], cpu: idle[label] } = await walk(run, evidence));
+      timed[label] = run.log.trail.map(({ cmd, ms }) => ({ cmd, ms }));
+      writeFileSync(join(evidence, `calls-${label}.json`), JSON.stringify({ engine_sha256: side.sha256, folder: side.folder, counts: counts[label],
+        idle_engine_cpu_ms: idle[label], calls: run.log.calls, timed: timed[label] }, null, 1));
     } finally {
       await halt(run);
       if (!kept) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
@@ -157,5 +186,12 @@ test("C1: the candidate makes no bridge call 2.3.2 never made and none more than
   }
   const findings = countFindings(counts.base, counts.candidate);
   writeFileSync(join(evidence, "findings.json"), JSON.stringify(findings, null, 1));
-  assert.deepEqual(findings, [], `calls 2.4.x adds over 2.3.2 (scenario cmd base -> candidate):\n${findings.map((item) => `${item.scenario} ${item.cmd} ${item.base} -> ${item.candidate}`).join("\n")}\nevidence ${evidence}`);
+  await t.test("C1: the candidate makes no bridge call 2.3.2 never made and none more than once beyond it, at start, on each page switch and in a minute idle (DEC-169)", () => {
+    assert.deepEqual(findings, [], `calls 2.4.x adds over 2.3.2 (scenario cmd base -> candidate):\n${findings.map((item) => `${item.scenario} ${item.cmd} ${item.base} -> ${item.candidate}`).join("\n")}\nevidence ${evidence}`);
+  });
+  await t.test("budgets: the idle project page under 5 calls a minute, 95% of engine calls under 20 ms and the engine's CPU under 600 ms over each idle minute (v2.5 S1)", () => {
+    const budgets = callBudgets({ counts: counts.candidate, calls: timed.candidate, cpu: idle.candidate, idleMs: IDLE_MS });
+    writeFileSync(join(evidence, "budgets.json"), JSON.stringify(budgets, null, 1));
+    assert.deepEqual(budgets.findings, [], `budgets the candidate misses (budget scenario reading, limit):\n${budgets.findings.map((row) => `${row.budget} ${row.scenario ?? "all"} ${row.reading}, under ${row.limit}`).join("\n")}\nevidence ${evidence}`);
+  });
 });
