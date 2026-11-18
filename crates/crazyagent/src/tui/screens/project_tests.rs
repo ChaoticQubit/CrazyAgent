@@ -5578,3 +5578,62 @@ fn the_reinstall_line_counts_like_the_desktop_and_the_draft_keeps_typed_text() {
         "Hello\n\nReinstall."
     );
 }
+
+/// NOTE-1845: a notice naming folders with long paths shows each name by its tail, so on an
+/// 80 by 24 terminal its whole sentence, its keys and the master's input row are drawn; on 80
+/// by 16, where the old notice pushed the input off, it takes at most half the free rows, its
+/// sentence cut short, and the keys and the input stay.
+#[test]
+fn a_long_reinstall_notice_keeps_its_keys_and_the_input_on_a_small_terminal() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let long = |name: &str| format!("{}/{name}", "deep".repeat(60));
+    screen.reinstall = Some(crate::projects_home::reinstall::Offer {
+        folders: vec![long("node_modules"), long("dist"), long(".venv")],
+        more: 4,
+        draft: "Please reinstall them.".into(),
+    });
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    let look = Look::plain();
+    let keys = "Press a to put the drafted message in your input, d to dismiss this.";
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    let said = words(&drawn.rows);
+    assert!(said.contains("deep/node_modules, "), "{shown}");
+    assert!(
+        said.contains(
+            "deep/.venv and 4 more were left out when this project came into your projects \
+             folder, as they can be rebuilt."
+        ),
+        "{shown}"
+    );
+    assert!(said.contains(keys), "{shown}");
+    assert!(shown.contains("> Message the master"), "{shown}");
+    let drawn = project_screen(&mut screen, 80, 16, &look);
+    let shown = text(&drawn.rows);
+    assert!(words(&drawn.rows).contains(keys), "{shown}");
+    assert!(shown.contains("> Message the master"), "{shown}");
+    assert!(shown.contains("deep"), "{shown}");
+    assert!(!shown.contains("can be rebuilt"), "{shown}");
+}
+
+/// NOTE-1845: when the owner's text and the draft together pass the master's message bound,
+/// a leaves the input as typed and says why, instead of cutting the draft off in the input.
+#[test]
+fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let typed = "x".repeat(8180);
+    screen.input.set(&typed);
+    assert_eq!(screen.input.value(), typed);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), typed);
+    assert!(!screen.typing);
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| problem.contains("don't fit in one message")),
+        "{:?}",
+        screen.problem
+    );
+}
