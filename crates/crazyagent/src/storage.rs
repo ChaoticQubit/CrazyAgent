@@ -529,9 +529,9 @@ pub(crate) fn not_submitted(code: &str) -> bool {
 
 impl Job {
     /// Tells whether losing this job would leave more access than the owner asked for:
-    /// a revocation, a sign-out or sign-in cancel, an account or secret removal, a grant
-    /// narrowed, or an access level that may be lowered. Such a job is never withdrawn.
-    /// Input: the job. Output: the answer.
+    /// a revocation, a sign-out or sign-in cancel, an account or secret removal, a replaced
+    /// key storage deletes, a grant narrowed, or an access level that may be lowered. Such a
+    /// job is never withdrawn. Input: the job. Output: the answer.
     pub(crate) fn narrows_access(&self) -> bool {
         match self {
             Self::OwnerControl(_, control, _) => control.decision == OwnerDecision::Revoke,
@@ -539,7 +539,10 @@ impl Job {
                 command,
                 owner_auth::Command::Logout(_) | owner_auth::Command::Cancel(_)
             ),
-            Self::Accounts(_, command, _) => matches!(command, accounts::Command::Remove(_)),
+            Self::Accounts(_, command, _) => matches!(
+                command,
+                accounts::Command::Remove(_) | accounts::Command::KeyReplaced(..)
+            ),
             Self::Plugins(command, _) => plugin_narrows_access(command),
             Self::OwnerApply(_, request, _) => match &request.operation {
                 OwnerOperation::Apply { mutation } => mutation_narrows_access(mutation),
