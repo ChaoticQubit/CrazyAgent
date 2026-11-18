@@ -34801,3 +34801,19 @@ fn ide_workspaces_are_followed_only_after_the_database_changes() {
     assert!(runtime.follow_due().unwrap(), "the runtime wrote");
     runtime.shutdown().unwrap();
 }
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): with no queued task, dispatch reads none of the
+/// settings only its per-task loop uses (caps, open recovery runs, Reuse idle, Keep warm)
+/// on each tick. A caps table that cannot be read shows it: an idle dispatch succeeds.
+#[test]
+fn dispatch_with_nothing_queued_reads_no_per_task_settings() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute_batch("DROP TABLE team_caps")
+        .unwrap();
+    let idle = team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new());
+    assert!(idle.is_ok(), "an idle dispatch read the caps: {idle:?}");
+    team.shutdown().unwrap();
+}
