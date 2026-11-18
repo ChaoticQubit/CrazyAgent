@@ -304,9 +304,8 @@ pub fn plain_code(problem: &str) -> bool {
 /// The screen's sentence for a problem it has no copy for, naming the code.
 /// Inputs: the sentence and the problem. Output: "<sentence> (code: <code>)",
 /// with `UNPLAIN_CODE` in place of a problem that is not a plain code, so raw
-/// error text never reaches the screen; a request refused by the full request queue, not
-/// sent on by a starting or busy database, or an access change still pending, and a
-/// version mismatch read as their own sentences on every screen.
+/// error text never reaches the screen; a storage answer, the owner-busy code and
+/// a version mismatch each read as their own sentence on every screen.
 pub fn coded(sentence: &str, problem: &str) -> String {
     if problem == super::seam::OWNER_BUSY {
         return crate::config::OWNER_BUSY_LINE.to_owned();
