@@ -905,7 +905,7 @@ fn download_everything_lists_the_rebuildable_folders_too() {
     fake::placeholders();
     let folder = project();
     let root = folder.path();
-    assert!(!COPY_BOUNDS.skip_rebuildable);
+    const { assert!(!COPY_BOUNDS.skip_rebuildable) }
     let (wanted, skipped) = listed(root, COPY_BOUNDS);
     assert_eq!(
         wanted,
