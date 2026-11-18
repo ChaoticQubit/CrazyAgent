@@ -3,6 +3,7 @@ use super::clone;
 use crate::engine::EngineError;
 use crate::project_setup::SECRET_PREFIXES;
 use crate::research::runner::git_safe;
+use crate::sandbox::OwnerGit;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -230,12 +231,13 @@ fn commit_step(project: &Path, at: &str) {
     }
 }
 
-/// A private empty folder under the engine root that git uses as its home for one call,
-/// so no owner configuration applies; it is deleted when dropped.
+/// A private empty folder for one call, deleted when dropped: under the engine root, git's
+/// home, so no owner configuration applies, and under owner git's temp folder, where its
+/// container keeps the publish commit's private index.
 pub(super) struct GitHome(PathBuf);
 
 impl GitHome {
-    /// Makes the folder. Input: the engine root. Output: the home, or
+    /// Makes the folder. Input: the folder it goes in. Output: the folder, or
     /// `github_publish_failed`.
     pub(super) fn new(root: &Path) -> Result<Self, EngineError> {
         let mut token = [0_u8; 8];
@@ -257,10 +259,54 @@ impl Drop for GitHome {
     }
 }
 
-/// The git the engine runs for a publish, as for a clone. Output: its path, or
-/// `github_git_missing`.
-pub(super) fn git() -> Result<PathBuf, EngineError> {
+/// The git a publish step runs: its program, and for a project whose owner git is ready, the
+/// container every command in the project runs in (V244-WIN-GIT-UNC-SIBLINGS), so a `.git`
+/// that names a share or another outside place reaches nothing. Without one, git runs as the
+/// owner, as on Unix and on a Windows install that declined the administrator step.
+#[derive(Debug, Clone)]
+pub(crate) struct PublishGit {
+    program: PathBuf,
+    contained: Option<Arc<OwnerGit>>,
+}
+
+impl PublishGit {
+    /// Git that runs as the owner. Input: its absolute program. Output: the git.
+    pub(crate) fn plain(program: PathBuf) -> Self {
+        Self {
+            program,
+            contained: None,
+        }
+    }
+
+    /// Git that runs every command in the project inside `owner`'s container, with the
+    /// program owner git was installed for. Input: owner git for the project. Output: the git.
+    #[cfg_attr(
+        not(all(test, windows)),
+        expect(dead_code, reason = "slice 3b's prepare routes publish through it")
+    )]
+    pub(crate) fn contained(owner: Arc<OwnerGit>) -> Self {
+        Self {
+            program: owner.git().to_path_buf(),
+            contained: Some(owner),
+        }
+    }
+
+    /// The program. Output: its absolute path.
+    pub(crate) fn program(&self) -> &Path {
+        &self.program
+    }
+
+    /// The container project commands run in. Output: owner git's, or None for git as the owner.
+    fn container(&self) -> Option<&OwnerGit> {
+        self.contained.as_deref()
+    }
+}
+
+/// The git the engine runs for a publish, as for a clone, as the owner until a caller has owner
+/// git's container for the project. Output: the git, or `github_git_missing`.
+pub(super) fn git() -> Result<PublishGit, EngineError> {
     clone::git_program(std::env::var_os("PATH").as_deref())
+        .map(PublishGit::plain)
         .ok_or_else(|| failure("github_git_missing"))
 }
 
@@ -269,8 +315,8 @@ pub(super) fn git() -> Result<PathBuf, EngineError> {
 /// outside file its config names ([`OUTSIDE_FILES_OFF`]) runs or is read, and git never looks
 /// above the project. [`refuse_hooks`] first refuses a config hook these options do not stop.
 /// Inputs: git, its empty home and the project. Output: the command, without arguments.
-fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
-    let mut command = clone::git_command(git, home);
+fn project_git(git: &PublishGit, home: &Path, project: &Path) -> Command {
+    let mut command = clone::git_command(git.program(), home);
     command
         .current_dir(project)
         .args(OUTSIDE_FILES_OFF)
@@ -349,21 +395,47 @@ impl Watched {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A step the rows run once, just before the next publish git starts, standing in for an
+    /// agent that changes `.git` after publish checked it. None runs nothing.
+    static BEFORE_SPAWN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Starts `command` and its watcher with its output piped, and its input piped when it takes
+/// input. Every publish git starts here. Inputs: owner git's container for a project command,
+/// none for any other, the command, whether it takes input and the limit. Output: as
+/// [`Watched::start`].
+fn started(
+    _contained: Option<&OwnerGit>,
+    command: &mut Command,
+    input: bool,
+    limit: Duration,
+) -> Result<Watched, EngineError> {
+    #[cfg(test)]
+    if let Some(step) = BEFORE_SPAWN.with(|next| next.borrow_mut().take()) {
+        step();
+    }
+    if input {
+        command.stdin(Stdio::piped());
+    }
+    Watched::start(command.stdout(Stdio::piped()), limit)
+}
+
 /// Runs a git command to its end within `limit`, keeping at most `cap` bytes and one more
 /// of what it prints and draining the rest, so git never waits on a full pipe. Input for
 /// git's standard input is written by its own thread, so neither pipe holds the other.
-/// Inputs: the command, its input if any, the limit and the cap. Output: its status and
-/// what was kept, or `github_publish_failed`, also when git did not take all the input.
+/// Inputs: the container ([`started`]), the command, its input if any, the limit and the cap.
+/// Output: its status and what was kept, or `github_publish_failed`, also for input not taken.
 fn collect(
+    contained: Option<&OwnerGit>,
     command: &mut Command,
     input: Option<Vec<u8>>,
     limit: Duration,
     cap: u64,
 ) -> Result<(ExitStatus, Vec<u8>), EngineError> {
-    if input.is_some() {
-        command.stdin(Stdio::piped());
-    }
-    let watched = Watched::start(command.stdout(Stdio::piped()), limit)?;
+    let watched = started(contained, command, input.is_some(), limit)?;
     let (stdout, stdin) = watched.pipes();
     let stdout = stdout.expect("git stdout is piped");
     let writer = input.map(|input| {
@@ -385,23 +457,27 @@ fn collect(
     Ok((status, bytes))
 }
 
-/// Runs a git command whose output is small within `LOOKUP_TIME`. Input: the command.
-/// Output: as [`run_within`].
-fn run(command: &mut Command) -> Result<Output, EngineError> {
-    run_within(command, LOOKUP_TIME)
+/// Runs a git command whose output is small within `LOOKUP_TIME`. Inputs: the container
+/// ([`started`]) and the command. Output: as [`run_within`].
+fn run(contained: Option<&OwnerGit>, command: &mut Command) -> Result<Output, EngineError> {
+    run_within(contained, command, LOOKUP_TIME)
 }
 
 /// Runs a git command that writes the repository, such as add or commit, within
-/// `WORK_TIME`. Input: the command. Output: as [`run_within`].
-fn work(command: &mut Command) -> Result<Output, EngineError> {
-    run_within(command, WORK_TIME)
+/// `WORK_TIME`. Inputs: the container ([`started`]) and the command. Output: as [`run_within`].
+fn work(contained: Option<&OwnerGit>, command: &mut Command) -> Result<Output, EngineError> {
+    run_within(contained, command, WORK_TIME)
 }
 
-/// Runs a git command whose output is small, within `limit`. Inputs: the command and the
-/// limit. Output: what it printed and its status, or `github_publish_failed` when it
-/// could not start, ran over or printed past 1 MiB.
-fn run_within(command: &mut Command, limit: Duration) -> Result<Output, EngineError> {
-    let (status, stdout) = collect(command, None, limit, OUTPUT_BYTES_MAX)?;
+/// Runs a git command whose output is small, within `limit`. Inputs: the container
+/// ([`started`]), the command and the limit. Output: what it printed and its status, or
+/// `github_publish_failed` when it could not start, ran over or printed past 1 MiB.
+fn run_within(
+    contained: Option<&OwnerGit>,
+    command: &mut Command,
+    limit: Duration,
+) -> Result<Output, EngineError> {
+    let (status, stdout) = collect(contained, command, None, limit, OUTPUT_BYTES_MAX)?;
     if stdout.len() as u64 > OUTPUT_BYTES_MAX {
         return Err(failure("github_publish_failed"));
     }
@@ -413,21 +489,26 @@ fn run_within(command: &mut Command, limit: Duration) -> Result<Output, EngineEr
 }
 
 /// Runs a git command that lists files within `limit`, keeping at most
-/// `LISTING_BYTES_MAX` of it. Inputs: the command and the limit. Output: as
-/// [`listing_within`].
-fn listing(command: &mut Command, limit: Duration) -> Result<Vec<u8>, EngineError> {
-    listing_within(command, limit, LISTING_BYTES_MAX)
+/// `LISTING_BYTES_MAX` of it. Inputs: the container ([`started`]), the command and the limit.
+/// Output: as [`listing_within`].
+fn listing(
+    contained: Option<&OwnerGit>,
+    command: &mut Command,
+    limit: Duration,
+) -> Result<Vec<u8>, EngineError> {
+    listing_within(contained, command, limit, LISTING_BYTES_MAX)
 }
 
 /// Runs a git command that lists files within `limit`, keeping at most `cap` bytes of it.
-/// Inputs: the command, the limit and the cap. Output: the listing, or
-/// `github_publish_too_large`, `github_publish_failed`.
+/// Inputs: the container ([`started`]), the command, the limit and the cap. Output: the
+/// listing, or `github_publish_too_large`, `github_publish_failed`.
 fn listing_within(
+    contained: Option<&OwnerGit>,
     command: &mut Command,
     limit: Duration,
     cap: u64,
 ) -> Result<Vec<u8>, EngineError> {
-    let (status, bytes) = collect(command, None, limit, cap)?;
+    let (status, bytes) = collect(contained, command, None, limit, cap)?;
     if bytes.len() as u64 > cap {
         return Err(failure("github_publish_too_large"));
     }
@@ -442,7 +523,7 @@ fn listing_within(
 /// `github_publish_other_host`, `github_publish_detached`, `github_publish_not_plain_repo`,
 /// `project_folder_missing`.
 pub(super) fn inspect(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     host: &str,
@@ -455,8 +536,11 @@ pub(super) fn inspect(
 /// can fire one (add, commit, status, update-ref) and reads the keys as landing does.
 /// Inputs: git, its empty home and the project. Output: `()`, or
 /// `github_publish_hooks_set`, `github_publish_failed`.
-fn refuse_hooks(git: &Path, home: &Path, project: &Path) -> Result<(), EngineError> {
-    let listed = run(project_git(git, home, project).args(crate::research::runner::FILTER_KEYS))?;
+fn refuse_hooks(git: &PublishGit, home: &Path, project: &Path) -> Result<(), EngineError> {
+    let listed = run(
+        git.container(),
+        project_git(git, home, project).args(crate::research::runner::FILTER_KEYS),
+    )?;
     let keys = listed
         .status
         .success()
@@ -473,7 +557,7 @@ fn refuse_hooks(git: &Path, home: &Path, project: &Path) -> Result<(), EngineErr
 /// Inputs: git, its empty home, the project, GitHub's web host and the limit. Output: as
 /// [`inspect`].
 fn inspect_within(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     host: &str,
@@ -581,13 +665,14 @@ fn nested_repository(project: &Path) -> Result<(), EngineError> {
 /// Output: the branch and the history, or `github_publish_detached`,
 /// `github_publish_not_plain_repo`, `github_publish_failed` for a history git cannot read.
 fn head_state(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     limit: Duration,
 ) -> Result<(String, GitHubHistory), EngineError> {
     let failed = || failure("github_publish_failed");
     let head = run_within(
+        git.container(),
         project_git(git, home, project).args(["symbolic-ref", "-q", "HEAD"]),
         limit,
     )?;
@@ -609,6 +694,7 @@ fn head_state(
         .ok_or_else(|| failure("github_publish_detached"))?
         .to_owned();
     let born = run_within(
+        git.container(),
         project_git(git, home, project).args(["rev-parse", "-q", "--verify", "HEAD"]),
         limit,
     )?;
@@ -618,6 +704,7 @@ fn head_state(
         _ => return Err(failed()),
     }
     let log = run_within(
+        git.container(),
         project_git(git, home, project).args([
             "log",
             "-2",
@@ -683,7 +770,7 @@ fn read_config(project: &Path) -> Result<Option<Vec<u8>>, EngineError> {
 /// host and the limit. Output: `()`, or `github_publish_on_github`,
 /// `github_publish_other_host`, `github_publish_not_plain_repo`, `github_publish_failed`.
 fn remotes(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     host: &str,
@@ -693,7 +780,8 @@ fn remotes(
         return Ok(());
     };
     let (status, listed) = collect(
-        clone::git_command(git, home)
+        None,
+        clone::git_command(git.program(), home)
             .args(["config", "--file", "-", "--no-includes", "-z", "--list"])
             .stderr(Stdio::null()),
         Some(config),
@@ -754,7 +842,7 @@ fn github_url(url: &str, host: &str) -> bool {
 /// `github_publish_gitignore_invalid`, `github_publish_file_invalid`,
 /// `github_publish_not_plain_repo`, `github_publish_failed`.
 pub(super) fn prepare(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     local: &GitHubLocal,
@@ -771,10 +859,13 @@ pub(super) fn prepare(
     let existing = read_gitignore(&ignore)?;
     let files = generated(project, choices)?;
     if !local.repository {
-        let made = run(project_git(git, home, project)
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .args(["init", "-q", "--template=", "-b", MAIN]))?;
+        let made = run(
+            git.container(),
+            project_git(git, home, project)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .args(["init", "-q", "--template=", "-b", MAIN]),
+        )?;
         if !made.status.success() {
             return Err(failure("github_publish_failed"));
         }
@@ -968,7 +1059,7 @@ fn write_new(project: &Path, path: &str, text: &str) -> Result<(), EngineError> 
 /// its empty home, the project folder and its history. Output: the findings by file and line,
 /// or a refusal [`findings_within`] names, `github_publish_too_large` past 20,000 files or 200 MiB.
 pub(super) fn secret_findings(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     history: GitHubHistory,
@@ -1060,7 +1151,7 @@ pub(super) fn written_findings(
 /// `github_publish_too_large`, `github_publish_failed`, or on Windows
 /// `github_publish_nested_repository` or `github_publish_tree_too_large` ([`nested_repository`]).
 fn findings_within(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     history: GitHubHistory,
@@ -1076,13 +1167,14 @@ fn findings_within(
     if history == GitHubHistory::Owner {
         return tree_findings(git, home, project, "HEAD", files_max, bytes_max, limit);
     }
-    if cfg!(windows) {
+    if cfg!(windows) && git.container().is_none() {
         nested_repository(project)?;
     }
     let mut findings = Vec::new();
     let mut truncated = false;
     let mut total: u64 = 0;
     let listed = listing(
+        git.container(),
         project_git(git, home, project).args([
             "ls-files",
             "-z",
@@ -1132,7 +1224,7 @@ fn findings_within(
 /// Inputs: git, its empty home, the project, the tree, the most files, the most bytes and
 /// the limit. Output: the findings, or `github_publish_too_large`, `github_publish_failed`.
 fn tree_findings(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     tree: &str,
@@ -1146,6 +1238,7 @@ fn tree_findings(
     let mut truncated = false;
     let mut total: u64 = 0;
     let listed = listing(
+        git.container(),
         project_git(git, home, project).args(["ls-tree", "-r", "-z", "-l", "--full-tree", tree]),
         limit,
     )?;
@@ -1211,7 +1304,7 @@ fn listed_path(bytes: &[u8]) -> Option<PathBuf> {
 /// findings to add to, the flag a cut list sets and the limit. Output: `()`, or
 /// `github_publish_failed`.
 fn read_blobs(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     blobs: &[(String, String)],
@@ -1224,11 +1317,12 @@ fn read_blobs(
     }
     let failed = || failure("github_publish_failed");
     let mut command = project_git(git, home, project);
-    command
-        .args(["cat-file", "--batch"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
-    let watched = Watched::start(&mut command, limit)?;
+    let watched = started(
+        git.container(),
+        command.args(["cat-file", "--batch"]),
+        true,
+        limit,
+    )?;
     let (stdout, stdin) = watched.pipes();
     let mut stdin = stdin.expect("cat-file stdin is piped");
     let names: Vec<u8> = blobs
@@ -1475,12 +1569,17 @@ pub(super) struct Author {
 /// settings and the owner's own, from the owner's home, as a commit there would. A name
 /// or email git would refuse or mangle counts as none. Inputs: git, the owner's home
 /// folder and the project. Output: the author, or None, also for a `.git` that is not plain.
-pub(super) fn configured_author(git: &Path, owner_home: &Path, project: &Path) -> Option<Author> {
+pub(super) fn configured_author(
+    git: &PublishGit,
+    owner_home: &Path,
+    _home: &Path,
+    project: &Path,
+) -> Option<Author> {
     if plain_repository(project).is_err() {
         return None;
     }
     let value = |key: &str| {
-        let mut command = clone::git_command(git, owner_home);
+        let mut command = clone::git_command(git.program(), owner_home);
         command
             .env_remove("GIT_CONFIG_GLOBAL")
             .current_dir(project)
@@ -1489,7 +1588,7 @@ pub(super) fn configured_author(git: &Path, owner_home: &Path, project: &Path) -
             .args(["config", "--get", key])
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        let output = run(&mut command).ok()?;
+        let output = run(None, &mut command).ok()?;
         let text = String::from_utf8(output.stdout)
             .ok()
             .filter(|_| output.status.success())?;
@@ -1525,7 +1624,7 @@ pub(super) fn noreply_author(login: &str, id: Option<u64>) -> Author {
 /// HEAD it was built on. Inputs: git, its empty home, the project, the paths prepare wrote
 /// and the author. Output: the commit, or the refusal, such as `github_publish_secret_found`.
 pub(super) fn commit(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     written: &[String],
@@ -1540,7 +1639,7 @@ pub(super) fn commit(
 /// written path gone and untracked is left out. Inputs: as [`commit`], and the cap. Output:
 /// as [`commit`], `github_publish_head_moved` when HEAD moved meanwhile, or the cap's code.
 fn commit_within(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     written: &[String],
@@ -1558,12 +1657,13 @@ fn commit_within(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
-    if cfg!(windows) {
+    if cfg!(windows) && git.container().is_none() {
         nested_repository(project)?;
     }
     refuse_hooks(git, home, project)?;
     let (branch, history) = head_state(git, home, project, LOOKUP_TIME)?;
     let status = listing_within(
+        git.container(),
         project_git(git, home, project).args([
             "status",
             "--porcelain",
@@ -1600,7 +1700,7 @@ fn commit_within(
         .filter(|entry| !entry.is_empty() && !taken(entry))
         .count();
     let succeeded = |command: &mut Command| -> Result<(), EngineError> {
-        let output = work(command)?;
+        let output = work(git.container(), command)?;
         if output.status.success() {
             Ok(())
         } else {
@@ -1612,19 +1712,27 @@ fn commit_within(
         GitHubHistory::EngineStart | GitHubHistory::Owner => Some(head_commit(git, home, project)?),
     };
     let kept = match (&base, history) {
-        (Some(base), GitHubHistory::Owner) => {
-            Some(object_id(&run(project_git(git, home, project).args([
+        (Some(base), GitHubHistory::Owner) => Some(object_id(&run(
+            git.container(),
+            project_git(git, home, project).args([
                 "rev-parse",
                 "-q",
                 "--verify",
                 &format!("{base}^{{tree}}"),
-            ]))?)?)
-        }
+            ]),
+        )?)?),
         _ => None,
     };
     #[cfg(test)]
     commit_step(project, "add");
-    let index = home.join(PRIVATE_INDEX);
+    let scratch = git
+        .container()
+        .map(|owner| GitHome::new(owner.tmp()))
+        .transpose()?;
+    let index = scratch
+        .as_ref()
+        .map_or(home, GitHome::path)
+        .join(PRIVATE_INDEX);
     let _ = std::fs::remove_file(&index);
     let indexed = || {
         let mut command = project_git(git, home, project);
@@ -1636,12 +1744,12 @@ fn commit_within(
         (Some(base), Some(_)) => {
             succeeded(indexed().args(["read-tree", base.as_str()]))?;
             succeeded(indexed().args(["add", "-f", "--"]).args(&paths))?;
-            object_id(&work(indexed().arg("write-tree"))?)?
+            object_id(&work(git.container(), indexed().arg("write-tree"))?)?
         }
         _ => {
             seed_index(project, &index)?;
             succeeded(indexed().args(["add", "-A"]))?;
-            object_id(&work(indexed().arg("write-tree"))?)?
+            object_id(&work(git.container(), indexed().arg("write-tree"))?)?
         }
     };
     let scan = tree_findings(
@@ -1676,7 +1784,7 @@ fn commit_within(
     if let Some(base) = &base {
         making.args(["-p", base.as_str()]);
     }
-    let commit = object_id(&work(making.arg(&tree))?)?;
+    let commit = object_id(&work(git.container(), making.arg(&tree))?)?;
     let mut synced = project_git(git, home, project);
     synced.args(["reset", "-q", commit.as_str(), "--"]);
     match history {
@@ -1686,17 +1794,22 @@ fn commit_within(
     succeeded(&mut synced)?;
     #[cfg(test)]
     commit_step(project, "ref");
-    let moved = work(project_git(git, home, project).args([
-        "update-ref",
-        "-m",
-        MESSAGE,
-        "HEAD",
-        commit.as_str(),
-        base.as_deref().unwrap_or(""),
-    ]))?;
+    let moved = work(
+        git.container(),
+        project_git(git, home, project).args([
+            "update-ref",
+            "-m",
+            MESSAGE,
+            "HEAD",
+            commit.as_str(),
+            base.as_deref().unwrap_or(""),
+        ]),
+    )?;
     if !moved.status.success() {
-        let now =
-            run(project_git(git, home, project).args(["rev-parse", "-q", "--verify", "HEAD"]))?;
+        let now = run(
+            git.container(),
+            project_git(git, home, project).args(["rev-parse", "-q", "--verify", "HEAD"]),
+        )?;
         return Err(if object_id(&now).ok() == base {
             failed()
         } else {
@@ -1735,13 +1848,11 @@ fn seed_index(project: &Path, index: &Path) -> Result<(), EngineError> {
 
 /// Reads the commit HEAD points at. Inputs: git, its empty home and the project.
 /// Output: the commit id, or `github_publish_failed`.
-fn head_commit(git: &Path, home: &Path, project: &Path) -> Result<String, EngineError> {
-    object_id(&run(project_git(git, home, project).args([
-        "rev-parse",
-        "--verify",
-        "-q",
-        "HEAD",
-    ]))?)
+fn head_commit(git: &PublishGit, home: &Path, project: &Path) -> Result<String, EngineError> {
+    object_id(&run(
+        git.container(),
+        project_git(git, home, project).args(["rev-parse", "--verify", "-q", "HEAD"]),
+    )?)
 }
 
 /// The object id a git command printed on its one line: 40 or 64 hex digits. Input: the
@@ -1763,7 +1874,7 @@ fn object_id(output: &Output) -> Result<String, EngineError> {
 /// Output: true when `.github/workflows` is in it, `github_publish_not_plain_repo`, or
 /// `github_publish_failed`.
 pub(super) fn has_workflows(
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     commit: &str,
@@ -1774,13 +1885,16 @@ pub(super) fn has_workflows(
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
     }
-    let listed = run(project_git(git, home, project).args([
-        "ls-tree",
-        "--name-only",
-        commit,
-        "--",
-        ".github/workflows",
-    ]))?;
+    let listed = run(
+        git.container(),
+        project_git(git, home, project).args([
+            "ls-tree",
+            "--name-only",
+            commit,
+            "--",
+            ".github/workflows",
+        ]),
+    )?;
     if !listed.status.success() {
         return Err(failure("github_publish_failed"));
     }
@@ -1801,7 +1915,7 @@ pub(super) fn has_workflows(
 pub(super) fn push(
     endpoints: &super::Endpoints,
     helper: &str,
-    git: &Path,
+    git: &PublishGit,
     home: &Path,
     project: &Path,
     full_name: &str,
@@ -1832,17 +1946,19 @@ pub(super) fn push(
     alternates.push(b'\n');
     let stage = home.join(STAGE);
     let reference = format!("refs/heads/{branch}");
-    let mut init = clone::git_command(git, home);
+    let mut init = clone::git_command(git.program(), home);
     init.args(git_safe())
         .args(["init", "--bare", "-q", "--template="]);
     if commit.len() == 64 {
         init.arg("--object-format=sha256");
     }
-    let made = run(init
-        .arg("--")
-        .arg(&stage)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null()))?;
+    let made = run(
+        None,
+        init.arg("--")
+            .arg(&stage)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
     if !made.status.success() {
         return Err(failed());
     }
@@ -1850,17 +1966,20 @@ pub(super) fn push(
     std::fs::create_dir_all(&info)
         .and_then(|()| std::fs::write(info.join("alternates"), &alternates))
         .map_err(|_| failed())?;
-    let staged = run(clone::git_command(git, home)
-        .env("GIT_DIR", &stage)
-        .args(git_safe())
-        .args(["update-ref", reference.as_str(), commit.as_str()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null()))?;
+    let staged = run(
+        None,
+        clone::git_command(git.program(), home)
+            .env("GIT_DIR", &stage)
+            .args(git_safe())
+            .args(["update-ref", reference.as_str(), commit.as_str()])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
     if !staged.status.success() {
         return Err(failed());
     }
     clone::finish(
-        clone::credential_git(git, home, helper, scheme)
+        clone::credential_git(git.program(), home, helper, scheme)
             .env("GIT_DIR", &stage)
             .args(["push", "--quiet", "--no-verify", "--"])
             .arg(remote.as_str())
@@ -1873,11 +1992,10 @@ pub(super) fn push(
         "github_publish_push_timed_out",
     )?;
     let tracking = format!("refs/remotes/origin/{branch}");
-    let tracked = run(project_git(git, home, project).args([
-        "update-ref",
-        tracking.as_str(),
-        commit.as_str(),
-    ]))?;
+    let tracked = run(
+        git.container(),
+        project_git(git, home, project).args(["update-ref", tracking.as_str(), commit.as_str()]),
+    )?;
     if !tracked.status.success() {
         return Err(failed());
     }
@@ -1888,22 +2006,28 @@ pub(super) fn push(
         (format!("branch.{branch}.merge"), reference.as_str()),
     ];
     for (key, value) in &settings {
-        let set = run(clone::git_command(git, home)
-            .args(["config", "--file"])
-            .arg(&config)
-            .args(["--replace-all", key.as_str(), *value])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null()))?;
+        let set = run(
+            None,
+            clone::git_command(git.program(), home)
+                .args(["config", "--file"])
+                .arg(&config)
+                .args(["--replace-all", key.as_str(), *value])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null()),
+        )?;
         if !set.status.success() {
             return Err(failed());
         }
     }
-    let origin = run(clone::git_command(git, home)
-        .args(["config", "--file"])
-        .arg(&config)
-        .args(["--no-includes", "--get-all", "remote.origin.url"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null()))?;
+    let origin = run(
+        None,
+        clone::git_command(git.program(), home)
+            .args(["config", "--file"])
+            .arg(&config)
+            .args(["--no-includes", "--get-all", "remote.origin.url"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null()),
+    )?;
     if origin.stdout != format!("{remote}\n").as_bytes() {
         return Err(failed());
     }

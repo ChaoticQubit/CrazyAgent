@@ -16,7 +16,7 @@ const SHAPES: [&str; 5] = [
 /// Inputs: the folder and the arguments. Output: its standard output.
 fn owner_git(folder: &Path, args: &[&str]) -> String {
     let output = crate::spawn_gate::collected(
-        Command::new(git().unwrap())
+        Command::new(git().unwrap().program())
             .args(args)
             .current_dir(folder)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -152,7 +152,7 @@ fn every_windows_publish_step_refuses_a_git_folder_that_points_elsewhere() {
         let (git, home, folder) = (git().unwrap(), made.home.path(), made.path());
         let local = inspect(&git, home, &folder, HOST).unwrap();
         let head = made.head();
-        assert!(configured_author(&git, made.owner_home.path(), &folder).is_some());
+        assert!(configured_author(&git, made.owner_home.path(), home, &folder).is_some());
         made.plant(shape);
         let refusal = "github_publish_not_plain_repo";
         wrong.extend(mismatch(
@@ -197,7 +197,7 @@ fn every_windows_publish_step_refuses_a_git_folder_that_points_elsewhere() {
             refusal,
             &format!("{shape} workflows"),
         ));
-        if configured_author(&git, made.owner_home.path(), &folder).is_some() {
+        if configured_author(&git, made.owner_home.path(), home, &folder).is_some() {
             wrong.push(format!("{shape} author: still read"));
         }
     }
@@ -300,4 +300,147 @@ fn a_windows_publish_opens_no_file_the_repository_config_names_outside_the_tree(
             "{set}: {args:?}"
         );
     }
+}
+
+const CONTAINED_STEPS: [&str; 6] = [
+    "inspect",
+    "prepare",
+    "secrets",
+    "commit",
+    "workflows",
+    "author",
+];
+
+/// The project's folder in the form owner git's boundary holds it, the canonical one, which
+/// a contained command's folder must start with. Input: the project. Output: the folder.
+fn contained_folder(made: &Project) -> PathBuf {
+    crate::sandbox::canonical(&made.path()).unwrap()
+}
+
+/// Installs owner git for `made`, owned by the runner user, and gives the git that runs
+/// every project command in its container. Inputs: the project and its canonical folder.
+/// Output: the routed git.
+fn routed(made: &Project, folder: &Path) -> PublishGit {
+    use crate::sandbox::windows::owner_git::farm;
+    farm::own(folder);
+    let owner = farm::installed(made.place.path(), folder, git().unwrap().program());
+    PublishGit::contained(Arc::new(owner))
+}
+
+/// Runs one publish step for `made` through `git`, its answer dropped: the share-stop row
+/// reads the server session, not what the step returned. Inputs: the step, one of
+/// [`CONTAINED_STEPS`], the routed git, the project, its folder, its state and its head.
+fn ran_step(
+    step: &str,
+    git: &PublishGit,
+    made: &Project,
+    folder: &Path,
+    local: &GitHubLocal,
+    head: &str,
+) {
+    let home = made.home.path();
+    let ada = Author {
+        name: "Ada".into(),
+        email: "ada@example.invalid".into(),
+    };
+    let choices = GitHubPrepare {
+        private: true,
+        docs: false,
+        approved: Vec::new(),
+        rules: GitHubRule::defaults(),
+    };
+    match step {
+        "inspect" => drop(inspect(git, home, folder, HOST)),
+        "prepare" => drop(prepare(git, home, folder, local, &choices)),
+        "secrets" => drop(secret_findings(git, home, folder, GitHubHistory::Empty)),
+        "commit" => drop(commit(git, home, folder, &[], &ada)),
+        "workflows" => drop(has_workflows(git, home, folder, head)),
+        "author" => drop(configured_author(git, made.owner_home.path(), home, folder)),
+        _ => panic!("unknown step {step}"),
+    }
+}
+
+#[test]
+#[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
+fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_check() {
+    use crate::sandbox::windows::owner_git::farm;
+    let mut reached = Vec::new();
+    for (shape, _) in farm::SHAPES {
+        for step in CONTAINED_STEPS {
+            let made = project();
+            let folder = contained_folder(&made);
+            let git = routed(&made, &folder);
+            let local = inspect(&git, made.home.path(), &folder, HOST).unwrap();
+            let head = made.head();
+            farm::reset_sessions();
+            if shape == "nested" {
+                farm::plant(&folder, shape);
+            } else {
+                let planted = folder.clone();
+                BEFORE_SPAWN.with(|next| {
+                    *next.borrow_mut() = Some(Box::new(move || farm::plant(&planted, shape)));
+                });
+            }
+            ran_step(step, &git, &made, &folder, &local, &head);
+            BEFORE_SPAWN.with(|next| *next.borrow_mut() = None);
+            if farm::server_session() {
+                reached.push(format!("{shape} {step}"));
+            }
+        }
+    }
+    assert!(
+        reached.is_empty(),
+        "a server session after contained publish steps: {}",
+        reached.join(", ")
+    );
+}
+
+#[test]
+#[ignore = "needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
+fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first() {
+    let made = project();
+    let folder = contained_folder(&made);
+    let home = made.home.path();
+    std::fs::write(folder.join("notes.txt"), "new").unwrap();
+    std::fs::write(
+        made.owner_home.path().join(".gitconfig"),
+        "[include]\n\tpath = identity.gitconfig\n",
+    )
+    .unwrap();
+    std::fs::write(
+        made.owner_home.path().join("identity.gitconfig"),
+        "[user]\n\tname = Global\n\temail = global@example.invalid\n",
+    )
+    .unwrap();
+    let git = routed(&made, &folder);
+    let before = made.head();
+    inspect(&git, home, &folder, HOST).unwrap();
+    let author = configured_author(&git, made.owner_home.path(), home, &folder).unwrap();
+    assert_eq!(
+        author,
+        Author {
+            name: "Owner".into(),
+            email: "owner@example.invalid".into(),
+        },
+        "the project's own identity wins over the owner's global one"
+    );
+    let committed = commit(&git, home, &folder, &[], &author).unwrap();
+    assert_ne!(
+        committed.commit, before,
+        "the contained commit moved the branch"
+    );
+    let tree = owner_git(&folder, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(
+        tree.lines().any(|path| path == "notes.txt"),
+        "tree {tree:?}"
+    );
+    owner_git(&folder, &["config", "--unset", "user.name"]);
+    owner_git(&folder, &["config", "--unset", "user.email"]);
+    assert_eq!(
+        configured_author(&git, made.owner_home.path(), home, &folder)
+            .unwrap()
+            .name,
+        "Global",
+        "with no project identity the owner's global config gives it, through its include"
+    );
 }
