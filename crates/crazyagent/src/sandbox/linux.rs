@@ -2200,10 +2200,11 @@ type KeptHost = Mutex<Option<(Instant, super::LinuxHost)>>;
 /// marks unsupervised ([`forget_supervisor`]).
 static HOST_READ: KeptHost = Mutex::new(None);
 
-/// [`read_host`] for the helper beside this executable and the engine's data folder, read
-/// again once what is kept is older than `age_max`, or with no age only when nothing is
-/// kept. The lock is not held while the helper runs, so a reader of what is kept never
-/// waits on it. Input: the age. Output: the facts, each false when it cannot be asked.
+/// [`read_host`] for the helper launches take ([`helper_beside_engine`]) and the engine's
+/// data folder, read again once what is kept is older than `age_max`, or with no age only
+/// when nothing is kept. The lock is not held while the helper runs, so a reader of what is
+/// kept never waits on it. Input: the age. Output: the facts, each false when it cannot be
+/// asked.
 fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
@@ -2211,7 +2212,7 @@ fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     {
         return host;
     }
-    let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
+    let helper = helper_beside_engine();
     let host = read_host(&helper.unwrap_or_default(), crate::tools::engine_root());
     *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
     host

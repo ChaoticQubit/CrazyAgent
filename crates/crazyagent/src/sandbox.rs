@@ -1273,8 +1273,8 @@ impl LinuxHost {
     }
 }
 
-/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
-/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
+/// launches take, again once what is kept is a minute old. No input. Output: none on
 /// another system; on Linux the facts, each false when it cannot be read, so its gap line
 /// is shown.
 pub fn linux_host() -> Option<LinuxHost> {
