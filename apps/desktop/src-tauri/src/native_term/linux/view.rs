@@ -271,17 +271,18 @@ impl Pointer {
 
     /// Routes a button press: the left button presses with a click count and takes focus,
     /// the right opens the menu, the middle pastes PRIMARY, others are held without
-    /// events. Inputs: the button, the point, the event time in ms, whether Alt is held,
+    /// events. Inputs: the button, the point, the event time in ms, GDK's modifier state,
     /// whether the view is covered and the double-click limits. Output: the route.
     pub fn press(
         &mut self,
         button: u32,
         at: (f64, f64),
         time: u32,
-        option: bool,
+        state: ModifierType,
         covered: bool,
         double: DoubleClick,
     ) -> Route {
+        let option = state.contains(ModifierType::MOD1_MASK);
         if self.pressing.is_some() {
             return Route::View {
                 focus: false,
@@ -673,15 +674,14 @@ impl Inner {
             return Propagation::Proceed;
         };
         let covered = self.focus.get().is_covered();
-        let option = event
-            .state()
-            .is_some_and(|state| state.contains(ModifierType::MOD1_MASK));
+        let state = event.state().unwrap_or(ModifierType::empty());
+        let option = state.contains(ModifierType::MOD1_MASK);
         let button = event.button().unwrap_or(0);
         let route = {
             let mut pointer = self.pointer.borrow_mut();
             match kind {
                 EventType::ButtonPress => {
-                    pointer.press(button, at, event.time(), option, covered, self.double)
+                    pointer.press(button, at, event.time(), state, covered, self.double)
                 }
                 EventType::DoubleButtonPress | EventType::TripleButtonPress => pointer.repeat(),
                 EventType::ButtonRelease => pointer.release(button, at, option),
@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     fn left(pointer: &mut Pointer, at: (f64, f64), time: u32) -> Route {
-        let route = pointer.press(1, at, time, false, false, DOUBLE);
+        let route = pointer.press(1, at, time, ModifierType::empty(), false, DOUBLE);
         assert!(matches!(pointer.release(1, at, false), Route::View { .. }));
         route
     }
@@ -1105,7 +1105,14 @@ mod tests {
     fn a_press_inside_the_uncovered_rect_takes_focus_and_counts_clicks() {
         let mut pointer = placed();
         assert_eq!(
-            pointer.press(1, (110.0, 130.0), 1_000, false, false, DOUBLE),
+            pointer.press(
+                1,
+                (110.0, 130.0),
+                1_000,
+                ModifierType::empty(),
+                false,
+                DOUBLE
+            ),
             view(true, mouse(MouseKind::Press, (10.0, 10.0), 1))
         );
         assert_eq!(
@@ -1125,7 +1132,14 @@ mod tests {
             view(true, mouse(MouseKind::Press, (12.0, 11.0), 3))
         );
         assert_eq!(
-            pointer.press(1, (499.0, 359.0), 9_000, true, false, DOUBLE),
+            pointer.press(
+                1,
+                (499.0, 359.0),
+                9_000,
+                ModifierType::MOD1_MASK,
+                false,
+                DOUBLE
+            ),
             view(
                 true,
                 Some(ViewEvent::Mouse {
@@ -1142,7 +1156,7 @@ mod tests {
     fn a_press_outside_the_rect_on_a_covered_view_or_before_placing_goes_to_the_page() {
         let mut unplaced = Pointer::new();
         assert_eq!(
-            unplaced.press(1, (110.0, 130.0), 0, false, false, DOUBLE),
+            unplaced.press(1, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             Route::Page
         );
         assert_eq!(
@@ -1157,7 +1171,7 @@ mod tests {
             (110.0, 360.0),
         ] {
             assert_eq!(
-                pointer.press(1, outside, 0, false, false, DOUBLE),
+                pointer.press(1, outside, 0, ModifierType::empty(), false, DOUBLE),
                 Route::Page
             );
             assert_eq!(pointer.release(1, outside, false), Route::Page);
@@ -1166,7 +1180,14 @@ mod tests {
         assert_eq!(pointer.motion((110.0, 130.0), false), Route::Page);
         for button in [1, 2, 3] {
             assert_eq!(
-                pointer.press(button, (110.0, 130.0), 0, false, true, DOUBLE),
+                pointer.press(
+                    button,
+                    (110.0, 130.0),
+                    0,
+                    ModifierType::empty(),
+                    true,
+                    DOUBLE
+                ),
                 Route::Page
             );
         }
@@ -1176,15 +1197,59 @@ mod tests {
         );
         pointer.place(None);
         assert_eq!(
-            pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(1, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             Route::Page
+        );
+    }
+
+    #[test]
+    fn a_press_while_another_button_is_down_goes_to_the_page() {
+        let mut pointer = placed();
+        let inside = (110.0, 130.0);
+        let left_down = ModifierType::BUTTON1_MASK;
+        assert_eq!(
+            pointer.press(3, inside, 0, left_down, false, DOUBLE),
+            Route::Page,
+            "a press while the page holds the left button stays the page's"
+        );
+        assert_eq!(
+            pointer.release(1, inside, false),
+            Route::Page,
+            "so the page gets its left release"
+        );
+        assert_eq!(pointer.release(3, inside, false), Route::Page);
+        assert_eq!(
+            pointer.press(1, inside, 0, left_down, false, DOUBLE),
+            view(true, mouse(MouseKind::Press, (10.0, 10.0), 1)),
+            "a press's own button in its state is no other button"
+        );
+        assert_eq!(
+            pointer.release(1, inside, false),
+            view(false, mouse(MouseKind::Release, (10.0, 10.0), 1))
+        );
+        let mut first = placed();
+        let mut second = placed();
+        assert!(matches!(
+            first.press(1, inside, 0, ModifierType::empty(), false, DOUBLE),
+            Route::View { .. }
+        ));
+        assert_eq!(
+            second.press(3, inside, 0, left_down, false, DOUBLE),
+            Route::Page,
+            "a second view starts no press while the first holds one"
+        );
+        assert_eq!(second.release(1, inside, false), Route::Page);
+        assert_eq!(
+            first.release(1, inside, false),
+            view(false, mouse(MouseKind::Release, (10.0, 10.0), 1)),
+            "the first view gets its release"
         );
     }
 
     #[test]
     fn a_left_drag_follows_the_pointer_outside_the_rect_until_release() {
         let mut pointer = placed();
-        pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE);
+        pointer.press(1, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE);
         assert_eq!(
             pointer.motion((50.0, 400.0), false),
             view(false, mouse(MouseKind::Drag, (-50.0, 280.0), 1))
@@ -1200,7 +1265,7 @@ mod tests {
     fn the_right_button_opens_the_menu_and_other_buttons_are_held_without_events() {
         let mut pointer = placed();
         assert_eq!(
-            pointer.press(3, (110.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(3, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             view(
                 false,
                 Some(ViewEvent::Menu {
@@ -1210,14 +1275,14 @@ mod tests {
         );
         assert_eq!(pointer.motion((120.0, 140.0), false), view(false, None));
         assert_eq!(
-            pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(1, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             view(false, None)
         );
         assert_eq!(pointer.release(1, (110.0, 130.0), false), view(false, None));
         assert_eq!(pointer.release(3, (110.0, 130.0), false), view(false, None));
         assert_eq!(pointer.motion((110.0, 130.0), false), Route::Page);
         assert_eq!(
-            pointer.press(8, (110.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(8, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             view(false, None)
         );
         assert_eq!(pointer.release(8, (110.0, 130.0), false), view(false, None));
@@ -1227,17 +1292,17 @@ mod tests {
     fn a_middle_press_inside_reads_primary_and_is_held_until_release() {
         let mut pointer = placed();
         assert_eq!(
-            pointer.press(2, (110.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(2, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             Route::Primary
         );
         assert_eq!(pointer.motion((120.0, 140.0), false), view(false, None));
         assert_eq!(pointer.release(2, (120.0, 140.0), false), view(false, None));
         assert_eq!(
-            pointer.press(2, (99.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(2, (99.0, 130.0), 0, ModifierType::empty(), false, DOUBLE),
             Route::Page
         );
         assert_eq!(
-            pointer.press(2, (110.0, 130.0), 0, false, true, DOUBLE),
+            pointer.press(2, (110.0, 130.0), 0, ModifierType::empty(), true, DOUBLE),
             Route::Page
         );
     }
@@ -1260,7 +1325,7 @@ mod tests {
     #[test]
     fn a_cover_during_a_press_leaves_the_rest_of_it_to_the_page() {
         let mut pointer = placed();
-        pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE);
+        pointer.press(1, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE);
         pointer.cover();
         assert_eq!(pointer.motion((120.0, 140.0), false), Route::Page);
         assert_eq!(pointer.release(1, (120.0, 140.0), false), Route::Page);
@@ -1355,7 +1420,7 @@ mod tests {
             1
         );
         assert_eq!(clicks(left(&mut pointer, (116.0, 134.0), 50)), 2);
-        pointer.press(3, (116.0, 134.0), 100, false, false, DOUBLE);
+        pointer.press(3, (116.0, 134.0), 100, ModifierType::empty(), false, DOUBLE);
         pointer.release(3, (116.0, 134.0), false);
         assert_eq!(clicks(left(&mut pointer, (116.0, 134.0), 150)), 1);
     }
