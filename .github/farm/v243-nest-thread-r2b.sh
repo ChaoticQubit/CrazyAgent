@@ -11,8 +11,8 @@ uname -r
 grep -E '^VERSION=' /etc/os-release
 bwrap --version
 git log --oneline -2
-if [ "$(git rev-parse --short=9 HEAD~2)" != "$tip" ]; then
-  row tip "HEAD~2 $tip" "$(git rev-parse --short=9 HEAD~2)"
+if [ "$(git rev-parse --short=9 HEAD~3)" != "$tip" ]; then
+  row tip "HEAD~3 $tip" "$(git rev-parse --short=9 HEAD~3)"
   exit 1
 fi
 judge() {
@@ -30,7 +30,13 @@ judge() {
     failed=1
   fi
 }
-cargo test -p crazyagent --lib --test linux_sandbox --locked --no-run 2>&1 | tail -3
+free -m
+nproc
+( while sleep 15; do echo "mem $(date -u +%T) $(free -m | awk '/^Mem:/ {print "used " $3 " of " $2 ", available " $7}')"; done ) &
+sampler=$!
+cargo test -p crazyagent --lib --locked --no-run 2>&1 | tail -3
+cargo test -p crazyagent --test linux_sandbox --locked --no-run 2>&1 | tail -3
+kill "$sampler" 2>/dev/null
 for run in 1 2 3 4 5; do
   started=$(date +%s)
   cargo test -p crazyagent --test linux_sandbox --locked -- "$engine" --exact > "$RUNNER_TEMP/engine-$run.txt" 2>&1

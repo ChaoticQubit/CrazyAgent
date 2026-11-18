@@ -65,7 +65,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 3
+          fetch-depth: 4
       - name: Install Linux build packages
         timeout-minutes: 10
         run: bash scripts/ci/linux-packages.sh
@@ -86,3 +86,11 @@ jobs:
         run: |
           cp .github/farm/v243-nest-thread-r2b.sh "$RUNNER_TEMP/v243-nest-thread-r2b.sh"
           bash "$RUNNER_TEMP/v243-nest-thread-r2b.sh"
+      - name: Kernel log and memory after the run
+        if: always()
+        run: |
+          free -m
+          sudo dmesg | grep -iE "oom|killed process|out of memory" | tail -20
+          sudo dmesg | tail -40
+          systemctl is-active systemd-oomd || true
+          journalctl -u systemd-oomd --no-pager -n 20 2>/dev/null || true
