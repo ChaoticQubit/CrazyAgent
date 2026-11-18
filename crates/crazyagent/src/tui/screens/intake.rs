@@ -284,8 +284,11 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "github_publish_in_progress" => {
             "This project already has a publish. Finish or discard it first."
         }
+        "github_publish_nested_repository" => {
+            "A folder in the project holds a git repository of its own, such as a submodule, so CrazyAgent won't publish this project. Move that repository out of the project, then try again."
+        }
         "github_publish_not_plain_repo" => {
-            "The project's .git is a link or a file, not a plain folder, so CrazyAgent won't publish it."
+            "The project's .git is a link or a file, or points git at another place, so CrazyAgent won't publish it."
         }
         "github_publish_not_started" => {
             "This project has no publish to go on with. Start it again."
@@ -313,6 +316,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         }
         "github_publish_too_large" => {
             "This project is too large to publish from CrazyAgent: over 20,000 files or 200 MB."
+        }
+        "github_publish_tree_too_large" => {
+            "The project folder holds over 2,000,000 files and folders, ignored ones too, more than CrazyAgent checks before it publishes."
         }
         "github_publish_unavailable" => "Publishing on GitHub can't be used right now. Try again.",
         "github_publish_workflow_scope" => {
@@ -427,6 +433,30 @@ mod tests {
         .map(|warning| (key(warning), warning.text()))
         .collect();
         assert_eq!(tui, desktop);
+    }
+
+    #[test]
+    fn the_publish_judge_refusals_read_the_same_in_the_tui_and_the_desktop() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src/api-intake.ts"
+        ))
+        .unwrap();
+        for code in [
+            "github_publish_nested_repository",
+            "github_publish_not_plain_repo",
+            "github_publish_tree_too_large",
+        ] {
+            let text = known(code).unwrap_or_else(|| panic!("{code} has no TUI sentence"));
+            assert!(
+                source.contains(&format!("  {code}: \"{text}\",\n")),
+                "{code}: the desktop words differ from {text:?}"
+            );
+            assert!(
+                !text.contains('_') && text.ends_with('.'),
+                "{code} shows {text}"
+            );
+        }
     }
 
     #[test]
