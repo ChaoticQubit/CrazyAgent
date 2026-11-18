@@ -78,8 +78,15 @@ pub struct Surface {
 /// bottom of its cells. Inputs: the marked cells, the cell size and the line height in
 /// pixels. Output: x, y, width and height in pixels.
 fn preedit_rect(preedit: Preedit, cell: (f32, f32), line: f32) -> [f32; 4] {
-    let _ = (preedit, cell, line);
-    [0.0; 4]
+    let (cw, ch) = cell;
+    assert!(cw > 0.0);
+    assert!(ch > 0.0);
+    assert!(line >= 1.0);
+    assert!(line <= ch);
+    assert!(preedit.cells > 0);
+    let x = preedit.column as f32 * cw;
+    let y = (preedit.row + 1) as f32 * ch - line;
+    [x, y, preedit.cells as f32 * cw, line]
 }
 
 fn linear(channel: u8) -> f64 {
@@ -517,6 +524,12 @@ impl Shared {
             let y = fill.row as f32 * ch;
             out.extend_from_slice(&[x, y, fill.width as f32 * cw, ch]);
             out.extend_from_slice(&linear_rgba(fill.color, 1.0));
+        }
+        assert!(frame.preedit.is_none() || frame.cursor.is_none());
+        if let Some(preedit) = frame.preedit {
+            let line = self.scale.round().max(1.0);
+            out.extend_from_slice(&preedit_rect(preedit, self.cell, line));
+            out.extend_from_slice(&linear_rgba(self.theme.foreground, 1.0));
         }
         for rect in frame
             .cursor
