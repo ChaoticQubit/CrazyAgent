@@ -1093,9 +1093,9 @@ fn remove_home_below(
 /// folder this user can list: one that opens but will not list, as reopening it as `.` the
 /// way [`rustix::fs::Dir::read_from`] does needs search on it, counts as one that stopped
 /// (code r1 F2 ds137-reset-walk). An open that stops on an entry that is still a folder
-/// clears its immutable and append-only flags ([`unpin_home_entry`]), gives this user rwx on
-/// it ([`open_up`]) and clears its ACL ([`release_home_acls`]), each through the parent's
-/// handle by name, then opens it once more. Inputs: the parent handle and the name.
+/// clears its flags ([`unpin_home_entry`]), opens it up ([`open_up`]) and clears its ACL
+/// ([`release_home_acls`]) through the parent's handle by name, then opens it once more and
+/// gives this user rwx through that folder handle. Inputs: the parent handle and the name.
 /// Output: the folder, None once the name is gone or names no folder, or the error.
 #[cfg(unix)]
 pub(crate) fn open_home_folder(
@@ -1126,6 +1126,9 @@ pub(crate) fn open_home_folder(
     let _ = open_up(parent, name);
     release_home_acls(parent, &[name]);
     let reopened = open();
+    if let Ok(opened) = &reopened {
+        let _ = rustix::fs::fchmod(opened, Mode::RWXU);
+    }
     if reopened.is_err() && !folder()? {
         return Ok(None);
     }
@@ -1703,10 +1706,10 @@ fn stuck_clear(
 }
 
 /// Gives this user rwx on the folder `name` under `parent` without following a link. Linux
-/// `fchmodat` cannot refuse a link, so there the folder is pinned by an `O_PATH` handle that
-/// refuses a link and changed through `/proc/self/fd/<n>` of that handle; elsewhere
-/// `chmodat` refuses the link itself. Inputs: the parent handle and the name. Output: Ok,
-/// or the error that left the folder as it was.
+/// `fchmodat` cannot refuse a link, so the folder is pinned by an `O_PATH` handle that
+/// refuses a link and anything but a folder, and changed through `/proc/self/fd/<n>` of that
+/// handle. Inputs: the parent handle and the name. Output: Ok, or the error that left the
+/// folder as it was.
 #[cfg(target_os = "linux")]
 fn open_up<P: rustix::path::Arg>(
     parent: impl std::os::fd::AsFd,
@@ -1726,20 +1729,93 @@ fn open_up<P: rustix::path::Arg>(
     )
 }
 
-/// Gives this user rwx on the folder `name` under `parent` without following a link, through
-/// `chmodat` with `AT_SYMLINK_NOFOLLOW`. Inputs: the parent handle and the name. Output: Ok,
-/// or the error that left the folder as it was.
+/// Gives this user read and search, never write, on `name` under `parent` once a look through
+/// the parent's handle that never follows a link shows a folder, first clearing an ACL of
+/// the entry that refuses that look ([`clear_refused_acl`]). A hard link to an owner file
+/// swapped in after the look gains no write (#571 sec F1); the caller adds write through a
+/// folder handle. Inputs: the parent handle and the name. Output: Ok, `ENOTDIR`, or the error.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn open_up<P: rustix::path::Arg>(
+fn open_up<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
     name: P,
 ) -> rustix::io::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode};
+    #[cfg(all(test, target_os = "macos"))]
+    open_up_step(OpenUpPoint::Start, &name);
+    let found = match rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::ACCESS) => {
+            clear_refused_acl(parent.as_fd(), name)?;
+            rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?
+        }
+        found => found?,
+    };
+    if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
+        return Err(rustix::io::Errno::NOTDIR);
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    open_up_step(OpenUpPoint::BeforeMode, &name);
     rustix::fs::chmodat(
         parent,
         name,
-        rustix::fs::Mode::RWXU,
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        Mode::RUSR | Mode::XUSR,
+        AtFlags::SYMLINK_NOFOLLOW,
     )
+}
+
+/// Clears the whole ACL of the entry `name` under `parent` by that name, never following a
+/// link, for a look there that a deny entry an agent set refused (#611 code F1). The callers
+/// of [`open_up`] name an entry they listed or looked at as a folder, so a swap after that
+/// read is the residual [`AclClears`] names. Inputs: the parent and the name. Output: Ok,
+/// `EACCES` for a name of more than one part, or the system's error.
+#[cfg(target_os = "macos")]
+fn clear_refused_acl<P: rustix::path::Arg>(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: P,
+) -> rustix::io::Result<()> {
+    let named = name.as_cow_c_str()?;
+    if !plain_name(&named) {
+        return Err(rustix::io::Errno::ACCESS);
+    }
+    crazyagent_macos_fs::clear_acl_at(parent, &named).map_err(|error| {
+        rustix::io::Errno::from_io_error(&error).unwrap_or(rustix::io::Errno::ACCESS)
+    })
+}
+
+/// Clears no ACL where no deny entry an agent may set refuses a look. Inputs: unused.
+/// Output: `EACCES`.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn clear_refused_acl<P: rustix::path::Arg>(
+    _: std::os::fd::BorrowedFd<'_>,
+    _: P,
+) -> rustix::io::Result<()> {
+    Err(rustix::io::Errno::ACCESS)
+}
+
+/// Where in [`open_up`] a cleanup test's step ([`OPEN_UP_STEP`]) runs: as it starts, or
+/// just before it changes the entry's mode.
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OpenUpPoint {
+    Start,
+    BeforeMode,
+}
+
+/// Runs the step a cleanup test set in [`OPEN_UP_STEP`] for this point and entry name, once.
+/// Inputs: the point and the name [`open_up`] was given. Output: none.
+#[cfg(all(test, target_os = "macos"))]
+fn open_up_step<P: rustix::path::Arg>(point: OpenUpPoint, name: &P) {
+    let Ok(named) = name.as_cow_c_str() else {
+        return;
+    };
+    let step = OPEN_UP_STEP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let due =
+            matches!(&*slot, Some((at, entry, _)) if *at == point && entry.as_c_str() == &*named);
+        if due { slot.take() } else { None }
+    });
+    if let Some((_, _, step)) = step {
+        step();
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1770,7 +1846,18 @@ thread_local! {
     /// None runs nothing.
     pub(super) static BEFORE_ACL_CLEAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// A step a cleanup test runs in [`open_up`] at one point for the entry of one name,
+    /// standing in for a process an agent left that swaps a listed folder for a link to the
+    /// owner's file meanwhile. Runs once; None runs nothing.
+    pub(super) static OPEN_UP_STEP: std::cell::RefCell<Option<OpenUpStep>> =
+        const { std::cell::RefCell::new(None) };
 }
+
+/// A step a cleanup test runs in [`open_up`] ([`OPEN_UP_STEP`]): where, for which entry
+/// name, and what it does.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) type OpenUpStep = (OpenUpPoint, std::ffi::CString, Box<dyn FnOnce()>);
 
 /// Clears the immutable and append-only flags, which an agent may set on what it owns, from
 /// one entry of this user that is not a link, keeping every other flag (T8 r1 L3). The

@@ -19,7 +19,7 @@ use seccompiler::{
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, RawFd};
@@ -39,6 +39,33 @@ pub use egress::{NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED,
 
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
+
+/// The Landlock helper for the engine executable at `engine`: the one beside it. Only in a
+/// debug build, an executable whose own folder is cargo's `deps`, as a test binary's is, with
+/// no helper beside it takes cargo's build one folder up, the one candidate, and logs it.
+/// Input: the executable's absolute path. Output: the helper's path.
+pub fn helper_for(engine: &Path) -> PathBuf {
+    assert!(engine.is_absolute());
+    let beside = engine.with_file_name(HELPER_NAME);
+    #[cfg(debug_assertions)]
+    if let Some(built) = engine
+        .parent()
+        .filter(|folder| folder.file_name() == Some(OsStr::new("deps")))
+        .map(|deps| deps.with_file_name(HELPER_NAME))
+        && !beside.is_file()
+        && built.is_file()
+    {
+        eprintln!("linux_helper_cargo_build: {}", built.display());
+        return built;
+    }
+    beside
+}
+
+/// The Landlock helper for this engine, as [`helper_for`] picks it. Output: the path, or the
+/// error reading the engine's own executable path.
+pub fn helper_beside_engine() -> std::io::Result<PathBuf> {
+    Ok(helper_for(&std::env::current_exe()?))
+}
 
 /// Fixed places a distribution installs bubblewrap. It is never looked up through `PATH`.
 pub const BWRAP_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
@@ -118,9 +145,17 @@ pub const NEST_ARGS: [&str; 10] = [
     "/proc",
 ];
 const RESOLVER_ROOT: &str = "/run/systemd/resolve";
-const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
-     or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
-     sockets, is missing; reinstall CrazyAgent";
+const HELPER_MISSING: &str = "CrazyAgent's sandbox helper is missing, and no Linux agent \
+     starts without it; reinstall CrazyAgent.";
+/// How the helper says the kernel holds the ruleset only in part or not at all, the one probe
+/// failure a kernel refusal names ([`probe_refusal`]).
+const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
+/// How a refusal starts when the probe failed for any reason but the kernel's answer.
+const PROBE_FAILED: &str = "the sandbox check failed";
+/// The most bytes of the probe's own reason a refusal carries.
+const PROBE_REASON_MAX: usize = 200;
+/// The most bytes of a failed probe's stderr that are read and logged ([`probe_said`]).
+const PROBE_SAID_MAX: usize = 4096;
 /// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's
 /// own nest probe failed (rv-sa241 SBX-2-R2 LOW-1), so no agent runs on the shared network
 /// with Landlock rules alone while the Agent access page says it is nested.
@@ -1218,10 +1253,7 @@ fn hold(
     match enforce(policy, launch.is_some()) {
         Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
-            eprintln!(
-                "crazyagent-landlock: this kernel cannot hold the boundary ({:?})",
-                status.ruleset
-            );
+            eprintln!("crazyagent-landlock: {HOLD_REFUSED} ({:?})", status.ruleset);
             return ExitCode::from(3);
         }
         Err(error) => {
@@ -1674,13 +1706,18 @@ impl LinuxSandbox {
     /// Picks the backend as [`LinuxSandbox::detect`] does, with bubblewrap looked for only
     /// at `bwraps`, so a caller with none pins the plain Landlock backend. Inputs: the
     /// project policy, the helper executable and the bubblewrap places, in order. Output:
-    /// the sandbox, or `Unavailable` when no backend can hold it.
+    /// the sandbox, or `Unavailable` naming a missing helper, the kernel's answer or the
+    /// probe's own reason ([`probe_refusal`]) when no backend can hold it.
     pub fn detect_among(
         sandbox: ProjectSandbox,
         helper: &Path,
         bwraps: &[&Path],
     ) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
+        if !clean_absolute(helper) || !helper.is_file() {
+            eprintln!("linux_helper_missing: expected at {}", helper.display());
+            return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
+        }
         let mut probe = Command::new(helper);
         probe.arg(PROBE);
         let open = matches!(sandbox.network(), SandboxNetwork::Open);
@@ -1693,8 +1730,8 @@ impl LinuxSandbox {
             }
         }
         let flags: Vec<OsString> = probe.get_args().map(OsStr::to_os_string).collect();
-        let held = clean_absolute(helper) && helper.is_file() && passes(&mut probe);
-        if held {
+        let failed = probe_failure(&mut probe, &mut std::io::stderr());
+        if failed.is_none() {
             let helper = helper.to_path_buf();
             let nest = bwraps
                 .iter()
@@ -1728,13 +1765,15 @@ impl LinuxSandbox {
             assert!(detected.routed.is_none() || detected.sandbox.bridged_ports().is_none());
             return Ok(detected);
         }
+        let named = failed.and_then(|reason| probe_refusal(&reason));
         if open {
-            return Err(SandboxError::Unavailable(
-                LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into(),
-            ));
+            let reason = named.unwrap_or_else(|| LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into());
+            return Err(SandboxError::Unavailable(reason));
         }
-        if !clean_absolute(helper) || !helper.is_file() {
-            return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
+        let limited =
+            matches!(sandbox.network(), SandboxNetwork::Only(remotes) if !remotes.is_empty());
+        if let Some(reason) = named.as_ref().filter(|_| limited) {
+            return Err(SandboxError::Unavailable(reason.clone()));
         }
         match bwraps.iter().find(|path| path.is_file()) {
             Some(bwrap) => Self::new(
@@ -1744,11 +1783,11 @@ impl LinuxSandbox {
                     helper: helper.to_path_buf(),
                 },
             ),
-            None => Err(SandboxError::Unavailable(
+            None => Err(SandboxError::Unavailable(named.unwrap_or_else(|| {
                 "this Linux cannot fully enforce Landlock file rules (Linux 6.2 or newer) and \
                  has no bubblewrap; install bubblewrap"
-                    .into(),
-            )),
+                    .into()
+            }))),
         }
     }
 
@@ -1878,6 +1917,89 @@ fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> b
         );
     }
     held
+}
+
+/// Runs a probe ([`probe_said`]) and, when it failed, writes what it said to `log` as one
+/// line ([`probe_log`]). A log that cannot take the line is passed over, since the refusal
+/// still names the reason. Inputs: the probe command and the log, the engine's stderr.
+/// Output: none when it ran and exited 0, else its reason ([`probe_reason`]).
+fn probe_failure(probe: &mut Command, log: &mut impl Write) -> Option<String> {
+    let (said, ended) = probe_said(probe)?;
+    let flags: Vec<&OsStr> = probe.get_args().collect();
+    let _ = writeln!(log, "{}", probe_log(&flags, &ended, &said));
+    Some(probe_reason(&said, &ended))
+}
+
+/// Runs a probe with no environment and no input, keeping at most [`PROBE_SAID_MAX`] bytes of
+/// what it says on stderr. The pipe closes before the wait, so a probe that says more gets
+/// `EPIPE`, or `SIGPIPE` where it keeps that signal's default, and ends rather than blocking.
+/// Input: the probe command. Output: none when it ran and exited 0, else its stderr and how
+/// it ended.
+fn probe_said(probe: &mut Command) -> Option<(String, String)> {
+    let started = crate::spawn_gate::spawn(
+        probe
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let mut child = match started {
+        Ok(child) => child,
+        Err(error) => return Some((String::new(), error.to_string())),
+    };
+    let mut bytes = Vec::new();
+    let read = child
+        .stderr
+        .take()
+        .map(|pipe| pipe.take(PROBE_SAID_MAX as u64).read_to_end(&mut bytes));
+    let status = match child.wait() {
+        Ok(status) if status.success() => return None,
+        Ok(status) => status.to_string(),
+        Err(error) => error.to_string(),
+    };
+    let ended = match read {
+        Some(Err(error)) => format!("{status}, stderr unread: {error}"),
+        Some(Ok(_)) | None => status,
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let said = text[..text.floor_char_boundary(PROBE_SAID_MAX)].to_owned();
+    assert!(said.len() <= PROBE_SAID_MAX);
+    Some((said, ended))
+}
+
+/// The log line for a failed probe, naming its flags, how it ended and what it said on
+/// stderr, which is quoted with its control characters escaped so it stays one line. Inputs:
+/// the flags, how it ended and what it said. Output: the line, without its newline.
+fn probe_log(flags: &[&OsStr], ended: &str, said: &str) -> String {
+    format!("linux_probe_failed: {flags:?} {ended}: {said:?}")
+}
+
+/// The reason a refusal carries for a failed probe: the first line it said, or how it ended
+/// when that line is blank, with control characters dropped and cut to [`PROBE_REASON_MAX`]
+/// bytes on a character boundary. Inputs: its stderr and how it ended. Output: the reason.
+fn probe_reason(said: &str, ended: &str) -> String {
+    let clean = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
+    let first = clean(said.lines().next().unwrap_or_default());
+    let source = if first.trim().is_empty() {
+        clean(ended)
+    } else {
+        first
+    };
+    let mut cut = PROBE_REASON_MAX.min(source.len());
+    while !source.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    source[..cut].to_owned()
+}
+
+/// The refusal a failed probe names, unless the probe gave the kernel's answer that it holds
+/// the ruleset only in part or not at all, for which the kernel refusals stay. Input: the
+/// probe's reason ([`probe_reason`]). Output: the refusal, or none for the kernel's answer.
+fn probe_refusal(reason: &str) -> Option<String> {
+    let kernel = [RulesetStatus::PartiallyEnforced, RulesetStatus::NotEnforced]
+        .iter()
+        .any(|status| reason == format!("crazyagent-landlock: {HOLD_REFUSED} ({status:?})"));
+    (!kernel).then(|| format!("{PROBE_FAILED}: {reason}"))
 }
 
 /// Runs a probe with no environment and no input or output. Input: the probe command.
@@ -2173,10 +2295,11 @@ type KeptHost = Mutex<Option<(Instant, super::LinuxHost)>>;
 /// marks unsupervised ([`forget_supervisor`]).
 static HOST_READ: KeptHost = Mutex::new(None);
 
-/// [`read_host`] for the helper beside this executable and the engine's data folder, read
-/// again once what is kept is older than `age_max`, or with no age only when nothing is
-/// kept. The lock is not held while the helper runs, so a reader of what is kept never
-/// waits on it. Input: the age. Output: the facts, each false when it cannot be asked.
+/// [`read_host`] for the helper launches take ([`helper_beside_engine`]) and the engine's
+/// data folder, read again once what is kept is older than `age_max`, or with no age only
+/// when nothing is kept. The lock is not held while the helper runs, so a reader of what is
+/// kept never waits on it. Input: the age. Output: the facts, each false when it cannot be
+/// asked.
 fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
@@ -2184,7 +2307,7 @@ fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     {
         return host;
     }
-    let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
+    let helper = helper_beside_engine();
     let host = read_host(&helper.unwrap_or_default(), crate::tools::engine_root());
     *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
     host
@@ -3468,13 +3591,193 @@ mod tests {
         }
         let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
         assert!(LinuxSandbox::new(sandbox, backend()).is_ok());
-        let (_absent, sandbox) = project(SandboxNetwork::Open);
-        match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
-            Err(SandboxError::Unavailable(reason)) => {
-                assert_eq!(reason, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK);
-            }
-            other => panic!("an open network without the helper must be refused: {other:?}"),
+    }
+
+    /// The refusal a detection gives, for the rows that expect one. Input: the detection.
+    /// Output: its reason; a sandbox or another error fails the row.
+    fn refusal(detected: Result<LinuxSandbox, SandboxError>) -> String {
+        match detected {
+            Err(SandboxError::Unavailable(reason)) => reason,
+            other => panic!("a refusal was expected: {other:?}"),
         }
+    }
+
+    /// V243-LINUX-KEEP-FREE-REFUSAL-NAME: without the helper no agent starts on any network,
+    /// and the refusal says the helper is missing, not that the kernel is too old.
+    #[test]
+    fn no_agent_starts_without_the_helper_and_the_refusal_says_so() {
+        for network in [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+            SandboxNetwork::Only(Vec::new()),
+        ] {
+            let (_absent, sandbox) = project(network.clone());
+            let missing = Path::new("/nonexistent/crazyagent-landlock");
+            assert_eq!(
+                refusal(LinuxSandbox::detect(sandbox, missing)),
+                HELPER_MISSING,
+                "{network:?}"
+            );
+        }
+    }
+
+    /// V243-LINUX-KEEP-FREE-REFUSAL-NAME: a probe that says the kernel cannot hold the
+    /// boundary keeps the kernel refusals; any other failure is named, its first line cut to
+    /// 200 bytes with no control characters. A network with ports never widens to open; a
+    /// closed network keeps its bubblewrap fallback, and without bubblewrap names the reason.
+    #[test]
+    fn a_failed_probe_names_its_own_reason_and_only_an_enforcement_answer_names_the_kernel() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let bwrap = std::env::current_exe().unwrap();
+        let fake = |name: &str, said: &str| {
+            let path = root.join(name);
+            fs::write(&path, format!("#!/bin/sh\nprintf '{said}' >&2\nexit 3\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let detected = |helper: &Path, network: SandboxNetwork| {
+            let (_folders, sandbox) = project(network);
+            LinuxSandbox::detect_among(sandbox, helper, &[bwrap.as_path()])
+        };
+        let ports = || SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+        let falls_back = |helper: &Path| {
+            let closed = detected(helper, SandboxNetwork::Only(Vec::new()));
+            matches!(
+                closed.as_ref().map(LinuxSandbox::backend),
+                Ok(LinuxBackend::Bubblewrap { .. })
+            )
+        };
+        let no_bubblewrap = |helper: &Path| {
+            let (_folders, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+            refusal(LinuxSandbox::detect_among(sandbox, helper, &[]))
+        };
+        for status in ["PartiallyEnforced", "NotEnforced"] {
+            let said =
+                format!("crazyagent-landlock: this kernel cannot hold the boundary ({status})\\n");
+            let helper = fake(status, &said);
+            assert_eq!(
+                refusal(detected(&helper, SandboxNetwork::Open)),
+                LINUX_OPEN_NETWORK_NEEDS_LANDLOCK
+            );
+            let limited = refusal(detected(&helper, ports()));
+            assert!(
+                limited.starts_with("limiting an agent's network to a few ports needs Landlock"),
+                "{limited}"
+            );
+            assert!(falls_back(&helper), "{status}");
+            let pinned = no_bubblewrap(&helper);
+            assert!(
+                pinned.starts_with("this Linux cannot fully enforce Landlock file rules"),
+                "{pinned}"
+            );
+        }
+        let other = fake(
+            "other",
+            "crazyagent-landlock: seccomp\\007 filter refused\\nsecond line\\n",
+        );
+        let named = "the sandbox check failed: crazyagent-landlock: seccomp filter refused";
+        assert_eq!(refusal(detected(&other, SandboxNetwork::Open)), named);
+        assert_eq!(refusal(detected(&other, ports())), named);
+        assert!(falls_back(&other));
+        assert_eq!(no_bubblewrap(&other), named);
+        let silent = fake("silent", "");
+        assert_eq!(
+            refusal(detected(&silent, SandboxNetwork::Open)),
+            "the sandbox check failed: exit status: 3"
+        );
+        let wide = fake("wide", &"é".repeat(150));
+        let cut = refusal(detected(&wide, SandboxNetwork::Open));
+        let reason = cut.strip_prefix("the sandbox check failed: ").unwrap();
+        assert!(
+            reason.len() <= 200 && reason.len() > 190,
+            "{}",
+            reason.len()
+        );
+        assert!(reason.chars().all(|letter| letter == 'é'));
+    }
+
+    /// V243-LINUX-PROBE-STDERR-CAP: a failed probe that says far more than it should is read
+    /// only to [`PROBE_SAID_MAX`] bytes and still ends with its own status; bytes that are not
+    /// UTF-8 stay within the cap once replaced.
+    #[test]
+    fn a_failed_probe_is_read_only_to_its_cap_and_still_ends() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let fake = |name: &str, says: &str| {
+            let path = temp.path().join(name);
+            fs::write(&path, format!("#!/bin/sh\n{says} >&2\nexit 3\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let ascii = fake("ascii", "yes x | head -c 1048576");
+        let (said, ended) = probe_said(&mut Command::new(&ascii)).unwrap();
+        assert_eq!(said.len(), PROBE_SAID_MAX);
+        assert!(said.starts_with("x\nx\n"));
+        assert_eq!(ended, "exit status: 3");
+        let raw = fake("raw", "head -c 1048576 /dev/zero | tr '\\000' '\\377'");
+        let (said, ended) = probe_said(&mut Command::new(&raw)).unwrap();
+        assert!(
+            said.len() <= PROBE_SAID_MAX && said.len() > PROBE_SAID_MAX - 4,
+            "{}",
+            said.len()
+        );
+        assert!(
+            said.chars()
+                .all(|letter| letter == char::REPLACEMENT_CHARACTER)
+        );
+        assert_eq!(ended, "exit status: 3");
+    }
+
+    /// V243-LINUX-PROBE-STDERR-CAP: what a failed probe said goes to the log as one line, with
+    /// its newlines and other control characters escaped, so a probe cannot write log lines
+    /// of its own or terminal escapes.
+    #[test]
+    fn a_failed_probe_is_logged_on_one_line_with_its_control_characters_escaped() {
+        let line = probe_log(
+            &[OsStr::new("--probe")],
+            "exit status: 3",
+            "first\nsecond\u{7}\u{1b}[31m red\r",
+        );
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(
+            line.starts_with(r#"linux_probe_failed: ["--probe"] exit status: 3: "#),
+            "{line:?}"
+        );
+        assert!(
+            line.contains(r"first\nsecond\u{7}\u{1b}[31m red\r"),
+            "{line:?}"
+        );
+    }
+
+    /// V243-LINUX-PROBE-STDERR-CAP (#592 F1): what a failed probe that says far too much
+    /// writes to the log is one line, built from at most [`PROBE_SAID_MAX`] bytes, with its
+    /// control characters escaped. Writing what it said raw fails this row.
+    #[test]
+    fn a_failed_probe_writes_one_escaped_line_to_the_log() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let talker = temp.path().join("talker");
+        let says = "yes \"$(printf 'first\\033[31m red\\r')\" | head -c 1048576 >&2";
+        fs::write(&talker, format!("#!/bin/sh\n{says}\nexit 3\n")).unwrap();
+        fs::set_permissions(&talker, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut log = Vec::new();
+        let reason = probe_failure(Command::new(&talker).arg("--probe"), &mut log);
+        assert_eq!(reason.as_deref(), Some("first[31m red"));
+        let line = String::from_utf8(log).unwrap();
+        let body = line
+            .strip_suffix('\n')
+            .expect("the log line ends in a newline");
+        let start: String = body.chars().take(120).collect();
+        assert!(!body.chars().any(char::is_control), "{start:?}");
+        assert!(
+            body.starts_with(
+                r#"linux_probe_failed: ["--probe"] exit status: 3: "first\u{1b}[31m red\r\n"#
+            ),
+            "{start:?}"
+        );
+        assert!(body.len() <= 6 * PROBE_SAID_MAX + 64, "{}", body.len());
     }
 
     #[test]
@@ -5095,5 +5398,45 @@ mod tests {
                 "{name} is not writable"
             );
         }
+    }
+
+    /// An engine whose own folder is not cargo's `deps` takes only the helper beside it, even
+    /// with none there and a helper in the folder above, and a `deps` folder further up the
+    /// path changes nothing (V243-LANDLOCK-TEST-HELPER-PATH).
+    #[test]
+    fn an_engine_outside_a_deps_folder_never_takes_another_helper() {
+        let root = tempfile::tempdir().unwrap();
+        for folder in ["opt/bin", "deps/bin", "depsx"] {
+            let engine = root.path().join(folder).join("crazyagent");
+            fs::create_dir_all(engine.parent().unwrap()).unwrap();
+            fs::write(engine.parent().unwrap().with_file_name(HELPER_NAME), "").unwrap();
+            assert_eq!(
+                helper_for(&engine),
+                engine.with_file_name(HELPER_NAME),
+                "{folder}"
+            );
+        }
+    }
+
+    /// A debug test binary in cargo's `deps` folder with no helper beside it takes cargo's own
+    /// build of the helper in the folder above; one beside it wins, and with neither it keeps
+    /// the missing one beside it (V243-LANDLOCK-TEST-HELPER-PATH).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_test_binary_in_cargos_deps_folder_takes_cargos_helper_build_only_when_none_is_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let deps = root.path().join("debug").join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        let engine = deps.join("linux_sandbox-0123abcd");
+        let (beside, built) = (deps.join(HELPER_NAME), deps.with_file_name(HELPER_NAME));
+        assert_eq!(
+            helper_for(&engine),
+            beside,
+            "neither: the missing one beside it"
+        );
+        fs::write(&built, "").unwrap();
+        assert_eq!(helper_for(&engine), built, "cargo's build, one folder up");
+        fs::write(&beside, "").unwrap();
+        assert_eq!(helper_for(&engine), beside, "the one beside it wins");
     }
 }

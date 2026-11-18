@@ -1101,8 +1101,19 @@ fn a_full_access_headless_stop_names_or_misses_an_orphan_made_between_two_tables
         Err(Unstopped::Left(left)) => {
             let report = left.plain();
             assert_eq!(left.code(), LEFT, "{report}");
-            let named = named_in(&report).remove(&orphan.as_raw_nonzero().get());
-            assert_eq!(named.as_deref(), Some("perl"), "{report}");
+            let named = named_in(&report);
+            assert_eq!(
+                named.keys().copied().collect::<Vec<_>>(),
+                [orphan.as_raw_nonzero().get()],
+                "a table saw the middle, so the stop names only the orphan: {report}"
+            );
+            assert_eq!(
+                named
+                    .get(&orphan.as_raw_nonzero().get())
+                    .map(String::as_str),
+                Some("perl"),
+                "{report}"
+            );
             false
         }
         Err(other) => panic!("the stop of a Full access agent was reported {other:?}"),
