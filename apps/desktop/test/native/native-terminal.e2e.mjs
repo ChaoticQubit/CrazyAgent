@@ -14,6 +14,7 @@ const MASTER_MS = 180000;
 const END_MS = 20000;
 const QUIET_MS = 4000;
 const SHORT_TURN_MS = 6000;
+const OWNER_IDLE_S = 300;
 const RUNNING = ["starting", "idle", "working"];
 const READ = { kind: "read" };
 const RETURN = { kind: "key", characters: "\r", code: 36 };
@@ -129,6 +130,36 @@ function paneWidth() {
   return width;
 }
 
+/** Reads how long the machine has had no keyboard, mouse or trackpad input. Output: whole
+ * seconds. */
+function idleSeconds() {
+  const result = spawnSync("/usr/sbin/ioreg", ["-c", "IOHIDSystem"], { encoding: "utf8" });
+  const found = /"HIDIdleTime" = (\d+)/.exec(result.stdout ?? "");
+  assert.ok(result.status === 0 && found, "the HID idle time");
+  return Number(BigInt(found[1]) / 1000000000n);
+}
+
+/** Moves only the test app's window to a 1x display, never taking focus, waits for the view
+ * to read that scale and the pane to change width, then puts the window back and waits for
+ * the first scale and width again. Inputs: the view, its state before the move (scale,
+ * active, key) and the display. */
+async function refit(view, start, target) {
+  assert.equal(target.scale, 1);
+  const width = paneWidth();
+  const place = await browser.getWindowRect();
+  try {
+    await browser.setWindowRect(target.x + 40, target.y + 40, Math.min(1000, target.width - 80), Math.min(700, target.height - 80));
+    const moved = await seenWhen(view, (seen) => seen.scale === target.scale, UI_MS, "the window never reached the 1x display");
+    assert.equal(moved.active, start.active, "the move never brings the app forward");
+    assert.equal(moved.key, start.key, "the move never makes the window key");
+    await until(async () => paneWidth() !== width, UI_MS, `the pane stayed ${width} columns after the scale changed`);
+  } finally {
+    await browser.setWindowRect(place.x, place.y, place.width, place.height);
+  }
+  await seenWhen(view, (seen) => seen.scale === start.scale, UI_MS, "the window never came back");
+  await until(async () => paneWidth() === width, UI_MS, `the pane never refit to ${width} columns on the way back`);
+}
+
 /** Closes a view the spec opened. Input: the view. Output: none. */
 async function close(view) {
   opened.delete(view);
@@ -208,25 +239,29 @@ describe("Native terminal views in the real window", () => {
   });
 
   it("a move to a display of another backing scale refits the grid and the pane follows", async function () {
+    const started = Date.now();
+    const unheld = (why) => {
+      console.log(`SCALE void: ${why}`);
+      this.skip();
+    };
+    if (idleSeconds() < OWNER_IDLE_S) unheld("the owner was active at the start");
     const shown = await open(true);
     const start = await ready(shown);
-    const target = screens().find((each) => each.scale !== start.scale && each.width > 760 && each.height > 600);
+    const target = screens().find((each) => each.scale === 1 && start.scale !== 1 && each.width > 760 && each.height > 600);
     if (!target) {
       await close(shown.view);
       this.skip();
     }
-    const width = paneWidth();
-    const place = await browser.getWindowRect();
+    let failure = null;
     try {
-      await browser.setWindowRect(target.x + 40, target.y + 40, Math.min(1000, target.width - 80), Math.min(700, target.height - 80));
-      await seenWhen(shown.view, (seen) => seen.scale === target.scale, UI_MS, `the window never reached a ${target.scale}x display`);
-      await until(async () => paneWidth() !== width, UI_MS, `the pane stayed ${width} columns after the scale changed`);
+      await refit(shown.view, start, target);
+    } catch (caught) {
+      failure = caught;
     } finally {
-      await browser.setWindowRect(place.x, place.y, place.width, place.height);
+      await close(shown.view).catch(() => {});
     }
-    await seenWhen(shown.view, (seen) => seen.scale === start.scale, UI_MS, "the window never came back");
-    await until(async () => paneWidth() === width, UI_MS, `the pane never refit to ${width} columns on the way back`);
-    await close(shown.view);
+    if (idleSeconds() * 1000 < Date.now() - started) unheld("the owner touched the machine during the row");
+    if (failure) throw failure;
   });
 
   it("an ended terminal closes the direct view", async () => {
