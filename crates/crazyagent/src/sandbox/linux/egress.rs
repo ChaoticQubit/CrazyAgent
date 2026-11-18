@@ -79,8 +79,8 @@ const SANDBOX_RESOLVER: &str = "10.0.2.3";
 /// alias, which maps to this computer's DNS address on any port. No route-port rule reaches
 /// it (rv-sa241 LEAD-1).
 const SLIRP_NETWORK: &str = "10.0.2.0/24";
-/// The loopback addresses: dropped after the `lo` accept, so only the agent's own loopback,
-/// where its bridged ports listen, is ever reached at one (rv-sa241 LEAD-1).
+/// The loopback addresses: refused after the `lo` accept ([`REFUSE`]), so only the agent's own
+/// loopback, where its bridged ports listen, is ever reached at one (rv-sa241 LEAD-1).
 const LOOPBACK_NETWORK: &str = "127.0.0.0/8";
 /// The link-local addresses, where a cloud VM answers its metadata service: no route port
 /// reaches them, even 80 or 443 on any host (rv-sa241 NOTE-1).
@@ -799,13 +799,11 @@ fn stop(parent: u32, child: u32) {
     }
 }
 
-/// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and in the
-/// form `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's
-/// resolver alone, then nothing to slirp's network ([`SLIRP_NETWORK`]), a loopback address
-/// off `lo` ([`LOOPBACK_NETWORK`]), a link-local one ([`LINK_LOCAL_NETWORK`]) or a cloud's
-/// metadata service outside it ([`crate::sandbox::CLOUD_METADATA`], each IPv4 one, in order),
-/// then out through `tap0` to each port; every refused packet is answered ([`REFUSE`]).
-/// Input: the ports on any host. Output: the rules.
+/// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and
+/// `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's resolver,
+/// each fenced network refused ([`SLIRP_NETWORK`], [`LOOPBACK_NETWORK`] off `lo`,
+/// [`LINK_LOCAL_NETWORK`], each IPv4 [`crate::sandbox::CLOUD_METADATA`]), then `tap0` to each
+/// port and every other packet answered ([`REFUSE`]). Input: the ports. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
     assert!(!any.contains(&0));
