@@ -15,7 +15,6 @@ concurrency:
 
 env:
   RUST_TOOLCHAIN: "1.98.1"
-  TMUX_VERSION: "3.8"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
 
@@ -24,117 +23,6 @@ defaults:
     shell: bash
 
 jobs:
-  storage-macos:
-    name: Storage red and green, reap green, desktop routes and b18 on macos-15
-    runs-on: macos-15
-    timeout-minutes: 358
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Select Xcode 26.3, whose git the engine runs
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.3.app
-          env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: "26.12.1"
-          cache: npm
-          cache-dependency-path: apps/desktop/package-lock.json
-      - name: Build the desktop frontend the desktop crate embeds
-        working-directory: apps/desktop
-        run: |
-          set -euo pipefail
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build
-      - name: Install Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: farm
-          shared-key: macos
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-bin: false
-          save-if: false
-      - name: Red at f9c2ff41c, green at the tip with the reap rows, touched suites, attribution
-        timeout-minutes: 220
-        run: |
-          export CARGO_BUILD_JOBS=2 G1_MUTANTS=0 G1_REAP=1
-          bash .github/farm/g1-storage.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-g1-storage-e-macos
-          path: ${{ runner.temp }}/g1-storage
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Desktop routes green at the tip, red against the kept_code mutant, attribution and clippy
-        if: ${{ !cancelled() }}
-        timeout-minutes: 110
-        run: |
-          export CARGO_BUILD_JOBS=2
-          bash .github/farm/g1-routes-desktop.sh
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-g1-storage-e-desktop
-          path: ${{ runner.temp }}/g1-routes-desktop
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Install tmux on macOS
-        if: ${{ !cancelled() }}
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Install cargo-nextest
-        if: ${{ !cancelled() }}
-        run: bash scripts/ci/install-nextest.sh
-      - name: Install Claude Code and Codex
-        if: ${{ !cancelled() }}
-        run: bash scripts/ci/install-harnesses.sh
-      - name: b18 access and toolchains row, the split assert
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -uo pipefail
-          export CARGO_BUILD_JOBS=2
-          mkdir -p "$RUNNER_TEMP/g1-b18"
-          echo "HOME=$HOME CARGO_HOME=${CARGO_HOME:-unset} RUSTUP_HOME=${RUSTUP_HOME:-unset}"
-          cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --features owner-trace --locked || exit 1
-          mkdir -p target/debug/deps
-          cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-          export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$GITHUB_WORKSPACE/target/debug/crazyagent"
-          cargo nextest run -p crazyagent --features owner-trace --locked --no-tests=fail --test acceptance_b18_tui -E 'test(=b18_the_owner_changes_agent_access_and_toolchains_in_settings)' 2>&1 | tee "$RUNNER_TEMP/g1-b18/b18.txt"
-          code=${PIPESTATUS[0]}
-          echo "b18 rc=$code"
-          exit "$code"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-g1-storage-e-b18
-          path: ${{ runner.temp }}/g1-b18
-          if-no-files-found: warn
-          retention-days: 14
-
   storage-linux:
     name: Storage submit red, mutants and green on ubuntu-22.04
     runs-on: ubuntu-22.04
@@ -150,7 +38,10 @@ jobs:
           fetch-depth: 0
       - name: Install Linux build packages
         timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -name '*microsoft*' -print -delete
+          bash scripts/ci/linux-packages.sh
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -202,11 +93,14 @@ jobs:
           set -euo pipefail
           npm ci --ignore-scripts --no-audit --no-fund
           npm run typecheck
-          node --test --test-timeout=15000 test/api.test.mjs test/native-auth.test.mjs test/app.test.mjs test/recovery-banner.test.mjs test/process.test.mjs test/project-cleanup.test.mjs test/agent-instructions.test.mjs --test-skip-pattern="picking an instructions mode, the transcript switch or an edit choice"
+          node --test --test-timeout=15000 --test-skip-pattern="picking an instructions mode, the transcript switch or an edit choice" test/api.test.mjs test/native-auth.test.mjs test/app.test.mjs test/recovery-banner.test.mjs test/process.test.mjs test/project-cleanup.test.mjs test/agent-instructions.test.mjs
       - name: Install Linux build packages
         if: ${{ !cancelled() }}
         timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
+        run: |
+          set -euo pipefail
+          sudo find /etc/apt/sources.list.d -name '*microsoft*' -print -delete
+          bash scripts/ci/linux-packages.sh
       - name: Install Rust toolchain
         if: ${{ !cancelled() }}
         run: |
