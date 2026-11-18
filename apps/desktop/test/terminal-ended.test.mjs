@@ -26,3 +26,14 @@ test("a team pane whose lead's teammates' server ended says so when its attach i
   assert.deepEqual(io.terminalEvent({ kind: "rejected", code: "terminal_teammates_server_ended" }),
     { kind: "ended", copy });
 });
+
+test("a native view's end codes each say why in plain words, never the generic line (V243-NATIVE-INPUT E5)", () => {
+  const copy = {
+    native_terminal_input_overflow: "More typing was waiting than this terminal could take, so the view closed. Open it again to keep typing.",
+    native_terminal_gpu: "This Mac couldn't draw the terminal, so the view closed. Open it again to try once more.",
+    terminal_closed: "The connection to this terminal closed. Open it again to reconnect.",
+    owner_grant_stale_or_revoked: "This app's access to the engine changed, so the view closed. Reconnect, then open it again.",
+  };
+  assert.equal(io.endCopy("not_a_code"), "This terminal closed.");
+  for (const [code, line] of Object.entries(copy)) assert.equal(io.endCopy(code), line, code);
+});

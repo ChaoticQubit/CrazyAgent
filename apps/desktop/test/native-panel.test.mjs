@@ -380,3 +380,148 @@ test("V243-NATIVE-ONLY: a native view whose ready event comes before the desktop
   `);
   assert.deepEqual(seen, { early: false, live: true, copied: true, copy: { view: 1, what: "output" } });
 });
+
+for (const saved of [null, "terminal", "box", "both"]) {
+  test(`V243-NATIVE-INPUT E1: with Terminal input ${saved} saved, the native view takes typed keys only when the choice lets them through, a reopened view is told again, and a choice changed before the next render reaches the open view`, async () => {
+    const keysOn = saved !== "box";
+    const flip = keysOn ? "box" : "both";
+    const seen = await page(`
+      await F.stage();
+      ${saved === null ? "" : `F.input(${JSON.stringify(saved)});`}
+      const view = await F.live("a", ${MASTER});
+      await pause(200);
+      const keys = () => F.calls("desktop_native_terminal_keys").map((entry) => entry.args);
+      const first = keys();
+      const boxes = document.querySelectorAll("#a textarea.tg-composer-input").length;
+      F.event(view, { type: "ended", code: "terminal_attach_failed", final: true });
+      await F.until(() => F.shown("a").buttons.includes("Open again"));
+      F.press("a", "Open again");
+      await F.until(() => F.calls("desktop_native_terminal_open").length === 2);
+      F.event(2, { type: "ready", cols: 80, rows: 24 });
+      await F.until(() => document.querySelector("#a .tg-terminal-note") !== null);
+      await pause(200);
+      const reopened = keys();
+      F.input(${JSON.stringify(flip)});
+      F.rerender("a", ${MASTER});
+      await pause(200);
+      return { view, first, boxes, reopened, changed: keys() };
+    `);
+    const off = keysOn ? [] : [{ view: 1, on: false }, { view: 2, on: false }];
+    assert.equal(seen.view, 1);
+    assert.deepEqual(seen.first, off.slice(0, 1), "a view starts with keys on, so only a choice without keys is told");
+    assert.equal(seen.boxes, saved === "box" || saved === "both" ? 1 : 0, "the message box shows as in the web panel");
+    assert.deepEqual(seen.reopened, off, "the view Open again makes is told the choice too");
+    assert.deepEqual(seen.changed, [...off, { view: 2, on: !keysOn }], "the choice read at the next render reaches the open view once");
+  });
+}
+
+test("V243-NATIVE-INPUT E2: with Both saved, the master's message box hands its text to the engine once and empties, then gives the native view the keyboard", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.input("both");
+    const view = await F.live("a", ${MASTER});
+    await pause(200);
+    const from = F.calls().length;
+    const sent = await F.promptBox("a", "Build the landing page");
+    const emptied = await F.until(() => document.querySelector("#a textarea.tg-composer-input").value === "" && F.calls("desktop_terminal_prompt").length === 1);
+    await F.until(() => F.callsOn(view, from).includes("desktop_native_terminal_focus"));
+    await pause(100);
+    return { view, sent, emptied, prompts: F.calls("desktop_terminal_prompt").map((entry) => entry.args.text), focus: F.callsOn(view, from).filter((command) => command === "desktop_native_terminal_focus").length };
+  `);
+  assert.deepEqual(seen, { view: 1, sent: true, emptied: true, prompts: ["Build the landing page"], focus: 1 });
+});
+
+test("V243-NATIVE-INPUT E4: a native view gets the keyboard once when it goes live while shown and once each time it shows again live, and none while a page dialog covers it until the dialog goes", async () => {
+  const seen = await page(`
+    await F.stage();
+    const focus = () => F.calls("desktop_native_terminal_focus").map((entry) => entry.args);
+    const view = await F.live("a", ${MASTER});
+    await pause(200);
+    const live = focus();
+    F.unmount("a");
+    await pause(100);
+    const hidden = focus().length;
+    F.mount("a", ${MASTER});
+    await pause(200);
+    const again = focus();
+    F.unmount("a");
+    F.dialog(true);
+    F.mount("a", ${MASTER});
+    await pause(300);
+    const covered = focus().length;
+    F.dialog(false);
+    await F.until(() => F.calls("desktop_native_terminal_cover").at(-1)?.args.covered === false);
+    await pause(100);
+    return { view, live, hidden, again, covered, after: focus() };
+  `);
+  assert.equal(seen.view, 1);
+  assert.deepEqual(seen.live, [{ view: 1 }], "going live while shown gives the view the keyboard once");
+  assert.equal(seen.hidden, 1, "hiding the view gives it nothing");
+  assert.deepEqual(seen.again, [{ view: 1 }, { view: 1 }], "showing the kept live view again gives it the keyboard once more");
+  assert.equal(seen.covered, 2, "nothing while a page dialog covers the view");
+  assert.deepEqual(seen.after, [{ view: 1 }, { view: 1 }, { view: 1 }], "the keyboard goes to the view once the dialog goes");
+});
+
+test("V243-NATIVE-INPUT E4: Jump to latest and leaving the terminal menu with Escape give the native view the keyboard back, the menu only once the view shows again", async () => {
+  const seen = await page(`
+    await F.stage();
+    const view = await F.live("a", ${MASTER});
+    await pause(200);
+    const from = F.calls().length;
+    F.event(view, { type: "behind", behind: true });
+    await F.until(() => F.shown("a").buttons.includes("Jump to latest"));
+    F.press("a", "Jump to latest");
+    await F.until(() => F.callsOn(view, from).includes("desktop_native_terminal_focus"));
+    const jumped = F.callsOn(view, from);
+    const rect = F.screenRect("a");
+    const mark = F.calls().length;
+    F.event(view, { type: "menu", x: rect.x + 30, y: rect.y + 30 });
+    await F.until(() => F.shown("a").menu.length === 2);
+    await F.until(() => F.calls("desktop_native_terminal_cover").at(-1)?.args.covered === true);
+    document.querySelector("#a [role=menu]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await F.until(() => F.callsOn(view, mark).includes("desktop_native_terminal_focus"));
+    await pause(100);
+    return { jumped, menu: F.callsOn(view, mark), open: F.shown("a").menu.length };
+  `);
+  assert.deepEqual(seen.jumped, ["desktop_native_terminal_jump", "desktop_native_terminal_focus"]);
+  assert.deepEqual(seen.menu, ["desktop_native_terminal_cover", "desktop_native_terminal_cover", "desktop_native_terminal_focus"], "Escape closes the menu, the view shows again, then it gets the keyboard");
+  assert.equal(seen.open, 0);
+});
+
+test("V243-NATIVE-INPUT E5: a native view that ends with a native code says why in its own words with Open again, and Open again opens a new view", async () => {
+  const seen = await page(`
+    await F.stage();
+    const view = await F.live("a", ${MASTER});
+    F.event(view, { type: "ended", code: "native_terminal_gpu", final: true });
+    const words = F.words("x", "native_terminal_gpu");
+    const generic = F.words("x", "x").ended;
+    const ended = await F.until(() => F.shown("a").alerts.some((line) => line.startsWith(words.ended)));
+    const pressed = F.press("a", "Open again");
+    const reopened = await F.until(() => F.calls("desktop_native_terminal_open").length === 2);
+    return { own: words.ended !== generic, ended, pressed, reopened };
+  `);
+  assert.deepEqual(seen, { own: true, ended: true, pressed: true, reopened: true });
+});
+
+test("V243-NATIVE-SEED-REFUSED: a console seed the desktop refuses is marked used, so no later panel pastes it unasked, and its reason stays in an alert until the owner dismisses it (#506 F1)", async () => {
+  const seen = await page(`
+    await F.stage();
+    window.seedUsed = 0;
+    const seed = { id: 7, text: "check the build", used: () => { window.seedUsed += 1; } };
+    F.fail("paste", { code: "native_terminal_view_unknown" });
+    const words = F.words("native_terminal_view_unknown", "x");
+    const line = "The drafted message wasn't pasted. " + words.refused;
+    F.mount("a", ${MASTER}, { seed });
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.event(1, { type: "ready", cols: 80, rows: 24 });
+    await F.until(() => F.calls("desktop_native_terminal_paste").length === 1);
+    const shown = await F.until(() => F.shown("a").alerts.includes(line + "Dismiss"));
+    await pause(2500);
+    const kept = F.shown("a").alerts.includes(line + "Dismiss");
+    const used = window.seedUsed;
+    const dismissed = F.press("a", "Dismiss");
+    const gone = await F.until(() => !F.shown("a").alerts.some((text) => text.startsWith(line)));
+    return { shown, kept, used, dismissed, gone, pastes: F.calls("desktop_native_terminal_paste").length };
+  `);
+  assert.deepEqual(seen, { shown: true, kept: true, used: 1, dismissed: true, gone: true, pastes: 1 });
+});

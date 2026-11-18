@@ -15,7 +15,7 @@ import { isMac } from "../../src/ui/index.ts";
 const WEBVIEW = ["desktop_terminal_attach", "desktop_terminal_input", "desktop_terminal_resize", "desktop_terminal_detach"];
 const roots = new Map();
 let probe = null;
-const desk = { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes: [], enabled: true, openFailure: null, copyFailure: null, promptFailure: null, hold: false, held: [] };
+const desk = { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes: [], enabled: true, openFailure: null, copyFailure: null, promptFailure: null, pasteFailure: null, hold: false, held: [] };
 
 /** Gives the page a working store: the test page is about:blank, whose storage refuses every
  * call, so an in-memory store takes its place. Output: none. */
@@ -49,6 +49,7 @@ async function invoke(command, args) {
   }
   if (command === "desktop_native_terminal_copy" && desk.copyFailure !== null) throw desk.copyFailure;
   if (command === "desktop_terminal_prompt" && desk.promptFailure !== null) throw desk.promptFailure;
+  if (command === "desktop_native_terminal_paste" && desk.pasteFailure !== null) throw desk.pasteFailure;
   if (command === "desktop_team_graph") return { nodes: desk.nodes, edges: [] };
   if (command.startsWith("desktop_native_terminal_") || command === "desktop_terminal_prompt" || WEBVIEW.includes(command)) return null;
   throw { code: "unknown", message: command };
@@ -65,7 +66,7 @@ export async function stage({ enabled = true, nodes = [] } = {}) {
   keepTerminalsOf(() => false);
   keepStorage();
   window.localStorage.clear();
-  Object.assign(desk, { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes, enabled, openFailure: null, copyFailure: null, promptFailure: null, hold: false, held: [] });
+  Object.assign(desk, { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes, enabled, openFailure: null, copyFailure: null, promptFailure: null, pasteFailure: null, hold: false, held: [] });
   window.__TAURI_INTERNALS__ = {
     invoke,
     transformCallback: (callback) => {
@@ -174,11 +175,13 @@ export function release(thrown) {
   return held.length;
 }
 
-/** Makes the next opens, copies or prompts fail as the desktop does. Inputs: which call
- * ("open", "copy" or "prompt") and the value it throws, or null to answer again. Output: none. */
+/** Makes the next opens, copies, prompts or pastes fail as the desktop does. Inputs: which
+ * call ("open", "copy", "prompt" or "paste") and the value it throws, or null to answer again.
+ * Output: none. */
 export function fail(call, thrown) {
   if (call === "open") desk.openFailure = thrown;
   else if (call === "copy") desk.copyFailure = thrown;
+  else if (call === "paste") desk.pasteFailure = thrown;
   else desk.promptFailure = thrown;
 }
 
