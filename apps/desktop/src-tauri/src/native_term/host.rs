@@ -8,6 +8,7 @@ use super::view::{MouseKind, TermView};
 use super::{HookEvent, HookInput, Rect, Report};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
+use objc2::runtime::NSObjectProtocol;
 use objc2_app_kit::{NSView, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::RefCell;

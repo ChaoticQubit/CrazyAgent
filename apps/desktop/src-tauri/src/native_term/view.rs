@@ -49,24 +49,7 @@ define_class!(
 
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            let mine = self.window().and_then(|w| w.firstResponder()).is_some_and(|r| {
-                let me: &NSResponder = self;
-                std::ptr::eq(&*r, me)
-            });
-            let flags = event.modifierFlags();
-            if !mine || !flags.contains(NSEventModifierFlags::Command) {
-                return false;
-            }
-            let bare = event
-                .charactersIgnoringModifiers()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            match bare.as_str() {
-                "c" => super::on_copy(self.ivars().id.get(), event.timestamp()),
-                "v" => super::on_paste(self.ivars().id.get(), event.timestamp()),
-                _ => return false,
-            }
-            true
+            self.key_equivalent(event)
         }
 
         #[unsafe(method(copy:))]
@@ -127,6 +110,39 @@ impl TermView {
         let view: Retained<TermView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         assert_eq!(view.ivars().id.get(), id);
         view
+    }
+
+    /// Takes Cmd-C and Cmd-V while this view has keyboard focus. It lives outside
+    /// `define_class!`, whose method bodies return the raw `Bool`, so they cannot return a
+    /// `bool` early. Input: the key event. Output: whether the view took the key.
+    fn key_equivalent(&self, event: &NSEvent) -> bool {
+        let mine = self
+            .window()
+            .and_then(|w| w.firstResponder())
+            .is_some_and(|r| {
+                let me: &NSResponder = self;
+                std::ptr::eq(&*r, me)
+            });
+        if !mine
+            || !event
+                .modifierFlags()
+                .contains(NSEventModifierFlags::Command)
+        {
+            return false;
+        }
+        let bare = event
+            .charactersIgnoringModifiers()
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let id = self.ivars().id.get();
+        assert!(id > 0);
+        match bare.as_str() {
+            "c" => super::on_copy(id, event.timestamp()),
+            "v" => super::on_paste(id, event.timestamp()),
+            _ => return false,
+        }
+        assert!(bare == "c" || bare == "v");
+        true
     }
 
     fn mouse(&self, event: &NSEvent, kind: MouseKind) {
