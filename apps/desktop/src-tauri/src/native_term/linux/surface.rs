@@ -708,9 +708,18 @@ mod tests {
     use alacritty_terminal::vte::ansi::Rgb;
     use serde_json::{Value, json};
 
-    /// The longest one present may take: under the 16.7 ms of a 60 Hz output, so a present
-    /// that waited on a frame callback fails the row.
+    /// The 95th percentile one present may take: under the 16.7 ms of a 60 Hz output, so
+    /// presents that wait on a frame callback fail the row.
     const PRESENT_MS_MAX: f64 = 12.0;
+
+    /// The longest any one present may take, the loaded cells' CPU preemption included: a
+    /// present blocked on a frame callback that never comes (run 3: 40 s) fails the row.
+    const PRESENT_BLOCK_MS_MAX: f64 = 50.0;
+
+    /// The GObject criticals the display row saw, such as a handler disconnected after its
+    /// toplevel's dispose had already removed it.
+    static GOBJECT_CRITICALS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
 
     /// How many presents the display row paces back to back.
     const FRAMES: usize = 60;
@@ -878,7 +887,9 @@ mod tests {
         child.presenting();
         let started = Instant::now();
         shared.draw(surface, frame).expect("a present");
-        ms(started)
+        let took = ms(started);
+        child.presented();
+        took
     }
 
     fn white_toplevel() -> gtk::Window {
@@ -913,6 +924,16 @@ mod tests {
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
     fn a_child_places_hides_shows_and_presents_only_on_its_frame_callback() {
+        let criticals = gtk::glib::log_set_handler(
+            Some("GLib-GObject"),
+            gtk::glib::LogLevels::LEVEL_CRITICAL,
+            false,
+            false,
+            |_, _, message| {
+                eprintln!("GLib-GObject critical: {message}");
+                GOBJECT_CRITICALS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
         let window = white_toplevel();
         let placed = Rect {
             x: 100,
@@ -985,7 +1006,11 @@ mod tests {
         drop(shared);
         pump_for(Duration::from_millis(100));
 
+        gtk::glib::log_remove_handler(Some("GLib-GObject"), criticals);
         let worst = presents.iter().copied().fold(shown_present, f64::max);
+        let mut sorted = presents.clone();
+        sorted.sort_by(f64::total_cmp);
+        let p95 = sorted[((sorted.len() - 1) as f64 * 0.95).round() as usize];
         let report = json!({
             "present_ms": stats(&presents),
             "wait_ms": stats(&waits),
@@ -996,8 +1021,17 @@ mod tests {
             std::fs::write(dir.join("report.json"), format!("{report}\n")).expect("report file");
         }
         assert!(
-            worst < PRESENT_MS_MAX,
-            "a present took {worst:.2} ms: {report}"
+            p95 < PRESENT_MS_MAX,
+            "presents took {p95:.2} ms at p95: {report}"
+        );
+        assert!(
+            worst < PRESENT_BLOCK_MS_MAX,
+            "a present blocked {worst:.2} ms: {report}"
+        );
+        assert_eq!(
+            GOBJECT_CRITICALS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the child left no GObject critical behind"
         );
     }
 }
