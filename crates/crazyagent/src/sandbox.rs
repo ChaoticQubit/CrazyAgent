@@ -1333,8 +1333,10 @@ pub fn linux_other_git(project: &Path) -> bool {
     }
 }
 
-/// Refusal to build or install a project sandbox, with a plain reason, or, on Windows, the
-/// read root no app container may read and this user cannot change (V244-WIN-NPM).
+/// Refusal to build or install a project sandbox: `Invalid` for an unsafe path or policy,
+/// `Unavailable` with a plain reason, such as a missing Windows helper or endpoint limit,
+/// `Unreadable` for a Windows read root no app container may read and this user cannot change
+/// (V244-WIN-NPM), or `Io`.
 #[derive(Debug)]
 pub enum SandboxError {
     Invalid(String),

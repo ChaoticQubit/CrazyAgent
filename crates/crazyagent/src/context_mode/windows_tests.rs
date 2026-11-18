@@ -465,7 +465,7 @@ fn npm_installs_into_a_fresh_staging_folder() {
 fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_own_code() {
     let bin = system_bin();
     assert!(
-        crazyagent_win_sandbox::unreadable_root(&bin),
+        crazyagent_win_sandbox::unreadable_root(&bin, "crazyagent.test.node"),
         "{}",
         bin.display()
     );
@@ -482,6 +482,34 @@ fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_
         Err(unreadable)
     );
     assert!(!staged.join(MODULES).exists());
+}
+
+/// V244-WIN-NPM r2 F3: an agent launch whose npx folder no app container reads and this
+/// standard user cannot change, since an OWNER RIGHTS entry takes the owner's right to change
+/// its list while the user keeps modify, leaves context-mode out as Node.js's folder, never as
+/// a failed set-up.
+#[test]
+#[ignore = "needs a standard user, whom an OWNER RIGHTS entry stops changing a list (test farm)"]
+fn an_agent_launch_whose_node_folder_this_user_cannot_change_says_so() {
+    let case = case();
+    let user = std::env::var("USERNAME").unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let locked = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe"))
+            .arg(&case.bin)
+            .args(["/inheritance:r", "/grant:r", "*S-1-3-4:(OI)(CI)(RX)"])
+            .arg(format!("{user}:(OI)(CI)(M)")),
+    )
+    .unwrap();
+    assert!(locked.status.success(), "{}", shown(&locked));
+    assert!(crazyagent_win_sandbox::unreadable_root(
+        &case.bin,
+        "crazyagent.test.node"
+    ));
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case)),
+        Err(ContextModeOff::NodeFolderUnreadable)
+    );
 }
 
 /// The access list of a folder a job read or wrote, as `icacls` prints it, without the

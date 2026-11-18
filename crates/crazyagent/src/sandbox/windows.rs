@@ -67,17 +67,11 @@ pub struct WindowsSandbox {
 }
 
 impl WindowsSandbox {
-    /// Writes the boundary profile for `sandbox` at `profile`, replacing any earlier one
-    /// atomically, and binds it to `helper`. The profile must end in `.sb` like every
-    /// platform's profile and lie outside every writable root, so no agent can rewrite the
-    /// profile its next launch uses; the existing `grants` folder, where the helper records
-    /// what it grants each container, must lie outside them too. Inputs: the policy, the
-    /// helper, the profile path and the grants folder. Output: the sandbox, `Unavailable` for
-    /// a missing helper or a loopback limit, `Unreadable` for a read root no app container
-    /// may read and this user cannot change ([`crazyagent_win_sandbox::unreadable_root`]),
-    /// which the helper could not open to the agent, or `Invalid` for an unsafe path or
-    /// policy. Before the profile, it makes each missing guarded folder (see
-    /// [`make_guarded_folders`]).
+    /// Makes each missing guarded folder ([`make_guarded_folders`]), then writes the boundary
+    /// profile for `sandbox` at `profile`, a `.sb` file replaced atomically, bound to `helper`;
+    /// the profile and the helper's `grants` folder lie outside every writable root, so no
+    /// agent rewrites what its next launch uses. Inputs: the policy, the helper, the profile
+    /// path and the grants folder. Output: the sandbox, or the [`SandboxError`] saying why not.
     pub fn install(
         sandbox: ProjectSandbox,
         helper: &Path,
@@ -89,11 +83,7 @@ impl WindowsSandbox {
             .ok_or_else(|| invalid("grants folder must exist"))?;
         make_guarded_folders(&sandbox)?;
         let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
-        if let Some(root) = boundary
-            .read_roots
-            .iter()
-            .find(|root| crazyagent_win_sandbox::unreadable_root(Path::new(root)))
-        {
+        if let Some(root) = crazyagent_win_sandbox::unreadable_read_root(&boundary) {
             eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
             return Err(SandboxError::Unreadable(PathBuf::from(root)));
         }
