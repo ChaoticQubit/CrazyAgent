@@ -87,3 +87,11 @@ jobs:
         run: |
           cp .github/farm/v243-linux-routed-r1.sh "$RUNNER_TEMP/v243-linux-routed-r1.sh"
           bash "$RUNNER_TEMP/v243-linux-routed-r1.sh"
+      - name: Kernel log and memory after the run
+        if: always()
+        run: |
+          free -m
+          sudo dmesg | grep -iE "oom|killed process|out of memory" | tail -20
+          sudo dmesg | tail -40
+          systemctl is-active systemd-oomd || true
+          journalctl -u systemd-oomd --no-pager -n 20 2>/dev/null || true

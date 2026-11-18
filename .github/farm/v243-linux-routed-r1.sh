@@ -6,8 +6,14 @@ printf '| check | expected | result |\n| --- | --- | --- |\n' >> "$summary"
 uname -r
 grep -E '^VERSION=' /etc/os-release
 /usr/bin/slirp4netns --version 2>&1 | head -1
-echo "== build at the red tip"
-cargo test -p crazyagent --lib --test linux_sandbox --locked --no-run 2>&1 | tail -3
+echo "== build at the red tip, one target at a time"
+free -m
+nproc
+( while sleep 15; do echo "mem $(date -u +%T) $(free -m | awk '/^Mem:/ {print "used " $3 " of " $2 ", available " $7}')"; done ) &
+sampler=$!
+cargo test -p crazyagent --lib --locked --no-run 2>&1 | tail -3
+cargo test -p crazyagent --test linux_sandbox --locked --no-run 2>&1 | tail -3
+kill "$sampler" 2>/dev/null
 helper="$PWD/target/debug/crazyagent-landlock"
 test -x "$helper" || { row build "the helper builds" "no helper at $helper"; exit 1; }
 rules=(--read /usr --read /lib --read /lib64 --read /bin --read /etc)
