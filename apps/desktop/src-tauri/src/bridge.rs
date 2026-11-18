@@ -1412,6 +1412,36 @@ fn cut_projects(mut items: Vec<ProjectRow>, more: bool) -> Result<ProjectList, B
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_route_names_each_storage_answer_instead_of_its_unknown_outcome() {
+        let routes: [(&str, fn(EngineError) -> BridgeError); 13] = [
+            ("agents", agents::agent_error),
+            ("changes", changes::changes_error),
+            ("cleanup", cleanup::cleanup_error),
+            ("ide", ide_reveal::ide_error),
+            ("ide_extensions", ide_extensions::extensions_error),
+            ("ide_tab", ide::ide_error),
+            ("overview", overview::overview_error),
+            ("process", process::process_error),
+            ("questions", questions::questions_error),
+            ("notify", notify::notify_error),
+            ("recovery", recovery::recovery_error),
+            ("roadmap", roadmap::roadmap_error),
+            ("usage", usage::usage_error),
+        ];
+        assert_eq!(crazyagent::storage::STORAGE_ANSWERS.len(), 4);
+        for (route, map) in routes {
+            for code in crazyagent::storage::STORAGE_ANSWERS {
+                let mapped = map(EngineError((*code).into()));
+                assert_eq!(
+                    (route, mapped.code, mapped.cause),
+                    (route, *code, None),
+                    "the route names the storage answer"
+                );
+            }
+        }
+    }
+
     fn kept(kind: &'static str, project_id: Option<&str>) -> PendingIntent {
         PendingIntent {
             kind,

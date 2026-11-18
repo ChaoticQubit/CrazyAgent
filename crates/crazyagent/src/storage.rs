@@ -503,23 +503,28 @@ impl Taken {
     }
 }
 
+/// Storage's own definite answers to a timed job, which every route of every client passes
+/// through by name: a full queue, a worker still starting and a job withdrawn before the
+/// worker took it mean nothing ran, and access_change_pending means an access-narrowing
+/// change still waits its turn.
+pub const STORAGE_ANSWERS: &[&str] = &[
+    "owner_queue_not_submitted",
+    "storage_starting_not_submitted",
+    "storage_busy_not_submitted",
+    ACCESS_CHANGE_PENDING,
+];
+
 /// Tells whether a code is one of storage's own definite answers, which every client shows
-/// by name. Input: the error code. Output: true for the not-submitted refusals and
-/// access_change_pending.
+/// by name. Input: the error code. Output: true for a code in `STORAGE_ANSWERS`.
 pub(crate) fn storage_answer(code: &str) -> bool {
-    not_submitted(code) || code == ACCESS_CHANGE_PENDING
+    STORAGE_ANSWERS.contains(&code)
 }
 
 /// Tells whether a storage refusal means the job never reached the worker, so nothing ran
 /// and the same request can be sent again. Input: the error code. Output: true for a full
 /// queue, a worker still starting, and a job withdrawn before the worker took it.
 pub(crate) fn not_submitted(code: &str) -> bool {
-    matches!(
-        code,
-        "owner_queue_not_submitted"
-            | "storage_starting_not_submitted"
-            | "storage_busy_not_submitted"
-    )
+    storage_answer(code) && code != ACCESS_CHANGE_PENDING
 }
 
 impl Job {
