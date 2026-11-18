@@ -158,7 +158,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p crazyagent-win-sandbox --locked --lib --test private_judge --test private_windows -- --test-threads 1
+          cargo test -p crazyagent-win-sandbox --locked --lib -- --test-threads 1
+          cargo test -p crazyagent-win-sandbox --locked --test private_judge --test private_windows -- --test-threads 1
       - name: Clippy on the crazyagent library
         if: ${{ !cancelled() }}
         run: |
