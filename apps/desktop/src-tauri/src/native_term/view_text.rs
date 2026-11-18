@@ -1,6 +1,6 @@
 use super::HookInput;
 use super::a11y::{self, Geometry, Marks, Text};
-use super::ime::{self, Mods, Route};
+use super::ime::{self, Mods, Route, Took};
 use super::pane::Input;
 use super::view::{TermView, key_input};
 use objc2::rc::Retained;
@@ -16,11 +16,13 @@ use objc2_foundation::{
 };
 
 /// The key event `interpretKeyEvents` is working on: its characters with and without
-/// modifiers, and whether the input method took it (inserted or marked text).
+/// modifiers, whether the input method took it (inserted or marked text) and whether it
+/// passed a command back.
 pub struct KeyDown {
     pub chars: String,
     pub bare: String,
     pub handled: bool,
+    pub command: bool,
 }
 
 /// What VoiceOver reads, kept on the view so no getter waits on the native state: the last
@@ -166,16 +168,17 @@ impl TermView {
                     chars,
                     bare,
                     handled: false,
+                    command: false,
                 };
                 self.interpret(event, key, composing);
             }
         }
     }
 
-    /// Hands one key to the input method; when it neither inserted nor marked text and no
-    /// composition was or is shown, the key's own bytes go to the pane once (Return, Tab,
-    /// Backspace, Escape, arrows arrive as commands, which send nothing themselves). Inputs:
-    /// the event, its stashed characters and whether marked text was shown before it.
+    /// Hands one key to the input method, then sends the key's own bytes once when
+    /// ime::own_bytes says so (Return, Tab, Backspace, Escape and arrows arrive as commands,
+    /// which send nothing themselves; a Korean syllable commits first, then the key goes on).
+    /// Inputs: the event, its stashed characters and whether marked text was shown before it.
     fn interpret(&self, event: &NSEvent, key: KeyDown, composing: bool) {
         let outer = self.ivars().key.replace(Some(key));
         let events = NSArray::from_slice(&[event]);
@@ -183,8 +186,13 @@ impl TermView {
         let Some(key) = self.ivars().key.replace(outer) else {
             unreachable!("the key stays stashed until interpretKeyEvents returns");
         };
-        let after = self.ivars().ime.borrow().composing();
-        if !key.handled && !composing && !after {
+        let took = Took {
+            handled: key.handled,
+            command: key.command,
+            before: composing,
+            after: self.ivars().ime.borrow().composing(),
+        };
+        if ime::own_bytes(took) {
             self.send(key_input(&key.chars, &key.bare), event.timestamp());
         }
     }
@@ -194,6 +202,14 @@ impl TermView {
     fn send(&self, input: Option<Input>, at: f64) {
         if let Some(input) = input {
             super::on_native(self.ivars().id(), input, at);
+        }
+    }
+
+    /// doCommandBySelector: records that the input method passed the key back as a command;
+    /// the command itself sends nothing.
+    pub(super) fn command_passed(&self) {
+        if let Some(key) = self.ivars().key.borrow_mut().as_mut() {
+            key.command = true;
         }
     }
 

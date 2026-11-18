@@ -53,7 +53,9 @@ define_class!(
         }
 
         #[unsafe(method(doCommandBySelector:))]
-        fn do_command(&self, _selector: Sel) {}
+        fn do_command(&self, _selector: Sel) {
+            self.command_passed();
+        }
 
         #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
         fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
