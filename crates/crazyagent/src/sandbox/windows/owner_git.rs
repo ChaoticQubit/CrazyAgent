@@ -184,7 +184,7 @@ mod tests {
     }
 
     /// A project, an owner-git folder, a grants folder and a stand-in for Git for Windows'
-    /// `cmd\git.exe`, all in one temp folder. Output: the folders.
+    /// `cmd\git.exe` beside its `mingw64` folder, all in one temp folder. Output: the folders.
     fn made() -> Made {
         let temp = tempfile::tempdir().unwrap();
         let root = canonical(temp.path()).unwrap();
@@ -193,7 +193,8 @@ mod tests {
             root.join("Git").join("cmd").join("git.exe"),
             root.join(GRANTS_FOLDER),
         );
-        for made in [&project, git.parent().unwrap(), &grants] {
+        let platform = root.join("Git").join("mingw64");
+        for made in [&project, git.parent().unwrap(), &grants, &platform] {
             fs::create_dir_all(made).unwrap();
         }
         fs::write(&git, "").unwrap();
@@ -307,6 +308,100 @@ mod tests {
         }
         let folder = canonical(&made.folder).unwrap();
         assert!(!places(&folder, &made.project).profile.exists());
+    }
+
+    /// Lays out a stand-in Git for Windows under `root`: each relative file is written empty
+    /// and each relative folder made. Inputs: the root, the files and the folders. Output:
+    /// the root's `cmd\git.exe` or, with no such file, the first file.
+    fn laid_out(root: &Path, files: &[&str], folders: &[&str]) -> PathBuf {
+        for folder in folders {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "").unwrap();
+        }
+        let cmd = root.join("cmd").join("git.exe");
+        if cmd.is_file() {
+            cmd
+        } else {
+            root.join(files[0])
+        }
+    }
+
+    /// Asserts owner git refuses to install for `git` with `words` in its reason and writes no
+    /// profile. Inputs: the folders, the owner-git folder, the project, git and the words.
+    fn refused_install(made: &Made, folder: &Path, project: &Path, git: &Path, words: &str) {
+        let helper = std::env::current_exe().unwrap();
+        match OwnerGit::install(folder, project, git, &helper, &made.grants) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert!(reason.contains(words), "{}: {reason}", git.display())
+            }
+            other => panic!(
+                "{}: expected a refusal naming {words}, got {other:?}",
+                git.display()
+            ),
+        }
+        let folder = canonical(folder).unwrap();
+        assert!(
+            !places(&folder, &canonical(project).unwrap())
+                .profile
+                .exists()
+        );
+    }
+
+    #[test]
+    fn owner_git_reads_only_a_folder_that_holds_git_for_windows_markers() {
+        let made = made();
+        for (name, files, folders) in [
+            ("UserBin", &["bin/git.exe"][..], &[][..]),
+            ("UserCmd", &["cmd/git.exe"][..], &[][..]),
+            ("NoCmd", &["bin/git.exe"][..], &["mingw64"][..]),
+            (
+                "NoPlatform",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["usr/bin"][..],
+            ),
+        ] {
+            let git = laid_out(&made.root.join(name), files, folders);
+            refused_install(&made, &made.folder, &made.project, &git, "Git for Windows");
+        }
+        for (name, platform) in [
+            ("Full", "mingw64"),
+            ("Arm", "clangarm64"),
+            ("Old", "mingw32"),
+        ] {
+            let git = laid_out(
+                &made.root.join(name),
+                &["cmd/git.exe", "bin/git.exe"],
+                &[platform],
+            );
+            let project = made.root.join(format!("project-{name}"));
+            fs::create_dir_all(&project).unwrap();
+            let helper = std::env::current_exe().unwrap();
+            let owner = OwnerGit::install(&made.folder, &project, &git, &helper, &made.grants)
+                .unwrap_or_else(|problem| panic!("{name}: {problem:?}"));
+            assert_eq!(
+                BoundaryProfile::load(owner.profile()).unwrap().read_roots,
+                [made.root.join(name).to_str().unwrap().to_owned()],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn owner_git_refuses_an_install_folder_that_holds_the_project_or_its_own_folder() {
+        let made = made();
+        let work = made.root.join("work");
+        let project = work.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let git = laid_out(&work, &["cmd/git.exe"], &["mingw64"]);
+        refused_install(&made, &made.folder, &project, &git, "holds");
+        let engine = made.root.join("engine");
+        let folder = engine.join(OWNER_GIT_FOLDER);
+        let git = laid_out(&engine, &["cmd/git.exe"], &["mingw64"]);
+        refused_install(&made, &folder, &made.project, &git, "holds");
     }
 
     #[test]
