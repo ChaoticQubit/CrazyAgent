@@ -1414,7 +1414,11 @@ mod tests {
 
     #[test]
     fn every_route_names_each_storage_answer_instead_of_its_unknown_outcome() {
-        let routes: [(&str, fn(EngineError) -> BridgeError); 13] = [
+        let routes: [(&str, fn(EngineError) -> BridgeError); 17] = [
+            ("accounts", accounts::account_error),
+            ("account_profile", account_profile::profile_error),
+            ("native_auth", native_auth::auth_error),
+            ("plugins", plugins::plugin_failure),
             ("agents", agents::agent_error),
             ("changes", changes::changes_error),
             ("cleanup", cleanup::cleanup_error),
@@ -1430,6 +1434,19 @@ mod tests {
             ("usage", usage::usage_error),
         ];
         assert_eq!(crazyagent::storage::STORAGE_ANSWERS.len(), 4);
+        for code in crazyagent::storage::STORAGE_ANSWERS {
+            assert_eq!(caused("any_outcome_unknown", code).code, *code);
+            assert_eq!(caused("any_outcome_unknown", code).cause, None);
+            assert_eq!(uncaused("any_outcome_unknown", code).code, *code);
+        }
+        assert_eq!(
+            caused("any_outcome_unknown", "Not A Code").code,
+            "any_outcome_unknown"
+        );
+        assert_eq!(
+            uncaused("any_outcome_unknown", ENGINE_VERSION_MISMATCH).code,
+            ENGINE_VERSION_MISMATCH
+        );
         for (route, map) in routes {
             for code in crazyagent::storage::STORAGE_ANSWERS {
                 let mapped = map(EngineError((*code).into()));

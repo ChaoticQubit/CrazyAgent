@@ -6,7 +6,6 @@ use crazyagent::questions::{
     ANSWER_BYTES_MAX, Answer, BulkDismissal, ClosedBy, LISTED_MAX, OPTIONS_MAX, Question,
     QuestionKind, QuestionStatus, Settlement,
 };
-use crazyagent::storage::STORAGE_ANSWERS;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -122,7 +121,6 @@ pub fn questions_error(error: EngineError) -> BridgeError {
     caused(
         QUESTIONS_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("questions_outcome_unknown"),

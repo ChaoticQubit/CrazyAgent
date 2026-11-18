@@ -4,7 +4,6 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AGENT_CONTROL_CODES, OwnerClient, RELEASE_WAIT};
 use crazyagent::master_session::MasterOwnerAction;
 use crazyagent::protocol::{CredentialRef, ProjectId};
-use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 const BRIDGE_CODES: &[&str] = &["not_connected", "agent_launch_failed"];
@@ -19,7 +18,6 @@ pub(super) fn agent_error(error: EngineError) -> BridgeError {
         BRIDGE_CODES
             .iter()
             .chain(AGENT_CONTROL_CODES)
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == code)
             .unwrap_or("agents_outcome_unknown"),

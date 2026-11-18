@@ -3,7 +3,6 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, ROADMAP_CODES};
 use crazyagent::protocol::ProjectId;
 use crazyagent::roadmap_status::{Refresh, RoadmapStatus};
-use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 /// The bridge failure for an engine roadmap status error: a known code reaches the window
@@ -16,7 +15,6 @@ pub fn roadmap_error(error: EngineError) -> BridgeError {
     caused(
         ROADMAP_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("roadmap_status_outcome_unknown"),

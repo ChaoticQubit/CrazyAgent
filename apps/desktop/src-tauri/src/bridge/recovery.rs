@@ -3,7 +3,6 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, RECOVERY_CODES, RecoveryBanner};
 use crazyagent::ledger::ActionKind;
 use crazyagent::protocol::ProjectId;
-use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 pub(super) fn recovery_error(error: EngineError) -> BridgeError {
@@ -13,7 +12,6 @@ pub(super) fn recovery_error(error: EngineError) -> BridgeError {
     caused(
         RECOVERY_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("recovery_outcome_unknown"),

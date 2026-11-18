@@ -4,7 +4,6 @@ use crazyagent::engine::owner::{OwnerClient, QUESTIONS_CODES};
 use crazyagent::projects_home::job::JobView;
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{Question, QuestionStatus};
-use crazyagent::storage::STORAGE_ANSWERS;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 use tauri::Manager;
@@ -268,7 +267,6 @@ pub fn notify_error(error: EngineError) -> BridgeError {
     caused(
         QUESTIONS_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("questions_outcome_unknown"),

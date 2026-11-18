@@ -4,7 +4,6 @@ use crazyagent::engine::owner::{OVERVIEW_CODES, OwnerClient};
 use crazyagent::project_overview::{Apply, Overview, README_BYTES_MAX, TAB_BYTES_MAX, Tab};
 use crazyagent::protocol::ProjectId;
 use crazyagent::roadmap_status::Refresh;
-use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 /// The most texts one Overview carries beside its README: a file and a proposal per tab.
@@ -30,7 +29,6 @@ pub(super) fn overview_error(error: EngineError) -> BridgeError {
     caused(
         OVERVIEW_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("overview_outcome_unknown"),

@@ -6,7 +6,6 @@ use crazyagent::engine::owner::{
     SavedText, UncommittedImport,
 };
 use crazyagent::protocol::ProjectId;
-use crazyagent::storage::STORAGE_ANSWERS;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,7 +16,6 @@ pub(super) fn process_error(error: EngineError) -> BridgeError {
     caused(
         PROCESS_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("process_outcome_unknown"),

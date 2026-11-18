@@ -2,7 +2,6 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CLEANUP_CODES, OwnerClient};
 use crazyagent::protocol::ProjectId;
-use crazyagent::storage::STORAGE_ANSWERS;
 use crazyagent::team::cleanup::{FinishedAgent, Removal, RemovalPreview};
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ pub(super) fn cleanup_error(error: EngineError) -> BridgeError {
     caused(
         CLEANUP_CODES
             .iter()
-            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("cleanup_outcome_unknown"),
