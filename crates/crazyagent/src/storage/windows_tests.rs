@@ -158,7 +158,10 @@ fn a_plugin_secret_round_trips_privately_and_an_open_one_is_refused() {
     drop(private::dir(&data).unwrap());
     let reference = plugins::new_secret_reference().unwrap();
     plugins::store_secret(&data, &reference, b"0123456789".to_vec()).unwrap();
-    assert_eq!(plugins::read_secret(&data, &reference).unwrap(), b"0123456789");
+    assert_eq!(
+        plugins::read_secret(&data, &reference).unwrap(),
+        b"0123456789"
+    );
     let file = plugins::store_folder(&data, &[plugins::SECRETS])
         .unwrap()
         .join(&reference);
