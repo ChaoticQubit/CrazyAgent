@@ -722,13 +722,11 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
-/// Lists one account with its latest sign-in, whether the provider rejected it, whether it
-/// passes the launch check every master, team and research turn uses on this engine run, so
-/// status never shows an account as signed in when a launch or the master would refuse it,
-/// and whether a sign-in that fails only that check waits for this run's re-check (DEC-108);
-/// a re-check that cannot be read counts as none, so one account never fails the list; and
-/// why its newest sign-out did not finish in the harness, if so. Inputs: the transaction,
-/// the admitted owner, the connection and its details. Output: the listed account.
+/// Lists one account: its latest sign-in, a provider rejection, the launch check every turn
+/// uses on this run (so status never says signed in when a launch would refuse), a pending
+/// re-check (DEC-108; one that cannot be read counts as none), and why its newest sign-out
+/// did not finish in the harness. Inputs: the transaction, the admitted owner, the
+/// connection and its details. Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
     admission: &Admission,
