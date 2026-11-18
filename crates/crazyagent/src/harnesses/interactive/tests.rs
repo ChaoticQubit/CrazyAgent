@@ -2162,11 +2162,14 @@ fn a_shim_under_a_sticky_shared_folder_starts_as_given_by_the_resolver_rule() {
     let home = mine.join("home");
     let shim = home.join(".volta/bin").join(name);
     stand_in(&shim);
-    let places = crate::tools::Places::new(Vec::new(), Some(home.clone()));
+    let places = crate::tools::Places::new(Vec::new(), Some(home));
     assert!(crate::harnesses::is_shim(places.home(), &shim));
     assert_eq!(launch_tool(&shim, &places).unwrap().entry, shim);
-    std::fs::set_permissions(shim.parent().unwrap(), std::fs::Permissions::from_mode(0o777))
-        .unwrap();
+    std::fs::set_permissions(
+        shim.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
     assert!(launch_tool(&shim, &places).is_err());
 }
 
