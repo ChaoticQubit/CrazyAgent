@@ -370,3 +370,91 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::fs;
+    use std::process::{Command, Stdio};
+
+    /// Runs git from the runner's PATH as a test owner would, with an empty home and no
+    /// system config. Inputs: the home, the folder and the arguments.
+    fn git(home: &Path, dir: &Path, args: &[&str]) {
+        let made = crate::spawn_gate::output(
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdin(Stdio::null()),
+        )
+        .unwrap();
+        assert!(
+            made.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+
+    /// Makes a junction, which needs no privilege, from a folder in the project to one
+    /// outside it. Inputs: the junction and its target.
+    fn junction(link: &Path, target: &Path) {
+        let made = crate::spawn_gate::output(
+            Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .stdin(Stdio::null()),
+        )
+        .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+
+    #[test]
+    fn a_windows_project_lists_its_tracked_and_untracked_files_but_no_ignored_one_or_one_through_a_junction()
+     {
+        let place = tempfile::tempdir().unwrap();
+        let (repo, home, outside) = (
+            place.path().join("repo"),
+            place.path().join("home"),
+            place.path().join("outside"),
+        );
+        for folder in [&repo, &home, &outside, &repo.join("src")] {
+            fs::create_dir(folder).unwrap();
+        }
+        fs::write(outside.join("secret.txt"), "secret").unwrap();
+        git(&home, &repo, &["init", "-q", "--template="]);
+        for (path, text) in [
+            ("README.md", "readme"),
+            ("src/Lib.rs", "pub fn lib() {}"),
+            ("notes.txt", "untracked"),
+            ("debug.log", "ignored"),
+            (".gitignore", "*.log\n"),
+        ] {
+            fs::write(repo.join(path), text).unwrap();
+        }
+        git(&home, &repo, &["add", "README.md", "src"]);
+        junction(&repo.join("out"), &outside);
+        let stop = Instant::now() + LISTING_TIME;
+        let mut listed = list(&repo, "", FILES_MAX, stop).unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [".gitignore", "README.md", "notes.txt", "src/Lib.rs"],
+            "tracked and untracked files, no ignored file and nothing through the junction"
+        );
+        assert_eq!(
+            list(&repo, "lib", FILES_MAX, stop).unwrap(),
+            ["src/Lib.rs"],
+            "the query matches in any case"
+        );
+        assert_eq!(
+            list(&outside, "", FILES_MAX, stop).unwrap_err().0,
+            "project_files_no_repository"
+        );
+    }
+}
