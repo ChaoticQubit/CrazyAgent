@@ -59,13 +59,23 @@ pub struct Fill {
     pub color: Rgb,
 }
 
+/// The cells marked text (an input method's composition) covers: its row, first column and
+/// width in cells, underlined by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Preedit {
+    pub row: usize,
+    pub column: usize,
+    pub cells: usize,
+}
+
 /// What one frame draws: the spans of every row, a hash per row to skip unchanged rows, the
-/// background fills and the cursor cell.
+/// background fills, the cursor cell and the marked text's cells.
 pub struct Frame {
     pub rows: Vec<Vec<Span>>,
     pub keys: Vec<u64>,
     pub fills: Vec<Fill>,
     pub cursor: Option<(usize, usize)>,
+    pub preedit: Option<Preedit>,
 }
 
 /// The xterm 256-colour palette entry for an index. Input: the index. Output: the colour.
@@ -152,9 +162,12 @@ fn cell_colors(cell: &Cell, colors: &Colors, selected: bool) -> (Rgb, Rgb) {
     (fg, bg)
 }
 
-/// Builds the frame for the visible screen. Input: the terminal. Output: rows, fills and the
-/// cursor; wide-character spacer cells add no text, and selected cells show swapped colours.
-pub fn frame(term: &Term<VoidListener>) -> Frame {
+/// Builds the frame for the visible screen. Inputs: the terminal and the marked text, if
+/// any. Output: rows, fills, the cursor and the marked text's cells; wide-character spacer
+/// cells add no text, selected cells show swapped colours, and marked text replaces the
+/// cells from the terminal cursor on (clipped at the row end, cursor hidden while shown).
+pub fn frame(term: &Term<VoidListener>, marked: Option<&str>) -> Frame {
+    let _ = marked;
     let content = term.renderable_content();
     let lines = term.screen_lines();
     let offset = content.display_offset as i32;
@@ -214,6 +227,7 @@ pub fn frame(term: &Term<VoidListener>) -> Frame {
         keys,
         fills,
         cursor,
+        preedit: None,
     }
 }
 
@@ -239,6 +253,53 @@ pub fn text_rows(frame: &Frame) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::term::Config;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn term(columns: usize, lines: usize, bytes: &[u8]) -> Term<VoidListener> {
+        let size = GridSize { columns, lines };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        term
+    }
+
+    #[test]
+    fn marked_text_replaces_cells_from_the_cursor_and_changes_only_its_row_key() {
+        let term = term(10, 3, b"ab\r\ncd");
+        let plain = frame(&term, None);
+        assert_eq!(plain.preedit, None);
+        assert_eq!(plain.cursor, Some((1, 2)));
+        let marked = frame(&term, Some("\u{306b}x"));
+        assert_eq!(text_rows(&marked), vec!["ab", "cd\u{306b}x", ""]);
+        assert_eq!(marked.keys[0], plain.keys[0]);
+        assert_ne!(marked.keys[1], plain.keys[1]);
+        assert_eq!(marked.keys[2], plain.keys[2]);
+        let cells = Preedit {
+            row: 1,
+            column: 2,
+            cells: 3,
+        };
+        assert_eq!(marked.preedit, Some(cells));
+        assert_eq!(marked.cursor, None);
+        let long = frame(&term, Some(&"\u{754c}".repeat(5)));
+        assert_eq!(text_rows(&long)[1], format!("cd{}", "\u{754c}".repeat(4)));
+        assert_eq!(long.preedit.map(|p| p.cells), Some(8));
+        assert!(frame(&term, Some("")).preedit.is_none());
+    }
+
+    #[test]
+    fn marked_text_covers_the_text_under_it_and_follows_a_hidden_cursor() {
+        let over = frame(&term(10, 2, b"abcd\x1b[1;2H"), Some("x"));
+        assert_eq!(text_rows(&over)[0], "axcd");
+        assert_eq!(
+            over.preedit.map(|p| (p.row, p.column, p.cells)),
+            Some((0, 1, 1))
+        );
+        let hidden = frame(&term(10, 2, b"\x1b[?25lab"), Some("y"));
+        assert_eq!(text_rows(&hidden)[0], "aby");
+        assert_eq!(hidden.preedit.map(|p| p.column), Some(2));
+    }
 
     #[test]
     fn palette_corners() {

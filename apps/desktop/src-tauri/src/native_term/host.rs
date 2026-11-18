@@ -416,7 +416,7 @@ impl Native {
             else {
                 continue;
             };
-            let frame = screen::frame(term);
+            let frame = screen::frame(term, None);
             view.pane.dirty = false;
             assert!(!view.ns.isHidden());
             let Ok(timing) = shared.draw(surface, &frame) else {

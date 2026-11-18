@@ -331,7 +331,7 @@ impl Pane {
         let rows = self
             .term
             .as_ref()
-            .map(|t| screen::text_rows(&screen::frame(t)))
+            .map(|t| screen::text_rows(&screen::frame(t, None)))
             .unwrap_or_default();
         for probe in self
             .probes

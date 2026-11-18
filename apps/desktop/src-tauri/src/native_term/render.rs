@@ -1,4 +1,4 @@
-use super::screen::{BACKGROUND, FOREGROUND, Frame, Span};
+use super::screen::{BACKGROUND, FOREGROUND, Frame, Preedit, Span};
 use alacritty_terminal::vte::ansi::Rgb;
 use glyphon::{
     Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -30,6 +30,9 @@ const RECT_BYTES: usize = 32;
 
 /// The padding around the grid, in points.
 const PAD_POINTS: f32 = 4.0;
+
+/// The thickness of the line under marked text, in points.
+const UNDERLINE_POINTS: f32 = 1.0;
 
 /// Times of one drawn frame: CPU build (rows, rects, glyph prepare), the wait for a drawable
 /// and the instant the frame was handed to the display.
@@ -576,4 +579,39 @@ fn span_attrs(span: &Span) -> Attrs<'static> {
         } else {
             Style::Normal
         })
+}
+
+/// The line under marked text, in physical pixels: the full width of its cells at the
+/// bottom of its row, `UNDERLINE_POINTS` thick and never under one pixel. Inputs: the marked
+/// cells, the cell size, the padding and the display scale. Output: x, y, width, height.
+pub fn underline(preedit: Preedit, cell: (f32, f32), pad: f32, scale: f32) -> [f32; 4] {
+    let _ = (preedit, cell, pad, scale, UNDERLINE_POINTS);
+    [0.0; 4]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marked_text_is_underlined_at_the_bottom_of_its_cells() {
+        let preedit = Preedit {
+            row: 1,
+            column: 2,
+            cells: 3,
+        };
+        assert_eq!(
+            underline(preedit, (16.0, 32.0), 8.0, 2.0),
+            [40.0, 70.0, 48.0, 2.0]
+        );
+        let first = Preedit {
+            row: 0,
+            column: 0,
+            cells: 1,
+        };
+        assert_eq!(
+            underline(first, (8.0, 16.0), 4.0, 1.0),
+            [4.0, 19.0, 8.0, 1.0]
+        );
+    }
 }
