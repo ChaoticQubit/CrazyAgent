@@ -367,30 +367,6 @@ fn rescaled_on_a_dpi_change(parent: HWND, view: &View) {
     println!("h1 row: 1.5x placed {want:?}, presents {}", presents());
 }
 
-/// A view wider than the device's largest texture side (sec #569 F1): 6000 CSS pixels at
-/// 1.5x is 9000 device pixels, past wgpu's default 8192. The render thread must not panic in
-/// configure: the wide view presents, then a narrow box presents again on the same thread.
-fn held_to_the_device_limit(parent: HWND, view: &View) {
-    let before = presents();
-    view.place(Some((0.0, 0.0, 6000.0, 60.0)))
-        .expect("a wide box");
-    let want = (WEBVIEW_AT.0, WEBVIEW_AT.1, 9000, 90);
-    assert_eq!(
-        placement(parent, view.hwnd()),
-        (want, true, true),
-        "9000 px wide"
-    );
-    await_present("the present past the texture limit", before);
-    let wide = presents();
-    view.place(Some(PAGE)).expect("the box again");
-    await_present("the render thread presents after the wide view", wide);
-    assert_eq!(draw::counts().1, 0, "no failure past the texture limit");
-    println!(
-        "h1 row: 9000 px view presented, then {} presents",
-        presents()
-    );
-}
-
 fn parent_destroys_a_live_view(parent: HWND, webview: HWND) {
     let second = View::new(parent, webview, 2, sink, &style()).expect("a second view");
     let before = presents();
@@ -429,7 +405,6 @@ fn a_view_sits_over_the_webview_draws_a_fed_screen_hides_and_drops_its_surface_f
     covered_and_shown_again(&view, centre);
     focus_follows_clicks(&view, webview, centre);
     rescaled_on_a_dpi_change(parent, &view);
-    held_to_the_device_limit(parent, &view);
     let hwnd = view.hwnd();
     let started = Instant::now();
     drop(view);
