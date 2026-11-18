@@ -550,6 +550,42 @@ fn a_bad_profile_or_batch_program_starts_nothing() {
     assert!(String::from_utf8_lossy(&batch.stderr).contains("batch files are refused"));
 }
 
+/// V244-WIN-NPM: a read root no app container reads and this standard user cannot change,
+/// made by an administrator and named in `CRAZYAGENT_TEST_UNCHANGEABLE_ROOT`, is refused
+/// before the helper runs, and the helper given it anyway names it in its refusal and starts
+/// nothing. A root every package reads and a folder this user owns are not refused.
+#[test]
+#[ignore = "needs an administrator-made folder and a standard user (test farm)"]
+fn a_read_root_only_an_administrator_can_open_to_containers_is_refused_by_name() {
+    let fixture = PathBuf::from(std::env::var("CRAZYAGENT_TEST_UNCHANGEABLE_ROOT").unwrap());
+    let programs = PathBuf::from(std::env::var("ProgramFiles").unwrap());
+    let case = case("crazyagent.test.unchangeable");
+    assert!(crazyagent_win_sandbox::unreadable_root(&fixture));
+    assert!(!crazyagent_win_sandbox::unreadable_root(&programs));
+    assert!(!crazyagent_win_sandbox::unreadable_root(&case.outside));
+    let mut profile = case.base.clone();
+    profile.read_roots = vec![plain(&fixture)];
+    install(&case, &profile);
+    let marker = case.project.join("started.txt");
+    let output = run(&case, &["/C", "echo", "started>", &plain(&marker)]);
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(REFUSED_EXIT)),
+        "{}",
+        ran(&output)
+    );
+    let named = format!(
+        "could not change an access list of {} (Windows error 5)",
+        plain(&fixture)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&named),
+        "{}",
+        ran(&output)
+    );
+    assert!(!marker.exists());
+}
+
 #[test]
 fn a_narrower_profile_takes_back_what_the_one_before_granted() {
     let case = case("crazyagent.test.contract");
