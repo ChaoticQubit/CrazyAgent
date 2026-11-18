@@ -1288,8 +1288,8 @@ impl LinuxHost {
     }
 }
 
-/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
-/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
+/// launches take, again once what is kept is a minute old. No input. Output: none on
 /// another system; on Linux the facts, each false when it cannot be read, so its gap line
 /// is shown.
 pub fn linux_host() -> Option<LinuxHost> {
@@ -4015,7 +4015,7 @@ impl InstalledSandbox {
             assert!(profile.is_file());
             #[cfg(target_os = "linux")]
             let linux = {
-                let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
+                let helper = linux::helper_beside_engine()?;
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
