@@ -19,6 +19,7 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  TMUX_VERSION: "3.8"
   BASE_SHA: cdf02af79b53347eb64d7d2b0d9d42391d6f71aa
   TIP_SHA: 3a648557df1cf8b215ad2f141a0218ce2b7733bb
   BOOT_ROWS: cli_output_failure_cleans_runtime_before_unlock cli_preserves_unrecorded_socket cli_shutdown_preserves_observed_replacements
@@ -48,6 +49,18 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Install tmux on macOS
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
       - name: Select the Xcode git the engine lands with
         run: |
           set -euo pipefail
