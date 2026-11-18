@@ -8,9 +8,11 @@ $base = 'C:\probe'
 $grants = "$base\grants"
 $profiles = "$base\profiles"
 $shares = "$base\shares"
-foreach ($folder in @($base, $grants, $profiles, $shares, "$base\p1w", "$base\work", "$base\work\home", "$base\work\tmp", "$base\lat", "$base\load")) {
+foreach ($folder in @($base, $grants, $profiles, $shares, "$base\io", "$base\p1w", "$base\work", "$base\work\home", "$base\work\tmp", "$base\lat", "$base\load")) {
     New-Item -ItemType Directory -Force -Path $folder | Out-Null
 }
+$stdin = "$base\io\stdin-empty"
+New-Item -ItemType File -Force -Path $stdin | Out-Null
 $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
 $git = (Get-Command git -CommandType Application | Select-Object -First 1).Source
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
@@ -18,32 +20,39 @@ $hostName = $env:COMPUTERNAME
 $os = (Get-CimInstance Win32_OperatingSystem).Caption
 Write-Host "SETUP os=[$os] version=$([Environment]::OSVersion.Version) cores=$([Environment]::ProcessorCount) git=[$git] ip=$ip host=$hostName"
 Write-Host "SETUP $(& $git --version)"
-Write-Host "SETUP git-folder $((icacls (Split-Path (Split-Path $git)) | Out-String) -replace '\s+', ' ')"
 Write-Host "SETUP lanmanserver=$((Get-Service LanmanServer).Status) lanmanworkstation=$((Get-Service LanmanWorkstation).Status)"
 auditpol /set /subcategory:"Logon" /success:enable /failure:enable | Out-Null
 Write-Host "SETUP audit $((auditpol /get /subcategory:'Logon' | Out-String) -replace '\s+', ' ')"
-Write-Host "SETUP symlinks $((fsutil behavior query SymlinkEvaluation | Out-String) -replace '\s+', ' ')"
 foreach ($share in 'pf', 'pa', 'pn', 'pi', 'pc', 'pl') {
     New-Item -ItemType Directory -Force -Path "$shares\$share" | Out-Null
     net share "$share=$shares\$share" "/GRANT:Everyone,READ" | Out-Null
 }
 Set-Content -NoNewline -Path "$shares\pf\f.txt" -Value 'probe-share-file'
 Set-Content -NoNewline -Path "$shares\pl\exclude" -Value 'linked-exclude'
-Write-Host "SETUP shares $((net share | Out-String) -replace '\s+', ' ')"
 
 function Get-LastRecord {
     try { (Get-WinEvent -LogName Security -MaxEvents 1 -ErrorAction Stop).RecordId } catch { 0 }
 }
 
-function Get-NetworkLogons([long]$after) {
-    $xpath = "*[System[(EventID=4624 or EventID=4625) and EventRecordID>$after]] and *[EventData[Data[@Name='LogonType']='3']]"
-    try { @(Get-WinEvent -LogName Security -FilterXPath $xpath -ErrorAction Stop) } catch { @() }
+function Get-Field($logged, [string]$name) {
+    $value = ''
+    foreach ($field in ([xml]$logged.ToXml()).Event.EventData.Data) {
+        if ($field.Name -eq $name) { $value = $field.'#text' }
+    }
+    $value
 }
 
-function Format-Logon($logon) {
-    $data = @{}
-    foreach ($field in ([xml]$logon.ToXml()).Event.EventData.Data) { $data[$field.Name] = $field.'#text' }
-    "event=$($logon.Id) user=$($data['TargetUserName']) package=$($data['AuthenticationPackageName']) lm=$($data['LmPackageName']) ip=$($data['IpAddress'])"
+function Get-SecurityEvents([long]$after) {
+    try {
+        @(Get-WinEvent -LogName Security -FilterXPath "*[System[EventRecordID>$after]]" -ErrorAction Stop)
+    } catch {
+        if ($_.Exception.Message -notlike '*No events were found*') { Write-Host "EVENTS query failed: $($_.Exception.Message)" }
+        @()
+    }
+}
+
+function Format-Logon($logged) {
+    "event=$($logged.Id) type=$(Get-Field $logged 'LogonType') user=$(Get-Field $logged 'TargetUserName') package=$(Get-Field $logged 'AuthenticationPackageName') lm=$(Get-Field $logged 'LmPackageName') ip=$(Get-Field $logged 'IpAddress')"
 }
 
 function Reset-Sessions {
@@ -79,6 +88,30 @@ function Invoke-Owner([string]$program, [string[]]$arguments) {
     [pscustomobject]@{ Exit = $LASTEXITCODE; Output = ($output | Out-String) }
 }
 
+function Format-Argument([string]$value) {
+    if ($value -match '[\s"]') { '"' + ($value -replace '"', '\"') + '"' } else { $value }
+}
+
+function Invoke-Redirected([string]$program, [string[]]$arguments, [string]$source) {
+    $out = "$base\io\out.txt"
+    $err = "$base\io\err.txt"
+    $line = ($arguments | ForEach-Object { Format-Argument $_ }) -join ' '
+    try {
+        $process = Start-Process -FilePath $program -ArgumentList $line -RedirectStandardInput $source -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -Wait -PassThru -ErrorAction Stop
+        [pscustomobject]@{ Exit = $process.ExitCode; Output = ("$(Get-Content -Raw -LiteralPath $out) $(Get-Content -Raw -LiteralPath $err)") }
+    } catch {
+        [pscustomobject]@{ Exit = -1; Output = "start failed: $($_.Exception.Message)" }
+    }
+}
+
+function Invoke-ContainedGit([string]$boundary, [string[]]$arguments) {
+    Invoke-Redirected $helper (@('--profile', $boundary, '--', $git) + $arguments) $stdin
+}
+
+function Invoke-OwnerGit([string[]]$arguments) {
+    Invoke-Redirected $git $arguments $stdin
+}
+
 function Measure-Open([string]$phase, [string]$label, [scriptblock]$action, [switch]$KeepSessions) {
     if (-not $KeepSessions) { Reset-Sessions }
     $before = Get-LastRecord
@@ -86,58 +119,39 @@ function Measure-Open([string]$phase, [string]$label, [scriptblock]$action, [swi
     $result = & $action
     $watch.Stop()
     Start-Sleep -Seconds 2
-    $logons = @(Get-NetworkLogons $before)
-    $credentialed = @($logons | Where-Object { (Format-Logon $_) -notmatch 'user=ANONYMOUS LOGON' })
+    $events = @(Get-SecurityEvents $before)
+    $logons = @($events | Where-Object { ($_.Id -eq 4624 -or $_.Id -eq 4625) -and (Get-Field $_ 'LogonType') -eq '3' })
+    $failed = @($logons | Where-Object { $_.Id -eq 4625 })
+    $ids = (($events | Group-Object Id | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ',')
     $sessions = Get-ServerSessions
     $hasSession = $sessions -notmatch 'There are no entries'
     $text = ($result.Output -replace '\s+', ' ').Trim()
     if ($text.Length -gt 300) { $text = $text.Substring(0, 300) }
-    Write-Host "$phase $label exit=$($result.Exit) ms=$($watch.ElapsedMilliseconds) logons=$($logons.Count) credentialed=$($credentialed.Count) session=$hasSession out=[$text]"
+    Write-Host "$phase $label exit=$($result.Exit) ms=$($watch.ElapsedMilliseconds) logons=$($logons.Count) failed=$($failed.Count) session=$hasSession events=[$ids] out=[$text]"
     foreach ($logon in $logons) { Write-Host "$phase $label   logon $(Format-Logon $logon)" }
     Write-Host "$phase $label   server=[$sessions] client=[$(Get-ClientConnections)]"
-    [pscustomobject]@{ Phase = $phase; Label = $label; Exit = $result.Exit; Logons = $logons.Count; Credentialed = $credentialed.Count; Session = $hasSession }
+    [pscustomobject]@{ Phase = $phase; Label = $label; Exit = $result.Exit; Logons = $logons.Count; Failed = $failed.Count; Session = $hasSession; Output = $text }
 }
 
 function Measure-Runs([int]$count, [scriptblock]$action) {
     $times = @()
+    $failures = 0
     for ($run = 0; $run -lt $count; $run++) {
         $watch = [Diagnostics.Stopwatch]::StartNew()
-        & $action | Out-Null
+        $result = & $action
         $watch.Stop()
+        if ($result.Exit -ne 0) { $failures++ }
         $times += $watch.Elapsed.TotalMilliseconds
     }
     $sorted = @($times | Sort-Object)
     $p90 = $sorted[[Math]::Ceiling(0.9 * $count) - 1]
-    "min=$([Math]::Round($sorted[0])) median=$([Math]::Round($sorted[[int][Math]::Floor($count / 2)])) p90=$([Math]::Round($p90)) max=$([Math]::Round($sorted[-1])) ms over $count runs"
+    "min=$([Math]::Round($sorted[0])) median=$([Math]::Round($sorted[[int][Math]::Floor($count / 2)])) p90=$([Math]::Round($p90)) max=$([Math]::Round($sorted[-1])) ms over $count runs, failed=$failures"
 }
 
 function Get-Load {
     $compilers = @(Get-Process -Name rustc, cargo -ErrorAction SilentlyContinue).Count
     $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
     "compilers=$compilers cpu=$cpu%"
-}
-
-function New-Tree([string]$tree) {
-    $bytes = [byte[]](0x61)
-    for ($folder = 0; $folder -lt 1000; $folder++) {
-        $path = "$tree\d$folder"
-        [void][IO.Directory]::CreateDirectory($path)
-        for ($file = 0; $file -lt 100; $file++) { [IO.File]::WriteAllBytes("$path\f$file.txt", $bytes) }
-    }
-}
-
-function Measure-Grant([string]$condition, [string]$tree, [string]$container) {
-    $boundary = Write-Profile "grant-$condition" $container @() @($tree)
-    $loadBefore = Get-Load
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    $first = Invoke-Contained $boundary $cmd @('/d', '/c', 'exit 0')
-    $watch.Stop()
-    $firstMs = $watch.ElapsedMilliseconds
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    $second = Invoke-Contained $boundary $cmd @('/d', '/c', 'exit 0')
-    $watch.Stop()
-    $entries = @((icacls "$tree\d999\f99.txt" | Out-String) -split "`n" | Where-Object { $_ -match 'S-1-15-2-\d+-' }).Count
-    Write-Host "P3 grant $condition files=100000 first-exit=$($first.Exit) first-ms=$firstMs second-exit=$($second.Exit) second-ms=$($watch.ElapsedMilliseconds) container-entries-on-last-file=$entries load-before=[$loadBefore] load-after=[$(Get-Load)] out=[$(($first.Output -replace '\s+', ' ').Trim())]"
 }
 
 $rows = @()
@@ -152,7 +166,6 @@ $targets = [ordered]@{
 }
 $nonLoopback = @('ip', 'host')
 $rows += Measure-Open 'P1-launch' 'nocap' { Invoke-Contained $p1Nocap $cmd @('/d', '/c', 'echo launched') }
-$rows += Measure-Open 'P1-launch' 'net' { Invoke-Contained $p1Net $cmd @('/d', '/c', 'echo launched') }
 foreach ($name in $targets.Keys) {
     $target = $targets[$name]
     $rows += Measure-Open 'P1-nocap' $name { Invoke-Contained $p1Nocap $cmd @('/d', '/c', "type $target") }
@@ -165,25 +178,47 @@ foreach ($name in $targets.Keys) {
     $target = $targets[$name]
     $rows += Measure-Open 'P1-owner' $name { Invoke-Owner $cmd @('/d', '/c', "type $target") }
 }
-$target = $targets['ip']
-Reset-Sessions
-Invoke-Owner $cmd @('/d', '/c', "type $target") | Out-Null
-$rows += Measure-Open 'P1-owner-session' 'nocap-ip' { Invoke-Contained $p1Nocap $cmd @('/d', '/c', "type $target") } -KeepSessions
-net use P: "\\$ip\pf" /persistent:no 2>&1 | Out-Null
-Write-Host "P1 mapped $((net use | Out-String) -replace '\s+', ' ')"
-$rows += Measure-Open 'P1-mapped' 'nocap' { Invoke-Contained $p1Nocap $cmd @('/d', '/c', 'type P:\f.txt') }
-Reset-Sessions
-Invoke-Owner $cmd @('/d', '/c', 'type P:\f.txt') | Out-Null
-$rows += Measure-Open 'P1-mapped-session' 'nocap' { Invoke-Contained $p1Nocap $cmd @('/d', '/c', 'type P:\f.txt') } -KeepSessions
-net use P: /delete /y 2>&1 | Out-Null
+$rows += Measure-Open 'P1-owner-bad-share' 'ip' { Invoke-Owner $cmd @('/d', '/c', "type \\$ip\missing-share\f.txt") }
 
 $env:GIT_CONFIG_NOSYSTEM = '1'
-$env:GIT_CONFIG_GLOBAL = 'NUL'
+$env:GIT_ATTR_NOSYSTEM = '1'
 $env:GIT_TERMINAL_PROMPT = '0'
 $env:GIT_NO_LAZY_FETCH = '1'
 $env:HOME = "$base\work\home"
 $env:TEMP = "$base\work\tmp"
 $env:TMP = "$base\work\tmp"
+$none = ([Environment]::SystemDirectory -replace '\\', '/') + '/crazyagent-none'
+$safe = @('-c', "core.hooksPath=$none", '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'submodule.recurse=false', '-c', 'protocol.allow=never', '-c', "gpg.program=$none", '-c', "gpg.x509.program=$none", '-c', "gpg.ssh.program=$none", '-c', 'log.showSignature=false')
+$emptyConfig = "$base\work\home\empty-config"
+New-Item -ItemType File -Force -Path $emptyConfig | Out-Null
+$script:excludes = ''
+
+function Set-Variant([string]$value) {
+    $env:GIT_CONFIG_GLOBAL = $value
+    $script:excludes = "core.excludesFile=$value"
+}
+
+function Get-GitArgs([string]$repo, [string[]]$command) {
+    @('-C', $repo, '--no-optional-locks') + $safe + @('-c', $script:excludes) + $command
+}
+
+function Get-StepArgs([string]$step, [string]$bundle) {
+    switch ($step) {
+        'ls-files' { @('ls-files', '--cached', '--others', '--exclude-standard') }
+        'add' { @('add', '-A') }
+        'commit' { @('-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', 'commit', '-q', '--allow-empty', '--no-gpg-sign', '-m', 'probe') }
+        'bundle' { @('bundle', 'create', $bundle, 'HEAD') }
+    }
+}
+
+$steps = @('ls-files', 'add', 'commit', 'bundle')
+$env:GIT_CONFIG_GLOBAL = 'NUL'
+$clean = "$base\work\r-clean"
+& $git init -q $clean
+Set-Content -Path "$clean\a.txt" -Value 'a'
+& $git -C $clean add a.txt
+& $git -C $clean -c user.name=probe -c user.email=probe@example.invalid commit -q -m init
+Set-Content -Path "$clean\b.txt" -Value 'b'
 $items = [ordered]@{ alternates = 'pa'; nested = 'pn'; include = 'pi'; commondir = 'pc'; excludelink = 'pl' }
 foreach ($item in $items.Keys) {
     $repo = "$base\work\r-$item"
@@ -201,42 +236,62 @@ Set-Content -NoNewline -Path "$base\work\r-commondir\.git\commondir" -Value "\\$
 Remove-Item -LiteralPath "$base\work\r-excludelink\.git\info\exclude" -Force
 Write-Host "P2 link $((& $cmd /d /c mklink "$base\work\r-excludelink\.git\info\exclude" "\\$ip\pl\exclude" 2>&1 | Out-String) -replace '\s+', ' ')"
 $gitProfile = Write-Profile 'p2-git' 'crazyagent.probe-git' @() @("$base\work")
-$rows += Measure-Open 'P2-first-launch' 'grant-over-planted-tree' { Invoke-Contained $gitProfile $git @('--version') }
-foreach ($item in $items.Keys) {
-    $repo = "$base\work\r-$item"
-    $bundle = "$base\work\b-$item-contained.bundle"
-    $rows += Measure-Open 'P2-nocap' "$item-ls-files" { Invoke-Contained $gitProfile $git @('-C', $repo, '--no-optional-locks', 'ls-files', '--cached', '--others', '--exclude-standard') }
-    $rows += Measure-Open 'P2-nocap' "$item-add" { Invoke-Contained $gitProfile $git @('-C', $repo, 'add', '-A') }
-    $rows += Measure-Open 'P2-nocap' "$item-commit" { Invoke-Contained $gitProfile $git @('-C', $repo, '-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'contained') }
-    $rows += Measure-Open 'P2-nocap' "$item-bundle" { Invoke-Contained $gitProfile $git @('-C', $repo, 'bundle', 'create', $bundle, 'HEAD') }
-}
-foreach ($item in $items.Keys) {
-    $repo = "$base\work\r-$item"
-    $bundle = "$base\work\b-$item-owner.bundle"
-    $rows += Measure-Open 'P2-owner' "$item-ls-files" { Invoke-Owner $git @('-C', $repo, '--no-optional-locks', 'ls-files', '--cached', '--others', '--exclude-standard') }
-    $rows += Measure-Open 'P2-owner' "$item-add" { Invoke-Owner $git @('-C', $repo, 'add', '-A') }
-    $rows += Measure-Open 'P2-owner' "$item-commit" { Invoke-Owner $git @('-C', $repo, '-c', 'user.name=probe', '-c', 'user.email=probe@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'owner') }
-    $rows += Measure-Open 'P2-owner' "$item-bundle" { Invoke-Owner $git @('-C', $repo, 'bundle', 'create', $bundle, 'HEAD') }
+$rows += Measure-Open 'P2-first-launch' 'grant-over-planted-tree' { Invoke-ContainedGit $gitProfile @('--version') }
+try {
+    $nulStdin = Start-Process -FilePath $helper -ArgumentList ('--profile ' + $gitProfile + ' -- ' + (Format-Argument $git) + ' --version') -RedirectStandardInput 'NUL' -RedirectStandardOutput "$base\io\nul-out.txt" -RedirectStandardError "$base\io\nul-err.txt" -NoNewWindow -Wait -PassThru -ErrorAction Stop
+    Write-Host "P2 stdin-nul exit=$($nulStdin.ExitCode) out=[$((Get-Content -Raw "$base\io\nul-out.txt") -replace '\s+', ' ')] err=[$((Get-Content -Raw "$base\io\nul-err.txt") -replace '\s+', ' ')]"
+} catch {
+    Write-Host "P2 stdin-nul start failed: $($_.Exception.Message)"
 }
 
-$watch = [Diagnostics.Stopwatch]::StartNew()
-New-Tree "$base\grant-quiet"
-New-Tree "$base\grant-loaded"
-$watch.Stop()
-Write-Host "P3 trees made: 2 x 100000 files in $([Math]::Round($watch.Elapsed.TotalSeconds)) s"
+$chosen = $null
+foreach ($variant in @($emptyConfig, 'NUL')) {
+    Set-Variant $variant
+    $tag = if ($variant -eq 'NUL') { 'nul' } else { 'file' }
+    $results = @{}
+    foreach ($step in $steps) {
+        $arguments = Get-GitArgs $clean (Get-StepArgs $step "$base\work\b-clean-$tag.bundle")
+        $row = Measure-Open "P2-clean-$tag" $step { Invoke-ContainedGit $gitProfile $arguments }
+        $rows += $row
+        $results[$step] = $row
+    }
+    $listed = $results['ls-files'].Exit -eq 0 -and $results['ls-files'].Output -match 'b\.txt'
+    $made = @($steps | Where-Object { $results[$_].Exit -ne 0 }).Count -eq 0
+    Write-Host "P2 CLEAN variant=$tag lists-untracked=$listed all-steps-exit-0=$made"
+    if ($null -eq $chosen -and $listed -and $made) { $chosen = $variant }
+}
+$gitWorks = $null -ne $chosen
+if ($gitWorks) {
+    Set-Variant $chosen
+    Write-Host "P2 using GIT_CONFIG_GLOBAL and core.excludesFile = $chosen"
+    foreach ($item in $items.Keys) {
+        $repo = "$base\work\r-$item"
+        foreach ($step in $steps) {
+            $arguments = Get-GitArgs $repo (Get-StepArgs $step "$base\work\b-$item-contained.bundle")
+            $rows += Measure-Open 'P2-nocap' "$item-$step" { Invoke-ContainedGit $gitProfile $arguments }
+        }
+    }
+    foreach ($item in $items.Keys) {
+        $repo = "$base\work\r-$item"
+        foreach ($step in $steps) {
+            $arguments = Get-GitArgs $repo (Get-StepArgs $step "$base\work\b-$item-owner.bundle")
+            $rows += Measure-Open 'P2-owner' "$item-$step" { Invoke-OwnerGit $arguments }
+        }
+    }
+} else {
+    Set-Variant $emptyConfig
+}
+
 & $git clone -q $ws "$base\lat\repo"
 $latRepo = "$base\lat\repo"
 $latFiles = @(& $git -C $latRepo ls-files).Count
 $latProfile = Write-Profile 'p3-lat' 'crazyagent.probe-lat' @() @("$base\lat")
-$watch = [Diagnostics.Stopwatch]::StartNew()
-$latFirst = Invoke-Contained $latProfile $cmd @('/d', '/c', 'exit 0')
-$watch.Stop()
-Write-Host "P3 grant lat-repo files=$latFiles first-exit=$($latFirst.Exit) first-ms=$($watch.ElapsedMilliseconds)"
-$listArgs = @('-C', $latRepo, '--no-optional-locks', 'ls-files', '-z', '--cached', '--others', '--exclude-standard')
-
-Measure-Grant 'quiet' "$base\grant-quiet" 'crazyagent.probe-grant-quiet'
-Write-Host "P3 latency quiet direct $(Measure-Runs 20 { & $git @listArgs }) load=[$(Get-Load)]"
-Write-Host "P3 latency quiet contained $(Measure-Runs 20 { & $helper '--profile' $latProfile '--' $git @listArgs }) load=[$(Get-Load)]"
+$latArgs = Get-GitArgs $latRepo (Get-StepArgs 'ls-files' '')
+$probe = Invoke-ContainedGit $latProfile $latArgs
+$probeLines = @(($probe.Output -split "`n") | Where-Object { $_.Trim() -ne '' }).Count
+Write-Host "P3 contained list check exit=$($probe.Exit) lines=$probeLines tracked=$latFiles excludes=[$($script:excludes)]"
+Write-Host "P3 latency quiet direct $(Measure-Runs 20 { Invoke-OwnerGit $latArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency quiet contained $(Measure-Runs 20 { Invoke-ContainedGit $latProfile $latArgs }) load=[$(Get-Load)]"
 
 $loop = "$base\load\loop.ps1"
 Set-Content -Path $loop -Value @'
@@ -253,33 +308,28 @@ $waited = 0
 while ($waited -lt 240 -and @(Get-Process -Name rustc -ErrorAction SilentlyContinue).Count -eq 0) { Start-Sleep -Seconds 2; $waited += 2 }
 Start-Sleep -Seconds 20
 Write-Host "P3 loaded start after $waited s: [$(Get-Load)]"
-Measure-Grant 'loaded' "$base\grant-loaded" 'crazyagent.probe-grant-loaded'
-Write-Host "P3 latency loaded direct $(Measure-Runs 20 { & $git @listArgs }) load=[$(Get-Load)]"
-Write-Host "P3 latency loaded contained $(Measure-Runs 20 { & $helper '--profile' $latProfile '--' $git @listArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency loaded direct $(Measure-Runs 20 { Invoke-OwnerGit $latArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency loaded contained $(Measure-Runs 20 { Invoke-ContainedGit $latProfile $latArgs }) load=[$(Get-Load)]"
 New-Item -ItemType File -Force -Path "$base\load\stop" | Out-Null
 Get-Process -Name cargo, rustc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 $load | Stop-Process -Force -ErrorAction SilentlyContinue
-Write-Host "P3 load rounds started: $(@(Get-ChildItem "$base\load" -Filter 'log*.txt').Count)"
 
 $p1 = @($rows | Where-Object { $_.Phase -eq 'P1-nocap' -and $nonLoopback -contains $_.Label })
 $opened = @($p1 | Where-Object { $_.Exit -eq 0 }).Count
 $logged = @($p1 | Where-Object { $_.Logons -gt 0 }).Count
 $sessioned = @($p1 | Where-Object { $_.Session }).Count
-$control = @($rows | Where-Object { $_.Phase -eq 'P1-owner' -and $nonLoopback -contains $_.Label -and $_.Exit -eq 0 -and ($_.Logons -gt 0 -or $_.Session) })
+$control = @($rows | Where-Object { $_.Phase -eq 'P1-owner' -and $nonLoopback -contains $_.Label -and $_.Exit -eq 0 -and $_.Session })
+$controlLogons = @($rows | Where-Object { $_.Phase -like 'P1-owner*' -and $_.Logons -gt 0 }).Count
 $controlValid = $control.Count -eq $nonLoopback.Count
-$launched = @($rows | Where-Object { $_.Phase -eq 'P1-launch' -and $_.Exit -eq 0 }).Count -eq 2
-Write-Host "P1 CONTROL containers launched=$launched owner non-loopback opens logged a logon or session=$controlValid"
-Write-Host "P1 VERDICT nocap non-loopback names: opened=$opened logons=$logged sessions=$sessioned A-holds=$($launched -and $controlValid -and $opened -eq 0 -and $logged -eq 0 -and $sessioned -eq 0)"
-foreach ($phase in 'P1-net', 'P1-owner-session', 'P1-mapped', 'P1-mapped-session') {
-    foreach ($row in @($rows | Where-Object { $_.Phase -eq $phase })) {
-        Write-Host "P1 SUMMARY $phase $($row.Label) exit=$($row.Exit) logons=$($row.Logons) credentialed=$($row.Credentialed) session=$($row.Session)"
-    }
+Write-Host "P1 CONTROL owner non-loopback opens with a server session=$controlValid owner rows with a network logon event=$controlLogons"
+Write-Host "P1 VERDICT nocap non-loopback names: opened=$opened logons=$logged sessions=$sessioned A-holds=$($controlValid -and $opened -eq 0 -and $logged -eq 0 -and $sessioned -eq 0)"
+foreach ($row in @($rows | Where-Object { $_.Phase -like 'P1-*' })) {
+    Write-Host "P1 SUMMARY $($row.Phase) $($row.Label) exit=$($row.Exit) logons=$($row.Logons) failed=$($row.Failed) session=$($row.Session)"
 }
 foreach ($row in @($rows | Where-Object { $_.Phase -like 'P2-*' })) {
-    Write-Host "P2 SUMMARY $($row.Phase) $($row.Label) exit=$($row.Exit) logons=$($row.Logons) credentialed=$($row.Credentialed) session=$($row.Session)"
+    Write-Host "P2 SUMMARY $($row.Phase) $($row.Label) exit=$($row.Exit) logons=$($row.Logons) failed=$($row.Failed) session=$($row.Session)"
 }
-$containedHits = @($rows | Where-Object { ($_.Phase -eq 'P2-nocap' -or $_.Phase -eq 'P2-first-launch') -and ($_.Logons -gt 0 -or $_.Session) }).Count
+$containedHits = @($rows | Where-Object { ($_.Phase -eq 'P2-nocap' -or $_.Phase -eq 'P2-first-launch' -or $_.Phase -like 'P2-clean-*') -and ($_.Logons -gt 0 -or $_.Session) }).Count
 $ownerHits = @($rows | Where-Object { $_.Phase -eq 'P2-owner' -and ($_.Logons -gt 0 -or $_.Session) }).Count
-$gitLaunched = @($rows | Where-Object { $_.Phase -eq 'P2-first-launch' -and $_.Exit -eq 0 }).Count -eq 1
-Write-Host "P2 VERDICT git-launched-in-container=$gitLaunched contained runs that reached a share=$containedHits owner runs that reached a share=$ownerHits"
+Write-Host "P2 VERDICT git-works-in-container=$gitWorks variant=[$chosen] contained runs that reached a share=$containedHits owner runs that reached a share=$ownerHits"
 exit 0

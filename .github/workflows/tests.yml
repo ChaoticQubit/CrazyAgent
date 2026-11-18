@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
-      - name: Probe P1 share reach, P2 git in the container, P3 latency and grant time
+      - name: Probe P1 recheck, P2b git in the container with owner-opened std handles, P3 contained latency
         shell: pwsh
         timeout-minutes: 50
         run: ./.github/farm/probe-git-unc.ps1
