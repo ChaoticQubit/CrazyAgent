@@ -16,6 +16,7 @@ concurrency:
 jobs:
   win-git-program-probe:
     name: What Git for Windows runs for each signature program and ssh command value ${{ matrix.runner }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -117,5 +118,97 @@ jobs:
                 Probe "sig drive=$($drive.name) armor=$armor value=$value" $fx.repo @('-c', "gpg.program=$value", '-c', "gpg.x509.program=$value", '-c', "gpg.ssh.program=$value", 'log', '--show-signature', '-1', '--format=%s')
               }
               Probe "ssh drive=$($drive.name) value=$value" $fx.repo @('-c', "core.sshCommand=$value", 'ls-remote', 'ssh://example.invalid/x')
+            }
+          }
+
+  win-git-hookspath-probe:
+    name: What Git for Windows runs for core.hooksPath=/dev/null and a missing system folder, publish's update-ref under GIT_SAFE ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-2025]
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - name: Plant hooks under each drive's dev\null, then run publish's update-ref and hook-firing git per hooksPath value, repo on C and on D
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $git = 'C:\Program Files\Git\cmd\git.exe'
+          & $git --version
+          "system folder: " + [Environment]::SystemDirectory
+          "C:\ ACL: " + (((Get-Acl 'C:\').Access | Where-Object { $_.IdentityReference -match 'Authenticated Users|Users' } | ForEach-Object { "$($_.IdentityReference) $($_.FileSystemRights) $($_.AccessControlType)" }) -join '; ')
+          $t = $env:RUNNER_TEMP
+          $marks = Join-Path $t 'marks'
+          New-Item -ItemType Directory -Force $marks | Out-Null
+          $marker = Join-Path $t 'marker.exe'
+          $src = Join-Path $t 'marker.rs'
+          $code = "fn main() {`n    let me = std::env::current_exe().unwrap();`n    let _ = std::fs::write(me.with_extension(`"ran`"), me.display().to_string());`n}`n"
+          [IO.File]::WriteAllText($src, $code)
+          rustc -O $src -o $marker
+          if ($LASTEXITCODE -ne 0) { throw 'marker build failed' }
+          $hooks = @('reference-transaction', 'pre-commit', 'commit-msg', 'post-commit', 'post-checkout')
+          $planted = @()
+          foreach ($d in 'C', 'D') {
+            $dir = "${d}:\dev\null"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            foreach ($h in $hooks) {
+              $mark = (Join-Path $marks "$d-$h.txt") -replace '\\', '/'
+              [IO.File]::WriteAllText((Join-Path $dir $h), "#!/bin/sh`necho ""`$0"" >> '$mark'`n")
+              Copy-Item $marker (Join-Path $dir "$h.exe") -Force
+              $planted += (Join-Path $dir "$h.ran")
+            }
+          }
+          function Ran {
+            $found = @()
+            foreach ($f in Get-ChildItem $marks -File) { $found += "sh:" + $f.BaseName; Remove-Item $f.FullName -Force }
+            foreach ($p in $planted) { if (Test-Path $p) { $found += "exe:" + (Get-Content $p -Raw); Remove-Item $p -Force } }
+            return (($found | Sort-Object -Unique) -join ', ')
+          }
+          function Safe([string]$hooksPath) {
+            return @('-c', "core.hooksPath=$hooksPath", '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'submodule.recurse=false', '-c', 'protocol.allow=never', '-c', 'gpg.program=/usr/bin/false', '-c', 'gpg.x509.program=/usr/bin/false', '-c', 'gpg.ssh.program=/usr/bin/false', '-c', 'log.showSignature=false')
+          }
+          function Run([string]$label, [string]$cwd, [hashtable]$vars, [string[]]$gitArgs) {
+            $saved = @{}
+            foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
+            Push-Location $cwd
+            & $git @gitArgs > (Join-Path $t 'out.txt') 2> (Join-Path $t 'err.txt')
+            $rc = $LASTEXITCODE
+            Pop-Location
+            foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+            $err = ((Get-Content (Join-Path $t 'err.txt') -TotalCount 2 -ErrorAction SilentlyContinue) -join ' | ')
+            "$label rc=$rc ran=[$(Ran)] err=[$err]"
+          }
+          $values = @('/dev/null', (([Environment]::SystemDirectory -replace '\\', '/') + '/crazyagent-none'))
+          foreach ($drive in @(@{ name = 'C'; base = (Join-Path $env:USERPROFILE 'hp') }, @{ name = 'D'; base = (Join-Path $t 'hp') })) {
+            for ($n = 0; $n -lt $values.Count; $n++) {
+              $value = $values[$n]
+              $base = Join-Path $drive.base "v$n"
+              $project = Join-Path $base 'project'
+              $homeDir = Join-Path $base 'home'
+              $stage = Join-Path $homeDir 'stage'
+              New-Item -ItemType Directory -Force $project, $homeDir | Out-Null
+              & $git -C $project init -q --template= -b main | Out-Null
+              & $git -C $project -c user.name=o -c user.email=o@example.invalid -c core.hooksPath=NONE commit -q --allow-empty --no-verify -m base | Out-Null
+              $commit = (& $git -C $project rev-parse HEAD).Trim()
+              $null = Ran
+              $env1 = @{ HOME = $homeDir; GIT_NO_LAZY_FETCH = '1'; GIT_CONFIG_NOSYSTEM = '1'; GIT_ATTR_NOSYSTEM = '1'; GIT_TERMINAL_PROMPT = '0'; GIT_CONFIG_GLOBAL = 'NUL' }
+              $projectVars = $env1.Clone(); $projectVars['GIT_DIR'] = (Join-Path $project '.git'); $projectVars['GIT_WORK_TREE'] = $project
+              Run "hooks drive=$($drive.name) value=$value cmd=publish-project-update-ref" $project $projectVars ((Safe $value) + @('update-ref', 'refs/heads/published', $commit))
+              Run "hooks drive=$($drive.name) value=$value cmd=publish-stage-init" $homeDir $env1 ((Safe $value) + @('init', '--bare', '-q', '--template=', '--', $stage))
+              $alternates = Join-Path $stage 'objects\info'
+              New-Item -ItemType Directory -Force $alternates | Out-Null
+              [IO.File]::WriteAllText((Join-Path $alternates 'alternates'), ((Join-Path $project '.git\objects') + "`n"))
+              $stageVars = $env1.Clone(); $stageVars['GIT_DIR'] = $stage
+              Run "hooks drive=$($drive.name) value=$value cmd=publish-stage-update-ref" $homeDir $stageVars ((Safe $value) + @('update-ref', 'refs/heads/main', $commit))
+              Run "hooks drive=$($drive.name) value=$value cmd=commit" $project @{} @('-c', "core.hooksPath=$value", '-c', 'user.name=o', '-c', 'user.email=o@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
+              Run "hooks drive=$($drive.name) value=$value cmd=checkout" $project @{} @('-c', "core.hooksPath=$value", 'checkout', '-q', '-b', 'probe2')
             }
           }
