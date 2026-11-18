@@ -893,17 +893,11 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
         .restrict_self()
 }
 
-/// Installs the seccomp filter every agent process, slirp4netns ([`egress::confine_slirp`])
-/// and their children keep: a new Unix-domain socket and a new io_uring ring both fail with
-/// `EACCES`, and with `tcp_only` so does every
-/// socket but TCP over IPv4 or IPv6 and routing netlink, since Landlock limits TCP only and
-/// a datagram, raw or other family socket reaches any host. Landlock does not mediate a
-/// pathname socket connect, and a ring could create a socket without `socket(2)`;
-/// `socketpair(2)` stays allowed since it reaches no path. With `plain_tcp` the filter also
-/// refuses the stream sockets that hold a TCP port without being plain TCP, which
-/// Landlock's bind rules do not see on every kernel. Inputs: whether only TCP sockets may open, and whether
-/// Landlock keeps TCP ports free of this agent. Output: the installed filter, or the reason
-/// this kernel or architecture cannot hold it.
+/// Installs the seccomp filter that agents, slirp4netns ([`egress::confine_slirp`]) and their
+/// children keep: a Unix-domain `socket(2)` and `io_uring_setup` fail with `EACCES`, with
+/// `tcp_only` so does every socket but TCP and routing netlink, and with `plain_tcp` so does
+/// a stream socket that holds a TCP port without being plain TCP. Inputs: the two switches.
+/// Output: the installed filter, or the reason this kernel or architecture cannot hold it.
 fn refuse_sockets(tcp_only: bool, plain_tcp: bool) -> Result<(), String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     rules.insert(libc::SYS_socket, refused_sockets(tcp_only, plain_tcp)?);

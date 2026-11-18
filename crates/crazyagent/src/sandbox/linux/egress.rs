@@ -577,9 +577,9 @@ fn start_slirp(child: u32) -> Result<Slirp, String> {
 
 /// Opens the agent's user and network namespaces while Landlock still lets it, then confines
 /// this thread and its children under no new privileges: read and execute beneath
-/// [`SLIRP_READ`], all rights on [`TUN`], signals scoped to its domain where the kernel can,
-/// and no Unix-domain socket, the way to the engine's sockets by path. Input: the agent's
-/// process id. Output: the two namespaces, user first, or the reason.
+/// [`SLIRP_READ`], all rights on [`TUN`], signals scoped where the kernel can, and no new
+/// Unix-domain socket through `socket(2)`; a socket pair, which reaches no path, still opens.
+/// Input: the agent's process id. Output: the two namespaces, user first, or the reason.
 pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
     assert!(child > 1);
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
