@@ -88,6 +88,48 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
     Ok(opened)
 }
 
+/// Opens the private file at `path` for reading only, never following a link, and refuses it
+/// unless [`judge`] finds it private. Like [`file`] it never shares delete, so the file
+/// cannot be renamed or replaced while it is read. Input: the absolute path. Output: the open
+/// file, or why it is not private.
+pub fn read_only(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let opened = open(&name, GENERIC_READ | READ_CONTROL, OPEN_EXISTING, 0, None)?;
+    private_as(&opened, &user, false)?;
+    Ok(opened)
+}
+
+/// The identity a store pins for an open private object: its volume serial number and its
+/// 64-bit file id, the twin of Unix `(dev, ino)`. A file id that needs all 128 bits, as on
+/// ReFS, is refused, so two files never share one identity. Input: the handle. Output: the
+/// pair, or the error.
+pub fn identity(object: &File) -> io::Result<(u64, u64)> {
+    let (volume, id) = id(object)?;
+    let (low, high) = id.split_at(8);
+    if high.iter().any(|byte| *byte != 0) {
+        return Err(refused("a private path's file id needs more than 64 bits"));
+    }
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(low);
+    Ok((volume, u64::from_le_bytes(bytes)))
+}
+
+/// Writes a private folder's entries to disk after a create, rename or delete in it, the
+/// twin of `sync_all` on a Unix folder: the folder is opened for writing, never following a
+/// link, and flushed. Input: the absolute folder path. Output: Ok, or the Windows error.
+pub fn sync_folder(path: &Path) -> io::Result<()> {
+    let name = wide_path(path)?;
+    open(
+        &name,
+        GENERIC_WRITE,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )?
+    .sync_all()
+}
+
 /// Reads what W1's check judges from an open folder or file. Input: the handle. Output: the
 /// facts, or the Windows error.
 pub fn facts(object: &File) -> io::Result<Facts> {

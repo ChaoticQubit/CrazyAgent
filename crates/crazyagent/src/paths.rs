@@ -171,6 +171,7 @@ impl Layout {
 /// Creates a folder and any missing parents private to this user (0700), then refuses
 /// it unless it is a real folder this user owns with exactly mode 0700. Input: the
 /// folder. Output: Ok, or an error naming the path and the fix.
+#[cfg(unix)]
 pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -186,14 +187,62 @@ pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     private(path, &metadata, 0o700, "700")
 }
 
-/// Whether a folder already is one [`private_folder`] leaves: a real folder, not a link,
-/// owned by this user with mode 700 where Unix modes exist. Nothing is created. Input: the
-/// folder. Output: the answer, false for a missing folder.
-pub(crate) fn is_private_folder(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.is_dir() && private(path, &metadata, 0o700, "700").is_ok())
+/// Creates a folder's missing parents, then the folder itself as a W1 private folder (owned
+/// by this user, protected list for the user, SYSTEM and the administrators), or checks the
+/// one already there (DESIGN-0256 D1). Input: the folder. Output: Ok, or an error naming the
+/// path and why it is not private.
+#[cfg(windows)]
+pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| problem(path, format!("could not create the folder ({error})")))?;
+    }
+    crazyagent_win_sandbox::private::dir(path)
+        .map(drop)
+        .map_err(|error| refused(path, &error))
 }
 
+/// Says why W1's private check refused an entry, or that it could not be opened. Inputs: the
+/// path and the error. Output: the problem naming the path.
+#[cfg(windows)]
+fn refused(path: &Path, error: &std::io::Error) -> PathsError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        problem(path, format!("must be private to you ({error})"))
+    } else {
+        problem(path, error)
+    }
+}
+
+/// Whether a folder already is one [`private_folder`] leaves: a real folder, not a link,
+/// owned by this user with mode 700 where Unix modes exist, private by W1's check on Windows.
+/// Nothing is created. Input: the folder. Output: the answer, false for a missing folder.
+pub(crate) fn is_private_folder(path: &Path) -> bool {
+    #[cfg(unix)]
+    return std::fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && private(path, &metadata, 0o700, "700").is_ok());
+    #[cfg(windows)]
+    return std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        && crazyagent_win_sandbox::private::dir(path).is_ok();
+}
+
+/// Writes a default settings file private to this user when it is missing, or checks the one
+/// already there, on Windows through W1's private file (DESIGN-0256 D1). Inputs: the path
+/// and the default text. Output: Ok, or an error naming the path.
+#[cfg(windows)]
+fn private_settings(path: &Path, defaults: &str) -> Result<(), PathsError> {
+    use crazyagent_win_sandbox::private;
+    match private::file(path, true) {
+        Ok(mut file) => std::io::Write::write_all(&mut file, defaults.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| problem(path, format!("could not write settings ({error})"))),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => private::read_only(path)
+            .map(drop)
+            .map_err(|error| refused(path, &error)),
+        Err(error) => Err(refused(path, &error)),
+    }
+}
+
+#[cfg(unix)]
 fn private_settings(path: &Path, defaults: &str) -> Result<(), PathsError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -238,18 +287,6 @@ fn private(
             ),
         ));
     }
-    Ok(())
-}
-
-/// Accepts every entry where Unix owner and mode bits do not exist. Inputs unused.
-/// Output: Ok; the engine itself still refuses roots it cannot check on Windows.
-#[cfg(not(unix))]
-fn private(
-    _path: &Path,
-    _metadata: &std::fs::Metadata,
-    _mode: u32,
-    _shown: &str,
-) -> Result<(), PathsError> {
     Ok(())
 }
 

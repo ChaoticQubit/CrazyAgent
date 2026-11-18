@@ -228,6 +228,51 @@ fn same_tells_one_private_file_from_another() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// W1c D5: a private file opens for reading with the identity its writer pinned, a file
+/// with a second hard link is refused for reading too, and a held read stops a rename.
+#[test]
+fn a_read_only_open_keeps_the_identity_and_the_private_check() {
+    let root = scratch("read");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("global.toml");
+    let written = private::file(&path, true).unwrap();
+    let pinned = private::identity(&written).unwrap();
+    drop(written);
+    let read = private::read_only(&path).unwrap();
+    assert_eq!(private::identity(&read).unwrap(), pinned);
+    assert!(std::fs::rename(&path, root.join("moved.toml")).is_err());
+    drop(read);
+    std::fs::hard_link(&path, root.join("again.toml")).unwrap();
+    assert!(private::read_only(&path).is_err());
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// W1c D5: a replace inside a held private folder works, keeps the new file's identity under
+/// the old name, and the folder flush after it succeeds; a replace over a target held open
+/// by a private handle fails and leaves both files as they were.
+#[test]
+fn a_replace_in_a_held_folder_works_and_fails_cleanly_over_a_held_target() {
+    let root = scratch("replace");
+    let held = private::dir(&root).unwrap();
+    let target = root.join("global.toml");
+    drop(private::file(&target, true).unwrap());
+    let staged = root.join(".publication");
+    let file = private::file(&staged, true).unwrap();
+    let pinned = private::identity(&file).unwrap();
+    drop(file);
+    std::fs::rename(&staged, &target).unwrap();
+    private::sync_folder(&root).unwrap();
+    let replaced = private::read_only(&target).unwrap();
+    assert_eq!(private::identity(&replaced).unwrap(), pinned);
+    drop(private::file(&staged, true).unwrap());
+    assert!(std::fs::rename(&staged, &target).is_err());
+    assert_eq!(private::identity(&replaced).unwrap(), pinned);
+    assert!(staged.is_file());
+    drop((replaced, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// W1 D1 (rv-sec3 N4): a private file given a low mandatory label, which lets a low
 /// integrity process of the user write it, is refused on open.
 #[test]
