@@ -41,6 +41,18 @@ fn unsubmitted<T>(answer: &Result<T, EngineError>) -> bool {
     })
 }
 
+/// Whether an answer is a refusal the owner hears by name, so the kept sign-out it answers
+/// ends: a native-auth refusal every client shows, or a busy profile the owner reads as
+/// recovery required. Pending, outcome unknown and storage's own answers are not.
+/// Input: the answer. Output: the verdict.
+fn refused_by_name<T>(answer: &Result<T, EngineError>) -> bool {
+    answer.as_ref().is_err_and(|refused| {
+        refused.0 == "native_auth_host_busy"
+            || (!crate::storage::storage_answer(&refused.0)
+                && crate::engine::owner::native_auth::public_error(&refused.0))
+    })
+}
+
 impl OwnerRuntimeHandle {
     /// Keeps one narrowing change on disk before its job is submitted, so a lost job is
     /// applied later. Input: the change. Output: the intent's name, or none when it could not
@@ -82,6 +94,30 @@ impl OwnerRuntimeHandle {
                 Err(failure(crate::storage::ACCESS_CHANGE_PENDING))
             }
             _ => answer,
+        }
+    }
+
+    /// Ends a kept sign-out when the answer the owner is about to hear is storage's refusal by
+    /// name, since the owner then knows nothing changed; any other answer keeps it for the
+    /// drainer or the next open. Inputs: the intent and the answer. Output: none; a removal
+    /// that fails is logged, and the sign-out then replays at the next open.
+    pub(super) async fn end_refused_sign_out<T>(
+        &self,
+        id: &IntentId,
+        answer: &Result<T, EngineError>,
+    ) {
+        if !refused_by_name(answer) {
+            return;
+        }
+        let Some(intents) = self.engine.storage.intents.clone() else {
+            return;
+        };
+        let name = id.as_str().to_owned();
+        let id = id.clone();
+        match tokio::task::spawn_blocking(move || intents.remove(&id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(left)) => eprintln!("narrowing_intent_unremoved id={name} cause={}", left.0),
+            Err(_) => eprintln!("narrowing_intent_unremoved id={name} cause=remover_lost"),
         }
     }
 

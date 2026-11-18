@@ -1135,10 +1135,11 @@ impl OwnerRuntimeHandle {
         self.authority.reserve_native_auth(dispatch, false)
     }
 
-    /// Runs one native-auth command. A sign-out is kept on disk first, and one storage
-    /// refuses to take is queued for the drainer and answered pending, so it lands later or
-    /// at the next open. Inputs: the admission, the command and who asks. Output: the reply,
-    /// or the code the asker sees.
+    /// Runs one native-auth command. A sign-out is kept on disk first: it ends here when the
+    /// owner hears storage refuse it by name, one storage refuses to take is queued for the
+    /// drainer and answered pending, and any other stays until storage records it or the
+    /// next open replays it. Inputs: the admission, the command and who asks. Output: the
+    /// reply, or the code the asker sees.
     pub(super) async fn native_auth_command(
         &self,
         admission: Admission,
@@ -1153,12 +1154,16 @@ impl OwnerRuntimeHandle {
             return self.native_auth_submit(admission, command, ask).await;
         };
         command.validate()?;
+        let owner = matches!(ask, crate::storage::NativeAuthAsk::Owner { .. });
         let kept = self
             .keep_narrowing(crate::storage::narrowing::Change::Logout(logout.clone()))
             .await;
         let answer = self
             .native_auth_submit(admission.clone(), command, ask)
             .await;
+        if owner && let Some(id) = &kept {
+            self.end_refused_sign_out(id, &answer).await;
+        }
         self.pending_unless_taken(
             answer,
             kept.map(|id| super::narrowing::Pending::Logout {

@@ -935,7 +935,7 @@ impl Storage {
                                 )
                             };
                             if let Some(request_id) = &logout
-                                && final_answer(&result, &ask)
+                                && result.is_ok()
                             {
                                 end_logout_intent(intents.as_deref(), request_id);
                             }
@@ -3523,25 +3523,10 @@ fn end_superseded_sign_outs(
     }
 }
 
-/// Whether a sign-out's answer is final for its intent: storage ran it, or refused it by a
-/// name the owner hears, an owner ask answered by its due time (a busy profile reads as
-/// recovery required). A drained, engine or late refusal, told pending or never told, and
-/// any storage fault keep it for the next open. Inputs: the answer and who asked.
-/// Output: the verdict.
-fn final_answer<T>(result: &Result<T, EngineError>, ask: &NativeAuthAsk) -> bool {
-    let Err(refused) = result else {
-        return true;
-    };
-    let heard = match ask {
-        NativeAuthAsk::Owner { answer_by } => tokio::time::Instant::now() <= *answer_by,
-        NativeAuthAsk::Drained(_) | NativeAuthAsk::Engine => false,
-    };
-    heard && (refused.0 == "native_auth_host_busy" || owner_auth::public_error(&refused.0))
-}
-
-/// Ends the kept sign-out with this operation id once storage gave it a final answer, so the
-/// next open does not sign out for it. Inputs: the store and the sign-out's operation id.
-/// Output: none; a store that cannot be read is logged and its intent replays later.
+/// Ends the kept sign-out with this operation id once storage recorded its begin, so the next
+/// open does not sign out for it again; a refusal the owner hears is ended where it is
+/// answered. Inputs: the store and the sign-out's operation id. Output: none; a store that
+/// cannot be read is logged and its intent replays later.
 fn end_logout_intent(intents: Option<&narrowing::Intents>, request_id: &RequestId) {
     let Some(intents) = intents else {
         return;
