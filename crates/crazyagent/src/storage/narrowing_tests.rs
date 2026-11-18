@@ -15,6 +15,14 @@ fn root() -> tempfile::TempDir {
     root
 }
 
+/// Opens the intent store of an engine root, which on Unix is always some store.
+/// Input: the engine root. Output: the store.
+fn store(root: &Path) -> Intents {
+    Intents::open(root)
+        .unwrap()
+        .expect("the intent store opens on unix")
+}
+
 /// A revocation of the TUI client at `epoch`, for the database `db_instance`.
 /// Inputs: the operation name and the epoch. Output: the intent.
 fn revocation(name: &str, epoch: i64) -> Intent {
@@ -50,7 +58,7 @@ fn plant(root: &Path, name: &str, bytes: &[u8], mode: u32) -> PathBuf {
 #[test]
 fn a_written_intent_is_a_private_file_listed_once_and_gone_after_its_removal() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     assert!(
         !root.path().join(FOLDER).exists(),
         "opening makes no folder"
@@ -79,7 +87,7 @@ fn a_written_intent_is_a_private_file_listed_once_and_gone_after_its_removal() {
 #[test]
 fn intents_are_listed_in_the_order_they_were_written() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     let written: Vec<IntentId> = (0..20)
         .map(|index| {
             intents
@@ -100,7 +108,7 @@ fn intents_are_listed_in_the_order_they_were_written() {
 #[test]
 fn a_kind_that_does_not_narrow_access_or_an_unknown_field_is_refused_and_left_in_place() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     let id = intents.write(&revocation("revoke-kept", 1)).unwrap();
     let good = std::fs::read(root.path().join(FOLDER).join(id.as_str())).unwrap();
     let text = String::from_utf8(good).unwrap();
@@ -129,7 +137,7 @@ fn a_kind_that_does_not_narrow_access_or_an_unknown_field_is_refused_and_left_in
 #[test]
 fn a_link_a_shared_mode_a_second_name_a_bad_name_or_an_oversized_file_is_refused_and_left() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     let id = intents.write(&revocation("revoke-real", 1)).unwrap();
     let real = root.path().join(FOLDER).join(id.as_str());
     let bytes = std::fs::read(&real).unwrap();
@@ -165,7 +173,7 @@ fn a_link_a_shared_mode_a_second_name_a_bad_name_or_an_oversized_file_is_refused
 #[test]
 fn an_intent_over_the_size_bound_is_never_written() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     let long = Intent {
         db_instance: "a".repeat(MAX_BYTES),
         ..revocation("revoke-long", 1)
@@ -180,7 +188,7 @@ fn an_intent_over_the_size_bound_is_never_written() {
 #[test]
 fn at_most_the_listing_cap_of_intents_is_read_and_the_rest_are_refused() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     for index in 0..=MAX_INTENTS {
         intents
             .write(&revocation(&format!("revoke-{index}"), 1))
@@ -195,7 +203,7 @@ fn at_most_the_listing_cap_of_intents_is_read_and_the_rest_are_refused() {
 #[test]
 fn a_shared_or_linked_intent_folder_is_refused() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     std::fs::create_dir(root.path().join(FOLDER)).unwrap();
     std::fs::set_permissions(
         root.path().join(FOLDER),
@@ -233,7 +241,7 @@ fn a_shared_or_linked_intent_folder_is_refused() {
 #[test]
 fn a_logout_intent_reads_back_as_written() {
     let root = root();
-    let intents = Intents::open(root.path()).unwrap();
+    let intents = store(root.path());
     let logout = Intent {
         db_instance: "c".repeat(64),
         change: Change::Logout(NativeAuthLogout {
