@@ -36,17 +36,67 @@ const READER_WAIT: Duration = Duration::from_secs(45);
 /// Lines of the reader's error output kept in the log.
 const READER_ERROR_LINES: usize = 6;
 
+/// The emoji picker: Windows PowerShell's UI Automation client finds the emoji panel
+/// ("Windows Input Experience") among the desktop's children, lists its first items and
+/// invokes (or selects) the first named one, as a user's pick would. Lines are "key=value".
+const EMOJI_PICKER: &str = r##"param([Int64]$Unused)
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$element = [System.Windows.Automation.AutomationElement]
+$scope = [System.Windows.Automation.TreeScope]
+$named = New-Object System.Windows.Automation.PropertyCondition($element::NameProperty, "Windows Input Experience")
+$panel = $element::RootElement.FindFirst($scope::Children, $named)
+if ($null -eq $panel) { "picker_panel=missing"; exit 0 }
+"picker_panel=found class=$($panel.Current.ClassName) rect=$($panel.Current.BoundingRectangle)"
+$listed = New-Object System.Windows.Automation.PropertyCondition($element::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
+$items = @($panel.FindAll($scope::Descendants, $listed) | Where-Object { $_.Current.Name -ne "" })
+"picker_items=$($items.Count)"
+"picker_first_names=$((@($items | Select-Object -First 6 | ForEach-Object { $_.Current.Name })) -join ' | ')"
+foreach ($item in $items) {
+    $pattern = $null
+    if ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+        $pattern.Invoke()
+        "picker_invoked=$($item.Current.Name) via=invoke"
+        exit 0
+    }
+    if ($item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+        $pattern.Select()
+        "picker_invoked=$($item.Current.Name) via=select"
+        exit 0
+    }
+}
+"picker_invoked=none"
+"##;
+
 /// Runs the reader in its own process against the view's window, the way a screen reader
 /// reaches it. Called off the window's thread, which must stay free to answer the
 /// reader's WM_GETOBJECT. Input: the view's window. Output: the reader's lines with its
 /// exit and time, or why it could not start.
 pub fn read(hwnd: isize) -> Result<Vec<String>, String> {
     assert!(hwnd != 0, "the view exists before it is read");
+    run_script("reader", READER, &hwnd.to_string())
+}
+
+/// Picks the first emoji in the open emoji panel through UI Automation, from its own
+/// process. Called off the window's thread. Output: the picker's lines with its exit and
+/// time, or why it could not start.
+pub fn pick_emoji() -> Result<Vec<String>, String> {
+    run_script("emoji", EMOJI_PICKER, "0")
+}
+
+/// Runs one Windows PowerShell script in its own process, killed past `READER_WAIT`.
+/// Inputs: a file stem, the script and its one argument. Output: its output lines, the
+/// first error lines and its exit and time, or why it could not start.
+fn run_script(stem: &str, body: &str, argument: &str) -> Result<Vec<String>, String> {
+    assert!(!stem.is_empty() && !body.is_empty());
     let dir = std::env::temp_dir().join(format!("spike-uia-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let script = dir.join("reader.ps1");
-    std::fs::write(&script, READER).map_err(|e| e.to_string())?;
-    let (out, err) = (dir.join("out.txt"), dir.join("err.txt"));
+    let script = dir.join(format!("{stem}.ps1"));
+    std::fs::write(&script, body).map_err(|e| e.to_string())?;
+    let (out, err) = (
+        dir.join(format!("{stem}-out.txt")),
+        dir.join(format!("{stem}-err.txt")),
+    );
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let shell = PathBuf::from(root).join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
     let started = Instant::now();
@@ -59,7 +109,7 @@ pub fn read(hwnd: isize) -> Result<Vec<String>, String> {
             "-File",
         ])
         .arg(&script)
-        .arg(hwnd.to_string())
+        .arg(argument)
         .env_remove("PSModulePath")
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&out).map_err(|e| e.to_string())?)

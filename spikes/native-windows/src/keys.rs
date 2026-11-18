@@ -1,6 +1,4 @@
-use crate::probe::{
-    child, click_screen, click_term, log, note, on_main, on_main_within, take_notes, wide,
-};
+use crate::probe::{child, click_term, log, note, on_main, on_main_within, take_notes, wide};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
@@ -390,9 +388,10 @@ fn new_windows(before: &[Top]) -> Vec<String> {
         .collect()
 }
 
-/// The emoji panel row: Win+. on the focused view and the windows that appear, then Enter
-/// and then a click at the panel's centre, each with the UTF-16 units that reach the
-/// view; INCONCLUSIVE when no window appears. Escape closes the panel after.
+/// The emoji panel row: Win+. on the focused view and the windows that appear, what the
+/// chord alone brought, then a pick of the panel's first emoji through UI Automation and
+/// then Enter, each with the UTF-16 units that reach the view; INCONCLUSIVE when no window
+/// appears. Escape closes the panel after.
 pub fn emoji_rows() {
     click_term();
     take_notes();
@@ -405,12 +404,8 @@ pub fn emoji_rows() {
     ];
     let taken = send_keys(&chord, 0);
     std::thread::sleep(Duration::from_millis(2000));
-    let panel: Vec<Top> = top_windows()
-        .into_iter()
-        .filter(|window| before.iter().all(|old| old.hwnd != window.hwnd))
-        .collect();
-    let named: Vec<String> = panel.iter().map(|window| window.name.clone()).collect();
-    let verdict = if panel.is_empty() {
+    let named: Vec<String> = new_windows(&before);
+    let verdict = if named.is_empty() {
         "INCONCLUSIVE no panel window"
     } else {
         "panel"
@@ -419,23 +414,16 @@ pub fn emoji_rows() {
         "emoji_panel",
         &format!("{verdict} events={taken} new={}", named.join(" ; ")),
     );
+    log("emoji_chord_got", &take_notes().join(" "));
+    match crate::uia::pick_emoji() {
+        Ok(lines) => lines.iter().for_each(|line| log("emoji_uia", line)),
+        Err(error) => log("emoji_uia", &format!("error {error}")),
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    log("emoji_picked_uia", &take_notes().join(" "));
     send_keys(&taps(&[VK_RETURN]), 0);
     std::thread::sleep(Duration::from_millis(1000));
     log("emoji_picked_enter", &take_notes().join(" "));
-    if let Some(window) = panel.first() {
-        let r = window.rect;
-        let centre = POINT {
-            x: (r.left + r.right) / 2,
-            y: (r.top + r.bottom) / 2,
-        };
-        let clicked = click_screen(centre);
-        std::thread::sleep(Duration::from_millis(1000));
-        let got = take_notes().join(" ");
-        log(
-            "emoji_picked_click",
-            &format!("at={},{} events={clicked} got={got}", centre.x, centre.y),
-        );
-    }
     send_keys(&taps(&[VK_ESCAPE]), 0);
     std::thread::sleep(Duration::from_millis(300));
 }
