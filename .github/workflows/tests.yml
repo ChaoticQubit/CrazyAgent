@@ -204,14 +204,17 @@ jobs:
           npm run typecheck
           node --test --test-timeout=15000 test/api.test.mjs test/native-auth.test.mjs test/app.test.mjs test/recovery-banner.test.mjs test/process.test.mjs test/project-cleanup.test.mjs test/agent-instructions.test.mjs --test-skip-pattern="picking an instructions mode, the transcript switch or an edit choice"
       - name: Install Linux build packages
+        if: ${{ !cancelled() }}
         timeout-minutes: 10
         run: bash scripts/ci/linux-packages.sh
       - name: Install Rust toolchain
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        if: ${{ !cancelled() }}
         with:
           prefix-key: farm
           shared-key: linux
@@ -220,12 +223,14 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Clippy on the crate, then on its test build
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           export CARGO_BUILD_JOBS=2
           cargo clippy -p crazyagent --lib --locked -- -D warnings
           cargo clippy -p crazyagent --lib --profile test --locked -- -D warnings
       - name: The worktree ownership integration test, whose client resends on a not-submitted code
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           export CARGO_BUILD_JOBS=2
