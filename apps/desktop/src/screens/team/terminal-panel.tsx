@@ -1009,10 +1009,10 @@ export const still = () => () => {};
 const idle = () => IDLE;
 
 /** One agent's live terminal beside the graph, in a console or as a wall tile: the head, the
- * terminal sized to the panel, Copy and Copy output, Jump to latest and the message box, the
- * view kept after the panel closes among the two most recently used (DEC-187). The webview
- * terminal on Windows and Linux, the native view on macOS (DEC-203), the plain reason when the
- * desktop's answer could not be read. Input: `PanelProps`. Output: the panel. */
+ * terminal, Copy, Jump to latest and the message box. In the main window the view stays after
+ * the panel closes, among the two most recently used (DEC-187); a wall tile's view goes with
+ * the tile. Webview terminal on Windows and Linux, native view on macOS (DEC-203), else the
+ * plain reason the desktop's answer could not be read. Input: `PanelProps`. Output: the panel. */
 export function TerminalPanel(props: PanelProps) {
   const kind = terminalKind();
   if (kind.kind === "native") return <NativeTerminalPanel {...props} />;
