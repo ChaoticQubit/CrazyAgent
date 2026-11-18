@@ -19,6 +19,8 @@ use std::fs;
 
 use std::io::{BufRead, BufReader, Read, Write};
 
+use std::os::fd::AsRawFd;
+
 use std::path::{Path, PathBuf};
 
 use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -2688,6 +2690,70 @@ fn the_bridge_leaves_no_descriptor_in_the_harness() {
     };
     assert_eq!(open(&bridged), "0\n1\n2\n3\n");
     assert_eq!(open(&bridged), open(&shared));
+}
+
+/// Lists the descriptors a wrapped `/bin/sh` holds when its starter also hands it `/dev/null`
+/// under that descriptor's own number, not closed on exec, as a parent of the engine leaves
+/// one open. Inputs: the sandbox and the case. Output: the harness's `ls /proc/self/fd`.
+fn listed_with_inherited(sandbox: &dyn Sandbox, case: &Case) -> String {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", "ls /proc/self/fd"])
+        .current_dir(case.project.join("worktrees"));
+    let mut wrapped = sandbox.wrap(&harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let output = crazyagent::spawn_gate::spawn_handing(&mut wrapped, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A guard, V243-LINUX-HARNESS-FD-LEAK: a descriptor the engine inherited and does not close
+/// on exec reaches no harness, plain, nested or bridged, where a GitHub runner's two open
+/// pipes reached every one. The control shows a plain child does inherit it.
+#[test]
+fn a_descriptor_the_engine_inherited_reaches_no_harness() {
+    let case = case();
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let number = inherited.as_raw_fd().to_string();
+    let mut plain = Command::new("/bin/ls");
+    plain
+        .arg("/proc/self/fd")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
+    let control = crazyagent::spawn_gate::spawn_handing(&mut plain, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        String::from_utf8(control.stdout)
+            .unwrap()
+            .lines()
+            .any(|line| line == number),
+        "the control: a plain child inherits descriptor {number}"
+    );
+    let bridged = SandboxNetwork::Only(vec![SandboxRemote::Loopback(18_080)]);
+    let mut sandboxes = vec![pinned(policy(&case, SandboxNetwork::Open))];
+    sandboxes.extend(nested(policy(&case, SandboxNetwork::Open)));
+    sandboxes.extend(nested(policy(&case, bridged)));
+    for sandbox in &sandboxes {
+        assert_eq!(
+            listed_with_inherited(sandbox, &case),
+            "0\n1\n2\n3\n",
+            "{:?}",
+            sandbox.backend()
+        );
+    }
 }
 
 /// Tells whether a broker that carries a port runs on this machine, by its arguments.
