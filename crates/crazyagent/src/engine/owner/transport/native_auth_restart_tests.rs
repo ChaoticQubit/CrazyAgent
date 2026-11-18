@@ -2513,3 +2513,65 @@ async fn a_drained_sign_out_refused_by_name_keeps_its_intent_and_the_next_open_r
     .await
     .expect("the refused drained sign-out case exceeded 60 seconds");
 }
+
+/// V243-NARROWING-DURABLE r2: a sign-out storage refuses by name only after the owner was
+/// told it is pending keeps its intent, since the owner never hears that refusal, and the
+/// next open replays it: the profile reads Not signed in and no longer launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_refused_after_the_owner_was_told_pending_keeps_its_intent_for_the_next_open() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let (release, held) = tokio::sync::oneshot::channel();
+        first
+            .handle
+            .engine
+            .storage
+            .sender
+            .try_send(Job::Hold(held))
+            .unwrap();
+        let told = first
+            .client()
+            .logout_native_auth(NativeAuthLogout {
+                request_id: request("restart-logout-late-refused"),
+                scope,
+            })
+            .await;
+        assert_eq!(
+            told.map(|reply| reply.fact.action).map_err(|error| error.0),
+            Err("access_change_pending".to_owned()),
+            "a sign-out storage cannot answer by its due time is pending"
+        );
+        release.send(()).unwrap();
+        let (send, settled) = tokio::sync::oneshot::channel();
+        first
+            .handle
+            .engine
+            .storage
+            .sender
+            .send(Job::Setup(crate::storage::setup::Command::Sweep, send))
+            .await
+            .unwrap();
+        settled.await.unwrap().unwrap();
+        assert_eq!(
+            restart.kept(),
+            1,
+            "a refusal the owner never hears keeps the sign-out's intent"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(restart.kept(), 0, "the next open replays the kept sign-out");
+        assert!(
+            restart.launch().is_err(),
+            "the replayed sign-out keeps the profile from launching"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the late refused sign-out case exceeded 60 seconds");
+}
