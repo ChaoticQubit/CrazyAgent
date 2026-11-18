@@ -159,8 +159,8 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
 /// container's entry, and this user cannot change the list, so that write fails. `changeable`
 /// is asked only for such a root. Inputs: the list, the container SID and the change probe.
 /// Output: true to refuse.
-pub fn read_root_refused(acl: &[u8], _container: &[u8], changeable: impl FnOnce() -> bool) -> bool {
-    !reads(acl, &ALL_APPLICATION_PACKAGES) && !changeable()
+pub fn read_root_refused(acl: &[u8], container: &[u8], changeable: impl FnOnce() -> bool) -> bool {
+    !reads(acl, &ALL_APPLICATION_PACKAGES) && !reads(acl, container) && !changeable()
 }
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];

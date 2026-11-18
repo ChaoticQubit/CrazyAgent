@@ -124,7 +124,7 @@ pub fn plan(
 ) -> Result<Vec<Ace>, &'static str> {
     refuse(profile)?;
     let writes = outermost(profile.write_roots.iter().map(String::as_str), &[]);
-    let reads = outermost(profile.read_roots.iter().map(String::as_str), &writes);
+    let reads = granted_read_roots(profile);
     let mut guards = guards(profile, &writes, &reads);
     guards.sort_by_key(|ace| std::cmp::Reverse(depth(&ace.path)));
     let mut anchors = anchors(profile, &writes, &guards, present);
@@ -283,7 +283,8 @@ fn anchors(
 /// [`plan`] keeps them (DEC-193 D1), since a root inside a granted one is reached through it.
 /// Input: the profile. Output: those roots.
 pub fn granted_read_roots(profile: &BoundaryProfile) -> Vec<&str> {
-    profile.read_roots.iter().map(String::as_str).collect()
+    let writes = outermost(profile.write_roots.iter().map(String::as_str), &[]);
+    outermost(profile.read_roots.iter().map(String::as_str), &writes)
 }
 
 fn outermost<'a>(roots: impl Iterator<Item = &'a str>, covered: &[&'a str]) -> Vec<&'a str> {
