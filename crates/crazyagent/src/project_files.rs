@@ -206,11 +206,16 @@ fn inside(root: &Path, path: &str) -> bool {
             .is_some_and(|parent| parent.starts_with(root))
 }
 
+/// A test step `list` runs with the `.git` folder it checked. Input: that folder. Output:
+/// none.
+#[cfg(all(test, unix))]
+type AfterCheck = Box<dyn Fn(&Path)>;
+
 #[cfg(all(test, unix))]
 thread_local! {
     /// A step the tests run once `list` has checked the `.git` folder and before git starts,
     /// with that folder, standing in for an agent that changes it meanwhile. None runs nothing.
-    static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
+    static AFTER_CHECK: std::cell::RefCell<Option<AfterCheck>> =
         const { std::cell::RefCell::new(None) };
 }
 
