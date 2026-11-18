@@ -848,10 +848,21 @@ impl Tmux {
             return Err(failure("terminal_input_bounds"));
         }
         let interleave = crate::hop_trace::toggled(crate::hop_trace::T6_INTERLEAVE_ENV);
-        match input_route(bytes, interleave) {
+        let paste_buffer = crate::hop_trace::toggled(crate::hop_trace::T7_PASTE_BUFFER_ENV);
+        match input_route(bytes, interleave, paste_buffer) {
             Route::OneByOne => Self::send_one_by_one(control, target, bytes),
             Route::BackToBack => Self::send_back_to_back(control, target, bytes),
+            Route::PasteBuffer => Self::send_pasted(control, target, bytes),
         }
+    }
+
+    /// Pastes bytes longer than one run into one tmux target through a named tmux buffer
+    /// (DEC-202 T7): `set-buffer` then `paste-buffer -d -r -S`, written back to back, so the
+    /// pane gets the bytes unchanged in one write and the buffer is deleted; on a failure a
+    /// best-effort `delete-buffer` follows. Takes the control client, the target and bytes
+    /// without a NUL. Returns once tmux took them all.
+    fn send_pasted(_control: &Control, _target: &str, _bytes: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_input_bounds"))
     }
 
     /// Types bytes longer than one run into one tmux target as hex keys (DEC-202 T6, parked
@@ -2571,12 +2582,15 @@ enum Route {
     OneByOne,
     /// T6: every run written at once, then each answer awaited in order.
     BackToBack,
+    /// T7: one `set-buffer` and one `paste-buffer` written at once.
+    PasteBuffer,
 }
 
-/// The route `send_bytes` takes for one request: back to back (DEC-202 T6) when its toggle is
-/// on and the bytes take more than one `send-keys` run, else one by one. Takes at most
-/// `INPUT_BYTES_MAX` bytes and whether T6 is on. Returns the route.
-fn input_route(bytes: &[u8], interleave: bool) -> Route {
+/// The route `send_bytes` takes for one request of more than one `send-keys` run: through a
+/// tmux buffer (DEC-202 T7) when its toggle is on and the bytes hold no NUL, which ends a
+/// buffer, else back to back (T6) when that toggle is on; any other request goes one by one.
+/// Takes at most `INPUT_BYTES_MAX` bytes and whether T6 and T7 are on. Returns the route.
+fn input_route(bytes: &[u8], interleave: bool, _paste_buffer: bool) -> Route {
     assert!(bytes.len() <= INPUT_BYTES_MAX);
     let route = if interleave && bytes.len() > SEND_KEYS_BYTES_MAX {
         Route::BackToBack
@@ -2589,6 +2603,15 @@ fn input_route(bytes: &[u8], interleave: bool) -> Route {
 
 /// The most commands one `Control::send_all` writes: the runs of the longest input.
 const COMMANDS_SENT_MAX: usize = super::input_runs_max(INPUT_BYTES_MAX, SEND_KEYS_BYTES_MAX);
+
+/// The two commands that paste bytes into one target through a named tmux buffer (DEC-202
+/// T7): `set-buffer` with every byte other than an ASCII letter or digit written as a `\ooo`
+/// octal escape inside double quotes, so tmux's parser decodes each exactly and expands no
+/// `$`, `~` or `#`, then `paste-buffer -d -r -S`, which writes the bytes unchanged and deletes
+/// the buffer. Takes the target, the buffer name and bytes without a NUL. Returns the commands.
+fn paste_buffer_lines(_target: &str, _buffer: &str, _bytes: &[u8]) -> Vec<String> {
+    Vec::new()
+}
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`

@@ -295,14 +295,109 @@ fn t6_takes_only_a_request_of_more_than_one_run_and_only_with_its_toggle_on() {
         INPUT_BYTES_MAX,
     ] {
         let bytes = vec![b'a'; length];
-        assert_eq!(input_route(&bytes, false), Route::OneByOne);
+        assert_eq!(input_route(&bytes, false, false), Route::OneByOne);
         let on = if length > SEND_KEYS_BYTES_MAX {
             Route::BackToBack
         } else {
             Route::OneByOne
         };
-        assert_eq!(input_route(&bytes, true), on, "{length} bytes");
+        assert_eq!(input_route(&bytes, true, false), on, "{length} bytes");
     }
+}
+
+/// DEC-202 T7: the paste-buffer route takes a request of more than one `send-keys` run with
+/// its toggle on, ahead of T6, but never one holding a NUL, which would end the buffer; that
+/// one goes back to back with T6 on and one by one with it off.
+#[test]
+fn t7_takes_a_request_of_more_than_one_run_without_a_nul_ahead_of_t6() {
+    for length in [
+        0,
+        1,
+        SEND_KEYS_BYTES_MAX,
+        SEND_KEYS_BYTES_MAX + 1,
+        INPUT_BYTES_MAX,
+    ] {
+        let bytes = vec![b'a'; length];
+        let long = length > SEND_KEYS_BYTES_MAX;
+        let pasted = if long {
+            Route::PasteBuffer
+        } else {
+            Route::OneByOne
+        };
+        assert_eq!(input_route(&bytes, false, true), pasted, "{length} bytes");
+        assert_eq!(input_route(&bytes, true, true), pasted, "{length} bytes");
+        let mut nul = bytes.clone();
+        if let Some(last) = nul.last_mut() {
+            *last = 0;
+        }
+        let interleaved = if long {
+            Route::BackToBack
+        } else {
+            Route::OneByOne
+        };
+        assert_eq!(input_route(&nul, false, true), Route::OneByOne);
+        assert_eq!(input_route(&nul, true, true), interleaved, "{length} bytes");
+    }
+}
+
+/// DEC-202 T7: every one of the 255 non-NUL bytes round-trips through the `set-buffer`
+/// quoting, which writes only ASCII letters, digits and `\ooo` escapes inside its double
+/// quotes, so tmux's parser expands no `$HOME`, `~` or `#{...}`; `paste-buffer` then pastes
+/// that buffer unchanged into the target and deletes it.
+#[test]
+fn t7_quoting_round_trips_every_non_nul_byte_and_never_expands_a_dollar() {
+    let mut bytes: Vec<u8> = (1..=255u8).collect();
+    bytes.extend_from_slice(b"$HOME ${HOME} ~ #{pane_id} \\ \" ' ; {");
+    let lines = paste_buffer_lines("%7", "crazyagent-t7-1-2", &bytes);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1], "paste-buffer -d -r -S -b crazyagent-t7-1-2 -t %7");
+    let quoted = lines[0]
+        .strip_prefix("set-buffer -b crazyagent-t7-1-2 -- \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("set-buffer with one double-quoted argument");
+    assert!(!quoted.contains('$'));
+    let mut decoded = Vec::new();
+    let mut chars = quoted.bytes();
+    while let Some(byte) = chars.next() {
+        if byte.is_ascii_alphanumeric() {
+            decoded.push(byte);
+            continue;
+        }
+        assert_eq!(byte, b'\\', "a raw {byte:#04x} inside the quotes");
+        let digits: Vec<u8> = chars.by_ref().take(3).collect();
+        assert_eq!(digits.len(), 3);
+        assert!(digits.iter().all(|digit| (b'0'..=b'7').contains(digit)));
+        let text = std::str::from_utf8(&digits).unwrap();
+        decoded.push(u8::from_str_radix(text, 8).unwrap());
+    }
+    assert_eq!(decoded, bytes);
+}
+
+/// DEC-202 T7: a full request whose `set-buffer` line is the longest one (every byte value
+/// once, then only bytes that need an escape, `$HOME` among them) is pasted through a buffer
+/// to an agent's window target and reaches its pane byte-exact, with no buffer left behind.
+#[cfg(target_os = "macos")]
+#[test]
+fn t7_a_full_request_pasted_through_a_buffer_reaches_the_window_pane_byte_exact() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path());
+    let control = host.live_control().unwrap();
+    let target = host.agent_target(&control, &agent).unwrap();
+    assert!(!pane_id_valid(&target));
+    let escaped: Vec<u8> = (1..=255u8)
+        .filter(|byte| !byte.is_ascii_alphanumeric())
+        .collect();
+    let mut bytes: Vec<u8> = (1..=255u8).collect();
+    bytes.extend_from_slice(b"$HOME ${HOME} ~ #{pane_id}");
+    while bytes.len() < INPUT_BYTES_MAX {
+        bytes.push(escaped[bytes.len() % escaped.len()]);
+    }
+    Tmux::send_pasted(&control, &target, &bytes).unwrap();
+    assert_eq!(received_bytes(&received, bytes.len()), bytes);
+    let left = control
+        .ask(&format!("list-buffers -F '#{{buffer_name}}{FORMAT_END}'"))
+        .unwrap();
+    assert!(left.is_empty(), "{} buffers left", left.len());
 }
 
 /// DEC-202 T6: a full request sent back to back to an agent's window target, not a pane id,

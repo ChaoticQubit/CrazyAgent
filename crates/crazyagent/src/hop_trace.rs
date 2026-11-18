@@ -21,6 +21,10 @@ pub const T5_MERGE_WHEEL_ENV: &str = "CRAZYAGENT_T5_MERGE_WHEEL";
 /// back to back under one hold of the control client's input, so their replies overlap.
 pub const T6_INTERLEAVE_ENV: &str = "CRAZYAGENT_T6_INTERLEAVE";
 
+/// The research toggle (DEC-202 T7) that pastes a request longer than one `send-keys` run
+/// through a named tmux buffer, `set-buffer` then `paste-buffer`, in one round trip.
+pub const T7_PASTE_BUFFER_ENV: &str = "CRAZYAGENT_T7_PASTE_BUFFER";
+
 /// The most characters one hop's label carries into a trace line.
 const LABEL_CHARS_MAX: usize = 32;
 
