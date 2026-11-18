@@ -9,8 +9,8 @@ use rusqlite::Connection;
 use rusqlite::types::Value as Column;
 use serde_json::json;
 
-/// The `state` row at revision 0, the `events` table, and the three sessions tables with
-/// the columns the engine's own make; replay never needs `master_turns`, so there is none.
+/// The `state` row at revision 0, the `events` table, and the seven sessions tables with
+/// the columns and keys the engine's own make.
 const STATE: &str =
     "CREATE TABLE state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
     CREATE TABLE events (cursor INTEGER PRIMARY KEY, body TEXT NOT NULL);
@@ -22,11 +22,20 @@ const STATE: &str =
         brief_version INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (project, event_cursor));
     CREATE TABLE agent_texts (agent INTEGER PRIMARY KEY CHECK (agent > 0),
         project TEXT NOT NULL, text TEXT NOT NULL);
+    CREATE TABLE master_turns (session TEXT NOT NULL, ordinal INTEGER NOT NULL,
+        id TEXT NOT NULL, input INTEGER NOT NULL UNIQUE, phase TEXT NOT NULL,
+        body TEXT NOT NULL, PRIMARY KEY(session,ordinal), UNIQUE(session,id));
+    CREATE TABLE master_preparations (session TEXT NOT NULL, turn TEXT NOT NULL,
+        body TEXT NOT NULL, PRIMARY KEY(session,turn));
+    CREATE TABLE master_waiting_resolves (session TEXT PRIMARY KEY, project TEXT NOT NULL,
+        operation TEXT NOT NULL, input INTEGER NOT NULL, body TEXT NOT NULL);
+    CREATE TABLE configured_master_profiles (id TEXT PRIMARY KEY, session TEXT NOT NULL,
+        profile TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(session,profile));
     INSERT INTO state VALUES (1,0);";
 
 /// A store with the sessions tables and the owner tables holding the test host started.
 /// Output: the connection.
-fn store() -> Connection {
+pub(super) fn store() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(STATE).unwrap();
     seed(&db);
@@ -34,7 +43,7 @@ fn store() -> Connection {
 }
 
 /// A store with the sessions tables that no engine host runs. Output: the connection.
-fn unhosted() -> Connection {
+pub(super) fn unhosted() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(STATE).unwrap();
     db
@@ -42,7 +51,7 @@ fn unhosted() -> Connection {
 
 /// A stored master session of one project at one version and phase. Inputs: the project,
 /// the session, the version and the phase word. Output: the session.
-fn view(project: &str, session: &str, version: u64, phase: &str) -> MasterSessionView {
+pub(super) fn view(project: &str, session: &str, version: u64, phase: &str) -> MasterSessionView {
     let hex = "a".repeat(64);
     serde_json::from_value(json!({
         "project_id": project,
@@ -87,7 +96,7 @@ fn view(project: &str, session: &str, version: u64, phase: &str) -> MasterSessio
 
 /// Writes a session row as the open or a save leaves it, without marking it. Inputs: the
 /// store, the session and the revision it was created at. Output: none.
-fn write_session(db: &Connection, session: &MasterSessionView, created: u64) {
+pub(super) fn write_session(db: &Connection, session: &MasterSessionView, created: u64) {
     let phase = serde_json::to_value(session.phase).unwrap();
     db.execute(
         "INSERT INTO master_sessions VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET
@@ -134,8 +143,8 @@ fn put_text(db: &Connection, agent: i64, project: &str, text: &str) {
     mark(db, Table::Texts, &agent.to_string(), project).unwrap();
 }
 
-/// The three tables, each ordered by all its columns. Input: the store. Output: the rows.
-fn tables(db: &Connection) -> Vec<Vec<Vec<Column>>> {
+/// The seven tables, each ordered by all its columns. Input: the store. Output: the rows.
+pub(super) fn tables(db: &Connection) -> Vec<Vec<Vec<Column>>> {
     TABLES
         .iter()
         .map(|table| rows(db, table).unwrap())
@@ -143,7 +152,7 @@ fn tables(db: &Connection) -> Vec<Vec<Vec<Column>>> {
 }
 
 /// The kinds of the logged events in seq order. Input: the store. Output: the kinds.
-fn kinds(db: &Connection) -> Vec<String> {
+pub(super) fn kinds(db: &Connection) -> Vec<String> {
     db.prepare("SELECT kind FROM state_log ORDER BY seq")
         .unwrap()
         .query_map([], |row| row.get(0))
@@ -154,7 +163,7 @@ fn kinds(db: &Connection) -> Vec<String> {
 
 /// The bodies of the logged events of one kind in seq order. Inputs: the store and the
 /// kind. Output: the bodies as JSON.
-fn bodies(db: &Connection, kind: &str) -> Vec<serde_json::Value> {
+pub(super) fn bodies(db: &Connection, kind: &str) -> Vec<serde_json::Value> {
     db.prepare("SELECT body FROM state_log WHERE kind=?1 ORDER BY seq")
         .unwrap()
         .query_map([kind], |row| row.get::<_, Vec<u8>>(0))
@@ -165,7 +174,7 @@ fn bodies(db: &Connection, kind: &str) -> Vec<serde_json::Value> {
 
 /// The marks no close logged yet, 0 before any key was marked. Input: the store. Output:
 /// the count.
-fn left_marks(db: &Connection) -> i64 {
+pub(super) fn left_marks(db: &Connection) -> i64 {
     let made: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sessions_touched')",
@@ -184,7 +193,7 @@ fn left_marks(db: &Connection) -> i64 {
 
 /// Whether owner_texts holds a holder. Inputs: the store and the holder. Output: the
 /// answer.
-fn held(db: &Connection, holder: &str) -> bool {
+pub(super) fn held(db: &Connection, holder: &str) -> bool {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM kept_text_refs WHERE holder=?1)",
         [holder],
@@ -194,13 +203,13 @@ fn held(db: &Connection, holder: &str) -> bool {
 }
 
 /// The refusal code of a result, none when it succeeded. Input: the result. Output: the code.
-fn code<T>(result: Result<T, EngineError>) -> Option<String> {
+pub(super) fn code<T>(result: Result<T, EngineError>) -> Option<String> {
     result.err().map(|error| error.0)
 }
 
-/// Asserts that replay of the log rebuilds the three tables as they stand. Input: the
+/// Asserts that replay of the log rebuilds the seven tables as they stand. Input: the
 /// store. Output: none.
-fn replays_to_live(db: &mut Connection) {
+pub(super) fn replays_to_live(db: &mut Connection) {
     let live = tables(db);
     let tx = db.transaction().unwrap();
     rebuild(&tx).unwrap();
@@ -210,9 +219,9 @@ fn replays_to_live(db: &mut Connection) {
 
 /// v2.5 L13 replay row: the marked writes of every table close into one event each, a
 /// second close logs the saved session again and the dropped entry and agent text as
-/// dropped events whose texts go, L12's delete event is passed over, and replay of the log,
-/// with no `master_turns` table, equals the live tables; a skipped (redacted) later save
-/// shows the earlier one.
+/// dropped events whose texts go, L12's delete of a session with no turn changes nothing,
+/// and replay of the log equals the live tables; a skipped (redacted) later save shows the
+/// earlier one.
 #[test]
 fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
     let mut db = store();
@@ -289,7 +298,9 @@ fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
     );
     assert!(held(&db, "conversation_entries/p1/4/text"));
     let live = tables(&db);
-    assert_eq!(live.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 0]);
+    let sizes: Vec<usize> = live.iter().map(Vec::len).collect();
+    assert_eq!(sizes[..3], [1, 1, 0]);
+    assert!(sizes[3..].iter().all(|size| *size == 0), "{sizes:?}");
     replays_to_live(&mut db);
 
     let parked: i64 = db
@@ -435,15 +446,9 @@ fn the_first_run_carries_rows_written_before_the_log() {
     .unwrap();
     assert!(first_run(&tx, Opening::for_test(3)).unwrap());
     tx.commit().unwrap();
-    assert_eq!(
-        kinds(&db),
-        [
-            SNAPSHOT_CHUNK,
-            SNAPSHOT_CHUNK,
-            SNAPSHOT_CHUNK,
-            SNAPSHOT_DONE
-        ]
-    );
+    let mut run = vec![SNAPSHOT_CHUNK; TABLES.len()];
+    run.push(SNAPSHOT_DONE);
+    assert_eq!(kinds(&db), run, "one chunk per table, then the run's close");
     let revision: i64 = db
         .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
             row.get(0)

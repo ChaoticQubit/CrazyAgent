@@ -922,6 +922,7 @@ fn cancel_turn(
     if queued {
         let changed = tx.execute("UPDATE master_turns SET phase='cancelled',body=?1 WHERE session=?2 AND id=?3 AND phase='queued'", params![encode(&turn)?, turn.session_id.as_str(), turn.id.as_str()]).map_err(error)?;
         assert_eq!(changed, 1);
+        crate::sessions_log::mark_turn(tx, turn.input_cursor.value())?;
         assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
     } else {
         save_turn(tx, &turn)?;
@@ -1323,6 +1324,7 @@ fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineEr
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
+    crate::sessions_log::mark_turn(tx, turn.input_cursor.value())?;
     if let Some(reply) = &turn.reply {
         crate::master_sessions::one_turn_reply(
             tx,
@@ -1455,82 +1457,6 @@ fn load_runtime_turn(
     let turn =
         load_turn(tx, &session, turn_id, revision)?.ok_or_else(|| error("master_turn_missing"))?;
     Ok((session, turn))
-}
-
-#[cfg(all(test, unix))]
-pub(super) fn settle_stopped_commit(
-    db: &mut Connection,
-    config: &EffectiveConfig,
-    host: &HostStamp,
-    binding: &MasterStopBinding,
-) -> Result<MasterTurnView, EngineError> {
-    let tx = db
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(error)?;
-    check_owner_host(&tx, host)?;
-    let provenance = &binding.provenance;
-    if binding.db_instance != host.db_instance
-        || provenance.origin != "native_owner"
-        || provenance.engine_epoch != host.engine_epoch
-        || provenance.operation_id != binding.turn_id
-        || provenance.revision_after != binding.input_cursor
-        || provenance.event_cursor.as_ref() != Some(&binding.input_cursor)
-        || provenance.revision_before.value().checked_add(1) != Some(binding.input_cursor.value())
-        || provenance.admitted_epoch < 1
-        || provenance.resulting_epoch != provenance.admitted_epoch
-    {
-        return Err(error("master_stop_binding_mismatch"));
-    }
-    let (stored, result) = owner_lookup(
-        &tx,
-        "native_owner",
-        &provenance.owner_id,
-        &provenance.operation_id,
-        Some(&provenance.request_hash),
-    )?
-    .ok_or_else(|| error("master_stop_binding_mismatch"))?;
-    if stored != *provenance
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(error("master_stop_binding_mismatch"));
-    }
-    let (mut session, mut turn) = load_runtime_turn(
-        &tx,
-        host,
-        &binding.project_id,
-        &binding.session_id,
-        &binding.turn_id,
-    )?;
-    if turn.input_cursor != binding.input_cursor {
-        return Err(error("master_stop_binding_mismatch"));
-    }
-    if turn.phase.outstanding() && session.current_turn.as_ref() != Some(&turn.id) {
-        return Err(error("master_turn_not_current"));
-    }
-    match turn.phase {
-        MasterTurnPhase::Queued | MasterTurnPhase::Prepared => {
-            turn = cancel_turn(&tx, turn)?;
-        }
-        MasterTurnPhase::Delivering | MasterTurnPhase::Running => {
-            complete_local(&tx, &mut turn, MasterTurnPhase::Uncertain)?;
-            turn.phase = MasterTurnPhase::Uncertain;
-            turn.reason = Some(MasterReason::CaptureIncomplete);
-        }
-        MasterTurnPhase::Blocked
-        | MasterTurnPhase::Succeeded
-        | MasterTurnPhase::Failed
-        | MasterTurnPhase::Cancelled
-        | MasterTurnPhase::Uncertain => {
-            tx.commit().map_err(error)?;
-            return Ok(turn);
-        }
-        MasterTurnPhase::WaitingApproval => {
-            return Err(error("master_runtime_state_unqualified"));
-        }
-    }
-    persist_runtime(&tx, config, &mut session, &turn)?;
-    tx.commit().map_err(error)?;
-    Ok(turn)
 }
 
 fn current_scope(
@@ -3227,6 +3153,7 @@ fn prepare_turn(
             )
             .map_err(error)?;
         assert_eq!(inserted, 1);
+        crate::sessions_log::mark_preparation(tx, session.session_id.as_str(), turn.id.as_str())?;
         turn.attempt = Some(attempt);
         turn.phase = MasterTurnPhase::Prepared;
         persist_runtime(tx, config, session, turn)?;
@@ -3735,6 +3662,7 @@ fn publish_rcli_profile(
                 return Ok(record.proof);
             }
             Err(failure) if failure.0 == "master_configured_receipt_stale" => {
+                crate::sessions_log::mark_profile(tx, record.proof.registration_id.as_str())?;
                 let removed = tx
                     .execute(
                         "DELETE FROM configured_master_profiles WHERE id=?1",
@@ -3757,6 +3685,7 @@ fn publish_rcli_profile(
     let most = i64::try_from(CONFIGURED_PROFILES_MAX).map_err(error)?;
     let mut count = counted()?;
     if count >= most {
+        crate::sessions_log::mark_profiles(tx)?;
         tx.execute(
             "DELETE FROM configured_master_profiles WHERE rowid IN (SELECT p.rowid FROM configured_master_profiles p WHERE NOT EXISTS (SELECT 1 FROM master_sessions s WHERE s.id=p.session AND s.phase='configured') ORDER BY p.rowid LIMIT ?1)",
             [count - (most - 1)],
@@ -3797,6 +3726,7 @@ fn publish_rcli_profile(
         )
         .map_err(error)?;
     assert_eq!(inserted, 1);
+    crate::sessions_log::mark_profile(tx, proof.registration_id.as_str())?;
     Ok(proof)
 }
 
@@ -4220,6 +4150,9 @@ fn record_rcli_registration(
         &serde_json::to_vec(&result).map_err(error)?,
     )?;
     assert_eq!(owner_revision(tx)?, provenance.revision_after.value());
+    if registered {
+        crate::sessions_log::close_owner(tx, next, admission)?;
+    }
     Ok(OwnerApplied {
         result,
         provenance,
@@ -4889,6 +4822,7 @@ fn queue_turn(
     };
     let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![session.session_id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(turn.input_cursor.value())?, encode(&turn)?]).map_err(error)?;
     assert_eq!(changed, 1);
+    crate::sessions_log::mark_turn(tx, turn.input_cursor.value())?;
     note_asked(tx, session, &turn)?;
     session.current_turn = Some(turn.id);
     Ok(())
@@ -4943,7 +4877,7 @@ fn wait_resolve(
         ],
     )
     .map_err(error)?;
-    Ok(())
+    crate::sessions_log::mark_resolve(tx, session.project_id.as_str(), session.session_id.as_str())
 }
 
 /// Starts the Resolve the owner asked for while this session's turn was outstanding, once
@@ -4978,6 +4912,7 @@ fn start_waiting(
     let Some(mut session) = session.filter(|session| {
         &session.project_id == project && session.phase == MasterSessionPhase::Configured
     }) else {
+        crate::sessions_log::mark_resolve(tx, project.as_str(), session_id.as_str())?;
         tx.execute(
             "DELETE FROM master_waiting_resolves WHERE session=?1",
             [session_id.as_str()],
@@ -4992,6 +4927,7 @@ fn start_waiting(
             return Ok(None);
         }
     }
+    crate::sessions_log::mark_resolve(tx, project.as_str(), session_id.as_str())?;
     tx.execute(
         "DELETE FROM master_waiting_resolves WHERE session=?1",
         [session_id.as_str()],
@@ -5692,75 +5628,15 @@ mod sessions_tests;
 mod rcli_configured_tests;
 
 #[cfg(test)]
-mod sign_in_gap_tests {
-    use super::sign_in_gap;
-    use crate::engine::owner::native_auth::NativeAuthPhase;
-
-    #[test]
-    fn a_finished_sign_in_without_an_account_reads_as_not_signed_in() {
-        for phase in [
-            NativeAuthPhase::UnauthenticatedObserved,
-            NativeAuthPhase::Failed,
-            NativeAuthPhase::Cancelled,
-            NativeAuthPhase::Unavailable,
-        ] {
-            assert_eq!(
-                sign_in_gap(phase),
-                Some("master_authentication_unknown"),
-                "{phase:?}"
-            );
-        }
-        for phase in [
-            NativeAuthPhase::Starting,
-            NativeAuthPhase::AwaitingOwner,
-            NativeAuthPhase::CheckingAccount,
-            NativeAuthPhase::Cancelling,
-            NativeAuthPhase::Uncertain,
-        ] {
-            assert_eq!(
-                sign_in_gap(phase),
-                Some("master_authentication_stale"),
-                "{phase:?}"
-            );
-        }
-        assert_eq!(sign_in_gap(NativeAuthPhase::AuthenticatedObserved), None);
-    }
-}
+mod sign_in_gap_tests;
 
 #[cfg(all(test, unix))]
-mod activity_store_tests {
-    use super::*;
-    use crate::master_session::MasterActivityLine;
-
-    #[test]
-    #[should_panic(expected = "master turn activity is never stored")]
-    fn a_turn_read_with_its_live_activity_is_never_saved_back() {
-        let db = Connection::open_in_memory().unwrap();
-        let tx = db.unchecked_transaction().unwrap();
-        let turn = MasterTurnView {
-            id: RequestId::new("turn-1").unwrap(),
-            session_id: SessionId::new("session-1").unwrap(),
-            ordinal: 1,
-            input_cursor: Cursor::new(1),
-            phase: MasterTurnPhase::Running,
-            reason: None,
-            attempt: None,
-            runtime: None,
-            reply: None,
-            accounts: Vec::new(),
-            tasks: Vec::new(),
-            changes: None,
-            engine_request: None,
-            activity: vec![MasterActivityLine {
-                at_ms: 1,
-                text: "Reading src/app.ts".into(),
-            }],
-            detail: None,
-            cause: None,
-        };
-        let _ = save_turn(&tx, &turn);
-    }
-}
+mod activity_store_tests;
 
 #[cfg(all(test, unix))]
 mod schema_tests;
+
+#[cfg(all(test, unix))]
+mod stop_settle;
+#[cfg(all(test, unix))]
+use stop_settle::settle_stopped_commit;

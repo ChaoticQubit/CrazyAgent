@@ -126,6 +126,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 17,
         run: landing_step::landing_on_the_log,
     },
+    Step {
+        to: 18,
+        run: settings_step::session_turns_on_the_log,
+    },
 ];
 
 /// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step

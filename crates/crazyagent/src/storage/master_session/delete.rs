@@ -40,6 +40,7 @@ pub(super) fn delete_session(
     }
     crate::learning::latch(tx);
     crate::sessions_log::mark_session_entries(tx, id.as_str())?;
+    crate::sessions_log::release_session_turns(tx, id.as_str())?;
     for statement in [
         "DELETE FROM master_preparations WHERE session=?1",
         "DELETE FROM conversation_entries WHERE kind='message' AND event_cursor IN (SELECT input FROM master_turns WHERE session=?1)",
@@ -54,14 +55,11 @@ pub(super) fn delete_session(
     Ok(Outcome::Applied)
 }
 
-/// Logs an applied owner Delete of a master session at the request's revision: one
-/// [`SESSION_DELETED`] event holding only the two ids, which the team projection applies in
-/// the same transaction, then every earlier Sessions and Team event naming the session is
-/// redacted (L1-N1), then the request's sessions marks close (v2.5 L13), the closed row
-/// marked first, so its final save is the one event naming it and replay keeps the row.
-/// Any refusal rolls the whole request back, the redactions with it. Inputs: the request's
-/// transaction, its revision, the owner's admission, the project and the session. Output:
-/// how many earlier events were redacted, or the first refusal.
+/// Logs an applied owner Delete at the request's revision: one [`SESSION_DELETED`] of the two
+/// ids, applied by the team projection; the redaction of every earlier Sessions and Team
+/// event naming the session (L1-N1); a close of the closed row, its Resolve and receipts, so
+/// their final saves name it. Inputs: the transaction, revision, admission, project and
+/// session. Output: how many events were redacted, or the refusal, which rolls all back.
 pub(super) fn log_deleted(
     tx: &Transaction<'_>,
     revision: u64,
@@ -104,6 +102,7 @@ pub(super) fn log_deleted(
         &fence,
     )?;
     crate::sessions_log::mark_session(tx, project.as_str(), session.as_str())?;
+    crate::sessions_log::mark_session_rest(tx, project.as_str(), session.as_str())?;
     crate::sessions_log::close(&mut log)?;
     Ok(redacted)
 }

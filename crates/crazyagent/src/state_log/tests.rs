@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 48] = [
+const KINDS: [&str; 54] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -488,6 +488,12 @@ const KINDS: [&str; 48] = [
     crate::sessions_log::KIND_ENTRIES_DROPPED,
     crate::sessions_log::KIND_TEXT,
     crate::sessions_log::KIND_TEXTS_DROPPED,
+    crate::sessions_log::KIND_TURN,
+    crate::sessions_log::KIND_PREPARATION,
+    crate::sessions_log::KIND_RESOLVE,
+    crate::sessions_log::KIND_RESOLVES_DROPPED,
+    crate::sessions_log::KIND_PROFILE,
+    crate::sessions_log::KIND_PROFILES_DROPPED,
     crate::worktrees::log::KIND_ADMITTED,
     crate::worktrees::log::KIND_RESERVED,
     crate::worktrees::log::KIND_SAVED,
@@ -553,6 +559,12 @@ const WRITERS: [(&str, &[&str]); 9] = [
             "KIND_ENTRIES_DROPPED,",
             "KIND_TEXT,",
             "KIND_TEXTS_DROPPED,",
+            "KIND_TURN,",
+            "KIND_PREPARATION,",
+            "KIND_RESOLVE,",
+            "KIND_RESOLVES_DROPPED,",
+            "KIND_PROFILE,",
+            "KIND_PROFILES_DROPPED,",
         ],
     ),
     (
@@ -645,7 +657,15 @@ const SNAPSHOTS: [(&str, &[&str]); 5] = [
     ),
     (
         "sessions_log.rs",
-        &["master_sessions", "conversation_entries", "agent_texts"],
+        &[
+            "master_sessions",
+            "conversation_entries",
+            "agent_texts",
+            "master_turns",
+            "master_preparations",
+            "master_waiting_resolves",
+            "configured_master_profiles",
+        ],
     ),
 ];
 
@@ -955,6 +975,36 @@ fn sessions_body_is_closed(kind: &str) {
         sessions::KIND_TEXTS_DROPPED => (
             json!({"project": "app", "agents": [7]}),
             &["project", "agents"],
+        ),
+        sessions::KIND_TURN => (
+            json!({"project": "app", "session": "s1", "ordinal": 1, "id": "turn-1",
+                "input": 5, "phase": "queued", "body": digest}),
+            &[
+                "project", "session", "ordinal", "id", "input", "phase", "body",
+            ],
+        ),
+        sessions::KIND_PREPARATION => (
+            json!({"project": "app", "session": "s1", "turn": "turn-1", "input": 5,
+                "body": digest}),
+            &["project", "session", "turn", "input", "body"],
+        ),
+        sessions::KIND_RESOLVE => (
+            json!({"project": "app", "session": "s1", "operation": "resolve-1",
+                "input": 6, "body": digest}),
+            &["project", "session", "operation", "input", "body"],
+        ),
+        sessions::KIND_RESOLVES_DROPPED => (
+            json!({"project": "app", "sessions": ["s1"]}),
+            &["project", "sessions"],
+        ),
+        sessions::KIND_PROFILE => (
+            json!({"project": "app", "session": "s1", "id": "reg-1", "profile": "cred-1",
+                "body": digest}),
+            &["project", "session", "id", "profile", "body"],
+        ),
+        sessions::KIND_PROFILES_DROPPED => (
+            json!({"project": "app", "ids": ["reg-1"]}),
+            &["project", "ids"],
         ),
         other => panic!("{other} is not a sessions kind"),
     };
