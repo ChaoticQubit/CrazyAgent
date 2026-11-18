@@ -890,21 +890,7 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let (reason, attempts_max) = match &error {
-                    RunError::Context(problem) => (
-                        crate::launch_context::secret_in_command_text(problem).unwrap_or_else(
-                            || "Could not give the agent this project's context".to_owned(),
-                        ),
-                        self.limits.attempts_max,
-                    ),
-                    RunError::Uncertain(_) => {
-                        (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1)
-                    }
-                    _ => (
-                        "Could not prepare the research sandbox".to_owned(),
-                        self.limits.attempts_max,
-                    ),
-                };
+                let (reason, attempts_max) = launch_failure(&error, self.limits.attempts_max);
                 jobs.fail(&job, &reason, attempts_max)?;
                 Err(error)
             }
@@ -1072,7 +1058,14 @@ impl ResearchRunner {
             return Err(RunError::Invalid(reason.into()));
         }
         let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
-        let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
+        let (network, proxy) = job_reach(
+            std::env::consts::OS,
+            &policy,
+            job.tools,
+            account,
+            job.id,
+            &kept,
+        )?;
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
@@ -2084,12 +2077,13 @@ pub(crate) fn job_network(
 /// The sandbox network a research job runs under and the model proxy it reaches its model
 /// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
 /// for its account's hosts and reaches only the proxy's port; any other job gets
-/// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
-/// account, its id, which the proxy's refusal lines name, and the owner's model ports the
-/// proxy leaves alone. Output: the network and the proxy, which must live as long as the
-/// job runs, or the refusal of an endpoint no proxy can reach by name or a proxy that could
-/// not start.
+/// [`job_network`]. Inputs: the OS it runs on, the project's agent policy, whether the job
+/// has tools, its account, its id, which the proxy's refusal lines name, and the owner's
+/// model ports the proxy leaves alone. Output: the network and the proxy, which must live
+/// as long as the job runs, or the refusal of an endpoint no proxy can reach by name or a
+/// proxy that could not start.
 pub(crate) fn job_reach(
+    _os: &str,
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
@@ -2125,6 +2119,26 @@ pub(crate) fn job_reach(
     let proxy = ModelProxy::bind(job, hosts, None, kept)?;
     let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
     Ok((network, Some(proxy)))
+}
+
+/// The line a research job fails with when its launch errs, and how many attempts that
+/// failure may use: a context problem names a secret in the command text when it found one,
+/// a warden that did not confirm the sandbox empty fails at once, and any other error is a
+/// sandbox that could not be prepared. Inputs: the launch error and the runner's attempt
+/// limit. Output: the line and the attempts.
+fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
+    match error {
+        RunError::Context(problem) => (
+            crate::launch_context::secret_in_command_text(problem)
+                .unwrap_or_else(|| "Could not give the agent this project's context".to_owned()),
+            attempts_max,
+        ),
+        RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        _ => (
+            "Could not prepare the research sandbox".to_owned(),
+            attempts_max,
+        ),
+    }
 }
 
 /// Puts a keyed endpoint account behind an engine key relay for one run (DEC-141 PA-8): the
@@ -4520,7 +4534,8 @@ mod tests {
             connection: codex_connection(),
             model: None,
         };
-        let (network, proxy) = job_reach(&none, true, &account, 41, &[]).unwrap();
+        let (network, proxy) =
+            job_reach(std::env::consts::OS, &none, true, &account, 41, &[]).unwrap();
         assert!(
             proxy.is_some(),
             "a tools-on job under None gets a model proxy, not {network:?}"
@@ -4550,7 +4565,8 @@ mod tests {
                 .unwrap();
             assert_eq!(line.trim_end(), status, "{target}");
         }
-        let (off, unproxied) = job_reach(&none, false, &account, 41, &[]).unwrap();
+        let (off, unproxied) =
+            job_reach(std::env::consts::OS, &none, false, &account, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
         let local = ResearchAccount::Endpoint {
@@ -4558,7 +4574,8 @@ mod tests {
             model: "qwen2.5:0.5b".into(),
             key: None,
         };
-        let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
+        let (direct, unproxied) =
+            job_reach(std::env::consts::OS, &none, true, &local, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(
             direct,
@@ -4570,9 +4587,55 @@ mod tests {
             key: None,
         };
         assert!(matches!(
-            job_reach(&none, true, &unnamed, 41, &[]),
+            job_reach(std::env::consts::OS, &none, true, &unnamed, 41, &[]),
             Err(RunError::Invalid(_))
         ));
+    }
+
+    /// A research job on Windows whose model is on this computer is refused with the loopback
+    /// line under every network choice, tools on or off, as a team agent is (#526 r2 F1): under
+    /// Open it would otherwise start and fail every model call. Linux and macOS still reach it,
+    /// and the job fails once with the plain sentence for `model_loopback_unavailable_windows`.
+    #[test]
+    fn a_research_job_on_windows_with_a_model_on_this_computer_is_refused_under_every_choice() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let local = ResearchAccount::Endpoint {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        };
+        for network in [AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None] {
+            let policy = AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            };
+            for tools in [true, false] {
+                let refused = job_reach("windows", &policy, tools, &local, 41, &[]);
+                assert!(
+                    matches!(&refused, Err(RunError::Sandbox(error)) if crate::sandbox::model_loopback_windows(error)),
+                    "{network:?} tools {tools}: {:?}",
+                    refused.as_ref().map(|(reach, _)| reach)
+                );
+                for os in ["linux", "macos"] {
+                    assert!(
+                        job_reach(os, &policy, tools, &local, 41, &[]).is_ok(),
+                        "{os} {network:?} tools {tools}"
+                    );
+                }
+            }
+        }
+        let refusal = RunError::Sandbox(SandboxError::Unavailable(
+            crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+        ));
+        let sentence =
+            crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap();
+        assert_eq!(launch_failure(&refusal, 2), (sentence.to_owned(), 1));
+        let other = RunError::Sandbox(SandboxError::Unavailable("another refusal".into()));
+        assert_eq!(
+            launch_failure(&other, 2),
+            ("Could not prepare the research sandbox".to_owned(), 2)
+        );
     }
 
     #[test]
