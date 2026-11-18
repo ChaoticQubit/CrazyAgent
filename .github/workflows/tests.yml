@@ -190,7 +190,7 @@ jobs:
           set -uo pipefail
           out="$RUNNER_TEMP/d6"
           mkdir -p "$out"
-          rows=(ipc:: engine::tests:: engine::owner::transport:: engine::bootstrap:: tui::client::)
+          rows=(ipc:: engine::tests:: engine::owner::transport:: engine::bootstrap:: tui::client:: ide::bridge::)
           cargo test -p crazyagent --lib --locked -- "${rows[@]}" > "$out/after.txt" 2>&1
           git fetch --no-tags --depth=1 origin "$BEFORE_D6" || exit 1
           git checkout --detach "$BEFORE_D6" || exit 1
