@@ -605,6 +605,20 @@ pub fn allowing(sids: &[&[u8]], flags: u8, mask: u32) -> Vec<u8> {
     list
 }
 
+/// A system access list holding one mandatory label entry with `flags`: integrity `level`,
+/// the label SID's last part, and the `policy` bits, in the layout Windows reads. Inputs:
+/// the level, the policy and the entry flags. Output: the list bytes.
+pub fn labelled(level: u32, policy: u32, flags: u8) -> Vec<u8> {
+    let mut sid = vec![1, 1];
+    sid.extend(LABEL_AUTHORITY);
+    sid.extend(level.to_le_bytes());
+    let ace = ace_bytes(MANDATORY_LABEL, flags, policy, &sid);
+    let list = list_from(&[ACL_REVISION, 0, 0, 0, 0, 0, 0, 0], &[ace]).expect("one label fits");
+    let applies = flags & INHERIT_ONLY == 0;
+    assert_eq!(label(&list), Ok(applies.then_some((level, policy))));
+    list
+}
+
 /// The mandatory label a system access list holds for the object itself: the integrity
 /// level, the label SID's last part, and the policy bits. Inherit-only labels are skipped.
 /// Input: the list bytes Windows copied out with the label asked for. Output: the level and
