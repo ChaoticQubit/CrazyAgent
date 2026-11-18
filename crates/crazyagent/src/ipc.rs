@@ -377,16 +377,14 @@ mod windows_tests {
         let (_temp, root) = private_root();
         let file = root.join("pipes");
         std::fs::write(&file, "theirs\n").unwrap();
-        let set = std::process::Command::new("icacls")
-            .arg(&file)
-            .args(["/setowner", "*S-1-5-32-545"])
-            .output()
-            .unwrap();
-        assert!(
-            set.status.success(),
-            "{}",
-            String::from_utf8_lossy(&set.stdout)
-        );
+        let set = crate::spawn_gate::status(
+            std::process::Command::new("icacls")
+                .arg(&file)
+                .args(["/setowner", "*S-1-5-32-545"])
+                .stdin(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(set.success());
         let refused = publish(&root, "engine.sock").unwrap_err();
         assert_eq!(
             refused.kind(),
