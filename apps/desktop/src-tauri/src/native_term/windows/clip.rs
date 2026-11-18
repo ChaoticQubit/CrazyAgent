@@ -1,9 +1,20 @@
+use std::cell::RefCell;
+use std::iter;
 use std::ptr;
+use std::slice;
+use std::thread;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{GlobalFree, HWND};
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, HWND_MESSAGE};
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
+use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE};
 
 use super::super::codec::COPY_BYTES_MAX;
 
@@ -17,13 +28,36 @@ const OPEN_GAP: Duration = Duration::from_millis(10);
 /// bytes never needs more, since every unit makes at least one UTF-8 byte.
 const READ_UNITS_MAX: usize = COPY_BYTES_MAX;
 
+/// Text as a copy or a paste takes it: 1 to `COPY_BYTES_MAX` bytes, else none.
+fn bounded(text: String) -> Option<String> {
+    (!text.is_empty() && text.len() <= COPY_BYTES_MAX).then_some(text)
+}
+
 /// The text a clipboard block holds: its units up to the first NUL, an unpaired surrogate
 /// as U+FFFD, kept only at 1 to `COPY_BYTES_MAX` bytes; none when the units seen stop at
 /// the scan cap with no NUL. Inputs: the units seen and whether the block runs past them.
 /// Output: the text, or none.
 fn block_text(units: &[u16], cut: bool) -> Option<String> {
-    let _ = (units, cut);
-    unimplemented!("H4 red")
+    let end = units.iter().position(|&unit| unit == 0);
+    let text = match (end, cut) {
+        (Some(end), _) => &units[..end],
+        (None, false) => units,
+        (None, true) => return None,
+    };
+    assert!(!text.contains(&0), "the text stops before its NUL");
+    let kept = bounded(String::from_utf16_lossy(text));
+    assert!(
+        kept.as_ref()
+            .is_none_or(|kept| kept.len() <= COPY_BYTES_MAX)
+    );
+    kept
+}
+
+/// Where a Clip's text lives: the desktop clipboard, opened through a message-only
+/// window the Clip owns (null when Windows made none), or a board in process memory.
+enum Board {
+    Desktop(HWND),
+    Private(RefCell<Option<String>>),
 }
 
 /// The board the views' copy and paste use: the desktop clipboard, or one in process
@@ -31,38 +65,69 @@ fn block_text(units: &[u16], cut: bool) -> Option<String> {
 /// clipboard. Desktop calls run on the thread that made the Clip; another app holding the
 /// clipboard is waited for a bounded time, then refused.
 pub struct Clip {
-    owner: HWND,
+    board: Board,
 }
 
 impl Clip {
     /// The desktop clipboard, through a message-only window owned here. Output: the Clip;
     /// its calls refuse when Windows made no window.
     pub fn desktop() -> Clip {
-        unimplemented!("H4 red")
+        let clip = Clip {
+            board: Board::Desktop(message_window()),
+        };
+        assert!(!clip.is_private());
+        clip
     }
 
     /// An empty board in process memory. Output: it.
     pub fn private() -> Clip {
-        unimplemented!("H4 red")
+        let clip = Clip {
+            board: Board::Private(RefCell::new(None)),
+        };
+        assert!(clip.is_private());
+        clip
     }
 
     /// Whether the board is the in-process one. Output: the answer.
     pub fn is_private(&self) -> bool {
-        let _ = self.owner;
-        unimplemented!("H4 red")
+        matches!(self.board, Board::Private(_))
     }
 
     /// Puts plain text on the board in place of what it held. Input: the text, refused
     /// when empty or over `COPY_BYTES_MAX` bytes. Output: whether the board took it.
     pub fn write(&self, text: &str) -> bool {
-        let _ = text;
-        unimplemented!("H4 red")
+        if text.is_empty() || text.len() > COPY_BYTES_MAX {
+            return false;
+        }
+        match &self.board {
+            Board::Private(held) => {
+                *held.borrow_mut() = Some(text.to_owned());
+                true
+            }
+            Board::Desktop(owner) => write_desktop(*owner, text),
+        }
     }
 
     /// Reads the board's plain text, kept only at 1 to `COPY_BYTES_MAX` bytes. Output: the
     /// text, or none when the board holds none, holds too much or stays held by another app.
     pub fn read(&self) -> Option<String> {
-        unimplemented!("H4 red")
+        let text = match &self.board {
+            Board::Private(held) => held.borrow().clone().and_then(bounded),
+            Board::Desktop(owner) => read_desktop(*owner),
+        };
+        assert!(text.as_ref().is_none_or(|text| !text.is_empty()));
+        text
+    }
+}
+
+impl Drop for Clip {
+    /// Destroys the desktop board's window, on the thread that made it.
+    fn drop(&mut self) {
+        if let Board::Desktop(owner) = self.board
+            && !owner.is_null()
+        {
+            unsafe { DestroyWindow(owner) };
+        }
     }
 }
 
@@ -89,22 +154,108 @@ fn message_window() -> HWND {
     }
 }
 
+/// Opens the clipboard for a window, tried `OPEN_TRIES` times `OPEN_GAP` apart while
+/// another app holds it. Input: the window. Output: whether it is open; the caller closes.
+fn open(owner: HWND) -> bool {
+    if owner.is_null() {
+        return false;
+    }
+    for tried in 1..=OPEN_TRIES {
+        if unsafe { OpenClipboard(owner) } != 0 {
+            return true;
+        }
+        if tried < OPEN_TRIES {
+            thread::sleep(OPEN_GAP);
+        }
+    }
+    false
+}
+
+/// Writes text to the desktop clipboard as CF_UNICODETEXT with its NUL, owned by the
+/// window. Inputs: the window and 1 to `COPY_BYTES_MAX` bytes. Output: whether the
+/// clipboard took it.
+fn write_desktop(owner: HWND, text: &str) -> bool {
+    assert!(!text.is_empty() && text.len() <= COPY_BYTES_MAX);
+    let units: Vec<u16> = text.encode_utf16().chain(iter::once(0)).collect();
+    assert!(
+        units.len() <= COPY_BYTES_MAX + 1,
+        "a unit per byte at most, and the NUL"
+    );
+    if !open(owner) {
+        return false;
+    }
+    let written = unsafe { EmptyClipboard() } != 0 && put(&units);
+    unsafe { CloseClipboard() };
+    written
+}
+
+/// Hands the open clipboard a movable block holding the units; the block is the
+/// clipboard's once taken and is freed here otherwise. Input: the units with their NUL.
+/// Output: whether the clipboard took it.
+fn put(units: &[u16]) -> bool {
+    assert_eq!(units.last(), Some(&0), "the units end with their NUL");
+    let block = unsafe { GlobalAlloc(GMEM_MOVEABLE, size_of_val(units)) };
+    if block.is_null() {
+        return false;
+    }
+    let target = unsafe { GlobalLock(block) }.cast::<u16>();
+    if target.is_null() || !target.is_aligned() {
+        if !target.is_null() {
+            unsafe { GlobalUnlock(block) };
+        }
+        unsafe { GlobalFree(block) };
+        return false;
+    }
+    unsafe { ptr::copy_nonoverlapping(units.as_ptr(), target, units.len()) };
+    unsafe { GlobalUnlock(block) };
+    let taken = !unsafe { SetClipboardData(u32::from(CF_UNICODETEXT), block) }.is_null();
+    if !taken {
+        unsafe { GlobalFree(block) };
+    }
+    taken
+}
+
+/// Reads the desktop clipboard's CF_UNICODETEXT. Input: the window to open it with.
+/// Output: the text, kept only at 1 to `COPY_BYTES_MAX` bytes, or none.
+fn read_desktop(owner: HWND) -> Option<String> {
+    if !open(owner) {
+        return None;
+    }
+    let text = take();
+    unsafe { CloseClipboard() };
+    text
+}
+
+/// The open clipboard's text block, locked only while it is scanned, at most its own
+/// size and `READ_UNITS_MAX` plus one units, so no block is read past its end or kept past
+/// the cap. Output: the text, or none.
+fn take() -> Option<String> {
+    let block = unsafe { GetClipboardData(u32::from(CF_UNICODETEXT)) };
+    if block.is_null() {
+        return None;
+    }
+    let size = unsafe { GlobalSize(block) };
+    let units = size / size_of::<u16>();
+    let seen = units.min(READ_UNITS_MAX + 1);
+    let source = unsafe { GlobalLock(block) }.cast::<u16>().cast_const();
+    if source.is_null() {
+        return None;
+    }
+    let text = source.is_aligned().then(|| {
+        let view = unsafe { slice::from_raw_parts(source, seen) };
+        block_text(view, seen < units)
+    });
+    unsafe { GlobalUnlock(block) };
+    assert!(seen <= units && seen <= READ_UNITS_MAX + 1);
+    text.flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::thread;
     use std::time::Instant;
-    use windows_sys::Win32::Foundation::GlobalFree;
-    use windows_sys::Win32::System::DataExchange::{
-        CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
-        SetClipboardData,
-    };
-    use windows_sys::Win32::System::Memory::{
-        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
-    };
-    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-    use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+    use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
 
     fn units(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()
