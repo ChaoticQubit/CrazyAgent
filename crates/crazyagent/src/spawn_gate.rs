@@ -120,6 +120,43 @@ pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io:
     })
 }
 
+/// The custody of a child started by [`kept`]: the thread that forked it waits until this
+/// drops. Linux sends a child's parent-death signal, which bubblewrap's `--die-with-parent`
+/// sets, when the thread that forked it exits, so the child ends with this keeper or with
+/// the process, never with the thread that asked for it.
+#[must_use = "dropping the keeper ends the thread that forked the child"]
+pub struct Keeper {
+    _release: std::sync::mpsc::SyncSender<()>,
+}
+
+/// Runs `start`, which forks a child, on a thread of its own that waits until the returned
+/// keeper drops, so the child outlives the calling thread and still ends with the engine
+/// (V243 P6). Input: the start, which may enter the gate. Output: what the start returned
+/// and its keeper, or the error that kept the thread or the child from starting.
+pub fn kept<T: Send + 'static>(
+    start: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<(T, Keeper)> {
+    assert!(
+        !HELD.get(),
+        "a kept start waits on a thread that already holds the spawn gate"
+    );
+    let (started_sender, started) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+    std::thread::Builder::new()
+        .name("spawn-keeper".to_owned())
+        .spawn(move || {
+            let result = start();
+            let holds = result.is_ok();
+            if started_sender.send(result).is_ok() && holds {
+                let _released = released.recv();
+            }
+        })?;
+    let result = started
+        .recv()
+        .map_err(|_| io::Error::other("spawn_keeper_lost"))??;
+    Ok((result, Keeper { _release: release }))
+}
+
 /// Starts a child through the gate and waits for it outside the gate.
 /// Input: the configured command; its stdio is inherited unless set, as with
 /// `Command::status`. Output: the exit status.
