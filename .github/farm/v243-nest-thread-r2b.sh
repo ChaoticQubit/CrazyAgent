@@ -11,8 +11,8 @@ uname -r
 grep -E '^VERSION=' /etc/os-release
 bwrap --version
 git log --oneline -2
-if [ "$(git rev-parse --short=9 HEAD~1)" != "$tip" ]; then
-  row tip "HEAD~1 $tip" "$(git rev-parse --short=9 HEAD~1)"
+if [ "$(git rev-parse --short=9 HEAD~2)" != "$tip" ]; then
+  row tip "HEAD~2 $tip" "$(git rev-parse --short=9 HEAD~2)"
   exit 1
 fi
 judge() {
