@@ -655,6 +655,7 @@ async fn watch(
             let Ok(request) = serde_json::from_slice::<TerminalRequest>(&frame[4..]) else {
                 break;
             };
+            crate::hop_trace::request("engine_read", &request);
             if requests.send(request).await.is_err() {
                 break;
             }
@@ -745,6 +746,55 @@ impl Viewing for Grant<'_> {
 /// send runs at a time beside the output; the next request is read once it answered, and a
 /// send running when the view ends is finished first, so a prompt taken is recorded as heard.
 /// Takes the writer, the viewer, the request queue, the host and the grant. Returns why it ended.
+/// The next owner request for a view's loop: the one held back by `merged` first, then the
+/// queue's next. Takes the hold and the queue. Returns the request, or none once the queue
+/// closed.
+#[cfg(unix)]
+async fn next_request(
+    held: &mut Option<TerminalRequest>,
+    asked: &mut tokio::sync::mpsc::Receiver<TerminalRequest>,
+) -> Option<TerminalRequest> {
+    match held.take() {
+        Some(request) => Some(request),
+        None => asked.recv().await,
+    }
+}
+
+/// Joins the wheel requests waiting right behind a wheel request into it while the research
+/// toggle `CRAZYAGENT_T5_MERGE_WHEEL` is on (DEC-202 T5), up to `INPUT_BYTES_MAX` bytes; the
+/// first waiting request that is not one, or does not fit, is held for the next turn. Takes
+/// the request, the queue and the empty hold. Returns the request to send.
+#[cfg(unix)]
+fn merged(
+    request: TerminalRequest,
+    asked: &mut tokio::sync::mpsc::Receiver<TerminalRequest>,
+    held: &mut Option<TerminalRequest>,
+) -> TerminalRequest {
+    assert!(held.is_none());
+    let TerminalRequest::Scroll { mut bytes } = request else {
+        return request;
+    };
+    if !crate::hop_trace::toggled(crate::hop_trace::T5_MERGE_WHEEL_ENV) {
+        return TerminalRequest::Scroll { bytes };
+    }
+    for _ in 0..REQUESTS_QUEUED {
+        match asked.try_recv() {
+            Ok(TerminalRequest::Scroll { bytes: more })
+                if bytes.len() + more.len() <= INPUT_BYTES_MAX =>
+            {
+                bytes.extend(more);
+            }
+            Ok(other) => {
+                *held = Some(other);
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    TerminalRequest::Scroll { bytes }
+}
+
 #[cfg(unix)]
 async fn pump(
     writer: &mut (impl AsyncWrite + Unpin),
@@ -756,13 +806,16 @@ async fn pump(
     let agent = viewer.agent.clone();
     let mut check = tokio::time::interval(GRANT_CHECK);
     let mut sending: Option<Sending> = None;
+    let mut held: Option<TerminalRequest> = None;
     let reason = loop {
         tokio::select! {
             chunk = viewer.next() => match chunk {
                 Some(Chunk::Output(bytes)) => {
+                    crate::hop_trace::hop("engine_output", bytes.len(), "");
                     if write(writer, &TerminalFrame::Output { bytes }).await.is_err() {
                         break VIEWER_GONE;
                     }
+                    crate::hop_trace::hop("engine_output_written", 0, "");
                 }
                 Some(Chunk::Behind) => match attach_again(host.clone(), agent.clone()).await {
                     Ok(fresh) => {
@@ -780,13 +833,14 @@ async fn pump(
                 sending.as_mut().expect("polled only while a send runs").await
             }, if sending.is_some() => {
                 sending = None;
+                crate::hop_trace::hop("engine_send_done", 0, "");
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
                     Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
                     Err(_) | Ok(None) => {}
                     Ok(Some(text)) => viewing.heard(text).await,
                 }
             },
-            request = asked.recv(), if sending.is_none() => match request {
+            request = next_request(&mut held, asked), if sending.is_none() => match request {
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
                 Some(
                     TerminalRequest::Attach { .. }
@@ -799,7 +853,9 @@ async fn pump(
                     break GRANT_ENDED;
                 }
                 Some(request) => {
+                    let request = merged(request, asked, &mut held);
                     viewing.typed(&request);
+                    crate::hop_trace::request("engine_send_start", &request);
                     sending = Some(send(&host, &agent, viewer.at.clone(), request));
                 }
             },

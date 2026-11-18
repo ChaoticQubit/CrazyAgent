@@ -677,19 +677,8 @@ impl Tmux {
             control.stop();
             return Err(refused);
         }
-        for option in [
-            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
-            "set-option -gw allow-rename off".into(),
-            "set-option -gw automatic-rename off".into(),
-            "set-option -gw remain-on-exit off".into(),
-            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
-        ]
-        .into_iter()
-        .chain(
-            self.confined
-                .is_some()
-                .then(|| format!("set-option -g default-shell {LEAD_SHELL}")),
-        ) {
+        let paste_buffer = crate::hop_trace::toggled(crate::hop_trace::T7_PASTE_BUFFER_ENV);
+        for option in server_options(self.confined.is_some(), paste_buffer) {
             control
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
@@ -840,15 +829,91 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys, one command after another, in order.
-    /// Takes the control client, the target and the bytes. Returns once tmux took them all,
-    /// or `terminal_input_bounds`.
+    /// Types bytes into one tmux target by the route `input_route` picks from the DEC-202
+    /// research toggles, one by one without them. Takes the control client, the target and
+    /// the bytes. Returns once tmux took them all, or `terminal_input_bounds`.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
         }
-        for line in send_keys_lines(target, bytes) {
+        let interleave = crate::hop_trace::toggled(crate::hop_trace::T6_INTERLEAVE_ENV);
+        let paste_buffer = crate::hop_trace::toggled(crate::hop_trace::T7_PASTE_BUFFER_ENV);
+        match input_route(bytes, interleave, paste_buffer) {
+            Route::OneByOne => Self::send_one_by_one(control, target, bytes),
+            Route::BackToBack => Self::send_back_to_back(control, target, bytes),
+            Route::PasteBuffer => Self::send_pasted(control, target, bytes),
+        }
+    }
+
+    /// Pastes bytes longer than one run into one tmux target through a named tmux buffer
+    /// (DEC-202 T7): `set-buffer` then `paste-buffer -d -r -S`, written back to back, so the
+    /// pane gets the bytes unchanged in one write and the buffer is deleted; on a failure a
+    /// best-effort `delete-buffer` follows. Takes the control client, the target and bytes
+    /// without a NUL. Returns once tmux took them all.
+    fn send_pasted(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(bytes.len() > SEND_KEYS_BYTES_MAX);
+        assert!(!bytes.contains(&0));
+        crate::hop_trace::hop("tmux_t7_start", bytes.len(), target);
+        let buffer = paste_buffer_name();
+        let pasted = control.run_all(&paste_buffer_lines(target, &buffer, bytes));
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        crate::hop_trace::hop("tmux_t7_done", 0, target);
+        pasted
+    }
+
+    /// Types bytes longer than one run into one tmux target as hex keys (DEC-202 T6, parked
+    /// 6b0a84dc2): a target that is not a pane id is resolved to its pane once, so every run
+    /// reaches that pane, then all the runs are written at once and each answer is awaited
+    /// in order. Takes the control client, the target and the bytes. Returns once tmux took
+    /// them all.
+    fn send_back_to_back(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(bytes.len() > SEND_KEYS_BYTES_MAX);
+        assert!(bytes.len() <= INPUT_BYTES_MAX);
+        crate::hop_trace::hop("tmux_t6_start", bytes.len(), target);
+        let pane = if pane_id_valid(target) {
+            target.to_owned()
+        } else {
+            Self::pane_of(control, target)?
+        };
+        crate::hop_trace::hop("tmux_t6_pane", 0, &pane);
+        let lines = send_keys_lines(&pane, bytes);
+        assert!(lines.len() >= 2);
+        control.run_all(&lines)?;
+        crate::hop_trace::hop("tmux_t6_done", 0, target);
+        Ok(())
+    }
+
+    /// The id of the pane a target names now. Takes the control client and the target.
+    /// Returns the pane id, or `terminal_agent_unknown` for an answer that is not one.
+    fn pane_of(control: &Control, target: &str) -> Result<String, HostError> {
+        let lines = control.ask(&format!(
+            "display-message -p -t {target} '#{{pane_id}}{FORMAT_END}'"
+        ))?;
+        let pane = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .filter(|pane| pane_id_valid(pane))
+            .ok_or_else(|| failure("terminal_agent_unknown"))?;
+        assert!(pane.starts_with('%'));
+        Ok(pane.to_owned())
+    }
+
+    /// Types bytes into one tmux target as hex keys, one command after another, in order, as
+    /// without the research toggles. Takes the control client, the target and at most
+    /// `INPUT_BYTES_MAX` bytes. Returns once tmux took them all.
+    fn send_one_by_one(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(bytes.len() <= INPUT_BYTES_MAX);
+        let lines = if crate::hop_trace::toggled(crate::hop_trace::T2_ONE_RUN_ENV) {
+            crate::hop_trace::one_run_lines(target, bytes)
+        } else {
+            send_keys_lines(target, bytes)
+        };
+        for line in lines {
+            crate::hop_trace::hop("tmux_run_start", line.len(), target);
             control.run(&line)?;
+            crate::hop_trace::hop("tmux_run_done", 0, target);
         }
         Ok(())
     }
@@ -961,21 +1026,37 @@ impl Control {
     }
 
     fn send(&self, line: &str, pending: Pending) -> Result<(), HostError> {
-        assert!(!line.contains('\n') && !line.contains('\r'));
+        self.send_all(vec![(line, pending)])
+    }
+
+    /// Queues each command's pending reply in order and writes all the commands in one write
+    /// under one hold of the client's input, so no other caller's command lands between them
+    /// (DEC-202 T6, parked 6b0a84dc2). Takes the commands with their pendings, at most
+    /// `COMMANDS_SENT_MAX`. Returns once they are written, or the closed client's error.
+    fn send_all(&self, commands: Vec<(&str, Pending)>) -> Result<(), HostError> {
+        assert!(!commands.is_empty());
+        assert!(commands.len() <= COMMANDS_SENT_MAX);
+        assert!(
+            commands
+                .iter()
+                .all(|(line, _)| !line.contains('\n') && !line.contains('\r'))
+        );
         let mut input = self.input.lock().map_err(|_| closed())?;
         let Some(writer) = input.as_mut() else {
             return Err(closed());
         };
+        let mut bytes = Vec::with_capacity(commands.iter().map(|(line, _)| line.len() + 1).sum());
         {
             let mut state = self.state.lock().map_err(|_| closed())?;
             if state.closed {
                 return Err(closed());
             }
-            state.pending.push_back(pending);
+            for (line, pending) in commands {
+                state.pending.push_back(pending);
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+            }
         }
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
         if writer
             .write_all(&bytes)
             .and_then(|()| writer.flush())
@@ -998,6 +1079,27 @@ impl Control {
             }
             Err(RecvTimeoutError::Disconnected) => Err(closed()),
         }
+    }
+
+    /// Runs commands back to back: sends them all at once through `send_all`, then waits for
+    /// each answer in order. Takes the commands. Returns once all succeeded, or the first error.
+    fn run_all(&self, lines: &[String]) -> Result<(), HostError> {
+        assert!(!lines.is_empty());
+        let mut answers = Vec::with_capacity(lines.len());
+        let commands = lines
+            .iter()
+            .map(|line| {
+                let (reply, answer) = sync_channel(1);
+                answers.push(answer);
+                (line.as_str(), Pending::Reply(reply))
+            })
+            .collect();
+        self.send_all(commands)?;
+        assert_eq!(answers.len(), lines.len());
+        for answer in &answers {
+            self.wait(answer)?;
+        }
+        Ok(())
     }
 
     fn run(&self, line: &str) -> Answer {
@@ -2032,7 +2134,9 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
                 .map_or((rest, &b""[..]), |space| {
                     (&rest[..space], &rest[space + 1..])
                 });
-            deliver(&mut state, pane, &decode(data));
+            let decoded = decode(data);
+            crate::hop_trace::hop("tmux_output", decoded.len(), &String::from_utf8_lossy(pane));
+            deliver(&mut state, pane, &decoded);
         } else if let Some(rest) =
             guard(&line, b"%window-close").or_else(|| guard(&line, b"%unlinked-window-close"))
         {
@@ -2468,6 +2572,107 @@ impl Host for Tmux {
 
 const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
 const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// How `send_bytes` hands one request to tmux (DEC-202 research toggles).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// Each `send-keys` run waits for the previous run's answer, as without the toggles.
+    OneByOne,
+    /// T6: every run written at once, then each answer awaited in order.
+    BackToBack,
+    /// T7: one `set-buffer` and one `paste-buffer` written at once.
+    PasteBuffer,
+}
+
+/// The route `send_bytes` takes for one request of more than one `send-keys` run: through a
+/// tmux buffer (DEC-202 T7) when its toggle is on and the bytes hold no NUL, which ends a
+/// buffer, else back to back (T6) when that toggle is on; any other request goes one by one.
+/// Takes at most `INPUT_BYTES_MAX` bytes and whether T6 and T7 are on. Returns the route.
+fn input_route(bytes: &[u8], interleave: bool, paste_buffer: bool) -> Route {
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let route = if bytes.len() <= SEND_KEYS_BYTES_MAX {
+        Route::OneByOne
+    } else if paste_buffer && !bytes.contains(&0) {
+        Route::PasteBuffer
+    } else if interleave {
+        Route::BackToBack
+    } else {
+        Route::OneByOne
+    };
+    assert!(route == Route::OneByOne || bytes.len() > SEND_KEYS_BYTES_MAX);
+    route
+}
+
+/// The `set-option` commands the engine runs on each server it controls, in order: the
+/// terminal type, window names and exits, scrollback, the lead shell on a confined host, and
+/// with DEC-202 T7 on, `set-clipboard external` and `get-clipboard off`, so no pane's OSC 52
+/// query reads a tmux buffer. Takes whether the host is confined and whether T7 is on.
+/// Returns the commands.
+fn server_options(confined: bool, paste_buffer: bool) -> Vec<String> {
+    let mut options = vec![
+        format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+        "set-option -gw allow-rename off".into(),
+        "set-option -gw automatic-rename off".into(),
+        "set-option -gw remain-on-exit off".into(),
+        format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+    ];
+    if confined {
+        options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+    }
+    if paste_buffer {
+        options.push("set-option -sq set-clipboard external".into());
+        options.push("set-option -sq get-clipboard off".into());
+    }
+    assert!(options.len() >= 5);
+    assert!(
+        options
+            .iter()
+            .all(|option| option.starts_with("set-option -"))
+    );
+    options
+}
+
+/// The most commands one `Control::send_all` writes: the runs of the longest input.
+const COMMANDS_SENT_MAX: usize = super::input_runs_max(INPUT_BYTES_MAX, SEND_KEYS_BYTES_MAX);
+
+/// The two commands that paste bytes into one target through a named tmux buffer (DEC-202
+/// T7): `set-buffer` with every byte other than an ASCII letter or digit written as a `\ooo`
+/// octal escape inside double quotes, so tmux's parser decodes each exactly and expands no
+/// `$`, `~` or `#`, then `paste-buffer -d -r -S`, which writes the bytes unchanged and deletes
+/// the buffer. Takes the target, the buffer name and bytes without a NUL. Returns the commands.
+fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let mut set = String::with_capacity(24 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer -b {buffer} -- \"");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() {
+            set.push(char::from(byte));
+        } else {
+            let _ = write!(set, "\\{byte:03o}");
+        }
+    }
+    set.push('"');
+    assert!(set.len() <= "set-buffer -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    vec![
+        set,
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// A tmux buffer name no other paste of this engine uses, `crazyagent-t7-<pid>-<n>`, plain
+/// enough to sit unquoted in a command. Takes nothing. Returns the name.
+fn paste_buffer_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(next < u64::MAX);
+    let name = format!("crazyagent-t7-{}-{next}", std::process::id());
+    assert!(
+        name.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    );
+    name
+}
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
