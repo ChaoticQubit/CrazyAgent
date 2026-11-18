@@ -32,8 +32,16 @@ impl Board {
 /// read or written. Only a key press or a button press or release counts. Input: the
 /// type of GTK's current event, if any. Output: the answer.
 pub fn user_input(kind: Option<EventType>) -> bool {
-    let _ = kind;
-    true
+    matches!(
+        kind,
+        Some(
+            EventType::KeyPress
+                | EventType::ButtonPress
+                | EventType::DoubleButtonPress
+                | EventType::TripleButtonPress
+                | EventType::ButtonRelease
+        )
+    )
 }
 
 #[cfg(test)]
@@ -56,7 +64,8 @@ fn current_input() -> Option<EventType> {
 /// A board's text as a paste takes it: 1 to `COPY_BYTES_MAX` bytes, else none. Input:
 /// the text read. Output: the text kept.
 pub fn bounded(text: Option<&str>) -> Option<String> {
-    text.map(str::to_owned)
+    text.filter(|text| !text.is_empty() && text.len() <= COPY_BYTES_MAX)
+        .map(str::to_owned)
 }
 
 /// The boards the views copy to and paste from: the desktop's CLIPBOARD and PRIMARY

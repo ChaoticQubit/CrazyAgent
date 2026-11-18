@@ -84,6 +84,27 @@ pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
     text.into_bytes()
 }
 
+/// Makes each run of carriage returns and line feeds one space, as the xterm panel's seed
+/// does for an app without bracketed paste. Input: the text. Output: the text with no line
+/// break, never longer.
+fn flat_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut breaking = false;
+    for c in text.chars() {
+        let line_break = c == '\r' || c == '\n';
+        if line_break && !breaking {
+            out.push(' ');
+        }
+        if !line_break {
+            out.push(c);
+        }
+        breaking = line_break;
+    }
+    assert!(out.len() <= text.len());
+    assert!(!out.contains(['\r', '\n']));
+    out
+}
+
 /// One input to a native view from its host. Cells are column and line on the visible
 /// screen; `option` forces a local selection while the pane reads the mouse; `clicks` selects
 /// a word on 2 and a line on 3; `primary` marks a middle click's paste of the primary
@@ -272,8 +293,8 @@ impl Pane {
     /// Applies one input, as the xterm panel does: keys and text ask for bytes; the wheel asks
     /// for reports when the pane reads the mouse, for one arrow on the alternate screen, else
     /// scrolls locally, and reaches the agent even with keys off; presses and drags ask for
-    /// reports only with keys on, else select locally; a paste asks for the owner's text
-    /// unchanged. Input: the input. Output: what the host must do.
+    /// reports only with keys on, else select locally; a paste asks for the owner's text, a
+    /// PRIMARY one flat unless the app brackets. Input: the input. Output: what the host must do.
     pub fn apply(&mut self, input: Input) -> Action {
         if !self.ready() {
             return Action::Nothing;
@@ -337,10 +358,18 @@ impl Pane {
     }
 
     fn paste(&mut self, text: String, primary: bool) -> Action {
-        let _ = primary;
         if !self.keys || text.is_empty() || text.len() > codec::COPY_BYTES_MAX {
             return Action::Nothing;
         }
+        let bracketed = self
+            .term
+            .as_ref()
+            .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
+        let text = if primary && !bracketed {
+            flat_lines(&text)
+        } else {
+            text
+        };
         self.snap_bottom();
         assert!(!text.is_empty());
         Action::Paste { text }

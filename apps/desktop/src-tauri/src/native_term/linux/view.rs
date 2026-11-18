@@ -77,8 +77,7 @@ pub fn commit_event(focus: Focus, text: &str) -> Option<ViewEvent> {
 /// and only while the view is still placed and uncovered. Inputs: the view's focus, whether
 /// it is placed and the text read. Output: the event.
 pub fn primary_paste(focus: Focus, placed: bool, text: Option<String>) -> Option<ViewEvent> {
-    let _ = focus;
-    if !placed {
+    if !placed || focus.is_covered() {
         return None;
     }
     let text = text.filter(|text| !text.is_empty())?;
