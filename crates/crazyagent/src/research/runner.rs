@@ -44,8 +44,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
 /// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
-/// (RV-DS241-39 r2 F2), and [`no_program`] for every signature program the repository could
-/// name (RV-DS241-39). Output: the nine `-c` pairs, built once.
+/// (RV-DS241-39 r2 F2), and [`no_program`] for the hook folder and every signature program
+/// the repository could name (RV-DS241-39). Output: the nine `-c` pairs, built once.
 pub(crate) fn git_safe() -> &'static [String; GIT_SAFE_LEN] {
     static SAFE: LazyLock<[String; GIT_SAFE_LEN]> = LazyLock::new(|| safe_settings(no_program()));
     LazyLock::force(&SAFE)
@@ -54,12 +54,12 @@ pub(crate) fn git_safe() -> &'static [String; GIT_SAFE_LEN] {
 /// How many arguments [`git_safe`] holds: nine `-c` pairs.
 const GIT_SAFE_LEN: usize = 18;
 
-/// The [`git_safe`] arguments, naming `program` for every signature program. Input: the
-/// value. Output: the nine `-c` pairs.
+/// The [`git_safe`] arguments, naming `program` for the hook folder and every signature
+/// program. Input: the value. Output: the nine `-c` pairs.
 fn safe_settings(program: &str) -> [String; GIT_SAFE_LEN] {
     [
         "-c".to_owned(),
-        "core.hooksPath=/dev/null".to_owned(),
+        format!("core.hooksPath={program}"),
         "-c".to_owned(),
         "core.fsmonitor=false".to_owned(),
         "-c".to_owned(),
@@ -79,16 +79,52 @@ fn safe_settings(program: &str) -> [String; GIT_SAFE_LEN] {
     ]
 }
 
-/// What a git the engine starts names for a program it must never run: on Unix `/dev/null`,
-/// which git cannot start and goes on without, where a started `/usr/bin/false` could exit
-/// before git wrote it an ssh payload and kill git with SIGPIPE (V243-WORKTREES-GIT-FLAKE);
-/// elsewhere `/usr/bin/false` for now (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value.
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Unix: `/dev/null`, which git cannot start and goes on without, where a
+/// started `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with
+/// SIGPIPE (V243-WORKTREES-GIT-FLAKE). Output: the value.
+#[cfg(unix)]
 pub(crate) fn no_program() -> &'static str {
-    if cfg!(unix) {
-        "/dev/null"
-    } else {
-        "/usr/bin/false"
-    }
+    "/dev/null"
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Windows: [`windows_no_program`] of the system folder, read once, where a
+/// drive-relative `/dev/null` reached a hook any user can plant under `C:\dev\null`
+/// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; an unusable folder is a panic.
+#[cfg(windows)]
+pub(crate) fn no_program() -> &'static str {
+    static VALUE: LazyLock<String> = LazyLock::new(|| {
+        let folder = crazyagent_win_sandbox::system_folder()
+            .expect("GetSystemDirectoryW names the system folder");
+        windows_no_program(&folder).expect("the system folder is a plain <letter>:\\ folder")
+    });
+    VALUE.as_str()
+}
+
+/// The Windows value for a hook folder or a program no git may run: `folder` with forward
+/// slashes, the shape Git for Windows starts without a shell, then `/crazyagent-none`.
+/// Input: the system folder. Output: the value, or None unless the folder is `<letter>:\`
+/// and parts of letters, digits, `.`, `_` and `-`, none empty, `.` or `..`.
+#[cfg(any(windows, test))]
+fn windows_no_program(folder: &Path) -> Option<String> {
+    let text = folder.to_str()?.replace('\\', "/");
+    let (drive, rest) = text.split_at_checked(3)?;
+    let mut drive = drive.chars();
+    let lettered = drive
+        .next()
+        .is_some_and(|letter| letter.is_ascii_alphabetic())
+        && drive.as_str() == ":/";
+    let plain = !rest.is_empty()
+        && rest.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    (lettered && plain).then(|| format!("{text}/crazyagent-none"))
 }
 /// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
 /// partial clone lacks, so a repository's own promisor remote never runs a command on a read

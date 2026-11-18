@@ -1,4 +1,5 @@
-use super::git_safe;
+use super::{git_safe, windows_no_program};
+use std::path::Path;
 
 /// The keys of every engine and IDE git setting that names a hook folder or a program git
 /// would start, each with the table it sits in, in table order.
@@ -83,4 +84,35 @@ fn engine_and_ide_git_name_a_missing_system_folder_file_for_hooks_programs_and_s
         every_program_named(&value),
         "a git names a program a user could plant"
     );
+}
+
+/// V244-WIN-GIT-SAFE-PROGRAM-PATH: the Windows value is the system folder with forward
+/// slashes and `/crazyagent-none`, and a folder that is not `<letter>:\` or holds a space, a
+/// shell character, an empty part or a `..` gives none, so no such value reaches a git.
+#[test]
+fn the_windows_value_is_a_plain_system_folder_with_forward_slashes_or_none() {
+    assert_eq!(
+        windows_no_program(Path::new(r"C:\Windows\system32")).as_deref(),
+        Some("C:/Windows/system32/crazyagent-none")
+    );
+    assert_eq!(
+        windows_no_program(Path::new(r"D:\WINNT\System32")).as_deref(),
+        Some("D:/WINNT/System32/crazyagent-none")
+    );
+    for refused in [
+        r"C:\My Windows\system32",
+        r"C:\Win$dows\system32",
+        r"C:\Windows\..\system32",
+        r"C:\Windows\\system32",
+        r"C:\Windows\system32\",
+        r"\Windows\system32",
+        r"system32",
+        r"\\?\C:\Windows\system32",
+        r"\\server\share\system32",
+        r"C:\",
+        r"C:",
+        r"1:\Windows",
+    ] {
+        assert_eq!(windows_no_program(Path::new(refused)), None, "{refused}");
+    }
 }

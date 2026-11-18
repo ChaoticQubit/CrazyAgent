@@ -24,9 +24,9 @@ const KEYS: usize = 17;
 /// (IDE-SANDBOX-AGENT-FOLDERS); git skips the reflog step only when both expiry keys are
 /// `never`. Every signing switch is off, so a project that signs every commit or tag still
 /// commits and tags from the IDE, unsigned (INT1-3), and no log checks a signature. The ssh
-/// command and the signature programs are [`NO_PROGRAM`], never a `false` a path lookup
-/// finds on Unix (V243-WORKTREES-GIT-FLAKE). The server's environment adds them after its
-/// allowlist.
+/// command, the signature programs and the hooks folder are the engine's own
+/// [`crate::research::runner::no_program`], never a name a lookup or a planted file supplies.
+/// The server's environment adds them after its allowlist.
 pub fn config_env() -> &'static [(&'static str, &'static str); CONFIG_ENV_LEN] {
     static ENV: LazyLock<[(&'static str, &'static str); CONFIG_ENV_LEN]> = LazyLock::new(|| {
         [
@@ -38,17 +38,17 @@ pub fn config_env() -> &'static [(&'static str, &'static str); CONFIG_ENV_LEN] {
             ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
             ("GIT_CONFIG_VALUE_2", "false"),
             ("GIT_CONFIG_KEY_3", "core.sshCommand"),
-            ("GIT_CONFIG_VALUE_3", NO_PROGRAM),
+            ("GIT_CONFIG_VALUE_3", crate::research::runner::no_program()),
             ("GIT_CONFIG_KEY_4", "core.pager"),
             ("GIT_CONFIG_VALUE_4", "cat"),
             ("GIT_CONFIG_KEY_5", "credential.helper"),
             ("GIT_CONFIG_VALUE_5", ""),
             ("GIT_CONFIG_KEY_6", "gpg.program"),
-            ("GIT_CONFIG_VALUE_6", NO_PROGRAM),
+            ("GIT_CONFIG_VALUE_6", crate::research::runner::no_program()),
             ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
-            ("GIT_CONFIG_VALUE_7", NO_PROGRAM),
+            ("GIT_CONFIG_VALUE_7", crate::research::runner::no_program()),
             ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
-            ("GIT_CONFIG_VALUE_8", NO_PROGRAM),
+            ("GIT_CONFIG_VALUE_8", crate::research::runner::no_program()),
             ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
             ("GIT_CONFIG_VALUE_9", "never"),
             ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
@@ -64,7 +64,7 @@ pub fn config_env() -> &'static [(&'static str, &'static str); CONFIG_ENV_LEN] {
             ("GIT_CONFIG_KEY_15", "log.showSignature"),
             ("GIT_CONFIG_VALUE_15", "false"),
             ("GIT_CONFIG_KEY_16", "core.hooksPath"),
-            ("GIT_CONFIG_VALUE_16", "/dev/null"),
+            ("GIT_CONFIG_VALUE_16", crate::research::runner::no_program()),
         ]
     });
     LazyLock::force(&ENV)
@@ -73,12 +73,6 @@ pub fn config_env() -> &'static [(&'static str, &'static str); CONFIG_ENV_LEN] {
 /// How many variables [`config_env`] holds: `GIT_CONFIG_COUNT` and a key and a value for
 /// each of the `KEYS` settings.
 pub const CONFIG_ENV_LEN: usize = 1 + 2 * KEYS;
-
-/// The ssh command and every signature program under [`config_env`]: on Unix `/dev/null`,
-/// an absolute path git cannot start, so the transport or check fails and nothing runs;
-/// elsewhere the bare `false` for now, which a path lookup resolves
-/// (V244-WIN-GIT-SAFE-PROGRAM-PATH).
-const NO_PROGRAM: &str = if cfg!(unix) { "/dev/null" } else { "false" };
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
 /// run the project's hooks: every [`config_env`] key but the last, `core.hooksPath`.
