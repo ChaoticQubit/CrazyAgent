@@ -387,6 +387,17 @@ test("every uv the Rust shard action installs puts its folder on the job's PATH,
   }
 });
 
+test("the macOS Rust shard links the graphify it installs into the uv folder on the job's PATH, never the venv's bin, so an engine started by a row finds it where the graph step looks (G1 macOS M3)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const step = shard.split(/\n(?= {4}- )/).map((text) => `${text}\n`).find((text) => text.includes("name: Install pinned graphify for the graph rows\n"));
+  assert(step, "the macOS graphify step");
+  const checked = step.indexOf('"$venv/bin/graphify" --help > /dev/null\n');
+  assert(checked >= 0, "the step runs the graphify it installed");
+  assert(step.indexOf('ln -s "$venv/bin/graphify" "$work/bin/graphify"\n') > checked, "the link names the graphify just checked");
+  assert(step.includes('echo "$work/bin" >> "$GITHUB_PATH"\n'), "the linked folder is on the job's PATH");
+  assert.doesNotMatch(step, /"\$venv\/bin" >> "\$GITHUB_PATH"/, "the venv's python never shadows the runner's");
+});
+
 test("both test farm engine cargo builds turn on the engine's owner-trace feature only where the built tree's engine defines it, so a failed row's captured stderr holds one line per owner exchange and a tree from any other base still builds; the Windows boundary build has no engine and builds without it (leader 02:58, #297 F1; #326 r1 F1; clean_mac_release.rs keeps it out of every release build)", async () => {
   const archive = await readFile(new URL("../../.github/actions/rust-archive/action.yml", import.meta.url), "utf8");
   const parts = archive.split(/\n(?= {4}- )/);
