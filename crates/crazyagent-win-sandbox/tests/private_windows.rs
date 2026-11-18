@@ -281,7 +281,7 @@ fn a_private_file_with_a_low_label_is_refused() {
     let held = private::dir(&root).unwrap();
     let path = root.join("engine.db");
     drop(private::file(&path, true).unwrap());
-    drop(private::file(&path, false).expect("a file with its own medium label opens"));
+    drop(private::file(&path, false).expect("a file with no label opens"));
     run(
         "icacls",
         &[path.to_str().unwrap(), "/setintegritylevel", "low"],
@@ -362,31 +362,69 @@ fn repair_refuses_a_folder_that_already_holds_a_file_and_changes_nothing() {
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
-/// #512 r2 (rv-sec2 N1, leader 05:03): the data root is made with a medium label that keeps
-/// a lower integrity process of the user from reading or writing, handed on to what is made
-/// in it, so a private file and a side file SQLite would make there both carry no-read-up.
+/// The medium label with no-write-up and no-read-up the secret stores carry (#524 r3).
+const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+
+/// The mandatory label that applies to an open folder or file itself. Input: the object.
+/// Output: the level and policy, None when it has none.
+fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
+    let facts = private::facts(object).unwrap();
+    facts.label.and_then(|sacl| dacl::label(&sacl).unwrap())
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): the database folder, the data root, hands the medium
+/// no-read-up label to the files made directly in it, engine.db and SQLite's side files. It
+/// carries none itself and hands none to a folder made in it, which may be a root granted to
+/// an AppContainer, nor to what is made there.
 #[test]
-fn a_file_made_in_the_data_root_carries_no_read_up() {
-    const MEDIUM: u32 = 0x2000;
-    const NO_READ_UP: u32 = 0x2;
-    let root = scratch("no-read-up");
-    let held = private::dir(&root).unwrap();
-    let own = private::facts(&held).unwrap();
-    let sacl = own.label.expect("the data root carries a label");
-    assert_eq!(dacl::label(&sacl), Ok(Some((MEDIUM, 0x3))));
-    assert_eq!(dacl::inherited_label(&sacl), Ok(Some((MEDIUM, 0x3))));
-    drop(private::file(&root.join("account-key"), true).unwrap());
+fn the_database_folder_labels_only_the_files_made_directly_in_it() {
+    let root = scratch("database-label");
+    let held = private::store_dir(&root, private::Store::Database).unwrap();
+    assert_eq!(own_label(&held), None);
+    drop(private::file(&root.join("engine.db"), true).unwrap());
     std::fs::write(root.join("engine.db-wal"), "x").unwrap();
-    for name in ["account-key", "engine.db-wal"] {
+    for name in ["engine.db", "engine.db-wal"] {
         let file = std::fs::File::open(root.join(name)).unwrap();
-        let facts = private::facts(&file).unwrap();
-        let sacl = facts
-            .label
-            .unwrap_or_else(|| panic!("{name} carries no label"));
-        let (level, policy) = dacl::label(&sacl).unwrap().expect("a label applies");
-        assert_eq!(level, MEDIUM, "{name}");
-        assert_ne!(policy & NO_READ_UP, 0, "{name} must carry no-read-up");
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
     }
-    drop(held);
+    let made = root.join("setup");
+    let plain = root.join("check");
+    std::fs::create_dir(&plain).unwrap();
+    for folder in [private::dir(&made).unwrap(), private::dir(&plain).unwrap()] {
+        assert_eq!(own_label(&folder), None);
+    }
+    std::fs::write(made.join("inside.txt"), "x").unwrap();
+    let inside = std::fs::File::open(made.join("inside.txt")).unwrap();
+    assert_eq!(own_label(&inside), None);
+    drop((held, inside));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): a secret store folder (account keys, MCP secrets)
+/// carries the medium no-read-up label itself and hands it to every file and folder made in
+/// it.
+#[test]
+fn a_secret_folder_labels_itself_and_all_made_in_it() {
+    let root = scratch("secret-label");
+    let held = private::store_dir(&root, private::Store::Secret).unwrap();
+    assert_eq!(own_label(&held), MEDIUM_NO_UP);
+    let file = private::file(&root.join("secret-1"), true).unwrap();
+    assert_eq!(own_label(&file), MEDIUM_NO_UP);
+    let below = private::dir(&root.join("below")).unwrap();
+    assert_eq!(own_label(&below), MEDIUM_NO_UP);
+    drop((held, file, below));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): a private folder or file outside the secret stores
+/// carries no label of its own, as before #512 r2's N1.
+#[test]
+fn a_private_folder_and_file_carry_no_label_of_their_own() {
+    let root = scratch("no-label");
+    let held = private::dir(&root).unwrap();
+    assert_eq!(own_label(&held), None);
+    let file = private::file(&root.join("plain"), true).unwrap();
+    assert_eq!(own_label(&file), None);
+    drop((held, file));
     std::fs::remove_dir_all(&root).unwrap();
 }

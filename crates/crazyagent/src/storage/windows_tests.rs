@@ -147,6 +147,45 @@ fn layout_prepare_makes_every_entry_private_and_refuses_an_open_root() {
     assert!(crate::paths::Layout::new(open).unwrap().prepare().is_err());
 }
 
+/// The mandatory label that applies to an open folder or file itself. Input: the object.
+/// Output: the level and policy, None when it has none.
+fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
+    let facts = private::facts(object).unwrap();
+    facts
+        .label
+        .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap())
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): on a data folder `Layout::prepare` makes, engine.db
+/// and the side files SQLite makes beside it, and the MCP secrets folder, carry the medium
+/// no-read-up label; the data root itself, its logs and the plugin store carry none, so a
+/// root the engine makes there for an AppContainer starts unlabelled.
+#[tokio::test]
+async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_label() {
+    use super::plugins;
+    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    let root = tempfile::tempdir().unwrap();
+    let layout = crate::paths::Layout::new(root.path().join("data")).unwrap();
+    layout.prepare().unwrap();
+    let data = layout.root().to_path_buf();
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let storage = Storage::open(&data.join("engine.db"), config, false)
+        .await
+        .unwrap();
+    let secrets = plugins::store_folder(&data, &[plugins::SECRETS]).unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let file = private::file(&data.join(name), false).unwrap();
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+    }
+    assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_NO_UP);
+    for folder in [data.clone(), layout.logs(), data.join(plugins::STORE)] {
+        let held = private::dir(&folder).unwrap();
+        assert_eq!(own_label(&held), None, "{}", folder.display());
+    }
+    drop(storage);
+}
+
 /// W1c D5: an MCP server secret round-trips through the Windows plugin key store as a W1
 /// private file, a secret file other users may read is refused as unsafe, and a removed
 /// secret is gone.
