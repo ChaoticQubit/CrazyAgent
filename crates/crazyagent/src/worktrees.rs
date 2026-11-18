@@ -3947,6 +3947,20 @@ mod tests {
         }
     }
 
+    /// V243-WORKTREE-GIT-FLOOR: a lease check at start refused for a git older than the floor
+    /// says nothing about the lease, so a Ready or RecoveryRequired lease waits for recovery,
+    /// checked again once Git is updated, instead of turning Uncertain.
+    #[test]
+    fn a_lease_check_refused_for_an_old_git_at_start_keeps_the_lease_for_recovery() {
+        for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
+            assert_eq!(
+                restarted(state.clone(), &[Err("worktree_git_old")]),
+                (LeaseState::RecoveryRequired, 1),
+                "{state:?}"
+            );
+        }
+    }
+
     /// ENGINE-START-LEASE-DEMOTE: a lease check at start that failed on a read is tried once
     /// more, as a lease read's check is; a second failed read leaves the lease Uncertain.
     #[test]
