@@ -33,10 +33,25 @@ const HELPER: &str = env!("CARGO_BIN_EXE_crazyagent-landlock");
 /// helper refuses ([`loader_variable`]), such as the `LD_LIBRARY_PATH` cargo sets for
 /// tests (DEC-179 SBX-3 fold, rv-ds241 F2). No input. Output: the command.
 fn helper_command() -> Command {
-    let mut command = Command::new(HELPER);
-    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+    without_loader(Command::new(HELPER))
+}
+
+/// A command that runs with this test's environment less every variable the helper refuses
+/// ([`loader_variable`]), for the helper itself or a shell that starts it (G1). Input: the
+/// command. Output: the same command, each such variable removed.
+fn without_loader(mut command: Command) -> Command {
+    let loaders: Vec<OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| loader_variable(name))
+        .collect();
+    for name in &loaders {
         command.env_remove(name);
     }
+    assert!(loaders.iter().all(|name| {
+        command
+            .get_envs()
+            .any(|(set, value)| set == name.as_os_str() && value.is_none())
+    }));
     command
 }
 
@@ -192,13 +207,14 @@ fn process_state(pid: u32) -> Option<char> {
 /// git step is) starts its program, which the helper became, and that program is killed once
 /// its parent exits, so a git step never outlives the engine that took its lock. A parent id
 /// that is not the helper's parent is refused (exit 3) before the program starts, and
-/// process 1 is never named.
+/// process 1 is never named. The shell that starts the helper runs without the loader
+/// variables the helper refuses, as every other row's helper does (G1).
 #[test]
 fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     let case = case();
     let started = case.tmp.join("started");
     let parent = crazyagent::spawn_gate::status(
-        Command::new("/bin/sh")
+        without_loader(Command::new("/bin/sh"))
             .arg("-c")
             .arg(
                 "\"$0\" --die-with $$ --read / --write \"$1\" -- \
@@ -3446,9 +3462,11 @@ fn told(output: &Output) -> String {
 
 /// Rows about the call supervisor need a kernel that runs it: seccomp user notification
 /// whose wait only a fatal signal cuts (Linux 5.19) and a ptrace scope that lets a parent
-/// read the programs it started. The check itself fails where nothing supervises it.
+/// read the programs it started. The probe runs as the engine runs it, in a new empty folder
+/// only this user may open (G1). The check itself fails where nothing supervises it.
 #[test]
 fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_supervising() {
+    use std::os::unix::fs::PermissionsExt;
     let quiet = |command: &mut Command| {
         let silenced = command
             .stdin(Stdio::null())
@@ -3456,7 +3474,11 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
             .stderr(Stdio::null());
         crazyagent::spawn_gate::status(silenced).unwrap()
     };
-    let probe = quiet(helper_command().arg("--probe-supervisor"));
+    let held = tempfile::tempdir().unwrap();
+    let folder = held.path().canonicalize().unwrap().join("probe");
+    fs::create_dir(&folder).unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+    let probe = quiet(helper_command().arg("--probe-supervisor").arg(&folder));
     assert!(
         probe.success(),
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
