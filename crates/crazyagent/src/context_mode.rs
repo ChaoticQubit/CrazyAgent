@@ -26,6 +26,10 @@ const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
 const NODE_FOLDER_UNREADABLE: &str = "context_mode_node_folder_unreadable";
+/// The install code for a drive root of the node probe's paths that keeps every app container
+/// from reading its attributes, so a boxed Node.js script fails to resolve its own path
+/// (V244-WIN-ADMIN-STEP); matched by name where a check reads it.
+pub(crate) const NODE_DRIVE_ROOT_UNREADABLE: &str = "context_mode_node_drive_root_unreadable";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
 const NODE_PROFILE: &str = "node.sb";

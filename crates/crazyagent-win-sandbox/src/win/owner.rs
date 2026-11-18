@@ -155,6 +155,37 @@ pub fn unreadable_read_root(profile: &BoundaryProfile) -> Option<&str> {
         .find(|root| unreadable_root(Path::new(root), &profile.container))
 }
 
+/// The root of the drive or share an absolute path sits on, its last ancestor in the same
+/// form: `C:\` for `C:\x`, `\\?\C:\` for `\\?\C:\x`. Input: the path. Output: the root, or
+/// none for a relative path.
+fn drive_root(path: &Path) -> Option<&Path> {
+    todo!("{path:?}")
+}
+
+/// Whether the volume whose root is `root` keeps access lists (`FILE_PERSISTENT_ACLS`); FAT
+/// and exFAT do not, so no list there keeps a container out. Input: the root, with its
+/// trailing separator. Output: the answer, false too when Windows cannot say.
+fn keeps_access_lists(root: &Path) -> bool {
+    todo!("{root:?}")
+}
+
+/// Whether the list of `path` itself, read where it sits, keeps every app container from
+/// reading its attributes: no plain allow gives ALL APPLICATION PACKAGES
+/// [`DRIVE_ROOT_RIGHTS`] on it ([`holds_allow`]). A path with no list grants everyone, and
+/// one whose list cannot be read is left to the launch. Input: the path. Output: true to
+/// refuse.
+fn attributes_unreadable(path: &Path) -> bool {
+    todo!("{path:?}")
+}
+
+/// The first drive root among `paths`' roots ([`drive_root`]) on a volume that keeps access
+/// lists ([`keeps_access_lists`]) whose list keeps every app container from reading its
+/// attributes ([`attributes_unreadable`]), each root asked once: a boxed Node.js fails to
+/// resolve a path there (V244-WIN-ADMIN-STEP). Input: the paths. Output: that root, or none.
+pub fn unreadable_drive_root<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
+    todo!("{:?}", paths.into_iter().count())
+}
+
 /// Opens the file or folder at `path` itself for `access`, with the link flag so a link or
 /// junction there is opened, never what it leads to, sharing every kind of access. Inputs:
 /// the path and the access. Output: the handle, or the Windows error.
@@ -340,5 +371,82 @@ mod tests {
         }
         users(&above, &remove);
         owner_only(&program).unwrap();
+    }
+
+    /// V244-WIN-ADMIN-STEP: a path's drive root is its last ancestor, the verbatim form kept;
+    /// a relative path, or one relative to a drive, has none.
+    #[test]
+    fn a_paths_drive_root_is_its_last_ancestor_in_the_same_form() {
+        assert_eq!(
+            drive_root(Path::new(r"C:\Users\x")),
+            Some(Path::new(r"C:\"))
+        );
+        assert_eq!(
+            drive_root(Path::new(r"\\?\C:\Users\x")),
+            Some(Path::new(r"\\?\C:\"))
+        );
+        assert_eq!(drive_root(Path::new(r"C:\")), Some(Path::new(r"C:\")));
+        assert_eq!(drive_root(Path::new(r"Users\x")), None);
+        assert_eq!(drive_root(Path::new(r"C:Users")), None);
+    }
+
+    /// V244-WIN-ADMIN-STEP: the system drive keeps access lists, asked by its plain and its
+    /// verbatim root; a folder that is no volume root gets no answer, so it counts as none.
+    #[test]
+    fn the_system_drive_keeps_access_lists_asked_by_either_root() {
+        let drive = std::env::var("SystemDrive").unwrap();
+        assert!(keeps_access_lists(Path::new(&format!(r"{drive}\"))));
+        assert!(keeps_access_lists(Path::new(&format!(r"\\?\{drive}\"))));
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        assert!(!keeps_access_lists(&windows));
+    }
+
+    /// V244-WIN-ADMIN-STEP: a folder whose own list gives every app container read attributes
+    /// and synchronize, or more, on the folder itself keeps none out; one without such an
+    /// entry, with read attributes alone, or with one only what it holds inherits, does. A
+    /// path whose list cannot be read is left to the launch.
+    #[test]
+    fn a_list_without_read_attributes_for_every_app_container_keeps_them_out() {
+        let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let root = directory.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let user = std::env::var("USERNAME").unwrap();
+        users(
+            &root,
+            &["/inheritance:r", "/grant:r", &format!("{user}:(OI)(CI)(F)")],
+        );
+        assert!(attributes_unreadable(&root), "no entry");
+        let package = "*S-1-15-2-1";
+        for (rights, refused) in [
+            ("(RA,S)", false),
+            ("(RX)", false),
+            ("(RA)", true),
+            ("(OI)(CI)(IO)(RA,S)", true),
+        ] {
+            users(&root, &["/grant", &format!("{package}:{rights}")]);
+            assert_eq!(attributes_unreadable(&root), refused, "{rights}");
+            users(&root, &["/remove:g", package]);
+        }
+        assert!(attributes_unreadable(&root));
+        assert!(!attributes_unreadable(&directory.path().join("missing")));
+    }
+
+    /// V244-WIN-ADMIN-STEP: the drive-root check skips a relative path and, on the system
+    /// drive, agrees with that root's own list, asked once for many paths on it.
+    #[test]
+    fn the_drive_root_check_names_a_root_whose_list_keeps_app_containers_out() {
+        let drive = PathBuf::from(format!(r"{}\", std::env::var("SystemDrive").unwrap()));
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let system = windows.join("System32");
+        let expected = attributes_unreadable(&drive).then(|| drive.clone());
+        eprintln!(
+            "system drive root keeps app containers out: {}",
+            expected.is_some()
+        );
+        assert_eq!(
+            unreadable_drive_root([Path::new("relative"), windows.as_path(), system.as_path()]),
+            expected
+        );
+        assert_eq!(unreadable_drive_root([Path::new("relative")]), None);
     }
 }
