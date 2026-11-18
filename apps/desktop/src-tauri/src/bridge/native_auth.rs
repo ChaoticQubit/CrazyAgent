@@ -637,6 +637,8 @@ pub(super) fn auth_error(error: EngineError) -> BridgeError {
             "owner_grant_stale_or_revoked" => "owner_revoked",
             "owner_revoked" => "owner_revoked",
             "owner_queue_not_submitted" => "owner_queue_not_submitted",
+            "storage_starting_not_submitted" => "storage_starting_not_submitted",
+            "storage_busy_not_submitted" => "storage_busy_not_submitted",
             "owner_busy" => "owner_busy",
             _ => "native_auth_outcome_unknown_read_same_operation",
         },

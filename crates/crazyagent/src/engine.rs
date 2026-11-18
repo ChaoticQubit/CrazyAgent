@@ -483,6 +483,9 @@ type TerminalHost = (
     u64,
 );
 
+/// The refusal for an apply or settings change sent while the storage queue is full.
+const QUEUE_FULL: &str = "queue unavailable: no available capacity";
+
 pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
@@ -520,10 +523,10 @@ impl Engine {
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
+        let submit_by = tokio::time::Instant::now() + self.timeout;
         self.storage
-            .sender
-            .try_send(build(send))
-            .map_err(|_| EngineError("owner_queue_not_submitted".into()))?;
+            .submit(build(send), submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(wait, receive)
             .await
             .map_err(|_| owner::native_auth::outcome_unknown())?
@@ -542,8 +545,13 @@ impl Engine {
         settle: impl FnOnce(&Result<T, EngineError>) -> Result<(), EngineError> + Send + 'static,
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
-        if self.storage.sender.try_send(build(send)).is_err() {
-            let refused = Err(EngineError("owner_queue_not_submitted".into()));
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(build(send), submit_by, "owner_queue_not_submitted")
+            .await;
+        if let Err(refused) = submitted {
+            let refused = Err(refused);
             settle(&refused)?;
             return refused;
         }
@@ -656,15 +664,15 @@ impl Engine {
     }
 
     pub async fn apply(&self, request: WireRequest) -> Result<WireReply, EngineError> {
-        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.read())
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let _delivery = tokio::time::timeout_at(submit_by, self.owner_egress.read())
             .await
             .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
         self.storage
-            .sender
-            .try_send(Job::Apply(request, send))
-            .map_err(|e| EngineError(format!("queue unavailable: {e}")))?;
+            .submit(Job::Apply(request, send), submit_by, QUEUE_FULL)
+            .await?;
         tokio::time::timeout(self.timeout, receive)
             .await
             .map_err(|_| EngineError("outcome_unknown_retry_same_identity".into()))?
@@ -672,15 +680,15 @@ impl Engine {
     }
 
     pub async fn update_config(&self, config: EffectiveConfig) -> Result<(), EngineError> {
-        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let _delivery = tokio::time::timeout_at(submit_by, self.owner_egress.write())
             .await
             .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         config.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
         self.storage
-            .sender
-            .try_send(Job::Config(config, send))
-            .map_err(|e| EngineError(format!("queue unavailable: {e}")))?;
+            .submit(Job::Config(config, send), submit_by, QUEUE_FULL)
+            .await?;
         tokio::time::timeout(self.timeout, receive)
             .await
             .map_err(|_| EngineError("configuration_update_outcome_unknown".into()))?

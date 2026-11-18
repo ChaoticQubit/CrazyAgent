@@ -1162,7 +1162,7 @@ impl OwnerRuntimeHandle {
                     .native_auth_job(|reply| Job::NativeAuthFinish(admission, work, reply))
                     .await
                     .map_err(|error| {
-                        if error.0 == "owner_queue_not_submitted" {
+                        if crate::storage::not_submitted(&error.0) {
                             crate::engine::owner::native_auth::outcome_unknown()
                         } else {
                             error
@@ -1694,7 +1694,7 @@ impl Authority {
 /// reply never arrived. False when storage answered with a refusal, which means the
 /// dispatch scope already changed and its durable fence stays in place for recovery.
 fn custody_release_undelivered(error: &EngineError) -> bool {
-    error.0 == "owner_queue_not_submitted"
+    crate::storage::not_submitted(&error.0)
         || *error == crate::engine::owner::native_auth::outcome_unknown()
 }
 

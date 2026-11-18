@@ -1790,10 +1790,10 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
+        let submit_by = tokio::time::Instant::now() + self.timeout;
         self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(deadline, receive)
             .await
             .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
@@ -1812,10 +1812,10 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
+        let submit_by = tokio::time::Instant::now() + self.timeout;
         self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -2760,19 +2760,19 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = matches!(
-            e.0.as_str(),
-            "owner_busy"
-                | "owner_grant_stale_or_revoked"
-                | "owner_runtime_stale"
-                | "owner_queue_not_submitted"
-                | "operation_identity_conflict"
-                | "master_transaction_rolled_back"
-                | "master_dispatch_stopped"
-                | "master_dispatch_capacity"
-                | "move_project_old_folder_left"
-                | "job_busy"
-        );
+        let known = crate::storage::not_submitted(&e.0)
+            || matches!(
+                e.0.as_str(),
+                "owner_busy"
+                    | "owner_grant_stale_or_revoked"
+                    | "owner_runtime_stale"
+                    | "operation_identity_conflict"
+                    | "master_transaction_rolled_back"
+                    | "master_dispatch_stopped"
+                    | "master_dispatch_capacity"
+                    | "move_project_old_folder_left"
+                    | "job_busy"
+            );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
                 operation_id: id.clone(),

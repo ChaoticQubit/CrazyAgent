@@ -49,49 +49,80 @@ pub(crate) use native_auth::account_check_running;
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
+/// A point the storage worker can be held at by a row: before its receive loop, as a slow
+/// start does, or after it dequeues a claimed job and before it claims it.
 #[cfg(all(test, unix))]
-static HELD_STARTS: (
-    std::sync::Mutex<Vec<std::path::PathBuf>>,
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Stage {
+    Start,
+    Claim,
+}
+
+#[cfg(all(test, unix))]
+static HELD: (
+    std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>>,
     std::sync::Condvar,
 ) = (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
 
-/// Holds the storage worker of the database at `path` before its receive loop, as a slow
-/// start does, until the returned guard drops. Input: the path given to `Storage::open`.
-/// Output: the guard.
+/// Holds the storage worker of the database at `path` before its receive loop until the
+/// returned guard drops. Input: the path given to `Storage::open`. Output: the guard.
 #[cfg(all(test, unix))]
-pub(crate) fn hold_start(path: &Path) -> StartHold {
-    let mut held = HELD_STARTS.0.lock().unwrap();
-    assert!(!held.iter().any(|other| other == path));
-    held.push(path.to_path_buf());
-    StartHold(path.to_path_buf())
+pub(crate) fn hold_start(path: &Path) -> StageHold {
+    hold(path, Stage::Start)
 }
 
-/// A start hold from [`hold_start`]; dropping it lets that worker reach its receive loop.
+/// Holds the storage worker of the database at `path` at the claim of every job it dequeues
+/// until the returned guard drops. Input: the path given to `Storage::open`. Output: the guard.
 #[cfg(all(test, unix))]
-pub(crate) struct StartHold(std::path::PathBuf);
+pub(crate) fn hold_claims(path: &Path) -> StageHold {
+    hold(path, Stage::Claim)
+}
+
+/// Puts one hold on the list. Inputs: the database path and the stage.
+/// Output: the guard that lifts it.
+#[cfg(all(test, unix))]
+fn hold(path: &Path, stage: Stage) -> StageHold {
+    let mut held = HELD.0.lock().unwrap();
+    assert!(
+        !held
+            .iter()
+            .any(|other| *other == (path.to_path_buf(), stage))
+    );
+    held.push((path.to_path_buf(), stage));
+    StageHold(path.to_path_buf(), stage)
+}
+
+/// A hold from [`hold_start`] or [`hold_claims`]; dropping it lets that worker go on.
+#[cfg(all(test, unix))]
+pub(crate) struct StageHold(std::path::PathBuf, Stage);
 
 #[cfg(all(test, unix))]
-impl Drop for StartHold {
+impl Drop for StageHold {
     fn drop(&mut self) {
-        let mut held = HELD_STARTS
+        let mut held = HELD
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        held.retain(|other| *other != self.0);
-        HELD_STARTS.1.notify_all();
+        let before = held.len();
+        held.retain(|other| *other != (self.0.clone(), self.1));
+        assert_eq!(held.len() + 1, before);
+        HELD.1.notify_all();
     }
 }
 
-/// Waits while a row holds the start of the worker for `path`. Input: the database path.
-/// Output: none.
+/// Waits while a row holds the worker for `path` at `stage`.
+/// Inputs: the database path and the stage. Output: none.
 #[cfg(all(test, unix))]
-fn wait_while_start_held(path: &Path) {
-    let mut held = HELD_STARTS
+fn wait_while_held(path: &Path, stage: Stage) {
+    let mut held = HELD
         .0
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    while held.iter().any(|other| other == path) {
-        held = HELD_STARTS
+    while held
+        .iter()
+        .any(|other| *other == (path.to_path_buf(), stage))
+    {
+        held = HELD
             .1
             .wait(held)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -357,6 +388,9 @@ pub(crate) enum Job {
     Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
+    /// A timed job and its claim. The worker runs the job only when it takes the claim
+    /// before the caller withdraws it, so a withdrawn job never runs.
+    Claimed(Box<Job>, Arc<Claim>),
     /// Keeps the storage thread busy until the test sends on, or drops, the paired sender,
     /// so every job queued after it is answered only then, however fast the machine is.
     #[cfg(all(test, unix))]
@@ -369,6 +403,56 @@ pub(crate) enum Job {
 
 pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
+    admission: Arc<tokio::sync::Semaphore>,
+    receiving: tokio::sync::watch::Receiver<bool>,
+}
+
+const QUEUED: u8 = 0;
+const TAKEN: u8 = 1;
+const WITHDRAWN: u8 = 2;
+
+/// One timed job's place in the queue. It starts queued and is then taken by the worker or
+/// withdrawn by its caller, decided by one compare-and-swap. It holds the job's queue permit
+/// until then and wakes the caller when the worker takes the job.
+pub(crate) struct Claim {
+    state: std::sync::atomic::AtomicU8,
+    permit: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    taken: tokio::sync::Notify,
+}
+
+impl Claim {
+    /// Moves the claim from queued to `to` and frees its queue permit.
+    /// Input: TAKEN or WITHDRAWN. Output: true when this call decided the claim, false when
+    /// the other side already had, so this side backs off.
+    fn decide(&self, to: u8) -> bool {
+        use std::sync::atomic::Ordering;
+        assert!(to == TAKEN || to == WITHDRAWN);
+        let won = self
+            .state
+            .compare_exchange(QUEUED, to, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if won {
+            let permit = self
+                .permit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            assert!(permit.is_some());
+        }
+        won
+    }
+}
+
+/// Tells whether a storage refusal means the job never reached the worker, so nothing ran
+/// and the same request can be sent again. Input: the error code. Output: true for a full
+/// queue, a worker still starting, and a job withdrawn before the worker took it.
+pub(crate) fn not_submitted(code: &str) -> bool {
+    matches!(
+        code,
+        "owner_queue_not_submitted"
+            | "storage_starting_not_submitted"
+            | "storage_busy_not_submitted"
+    )
 }
 
 impl Job {
@@ -386,6 +470,46 @@ impl Job {
 }
 
 impl Storage {
+    /// Queues one timed job once the worker receives jobs, then waits until the worker takes it.
+    /// Inputs: the job, the deadline for both waits, and the refusal for a full queue.
+    /// Output: Ok once the worker took the job, so the caller's reply timer starts then;
+    /// otherwise storage_starting_not_submitted, storage_busy_not_submitted or `full`, with
+    /// nothing run.
+    pub(crate) async fn submit(
+        &self,
+        job: Job,
+        deadline: tokio::time::Instant,
+        full: &str,
+    ) -> Result<(), EngineError> {
+        assert!(!matches!(job, Job::Claimed(..)));
+        let mut receiving = self.receiving.clone();
+        match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
+            Err(_) => return Err(error("storage_starting_not_submitted")),
+            Ok(Err(_)) => return Err(error(full)),
+            Ok(Ok(_)) => {}
+        }
+        let permit = self
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error(full))?;
+        let claim = Arc::new(Claim {
+            state: std::sync::atomic::AtomicU8::new(QUEUED),
+            permit: std::sync::Mutex::new(Some(permit)),
+            taken: tokio::sync::Notify::new(),
+        });
+        self.sender
+            .try_send(Job::Claimed(Box::new(job), claim.clone()))
+            .map_err(|_| error(full))?;
+        let late = tokio::time::timeout_at(deadline, claim.taken.notified())
+            .await
+            .is_err();
+        if late && claim.decide(WITHDRAWN) {
+            return Err(error("storage_busy_not_submitted"));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn open(
         path: &Path,
         config: EffectiveConfig,
@@ -410,7 +534,11 @@ impl Storage {
         readonly: bool,
         mut sources: Option<settings::SettingsSources>,
     ) -> Result<(Self, EffectiveConfig), EngineError> {
-        let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
+        let capacity = config.settings.queue_capacity;
+        assert!(capacity > 0);
+        let (sender, mut receiver) = mpsc::channel(capacity * 2);
+        let admission = Arc::new(tokio::sync::Semaphore::new(capacity));
+        let (receiving_send, receiving) = tokio::sync::watch::channel(false);
         let delete_files_jobs = (!readonly).then(|| sender.clone());
         let forgotten_jobs = delete_files_jobs.as_ref().map(mpsc::Sender::downgrade);
         let path = path.to_path_buf();
@@ -489,8 +617,21 @@ impl Storage {
                     home_watch.restart(&connection);
                 }
                 #[cfg(all(test, unix))]
-                wait_while_start_held(&path);
+                wait_while_held(&path, Stage::Start);
+                let _ = receiving_send.send(true);
                 while let Some(job) = receiver.blocking_recv() {
+                    let job = match job {
+                        Job::Claimed(job, claim) => {
+                            #[cfg(all(test, unix))]
+                            wait_while_held(&path, Stage::Claim);
+                            if !claim.decide(TAKEN) {
+                                continue;
+                            }
+                            claim.taken.notify_one();
+                            *job
+                        }
+                        job => job,
+                    };
                     match job {
                         Job::Accounts(admission, command, reply) => {
                             let result = if readonly {
@@ -1252,12 +1393,20 @@ impl Storage {
                         Job::BusyHandler(handler, reply) => {
                             let _ = reply.send(connection.busy_handler(Some(handler)).map_err(error));
                         }
+                        Job::Claimed(..) => unreachable!("a claimed job wraps one plain job"),
                     }
                 }
             })
             .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
         let config = ready_receive.await.map_err(error)??;
-        Ok((Self { sender }, config))
+        Ok((
+            Self {
+                sender,
+                admission,
+                receiving,
+            },
+            config,
+        ))
     }
 }
 
