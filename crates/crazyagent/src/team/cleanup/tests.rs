@@ -2574,3 +2574,52 @@ fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own()
     assert_eq!(walked, "cleanup_walk_too_long");
     assert_eq!(failed, "agent_home_unwritable");
 }
+
+/// V243-CLEANUP-OPEN-UP-FOLDER-PROOF (#571 sec F1): a folder an agent shut, swapped for a
+/// hard link to the owner's read-only file while Clean up opens it up, never makes that
+/// file writable: swapped before the folder check the file keeps its mode, and swapped just
+/// after it, the worst case, the file gains no write bit.
+#[cfg(target_os = "macos")]
+#[test]
+fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    for point in [OpenUpPoint::Start, OpenUpPoint::BeforeMode] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let owner = root.join("owner");
+        write(&owner, b"the owner's\n");
+        std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let agent = root.join("agent");
+        let shut = agent.join("shut");
+        write(&shut.join("inner"), b"left by a session\n");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (moved, aside, linked) = (shut.clone(), agent.join("aside"), owner.clone());
+        let swap: Box<dyn FnOnce()> = Box::new(move || {
+            std::fs::rename(&moved, &aside).unwrap();
+            std::fs::hard_link(&linked, &moved).unwrap();
+        });
+        OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"shut".to_owned(), swap)));
+        let _ = remove_agent_tree(&agent);
+        let swapped = OPEN_UP_STEP.with(|slot| slot.borrow_mut().take().is_none());
+        let after = mode(&owner);
+        let _ =
+            std::fs::set_permissions(agent.join("aside"), std::fs::Permissions::from_mode(0o700));
+        let _ = remove_agent_tree(&agent);
+        assert!(swapped, "{point:?}: the swap never ran");
+        assert_eq!(
+            after & 0o222,
+            0,
+            "{point:?}: the owner's file is writable: {after:o}"
+        );
+        if point == OpenUpPoint::Start {
+            assert_eq!(after, 0o400, "the owner's file changed mode: {after:o}");
+        }
+    }
+}

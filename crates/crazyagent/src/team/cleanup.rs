@@ -1734,12 +1734,43 @@ fn open_up<P: rustix::path::Arg>(
     parent: impl std::os::fd::AsFd,
     name: P,
 ) -> rustix::io::Result<()> {
+    #[cfg(all(test, target_os = "macos"))]
+    open_up_step(OpenUpPoint::Start, &name);
+    #[cfg(all(test, target_os = "macos"))]
+    open_up_step(OpenUpPoint::BeforeMode, &name);
     rustix::fs::chmodat(
         parent,
         name,
         rustix::fs::Mode::RWXU,
         rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
     )
+}
+
+/// Where in [`open_up`] a cleanup test's step ([`OPEN_UP_STEP`]) runs: as it starts, or
+/// just before it changes the entry's mode.
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OpenUpPoint {
+    Start,
+    BeforeMode,
+}
+
+/// Runs the step a cleanup test set in [`OPEN_UP_STEP`] for this point and entry name, once.
+/// Inputs: the point and the name [`open_up`] was given. Output: none.
+#[cfg(all(test, target_os = "macos"))]
+fn open_up_step<P: rustix::path::Arg>(point: OpenUpPoint, name: &P) {
+    let Ok(named) = name.as_cow_c_str() else {
+        return;
+    };
+    let step = OPEN_UP_STEP.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let due =
+            matches!(&*slot, Some((at, entry, _)) if *at == point && entry.as_c_str() == &*named);
+        if due { slot.take() } else { None }
+    });
+    if let Some((_, _, step)) = step {
+        step();
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1770,7 +1801,18 @@ thread_local! {
     /// None runs nothing.
     pub(super) static BEFORE_ACL_CLEAR: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// A step a cleanup test runs in [`open_up`] at one point for the entry of one name,
+    /// standing in for a process an agent left that swaps a listed folder for a link to the
+    /// owner's file meanwhile. Runs once; None runs nothing.
+    pub(super) static OPEN_UP_STEP: std::cell::RefCell<Option<OpenUpStep>> =
+        const { std::cell::RefCell::new(None) };
 }
+
+/// A step a cleanup test runs in [`open_up`] ([`OPEN_UP_STEP`]): where, for which entry
+/// name, and what it does.
+#[cfg(all(test, target_os = "macos"))]
+pub(super) type OpenUpStep = (OpenUpPoint, std::ffi::CString, Box<dyn FnOnce()>);
 
 /// Clears the immutable and append-only flags, which an agent may set on what it owns, from
 /// one entry of this user that is not a link, keeping every other flag (T8 r1 L3). The
