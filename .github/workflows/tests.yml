@@ -160,10 +160,11 @@ jobs:
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --lib -- --test-threads 1
           cargo test -p crazyagent-win-sandbox --locked --test private_judge --test private_windows -- --test-threads 1
-      - name: W2 P2 pipe rows with their probe lines
+      - name: W2 P2 and D9 pipe rows with their probe lines
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           set -euo pipefail
+          cargo test -p crazyagent-win-sandbox --locked --test peer_judge -- --test-threads 1
           cargo test -p crazyagent-win-sandbox --locked --test pipe_windows -- --test-threads 1 --show-output
       - name: Clippy on the crazyagent library
         if: ${{ !cancelled() }}
