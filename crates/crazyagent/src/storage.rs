@@ -226,7 +226,7 @@ pub(crate) enum Job {
         Admission,
         ProjectId,
         crate::projects_home::AddMode,
-        oneshot::Sender<Result<(String, bool), EngineError>>,
+        oneshot::Sender<Result<crate::projects_home::MoveCheck, EngineError>>,
     ),
     HomeMovePlan(
         Admission,
