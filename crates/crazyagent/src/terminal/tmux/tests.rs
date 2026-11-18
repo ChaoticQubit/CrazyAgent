@@ -1039,13 +1039,11 @@ fn show_environment_replies_name_only_the_variables_still_set() {
     assert!(variable_names(&[b"-REMOVED".to_vec()]).is_empty());
 }
 
-#[cfg(target_os = "macos")]
 struct Server {
     tmux: PathBuf,
     socket: PathBuf,
 }
 
-#[cfg(target_os = "macos")]
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = crate::spawn_gate::status(
