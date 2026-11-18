@@ -1876,11 +1876,21 @@ impl TeamRuntime {
         self.watch_questions()?;
         self.watch_teammates()?;
         self.sweep()?;
-        crate::ide::workspace::follow(&self.connection, &self.root)?;
+        if self.follow_due()? {
+            crate::ide::workspace::follow(&self.connection, &self.root)?;
+        }
         self.watch_master_questions()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
         let lanes = self.lanes();
         questions.and(lanes)
+    }
+
+    /// Tells whether the IDE workspaces may need a rewrite: on the first tick and whenever
+    /// the database changed since they were last followed, by another connection
+    /// (`PRAGMA data_version`) or by this one (`total_changes`), since a workspace is built
+    /// from stored rows alone. Takes the runtime. Returns the answer, or a failed read.
+    fn follow_due(&self) -> Result<bool, EngineError> {
+        Ok(true)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's

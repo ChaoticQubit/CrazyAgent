@@ -34773,3 +34773,31 @@ fn active_projects_steps(connection: &Connection) -> i32 {
     assert!(steps > 0);
     steps
 }
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): the tick follows the IDE workspaces only when the
+/// database changed since it last did, so an idle tick runs none of their reads, while a
+/// write by another connection or by the runtime makes the next tick follow them again.
+#[test]
+fn ide_workspaces_are_followed_only_after_the_database_changes() {
+    let fixture = Fixture::new(1);
+    let mut runtime = fixture.runtime();
+    let write = "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Seen','answered',1)";
+    assert!(runtime.follow_due().unwrap(), "the first tick follows");
+    runtime.tick().unwrap();
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "an idle tick leaves nothing to follow"
+    );
+    fixture.connection.execute(write, [PROJECT]).unwrap();
+    assert!(runtime.follow_due().unwrap(), "another connection wrote");
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "the tick followed that write"
+    );
+    runtime.connection.execute(write, [PROJECT]).unwrap();
+    assert!(runtime.follow_due().unwrap(), "the runtime wrote");
+    runtime.shutdown().unwrap();
+}
