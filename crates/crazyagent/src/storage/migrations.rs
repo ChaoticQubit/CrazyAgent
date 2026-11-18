@@ -2,13 +2,16 @@ use super::error;
 use super::settings::SettingsSources;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 /// The folder beside engine.db that holds one folder per upgrade backup, each with a full
@@ -17,8 +20,10 @@ mod tests;
 /// inside it.
 pub(crate) const BACKUPS: &str = "backups";
 
-/// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
+/// How many upgrade backups of this user stay on disk: the new one and the newest others.
+/// Older ones are removed once a new one exists; another account's folders are never touched.
 pub(crate) const BACKUPS_KEPT: usize = 5;
+const _: () = assert!(BACKUPS_KEPT >= 1);
 
 /// The database file name inside a backup folder.
 const DATABASE: &str = "engine.db";
@@ -513,9 +518,10 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 }
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
-/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), then keeps
-/// only the newest BACKUPS_KEPT backups. Inputs: the connection, its path, the settings
-/// sources and both versions. Output: the new backup folder.
+/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), then keeps it and
+/// the newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the
+/// connection, its path, the settings sources and both versions. Output: the new backup
+/// folder.
 fn backup(
     db: &Connection,
     path: &Path,
@@ -529,15 +535,18 @@ fn backup(
         .ok_or_else(|| backup_failed("the database has no folder"))?;
     let folder = backups_folder(root)?;
     let target = folder.join(format!("{from}-to-{to}-{}", stamp(SystemTime::now())?));
+    #[cfg(unix)]
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&target)
         .map_err(backup_failed)?;
+    #[cfg(windows)]
+    std::fs::create_dir(&target).map_err(backup_failed)?;
     if let Err(cause) = fill(db, &target, settings) {
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);
     }
-    prune(&folder)?;
+    prune(&folder, &target)?;
     Ok(target)
 }
 
@@ -545,6 +554,7 @@ fn backup(
 /// again when an older build or a copy left it open to others (F36), and checks it. A link,
 /// a file or a folder of another user is refused. Input: the engine root. Output: the
 /// backups folder path.
+#[cfg(unix)]
 fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     let folder = root.join(BACKUPS);
     match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
@@ -577,9 +587,35 @@ fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     Ok(folder)
 }
 
+/// Creates `<root>/backups` as a W1 private folder when missing, or opens and checks the one
+/// there, and makes a local folder of this user there private again when an older build or
+/// a copy left it open to others (F36, DESIGN-0256 D5). A link, a file or a folder of another
+/// user is refused as unsafe. Input: the engine root. Output: the backups folder path.
+#[cfg(windows)]
+fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
+    let folder = root.join(BACKUPS);
+    match private::dir(&folder) {
+        Ok(_) => Ok(folder),
+        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => {
+            match private::repair(&folder) {
+                Ok(_) => {
+                    eprintln!("storage_backup_folder_made_private");
+                    Ok(folder)
+                }
+                Err(_) => Err(error(format!(
+                    "{BACKUP_UNSAFE}: {} must be a private folder of this user",
+                    folder.display()
+                ))),
+            }
+        }
+        Err(cause) => Err(backup_failed(cause)),
+    }
+}
+
 /// Sets one folder of this user to 0700 through a handle opened without following a link,
 /// only when it is still the folder that was checked. Inputs: the folder and its checked
 /// metadata. Output: done, or the refusal or I/O error.
+#[cfg(unix)]
 fn make_private(folder: &Path, checked: &std::fs::Metadata) -> Result<(), EngineError> {
     use rustix::fs::{Mode, OFlags};
     let handle = std::fs::File::from(
@@ -653,18 +689,26 @@ fn forget_backup_failure(path: &Path) {
 /// `storage_backup_failed`, or none.
 pub fn backup_failure(root: &Path) -> Option<&'static str> {
     use std::io::Read;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(root.join(BACKUP_FAILURE_FILE))
-        .ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
-        return None;
-    }
+    #[cfg(unix)]
+    let file = {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            )
+            .open(root.join(BACKUP_FAILURE_FILE))
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return None;
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = private::read_only(&root.join(BACKUP_FAILURE_FILE)).ok()?;
     let mut text = String::new();
     file.take(64).read_to_string(&mut text).ok()?;
     [BACKUP_UNSAFE, BACKUP_FAILED]
@@ -695,20 +739,24 @@ fn fill(
 /// Creates a new file readable only by this user and writes it to disk.
 /// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
 fn private_file(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
+    #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(backup_failed)?;
+    #[cfg(windows)]
+    let mut file = private::file(path, true).map_err(backup_failed)?;
     file.write_all(bytes).map_err(backup_failed)?;
     file.sync_all().map_err(backup_failed)
 }
 
-/// Removes all but the newest BACKUPS_KEPT backup folders. Only real folders named
-/// `<from>-to-<to>-<UTC time>` count; anything else in the folder is left alone.
-/// Input: the backups folder. Output: Ok once the older backups are gone.
-fn prune(folder: &Path) -> Result<(), EngineError> {
+/// Keeps the backup just made and the newest BACKUPS_KEPT - 1 others, removing the rest.
+/// Only real folders of this user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count;
+/// anything else, another account's folder included, is neither counted nor removed.
+/// Inputs: the backups folder and the new backup. Output: Ok once the older backups are gone.
+fn prune(folder: &Path, made: &Path) -> Result<(), EngineError> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(folder).map_err(backup_failed)? {
         let entry = entry.map_err(backup_failed)?;
@@ -718,16 +766,54 @@ fn prune(folder: &Path) -> Result<(), EngineError> {
         let Some(time) = backup_time(&name).map(str::to_owned) else {
             continue;
         };
-        if entry.file_type().map_err(backup_failed)?.is_dir() {
+        let path = folder.join(&name);
+        if path != made && own_folder(&path) {
             found.push((time, name));
         }
     }
     found.sort();
-    let excess = found.len().saturating_sub(BACKUPS_KEPT);
+    let excess = found.len().saturating_sub(BACKUPS_KEPT - 1);
     for (_, name) in &found[..excess] {
         std::fs::remove_dir_all(folder.join(name)).map_err(backup_failed)?;
     }
     Ok(())
+}
+
+/// Whether a backups entry is a real folder of this user, read without following a link, so
+/// a link, a file or a folder another account placed there is never counted or removed.
+/// Input: the entry's path. Output: the answer, false for anything unreadable or gone.
+#[cfg(unix)]
+fn own_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_dir() && metadata.uid() == rustix::process::getuid().as_raw()
+    })
+}
+
+/// Whether a backups entry is a real folder of this user, opened as itself, never a link's
+/// target: a folder that is no reparse point, with this user or, for an elevated user, the
+/// administrators as owner (DESIGN-0256 C6). Input: the entry's path. Output: the answer,
+/// false for anything unreadable or gone, so an unknown folder is never removed.
+#[cfg(windows)]
+fn own_folder(path: &Path) -> bool {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    let Ok(folder) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    else {
+        return false;
+    };
+    let (Ok(metadata), Ok(facts), Ok(user)) = (
+        folder.metadata(),
+        private::facts(&folder),
+        private::user_sid(),
+    ) else {
+        return false;
+    };
+    metadata.is_dir()
+        && !facts.reparse
+        && crazyagent_win_sandbox::dacl::trusted_owner(&facts.owner, &user)
 }
 
 /// The UTC time part of a backup folder name `<from>-to-<to>-<time>`.
@@ -784,4 +870,106 @@ fn civil(days: i64) -> (i64, u32, u32) {
     let year = yoe + era * 400 + i64::from(month <= 2);
     assert!((1..=12).contains(&month) && (1..=31).contains(&day));
     (year, month, day)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crazyagent_win_sandbox::private;
+    use std::path::Path;
+
+    /// Runs a Windows tool and fails the test when it fails. Inputs: the program and its
+    /// arguments.
+    fn run(program: &str, args: &[&str]) {
+        let status = std::process::Command::new(program)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{program} {args:?} failed: {status}");
+    }
+
+    /// Lets authenticated users change a folder and what it will hold. Input: the folder.
+    fn open_to_other_users(folder: &Path) {
+        run(
+            "icacls",
+            &[folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"],
+        );
+    }
+
+    /// W1c D5 (F36): an empty backups folder of this user that other users may change is made
+    /// private again, the twin of the Unix chmod; one that already holds files (#512 r2) and
+    /// a junction in its place are refused as unsafe.
+    #[test]
+    fn an_open_backups_folder_is_repaired_and_a_junction_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = data.join(super::BACKUPS);
+        std::fs::create_dir(&backups).unwrap();
+        open_to_other_users(&backups);
+        assert!(private::dir(&backups).is_err());
+        assert_eq!(super::backups_folder(&data).unwrap(), backups);
+        private::check(&private::dir(&backups).unwrap()).unwrap();
+        std::fs::remove_dir(&backups).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        open_to_other_users(&elsewhere);
+        run(
+            "cmd",
+            &[
+                "/C",
+                "mklink",
+                "/J",
+                backups.to_str().unwrap(),
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        let refused = super::backups_folder(&data).unwrap_err();
+        assert!(refused.0.starts_with(super::BACKUP_UNSAFE), "{}", refused.0);
+        assert!(private::dir(&elsewhere).is_err());
+        std::fs::remove_dir(&backups).unwrap();
+        std::fs::create_dir(&backups).unwrap();
+        std::fs::write(backups.join("older"), "x").unwrap();
+        open_to_other_users(&backups);
+        let held = super::backups_folder(&data).unwrap_err();
+        assert!(held.0.starts_with(super::BACKUP_UNSAFE), "{}", held.0);
+        assert!(private::dir(&backups).is_err());
+        std::fs::remove_dir_all(&backups).unwrap();
+    }
+
+    /// #512 r2 (rv-sec2 F1, leader 05:13): backup-shaped folders another account owns, stamped
+    /// later than any backup, are neither counted nor removed by the prune, so the backup just
+    /// made and this user's older ones stay.
+    #[test]
+    fn folders_another_account_owns_are_neither_counted_nor_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = super::backups_folder(&data).unwrap();
+        let foreign: Vec<_> = (1..=super::BACKUPS_KEPT)
+            .map(|day| backups.join(format!("0-to-1-9999010{day}T000000000Z")))
+            .collect();
+        for folder in &foreign {
+            std::fs::create_dir(folder).unwrap();
+            run(
+                "icacls",
+                &[folder.to_str().unwrap(), "/setowner", "*S-1-5-32-545"],
+            );
+            assert!(!super::own_folder(folder), "{}", folder.display());
+        }
+        let older: Vec<_> = (1..=2)
+            .map(|day| backups.join(format!("1-to-2-2000010{day}T000000000Z")))
+            .collect();
+        for folder in &older {
+            std::fs::create_dir(folder).unwrap();
+            assert!(super::own_folder(folder), "{}", folder.display());
+        }
+        let database = data.join(super::DATABASE);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let made = super::backup(&connection, &database, None, 1, 2).unwrap();
+        assert!(made.join(super::DATABASE).is_file(), "{}", made.display());
+        for folder in foreign.iter().chain(&older) {
+            assert!(folder.is_dir(), "{}", folder.display());
+        }
+        drop(connection);
+    }
 }

@@ -46,7 +46,6 @@ const _: () = assert!(MESSAGE_BYTES_MAX == 8192);
 /// The most stored messages a summary, a handoff or a history reads: the newest ones.
 const MESSAGES_READ_MAX: usize = 2048;
 /// The most sessions one engine start moves into the store.
-#[cfg(unix)]
 const BACKFILL_SESSIONS_MAX: usize = 4096;
 /// The most terminal turns an older engine only counted that the store keeps as rows.
 const COUNTED_TURNS_MAX: u64 = 1024;
@@ -99,7 +98,6 @@ const HANDOFF_TURN_MIN_BYTES: usize = 160;
 /// The longest title a handoff part has, naming the conversation it comes from.
 const HANDOFF_TITLE_BYTES_MAX: usize = 128;
 
-#[cfg(unix)]
 const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -107,7 +105,6 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     active_ms INTEGER NOT NULL CHECK(active_ms >= started_ms)
 )";
 
-#[cfg(unix)]
 const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -116,7 +113,6 @@ const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
 )";
 
 /// Gives a table an older engine made the newest line of each session's terminal turns.
-#[cfg(unix)]
 const OWNER_TURNS_LINED: &str = "ALTER TABLE session_owner_turns ADD COLUMN last_line TEXT CHECK(last_line IS NULL OR length(last_line) BETWEEN 1 AND 80);";
 
 const _: () = assert!(LINE_CHARS_MAX == 80);
@@ -124,7 +120,6 @@ const _: () = assert!(LINE_CHARS_MAX == 80);
 /// Gives a table an older engine made its turn count: a row of a session with no engine
 /// turn counts the one terminal turn it proves, while a row of a session with engine turns
 /// may be the first creation's backfill of a kept conversation, so it counts none.
-#[cfg(unix)]
 const OWNER_TURNS_COUNTED: &str =
     "ALTER TABLE session_owner_turns ADD COLUMN turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0);
      UPDATE session_owner_turns SET turns=0
@@ -345,7 +340,6 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 /// gains it as `OWNER_TURNS_COUNTED` says. A new table, or one that gains the newest line,
 /// fills it once by `fill_lines`. Takes the engine connection. Returns any SQLite failure,
 /// with the table left as it was.
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     initialize_owner_turns(connection)?;
     connection.execute_batch(MESSAGES).map_err(error)?;
@@ -354,7 +348,6 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
 
 /// Creates the marks table and the table of sessions with an owner turn as older engines
 /// kept them. Takes the engine connection. Returns any SQLite failure.
-#[cfg(unix)]
 fn initialize_owner_turns(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
     if table_exists(connection, "session_owner_turns")? {
@@ -387,7 +380,6 @@ fn initialize_owner_turns(connection: &Connection) -> Result<(), EngineError> {
     })
 }
 
-#[cfg(unix)]
 fn owner_turns_column(connection: &Connection, name: &str) -> Result<bool, EngineError> {
     connection
         .query_row(
@@ -425,7 +417,6 @@ fn owner_turns_change(
 /// `SESSIONS_LISTED_MAX`, so a session an older engine recorded shows a line once. A record
 /// that cannot be read leaves its line empty. Takes the engine connection. Returns any
 /// SQLite failure.
-#[cfg(unix)]
 fn fill_lines(connection: &Connection) -> Result<(), EngineError> {
     if !table_exists(connection, "team_master_conversations")? {
         return Ok(());
@@ -971,7 +962,6 @@ pub(crate) fn has_owner_turn(
 /// Migration part that gives team tasks and team agents their owning session column.
 /// Tables not created yet are left to `team::initialize`, which makes the column.
 /// Takes the upgrade transaction. Returns Ok once both tables have the column.
-#[cfg(unix)]
 pub(crate) fn add_ownership_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx
@@ -3207,7 +3197,6 @@ fn absorb_live(
 /// costs a few reads. A session that cannot be moved is left for the next start and named
 /// on standard error, so one bad row never stops the engine. Takes the engine connection.
 /// Returns a failure to list the sessions.
-#[cfg(unix)]
 fn backfill(connection: &Connection) -> Result<(), EngineError> {
     if !table_exists(connection, "master_sessions")? {
         return Ok(());

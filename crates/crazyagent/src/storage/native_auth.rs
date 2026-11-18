@@ -534,7 +534,6 @@ pub(crate) enum NativeAuthHostUpdate {
     Unavailable,
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS native_auth_operations (

@@ -1,0 +1,325 @@
+use super::Storage;
+use crazyagent_win_sandbox::private;
+use std::path::{Path, PathBuf};
+
+/// A temp root holding a W1 private data folder, the engine database path inside it and a
+/// config with no settings files. Output: the root guard, the database path and the config.
+fn fixture() -> (tempfile::TempDir, PathBuf, crate::config::EffectiveConfig) {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    (root, data.join("engine.db"), config)
+}
+
+/// Grants authenticated users inheritable modify on a folder through icacls. Input: the
+/// folder.
+fn open_to_other_users(folder: &Path) {
+    let status = std::process::Command::new("icacls")
+        .args([folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// W1 D1-D2: engine storage opens in a private data folder on Windows, and the database
+/// and the write-ahead and shared-memory files SQLite makes beside it pass W1's check.
+#[tokio::test]
+async fn engine_storage_opens_in_a_private_folder_and_its_side_files_stay_private() {
+    let (_root, path, config) = fixture();
+    let storage = Storage::open(&path, config, false).await.unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let side = path.with_file_name(name);
+        let file = private::file(&side, false).unwrap_or_else(|error| panic!("{name}: {error}"));
+        private::check(&file).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    drop(storage);
+}
+
+/// W1 D4: a second engine on the same data folder is refused by the engine lock, as on
+/// Unix.
+#[tokio::test]
+async fn a_second_engine_on_the_same_folder_is_refused() {
+    let (_root, path, config) = fixture();
+    let first = Storage::open(&path, config.clone(), false).await.unwrap();
+    let Err(error) = Storage::open(&path, config, false).await else {
+        panic!("a second engine opened the same database");
+    };
+    assert!(
+        error.to_string().contains("database_lock_acquire_failed"),
+        "{error}"
+    );
+    drop(first);
+}
+
+/// Closes engine storage through its own close job, which releases the engine lock before it
+/// answers. Input: the storage. Output: none; a failed close fails the test.
+async fn close(storage: Storage) {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    storage
+        .sender
+        .try_send(super::Job::Close(send))
+        .unwrap_or_else(|_| panic!("the close job was not queued"));
+    receive.await.unwrap().unwrap();
+}
+
+/// W1 D3 (F2): while the engine runs, neither its database nor its data folder can be
+/// renamed away, so the path checked before SQLite opened it keeps naming the same file.
+#[tokio::test]
+async fn the_database_and_its_folder_cannot_be_renamed_while_the_engine_runs() {
+    let (root, path, config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    let storage = Storage::open(&path, config, false).await.unwrap();
+    assert!(std::fs::rename(&path, data.join("moved.db")).is_err());
+    assert!(std::fs::rename(&data, root.path().join("moved")).is_err());
+    assert!(path.is_file() && !data.join("moved.db").exists());
+    close(storage).await;
+}
+
+/// W1 D4 (rv-code4 F2): the lock probe says free before an engine opens the folder, held
+/// while one runs, and free again once that engine has closed.
+#[tokio::test]
+async fn the_lock_probe_sees_a_running_engine_and_its_close() {
+    let (_root, path, config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    assert!(super::engine_lock_released(&data));
+    let storage = Storage::open(&path, config, false).await.unwrap();
+    assert!(!super::engine_lock_released(&data));
+    close(storage).await;
+    assert!(super::engine_lock_released(&data));
+}
+
+/// W1c D5: the settings sources open on Windows in a private data folder with the engine,
+/// and a second writer of the same sources is refused while the first holds its lease.
+#[tokio::test]
+async fn settings_sources_open_privately_and_a_second_writer_is_busy() {
+    let (_root, path, _config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    let (global, project) = (data.join("global.toml"), data.join("project.toml"));
+    let (storage, _config) = Storage::open_with_settings_sources(&path, &global, &project)
+        .await
+        .unwrap();
+    let Err(error) = super::settings::SettingsSources::open(&global, &project) else {
+        panic!("a second settings writer opened the same sources");
+    };
+    assert!(error.0.contains("settings_writer_busy"), "{}", error.0);
+    close(storage).await;
+}
+
+/// W1c D5: a global settings file other users may read is refused with the code Unix gives
+/// a settings file that is not private.
+#[tokio::test]
+async fn a_settings_file_other_users_may_read_is_refused() {
+    let (_root, path, _config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    let global = data.join("global.toml");
+    std::fs::write(&global, "").unwrap();
+    let status = std::process::Command::new("icacls")
+        .args([global.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let Err(error) =
+        Storage::open_with_settings_sources(&path, &global, &data.join("project.toml")).await
+    else {
+        panic!("settings other users may read were opened");
+    };
+    assert!(error.0.contains("settings_metadata_invalid"), "{}", error.0);
+}
+
+/// W1c D1: preparing a data folder on Windows makes the root, the logs folder and both
+/// default settings files private, and refuses a root other users may change.
+#[test]
+fn layout_prepare_makes_every_entry_private_and_refuses_an_open_root() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = crate::paths::Layout::new(root.path().join("data")).unwrap();
+    layout.prepare().unwrap();
+    for folder in [layout.root().to_path_buf(), layout.logs()] {
+        private::check(&private::dir(&folder).unwrap()).unwrap();
+    }
+    for file in [layout.global_settings(), layout.project_settings()] {
+        private::check(&private::read_only(&file).unwrap()).unwrap();
+    }
+    let open = root.path().join("open");
+    std::fs::create_dir(&open).unwrap();
+    open_to_other_users(&open);
+    assert!(crate::paths::Layout::new(open).unwrap().prepare().is_err());
+}
+
+/// The mandatory label that applies to an open folder or file itself. Input: the object.
+/// Output: the level and policy, None when it has none.
+fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
+    let facts = private::facts(object).unwrap();
+    facts
+        .label
+        .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap())
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): on a data folder `Layout::prepare` makes, engine.db
+/// and the side files SQLite makes beside it, and the MCP secrets folder, carry the medium
+/// no-read-up label; the data root itself, its logs and the plugin store carry none, so a
+/// root the engine makes there for an AppContainer starts unlabelled.
+#[tokio::test]
+async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_label() {
+    use super::plugins;
+    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    let root = tempfile::tempdir().unwrap();
+    let layout = crate::paths::Layout::new(root.path().join("data")).unwrap();
+    layout.prepare().unwrap();
+    let data = layout.root().to_path_buf();
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let storage = Storage::open(&data.join("engine.db"), config, false)
+        .await
+        .unwrap();
+    let secrets = plugins::store_folder(&data, &[plugins::SECRETS]).unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let file = private::file(&data.join(name), false).unwrap();
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+    }
+    assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_NO_UP);
+    for folder in [data.clone(), layout.logs(), data.join(plugins::STORE)] {
+        let held = private::dir(&folder).unwrap();
+        assert_eq!(own_label(&held), None, "{}", folder.display());
+    }
+    drop(storage);
+}
+
+/// W1c D5: an MCP server secret round-trips through the Windows plugin key store as a W1
+/// private file, a secret file other users may read is refused as unsafe, and a removed
+/// secret is gone.
+#[test]
+fn a_plugin_secret_round_trips_privately_and_an_open_one_is_refused() {
+    use super::plugins;
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let reference = plugins::new_secret_reference().unwrap();
+    plugins::store_secret(&data, &reference, b"0123456789".to_vec()).unwrap();
+    assert_eq!(
+        plugins::read_secret(&data, &reference).unwrap(),
+        b"0123456789"
+    );
+    let file = plugins::store_folder(&data, &[plugins::SECRETS])
+        .unwrap()
+        .join(&reference);
+    private::check(&private::read_only(&file).unwrap()).unwrap();
+    let status = std::process::Command::new("icacls")
+        .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        plugins::read_secret(&data, &reference).unwrap_err().0,
+        "plugin_store_unsafe"
+    );
+    plugins::remove_secret(&data, &reference).unwrap();
+    assert!(!file.exists());
+}
+
+/// W1c D5: an account key in the Windows key folder is read as a W1 private file, a key or
+/// a key folder other users may read is refused as unsafe, and a removed key is gone.
+#[test]
+fn an_account_key_is_read_privately_and_an_open_one_is_refused() {
+    use super::accounts::{ACCOUNT_KEYS, read_key_file, remove_key_file};
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let name = "anthropic-key-0123456789abcdef0123";
+    let reference = crate::protocol::CredentialRef::new(name).unwrap();
+    assert!(read_key_file(&data, &reference).unwrap().is_none());
+    assert!(!data.join(ACCOUNT_KEYS).exists());
+    let folder = data.join(ACCOUNT_KEYS);
+    drop(private::dir(&folder).unwrap());
+    let file = folder.join(name);
+    private::file(&file, true)
+        .unwrap()
+        .write_all(b"sk-ant-test-key")
+        .unwrap();
+    let key = read_key_file(&data, &reference).unwrap().unwrap();
+    assert_eq!(key.expose(), "sk-ant-test-key");
+    let status = std::process::Command::new("icacls")
+        .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        read_key_file(&data, &reference).unwrap_err().0,
+        "account_key_store_unsafe"
+    );
+    remove_key_file(&data, name).unwrap();
+    assert!(!file.exists());
+    remove_key_file(&data, name).unwrap();
+    open_to_other_users(&folder);
+    assert_eq!(
+        read_key_file(&data, &reference).unwrap_err().0,
+        "account_key_store_unsafe"
+    );
+    assert_eq!(
+        remove_key_file(&data, name).unwrap_err().0,
+        "account_key_store_unsafe"
+    );
+}
+
+/// W1c D5: the start sweep on Windows deletes the MCP secret, hook folder and account key a
+/// committed removal left noted and forgets their notes, and keeps the note of a native
+/// sign-in, whose custody Windows does not run, for a later start.
+#[test]
+fn the_start_sweep_deletes_what_a_removal_left_noted() {
+    use super::{accounts, plugins, trash};
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let connection = rusqlite::Connection::open(data.join("engine.db")).unwrap();
+    trash::initialize(&connection).unwrap();
+    plugins::initialize(&connection).unwrap();
+    accounts::initialize(&connection).unwrap();
+    let secret = plugins::new_secret_reference().unwrap();
+    plugins::store_secret(&data, &secret, b"0123456789".to_vec()).unwrap();
+    let secret_file = plugins::store_folder(&data, &[plugins::SECRETS])
+        .unwrap()
+        .join(&secret);
+    let hook = plugins::store_folder(&data, &[plugins::HOOKS, "hook-a"]).unwrap();
+    std::fs::write(hook.join("run.cmd"), "exit 0").unwrap();
+    let name = "anthropic-key-0123456789abcdef0123";
+    let keys = data.join(accounts::ACCOUNT_KEYS);
+    drop(private::dir(&keys).unwrap());
+    drop(private::file(&keys.join(name), true).unwrap());
+    trash::put(&connection, trash::MCP_SECRET, &secret).unwrap();
+    trash::put(&connection, trash::HOOK_FOLDER, "hook-a").unwrap();
+    trash::put(&connection, trash::ACCOUNT_KEY, name).unwrap();
+    trash::put(&connection, trash::NATIVE_SIGN_IN, name).unwrap();
+    trash::sweep_at_start(&connection, None).unwrap();
+    assert!(!secret_file.exists());
+    assert!(!hook.exists());
+    assert!(!keys.join(name).exists());
+    let left: Vec<String> = connection
+        .prepare("SELECT kind FROM file_trash")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(left, [trash::NATIVE_SIGN_IN]);
+}
+
+/// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
+/// the blanket `storage_unavailable` refusal the port replaces.
+#[tokio::test]
+async fn a_data_folder_other_users_may_change_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    open_to_other_users(&data);
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let Err(error) = Storage::open(&data.join("engine.db"), config, false).await else {
+        panic!("storage opened in a folder other users may change");
+    };
+    assert!(
+        !error.to_string().contains("storage_unavailable"),
+        "{error}"
+    );
+}

@@ -1556,7 +1556,7 @@ fn find(root: &Path) -> Vec<Found> {
 fn owned_text(target: &Path) -> Result<String, &'static str> {
     let file = crate::platform::open_plain(target).map_err(|_| "process_import_unreadable")?;
     let held = file.metadata().map_err(|_| "process_import_unreadable")?;
-    if !held.is_file() || !owned(&held) {
+    if !held.is_file() || !owned(&file, &held) {
         return Err("process_import_unsafe");
     }
     if held.len() > crate::agent_home::TEXT_BYTES_MAX as u64 {
@@ -1577,14 +1577,25 @@ fn owned_text(target: &Path) -> Result<String, &'static str> {
     Ok(text)
 }
 
+/// Tells whether the engine's user owns an open file, read from its metadata. Inputs: the
+/// open file, unused here, and its metadata. Output: true only then.
 #[cfg(unix)]
-fn owned(metadata: &fs::Metadata) -> bool {
+fn owned(_file: &fs::File, metadata: &fs::Metadata) -> bool {
     metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-#[cfg(not(unix))]
-fn owned(_metadata: &fs::Metadata) -> bool {
-    true
+/// Tells whether an open file on Windows has an owner W1's judge trusts, read from the
+/// handle: the engine's user, SYSTEM, the administrators or TrustedInstaller, as an elevated
+/// user's new files are owned by the administrators (DESIGN-0256 C6). Inputs: the open file
+/// and its metadata, unused here. Output: true only then; a handle whose owner cannot be
+/// read is false.
+#[cfg(windows)]
+fn owned(file: &fs::File, _metadata: &fs::Metadata) -> bool {
+    use crazyagent_win_sandbox::{dacl, private};
+    match (private::facts(file), private::user_sid()) {
+        (Ok(facts), Ok(user)) => dacl::trusted_owner(&facts.owner, &user),
+        _ => false,
+    }
 }
 
 /// Moves one project instruction file, or the link at its path, or arrived project
@@ -1639,3 +1650,26 @@ fn real_folder(folder: &Path) -> std::io::Result<()> {
 #[cfg(all(test, unix))]
 #[path = "instruction_files/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    /// C6 (DESIGN-0256): owner text on Windows is a file whose owner W1's judge trusts, read
+    /// from the open file; a file whose owner is the Users group is unsafe, as a file of
+    /// another uid is on Unix. Setting that owner needs the elevated runner (P0).
+    #[test]
+    fn owner_text_is_a_file_with_a_trusted_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("AGENTS.md");
+        std::fs::write(&file, "# rules").unwrap();
+        assert_eq!(super::owned_text(&file).unwrap(), "# rules");
+        let status = std::process::Command::new("icacls")
+            .args([file.to_str().unwrap(), "/setowner", "*S-1-5-32-545"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            super::owned_text(&file).unwrap_err(),
+            "process_import_unsafe"
+        );
+    }
+}

@@ -37,7 +37,6 @@ pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
 pub const LINKED_WORKTREES_MAX: usize = 4096;
 
-#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)
@@ -1023,7 +1022,6 @@ pub(crate) const RECORDED_NAME_BYTES_MAX: usize = 96;
 /// The statement that makes the record of the engine files a Delete everything moved when
 /// it is missing, its names checked to hold [`RECORDED_NAME_BYTES_MAX`] bytes. Output: the
 /// statement.
-#[cfg(unix)]
 fn delete_files_table() -> String {
     format!(
         "CREATE TABLE IF NOT EXISTS projects_delete_files (
@@ -1295,7 +1293,6 @@ pub fn found(
 /// the table that holds each Delete everything planned and not yet settled, when the
 /// engine database opens; a database from before gains the tables it lacks.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(TABLE)

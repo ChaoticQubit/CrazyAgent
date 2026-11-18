@@ -1264,7 +1264,7 @@ fn read_home_file(path: &Path, bytes_max: usize) -> Result<String, AgentHomeErro
     let held = file
         .metadata()
         .map_err(|_| failure("agent_instructions_unreadable"))?;
-    if !held.is_file() || !sole_own_link(&held) {
+    if !held.is_file() || !sole_own_link(&file, &held) {
         return Err(failure("agent_instructions_unsafe"));
     }
     let mut bytes = Vec::new();
@@ -1280,14 +1280,46 @@ fn read_home_file(path: &Path, bytes_max: usize) -> Result<String, AgentHomeErro
     }
 }
 
+/// Tells whether an open file has one link and the engine's user as owner, read from its
+/// metadata. Inputs: the open file, unused here, and its metadata. Output: true only then.
 #[cfg(unix)]
-fn sole_own_link(metadata: &fs::Metadata) -> bool {
+fn sole_own_link(_file: &File, metadata: &fs::Metadata) -> bool {
     metadata.nlink() == 1 && metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-#[cfg(not(unix))]
-fn sole_own_link(_metadata: &fs::Metadata) -> bool {
-    true
+/// Tells whether an open file on Windows has one link and an owner W1's judge trusts.
+/// Inputs: the open file and its metadata, unused here. Output: true only then; a handle
+/// whose owner or links cannot be read is false.
+#[cfg(windows)]
+fn sole_own_link(file: &File, _metadata: &fs::Metadata) -> bool {
+    sole_trusted_link(file).unwrap_or(false)
+}
+
+/// Reads from an open file's handle on Windows whether it is no link, has one name and an
+/// owner W1's judge trusts: the engine's user, SYSTEM, the administrators or TrustedInstaller,
+/// as an elevated user's new files are owned by the administrators (DESIGN-0256 C6). Input:
+/// the open file. Output: the answer, or the Windows error.
+#[cfg(windows)]
+fn sole_trusted_link(file: &File) -> std::io::Result<bool> {
+    use crazyagent_win_sandbox::{dacl, private};
+    let facts = private::facts(file)?;
+    Ok(!facts.reparse
+        && facts.links == 1
+        && dacl::trusted_owner(&facts.owner, &private::user_sid()?))
+}
+
+/// Tells whether a home entry kept as a file on Windows has one link and a trusted owner,
+/// opened as itself, never a link's target. Input: the entry. Output: the answer, false for
+/// an entry gone meanwhile, or `agent_home_unwritable` when it cannot be opened or read, so
+/// a failed open never removes a kept file.
+#[cfg(windows)]
+fn kept_file(path: &Path) -> Result<bool, AgentHomeError> {
+    let file = match crate::platform::open_plain(path) {
+        Ok(file) => file,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(failure("agent_home_unwritable")),
+    };
+    sole_trusted_link(&file).map_err(|_| failure("agent_home_unwritable"))
 }
 
 fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
@@ -1733,7 +1765,7 @@ fn keep_only(
                 .find(|(known, _)| name == *known)
                 .map(|(_, kind)| *kind);
             match wanted {
-                Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
+                Some(Kept::File) if metadata.is_file() && kept_file(&path)? => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
                 Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
                 Some(Kept::Transcripts) if metadata.is_dir() => clear_memory(&path)?,
@@ -2086,3 +2118,64 @@ pub use transcript::{LoadedFile, Observed, observed};
 #[cfg(test)]
 #[path = "agent_home/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::Kept;
+
+    /// C6 (DESIGN-0256): a home file is read on Windows only while it has one link and the
+    /// engine's user owns it, both read from the open file, so a second hard link makes it
+    /// unsafe as on Unix.
+    #[test]
+    fn a_home_file_with_a_second_hard_link_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CLAUDE.md");
+        std::fs::write(&file, "# rules").unwrap();
+        assert_eq!(super::read_home_file(&file, 64).unwrap(), "# rules");
+        std::fs::hard_link(&file, root.path().join("linked")).unwrap();
+        assert_eq!(
+            super::read_home_file(&file, 64).unwrap_err().0,
+            "agent_instructions_unsafe"
+        );
+    }
+
+    /// C6 (DESIGN-0256): a home cleanup on Windows keeps a file it keeps only while it has
+    /// one link and the engine's user owns it; a kept name with a second hard link is
+    /// removed as any entry it does not keep.
+    #[test]
+    fn a_kept_home_file_with_a_second_hard_link_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let (kept, linked) = (home.join("kept"), home.join("linked"));
+        std::fs::write(&kept, "x").unwrap();
+        std::fs::write(&linked, "y").unwrap();
+        std::fs::hard_link(&linked, root.path().join("outside")).unwrap();
+        let mut held = Vec::new();
+        super::keep_only(
+            &home,
+            &[("kept", Kept::File), ("linked", Kept::File)],
+            &mut held,
+        )
+        .unwrap();
+        assert!(kept.is_file());
+        assert!(!linked.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("outside")).unwrap(),
+            "y"
+        );
+    }
+
+    /// #512 r2 (rv-sec2 N2): a link opened as itself is no kept file, even with one name and
+    /// a trusted owner, so a link an agent swaps in for a kept file is never kept as a file.
+    #[test]
+    fn a_link_in_place_of_a_kept_home_file_is_not_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, "x").unwrap();
+        let link = root.path().join("kept");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(!super::kept_file(&link).unwrap());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
+    }
+}

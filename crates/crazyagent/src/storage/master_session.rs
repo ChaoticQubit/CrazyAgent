@@ -35,7 +35,6 @@ use crate::worktrees::{LeaseState, WorktreeLease};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -43,19 +42,27 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The device and inode that name the engine database file.
-/// Takes its metadata. Returns the pair, or `master_configured_database_unavailable` where
-/// the platform has no stable file identity in the standard library.
+/// Takes its path, unused here, and its metadata. Returns the pair.
 #[cfg(unix)]
-fn database_identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), EngineError> {
+fn database_identity(
+    _path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(u64, u64), EngineError> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
-/// The device and inode that name the engine database file.
-/// Takes its metadata. Returns `master_configured_database_unavailable`, because the
-/// standard library has no stable file identity here.
-#[cfg(not(unix))]
-fn database_identity(_metadata: &std::fs::Metadata) -> Result<(u64, u64), EngineError> {
-    Err(error("master_configured_database_unavailable"))
+/// The volume serial and 64-bit file id that name the engine database file on Windows, read
+/// from a W1 private read-only open that never follows a link (DESIGN-0256 D5).
+/// Takes its path and its metadata, unused here. Returns the pair, or
+/// `master_configured_database_unavailable` for a file W1 refuses or cannot name.
+#[cfg(windows)]
+fn database_identity(
+    path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(u64, u64), EngineError> {
+    crazyagent_win_sandbox::private::read_only(path)
+        .and_then(|file| crazyagent_win_sandbox::private::identity(&file))
+        .map_err(|_| error("master_configured_database_unavailable"))
 }
 
 pub(crate) enum MasterRuntimeCommand {
@@ -314,14 +321,12 @@ struct ConfiguredRegistration {
     database_identity: (u64, u64),
 }
 
-#[cfg(unix)]
 const LEGACY_CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     session TEXT NOT NULL UNIQUE CHECK(length(session) BETWEEN 1 AND 128),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
 
-#[cfg(unix)]
 const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
@@ -333,7 +338,6 @@ const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
 /// The most configured RCLI registrations kept: one per pool member of every open master.
 const CONFIGURED_PROFILES_MAX: usize = SESSIONS_MAX * crate::config::POOL_MEMBERS_MAX;
 
-#[cfg(unix)]
 const SESSIONS: &str = "CREATE TABLE master_sessions (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -342,7 +346,6 @@ const SESSIONS: &str = "CREATE TABLE master_sessions (
     phase TEXT NOT NULL CHECK(phase IN ('configured','parked','closed')),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
-#[cfg(unix)]
 const UNPARKED_SESSIONS: &str = "CREATE TABLE master_sessions (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -351,9 +354,7 @@ const UNPARKED_SESSIONS: &str = "CREATE TABLE master_sessions (
     phase TEXT NOT NULL CHECK(phase IN ('configured','closed')),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
-#[cfg(unix)]
 const CURRENT: &str = "CREATE UNIQUE INDEX master_current_project ON master_sessions(project) WHERE phase='configured'";
-#[cfg(unix)]
 const LATEST: &str = "CREATE INDEX master_latest_project ON master_sessions(project,created DESC)";
 
 /// Migration part that lets master sessions be parked (DEC-096 addendum 4b): rebuilds
@@ -361,7 +362,6 @@ const LATEST: &str = "CREATE INDEX master_latest_project ON master_sessions(proj
 /// row and both indexes, and parks the sessions the owner ended in projects that still
 /// exist, so they can be resumed. Takes the upgrade transaction. Returns Ok, also when
 /// the table was never created, or `master_schema_conflict` for an unknown layout.
-#[cfg(unix)]
 pub(super) fn allow_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
     let found: Option<String> = tx
         .query_row(
@@ -399,7 +399,6 @@ pub(super) fn allow_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
     .map_err(error)?;
     Ok(())
 }
-#[cfg(unix)]
 const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
@@ -410,10 +409,8 @@ const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
-#[cfg(unix)]
 const LEGACY_OUTSTANDING: &str =
     "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase='queued'";
-#[cfg(unix)]
 const TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
@@ -424,9 +421,7 @@ const TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
-#[cfg(unix)]
 const OUTSTANDING: &str = "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase IN ('queued','prepared','delivering','running','waiting_approval','uncertain')";
-#[cfg(unix)]
 const PREPARATIONS: &str = "CREATE TABLE master_preparations (
     session TEXT NOT NULL,
     turn TEXT NOT NULL,
@@ -434,7 +429,6 @@ const PREPARATIONS: &str = "CREATE TABLE master_preparations (
     PRIMARY KEY(session,turn),
     FOREIGN KEY(session,turn) REFERENCES master_turns(session,id)
 )";
-#[cfg(unix)]
 const WAITING_RESOLVES: &str = "CREATE TABLE master_waiting_resolves (
     session TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -445,7 +439,6 @@ const WAITING_RESOLVES: &str = "CREATE TABLE master_waiting_resolves (
 const SESSION_COLUMNS: &str = "CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,CASE WHEN length(CAST(project AS BLOB))<=128 THEN project END,created,version,CASE WHEN length(phase)<=10 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 const TURN_COLUMNS: &str = "CASE WHEN length(CAST(session AS BLOB))<=128 THEN session END,ordinal,CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,input,CASE WHEN length(phase)<=16 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 
-#[cfg(unix)]
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     let tx = db.unchecked_transaction().map_err(error)?;
     let expected: BTreeMap<_, _> = [
@@ -1874,7 +1867,7 @@ fn validate_registration(
     let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
     if !crate::file_identity::same_files(
         &[record.database_identity],
-        &[database_identity(&metadata)?],
+        &[database_identity(&record.database_path, &metadata)?],
     ) {
         return Err(error("master_configured_database_changed"));
     }
@@ -3783,6 +3776,7 @@ fn publish_rcli_profile(
             .ok_or_else(|| error("master_runtime_directory_missing"))?,
     );
     let database_metadata = std::fs::symlink_metadata(&database_path).map_err(error)?;
+    let identity = database_identity(&database_path, &database_metadata)?;
     proof.at_revision = Cursor::new(owner_revision(tx)?);
     let record = ConfiguredRegistration {
         proof: proof.clone(),
@@ -3793,7 +3787,7 @@ fn publish_rcli_profile(
         global_source,
         project_source,
         database_path,
-        database_identity: database_identity(&database_metadata)?,
+        database_identity: identity,
     };
     validate_registration(tx, &session, &record)?;
     let inserted = tx
@@ -8320,5 +8314,33 @@ mod schema_tests {
             initialize(&db).unwrap_err().to_string(),
             "master_schema_conflict"
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crazyagent_win_sandbox::private;
+
+    /// W1c D5: the engine database identity on Windows is the W1 file identity, the same on
+    /// each read of one file and different once another file is renamed into its place, so a
+    /// configured master receipt sees a database that was swapped.
+    #[test]
+    fn the_database_identity_names_one_file_and_changes_when_it_is_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let path = data.join("engine.db");
+        let other = data.join("other.db");
+        drop(private::file(&path, true).unwrap());
+        drop(private::file(&other, true).unwrap());
+        let read = |file: &std::path::Path| {
+            let metadata = std::fs::symlink_metadata(file).unwrap();
+            super::database_identity(file, &metadata).unwrap()
+        };
+        let first = read(&path);
+        assert_eq!(read(&path), first);
+        assert_ne!(read(&other), first);
+        std::fs::rename(&other, &path).unwrap();
+        assert_ne!(read(&path), first);
     }
 }

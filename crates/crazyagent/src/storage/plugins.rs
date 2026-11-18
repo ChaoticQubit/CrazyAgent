@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
-#[cfg(any(unix, test))]
 macro_rules! items_columns {
     () => {
         "(
@@ -27,7 +26,6 @@ macro_rules! items_columns {
     };
 }
 
-#[cfg(any(unix, test))]
 const SCHEMA: &str = concat!(
     "CREATE TABLE IF NOT EXISTS plugin_items ",
     items_columns!(),
@@ -40,7 +38,6 @@ CREATE TABLE IF NOT EXISTS plugin_switches (
 );
 /// Rebuilds an item table from before hooks with the current check, keeping every row, for
 /// the upgrade step that lets it hold hooks.
-#[cfg(unix)]
 pub(super) const WIDEN_ITEMS: &str = concat!(
     "CREATE TABLE plugin_items_next ",
     items_columns!(),
@@ -252,7 +249,6 @@ struct ServerRecord {
 
 /// Creates the skill, MCP server and hook tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
@@ -269,16 +265,29 @@ fn new_id(prefix: &str) -> Result<String, EngineError> {
     Ok(format!("{prefix}-{}", &random[..24]))
 }
 
-/// Refuses the private plugin store where Unix owner and mode checks do not exist.
-/// Takes the folder path, unused.
-/// Returns `plugin_store_unavailable` until Windows has its own owner-only folder check.
-#[cfg(not(unix))]
-fn private_directory(_path: &Path) -> Result<(), EngineError> {
-    Err(error("plugin_store_unavailable"))
+/// Creates or opens one folder of the private plugin store as a W1 private folder on Windows
+/// (DESIGN-0256 D1), the MCP secrets folder as a secret store with the no-read-up label
+/// (#524 r3). Inputs: the folder path and whether it is the secrets folder. Output: Ok,
+/// `plugin_store_unsafe` for a folder W1's check refuses, or `plugin_store_unavailable`.
+#[cfg(windows)]
+fn private_directory(path: &Path, secrets: bool) -> Result<(), EngineError> {
+    use crazyagent_win_sandbox::private;
+    let held = if secrets {
+        private::store_dir(path, private::Store::Secret)
+    } else {
+        private::dir(path)
+    };
+    match held {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(error("plugin_store_unsafe"))
+        }
+        Err(_) => Err(error("plugin_store_unavailable")),
+    }
 }
 
 #[cfg(unix)]
-fn private_directory(path: &Path) -> Result<(), EngineError> {
+fn private_directory(path: &Path, _secrets: bool) -> Result<(), EngineError> {
     let unavailable = || error("plugin_store_unavailable");
     match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -299,20 +308,18 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
 /// Input: the engine root and the folders below `plugins`. Output: the folder path.
 pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, EngineError> {
     let mut path = root.join(STORE);
-    private_directory(&path)?;
+    private_directory(&path, false)?;
     for part in parts {
         assert!(crate::protocol::single_component(part));
         path.push(part);
-        private_directory(&path)?;
+        private_directory(&path, parts == [SECRETS])?;
     }
     Ok(path)
 }
 
-#[cfg(unix)]
 const SECRET_BYTES_MAX: usize = 8192;
 /// The shortest MCP secret value kept. A shorter value such as `1` or `true` is part of
 /// nearly every launch path or flag, so no launch could prove its command keeps it hidden.
-#[cfg(unix)]
 const SECRET_BYTES_MIN: usize = 8;
 
 fn valid_reference(reference: &str) -> bool {
@@ -358,17 +365,41 @@ pub(crate) fn new_secret_reference() -> Result<String, EngineError> {
     Ok(reference)
 }
 
-/// Saves one MCP server secret as a private 0600 file named by its reference.
-/// Inputs: the engine root, a fresh reference and the secret bytes, which are zeroed after
-/// writing. Output: Ok, or a code with no file left behind.
-#[cfg(not(unix))]
+/// Saves one MCP server secret on Windows as a W1 private file named by its reference in
+/// the private secrets folder. Inputs: the engine root, a fresh reference and the secret
+/// bytes, which are zeroed after writing. Output: Ok, or a code with no file left behind;
+/// `server_secret_too_short` for a value under `SECRET_BYTES_MIN` bytes.
+#[cfg(windows)]
 pub(crate) fn store_secret(
-    _root: &Path,
-    _reference: &str,
+    root: &Path,
+    reference: &str,
     mut secret: Vec<u8>,
 ) -> Result<(), EngineError> {
+    use crazyagent_win_sandbox::private;
+    let stored = (|| {
+        if !valid_reference(reference) || secret.is_empty() || secret.len() > SECRET_BYTES_MAX {
+            return Err(error("server_secret_invalid"));
+        }
+        if secret.len() < SECRET_BYTES_MIN {
+            return Err(error("server_secret_too_short"));
+        }
+        let folder = store_folder(root, &[SECRETS])?;
+        let path = folder.join(reference);
+        let mut file =
+            private::file(&path, true).map_err(|_| error("plugin_secret_store_unavailable"))?;
+        if std::io::Write::write_all(&mut file, &secret)
+            .and_then(|()| file.sync_all())
+            .is_err()
+        {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(error("plugin_secret_store_unavailable"));
+        }
+        drop(file);
+        private::sync_folder(&folder).map_err(|_| error("plugin_secret_store_unavailable"))
+    })();
     crate::credentials::wipe(&mut secret);
-    Err(error("plugin_secret_store_unavailable"))
+    stored
 }
 
 /// Saves one MCP server secret as a private 0600 file named by its reference.
@@ -417,11 +448,43 @@ pub(crate) fn store_secret(
     stored
 }
 
-/// Reads one MCP server secret for a launch or a check. Inputs: the engine root and the
-/// reference from the effective set. Output: the secret bytes; callers zero them after use.
-#[cfg(not(unix))]
-pub(crate) fn read_secret(_root: &Path, _reference: &str) -> Result<Vec<u8>, EngineError> {
-    Err(error("plugin_secret_store_unavailable"))
+/// Reads one MCP server secret on Windows through W1's private read, which refuses a file
+/// that is not private. Inputs: the engine root and the reference from the effective set.
+/// Output: the secret bytes; callers zero them after use.
+#[cfg(windows)]
+pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, EngineError> {
+    use std::io::Read;
+    if !valid_reference(reference) {
+        return Err(error("server_secret_not_found"));
+    }
+    let path = store_folder(root, &[SECRETS])?.join(reference);
+    let file = match crazyagent_win_sandbox::private::read_only(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error("server_secret_not_found"));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(error("plugin_store_unsafe"));
+        }
+        Err(_) => return Err(error("plugin_secret_store_unavailable")),
+    };
+    let metadata = file
+        .metadata()
+        .map_err(|_| error("plugin_secret_store_unavailable"))?;
+    if metadata.len() > SECRET_BYTES_MAX as u64 {
+        return Err(error("plugin_store_unsafe"));
+    }
+    let mut bytes = Vec::with_capacity(SECRET_BYTES_MAX);
+    if file
+        .take(SECRET_BYTES_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > SECRET_BYTES_MAX
+    {
+        crate::credentials::wipe(&mut bytes);
+        return Err(error("plugin_secret_store_unavailable"));
+    }
+    Ok(bytes)
 }
 
 /// Reads one MCP server secret for a launch or a check. Inputs: the engine root and the
@@ -469,11 +532,19 @@ pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, Engin
     Ok(bytes)
 }
 
-/// Deletes one MCP server secret file. Inputs: the engine root and the reference.
-/// Output: Ok when the file is gone, including when it was already missing.
-#[cfg(not(unix))]
-pub(crate) fn remove_secret(_root: &Path, _reference: &str) -> Result<(), EngineError> {
-    Err(error("plugin_secret_store_unavailable"))
+/// Deletes one MCP server secret file on Windows. Inputs: the engine root and the
+/// reference. Output: Ok when the file is gone, including when it was already missing.
+#[cfg(windows)]
+pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineError> {
+    if !valid_reference(reference) {
+        return Ok(());
+    }
+    let path = store_folder(root, &[SECRETS])?.join(reference);
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(error("plugin_secret_store_unavailable")),
+    }
 }
 
 /// Deletes one MCP server secret file. Inputs: the engine root and the reference.
@@ -721,7 +792,6 @@ pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<
 
 /// Deletes one stored hook folder the trash names, all its hooks being gone. Inputs: the
 /// engine root and the folder's id. Output: Ok when it is gone, or a plain refusal.
-#[cfg(unix)]
 pub(crate) fn remove_hook_folder(root: &Path, id: &str) -> Result<(), EngineError> {
     if !valid_folder_id(id) {
         return Err(error("plugin_hook_folder_invalid"));

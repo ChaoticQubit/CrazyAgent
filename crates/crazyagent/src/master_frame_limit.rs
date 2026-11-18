@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 /// The largest frame the engine writes to a configured master's harness under any option.
 pub const BYTES_MAX: usize = 1_048_576;
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS configured_master_frames (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     frame_limit TEXT NOT NULL CHECK(frame_limit IN ('kib64', 'kib256', 'mib1'))
@@ -61,7 +60,6 @@ fn invalid() -> EngineError {
 
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }

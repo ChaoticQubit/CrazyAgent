@@ -226,7 +226,7 @@ fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
 /// staying open for both calls, and on the buffer, aligned for `TOKEN_USER` and as long as
 /// Windows asked for, outliving the read of the SID it holds. Output: the SID bytes, or the
 /// Windows error.
-fn user_sid() -> Result<Vec<u8>, u32> {
+pub(super) fn user_sid() -> Result<Vec<u8>, u32> {
     let mut token: HANDLE = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(last_error());
@@ -265,7 +265,7 @@ fn user_sid() -> Result<Vec<u8>, u32> {
 
 /// Copies a SID Windows returned. Relies on `sid`, when not null, pointing at memory that
 /// stays alive for the call. Input: the SID. Output: its bytes, or `ERROR_INVALID_SID`.
-fn sid_bytes(sid: PSID) -> Result<Vec<u8>, u32> {
+pub(super) fn sid_bytes(sid: PSID) -> Result<Vec<u8>, u32> {
     if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
         return Err(ERROR_INVALID_SID);
     }
