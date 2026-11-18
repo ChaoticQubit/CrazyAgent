@@ -232,16 +232,18 @@ pub fn unreadable_drive_root<'a>(paths: impl IntoIterator<Item = &'a Path>) -> O
 /// container its rights ([`DeviceGrant::granted`]); a device with no list grants everyone.
 /// Input: the grant. Output: the answer, or the Windows error when the list cannot be read.
 pub fn device_grant_held(grant: &DeviceGrant) -> Result<bool, u32> {
-    let _ = grant;
-    todo!("B2")
+    let (_, list) = security(Path::new(grant.path))?;
+    Ok(list.is_none_or(|list| grant.granted(&list)))
 }
 
 /// The first of [`DEVICE_GRANTS`] its device does not hold ([`device_grant_held`]), a list
 /// that cannot be read counting as not held, so a caller falls to the path that needs no
 /// grant. Output: that grant, or None when the machine holds both.
 pub fn missing_device_grant() -> Option<&'static DeviceGrant> {
-    let _ = &DEVICE_GRANTS;
-    todo!("B2")
+    let grants: &'static [DeviceGrant; 2] = &DEVICE_GRANTS;
+    grants
+        .iter()
+        .find(|grant| device_grant_held(grant) != Ok(true))
 }
 
 /// Opens the file or folder at `path` itself for `access`, with the link flag so a link or

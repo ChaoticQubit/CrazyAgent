@@ -180,8 +180,7 @@ impl DeviceGrant {
     /// grant's rights on the object itself ([`holds_allow`]). Input: the list bytes. Output:
     /// true when it does; false for a malformed list.
     pub fn granted(&self, acl: &[u8]) -> bool {
-        let _ = acl;
-        todo!("B2")
+        holds_allow(acl, &ALL_APPLICATION_PACKAGES, self.mask)
     }
 }
 
