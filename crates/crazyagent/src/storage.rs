@@ -482,6 +482,30 @@ impl Claim {
     }
 }
 
+tokio::task_local! {
+    /// The instant by which a timed job submitted inside a bounded owner request is decided,
+    /// so the request still answers it before the request's bound cuts it.
+    static DECIDE_BY: tokio::time::Instant;
+}
+
+/// The time a bounded request keeps after a submit decision to encode and write its reply,
+/// at most a quarter of the bound.
+const REPLY_ROOM: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Runs one bounded owner request's work so every timed job it submits is decided before
+/// the bound cuts the work, leaving the request room to answer the decision itself.
+/// Inputs: the cut instant, the bound's length and the work. Output: the work's output.
+pub(crate) async fn before_cut<F: std::future::Future>(
+    cut: tokio::time::Instant,
+    bound: std::time::Duration,
+    work: F,
+) -> F::Output {
+    let room = REPLY_ROOM.min(bound / 4);
+    let decide_by = cut.checked_sub(room).unwrap_or(cut);
+    assert!(decide_by <= cut);
+    DECIDE_BY.scope(decide_by, work).await
+}
+
 /// Withdraws a timed job's claim that is still queued when its submitter stops waiting
 /// before deciding it, as when the transport cuts an owner request at its deadline, so the
 /// worker skips the job and it never lands. It holds no claim for an access-narrowing job,

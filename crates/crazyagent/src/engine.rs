@@ -1068,13 +1068,82 @@ mod tests {
         );
         drop(release);
         engine.close().await.unwrap();
-        let stored: i64 = rusqlite::Connection::open(&path)
+        assert_eq!(
+            stored_configs(&path, &id),
+            1,
+            "the dropped narrowing change still landed"
+        );
+    }
+
+    /// Counts the stored settings with one id in a closed engine's database.
+    /// Inputs: the database path and the settings id. Output: the count.
+    fn stored_configs(path: &std::path::Path, id: &str) -> i64 {
+        rusqlite::Connection::open(path)
             .unwrap()
-            .query_row("SELECT COUNT(*) FROM configs WHERE id=?1", [&id], |row| {
+            .query_row("SELECT COUNT(*) FROM configs WHERE id=?1", [id], |row| {
                 row.get(0)
             })
-            .unwrap();
-        assert_eq!(stored, 1, "the dropped narrowing change still landed");
+            .unwrap()
+    }
+
+    /// An apply inside a bounded owner request behind busy storage is decided before the
+    /// request's cut, so the request itself answers storage_busy_not_submitted instead of
+    /// being cut with its job still queued (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn an_apply_behind_busy_storage_is_refused_before_its_requests_cut() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, _) = one_slot_engine(root.path(), "").await;
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let bound = engine.timeout / 4;
+        let cut = tokio::time::Instant::now() + bound;
+        let request = crate::storage::before_cut(cut, bound, engine.apply(create_request("cut")));
+        let answered = tokio::time::timeout_at(cut, request)
+            .await
+            .map(|reply| reply.map(|reply| reply.revision).map_err(|error| error.0))
+            .map_err(|_| "cut");
+        drop(release);
+        assert_eq!(
+            answered,
+            Ok(Err("storage_busy_not_submitted".to_owned())),
+            "the request answered the refusal itself before its cut"
+        );
+    }
+
+    /// A narrowing job inside a bounded owner request behind busy storage is answered
+    /// access_change_pending before the request's cut and still lands once storage frees
+    /// up (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn a_narrowing_job_behind_busy_storage_is_pending_before_its_requests_cut_and_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, path) = one_slot_engine(root.path(), "").await;
+        let changed = root.path().join("g2");
+        std::fs::write(&changed, "queue_capacity = 1\ntimeout_ms = 4322\n").unwrap();
+        let config = crate::config::resolve_config(&changed, &root.path().join("p")).unwrap();
+        let id = config.id.as_str().to_owned();
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let bound = engine.timeout / 4;
+        let cut = tokio::time::Instant::now() + bound;
+        let request = crate::storage::before_cut(cut, bound, engine.update_config(config));
+        let answered = tokio::time::timeout_at(cut, request)
+            .await
+            .map(|changed| changed.map_err(|error| error.0))
+            .map_err(|_| "cut");
+        drop(release);
+        engine.close().await.unwrap();
+        assert_eq!(
+            answered,
+            Ok(Err("access_change_pending".to_owned())),
+            "the request answered the pending change itself before its cut"
+        );
+        assert_eq!(
+            stored_configs(&path, &id),
+            1,
+            "the pending narrowing change landed"
+        );
     }
 
     #[tokio::test]

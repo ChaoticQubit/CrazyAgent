@@ -2531,6 +2531,7 @@ async fn serve_admitted(
             .await
             .map(|()| None)
     });
+    let exchange = crate::storage::before_cut(deadline, engine.timeout, exchange);
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
