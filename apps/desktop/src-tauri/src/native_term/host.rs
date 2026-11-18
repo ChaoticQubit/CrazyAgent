@@ -4,7 +4,7 @@ use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::pane::{Action, GRID_MAX, Input};
-use super::render::{Shared, Surface};
+use super::render::{GPU_FAULT, Shared, Surface};
 use super::screen;
 use super::style::Style;
 use super::table::{Direct, Entry, Outbox, Table, Told, VIEWS_MAX, changes};
@@ -1079,17 +1079,25 @@ fn wheel(
 
 /// Draws one view's frame and hands VoiceOver and the input method what it showed. Inputs:
 /// the view, its shared renderer, the style and the blink phase. Output: whether the frame
-/// was drawn; a skipped frame leaves the view dirty for the next pass.
-fn draw_view(entry: &mut Entry<View>, shared: &mut Shared, style: &Style, shown: bool) -> bool {
+/// was drawn, a skipped frame leaving the view dirty for the next pass, or
+/// `native_terminal_gpu` when the GPU refused the frame and the view must end.
+fn draw_view(
+    entry: &mut Entry<View>,
+    shared: &mut Shared,
+    style: &Style,
+    shown: bool,
+) -> Result<bool, &'static str> {
     let view = &mut entry.platform;
     let (Some(surface), Some(term)) = (view.surface.as_mut(), entry.pane.term()) else {
-        return false;
+        return Ok(false);
     };
     let marked = view.ns.marked_text();
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
-    if shared.draw(surface, &frame).is_err() {
-        return false;
+    match shared.draw(surface, &frame) {
+        Ok(()) => {}
+        Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
+        Err(_) => return Ok(false),
     }
     let scale = f64::from(view.scale) / 100.0;
     let (width, height) = shared.cell_points();
@@ -1101,7 +1109,7 @@ fn draw_view(entry: &mut Entry<View>, shared: &mut Shared, style: &Style, shown:
     };
     view.ns
         .drawn(geometry, a11y::marks(term), a11y::text_key(term));
-    true
+    Ok(true)
 }
 
 impl Native {
@@ -1163,7 +1171,7 @@ impl Native {
         }
         entry.pane.dirty = true;
         if !made {
-            self.end(page, "native_terminal_gpu");
+            self.end(page, GPU_FAULT);
         }
         assert!(
             self.table
@@ -1200,18 +1208,27 @@ impl Native {
             return;
         };
         let mut drawn = 0;
-        for (_, entry) in table.entries_mut() {
+        let mut refused = Vec::new();
+        for (page, entry) in table.entries_mut() {
             if !entry.pane.dirty || entry.platform.ns.isHidden() {
                 continue;
             }
             let Some(shared) = shared.get_mut(&entry.platform.scale) else {
                 continue;
             };
-            if draw_view(entry, shared, style, *shown) {
-                entry.pane.dirty = false;
-                drawn += 1;
+            match draw_view(entry, shared, style, *shown) {
+                Ok(true) => {
+                    entry.pane.dirty = false;
+                    drawn += 1;
+                }
+                Ok(false) => {}
+                Err(code) => refused.push((*page, code)),
             }
         }
-        assert!(drawn <= self.table.pages().len());
+        assert!(drawn + refused.len() <= self.table.pages().len());
+        for (page, code) in refused {
+            self.end(page, code);
+            assert!(self.table.get(page).is_none());
+        }
     }
 }
