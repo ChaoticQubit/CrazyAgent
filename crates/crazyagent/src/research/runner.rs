@@ -94,12 +94,20 @@ pub(crate) fn no_program() -> &'static str {
 /// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; an unusable folder is a panic.
 #[cfg(windows)]
 pub(crate) fn no_program() -> &'static str {
-    static VALUE: LazyLock<String> = LazyLock::new(|| {
-        let folder = crazyagent_win_sandbox::system_folder()
-            .expect("GetSystemDirectoryW names the system folder");
-        windows_no_program(&folder).expect("the system folder is a plain <letter>:\\ folder")
-    });
-    VALUE.as_str()
+    static VALUE: LazyLock<Result<String, &'static str>> =
+        LazyLock::new(|| windows_value(crazyagent_win_sandbox::system_folder()));
+    VALUE
+        .as_deref()
+        .expect("the system folder is a plain <letter>:\\ folder")
+}
+
+/// The Windows value from the system folder GetSystemDirectoryW gave, as
+/// [`windows_no_program`] builds it. Input: the folder, or the read's error. Output: the
+/// value; an error or an unusable folder is a panic.
+#[cfg(any(windows, test))]
+fn windows_value(folder: io::Result<PathBuf>) -> Result<String, &'static str> {
+    let folder = folder.expect("GetSystemDirectoryW names the system folder");
+    Ok(windows_no_program(&folder).expect("the system folder is a plain <letter>:\\ folder"))
 }
 
 /// The Windows value for a hook folder or a program no git may run: `folder` with forward

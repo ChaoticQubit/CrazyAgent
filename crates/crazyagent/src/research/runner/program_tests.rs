@@ -1,5 +1,5 @@
-use super::{git_safe, windows_no_program};
-use std::path::Path;
+use super::{git_safe, windows_no_program, windows_value};
+use std::path::{Path, PathBuf};
 
 /// The keys of every engine and IDE git setting that names a hook folder or a program git
 /// would start, each with the table it sits in, in table order.
@@ -115,4 +115,28 @@ fn the_windows_value_is_a_plain_system_folder_with_forward_slashes_or_none() {
     ] {
         assert_eq!(windows_no_program(Path::new(refused)), None, "{refused}");
     }
+}
+
+/// #598 sec N1: a GetSystemDirectoryW error and a folder the builder refuses give the named
+/// refusal `git_safe_unavailable`, never a panic that poisons the value for every later git,
+/// so the engine start can refuse by name and run no git; a plain folder gives the value.
+#[test]
+fn an_unusable_system_folder_is_the_named_refusal_never_a_panic() {
+    let error = std::io::Error::other("no system folder");
+    assert_eq!(windows_value(Err(error)), Err("git_safe_unavailable"));
+    for refused in [
+        r"C:\My Windows\system32",
+        r"\\server\share\system32",
+        r"1:\Windows",
+    ] {
+        assert_eq!(
+            windows_value(Ok(PathBuf::from(refused))),
+            Err("git_safe_unavailable"),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        windows_value(Ok(PathBuf::from(r"C:\Windows\system32"))).as_deref(),
+        Ok("C:/Windows/system32/crazyagent-none")
+    );
 }
