@@ -1029,6 +1029,101 @@ fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
     );
 }
 
+/// #460 sec F1 and rv-code4 F2: a project stored by its /System/Volumes/Data spelling with one
+/// worktree's landing base recorded under both names of its folder would lose one of the two
+/// when its move writes both names to one place, so the move is refused with nothing moved
+/// and both rows kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_holding_one_key_under_both_names_is_refused_with_nothing_lost() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let worktree = case.worktree(7);
+    let inside = worktree.strip_prefix(&case.repo).unwrap();
+    for (folder, base) in [(&case.repo, "base-long"), (&short, "base-short")] {
+        case.db
+            .execute(
+                "INSERT INTO landing_bases(worktree, base) VALUES (?1,?2)",
+                params![text(&folder.join(inside)), base],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        case.move_project(AddMode::Move, &[]).err().map(|e| e.0),
+        Some("move_project_two_spellings".to_owned())
+    );
+    assert!(pending(&case.db).unwrap().is_none());
+    assert!(case.repo.join("README").is_file());
+    let rows: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM landing_bases", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 2);
+}
+
+/// #460 sec F1, the window after the plan: a landing base recorded under both names of a
+/// long-stored project's folder only after its move was planned is not lost when the move
+/// finishes. The stored name's row follows the folder into the home and the short name's
+/// row is kept as it was.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_move_keeps_a_key_held_under_both_names_after_its_plan() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let worktree = case.worktree(7);
+    let inside = worktree.strip_prefix(&case.repo).unwrap().to_path_buf();
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    for (folder, base) in [(&case.repo, "base-long"), (&short, "base-short")] {
+        case.db
+            .execute(
+                "INSERT INTO landing_bases(worktree, base) VALUES (?1,?2)",
+                params![text(&folder.join(&inside)), base],
+            )
+            .unwrap();
+    }
+    let (placed, landing) = planned
+        .run_with(Duration::ZERO, &super::Tally::default())
+        .map(super::Moved::into_parts)
+        .unwrap();
+    assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
+    drop(landing);
+    if let Placed::Copied(old) = placed {
+        old.clear().unwrap();
+    }
+    let mut statement = case
+        .db
+        .prepare("SELECT worktree, base FROM landing_bases")
+        .unwrap();
+    let rows: BTreeSet<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        BTreeSet::from([
+            (
+                text(&case.target().join(&inside)).to_owned(),
+                "base-long".to_owned()
+            ),
+            (
+                text(&short.join(&inside)).to_owned(),
+                "base-short".to_owned()
+            ),
+        ])
+    );
+}
+
 /// #433 F1 (rv-sec2 18:57): a project stored by its /System/Volumes/Data spelling still sees
 /// another project stored short inside its folder, so its move is refused in both modes.
 #[cfg(target_os = "macos")]
