@@ -2793,3 +2793,29 @@ fn a_folder_holding_the_owners_home_is_refused_under_the_data_volume_names() {
         Err("onboarding_folder_unsafe")
     );
 }
+
+/// V243-FIRMLINK-LAUNCH-ROOT: a project folder stored under the data volume's long name meets
+/// its hidden folders, which load under the short name, and its graph mark is the one the
+/// graph build writes from the short name, so its overview, mapping and graph keep their
+/// evidence.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_folder_meets_its_short_hidden_folders_and_graph_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", root.display()));
+    assert!(long.is_dir());
+    write_file(&root, "secrets/loader.py", "def load():\n    return 1\n");
+    let private = root.join("private");
+    std::fs::create_dir(&private).unwrap();
+    let hidden = vec![private];
+    assert_eq!(
+        draft::names::below_root(&long, &hidden),
+        Some(vec!["private".to_owned()])
+    );
+    assert!(!draft::kept_out(&root).unwrap().is_empty());
+    assert_eq!(
+        graph::current_mark(&long, &hidden),
+        graph::current_mark(&root, &hidden)
+    );
+}

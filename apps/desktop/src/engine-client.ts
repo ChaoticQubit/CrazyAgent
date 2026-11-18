@@ -3,6 +3,17 @@ import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 import { isWindows } from "./ui/keys";
 
+/** Storage's own answers to a request, one sentence each, the same on every page and in the
+ * terminal: a full queue, a database still starting and a request withdrawn unrun changed
+ * nothing, and an access change waiting its turn still takes effect. Input: none. Output:
+ * the sentence for each code. */
+export const STORAGE_COPY: Record<string, string> = {
+  owner_queue_not_submitted: "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.",
+  storage_starting_not_submitted: "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.",
+  access_change_pending: "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.",
+  storage_busy_not_submitted: "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.",
+};
+
 /** Retries a bridge call the native side refused with "busy" because another call held
  * the bridge; such a refusal happens before any action, so repeating it is safe. Each pause
  * is spread at random so calls refused together do not all retry at the same moment again.
@@ -413,6 +424,7 @@ export function errorMessage(error: unknown): string {
     invalid_baseline_data: "The engine returned a baseline that could not be validated.",
     unexpected_reply: "The engine returned an unexpected response. Refresh before continuing.",
   };
+  if (Object.hasOwn(STORAGE_COPY, code)) return STORAGE_COPY[code];
   return messages[code] ?? withCode("The owner request failed. Refresh before continuing.", code);
 }
 

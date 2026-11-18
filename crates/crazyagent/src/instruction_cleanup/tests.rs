@@ -318,6 +318,41 @@ fn a_run_checks_the_pool_rule_and_its_one_slot_before_it_touches_the_disk() {
     );
 }
 
+/// V243-FIRMLINK-STATE (#460 rv-code4 F1): a cleanup on the engine folder's
+/// /System/Volumes/Data name builds its runner on the short name, so it goes as far as on
+/// the short name (here to the unknown pool) instead of refusing every cleanup.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_cleanup_on_the_long_name_of_the_engine_folder_goes_as_far_as_on_the_short_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", root.display()));
+    assert!(long.is_dir());
+    let codex = root.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir(root.join(crate::project_setup::PROJECTS_DIRECTORY)).unwrap();
+    let picked = pool("pool-a");
+    let settings = (root.join("global.toml"), root.join("project.toml"));
+    let code = |root: &Path| {
+        run(&Request {
+            root,
+            settings: (&settings.0, &settings.1),
+            codex: Some(&codex),
+            claude: None,
+            project: None,
+            pool: Some(&picked),
+            prompt: "prompt",
+            agent: "instructions-cleanup",
+            holds_seat: true,
+        })
+        .unwrap_err()
+    };
+    assert_eq!(code(&root), POOL_UNKNOWN);
+    assert_eq!(code(&long), POOL_UNKNOWN);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_run_refuses_a_linked_or_filled_work_folder() {

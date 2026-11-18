@@ -1072,6 +1072,17 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
 /// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
 #[cfg(unix)]
 pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
+    let owner = std::env::var_os("HOME").map(PathBuf::from);
+    validate_home_for(home, owner.as_deref())
+}
+
+/// Checks an account home against a given owner HOME, as [`validate_home`] does with this
+/// process's, comparing both in their [`crate::sandbox::canonical`] spelling, so neither
+/// can pass the other through the macOS data volume's name. Inputs: the home and the
+/// owner's HOME, none when unset. Output: Ok, or a plain `launch_account_home_*` refusal
+/// code.
+#[cfg(unix)]
+fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchError> {
     let metadata =
         std::fs::symlink_metadata(home).map_err(|_| failure("launch_account_home_unavailable"))?;
     if !home.is_absolute()
@@ -1082,10 +1093,14 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
         return Err(failure("launch_account_home_unsafe"));
     }
     let canonical =
-        std::fs::canonicalize(home).map_err(|_| failure("launch_account_home_unavailable"))?;
-    if let Some(owner) = std::env::var_os("HOME").map(PathBuf::from) {
-        for forbidden in [owner.clone(), owner.join(".codex"), owner.join(".claude")] {
-            if std::fs::canonicalize(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
+        crate::sandbox::canonical(home).map_err(|_| failure("launch_account_home_unavailable"))?;
+    if let Some(owner) = owner {
+        for forbidden in [
+            owner.to_path_buf(),
+            owner.join(".codex"),
+            owner.join(".claude"),
+        ] {
+            if crate::sandbox::canonical(&forbidden).is_ok_and(|forbidden| forbidden == canonical)
                 || forbidden == home
             {
                 return Err(failure("launch_account_home_forbidden"));

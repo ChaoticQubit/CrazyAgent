@@ -812,28 +812,22 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
 async fn a_claude_master_whose_harness_it_can_never_reap_still_ends_and_releases_the_lease() {
     use crate::engine::master_host_fixture::{MasterFixture, reap_before_the_host};
 
-    for _ in 0..5 {
-        let mut fixture = MasterFixture::new("claude");
-        let mut claude = stand_in_master(
-            &mut fixture,
-            "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
-        )
-        .await;
-        if !reap_before_the_host(&fixture.project, || claude.process_group()) {
-            continue;
-        }
-        let started = std::time::Instant::now();
-        while fixture.sign_in("claude-unreaped-next", 3).is_err() {
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the profile lease was never released"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(claude.cancel().await.is_err());
-        return;
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = stand_in_master(
+        &mut fixture,
+        "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
+    )
+    .await;
+    reap_before_the_host(&fixture.project, || claude.process_group());
+    let started = std::time::Instant::now();
+    while fixture.sign_in("claude-unreaped-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the profile lease was never released"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("the host reaped its harness first on every attempt");
+    assert!(claude.cancel().await.is_err());
 }
 
 #[cfg(target_os = "macos")]
@@ -2712,5 +2706,16 @@ async fn a_reaped_claude_harness_with_a_half_written_turn_is_waited_for_without_
         passes <= 10,
         "{passes} drive passes in a second for a reaped harness"
     );
-    claude.cancel().await.unwrap();
+    let cancelled = claude.cancel().await.map_err(|error| error.0);
+    let ended = ["claude_host_input_failed", "claude_host_native_exit_0"];
+    assert!(
+        cancelled
+            .as_ref()
+            .map_or_else(|code| ended.contains(&code.as_str()), |()| true),
+        "the harness ended inside its turn, so the stop reports that end, as the write or the reap saw it first, or nothing: {cancelled:?}"
+    );
+    assert!(
+        claude.settled(),
+        "nothing the harness started is left running"
+    );
 }

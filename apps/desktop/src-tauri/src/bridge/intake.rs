@@ -28,7 +28,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 119] = [
+pub const INTAKE_CODES: [&str; 120] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -114,6 +114,7 @@ pub const INTAKE_CODES: [&str; 119] = [
     "move_project_folder_link",
     "move_project_in_progress",
     "move_project_master_session",
+    "move_project_two_spellings",
     "move_project_record_invalid",
     "move_project_unavailable",
     "move_project_interrupted",

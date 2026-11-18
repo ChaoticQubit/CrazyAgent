@@ -287,3 +287,36 @@ fn no_batch_file_is_ever_started_on_windows() {
     assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(!marker.exists());
 }
+
+/// A program is fixed only when it is absolute or a bare file name. A root-relative,
+/// drive-relative, folder-relative or empty program resolves against a drive or folder the
+/// engine did not choose, so it is not (V244-WIN-ROOT-RELATIVE-PROGRAM).
+#[test]
+fn a_program_is_fixed_only_when_absolute_or_a_bare_file_name() {
+    for name in [
+        "git",
+        "git.exe",
+        "C:\\x\\y.exe",
+        "C:/x/y.exe",
+        "\\\\server\\share\\y.exe",
+        "\\\\?\\C:\\y.exe",
+    ] {
+        assert!(fixed_program(Path::new(name)), "{name}");
+    }
+    for name in [
+        "/usr/bin/git",
+        "\\x",
+        "/x",
+        "C:x",
+        "C:",
+        "sub\\x",
+        "sub/x",
+        ".\\x",
+        "..\\x",
+        ".",
+        "..",
+        "",
+    ] {
+        assert!(!fixed_program(Path::new(name)), "{name}");
+    }
+}

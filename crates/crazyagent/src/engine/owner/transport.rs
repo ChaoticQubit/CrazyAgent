@@ -54,6 +54,7 @@ pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod intake;
+mod narrowing;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -521,6 +522,7 @@ struct Authority {
     reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
+    drain: Mutex<narrowing::Drain>,
 }
 
 /// Removes what an earlier engine left at a runner folder's place beside the engine's root
@@ -1164,9 +1166,25 @@ impl OwnerRuntimeHandle {
     /// Orders a trusted host grant change with actor work and response delivery.
     /// Takes an exact control identity, client kind and expected grant epoch. Returns
     /// committed status; prior delivered data cannot be recalled. A revocation that fails in
-    /// any way refuses the client at once; what storage commits late still takes effect.
+    /// any way refuses the client at once; it is kept on disk first, so one storage never
+    /// took lands later or at the next open, and that one is answered pending.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
         let (target, decision) = (control.target, control.decision);
+        let kept = match decision {
+            OwnerDecision::Revoke => {
+                self.keep_narrowing(crate::storage::narrowing::Change::Revoke {
+                    operation_id: control.operation_id.clone(),
+                    target,
+                    expected_epoch: control.expected_epoch,
+                })
+                .await
+            }
+            OwnerDecision::Reactivate => None,
+        };
+        let pending = kept.clone().map(|id| narrowing::Pending::Revoke {
+            control: control.clone(),
+            id,
+        });
         let barrier =
             tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
         let submitted = self.authority.next_control();
@@ -1176,7 +1194,7 @@ impl OwnerRuntimeHandle {
             let authority = self.authority.clone();
             self.engine
                 .settled_owner_job(
-                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, kept, reply),
                     move |stored| {
                         let (result, registration) = stored?;
                         authority.publish(registration, submitted).map_err(|_| {
@@ -1192,7 +1210,7 @@ impl OwnerRuntimeHandle {
             _ => Ok(()),
         };
         drop(barrier);
-        closed.and(committed)
+        closed.and(self.pending_unless_taken(committed, pending))
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1384,6 +1402,7 @@ impl OwnerServer {
                 reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
+                drain: Mutex::new(narrowing::Drain::default()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1791,20 +1810,22 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let taken = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(deadline, receive)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
     /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
     /// stops waiting first, so what storage commits late still takes effect in memory.
-    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
-    /// outcome-unknown error while storage has not answered in time or went away.
+    /// Inputs: the job and the settle step. Output: the settle step's answer; a not-submitted
+    /// code, with nothing to settle; access_change_pending for a narrowing job; else the owner
+    /// outcome-unknown error when a taken job does not answer in time or storage went away.
     async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -1813,10 +1834,23 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(stored) = receive.await {
+                        let _ = settle(stored);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => return Err(refused),
+        };
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -1825,7 +1859,7 @@ impl Engine {
         });
         tokio::time::timeout(deadline, settled)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -2761,19 +2795,19 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = matches!(
-            e.0.as_str(),
-            "owner_busy"
-                | "owner_grant_stale_or_revoked"
-                | "owner_runtime_stale"
-                | "owner_queue_not_submitted"
-                | "operation_identity_conflict"
-                | "master_transaction_rolled_back"
-                | "master_dispatch_stopped"
-                | "master_dispatch_capacity"
-                | "move_project_old_folder_left"
-                | "job_busy"
-        );
+        let known = crate::storage::storage_answer(&e.0)
+            || matches!(
+                e.0.as_str(),
+                "owner_busy"
+                    | "owner_grant_stale_or_revoked"
+                    | "owner_runtime_stale"
+                    | "operation_identity_conflict"
+                    | "master_transaction_rolled_back"
+                    | "master_dispatch_stopped"
+                    | "master_dispatch_capacity"
+                    | "move_project_old_folder_left"
+                    | "job_busy"
+            );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
                 operation_id: id.clone(),

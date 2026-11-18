@@ -69,6 +69,7 @@ pub(super) fn merge(
         .stored
         .project_folder()
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|_| EngineError("changes_workspace_invalid".into()))
         .and_then(|repository| crate::landing::land_on(connection, &repository, project));
     let target = match target {

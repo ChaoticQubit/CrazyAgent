@@ -590,6 +590,84 @@ test("every Rust test target that needs the staged RCLI host is left out of CI a
   assert(needing > 1, "the check found the tests that need the RCLI host");
 });
 
+/**
+ * Finds the functions in one Rust test file that read `name`: one entry per function, holding
+ * its test row when it is a plain unindented `fn` or `async fn` under a test attribute, else
+ * no row, so the read counts for the whole target. Inputs: the file text and the name.
+ * Output: the entries, in file order.
+ */
+function readersOf(text, name) {
+  const readers = new Map();
+  for (const { index } of text.matchAll(new RegExp(name, "g"))) {
+    const before = text.slice(0, index);
+    const fn = [...before.matchAll(/^([ \t]*)([^\n]*?)\bfn (\w+)\s*[(<]/gm)].at(-1);
+    const plain = fn !== undefined && fn[1] === "" && (fn[2] === "" || fn[2] === "async ");
+    const row = plain && /#\[(?:tokio::)?test[^\]\n]*\]\s*$/.test(before.slice(0, fn.index)) ? fn[3] : undefined;
+    readers.set(fn === undefined ? -1 : fn.index, { row });
+  }
+  assert(readers.size <= text.split(name).length - 1);
+  return [...readers.values()];
+}
+
+/**
+ * Names the test targets a file under crates/crazyagent/tests/ belongs to: its own target for
+ * a top-level file, else every top-level target that declares the module folder it sits in.
+ * Inputs: the path relative to that folder and the top-level files' texts by target. Output:
+ * the target names.
+ */
+function targetsOf(path, tops) {
+  const parts = path.split(/[\\/]/);
+  if (parts.length === 1) return [path.slice(0, -3)];
+  const module = new RegExp(`^\\s*(?:pub\\s+)?mod ${parts[0]};`, "m");
+  return [...tops].filter(([, text]) => module.test(text)).map(([target]) => target);
+}
+
+test("the srt guard credits a read to a test row only when it sits in that row's own unindented fn, and counts readers, not mentions (#499 F1)", () => {
+  const row = "#[test]\nfn a() {\n    let srt = std::env::var_os(\"CRAZYAGENT_SRT\").expect(\"CRAZYAGENT_SRT\");\n}\n";
+  assert.deepEqual(readersOf(row, "CRAZYAGENT_SRT"), [{ row: "a" }], "two mentions in one row are one reader");
+  assert.deepEqual(readersOf("#[tokio::test(flavor = \"multi_thread\")]\nasync fn b() {\n    CRAZYAGENT_SRT;\n}\n", "CRAZYAGENT_SRT"), [{ row: "b" }]);
+  for (const [label, helper] of [
+    ["an impl helper", "struct Fixture;\nimpl Fixture {\n    fn srt() {\n        CRAZYAGENT_SRT;\n    }\n}\n"],
+    ["a pub helper", "pub fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a pub(crate) helper", "pub(crate) fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a const helper", "const fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a row inside a module", "mod inner {\n    #[test]\n    fn c() {\n        CRAZYAGENT_SRT;\n    }\n}\n"],
+  ]) {
+    assert.deepEqual(readersOf(`#[test]\nfn a() {}\n${helper}`, "CRAZYAGENT_SRT"), [{ row: undefined }], `${label} after a row counts for the whole target`);
+  }
+  const tops = new Map([["e2e_add_existing", "mod e2e_support;\n"], ["onboarding", "#![cfg(unix)]\n\nmod research_support;\n"], ["harness_catalog_owner", "fn a() {}\n"]]);
+  assert.deepEqual(targetsOf("e2e_support/mod.rs", tops), ["e2e_add_existing"], "a support module counts for every target that declares it");
+  assert.deepEqual(targetsOf("research_support/fixtures/mod.rs", tops), ["onboarding"]);
+  assert.deepEqual(targetsOf("harness_catalog_owner.rs", tops), ["harness_catalog_owner"]);
+  assert.deepEqual(targetsOf("orphan/mod.rs", tops), [], "a module no target declares names none, which the guard refuses");
+});
+
+test("every Rust test that reads the leader-verified srt path is left out of CI and the test farm, which set no CRAZYAGENT_SRT", async () => {
+  const lists = [[await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE"], [await workflow("tests.yml"), "FARM_ENGINE_EXCLUDE"]];
+  const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
+  const names = (await readdir(folder, { recursive: true })).filter((name) => name.endsWith(".rs"));
+  const texts = new Map();
+  for (const name of names) texts.set(name, await readFile(new URL(name.replaceAll("\\", "/"), folder), "utf8"));
+  const tops = new Map([...texts].filter(([name]) => !/[\\/]/.test(name)).map(([name, text]) => [name.slice(0, -3), text]));
+  let readers = 0;
+  for (const [name, text] of texts) {
+    const targets = targetsOf(name, tops);
+    for (const reader of readersOf(text, "CRAZYAGENT_SRT")) {
+      readers += 1;
+      assert(targets.length > 0, `${name} reads CRAZYAGENT_SRT in a module no test target declares`);
+      const nested = /[\\/]/.test(name);
+      for (const target of targets) {
+        const row = reader.row === undefined || nested ? undefined : `${target}/${reader.row}`;
+        for (const [workflowText, list] of lists) {
+          const skipped = excluded(workflowText, list);
+          assert(skipped.has(target) || (row !== undefined && skipped.has(row)), `${name} reads CRAZYAGENT_SRT ${row ? `in ${row}` : `outside a test row, so the whole ${target} target`} but is not in ${list}`);
+        }
+      }
+    }
+  }
+  assert(readers >= 2, "the check found both functions that read CRAZYAGENT_SRT, qualification_boundary's row and worker_engine_boundary's");
+});
+
 test("every engine and desktop row or target CI or the test farm leaves out, for all jobs or one, names a real test, so no exclusion goes stale", async () => {
   const ci = await workflow("ci.yml");
   const farm = await workflow("tests.yml");

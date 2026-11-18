@@ -484,3 +484,14 @@ fn an_open_reply_carries_what_the_last_server_left_and_reads_without_it() {
     assert!(!older.contains("left"), "{older}");
     assert_eq!(serde_json::from_str::<IdeTabServer>(&older).unwrap(), none);
 }
+
+#[test]
+fn a_storage_answer_reaches_the_ide_tab_wire_by_name() {
+    for code in crate::storage::STORAGE_ANSWERS {
+        assert_eq!(public_code(EngineError((*code).into())), *code);
+    }
+    assert_eq!(
+        public_code(EngineError("Not A Code".into())),
+        "ide_tab_outcome_unknown"
+    );
+}

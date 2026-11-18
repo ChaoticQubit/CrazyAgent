@@ -115,6 +115,21 @@ pub(crate) fn batch_file(file: &Path) -> bool {
         .is_some_and(|name| batch_name(&name.to_string_lossy()))
 }
 
+/// Whether a program names a file no other local user can plant: an absolute path, or a bare
+/// file name Windows looks up only where it searches. A root-relative (`\x`), drive-relative
+/// (`C:x`) or folder-relative (`sub\x`, `.\x`) program resolves against a drive or folder the
+/// engine did not choose (V244-WIN-ROOT-RELATIVE-PROGRAM). Input: the program. Output: the
+/// answer, false for an empty one.
+#[cfg(windows)]
+pub(crate) fn fixed_program(program: &Path) -> bool {
+    let mut parts = program.components();
+    program.is_absolute()
+        || matches!(
+            (parts.next(), parts.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        )
+}
+
 /// Whether a file name is a batch file as Windows reads it: `.cmd` or `.bat` in any case once
 /// the trailing dots and spaces Windows drops are gone, or any name with a `:` stream part,
 /// which no program the engine starts has, so it fails closed (#333 r1 N3/N5). Input: the

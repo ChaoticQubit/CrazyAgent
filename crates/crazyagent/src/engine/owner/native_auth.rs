@@ -1044,36 +1044,36 @@ pub(crate) fn outcome_unknown() -> EngineError {
 }
 
 fn public_error(code: &str) -> bool {
-    matches!(
-        code,
-        "owner_busy"
-            | "native_auth_request_bounds"
-            | "native_auth_database_mismatch"
-            | "native_auth_method_mismatch"
-            | "native_auth_operation_conflict"
-            | "native_auth_operation_scope_conflict"
-            | "native_auth_operation_missing"
-            | "native_auth_operation_capacity"
-            | "native_auth_not_active"
-            | "native_auth_recovery_required"
-            | "native_auth_readonly"
-            | "native_profile_source_invalid"
-            | "native_profile_source_conflict"
-            | "native_profile_connection_missing"
-            | "native_profile_not_managed"
-            | "native_profile_binding_conflict"
-            | "native_profile_custody_unsafe"
-            | "native_profile_incomplete"
-            | "native_profile_identity_bounds"
-            | "native_profile_identity_changed"
-            | "native_profile_identity_invalid"
-            | "native_profile_capacity"
-            | "native_profile_new_home_not_empty"
-            | "native_profile_in_use"
-            | "native_profile_lock_unavailable"
-            | "owner_grant_stale_or_revoked"
-            | "owner_queue_not_submitted"
-    )
+    crate::storage::storage_answer(code)
+        || matches!(
+            code,
+            "owner_busy"
+                | "native_auth_request_bounds"
+                | "native_auth_database_mismatch"
+                | "native_auth_method_mismatch"
+                | "native_auth_operation_conflict"
+                | "native_auth_operation_scope_conflict"
+                | "native_auth_operation_missing"
+                | "native_auth_operation_capacity"
+                | "native_auth_not_active"
+                | "native_auth_recovery_required"
+                | "native_auth_readonly"
+                | "native_profile_source_invalid"
+                | "native_profile_source_conflict"
+                | "native_profile_connection_missing"
+                | "native_profile_not_managed"
+                | "native_profile_binding_conflict"
+                | "native_profile_custody_unsafe"
+                | "native_profile_incomplete"
+                | "native_profile_identity_bounds"
+                | "native_profile_identity_changed"
+                | "native_profile_identity_invalid"
+                | "native_profile_capacity"
+                | "native_profile_new_home_not_empty"
+                | "native_profile_in_use"
+                | "native_profile_lock_unavailable"
+                | "owner_grant_stale_or_revoked"
+        )
 }
 
 mod binding_wire {
