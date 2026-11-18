@@ -14,14 +14,39 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
-/// One message a native view's host reads from its inbox, the native form of the frames a
-/// page view's channel carries: the size once attached, the screen and then live output in
-/// order, and one `Ended` with a plain code for every way the view stops.
+/// One event a native view's host reads through `EngineFeed::take`, the native form of the
+/// frames a page view's channel carries: the size once attached, the screen and then live
+/// output in order, and one `Ended` with a plain code for every way the view stops.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FeedEvent {
     Attached { view: u64, cols: u16, rows: u16 },
     Output { view: u64, bytes: Vec<u8> },
     Ended { view: u64, code: String },
+}
+
+impl FeedEvent {
+    fn view(&self) -> u64 {
+        match self {
+            FeedEvent::Attached { view, .. }
+            | FeedEvent::Output { view, .. }
+            | FeedEvent::Ended { view, .. } => *view,
+        }
+    }
+}
+
+/// One inbox message: an event under the token of the open that sent it, which only
+/// `EngineFeed::take` reads, so an event of an open the host closed or opened again, maybe in
+/// another window, never reaches the view now holding its id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fed {
+    token: u64,
+    event: FeedEvent,
+}
+
+impl Fed {
+    pub(super) fn new(token: u64, event: FeedEvent) -> Fed {
+        Fed { token, event }
+    }
 }
 
 /// Runs after each event is queued, on any thread, so a host can reach its UI thread: the
@@ -104,10 +129,11 @@ type Slots = Arc<Mutex<HashMap<u64, Slot>>>;
 pub struct EngineFeed {
     terminals: Arc<Terminals>,
     opener: Opener,
-    inbox: mpsc::Sender<FeedEvent>,
+    inbox: mpsc::Sender<Fed>,
     wake: Wake,
     slots: Slots,
     opened: u64,
+    live: HashMap<u64, u64>,
 }
 
 /// An `io` error carrying a plain code. Takes the error kind and the code. Returns it.
@@ -121,7 +147,7 @@ impl EngineFeed {
     pub fn new(
         terminals: Arc<Terminals>,
         opener: Opener,
-        inbox: mpsc::Sender<FeedEvent>,
+        inbox: mpsc::Sender<Fed>,
         wake: Wake,
     ) -> EngineFeed {
         EngineFeed {
@@ -131,7 +157,16 @@ impl EngineFeed {
             wake,
             slots: Arc::new(Mutex::new(HashMap::new())),
             opened: 0,
+            live: HashMap::new(),
         }
+    }
+
+    /// Hands over one inbox message's event while its open is the view's live one, the last
+    /// opened and not closed since; any other is stale and dropped. Takes the message.
+    /// Returns the event, or none.
+    pub fn take(&self, fed: Fed) -> Option<FeedEvent> {
+        let view = fed.event.view();
+        (self.live.get(&view) == Some(&fed.token)).then_some(fed.event)
     }
 
     fn slots(&self) -> io::Result<MutexGuard<'_, HashMap<u64, Slot>>> {
@@ -184,6 +219,7 @@ impl EngineFeed {
         let opening = (self.opener)(key.clone(), grid, input_only);
         let sink = Sink::Native {
             view,
+            token,
             inbox: self.inbox.clone(),
             wake: Arc::clone(&self.wake),
         };
@@ -226,17 +262,17 @@ impl EngineFeed {
                         let _ = terminals.detach(&task_window, &task_key.agent, serial);
                         None
                     }
-                    Err(error) => {
-                        if current {
-                            slots.remove(&view);
-                        }
+                    Err(error) if current => {
+                        slots.remove(&view);
                         Some(error.code)
                     }
+                    Err(_) => None,
                 }
             };
             if let Some(code) = failed {
                 let code = code.to_owned();
-                if ended.send(FeedEvent::Ended { view, code }).await.is_ok() {
+                let event = Fed::new(token, FeedEvent::Ended { view, code });
+                if ended.send(event).await.is_ok() {
                     wake();
                 }
             }
@@ -250,6 +286,8 @@ impl EngineFeed {
                 token,
             },
         );
+        drop(slots);
+        self.live.insert(view, token);
         Ok(())
     }
 
@@ -293,10 +331,17 @@ impl EngineFeed {
         self.send(view, vec![TerminalRequest::Resize { cols, rows }])
     }
 
-    /// Closes one view: a bound place is given back, an opening session stopped, and an open
-    /// view detached from the engine, whose agent keeps running. Takes the view. Returns
-    /// nothing.
+    /// Closes one view: a bound place is given back, an opening session stopped, an open view
+    /// detached from the engine, whose agent keeps running, and every later event of its
+    /// opens dropped. Takes the view. Returns nothing.
     pub fn close(&mut self, view: u64) {
+        self.live.remove(&view);
+        self.end(view)
+    }
+
+    /// Ends one view's slot as `close` does but keeps its live token, so the `Ended` sent
+    /// next still reaches its host. Takes the view. Returns nothing.
+    fn end(&mut self, view: u64) {
         let Ok(mut slots) = self.slots() else {
             return;
         };
@@ -337,12 +382,20 @@ impl EngineFeed {
         {
             Ok(()) => Ok(()),
             Err(error) if error.code == NATIVE_OVERFLOW => {
-                self.close(view);
+                self.end(view);
+                assert!(
+                    self.live.contains_key(&view),
+                    "an open view has a live token"
+                );
                 let ended = FeedEvent::Ended {
                     view,
                     code: NATIVE_OVERFLOW.to_owned(),
                 };
-                if self.inbox.try_send(ended).is_ok() {
+                if self
+                    .inbox
+                    .try_send(Fed::new(self.live[&view], ended))
+                    .is_ok()
+                {
                     (self.wake)();
                 }
                 Err(refused(io::ErrorKind::WouldBlock, NATIVE_OVERFLOW))

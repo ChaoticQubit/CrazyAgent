@@ -25,7 +25,7 @@ fn started(
 ) -> (
     Arc<Terminals>,
     EngineFeed,
-    mpsc::Receiver<FeedEvent>,
+    mpsc::Receiver<Fed>,
     Arc<AtomicUsize>,
 ) {
     let terminals = Arc::new(Terminals::default());
@@ -62,7 +62,17 @@ fn opened(
             serial: place.serial(),
         },
     );
+    feed.opened += 1;
+    feed.live.insert(7, feed.opened);
     queue
+}
+
+/// The next inbox message, waited for up to `WAIT`. Takes the inbox. Returns the message.
+fn received(inbox: &mut mpsc::Receiver<Fed>) -> Fed {
+    tauri::async_runtime::block_on(async { tokio::time::timeout(WAIT, inbox.recv()).await })
+        .ok()
+        .flatten()
+        .expect("an inbox message within WAIT")
 }
 
 fn drained(queue: &mut mpsc::Receiver<TerminalRequest>) -> Vec<TerminalRequest> {
@@ -247,11 +257,12 @@ fn a_paste_larger_than_the_free_queue_is_refused_whole_and_ends_the_view() {
         "no chunk of the refused paste was queued"
     );
     assert_eq!(
-        inbox.try_recv().unwrap(),
-        FeedEvent::Ended {
+        feed.take(inbox.try_recv().unwrap()),
+        Some(FeedEvent::Ended {
             view: 7,
             code: NATIVE_OVERFLOW.to_owned()
-        }
+        }),
+        "the overflow's Ended keeps its open's token until the host closes the view"
     );
     assert_eq!(woken.load(Ordering::SeqCst), 1);
     assert!(queue.is_closed(), "the ended view was detached");
@@ -326,14 +337,9 @@ fn a_failed_open_gives_the_place_back_and_ends_the_view_with_its_code() {
         "native_view_unbound"
     );
     feed.open(5, (80, 24)).unwrap();
-    let ended = tauri::async_runtime::block_on(async {
-        tokio::time::timeout(WAIT, inbox.recv())
-            .await
-            .ok()
-            .flatten()
-    });
+    let ended = received(&mut inbox);
     assert_eq!(
-        ended,
+        feed.take(ended),
         Some(FeedEvent::Ended {
             view: 5,
             code: "terminal_agent_unknown".to_owned()
@@ -369,4 +375,49 @@ fn a_failed_open_gives_the_place_back_and_ends_the_view_with_its_code() {
         terminals.room("main", &team(99)).is_ok(),
         "closing the bound view gave its place back"
     );
+}
+
+/// #483 r1 sec F1: the host reads an event only through `take`, which hands it over while its
+/// open is the view's live one: once view 5 of the main window is closed, then bound and
+/// opened again in a wall window, an event of its first open, such as output its detached
+/// reader sent late, is dropped, as is any event of a view closed and not opened again.
+#[test]
+fn an_event_of_a_closed_open_never_reaches_the_view_opened_again_in_another_window() {
+    const WALL: &str = "terminals-0123456789abcdef-1";
+    let (terminals, mut feed, mut inbox, _) = started(failing("terminal_agent_unknown"), 4);
+    terminals.page_started(WALL);
+    let ended = |view| FeedEvent::Ended {
+        view,
+        code: "terminal_agent_unknown".to_owned(),
+    };
+    feed.bind(5, terminals.room("main", &team(1)).unwrap(), false)
+        .unwrap();
+    feed.open(5, (80, 24)).unwrap();
+    let first = received(&mut inbox);
+    let late = Fed::new(
+        first.token,
+        FeedEvent::Output {
+            view: 5,
+            bytes: b"main window only".to_vec(),
+        },
+    );
+    assert_eq!(feed.take(first), Some(ended(5)));
+    assert!(feed.take(late.clone()).is_some(), "its open is live");
+    feed.close(5);
+    assert_eq!(
+        feed.take(late.clone()),
+        None,
+        "a closed view's event is dropped"
+    );
+    feed.bind(5, terminals.room(WALL, &team(1)).unwrap(), false)
+        .unwrap();
+    feed.open(5, (80, 24)).unwrap();
+    let second = received(&mut inbox);
+    assert_ne!(second.token, late.token);
+    assert_eq!(
+        feed.take(late),
+        None,
+        "the first open's output never reaches the view opened in the wall window"
+    );
+    assert_eq!(feed.take(second), Some(ended(5)));
 }

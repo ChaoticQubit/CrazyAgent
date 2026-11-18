@@ -1953,6 +1953,7 @@ async fn desktop_terminal_attach(
     id: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
+    terminal_window(&webview)?;
     let (key, place) = attach_place(
         &webview,
         &state,

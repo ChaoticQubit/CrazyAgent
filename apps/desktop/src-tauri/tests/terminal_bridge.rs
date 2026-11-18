@@ -181,15 +181,24 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
         .unwrap()
         .1;
     assert!(attach.contains("id: Option<String>"), "{attach}");
-    assert!(attach.contains(PROJECT_WALL_GUARD), "{attach}");
+    assert!(attach.contains("attach_place("), "{attach}");
     assert!(
-        attach.contains("bridge::terminal::graph_shows(&graph, &key.agent)"),
+        attach.contains(".open_terminal(key.agent, key.pane, None, false)"),
         "{attach}"
     );
-    assert!(
-        attach.contains(".open_terminal(key.agent, key.pane)"),
-        "{attach}"
-    );
+    let gate = include_str!("../src/lib.rs")
+        .split_once("async fn attach_place(")
+        .and_then(|(_, rest)| rest.split_once("\n}\n"))
+        .unwrap()
+        .0;
+    for step in [
+        "terminal_window(webview)?;",
+        "bridge::terminal::place_project(webview.label(), id)?",
+        "bridge::terminal::graph_shows(&graph, &key.agent)",
+        ".checked_room(webview.label(), &key, shows)",
+    ] {
+        assert!(gate.contains(step), "attach_place lacks {step}: {gate}");
+    }
 }
 
 /// A wall window opens at an address naming its project, page and project name, and moves
@@ -570,7 +579,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(edge.reply, None);
 
     let unknown = bridge
-        .open_terminal(AgentId::team(99)?, None)
+        .open_terminal(AgentId::team(99)?, None, None, false)
         .await
         .err()
         .map(|e| e.code);

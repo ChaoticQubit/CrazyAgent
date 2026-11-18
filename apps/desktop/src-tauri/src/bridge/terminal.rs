@@ -1,4 +1,4 @@
-use super::feed::{FeedEvent, Wake, feed_event};
+use super::feed::{Fed, Wake, feed_event};
 use super::team::read_failure;
 use super::{BridgeError, NativeBridge, bounded, failure};
 use crazyagent::engine::owner::{TerminalControl, TerminalOutput, TerminalSession};
@@ -362,12 +362,11 @@ impl NativeBridge {
         bounded(graph)
     }
 
-    /// Opens one owner terminal session attached to an agent's terminal, or to one pane of
-    /// its window, such as a native teammate's. With a size the engine first sizes the window
-    /// to the viewer; an input-only session, which needs a size, sends no output, for a native
-    /// view that draws the pane from the engine's tmux server directly. Takes the terminal
-    /// name, the checked pane, the size if any and whether the session is input-only.
-    /// Returns the session with the terminal size, its output and its controls.
+    /// Opens one owner terminal session on an agent's terminal or one pane of its window,
+    /// first sized to the viewer when a size is given; an input-only session needs a size and
+    /// sends no output. Takes the terminal name, the checked pane, the size if any and
+    /// whether the session is input-only. Returns the session with its size, output and
+    /// controls.
     pub async fn open_terminal(
         &mut self,
         agent: AgentId,
@@ -506,7 +505,8 @@ pub enum Sink {
     Page(Channel<InvokeResponseBody>),
     Native {
         view: u64,
-        inbox: mpsc::Sender<FeedEvent>,
+        token: u64,
+        inbox: mpsc::Sender<Fed>,
         wake: Wake,
     },
 }
@@ -523,9 +523,14 @@ impl Sink {
                 output.send(message).map_err(|_| ())?;
                 Ok(last)
             }
-            Sink::Native { view, inbox, wake } => {
+            Sink::Native {
+                view,
+                token,
+                inbox,
+                wake,
+            } => {
                 let (event, last) = feed_event(*view, agent, frame);
-                inbox.send(event).await.map_err(|_| ())?;
+                inbox.send(Fed::new(*token, event)).await.map_err(|_| ())?;
                 wake();
                 Ok(last)
             }
@@ -566,13 +571,11 @@ impl Reservation {
         self.serial
     }
 
-    /// Streams one opened terminal session to its view in order: the attach frame with the
-    /// size first, then the screen and live output. A page view's channel takes the attach
-    /// frame here; a native view's inbox gets it first from the reader, and its request queue
-    /// holds a whole paste beside `REQUESTS_MAX` other requests.
-    /// Takes the session of this place's agent and where its frames go.
-    /// Returns the view's serial once the reader and writer run, which its detach names; a
-    /// place lost to a full set of views or to a newer view of the key is refused.
+    /// Streams one opened session to its view in order, the attach frame with the size first,
+    /// then the screen and live output; a native view's queue also holds a whole paste.
+    /// Takes the session of this place's agent and where its frames go. Returns the view's
+    /// serial, which its detach names, or a refusal for a place lost to a full set of views
+    /// or to a newer view of the key.
     pub fn attach(self, session: TerminalSession, sink: Sink) -> Result<u64, BridgeError> {
         let terminals = Arc::clone(&self.terminals);
         let (key, serial) = (self.key.clone(), self.serial);
@@ -695,12 +698,11 @@ impl Terminals {
             .map_err(|_| failure("terminal_not_attached"))
     }
 
-    /// Queues requests for one view, named by its serial, whole or not at all and without
-    /// waiting: a native view's typed keys, wheel keys, resizes and the chunks of one paste.
-    /// A newer view of the key, a page load or a closed window leaves the serial without a
-    /// view. Takes the window label, the key, the serial and 1 or more valid requests.
-    /// Returns unit, `terminal_request_invalid`, `terminal_not_attached`, or `NATIVE_OVERFLOW`
-    /// when the queue lacks room for all of them, in which case none was queued.
+    /// Queues requests for the view a serial names, whole or not at all and without waiting,
+    /// such as a native view's keys or one paste's chunks. Takes the window label, the key,
+    /// the serial and 1 or more valid requests. Returns unit, `terminal_request_invalid`,
+    /// `terminal_not_attached` once no view has that serial, or `NATIVE_OVERFLOW`, with none
+    /// queued, when the queue lacks room for all of them.
     pub fn try_send_view(
         &self,
         window: &str,
