@@ -1085,6 +1085,14 @@ impl Host for Servers {
         self.on_panes(agent, |server| server.input_live_pane(agent, pane))
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.on(agent, |server| server.paste(agent, keys))
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.on_panes(agent, |server| server.paste_pane(agent, pane, keys))
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         let mut alive = self.engine.alive()?;
         for lead in self.leads_listening() {

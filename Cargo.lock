@@ -944,6 +944,7 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "tokio",
+ "unicode-width 0.2.0",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

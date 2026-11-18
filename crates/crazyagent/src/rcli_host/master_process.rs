@@ -6,6 +6,7 @@ use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
+use crate::spawn_gate::Keeper;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
@@ -22,6 +23,9 @@ const WRITE_TIME: Duration = Duration::from_secs(1);
 const CLEANUP_TIME: Duration = Duration::from_secs(6);
 const INTERVAL: Duration = Duration::from_millis(5);
 
+/// One running rcli master host. `_custody` is the last field, so the thread that forked the
+/// host, whose exit would end a bubblewrap first process, ends only after the drop's cleanup
+/// has stopped the host's group.
 pub(super) struct HostProcess {
     child: Child,
     warden: Option<Warden>,
@@ -36,12 +40,15 @@ pub(super) struct HostProcess {
     follower: Option<Follower>,
     left: Option<Leftovers>,
     by: HoldBy,
+    _custody: Keeper,
 }
 
 impl HostProcess {
-    /// Starts the rcli master host with its pipes open and not blocking. Inputs: the wrapped
-    /// command, what the stop checks of the processes it leaves outside its group and who to
-    /// hold those under. Output: the process, or a plain refusal.
+    /// Starts the rcli master host with its pipes open and not blocking, forked on a thread
+    /// kept as long as the host ([`crate::spawn_gate::kept`]), so it outlives the engine
+    /// thread that asked for it. Inputs: the wrapped command, what the stop checks of the
+    /// processes it leaves outside its group and who to hold those under. Output: the
+    /// process, or a plain refusal.
     pub(super) fn spawn(
         mut command: Command,
         check: LineageCheck,
@@ -56,8 +63,9 @@ impl HostProcess {
         if let Some(token) = &token {
             command.env(LINEAGE_VARIABLE, token.as_str());
         }
-        let (mut child, warden) =
-            warden::spawn(&mut command).map_err(|_| error("rcli_master_spawn_failed"))?;
+        let ((mut child, warden), custody) =
+            crate::spawn_gate::kept(move || warden::spawn(&mut command))
+                .map_err(|_| error("rcli_master_spawn_failed"))?;
         assert!(child.id() > 1);
         let follower = Follower::start(child.id(), token, check);
         assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
@@ -78,6 +86,7 @@ impl HostProcess {
             follower,
             left: None,
             by,
+            _custody: custody,
         };
         assert!(process.child.id() > 1);
         assert!(process.pending.is_empty());
@@ -699,5 +708,57 @@ read -r _
             assert_eq!(failure.0, crate::sandbox::HELD_STOP_CAUSE, "{host}");
             process.cleanup().unwrap();
         }
+    }
+
+    /// V243 P6 (rv-code #501 F1): the engine's runtime has two workers, and a task that hands
+    /// its worker's core off for blocking work, as `off_worker` does, leaves that thread to
+    /// exit once idle. A host started on it whose first process is bubblewrap with
+    /// `--die-with-parent`, as the closed backend's is, dies with the thread that forked it,
+    /// so the custody forks it and the host outlives the worker.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_host_outlives_a_runtime_worker_that_handed_its_core_off() {
+        let bwrap = crate::sandbox::linux::BWRAP_PATHS
+            .iter()
+            .map(std::path::Path::new)
+            .find(|path| path.is_file())
+            .expect("Linux test machines need bubblewrap installed");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_keep_alive(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let mut command = Command::new(bwrap);
+        command
+            .args(["--die-with-parent", "--unshare-pid", "--dev-bind", "/", "/"])
+            .args(["--", "/bin/sh", "-c", "read -r line"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let task = runtime.spawn(async move {
+            let process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
+            let worker = std::fs::read_link("/proc/thread-self").unwrap();
+            tokio::task::block_in_place(|| thread::sleep(Duration::from_millis(100)));
+            (process, worker)
+        });
+        let (mut process, worker) = runtime.block_on(task).unwrap();
+        let worker = std::path::Path::new("/proc").join(worker);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while worker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the worker that started the host never exited"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(500));
+        process.reap().unwrap();
+        assert_eq!(
+            process.status, None,
+            "the host ended with the runtime worker that started it"
+        );
+        process.cleanup().unwrap();
+        drop(runtime);
     }
 }

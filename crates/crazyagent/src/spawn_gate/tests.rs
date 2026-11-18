@@ -1,4 +1,4 @@
-use super::{guarded, output, spawn, status};
+use super::{guarded, kept, output, spawn, status};
 use std::process::{Command, Stdio};
 
 /// A command that exits 0 and prints nothing: `true` here.
@@ -45,6 +45,15 @@ fn system_shell() -> std::path::PathBuf {
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
 fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
+}
+
+/// V243 P6: a kept start asked for while this thread holds the gate panics before its keeper
+/// thread starts, as that thread would wait on the gate forever for a start that forks. The
+/// start here forks nothing, so without the guard the call would return and the row fails.
+#[test]
+#[should_panic(expected = "a kept start waits on a thread that already holds the spawn gate")]
+fn a_kept_start_inside_the_gate_panics_instead_of_waiting_for_its_keeper() {
+    let _ = guarded(|| kept(|| Ok(())).map(|(started, _keeper)| started));
 }
 
 #[test]
@@ -173,6 +182,27 @@ fn a_refusing_port_turns_connects_away_and_stays_taken_while_held() {
         assert_eq!(named.kind(), std::io::ErrorKind::AddrInUse, "{named}");
     }
     drop(held);
+}
+
+/// A refusing port stands for a stopped model provider in a row's settings, so it lies where
+/// an owner's model port would: below every range the system hands out by itself, which on
+/// Linux a kept model port must stay out of or no Landlock agent starts (G1 N8 P4), and apart
+/// from the owner's and the model proxy's ports.
+#[test]
+fn a_refusing_port_lies_below_the_ports_the_system_hands_out() {
+    use crate::sandbox::OWNER_PORTS;
+    use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+    let held: Vec<_> = (0..4)
+        .map(|_| super::refusing_tcp_port().unwrap())
+        .collect();
+    for (_, port) in &held {
+        assert!(*port > 1024 && *port < PICKED_PORTS_START, "{port}");
+        assert!(
+            !PROXY_PORTS.contains(port) && !OWNER_PORTS.contains(port),
+            "{port}"
+        );
+    }
+    assert_eq!(held.len(), 4);
 }
 
 /// A low free port lies below every range the system hands out by itself, below the ports

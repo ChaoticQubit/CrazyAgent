@@ -78,7 +78,7 @@ fn known_fonts_folder() -> Option<PathBuf> {
 /// JetBrains Mono 2.304 (regular, bold, italic, bold italic), the first font of the panel's
 /// list, built into the app. Its metrics equal the webview's woff2 (2.305): 1000 units per
 /// em, ascent 1020, descent 300, no line gap, advance 600.
-const JETBRAINS_MONO: [&[u8]; 4] = [
+pub const JETBRAINS_MONO: [&[u8]; 4] = [
     include_bytes!("../../fonts/JetBrainsMono-Regular.ttf"),
     include_bytes!("../../fonts/JetBrainsMono-Bold.ttf"),
     include_bytes!("../../fonts/JetBrainsMono-Italic.ttf"),

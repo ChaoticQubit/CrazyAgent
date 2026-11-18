@@ -1,16 +1,28 @@
+mod a11y;
+#[cfg(target_os = "macos")]
+mod clip;
 mod codec;
 #[cfg(unix)]
 mod control;
+mod ended;
 mod event;
+#[cfg(target_os = "macos")]
+pub(crate) mod host;
+mod ime;
 mod keymap;
 #[cfg(target_os = "linux")]
 mod linux;
 mod pane;
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+pub(crate) mod probe;
 mod render;
 mod screen;
-mod style;
+pub(crate) mod style;
+mod table;
 #[cfg(target_os = "macos")]
 mod view;
+#[cfg(target_os = "macos")]
+mod view_text;
 
 #[cfg(unix)]
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};
@@ -106,6 +118,47 @@ pub fn window_name(name: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn focus_call(text: &str) -> Option<String> {
+        let needles = [
+            ["acti", "vate"].concat(),
+            ["make", "KeyWindow"].concat(),
+            ["make", "KeyAndOrderFront"].concat(),
+            ["order", "FrontRegardless"].concat(),
+        ];
+        needles
+            .into_iter()
+            .find(|needle| text.contains(needle.as_str()))
+    }
+
+    #[test]
+    fn the_focus_scan_finds_a_planted_call() {
+        let planted = format!("window.{}{}();", "makeKey", "Window");
+        assert_eq!(
+            focus_call(&planted).as_deref(),
+            Some(planted[7..20].as_ref())
+        );
+        let app = format!("app.{}IgnoringOtherApps(true);", ["acti", "vate"].concat());
+        assert!(focus_call(&app).is_some());
+        assert_eq!(focus_call("window.setFrame(rect);"), None);
+    }
+
+    #[test]
+    fn no_native_file_brings_the_app_forward_or_makes_a_window_key() {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
+        let mut read = 0;
+        for entry in std::fs::read_dir(&folder).expect("native_term folder") {
+            let path = entry.expect("folder entry").path();
+            if path.extension() != Some(std::ffi::OsStr::new("rs")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source file");
+            let shown = path.display();
+            assert_eq!(focus_call(&text), None, "{shown}");
+            read += 1;
+        }
+        assert!(read >= 14, "read {read} files");
+    }
 
     #[cfg(unix)]
     #[test]

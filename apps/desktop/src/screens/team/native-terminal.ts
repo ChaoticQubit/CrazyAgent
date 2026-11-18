@@ -39,7 +39,7 @@ export type NativeStyle = { fontFamily: string; fontSize: number; cursorBlink: b
  * click, in CSS pixels), `mouse` (mouse reporting on or off), `behind` (scrolled off or back
  * to the bottom); last, at most once, `ended` with a plain code, after which the view is gone.
  * `final` is false when a reopen may find the agent again, true when it cannot help (grant
- * revoked, attach rejected, a refused request). */
+ * revoked, an invalid request, another agent or a newer view, typing overflow, no GPU). */
 export type NativeEvent =
   | { type: "ready"; cols: number; rows: number }
   | { type: "menu"; x: number; y: number }
@@ -51,9 +51,10 @@ export type NativeEvent =
 export type NativeCopy = "selection" | "output";
 
 /** One native view to open: the agent's terminal name (`node.terminal`), the teammate pane it
- * shows or null, the label the screen reader says ("<label> terminal"), its place, its style,
- * whether it opens covered (a kept view preloaded with no host yet: it attaches and keeps its
- * terminal live but draws nothing until `cover(false)`) and the channel its events arrive on. */
+ * shows or null, the label the screen reader says, its place, its style, whether it opens
+ * covered (a preloaded kept view: live, drawn only after `cover(false)`), whether typed keys go
+ * through (the Terminal input), the project the terminal is in or null (a wall window is
+ * refused without one) and the channel its events arrive on. */
 export type NativeOpen = {
   name: string;
   pane: string | null;
@@ -61,6 +62,8 @@ export type NativeOpen = {
   rect: NativeRect;
   style: NativeStyle;
   covered: boolean;
+  keys: boolean;
+  project: string | null;
   events: Channel<NativeEvent>;
 };
 
@@ -106,6 +109,14 @@ export function styleNativeTerminals(style: NativeStyle): Promise<Result<void>> 
  * too large. */
 export function copyNativeTerminal(view: number, what: NativeCopy): Promise<Result<void>> {
   return call<void>("desktop_native_terminal_copy", { view, what });
+}
+
+/** Pastes text into a view as the owner's paste would, for a console seed (DEC-203 seed
+ * exception): the desktop flattens line breaks when the pane is not bracketed, applies the
+ * paste keys and sends it through the engine under the grant check. Inputs: the view and the
+ * text. Output: ok once sent. */
+export function pasteNativeTerminal(view: number, text: string): Promise<Result<void>> {
+  return call<void>("desktop_native_terminal_paste", { view, text });
 }
 
 /** Scrolls a view back to the bottom of its output. Input: the view. Output: ok. */

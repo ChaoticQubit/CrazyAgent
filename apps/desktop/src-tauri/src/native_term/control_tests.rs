@@ -402,6 +402,10 @@ impl Server {
     }
 
     fn run(&self, arguments: &[&str]) {
+        let _ = self.said(arguments);
+    }
+
+    fn said(&self, arguments: &[&str]) -> String {
         let mut command = Command::new(&self.tmux);
         command
             .args(["-u", "-f", "/dev/null", "-S"])
@@ -414,6 +418,21 @@ impl Server {
             .stderr(Stdio::piped());
         let done = crazyagent::spawn_gate::output(&mut command).expect("tmux runs");
         assert!(done.status.success(), "tmux {arguments:?}: {done:?}");
+        String::from_utf8_lossy(&done.stdout).into_owned()
+    }
+
+    fn guard(&self) -> (u64, u64) {
+        let probe = self.said(&["-C", "display-message", "-p", "probe"]);
+        let fields: Vec<u64> = probe
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("%begin "))
+            .expect("a control reply guard")
+            .split(' ')
+            .map(|field| field.parse().expect("a guard number"))
+            .collect();
+        assert_eq!(fields.len(), 3, "{probe}");
+        (fields[0], fields[1])
     }
 }
 
@@ -534,4 +553,68 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(refused, "native_terminal_control_closed");
+}
+
+const FLOOD_BINDS: u64 = 30;
+
+/// The program of a pane that prints as fast as the shell can, with builtins only: rows
+/// shaped as an end guard of a control reply (the second the shell's clock gives or the one
+/// after, the 400 command numbers after the probe's), a forged `%output` for pane `%0` and a
+/// plain row. Inputs: the time and command number a probe's guard read. Output: the program.
+fn flood(time: u64, number: u64) -> String {
+    format!(
+        "i=0; while :; do printf '%%end %s %s 1\\n%%output %%0 FAKE\\nflood-%s\\n' \
+         $(({time} + SECONDS + i % 2)) $(({number} + i / 2 % 400)) $i; i=$((i+1)); done"
+    )
+}
+
+#[test]
+fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_forges_nothing() {
+    let server = Server::start();
+    let (time, number) = server.guard();
+    let session = crazyagent::terminal::tmux::SESSION;
+    let script = flood(time, number);
+    server.run(&["new-window", "-d", "-t", session, "-n", "flood", &script]);
+    let (sender, events) = mpsc::channel();
+    let mut control = Control::attach(&server.tmux, &server.socket, move |event| {
+        sender.send(event).is_ok()
+    })
+    .expect("control client");
+    control.bind(1, "team-1").expect("bind");
+    let mut restored = 0;
+    let mut heights = std::collections::BTreeSet::new();
+    for view in 2..2 + FLOOD_BINDS {
+        server.run(&["clear-history", "-t", "crazyagent:=flood"]);
+        control.bind(view, "flood").expect("bind asks");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match events
+                .recv_timeout(left)
+                .expect("the bind answered in time")
+            {
+                Event::Restored { view: shown, bytes } if shown == view => {
+                    assert!(bytes.windows(6).any(|w| w == b"flood-"));
+                    heights.insert(bytes.iter().filter(|b| **b == b'\n').count());
+                    restored += 1;
+                    break;
+                }
+                Event::Output { views, bytes } if views.contains(&1) => {
+                    let forged = bytes.windows(4).any(|w| w == b"FAKE");
+                    assert!(!forged, "a planted row reached team-1 as output");
+                }
+                event @ (Event::Closed | Event::Refused { .. }) => {
+                    panic!("bind {view} of a printing pane: {event:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(control.close(view));
+    }
+    assert_eq!(restored, FLOOD_BINDS);
+    assert!(
+        heights.len() > 1,
+        "the captures held different row counts, so some ran under the history cap: \
+         {heights:?}"
+    );
 }
