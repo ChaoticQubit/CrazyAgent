@@ -6128,4 +6128,23 @@ mod tests {
         }
         assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
     }
+
+    #[test]
+    fn a_macos_build_answers_no_webview_terminal_attach_input_resize_or_detach() {
+        let webview = [
+            "desktop_terminal_attach",
+            "desktop_terminal_input",
+            "desktop_terminal_resize",
+            "desktop_terminal_detach",
+        ];
+        for command in webview {
+            assert_eq!(
+                NATIVE_COMMANDS.contains(&command),
+                cfg!(not(target_os = "macos")),
+                "{command}",
+            );
+        }
+        assert!(NATIVE_COMMANDS.contains(&"desktop_terminal_prompt"));
+        assert!(NATIVE_COMMANDS.contains(&"desktop_team_terminals_per_window"));
+    }
 }

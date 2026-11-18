@@ -39,6 +39,58 @@ const WALL_ONLY: [&str; 2] = [
     "desktop_focus_terminal_window",
 ];
 
+/// The commands only the webview terminal calls. Windows and Linux keep that terminal in 2.4.3;
+/// macOS draws every terminal natively (DEC-203), so a macOS build neither builds nor grants them.
+const WEBVIEW_TERMINAL: [&str; 4] = [
+    "desktop_terminal_attach",
+    "desktop_terminal_input",
+    "desktop_terminal_resize",
+    "desktop_terminal_detach",
+];
+
+#[test]
+fn the_webview_terminal_commands_are_built_and_granted_only_off_macos() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/capabilities/webview-terminal.json"
+    );
+    let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+    let capability: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let granted: Vec<String> = WEBVIEW_TERMINAL
+        .iter()
+        .map(|command| format!("allow-{}", command.replace('_', "-")))
+        .collect();
+    assert_eq!(
+        capability["platforms"],
+        serde_json::json!(["linux", "windows"])
+    );
+    assert_eq!(capability["local"], true);
+    assert_eq!(
+        capability["webviews"],
+        serde_json::json!(["main", "terminals-*"])
+    );
+    assert_eq!(capability["permissions"], serde_json::json!(granted));
+    for every_os in [
+        include_str!("../capabilities/main-window.json"),
+        include_str!("../capabilities/terminal-wall.json"),
+    ] {
+        for permission in &granted {
+            assert!(!every_os.contains(&format!("\"{permission}\"")), "{permission}");
+        }
+    }
+    let build = include_str!("../build.rs");
+    let gated = build
+        .split("const WEBVIEW_TERMINAL_COMMANDS")
+        .nth(1)
+        .and_then(|rest| rest.split("];").next())
+        .expect("build.rs names the webview terminal commands in one list");
+    for command in WEBVIEW_TERMINAL {
+        assert_eq!(build.matches(&format!("\"{command}\"")).count(), 1, "{command}");
+        assert!(gated.contains(&format!("\"{command}\"")), "{command}");
+    }
+    assert!(build.contains("if os != \"macos\""));
+}
+
 #[test]
 fn every_bound_command_is_built_and_granted_to_the_window_that_calls_it() {
     let bound = bound_commands(include_str!("../src/lib.rs"));
