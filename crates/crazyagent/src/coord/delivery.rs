@@ -44,6 +44,14 @@ const MASTER_NOTICE_BYTES_MAX: usize = crate::team::MESSAGE_BYTES_MAX * 2 - 64;
 /// it, with `?2` bound to `RESULTS_KEY` and `?3` to `EVENTS_KEY`.
 const WAKING_SQL: &str = "(m.kind IN ('prompt','question','reply') OR (m.from_kind='engine'
  AND (substr(m.idem_key,1,length(?2))=?2 OR substr(m.idem_key,1,length(?3))=?3)))";
+/// The read behind [`requeue_stopped`]: the recipients of messages delivered or typed to a
+/// session that stopped or failed, one row per message, with `?1` bound to the project and
+/// `?2` to `RECIPIENTS_PER_TICK_MAX`. It seeks `coord_messages_receipt`, so it reads only
+/// such messages; no DISTINCT, whose temp tree the caller's set makes needless.
+const REQUEUE_SQL: &str =
+    "SELECT m.to_agent FROM coord_messages m JOIN team_agents a ON a.id=m.to_agent
+ WHERE m.project=?1 AND m.to_kind='agent' AND m.receipt IN ('delivered','typed')
+ AND a.status IN ('stopped','failed') LIMIT ?2";
 const SENDER_BYTES_MAX: usize = 48;
 const HEAD_BYTES_MAX: usize = 160;
 const CUT: &str = " [cut here; read the whole message with inspect_work]";
@@ -151,17 +159,13 @@ impl Deliveries {
 }
 
 /// Puts back the messages delivered or typed to agents of a project whose session has
-/// stopped or failed, however it ended, so their next session gets them. Takes the
-/// database, the project and the time in ms. Returns any failure.
+/// stopped or failed, however it ended, so their next session gets them: every such
+/// message of the agents named by the first `RECIPIENTS_PER_TICK_MAX` found; those leave
+/// the read, so the next tick reaches the agents after them. Takes the database, the
+/// project and the time in ms. Returns any failure.
 fn requeue_stopped(db: &Connection, project: &ProjectId, now: i64) -> Result<(), EngineError> {
-    let stopped: Vec<AgentId> = {
-        let mut statement = db
-            .prepare(
-                "SELECT DISTINCT m.to_agent FROM coord_messages m JOIN team_agents a ON a.id=m.to_agent
-                 WHERE m.project=?1 AND m.to_kind='agent' AND m.receipt IN ('delivered','typed')
-                 AND a.status IN ('stopped','failed') LIMIT ?2",
-            )
-            .map_err(state)?;
+    let stopped: BTreeSet<AgentId> = {
+        let mut statement = db.prepare(REQUEUE_SQL).map_err(state)?;
         let limit = i64::try_from(RECIPIENTS_PER_TICK_MAX).map_err(state)?;
         statement
             .query_map(params![project.as_str(), limit], |row| row.get(0))
@@ -179,14 +183,7 @@ fn requeue_stopped(db: &Connection, project: &ProjectId, now: i64) -> Result<(),
 /// first, so agents holding only notes never crowd one out, then the one waiting longest.
 /// Takes the database and the project. Returns at most `RECIPIENTS_PER_TICK_MAX` ids.
 fn recipients(db: &Connection, project: &ProjectId) -> Result<Vec<AgentId>, EngineError> {
-    let mut statement = db
-        .prepare(&format!(
-            "SELECT m.to_agent FROM coord_messages m JOIN team_agents a ON a.id=m.to_agent
-             WHERE m.project=?1 AND m.to_kind='agent' AND m.receipt='sent'
-             AND a.status IN ('starting','idle','working')
-             GROUP BY m.to_agent ORDER BY MAX(ifnull({WAKING_SQL},0)) DESC, MIN(m.id) LIMIT ?4"
-        ))
-        .map_err(state)?;
+    let mut statement = db.prepare(&recipients_sql()).map_err(state)?;
     let limit = i64::try_from(RECIPIENTS_PER_TICK_MAX).map_err(state)?;
     let found: Vec<AgentId> = statement
         .query_map(
@@ -198,6 +195,20 @@ fn recipients(db: &Connection, project: &ProjectId) -> Result<Vec<AgentId>, Engi
         .map_err(state)?;
     assert!(found.len() <= RECIPIENTS_PER_TICK_MAX);
     Ok(found)
+}
+
+/// The read behind [`recipients`], with `?1` bound to the project, `?2` and `?3` as
+/// [`WAKING_SQL`] takes them and `?4` to `RECIPIENTS_PER_TICK_MAX`. It walks the
+/// project's live agents first (CROSS JOIN keeps that order) and seeks each one's Sent
+/// messages, so messages to stopped agents are never read; routing only ever addresses
+/// an agent of the message's own project. Output: the SQL text.
+fn recipients_sql() -> String {
+    format!(
+        "SELECT m.to_agent FROM team_agents a CROSS JOIN coord_messages m
+         ON m.to_kind='agent' AND m.to_agent=a.id AND m.project=?1 AND m.receipt='sent'
+         WHERE a.project=?1 AND a.status IN ('starting','idle','working')
+         GROUP BY m.to_agent ORDER BY MAX(ifnull({WAKING_SQL},0)) DESC, MIN(m.id) LIMIT ?4"
+    )
 }
 
 /// Delivers one agent's waiting messages, in order, through the first channel its

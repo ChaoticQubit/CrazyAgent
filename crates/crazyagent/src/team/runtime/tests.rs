@@ -34721,3 +34721,133 @@ fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is
         HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
     );
 }
+
+/// How many ended tasks, answered owner messages and stopped agents the idle-cost row puts
+/// in front of the tick's active project read.
+const HISTORY_ROWS: i64 = 300;
+/// The most SQLite steps that read may add over that history: far below one step per old
+/// row, so any arm that walks the history fails.
+const HISTORY_STEPS_SLACK: i32 = 32;
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): every tick reads which projects to step. Over a
+/// history of delivered ended tasks, answered owner messages and stopped agents the read
+/// takes as many SQLite steps as over none, so an idle tick does not grow with history.
+#[test]
+fn the_active_projects_read_does_not_grow_with_team_history() {
+    let fixture = Fixture::new(1);
+    let before = active_projects_steps(&fixture.connection);
+    for _ in 0..HISTORY_ROWS {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms)
+                 VALUES (?1,'master','codex',0,'Old','done',1,1)",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Old','answered',1)",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    }
+    let after = active_projects_steps(&fixture.connection);
+    assert!(
+        after <= before + HISTORY_STEPS_SLACK,
+        "active project steps grew from {before} to {after}"
+    );
+}
+
+/// Runs the tick's active project read to its end and counts its SQLite virtual machine
+/// steps. Input: the engine database. Output: the step count.
+fn active_projects_steps(connection: &Connection) -> i32 {
+    let mut statement = connection.prepare(ACTIVE_PROJECTS_SQL).unwrap();
+    let mut rows = statement.query([]).unwrap();
+    while rows.next().unwrap().is_some() {}
+    drop(rows);
+    let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(steps > 0);
+    steps
+}
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): the tick follows the IDE workspaces only when the
+/// database changed since it last did, so an idle tick runs none of their reads, while a
+/// write by another connection or by the runtime makes the next tick follow them again.
+#[test]
+fn ide_workspaces_are_followed_only_after_the_database_changes() {
+    let fixture = Fixture::new(1);
+    let mut runtime = fixture.runtime();
+    let write = "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Seen','answered',1)";
+    assert!(runtime.follow_due().unwrap(), "the first tick follows");
+    runtime.tick().unwrap();
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "an idle tick leaves nothing to follow"
+    );
+    fixture.connection.execute(write, [PROJECT]).unwrap();
+    assert!(runtime.follow_due().unwrap(), "another connection wrote");
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "the tick followed that write"
+    );
+    runtime.connection.execute(write, [PROJECT]).unwrap();
+    assert!(runtime.follow_due().unwrap(), "the runtime wrote");
+    runtime.shutdown().unwrap();
+}
+
+/// Idle cost (V243-ENGINE-IDLE-CPU, rv-code2 F1): another connection's commit that lands
+/// while the tick follows the IDE workspaces, after the follow read its rows, keeps the
+/// next tick due, and that tick's follow leaves nothing due again.
+#[test]
+fn a_commit_during_the_workspace_follow_is_followed_on_the_next_tick() {
+    let fixture = Fixture::new(1);
+    let mut runtime = fixture.runtime();
+    let write = "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Seen','answered',1)";
+    runtime.tick().unwrap();
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "an idle tick leaves nothing to follow"
+    );
+    fixture.connection.execute(write, [PROJECT]).unwrap();
+    runtime
+        .follow_workspaces(|db, root| {
+            crate::ide::workspace::follow(db, root)?;
+            fixture.connection.execute(write, [PROJECT]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        runtime.follow_due().unwrap(),
+        "a commit during the follow stays due"
+    );
+    runtime
+        .follow_workspaces(crate::ide::workspace::follow)
+        .unwrap();
+    assert!(!runtime.follow_due().unwrap(), "the next follow caught it");
+    runtime.shutdown().unwrap();
+}
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): with no queued task, dispatch reads none of the
+/// settings only its per-task loop uses (caps, open recovery runs, Reuse idle, Keep warm)
+/// on each tick. A caps table that cannot be read shows it: an idle dispatch succeeds.
+#[test]
+fn dispatch_with_nothing_queued_reads_no_per_task_settings() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute_batch("DROP TABLE team_caps")
+        .unwrap();
+    let idle = team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new());
+    assert!(idle.is_ok(), "an idle dispatch read the caps: {idle:?}");
+    team.shutdown().unwrap();
+}

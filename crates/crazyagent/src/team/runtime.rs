@@ -916,6 +916,7 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     restarts: BTreeMap<i64, (ProjectId, Restart)>,
     hidden_next: BTreeMap<ProjectId, Instant>,
+    followed: Option<(i64, u64)>,
     access_restarts: BTreeMap<i64, ProjectId>,
     access_widened: BTreeSet<ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
@@ -1270,6 +1271,7 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             restarts: BTreeMap::new(),
             hidden_next: BTreeMap::new(),
+            followed: None,
             access_restarts: BTreeMap::new(),
             access_widened: BTreeSet::new(),
             master_restarts: BTreeSet::new(),
@@ -1876,11 +1878,44 @@ impl TeamRuntime {
         self.watch_questions()?;
         self.watch_teammates()?;
         self.sweep()?;
-        crate::ide::workspace::follow(&self.connection, &self.root)?;
+        self.follow_workspaces(crate::ide::workspace::follow)?;
         self.watch_master_questions()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
         let lanes = self.lanes();
         questions.and(lanes)
+    }
+
+    /// Runs `follow` over the IDE workspaces when [`TeamRuntime::follow_due`] says the
+    /// database moved, then stores the mark it compares; the tick passes
+    /// `crate::ide::workspace::follow`. Takes the runtime and the follow step. Returns the
+    /// first failure; a failed follow keeps the old mark, so the next tick tries again.
+    fn follow_workspaces(
+        &mut self,
+        follow: impl FnOnce(&Connection, &Path) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        if self.follow_due()? {
+            let version = self.data_version()?;
+            follow(&self.connection, self.root.as_path())?;
+            self.followed = Some((version, self.connection.total_changes()));
+        }
+        Ok(())
+    }
+
+    /// Tells whether the IDE workspaces may need a rewrite: on the first tick and whenever
+    /// the database changed since they were last followed, by another connection
+    /// (`PRAGMA data_version`, read before that follow so a commit during it stays due) or
+    /// by this one (`total_changes`, read after it, so its own writes do not). Takes the
+    /// runtime. Returns the answer, or a failed read.
+    fn follow_due(&self) -> Result<bool, EngineError> {
+        Ok(self.followed != Some((self.data_version()?, self.connection.total_changes())))
+    }
+
+    /// Reads how many commits other connections made, as `PRAGMA data_version` counts
+    /// them for this connection. Takes the runtime. Returns the count, or a failed read.
+    fn data_version(&self) -> Result<i64, EngineError> {
+        self.connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(error)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's
@@ -3387,14 +3422,7 @@ impl TeamRuntime {
     fn active_projects(&self) -> Result<Vec<ProjectId>, EngineError> {
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
-                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
-                 UNION SELECT project FROM team_settings WHERE keep_warm=1
-                 UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
-                 UNION SELECT project FROM team_live_masters WHERE live=1",
-            )
+            .prepare(ACTIVE_PROJECTS_SQL)
             .map_err(error)?;
         let mut projects: BTreeSet<ProjectId> = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -6813,6 +6841,9 @@ impl TeamRuntime {
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
+        if queued.is_empty() {
+            return self.wait_beyond_dispatch(project, &queued);
+        }
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         let reserved: BTreeSet<i64> = crate::recovery::open_runs(&self.connection, project)?
@@ -13053,6 +13084,18 @@ const NOTE_RESULT_BYTES_MAX: usize = 300;
 const NOTE_PROBLEM_BYTES_MAX: usize = 200;
 const NOTE_PLACE_BYTES_MAX: usize = 120;
 const NOTES_PER_TICK_MAX: i64 = 16;
+/// The read behind `active_projects`: every project with pending owner messages, live or
+/// undelivered master tasks, Keep warm, live agents or a live master switched on. Each arm
+/// seeks an index led by the column it filters (`team_messages_state`, `team_tasks_status`,
+/// `team_tasks_undelivered`, `team_agents_status`), so no arm walks ended history, and
+/// UNION ALL builds no temp tree: the caller collects the rows into a set.
+const ACTIVE_PROJECTS_SQL: &str = "SELECT project FROM team_messages WHERE state='pending'
+ UNION ALL SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running')
+ UNION ALL SELECT project FROM team_tasks WHERE delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured'))
+ UNION ALL SELECT project FROM team_settings WHERE keep_warm=1
+ UNION ALL SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
+ UNION ALL SELECT project FROM team_live_masters WHERE live=1";
 
 /// One task a conversation master handed off that has ended, as the note sweep reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
