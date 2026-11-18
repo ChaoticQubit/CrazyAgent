@@ -114,6 +114,7 @@ pub const INTAKE_CODES: [&str; 119] = [
     "move_project_folder_link",
     "move_project_in_progress",
     "move_project_master_session",
+    "move_project_two_spellings",
     "move_project_record_invalid",
     "move_project_unavailable",
     "move_project_interrupted",

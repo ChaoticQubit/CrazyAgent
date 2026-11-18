@@ -93,6 +93,66 @@ fn origin_names(origin: &Path) -> Vec<PathBuf> {
     names
 }
 
+/// Names each table where the old folder's two names hold one key: a row under the stored
+/// name and a row under its short name that the move would write to one key of a unique
+/// index, so one would replace the other. The short name's rows are written to the stored
+/// name inside a savepoint that is always rolled back, and each table's rows are counted.
+/// Inputs: the caller's write and the stored folder. Output: the tables, none for one name.
+fn held_twice(tx: &Connection, origin: &Path) -> Result<Vec<&'static str>, EngineError> {
+    let names = origin_names(origin);
+    let [long, short] = names.as_slice() else {
+        return Ok(Vec::new());
+    };
+    let (long, short) = (text(long)?, text(short)?);
+    tx.execute_batch("SAVEPOINT move_held_twice").map_err(sql)?;
+    let found = collapsed(tx, short, long);
+    let undone = tx
+        .execute_batch("ROLLBACK TO move_held_twice; RELEASE move_held_twice")
+        .map_err(sql);
+    let found = found?;
+    undone?;
+    Ok(found)
+}
+
+/// The tables of [`PATH_COLUMNS`] whose row count drops when every path under `from` is
+/// written under `to` the way the move's rewrite writes it, replacing a row that already
+/// holds the key. Inputs: a write inside a savepoint and both names. Output: the tables.
+fn collapsed(tx: &Connection, from: &str, to: &str) -> Result<Vec<&'static str>, EngineError> {
+    let rows = |table: &str| -> Result<i64, EngineError> {
+        tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(sql)
+    };
+    let mut tables: Vec<&'static str> = PATH_COLUMNS.iter().map(|(table, _)| *table).collect();
+    tables.dedup();
+    let mut found = Vec::new();
+    for table in tables {
+        if !present(tx, table).map_err(sql)? {
+            continue;
+        }
+        let before = rows(table)?;
+        for (_, column) in PATH_COLUMNS.iter().filter(|(named, _)| *named == table) {
+            tx.execute(
+                &format!(
+                    "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
+                     WHERE {}",
+                    under(column)
+                ),
+                params![from, to],
+            )
+            .map_err(sql)?;
+        }
+        let after = rows(table)?;
+        assert!(after >= 0 && after <= before);
+        if after < before {
+            found.push(table);
+        }
+    }
+    assert!(found.len() <= PATH_COLUMNS.len());
+    Ok(found)
+}
+
 /// Says where a path inside the old project folder, under either of its names, is after
 /// the move. Inputs: the path and both folders. Output: the same place inside the new
 /// folder, or None for a path outside the old one.
@@ -556,9 +616,9 @@ struct Checked {
 /// (`move_project_in_progress`), no projects home, an unknown project, a project without
 /// setup, a folder gone (`home_source_missing`), already in the home
 /// (`move_project_already_home`) or reached through a link (`move_project_folder_link`),
-/// another project using the folder (`home_move_project`), what [`busy`] names, and a Copy
-/// while an agent works in a linked worktree (`move_project_copy_worktrees`). Nothing is
-/// written. Inputs: the transaction, the guarded projects, the project and the mode.
+/// another project using the folder (`home_move_project`), what [`busy`] names, a key the
+/// folder's two names both hold (`move_project_two_spellings`), and a Copy while an agent
+/// works in a linked worktree (`move_project_copy_worktrees`). Nothing is written. Inputs: the transaction, the guarded projects, the project and the mode.
 /// Output: the project's real folder, or the refusal code.
 pub(crate) fn check(
     tx: &Transaction<'_>,
@@ -616,6 +676,10 @@ fn checked(
     if let Some(code) = busy(tx, project, source)? {
         return Err(refused(code));
     }
+    if let Some(table) = held_twice(tx, &real)?.first() {
+        eprintln!("move_project_two_spellings table={table}");
+        return Err(refused("move_project_two_spellings"));
+    }
     if mode == AddMode::Copy && linked_agent_copies(tx, &real)? {
         return Err(refused("move_project_copy_worktrees"));
     }
@@ -629,8 +693,8 @@ fn checked(
 /// (`move_project_in_progress`), no projects home, a project without setup, a folder
 /// already in the home (`move_project_already_home`), a folder reached through a link or
 /// stored under the data volume with no short name (`move_project_folder_link`), another
-/// project using the folder (`home_move_project`),
-/// what [`busy`] names, a Copy while an agent works in a linked worktree
+/// project using the folder (`home_move_project`), what [`busy`] names, a key the
+/// folder's two names both hold (`move_project_two_spellings`), a Copy while an agent works in a linked worktree
 /// (`move_project_copy_worktrees`), a Move that breaks git worktrees kept outside the
 /// folder unless the owner went past it (`home_move_worktrees`), every refusal of
 /// [`plan_add`], and a destination another project's folder or repository still names,
@@ -833,7 +897,10 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
 /// new folder. A stale row already at the new path gives way to
 /// the moved one; [`plan`] refused a destination any other project still names, so such a
 /// row belongs to no project, and a plain UPDATE that failed here would leave a folder
-/// already moved unrecorded. Records of what was said or done (prompts, messages, events)
+/// already moved unrecorded. A table where the old folder's two names hold one key keeps
+/// its short-name rows as they were, logged as `move_project_rows_kept`: [`plan`] refuses
+/// such a move, so only rows written after the plan get here, and none is replaced.
+/// Records of what was said or done (prompts, messages, events)
 /// and of the master's identity-pinned working copies keep the old path. Inputs: the
 /// transaction, the project and both folders. Output: Ok, or the bound a moved path breaks.
 fn rewrite(
@@ -904,11 +971,18 @@ fn rewrite(
         }
     }
     let names = origin_names(origin);
+    let kept = held_twice(tx, origin)?;
+    for table in &kept {
+        eprintln!("move_project_rows_kept table={table}");
+    }
     for (table, column) in PATH_COLUMNS {
         if !present(tx, table).map_err(sql)? {
             continue;
         }
-        for name in &names {
+        for (index, name) in names.iter().enumerate() {
+            if index > 0 && kept.contains(&table) {
+                continue;
+            }
             tx.execute(
                 &format!(
                     "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
