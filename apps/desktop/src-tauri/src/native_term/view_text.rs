@@ -58,12 +58,12 @@ impl KeyDown {
 }
 
 /// What VoiceOver reads, kept on the view so no getter waits on the native state: the last
-/// text, whether a frame drawn since made it stale, and what the last frame showed (a hash
-/// of its rows, its cursor and selection) to post only real changes.
+/// text, whether a frame drawn since made it stale, and what the last frame showed (its
+/// text key, cursor and selection) to post only real changes.
 pub struct Access {
     pub text: Text,
     pub stale: bool,
-    pub rows_key: u64,
+    pub text_key: u64,
     pub marks: Marks,
 }
 
@@ -72,7 +72,7 @@ impl Default for Access {
         Access {
             text: Text::default(),
             stale: true,
-            rows_key: 0,
+            text_key: 0,
             marks: Marks::default(),
         }
     }
@@ -266,18 +266,18 @@ impl TermView {
     }
 
     /// Takes what one drawn frame showed: the geometry and cursor the input method's rect
-    /// needs, the accessibility text marked stale, and VoiceOver told when the rows or the
-    /// cursor and selection changed. Inputs: the geometry, the cursor and selection, and a
-    /// hash of the frame's rows.
-    pub fn drawn(&self, geometry: Geometry, marks: Marks, rows_key: u64) {
+    /// needs, the accessibility text marked stale, and VoiceOver told when its text or the
+    /// cursor and selection changed. Inputs: the geometry, the cursor and selection, and
+    /// `a11y::text_key` of the terminal the frame drew.
+    pub fn drawn(&self, geometry: Geometry, marks: Marks, text_key: u64) {
         self.ivars().geometry.set(Some(geometry));
         self.ivars().cursor.set(marks.cursor);
         let (value, selection) = {
             let mut access = self.ivars().access.borrow_mut();
             access.stale = true;
-            let value = access.rows_key != rows_key;
+            let value = access.text_key != text_key;
             let selection = access.marks != marks;
-            access.rows_key = rows_key;
+            access.text_key = text_key;
             access.marks = marks;
             (value, selection)
         };

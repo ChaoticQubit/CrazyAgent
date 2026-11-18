@@ -2,10 +2,16 @@ use super::ime::{slice_units, units};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 
 /// The most zero-width characters one cell gives the accessibility text; more are dropped.
 pub const ZERO_WIDTH_MAX: usize = 4;
+
+/// The start of the FNV-1a fold the text key uses.
+const HASH_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The value the text key folds in after each cell's characters; no character has it.
+const CELL_END: u64 = u64::MAX;
 
 /// One visible cell as the accessibility text reads it: its text (a blank cell is a space)
 /// and whether it is the right half of a wide character, which adds no text.
@@ -78,13 +84,8 @@ pub fn visible(term: &Term<VoidListener>) -> Grid {
         );
         let cell = indexed.cell;
         let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
-        let mut text = String::new();
-        if !spacer {
-            let leading = cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER);
-            text.push(if leading { ' ' } else { cell.c });
-            let zero_width = cell.zerowidth().unwrap_or(&[]);
-            text.extend(zero_width.iter().take(ZERO_WIDTH_MAX));
-        }
+        let text: String = cell_chars(cell).collect();
+        assert!(!spacer || text.is_empty());
         rows[row][column] = Glyph { text, spacer };
     }
     let Marks { cursor, selection } = marks(term);
@@ -131,20 +132,62 @@ pub fn marks(term: &Term<VoidListener>) -> Marks {
     Marks { cursor, selection }
 }
 
-/// One hash of the accessibility text a terminal shows. Input: the terminal. Output: the
-/// hash; not written yet.
-pub fn text_key(term: &Term<VoidListener>) -> u64 {
-    let _ = term;
-    0
+/// The characters one cell gives the accessibility text: none for the right half of a wide
+/// character, a space for the blank a wrapped wide character left, else the character and
+/// up to ZERO_WIDTH_MAX zero-width characters. Input: the cell. Output: the characters.
+fn cell_chars(cell: &Cell) -> impl Iterator<Item = char> + '_ {
+    let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+    let leading = cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER);
+    let first = (!spacer).then_some(if leading { ' ' } else { cell.c });
+    let take = if spacer { 0 } else { ZERO_WIDTH_MAX };
+    let zero_width = cell.zerowidth().unwrap_or(&[]).iter().take(take).copied();
+    first.into_iter().chain(zero_width)
 }
 
-/// One hash of a frame's row hashes, so a view posts a value change only when a row did.
-/// Input: the row hashes. Output: the hash.
-pub fn rows_key(keys: &[u64]) -> u64 {
-    assert!(keys.len() <= super::pane::GRID_MAX);
-    keys.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, row| {
-        (hash ^ row).wrapping_mul(0x0000_0100_0000_01b3)
-    })
+/// One step of the FNV-1a fold. Inputs: the hash so far and a value. Output: the hash.
+fn fold(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// One hash of the accessibility text a terminal shows, made without building it: each
+/// cell's characters as `visible` reads them and each row's kept width as `build` trims it,
+/// so a view posts a value change when what VoiceOver reads changed and not for a colour,
+/// blink phase, selection or marked text. Input: the terminal. Output: the hash.
+pub fn text_key(term: &Term<VoidListener>) -> u64 {
+    let content = term.renderable_content();
+    let (lines, columns) = (term.screen_lines(), term.columns());
+    assert!(lines > 0 && columns > 0);
+    assert!(lines <= super::pane::GRID_MAX && columns <= super::pane::GRID_MAX);
+    let offset = content.display_offset as i32;
+    let mut rows = vec![HASH_START; lines];
+    let mut ends = vec![0usize; lines];
+    for indexed in content.display_iter {
+        let row = usize::try_from(indexed.point.line.0 + offset).unwrap_or(usize::MAX);
+        let column = indexed.point.column.0;
+        assert!(
+            row < lines && column < columns,
+            "display cell inside the screen"
+        );
+        let (mut count, mut spaces) = (0usize, 0usize);
+        for c in cell_chars(indexed.cell) {
+            rows[row] = fold(rows[row], u64::from(c));
+            count += 1;
+            spaces += usize::from(c == ' ');
+        }
+        rows[row] = fold(rows[row], CELL_END);
+        if count != 1 || spaces != 1 {
+            ends[row] = column + 1;
+        }
+    }
+    let cursor = marks(term).cursor;
+    let mut key = HASH_START;
+    for (row, hash) in rows.iter().enumerate() {
+        let cursor_end = cursor.filter(|cell| cell.0 == row).map_or(0, |cell| cell.1);
+        let keep = ends[row].max(cursor_end).min(columns);
+        assert!(keep <= columns);
+        key = fold(fold(key, *hash), keep as u64);
+    }
+    key
 }
 
 /// Builds the accessibility text of a grid. Input: the grid. Output: the text.
