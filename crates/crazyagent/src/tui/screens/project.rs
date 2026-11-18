@@ -3330,6 +3330,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
         "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
+        "hidden_path_name_unchecked" => {
+            "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
+        }
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {

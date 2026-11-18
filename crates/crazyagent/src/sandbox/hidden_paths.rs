@@ -406,10 +406,10 @@ const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
 /// Whether git tracks any file inside any of these folders, asked with one `ls-files -z` run
-/// through [`crate::project_files::owner_git`] on their literal paths joined by `/`, killed
-/// after 5 s; a tracked file lives in every agent's worktree and in history. Inputs: the project
-/// root and the folders. Output: [`answer`]'s, `Ok(false)` with no folder inside the root or no
-/// `.git`, or unchecked when a folder or git cannot be read.
+/// through [`crate::project_files::owner_git`] on their paths joined by `/`, each as
+/// `:(literal,icase)`, killed after 5 s; a tracked file lives in every agent's worktree and in
+/// history. Inputs: the project root and the folders. Output: [`answer`]'s, `Ok(false)` with no
+/// folder inside the root or no `.git`, else unchecked when a folder or git cannot be read.
 fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'static str> {
     use crate::project_files::NoOwnerGit;
     use std::io::Read;
@@ -446,10 +446,20 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
         Err(NoOwnerGit::Absent) => return Ok(false),
         Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => return Err(unchecked),
     };
+    if cfg!(any(windows, target_os = "macos")) && !specs.iter().all(|spec| spec.is_ascii()) {
+        return Err("hidden_path_name_unchecked");
+    }
+    let magic = ":(literal,icase)";
+    let pathspecs: Vec<String> = specs.iter().map(|spec| format!("{magic}{spec}")).collect();
+    assert!(
+        pathspecs
+            .iter()
+            .zip(&specs)
+            .all(|(pathspec, spec)| pathspec.strip_prefix(magic) == Some(spec.as_str()))
+    );
     command
-        .env("GIT_LITERAL_PATHSPECS", "1")
         .args(["ls-files", "-z", "--"])
-        .args(&specs)
+        .args(&pathspecs)
         .stdout(Stdio::piped());
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
     let mut stdout = child.stdout.take().ok_or(unchecked)?;
@@ -481,10 +491,11 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
     answer(&bytes, &specs, status.success())
 }
 
-/// Judges git's NUL-separated answer for these literal paths: `Ok(true)` when it names a path
-/// in one of them, `Ok(false)` when it is empty and git exited clean, else unchecked, also when
-/// any line is empty, falls in none of them, or is cut short before the read cap. Inputs: the
-/// bytes read, the paths joined by `/` and whether git exited clean. Output: the answer.
+/// Judges git's NUL-separated answer for these paths: `Ok(true)` when it names a path in one of
+/// them, ASCII case ignored as git's `icase` does, `Ok(false)` when it is empty and git exited
+/// clean, else unchecked, also when any line is empty, falls in none of them, or is cut short
+/// before the read cap. Inputs: the bytes read, the paths joined by `/` and whether git exited
+/// clean. Output: the answer.
 fn answer(bytes: &[u8], specs: &[String], clean: bool) -> Result<bool, &'static str> {
     let unchecked = "hidden_path_unchecked";
     let capped = bytes.len() as u64 >= CHECK_BYTES_MAX;
@@ -496,7 +507,9 @@ fn answer(bytes: &[u8], specs: &[String], clean: bool) -> Result<bool, &'static 
     let within = |line: &[u8]| {
         specs.iter().any(|spec| {
             let spec = spec.as_bytes();
-            line == spec || (line.starts_with(spec) && line.get(spec.len()) == Some(&b'/'))
+            line.get(..spec.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(spec))
+                && matches!(line.get(spec.len()), None | Some(&b'/'))
         })
     };
     if !lines.iter().all(|line| within(line)) {
@@ -511,8 +524,8 @@ fn answer(bytes: &[u8], specs: &[String], clean: bool) -> Result<bool, &'static 
 
 /// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
 /// cannot answer for it, with one git run for the whole list (`any_tracked`). Inputs: the
-/// project root and the checked folders. Output: ok, `hidden_path_tracked` or
-/// `hidden_path_unchecked`.
+/// project root and the checked folders. Output: ok, `hidden_path_tracked`,
+/// `hidden_path_unchecked` or `hidden_path_name_unchecked`.
 pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
     if any_tracked(project_root, folders)? {
         Err("hidden_path_tracked")
