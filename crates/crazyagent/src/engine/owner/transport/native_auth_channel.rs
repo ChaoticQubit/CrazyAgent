@@ -1145,10 +1145,32 @@ impl OwnerRuntimeHandle {
                 .map_err(|_| failure("native_auth_recovery_required"))?
                 .frozen = true;
         }
+        let late = {
+            let runtime = self.clone();
+            let admission = admission.clone();
+            move |begun: crate::storage::NativeAuthBegin| async move {
+                let _ = runtime.settle_native_auth(admission, begun).await;
+            }
+        };
         let begun = self
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .native_auth_settled_job(
+                |reply| Job::NativeAuth(admission.clone(), command, reply),
+                late,
+            )
             .await?;
+        self.settle_native_auth(admission, begun).await
+    }
+
+    /// Takes a begun native-auth operation to its next step: its reply shown when it carries
+    /// no work, else its dispatch retained, or finished in storage when the host cannot take
+    /// it. Runs on the owner's answer, and later for a sign-out storage reached after the
+    /// owner's wait. Inputs: the admission and the begun operation. Output: the reply.
+    async fn settle_native_auth(
+        &self,
+        admission: Admission,
+        begun: crate::storage::NativeAuthBegin,
+    ) -> Result<NativeAuthReply, EngineError> {
         match begun.work {
             None => {
                 let mut reply = begun.reply;

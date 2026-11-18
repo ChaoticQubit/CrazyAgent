@@ -513,6 +513,42 @@ impl Engine {
         self.storage_job_within(self.timeout, build).await
     }
 
+    /// Runs one native-auth job whose answer carries work only its caller runs, such as the
+    /// dispatch that signs out. When an access-narrowing job answers after the owner stopped
+    /// waiting, `late` gets that answer, so the work still runs. Inputs: the job and the late
+    /// step. Output: the job's result, or the error the owner sees.
+    async fn native_auth_settled_job<T, F>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+        late: impl FnOnce(T) -> F + Send + 'static,
+    ) -> Result<T, EngineError>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (send, mut receive) = oneshot::channel();
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(build(send), submit_by, "owner_queue_not_submitted")
+            .await;
+        let lost = match submitted {
+            Ok(taken) => match tokio::time::timeout(self.timeout, &mut receive).await {
+                Ok(answer) => return answer.map_err(|_| owner::native_auth::outcome_unknown())?,
+                Err(_) => taken.lost(owner::native_auth::outcome_unknown()),
+            },
+            Err(refused) => refused,
+        };
+        if lost.0 == crate::storage::ACCESS_CHANGE_PENDING {
+            tokio::spawn(async move {
+                if let Ok(Ok(answer)) = receive.await {
+                    late(answer).await;
+                }
+            });
+        }
+        Err(lost)
+    }
+
     /// Runs one storage job and waits at most `wait` for its answer, for owner work whose
     /// client waits longer than the owner deadline. Inputs: the wait and the job.
     /// Output: the job's result, or the outcome-unknown error while storage has not
