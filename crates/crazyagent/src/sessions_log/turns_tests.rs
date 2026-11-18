@@ -422,3 +422,51 @@ fn replay_refuses_a_turns_event_it_does_not_know() {
         );
     }
 }
+
+/// #462 F1: a v2.2.0 store keeps configured_master_profiles in its legacy shape, with no
+/// `profile` column, until the open converts it after the steps. The sessions first run
+/// still carries its receipts, each with the profile that conversion gives it, so replay
+/// after the conversion equals the live tables.
+#[test]
+fn the_first_run_carries_legacy_profile_receipts_as_the_open_converts_them() {
+    let mut db = unhosted();
+    let tx = db.transaction().unwrap();
+    tx.execute_batch(
+        "DROP TABLE configured_master_profiles;
+         CREATE TABLE configured_master_profiles (id TEXT PRIMARY KEY,
+             session TEXT NOT NULL UNIQUE, body TEXT NOT NULL);",
+    )
+    .unwrap();
+    write_session(&tx, &view("p1", "s1", 3, "parked"), 2);
+    write_session(&tx, &view("p1", "s2", 5, "parked"), 4);
+    for (id, session, body) in [
+        (
+            "reg-1",
+            "s1",
+            json!({"proof": {"profile_ref": "cred-1"}, "home": SECRET}),
+        ),
+        ("reg-2", "s2", json!({"home": SECRET})),
+    ] {
+        tx.execute(
+            "INSERT INTO configured_master_profiles VALUES (?1,?2,?3)",
+            rusqlite::params![id, session, body.to_string()],
+        )
+        .unwrap();
+    }
+    assert!(first_run(&tx, Opening::for_test(3)).unwrap());
+    tx.execute_batch(
+        "ALTER TABLE configured_master_profiles RENAME TO configured_master_profiles_legacy;
+         CREATE TABLE configured_master_profiles (id TEXT PRIMARY KEY, session TEXT NOT NULL,
+             profile TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(session,profile));
+         INSERT INTO configured_master_profiles(id,session,profile,body) SELECT id,session,
+             COALESCE(CASE WHEN json_valid(body) THEN json_extract(body,'$.proof.profile_ref') END,id),
+             body FROM configured_master_profiles_legacy;
+         DROP TABLE configured_master_profiles_legacy;",
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(chunk_rows(&db, "configured_master_profiles"), [2]);
+    assert!(held(&db, "configured_master_profiles/reg-1/body"));
+    assert!(!text_in_log(&db), "no stored text in the log");
+    replays_to_live(&mut db);
+}
