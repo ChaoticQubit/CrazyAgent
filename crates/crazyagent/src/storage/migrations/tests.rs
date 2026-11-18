@@ -593,6 +593,55 @@ async fn only_the_newest_five_backups_are_kept() {
     );
 }
 
+/// #512 r2 (rv-sec2 F1, leader 05:13): the backup an upgrade just made is never removed,
+/// even when every other backup folder carries a later stamp, as one made under a clock set
+/// ahead or placed by another account would.
+#[tokio::test]
+async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
+    let root = Root::new();
+    legacy(&root).await;
+    let folder = root.path().join(BACKUPS);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&folder)
+        .unwrap();
+    for day in 1..=BACKUPS_KEPT {
+        std::fs::create_dir(folder.join(format!("1-to-2-9999010{day}T000000000Z"))).unwrap();
+    }
+
+    close(root.open().await.unwrap()).await;
+
+    let names: Vec<String> = root
+        .backups()
+        .iter()
+        .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names.len(), BACKUPS_KEPT, "{names:?}");
+    assert!(
+        names[0].starts_with(&format!("1-to-{}-", latest(STEPS))),
+        "{names:?}"
+    );
+    assert!(!folder.join("1-to-2-99990101T000000000Z").exists());
+}
+
+/// #512 r2 (rv-sec2 F1, leader 05:13): only a real folder of this user counts as a backup, so
+/// a folder another account placed, a link to a folder, a file or a missing entry is never
+/// counted or removed by the prune.
+#[test]
+fn only_a_real_folder_of_this_user_counts_as_a_backup() {
+    let root = Root::new();
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(root.path(), &link).unwrap();
+    assert!(own_folder(root.path()));
+    assert!(!own_folder(&link));
+    assert!(!own_folder(&root.global()));
+    assert!(!own_folder(&root.path().join("missing")));
+    assert_eq!(
+        own_folder(Path::new("/")),
+        rustix::process::getuid().as_raw() == 0
+    );
+}
+
 #[tokio::test]
 async fn newer_settings_file_is_refused_before_the_database_opens() {
     let root = Root::new();

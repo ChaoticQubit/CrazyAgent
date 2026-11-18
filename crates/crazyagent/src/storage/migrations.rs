@@ -893,4 +893,41 @@ mod windows_tests {
         assert!(private::dir(&backups).is_err());
         std::fs::remove_dir_all(&backups).unwrap();
     }
+
+    /// #512 r2 (rv-sec2 F1, leader 05:13): backup-shaped folders another account owns, stamped
+    /// later than any backup, are neither counted nor removed by the prune, so the backup just
+    /// made and this user's older ones stay.
+    #[test]
+    fn folders_another_account_owns_are_neither_counted_nor_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = super::backups_folder(&data).unwrap();
+        let foreign: Vec<_> = (1..=super::BACKUPS_KEPT)
+            .map(|day| backups.join(format!("0-to-1-9999010{day}T000000000Z")))
+            .collect();
+        for folder in &foreign {
+            std::fs::create_dir(folder).unwrap();
+            run(
+                "icacls",
+                &[folder.to_str().unwrap(), "/setowner", "*S-1-5-32-545"],
+            );
+            assert!(!super::own_folder(folder), "{}", folder.display());
+        }
+        let older: Vec<_> = (1..=2)
+            .map(|day| backups.join(format!("1-to-2-2000010{day}T000000000Z")))
+            .collect();
+        for folder in &older {
+            std::fs::create_dir(folder).unwrap();
+            assert!(super::own_folder(folder), "{}", folder.display());
+        }
+        let database = data.join(super::DATABASE);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let made = super::backup(&connection, &database, None, 1, 2).unwrap();
+        assert!(made.join(super::DATABASE).is_file(), "{}", made.display());
+        for folder in foreign.iter().chain(&older) {
+            assert!(folder.is_dir(), "{}", folder.display());
+        }
+        drop(connection);
+    }
 }
