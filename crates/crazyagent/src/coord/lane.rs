@@ -1050,9 +1050,9 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
         }
     };
     let _ = writeln!(out, "{NO_LANE}");
-    match crate::spawn_gate::status(
-        std::process::Command::new(&request.program).args(&request.arguments),
-    ) {
+    match own_program(&request.program).and_then(|program| {
+        crate::spawn_gate::status(std::process::Command::new(program).args(&request.arguments))
+    }) {
         Ok(status) => status.code().unwrap_or(LANE_FAILED),
         Err(problem) => {
             let _ = writeln!(
@@ -1064,5 +1064,24 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     }
 }
 
+/// The program an agent named, made absolute against this command's current folder unless it
+/// is a bare file name, so Windows starts the file the agent meant and the spawn gate, which
+/// refuses a relative program, lets it through (V244-WIN-ROOT-RELATIVE-PROGRAM). Input: the
+/// program. Output: the program to start, or why it could not be made absolute.
+#[cfg(not(unix))]
+fn own_program(program: &OsStr) -> std::io::Result<OsString> {
+    let path = Path::new(program);
+    let mut parts = path.components();
+    if matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    ) {
+        return Ok(program.to_owned());
+    }
+    std::path::absolute(path).map(PathBuf::into_os_string)
+}
+
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
