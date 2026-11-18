@@ -409,8 +409,8 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 /// the socket filter and start a harness, start bubblewrap from a fixed place with
 /// [`NEST_ARGS`], which then starts the helper again inside its namespaces, tell whether
 /// the kernel scopes signals, carry a nested agent's bridged ports as its broker, build a
-/// routed agent's network as its setup child, tell whether this machine runs the call
-/// supervisor, or be the check that question starts.
+/// routed agent's network as its setup child, start that network's slirp4netns confined,
+/// tell whether this machine runs the call supervisor, or be the check that question starts.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -440,6 +440,10 @@ pub enum HelperRequest {
         parent: u32,
         ports: Vec<u16>,
     },
+    Slirp {
+        child: u32,
+        ready: RawFd,
+    },
     Supervisor {
         folder: PathBuf,
     },
@@ -456,7 +460,7 @@ impl HelperRequest {
     /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
     /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else, or
     /// `--broker` with what [`bridge::broker_request`] takes, or `--egress` with what
-    /// [`egress::request`] takes.
+    /// [`egress::request`] takes, or `--slirp` with what [`egress::slirp_request`] takes.
     /// `--open-sockets` needs `--limit-network`. Output: the request, or the reason the
     /// arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
@@ -470,6 +474,9 @@ impl HelperRequest {
         }
         if args.first().is_some_and(|flag| flag == egress::EGRESS) {
             return egress::request(args);
+        }
+        if args.first().is_some_and(|flag| flag == egress::SLIRP) {
+            return egress::slirp_request(args);
         }
         if let Some(probe) = supervisor_probe(&args) {
             return probe;
@@ -886,8 +893,9 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
         .restrict_self()
 }
 
-/// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
-/// socket and a new io_uring ring both fail with `EACCES`, and with `tcp_only` so does every
+/// Installs the seccomp filter every agent process, slirp4netns ([`egress::confine_slirp`])
+/// and their children keep: a new Unix-domain socket and a new io_uring ring both fail with
+/// `EACCES`, and with `tcp_only` so does every
 /// socket but TCP over IPv4 or IPv6 and routing netlink, since Landlock limits TCP only and
 /// a datagram, raw or other family socket reaches any host. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
@@ -1070,6 +1078,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
         HelperRequest::Egress { parent, ports } => return egress::setup(parent, &ports),
+        HelperRequest::Slirp { child, ready } => return egress::slirp(child, ready),
         HelperRequest::Supervisor { folder } => return probe_supervisor(&folder),
         HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
@@ -3486,6 +3495,45 @@ mod tests {
         assert!(parse(&[PROBE, SCOPED]).is_err());
         assert!(parse(&[SCOPED, "--", "/bin/true"]).is_err());
         assert!(parse(&[READ, "/usr", SCOPED, "--", "/bin/true"]).is_err());
+    }
+
+    #[test]
+    fn the_slirp_request_takes_a_process_above_one_and_a_descriptor_above_two() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        let slirp = egress::SLIRP;
+        assert_eq!(
+            parse(&[slirp, "4242", "5"]),
+            Ok(HelperRequest::Slirp {
+                child: 4242,
+                ready: 5
+            })
+        );
+        assert_eq!(
+            parse(&[slirp, "2147483647", "3"]),
+            Ok(HelperRequest::Slirp {
+                child: 2_147_483_647,
+                ready: 3
+            })
+        );
+        for refused in [
+            &[slirp][..],
+            &[slirp, "4242"],
+            &[slirp, "4242", "5", "6"],
+            &[slirp, "1", "5"],
+            &[slirp, "0", "5"],
+            &[slirp, "2147483648", "5"],
+            &[slirp, "+4242", "5"],
+            &[slirp, "-4242", "5"],
+            &[slirp, "4242", "2"],
+            &[slirp, "4242", " 5"],
+            &[slirp, "4242", "0x5"],
+            &[slirp, "", "5"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        assert!(parse(&[READ, "/usr", slirp, "4242", "5"]).is_err());
+        assert!(parse(&[PROBE, slirp, "4242", "5"]).is_err());
     }
 
     #[test]
