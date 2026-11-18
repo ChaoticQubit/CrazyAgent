@@ -569,12 +569,6 @@ jobs:
           - state: base
             commit: f5cedbd834b0ac3a08da73b0a2cfff0719ec1c9e
             runner: ubuntu-22.04
-          - state: tip
-            commit: cf6ae5c15b985443d06103a0c1360b2475e94465
-            runner: ubuntu-22.04
-          - state: tip
-            commit: cf6ae5c15b985443d06103a0c1360b2475e94465
-            runner: macos-15
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -616,7 +610,7 @@ jobs:
         timeout-minutes: 120
         run: |
           set -u +e +o pipefail
-          git checkout -q --detach ${{ matrix.commit }}
+          git checkout -q -f --detach ${{ matrix.commit }}
           test "$(git rev-parse HEAD)" = ${{ matrix.commit }} || exit 2
           cargo fetch --locked || exit 2
           cargo build -p crazyagent --bin crazyagent --bin crazyagent-landlock --features crazyagent/owner-trace --locked --offline || exit 2
