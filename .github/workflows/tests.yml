@@ -105,7 +105,7 @@ jobs:
         timeout-minutes: 30
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           red=d35e24e37
           rows="with_allow_adds_one_24_byte_entry_after_the_explicit_entries_and_keeps_every_other_byte holds_allow_counts_a_plain_allow_on_the_object_itself_that_covers_the_rights without_allow_takes_out_only_the_entries_byte_equal_to_the_added_one with_allow_then_without_allow_gives_back_the_original_bytes with_allow_refuses_a_list_that_would_pass_the_size_limit"
           git checkout "$red" -- crates/crazyagent-win-sandbox || exit 1
@@ -145,7 +145,7 @@ jobs:
         timeout-minutes: 30
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           cargo test -p crazyagent --lib --locked -- plugins::tests::a_check_on_a tui::screens::settings_plugins::tests::a_check_on_a launch_context::tests::a_launch_that_left_context_mode_out_says_why_in_its_tools_section > "$RUNNER_TEMP/engine.txt" 2>&1
           rc=$?
           grep -E "^test |^test result|panicked" "$RUNNER_TEMP/engine.txt" | grep -v " ok$" | head -40
@@ -201,7 +201,7 @@ jobs:
         timeout-minutes: 60
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           red=e6e1b3579
           rows="a_paths_drive_root_is_its_last_ancestor_in_the_same_form the_system_drive_keeps_access_lists_asked_by_either_root a_list_without_read_attributes_for_every_app_container_keeps_them_out the_drive_root_check_names_a_root_whose_list_keeps_app_containers_out"
           git checkout "$red" -- crates/crazyagent-win-sandbox || exit 1
@@ -294,7 +294,7 @@ jobs:
         timeout-minutes: 30
         shell: bash
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           icacls "$SYSTEMDRIVE\\" || true
           echo "node $(command -v node) $(node -v)"
           cargo test -p crazyagent --lib --locked -- context_mode:: plugins::tests::a_check_on_a > "$RUNNER_TEMP/rows.txt" 2>&1
