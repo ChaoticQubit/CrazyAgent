@@ -125,7 +125,15 @@ export WEBKIT_DISABLE_DMABUF_RENDERER=1 NO_AT_BRIDGE=1
 unset DISPLAY WAYLAND_DISPLAY GTK_IM_MODULE XMODIFIERS
 
 display_pid=""
+holder_pid=""
 load_pids=()
+
+sway_keyboards() {
+  local sock
+  sock=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock 2> /dev/null | head -1)
+  [ -n "$sock" ] || { echo "no sway ipc socket"; return; }
+  SWAYSOCK=$sock timeout 5 swaymsg -t get_inputs -r 2> /dev/null | jq -r '[.[] | select(.type == "keyboard")] | length'
+}
 cell=""
 
 start_x11() {
@@ -152,6 +160,11 @@ start_sway() {
     socket=$(ls "$XDG_RUNTIME_DIR" 2> /dev/null | grep -E '^wayland-[0-9]+$' | head -1)
     if [ -n "$socket" ]; then
       export WAYLAND_DISPLAY=$socket
+      log "  $cell sway keyboards before the holder: $(sway_keyboards)"
+      wtype -s 3600000 -k Shift_L > "$root/holder-$cell.log" 2>&1 &
+      holder_pid=$!
+      sleep 1
+      log "  $cell sway keyboards with the holder: $(sway_keyboards)"
       return 0
     fi
     sleep 0.1
@@ -160,6 +173,8 @@ start_sway() {
 }
 
 stop_display() {
+  [ -n "$holder_pid" ] && kill "$holder_pid" 2> /dev/null
+  holder_pid=""
   pkill -x xclip 2> /dev/null
   pkill -x wl-copy 2> /dev/null
   [ -n "$display_pid" ] && kill "$display_pid" 2> /dev/null
@@ -194,7 +209,7 @@ press_key() {
     timeout 30 xdotool key --delay 80 "$name"
     rc=$?
   else
-    timeout 30 wtype -d 80 "$name"
+    timeout 30 wtype -s 300 -d 80 "$name"
     rc=$?
   fi
   log "  $cell key $name exit $rc"
@@ -335,6 +350,7 @@ run_row() {
     fi
     reached=$((reached + 1))
     last=$step
+    [ "$kind" = sway ] && log "  $cell at $step sway keyboards: $(sway_keyboards)"
     "act_$name" "$kind" "$step" "$dir"
     : > "$dir/go-$step"
   done
