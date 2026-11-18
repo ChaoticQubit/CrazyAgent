@@ -519,7 +519,7 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
 /// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600; on Windows a
-/// database store, so the copies take engine.db's no-read-up label), then keeps it and the
+/// database store, so the copies take engine.db's full medium label), then keeps it and the
 /// newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the connection,
 /// its path, the settings sources and both versions. Output: the new backup folder.
 fn backup(
