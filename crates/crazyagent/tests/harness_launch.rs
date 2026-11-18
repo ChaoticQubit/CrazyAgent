@@ -4,7 +4,7 @@ use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
-use crazyagent::harnesses::leftovers::{UNCHECKED, Unstopped};
+use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use crazyagent::protocol::CredentialRef;
@@ -1041,13 +1041,11 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
-/// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
-/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle process
-/// setsids, forks and exits within microseconds, between two tables the follower takes,
-/// leaves a grandchild running a program whose environment macOS hides. No table showed the
-/// middle, so neither the grandchild's parent nor the unique id it was forked from links it to
-/// the agent: the stop reports clean, or unchecked under load, naming nothing, while it keeps
-/// running. Pins today's result; a later fix that catches it turns this row red on purpose.
+/// SETSID-A-RESIDUAL: a Full access headless agent's double fork whose middle process setsids,
+/// forks and exits between two process tables leaves a grandchild no table links to the agent.
+/// The stop reports clean or unchecked, or names that grandchild as left on a slower machine
+/// where a table saw the middle (the macos-15 runner), and in every case the grandchild keeps
+/// running: the stop never ends it.
 #[test]
 fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     let root = private_dir("crazyagent-fast-orphan-");
@@ -1100,7 +1098,15 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
 
     match session.stop() {
         Ok(_) => {}
-        Err(Unstopped::Left(left)) => assert_eq!(left.code(), UNCHECKED, "{}", left.plain()),
+        Err(Unstopped::Left(left)) if left.code() == UNCHECKED => {}
+        Err(Unstopped::Left(left)) if left.code() == LEFT => {
+            let named = named_in(&left.plain());
+            assert_eq!(
+                named.keys().copied().collect::<Vec<_>>(),
+                [orphan.as_raw_nonzero().get()],
+                "a table saw the middle, so the stop names only the orphan: {named:?}"
+            );
+        }
         Err(other) => panic!("the stop of a Full access agent was reported {other:?}"),
     }
     assert_eq!(
