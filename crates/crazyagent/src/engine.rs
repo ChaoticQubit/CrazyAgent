@@ -551,8 +551,9 @@ impl Engine {
 
     /// Runs one storage job and waits at most `wait` for its answer, for owner work whose
     /// client waits longer than the owner deadline. Inputs: the wait and the job.
-    /// Output: the job's result, or the outcome-unknown error while storage has not
-    /// answered in time or went away without answering.
+    /// Output: the job's result; a not-submitted code when the worker never took the job;
+    /// access_change_pending for a narrowing one; else the outcome-unknown error when a
+    /// taken job does not answer within `wait` or storage went away without answering.
     async fn storage_job_within<T>(
         &self,
         wait: Duration,
@@ -571,11 +572,10 @@ impl Engine {
     }
 
     /// Runs one storage job for a record that refers to files written before it, and hands
-    /// storage's real answer to `settle` even when the owner stops waiting first, so a late
-    /// commit never loses a file its record refers to. Inputs: the job and the settle step.
-    /// Output: the settle step's error when it fails, else the job's result, or the
-    /// outcome-unknown error while storage has not answered in time or went away without
-    /// answering.
+    /// storage's answer to `settle` even when the owner stops waiting first, so a late commit
+    /// never loses a file its record refers to. Inputs: the job and the settle step. Output:
+    /// the settle error, else the job's result; a not-submitted code (settled at once);
+    /// access_change_pending for a narrowing job; or outcome-unknown when a taken job is late.
     async fn settled_job<T: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,

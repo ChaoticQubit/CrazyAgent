@@ -1803,8 +1803,9 @@ impl Engine {
 
     /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
     /// stops waiting first, so what storage commits late still takes effect in memory.
-    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
-    /// outcome-unknown error while storage has not answered in time or went away.
+    /// Inputs: the job and the settle step. Output: the settle step's answer; a not-submitted
+    /// code, with nothing to settle; access_change_pending for a narrowing job; else the owner
+    /// outcome-unknown error when a taken job does not answer in time or storage went away.
     async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,

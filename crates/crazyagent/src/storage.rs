@@ -567,11 +567,11 @@ impl Job {
 }
 
 impl Storage {
-    /// Queues one timed job once the worker receives jobs, then waits until the worker takes it.
-    /// Inputs: the job, the deadline for both waits, and the refusal for a full queue.
-    /// Output: `Taken` once the worker took the job, so the caller's reply timer starts then;
-    /// otherwise storage_starting_not_submitted, storage_busy_not_submitted or `full` with
-    /// nothing run, or access_change_pending for an access-narrowing job left queued.
+    /// Queues one timed job and waits until the worker takes it; only a job that is not
+    /// access-narrowing first waits for the worker to receive. Inputs: the job, the deadline
+    /// for both waits, the refusal for a full queue. Output: `Taken`, so the reply timer starts
+    /// at the take; else storage_starting_not_submitted, storage_busy_not_submitted or `full`
+    /// with nothing run, or access_change_pending for a narrowing job left queued.
     pub(crate) async fn submit(
         &self,
         job: Job,
