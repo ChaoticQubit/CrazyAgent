@@ -36,9 +36,8 @@ pub struct Facts {
 /// Judges whether an object is private to the user, the Windows twin of the Unix owner,
 /// mode 0600/0700, `nlink == 1` and no-follow checks: no link or junction, one name, a local
 /// volume, a trusted owner, no other SID with any right that applies to it, and no label that
-/// lets a lower integrity process write, read or hold it, so only the full policy the engine
-/// writes passes (V244-WIN-STORE-LABEL-NX). Inputs: the facts and the user's SID. Output: Ok,
-/// or the reason it is not private.
+/// lets a lower integrity process write, read or hold it; an object with no label passes.
+/// Inputs: the facts and the user's SID. Output: Ok, or the reason it is not private.
 pub fn judge(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
     judged(facts, user, FULL_POLICY)
 }
