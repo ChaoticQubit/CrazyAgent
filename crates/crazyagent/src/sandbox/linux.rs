@@ -4816,6 +4816,102 @@ mod tests {
         }
     }
 
+    /// A nest also takes the empty read-only folders a hidden folder gets, each as the exact
+    /// pair `--tmpfs P --remount-ro P` on one clean absolute path below the root, after the
+    /// network and before the working folder, at most [`crate::sandbox::HIDDEN_MAX`] of
+    /// them; any other shape, a lone half, two paths or one more pair is refused.
+    #[test]
+    fn a_nest_takes_exact_read_only_empty_folder_pairs_before_its_working_folder() {
+        use bridge::UNSHARE_NET;
+        let nest = |options: &[&str]| {
+            let mut words = vec![NEST, "--", BWRAP_PATHS[0]];
+            words.extend(NEST_ARGS);
+            words.extend(options);
+            HelperRequest::parse(words.iter().map(OsString::from).collect())
+        };
+        let helper = "/opt/helper";
+        let (hidden, other) = ("/work/private", "/work/notes/inner");
+        for kept in [
+            &["--tmpfs", hidden, "--remount-ro", hidden, "--", helper][..],
+            &[
+                UNSHARE_NET,
+                "--tmpfs",
+                hidden,
+                "--remount-ro",
+                hidden,
+                "--tmpfs",
+                other,
+                "--remount-ro",
+                other,
+                "--chdir",
+                "/work",
+                "--",
+                helper,
+                NESTED,
+            ],
+        ] {
+            assert!(nest(kept).is_ok(), "{kept:?}");
+        }
+        for refused in [
+            &["--tmpfs", hidden, "--", helper][..],
+            &["--remount-ro", hidden, "--", helper],
+            &["--tmpfs", hidden, "--remount-ro", other, "--", helper],
+            &[
+                "--tmpfs",
+                "work/private",
+                "--remount-ro",
+                "work/private",
+                "--",
+                helper,
+            ],
+            &[
+                "--tmpfs",
+                "/work/../etc",
+                "--remount-ro",
+                "/work/../etc",
+                "--",
+                helper,
+            ],
+            &["--tmpfs", "/", "--remount-ro", "/", "--", helper],
+            &["--remount-ro", hidden, "--tmpfs", hidden, "--", helper],
+            &[
+                "--chdir",
+                "/work",
+                "--tmpfs",
+                hidden,
+                "--remount-ro",
+                hidden,
+                "--",
+                helper,
+            ],
+            &[
+                "--tmpfs",
+                hidden,
+                "--remount-ro",
+                hidden,
+                UNSHARE_NET,
+                "--",
+                helper,
+            ],
+            &["--ro-bind", hidden, hidden, "--", helper],
+        ] {
+            assert!(nest(refused).is_err(), "{refused:?}");
+        }
+        let paths: Vec<String> = (0..=crate::sandbox::HIDDEN_MAX)
+            .map(|number| format!("/work/hidden-{number}"))
+            .collect();
+        let pairs = |count: usize| {
+            let mut words: Vec<&str> = Vec::new();
+            for path in &paths[..count] {
+                words.extend(["--tmpfs", path.as_str(), "--remount-ro", path.as_str()]);
+            }
+            words.extend(["--", helper]);
+            nest(&words)
+        };
+        assert!(pairs(crate::sandbox::HIDDEN_MAX).is_ok());
+        assert!(pairs(crate::sandbox::HIDDEN_MAX + 1).is_err());
+    }
+
     #[test]
     fn a_nested_policy_reads_back_from_its_own_arguments() {
         let policy = LandlockPolicy {

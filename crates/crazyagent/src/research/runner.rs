@@ -5676,6 +5676,78 @@ mod tests {
         assert!(!fs::read_to_string(&events).unwrap().contains(dummy));
     }
 
+    /// V243-LINUX-HIDDEN-BOUNDARY: a read-only run on Linux, as an overview or a roadmap
+    /// check starts one, keeps the project's saved hidden folder out of its stand-in
+    /// harness, which still reads a plain file beside it. With nothing saved the same run
+    /// reads both, so the run itself starts on Linux and only the hidden folder changes it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_read_only_run_on_linux_keeps_a_saved_hidden_folder_out_of_its_harness() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        let private = folder.join("private");
+        fs::create_dir_all(&private).unwrap();
+        fs::write(private.join("key.txt"), "owner secret\n").unwrap();
+        fs::write(folder.join("open.txt"), "open words\n").unwrap();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\ncat '{}' '{}'\nexit 0\n",
+                folder.join("open.txt").display(),
+                private.join("key.txt").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let project = ProjectId::new("alpha").unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let read = |name: &str| {
+            let run = ReadOnlyRun {
+                name,
+                agent: "overview",
+                kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+                project: Some(&project),
+                folder: &folder,
+                prompt: "Describe this project.",
+                account: &account,
+                wall_time: Duration::from_secs(5),
+                output_tokens: None,
+            };
+            let ending = runner.run_read_only(&run, &|| false);
+            let events = root.state.join("agents").join(name).join("events.jsonl");
+            (fs::read_to_string(events).unwrap_or_default(), ending)
+        };
+        let (open, ending) = read("overview-alpha-open");
+        assert!(
+            open.contains("open words") && open.contains("owner secret"),
+            "{open} {ending:?}"
+        );
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        crate::sandbox::hidden_paths::save(&connection, project.as_str(), &[private.clone()])
+            .unwrap();
+        drop(connection);
+        let (hidden, ending) = read("overview-alpha-hidden");
+        assert!(hidden.contains("open words"), "{hidden} {ending:?}");
+        assert!(!hidden.contains("owner secret"), "{hidden}");
+        assert_eq!(
+            fs::read_to_string(private.join("key.txt")).unwrap(),
+            "owner secret\n"
+        );
+    }
+
     /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
     /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
     /// opens the picked one for writes, since a read-only run only reads.
