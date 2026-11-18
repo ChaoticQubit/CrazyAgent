@@ -350,16 +350,15 @@ impl ChannelCase {
             .unwrap()
     }
 
-    async fn raw(&self, packet: &[u8; 37]) -> UnixStream {
-        let mut stream =
-            crate::spawn_gate::connect_unix(self.host.authority.root.path.join(SOCKET))
-                .await
-                .unwrap();
+    async fn raw(&self, packet: &[u8; 37]) -> Stream {
+        let mut stream = crate::ipc::owner_connect(self.host.authority.root.path.join(SOCKET))
+            .await
+            .unwrap();
         stream.write_all(packet).await.unwrap();
         stream
     }
 
-    async fn attached(&self) -> UnixStream {
+    async fn attached(&self) -> Stream {
         let mut stream = self.raw(&self.packet()).await;
         stream
             .write_all(&encode_frame(&json!({"protocol_version": 1, "kind": "attach"})).unwrap())
@@ -385,7 +384,7 @@ impl ChannelCase {
     }
 }
 
-async fn rejected(mut stream: UnixStream) {
+async fn rejected(mut stream: Stream) {
     let mut byte = [0; 1];
     let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
         .await

@@ -1,5 +1,5 @@
 use crate::engine::owner::{OwnerOperation, OwnerRequest};
-use crate::platform::unix_socket::UnixStream;
+use crate::ipc::Stream;
 use crate::protocol::RequestId;
 use std::cell::RefCell;
 use std::future::Future;
@@ -176,7 +176,7 @@ pub(crate) async fn reply<E>(
 /// Writes one refusal frame to the client and records it `refused`, or `failed` when the
 /// write errs or is cut off ([`reply`]). Inputs: the connection and the refusal frame.
 /// Output: the write's result.
-pub(crate) async fn refused(stream: &mut UnixStream, frame: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn refused(stream: &mut Stream, frame: &[u8]) -> std::io::Result<()> {
     reply(stream.write_all(frame), "refused").await
 }
 

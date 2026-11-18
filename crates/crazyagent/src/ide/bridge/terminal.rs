@@ -2,7 +2,7 @@ use super::{IdeReply, hex, refusal};
 use crate::engine::EngineError;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::harnesses::interactive::InteractiveCommand;
-use crate::platform::unix_socket::{OwnedWriteHalf, UnixStream};
+use crate::ipc::{OwnedWriteHalf, Stream};
 use crate::protocol::{ProjectId, encode_frame};
 use crate::sandbox::SandboxError;
 use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
@@ -46,7 +46,7 @@ pub(super) struct Terminals {
 /// capability stops working. The pane ends with the connection. Inputs: the stream, the
 /// handshake packet, the owner runtime, the project, the size and the level asked for.
 pub(super) async fn serve(
-    mut stream: UnixStream,
+    mut stream: Stream,
     packet: [u8; 37],
     runtime: OwnerRuntimeHandle,
     project: ProjectId,
@@ -330,7 +330,7 @@ async fn redraw(writer: &mut OwnedWriteHalf, viewer: &TerminalStream) -> Result<
 /// the packet, the owner runtime, the project, the host and the viewer. Output: the plain
 /// reason it ended.
 async fn relay(
-    mut reader: crate::platform::unix_socket::OwnedReadHalf,
+    mut reader: crate::ipc::OwnedReadHalf,
     writer: &mut OwnedWriteHalf,
     packet: &[u8; 37],
     runtime: &OwnerRuntimeHandle,

@@ -3,6 +3,7 @@
 
 pub mod dacl;
 pub mod grants;
+pub mod pipe;
 pub mod plan;
 pub mod private;
 pub mod profile;

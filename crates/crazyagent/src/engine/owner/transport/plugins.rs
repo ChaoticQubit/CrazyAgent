@@ -771,10 +771,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("plugins_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -889,7 +889,7 @@ enum Prepared {
 /// Inputs: the connection, engine, authority, packet, admission and request body.
 /// Output: done once the reply is written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -1649,7 +1649,7 @@ fn secret_frames(action: &Action) -> usize {
     }
 }
 
-async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
+async fn receive_secret(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("server_secret_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;

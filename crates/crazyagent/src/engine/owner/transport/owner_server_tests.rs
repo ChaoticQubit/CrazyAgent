@@ -65,13 +65,13 @@ impl Fixture {
     }
 }
 
-async fn connected(client: &OwnerClient) -> UnixStream {
-    crate::spawn_gate::connect_unix(client.root.path.join(SOCKET))
+async fn connected(client: &OwnerClient) -> Stream {
+    crate::ipc::owner_connect(client.root.path.join(SOCKET))
         .await
         .unwrap()
 }
 
-async fn admitted(client: &OwnerClient) -> UnixStream {
+async fn admitted(client: &OwnerClient) -> Stream {
     let mut stream = connected(client).await;
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(b"CAO1");
@@ -147,7 +147,7 @@ async fn an_owner_client_past_the_client_slots_is_refused_plainly_while_the_othe
 /// Sends a GitHub token request that says a token follows and never sends it, so the
 /// engine serves it past the owner exchange while it waits for the token frame.
 /// Input: the owner client. Output: the open connection.
-async fn awaiting_a_token(client: &OwnerClient) -> UnixStream {
+async fn awaiting_a_token(client: &OwnerClient) -> Stream {
     let mut stream = admitted(client).await;
     let frame =
         encode_frame(&json!({"github": {"kind": "token"}, "secret_present": true})).unwrap();
@@ -158,7 +158,7 @@ async fn awaiting_a_token(client: &OwnerClient) -> UnixStream {
 /// Opens a terminal view that sends its owner packet and no attach request, so the engine
 /// holds it as a view while it waits for the request. Input: the owner client. Output: the
 /// open connection.
-async fn terminal_waiting(client: &OwnerClient) -> UnixStream {
+async fn terminal_waiting(client: &OwnerClient) -> Stream {
     let mut stream = connected(client).await;
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(terminal::MAGIC);

@@ -1,5 +1,5 @@
 use super::*;
-use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
+use crate::ipc::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
 #[cfg(unix)]
 use crate::terminal::buffer::Chunk;
@@ -186,10 +186,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| unavailable())?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(MAGIC);
             packet[4] = match self.kind {
@@ -455,12 +455,12 @@ fn send(
 /// admission, the attached viewer, its host and the team agent the owner's prompts and
 /// typing count for, none for a pane, which is not that agent's own app.
 async fn open(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     packet: &[u8; 37],
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
 ) -> Result<(Admission, TerminalStream, Arc<dyn Host>, Option<i64>), EngineError> {
-    verify_peer(stream)?;
+    verify_client(stream)?;
     let admission = granted(engine, authority, packet).await?;
     let frame = read_frame(stream).await?;
     let (agent_id, pane, size) = match serde_json::from_slice(&frame[4..])
@@ -621,7 +621,7 @@ impl OwnerClient {
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
 async fn watch(
-    stream: UnixStream,
+    stream: Stream,
     _packet: &[u8; 37],
     _admission: Admission,
     _viewer: TerminalStream,
@@ -636,7 +636,7 @@ async fn watch(
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn watch(
-    stream: UnixStream,
+    stream: Stream,
     packet: &[u8; 37],
     admission: Admission,
     viewer: TerminalStream,
@@ -823,7 +823,7 @@ async fn pump(
 /// terminal ends or the owner's grant changes. Only a failed handshake gets `Rejected`.
 /// Takes the connection, its `CAT1` packet, the engine, the authority and the attach deadline.
 pub(super) async fn serve(
-    mut stream: UnixStream,
+    mut stream: Stream,
     auth: [u8; 37],
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -853,7 +853,7 @@ pub(super) async fn serve(
 /// request is read, all within the attach deadline; then closes the connection.
 /// Takes the connection, its `CAT1` packet, the authority and the attach deadline.
 pub(super) async fn refuse(
-    mut stream: UnixStream,
+    mut stream: Stream,
     auth: [u8; 37],
     authority: Arc<Authority>,
     deadline: Instant,
@@ -861,7 +861,7 @@ pub(super) async fn refuse(
     let mut packet = auth;
     packet[..4].copy_from_slice(b"CAO1");
     let refused = async {
-        verify_peer(&stream)?;
+        verify_client(&stream)?;
         authority.authenticate(&packet)?;
         read_frame(&mut stream).await?;
         let full = TerminalFrame::Rejected {

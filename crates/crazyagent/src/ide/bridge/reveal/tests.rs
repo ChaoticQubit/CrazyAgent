@@ -2,7 +2,7 @@ use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClient, OwnerClientKind};
 use crate::ide::bridge::{IdeReply, MAGIC, issue, launch_env};
-use crate::platform::unix_socket::UnixStream;
+use crate::ipc::Stream;
 use crate::protocol::FRAME_BYTES_MAX;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
@@ -115,8 +115,8 @@ pub(in crate::ide::bridge) async fn send(
     packet: [u8; 37],
     project: &str,
     call: serde_json::Value,
-) -> UnixStream {
-    let mut stream = crate::spawn_gate::connect_unix(socket).await.unwrap();
+) -> Stream {
+    let mut stream = crate::ipc::owner_connect(socket).await.unwrap();
     stream.write_all(&packet).await.unwrap();
     let body = serde_json::to_vec(&json!({ "project": project, "call": call })).unwrap();
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
@@ -126,7 +126,7 @@ pub(in crate::ide::bridge) async fn send(
 }
 
 /// Reads one reply frame, or none once the engine closed the connection.
-pub(in crate::ide::bridge) async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
+pub(in crate::ide::bridge) async fn read_reply(stream: &mut Stream) -> Option<IdeReply> {
     let length = stream.read_u32().await.ok()? as usize;
     assert!(length > 0 && length <= FRAME_BYTES_MAX);
     let mut body = vec![0; length];
@@ -139,7 +139,7 @@ pub(in crate::ide::bridge) async fn subscribe(
     socket: &Path,
     packet: [u8; 37],
     project: &str,
-) -> UnixStream {
+) -> Stream {
     let events = json!({ "name": "ide.events", "args": {} });
     let mut stream = send(socket, packet, project, events).await;
     assert_eq!(
@@ -152,7 +152,7 @@ pub(in crate::ide::bridge) async fn subscribe(
 }
 
 /// Reads the next reveal event from a subscription. Output: its request and path.
-async fn next_reveal(events: &mut UnixStream) -> (RequestId, String) {
+async fn next_reveal(events: &mut Stream) -> (RequestId, String) {
     let pushed = tokio::time::timeout(Duration::from_secs(10), read_reply(events))
         .await
         .unwrap();

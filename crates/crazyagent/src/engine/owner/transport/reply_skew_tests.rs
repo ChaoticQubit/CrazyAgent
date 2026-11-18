@@ -45,7 +45,7 @@ impl Skewed {
         let generation = fixture.client().await.root.path.clone();
         let socket = generation.join(SOCKET);
         std::fs::rename(&socket, generation.join(ASIDE)).unwrap();
-        let listener = crate::spawn_gate::bind_unix(&socket).unwrap();
+        let listener = crate::ipc::owner_listener(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
         let server = tokio::spawn(serve(listener, replies));
         let client =
@@ -92,10 +92,10 @@ impl Skewed {
 
 /// Answers one connection per queued reply with the reply's own bytes.
 /// Inputs: the listener and the frame bodies. Output: none; ends when the queue is empty.
-async fn serve(listener: UnixListener, replies: Vec<Vec<u8>>) {
+async fn serve(listener: Listener, replies: Vec<Vec<u8>>) {
     let mut replies: VecDeque<Vec<u8>> = replies.into();
     while let Some(reply) = replies.pop_front() {
-        let (mut stream, _) = crate::spawn_gate::accept_unix(&listener).await.unwrap();
+        let mut stream = crate::ipc::owner_accept(&listener).await.unwrap();
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.unwrap();
         read_frame(&mut stream).await.unwrap();
