@@ -42,6 +42,11 @@ const SHAPES: [(&str, &str, &str, &str); 4] = [
         "c.id",
     ),
 ];
+/// The read of configured profile receipts in the v2.2.0 shape, which has no `profile`
+/// column until the open converts it after the steps: each row takes the profile that
+/// conversion gives it (storage/master_session.rs `initialize`), its proof's profile ref,
+/// else its id (#462 F1).
+const LEGACY_PROFILES: &str = "SELECT c.id,c.session,c.profile,c.body,s.project,c.id FROM (SELECT id,session,COALESCE(CASE WHEN json_valid(body) THEN json_extract(body,'$.proof.profile_ref') END,id) AS profile,body FROM configured_master_profiles) c JOIN master_sessions s ON s.id=c.session";
 
 const _: () =
     assert!(NAMES_MAX * 131 + super::CHUNK_ENVELOPE_BYTES <= crate::state_log::BODY_BYTES_MAX);
@@ -488,10 +493,10 @@ fn mark_rows(
 }
 
 /// Reads the rows of one of the four tables whose session is stored, the one row of a key
-/// or every row in key order, each body kept under its holder in the live transaction.
-/// Inputs: the transaction, the table and the key. Output: the rows, none when a table it
-/// reads is missing, `sessions_log_snapshot_rows` past [`super::SNAPSHOT_ROWS_MAX`], or
-/// `sessions_log_row_invalid`.
+/// or every row in key order, legacy receipts as [`LEGACY_PROFILES`] reads them, each body
+/// kept under its holder in the live transaction. Inputs: the transaction, the table and
+/// the key. Output: the rows, none when a table it reads is missing, or the refusal
+/// (`sessions_log_snapshot_rows` past [`super::SNAPSHOT_ROWS_MAX`]).
 fn read(db: &Connection, table: &str, key: Option<Cell>) -> Result<Vec<Kept>, EngineError> {
     let invalid = || error("sessions_log_row_invalid");
     let (_, columns, select, column) = shape(table).ok_or_else(invalid)?;
@@ -500,6 +505,15 @@ fn read(db: &Connection, table: &str, key: Option<Cell>) -> Result<Vec<Kept>, En
             return Ok(Vec::new());
         }
     }
+    let legacy: bool = table == TABLES[6]
+        && !db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='profile')",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+    let select = if legacy { LEGACY_PROFILES } else { select };
     let (sql, value) = match key {
         Some(key) => (format!("{select} WHERE {column}=?1"), key),
         None => (
