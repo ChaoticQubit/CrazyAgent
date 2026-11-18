@@ -755,11 +755,13 @@ fn glyph_widths(buffer: &Buffer) -> HashMap<usize, (f32, usize)> {
     let mut out: HashMap<usize, (f32, usize)> = HashMap::new();
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
+            assert!(glyph.w.is_finite());
             let entry = out.entry(glyph.start).or_insert((0.0, 0));
             entry.0 += glyph.w;
             entry.1 += 1;
         }
     }
+    assert!(out.values().all(|&(_, glyphs)| glyphs > 0));
     out
 }
 
@@ -843,14 +845,14 @@ mod tests {
                 );
             }
             let row = [
-                span("a", 0, false),
-                span("\u{4e2d}", 1, true),
-                span("b", 3, false),
+                span("a ", 0, false),
+                span("\u{4e2d}", 2, true),
+                span("b", 4, false),
             ];
             shared.shape_row(&mut buffer, &row);
             let xs: Vec<f32> = glyphs(&buffer).iter().map(|g| g.1).collect();
-            assert_eq!(xs.len(), 3);
-            for (x, column) in xs.iter().zip([0.0, 1.0, 3.0]) {
+            assert_eq!(xs.len(), 4);
+            for (x, column) in xs.iter().zip([0.0, 1.0, 2.0, 4.0]) {
                 assert!((x - column * cell).abs() < 0.05, "{scale}x glyph at {x}");
             }
         }
