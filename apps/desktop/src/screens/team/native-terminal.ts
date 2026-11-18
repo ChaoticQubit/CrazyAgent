@@ -52,19 +52,22 @@ export type NativeEvent =
 export type NativeCopy = "selection" | "output";
 
 /** One native view to open: the agent's terminal name (`node.terminal`), the teammate pane it
- * shows or null, the label the screen reader says ("<label> terminal"), its place, its style
- * and the channel its events arrive on. */
+ * shows or null, the label the screen reader says ("<label> terminal"), its place, its style,
+ * whether it opens covered (a kept view preloaded with no host yet: it attaches and keeps its
+ * terminal live but draws nothing until `cover(false)`) and the channel its events arrive on. */
 export type NativeOpen = {
   name: string;
   pane: string | null;
   label: string;
   rect: NativeRect;
   style: NativeStyle;
+  covered: boolean;
   events: Channel<NativeEvent>;
 };
 
-/** Whether this desktop draws terminals natively: true only in a macOS build. Read once at
- * start. Output: the answer. */
+/** Whether this desktop draws terminals natively: true only in a macOS build. The command is
+ * built and granted on every OS, so it answers false on Windows and Linux. Read once at start.
+ * Output: the answer. */
 export function nativeTerminalEnabled(): Promise<Result<boolean>> {
   return call<boolean>("desktop_native_terminal_enabled");
 }
