@@ -658,9 +658,8 @@ async fn a_job_plans_at_the_current_revision_and_a_client_keeps_its_stale_refusa
 }
 
 /// A job under an id the owner ledger already holds for a different change still ends with
-/// `operation_identity_conflict`: only a plan refused as stale, which records nothing, plans
-/// again under the job's id. The job's folder is not added and the first change's row stays.
-/// The start waits out `job_busy` while the client's add still ends after its reply.
+/// `operation_identity_conflict`. The job's folder is not added and the first change's row
+/// stays. The start waits out `job_busy` while the client's add still ends after its reply.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_under_an_id_kept_for_a_different_change_ends_with_the_identity_conflict() {
     let mut jobs = Jobs::start().await;

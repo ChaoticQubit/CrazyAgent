@@ -1119,14 +1119,11 @@ pub(super) fn delete_files_clear(db: &Connection, names: &[String]) -> Result<()
 const DELETE_ROWS_MAX: i64 = 100_000;
 const DELETE_FILES_PER_START: i64 = 1024;
 
-/// Plans a Delete everything before the owner transport moves anything: the owner's grant
-/// and revision, the project, its exact name and [`delete_check`] are checked, then Stop all
-/// and the plan's hold on projects home moves are recorded in the same write, so the runtime
-/// stops the project's agents while the transport waits and no move starts until the
-/// exchange settles. Inputs: the connection, database path, admission, the DeleteProject
-/// request, the revision a client saw (none for a job) and the transport exchange running
-/// it. Output: the plan with the project's research jobs, or the refusal code, with nothing
-/// written on a refusal.
+/// Plans a Delete everything: checks the grant, the revision a client saw (none for a job),
+/// the project, its exact name and [`delete_check`], then records Stop all and the hold on
+/// projects home moves in one write. Inputs: the connection, database path, admission, the
+/// DeleteProject request, that revision and the exchange running it. Output: the plan with
+/// the project's research jobs, or the refusal code, with nothing written on a refusal.
 pub(super) fn delete_plan(
     db: &mut Connection,
     path: &Path,
