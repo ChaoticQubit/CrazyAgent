@@ -769,6 +769,27 @@ fn a_launch_is_refused_when_its_own_prefix_node_is_passed_over() {
     assert!(line.contains(&own.display().to_string()), "{line}");
 }
 
+/// V243-OWN-PREFIX-NODE-REFUSE: the harness list reads a harness as a launch reads it, so a
+/// Codex npm script whose own prefix `node` the resolver passes over shows as unable to run,
+/// with the launch's own line and no program to install, never as ready.
+#[test]
+fn the_harness_list_reads_a_passed_over_own_prefix_node_as_a_launch_does() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    assert!(resolve_entry(&entry, &places).is_ok());
+    let needs = crate::harnesses::update::needs(&entry, &places).expect("a harness that can't run");
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert_eq!(needs.line, line);
+    assert_eq!(needs.program, None);
+}
+
 /// V243-OWN-PREFIX-NODE-REFUSE: [`own_node_refused`] answers only for a script that asks
 /// `env` for `node` and whose own prefix holds a `node` the resolver passes over. A prefix
 /// with no `node` or with a usable one, and a script asking for another program, give none,
