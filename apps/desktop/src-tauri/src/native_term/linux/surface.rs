@@ -173,6 +173,17 @@ impl Pacing {
     fn is_gone(&self) -> bool {
         self.gone
     }
+
+    /// Notes the child's rectangle having no part inside the webview. Not tracked yet.
+    fn clip(&mut self) {}
+
+    /// Notes a part of the rectangle back inside the webview. Not tracked yet.
+    fn unclip(&mut self) {}
+
+    /// Whether the child is on screen: shown and its toplevel mapped. Output: the answer.
+    fn on_screen(&self) -> bool {
+        self.shown && !self.gone
+    }
 }
 
 /// Marks a child gone from its toplevel's unmap or unrealize handler. Input: the shared
@@ -884,6 +895,35 @@ mod tests {
         pacing.hide();
         pacing.show();
         assert!(pacing.ready());
+    }
+
+    /// A child whose rectangle has no part inside the webview stays off screen and never
+    /// presents, and owes a frame once a part comes back; a hidden child stays off screen.
+    #[test]
+    fn a_child_with_no_visible_part_never_presents_and_owes_a_frame_when_one_comes_back() {
+        let mut pacing = Pacing::new();
+        pacing.presenting();
+        pacing.frame_done();
+        pacing.clip();
+        pacing.changed();
+        assert!(!pacing.ready());
+        assert!(!pacing.on_screen());
+        pacing.unclip();
+        assert!(pacing.on_screen());
+        assert!(pacing.ready());
+        pacing.presenting();
+        pacing.frame_done();
+        pacing.unclip();
+        assert!(!pacing.ready(), "a part that stayed owes no frame");
+        pacing.clip();
+        pacing.hide();
+        pacing.unclip();
+        assert!(
+            !pacing.on_screen(),
+            "a hidden child stays off screen with a part"
+        );
+        pacing.show();
+        assert!(pacing.on_screen() && pacing.ready());
     }
 
     #[test]
