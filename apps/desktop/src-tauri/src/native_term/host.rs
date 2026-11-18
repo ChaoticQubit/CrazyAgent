@@ -119,7 +119,7 @@ fn engine() -> Result<(PathBuf, PathBuf), String> {
         .and_then(|terminal| terminal.parent())
         .ok_or("native_terminal_socket_invalid")?
         .to_path_buf();
-    assert!(root.join("engine.db").is_file());
+    assert!(root.is_absolute());
     assert!(socket.starts_with(&root));
     Ok((socket, root))
 }
@@ -242,7 +242,7 @@ impl Native {
             return Err("native_terminal_views_full".into());
         }
         let (_, root) = engine()?;
-        if super::own_server(&root, name) {
+        if super::own_server(&root, name)? {
             return Err("native_terminal_own_server".into());
         }
         if self.control.is_none() {
