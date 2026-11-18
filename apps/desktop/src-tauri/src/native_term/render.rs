@@ -835,17 +835,62 @@ impl Shared {
         painted
     }
 
-    /// Paints one frame: reshapes changed rows, uploads rectangles and glyphs, renders and
-    /// presents into the texture given, else the surface's next one; a lost surface is
-    /// reconfigured at its held size. On a lost device it does no GPU work, since glyphon's
-    /// buffer map then panics in wgpu 25. Inputs: the surface, the frame and an acquired
-    /// texture. Output: ok, why it was skipped, or `native_terminal_gpu`.
+    /// Gives back a texture acquired for a frame that is not drawn: dropped, which discards
+    /// it, or forgotten on a lost device, where the drop panics in wgpu 25, so one frame
+    /// leaks as in `hand_back`. Input: the texture. Output: ok, or `native_terminal_gpu` on
+    /// a lost device.
+    pub fn give_back(&self, output: wgpu::SurfaceTexture) -> Result<(), &'static str> {
+        let set = self
+            .device
+            .as_ref()
+            .expect("an acquired texture has a device");
+        assert!(output.texture.width() <= set.side_max);
+        if set.is_lost() {
+            std::mem::forget(output);
+            return Err(GPU_FAULT);
+        }
+        drop(output);
+        Ok(())
+    }
+
+    /// Paints one frame: builds it, then renders and presents into the texture given, else
+    /// the surface's next one; a lost surface is reconfigured at its held size. A texture
+    /// given for a frame that is not built goes back through `give_back`. Inputs: the
+    /// surface, the frame and an acquired texture. Output: ok, why it was skipped, or
+    /// `native_terminal_gpu`.
     fn paint(
         &mut self,
         surface: &mut Surface,
         frame: &Frame,
         acquired: Option<wgpu::SurfaceTexture>,
     ) -> Result<(), String> {
+        let rects = match self.build(surface, frame) {
+            Ok(rects) => rects,
+            Err(error) => {
+                if let Some(output) = acquired {
+                    self.give_back(output)?;
+                }
+                return Err(error);
+            }
+        };
+        let output = match acquired {
+            Some(output) => output,
+            None => self.acquire(surface)?,
+        };
+        let set = self.device.as_ref().expect("a built frame has a device");
+        let clear = linear_rgba(self.theme.background, 1.0);
+        let encoded = encode(set, surface, &output, rects.len() / 8, clear);
+        hand_back(set, output, encoded)?;
+        surface.atlas.trim();
+        assert_eq!(surface.generation, self.generation);
+        Ok(())
+    }
+
+    /// Builds one frame's GPU input: reshapes changed rows, uploads the rectangles, the
+    /// screen size and the glyphs. On a lost device it does no GPU work, since glyphon's
+    /// buffer map then panics in wgpu 25. Inputs: the surface and the frame. Output: the
+    /// rectangle data, why the frame is skipped, or `native_terminal_gpu`.
+    fn build(&mut self, surface: &mut Surface, frame: &Frame) -> Result<Vec<f32>, String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
         let set = self.device.as_ref().ok_or("no device")?;
@@ -892,16 +937,8 @@ impl Shared {
                 &mut self.swash,
             )
             .map_err(|e| e.to_string())?;
-        let output = match acquired {
-            Some(output) => output,
-            None => self.acquire(surface)?,
-        };
-        let clear = linear_rgba(self.theme.background, 1.0);
-        let encoded = encode(set, surface, &output, rects.len() / 8, clear);
-        hand_back(set, output, encoded)?;
-        surface.atlas.trim();
-        assert_eq!(surface.generation, self.generation);
-        Ok(())
+        assert_eq!(rects.len() % 8, 0);
+        Ok(rects)
     }
 }
 

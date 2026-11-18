@@ -192,7 +192,8 @@ impl Painter {
 
     /// Draws one ready view, frame-ready first: geometry, then the swap-chain wait, then
     /// the newest frame, so a frame posted during the wait is the one drawn. A view with no
-    /// surface or a failed wait keeps its change for the board's bounded retry.
+    /// surface or a failed wait keeps its change for the board's bounded retry; a texture
+    /// with no frame to draw is given back.
     fn draw(&mut self, id: u64) {
         let index = self.views.iter().position(|view| view.id == id);
         let index = index.expect("a ready view has a drawn entry");
@@ -220,6 +221,9 @@ impl Painter {
             view.last = Some(frame);
         }
         let Some(frame) = view.last.as_ref() else {
+            if shared.give_back(output).is_err() {
+                failed();
+            }
             return;
         };
         match shared.draw_acquired(surface, frame, output) {
