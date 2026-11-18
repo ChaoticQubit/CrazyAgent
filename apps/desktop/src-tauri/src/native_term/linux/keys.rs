@@ -47,6 +47,38 @@ fn text(keyval: Key) -> Option<String> {
     Some(typed.to_string())
 }
 
+/// One keymap entry for a hardware key, as GDK lists them: group, level and keyval.
+pub type Entry = (i32, i32, Key);
+
+/// The keyval a Control chord reads on a non-Latin layout, as other GTK terminals map it,
+/// so Ctrl+C still interrupts on a Cyrillic or Greek layout: with Control held and a key
+/// whose character is not ASCII, the same hardware key's keyval in its lowest Latin
+/// group, at the press's Shift level or else level 0. Inputs: the keyval, the modifier
+/// state and the key's entries, read only then. Output: the keyval to map.
+pub fn control_latin(
+    keyval: Key,
+    state: ModifierType,
+    entries: impl FnOnce() -> Vec<Entry>,
+) -> Key {
+    let latin = |found: Key| found.to_unicode().is_some_and(|c| c.is_ascii_graphic());
+    let non_latin = keyval.to_unicode().is_some_and(|c| !c.is_ascii());
+    if !state.contains(ModifierType::CONTROL_MASK) || !non_latin {
+        return keyval;
+    }
+    let entries = entries();
+    let at_level = |level: i32| {
+        entries
+            .iter()
+            .filter(|&&(_, at, found)| at == level && latin(found))
+            .min_by_key(|&&(group, _, _)| group)
+            .map(|&(_, _, found)| found)
+    };
+    let shifted = i32::from(state.contains(ModifierType::SHIFT_MASK));
+    let mapped = at_level(shifted).or_else(|| at_level(0)).unwrap_or(keyval);
+    assert!(mapped == keyval || latin(mapped));
+    mapped
+}
+
 /// The input one GDK key press makes in the agent's terminal, by the xterm rules of
 /// `keymap`: Shift, Control and Alt (Mod1) count, lock keys and the input method's forward
 /// bit do not, and a Super or Hyper chord sends nothing. Inputs: the key and its modifier

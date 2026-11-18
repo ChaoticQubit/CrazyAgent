@@ -487,15 +487,19 @@ impl Inner {
         }
     }
 
-    /// Takes one key press while the view is active, ahead of the webview: a chord becomes
-    /// its command, the input method gets the key next, and a key it does not take goes
-    /// to the key map. Input: the event. Output: whether the key goes on to the page,
-    /// which it does only while inactive.
+    /// Takes one key press while the view is active, ahead of the webview: a Control
+    /// chord reads the key's Latin group on a non-Latin layout, a chord becomes its
+    /// command, the input method gets the key next, and a key it does not take goes to
+    /// the key map. Input: the event. Output: whether the key goes on to the page, which
+    /// it does only while inactive.
     fn key_press(&self, event: &EventKey) -> Propagation {
         if !self.focus.get().active() {
             return Propagation::Proceed;
         }
-        let (keyval, state) = (event.keyval(), event.state());
+        let state = event.state();
+        let keyval = keys::control_latin(event.keyval(), state, || {
+            self.entries(event.hardware_keycode())
+        });
         if let Some(command) = chord(keyval, state) {
             self.send(command);
             return Propagation::Stop;
@@ -507,6 +511,19 @@ impl Inner {
             self.send(ViewEvent::Key(input));
         }
         Propagation::Stop
+    }
+
+    fn entries(&self, keycode: u16) -> Vec<keys::Entry> {
+        let display = WidgetExt::display(&self.toplevel);
+        gdk::Keymap::for_display(&display)
+            .map(|keymap| {
+                keymap
+                    .entries_for_keycode(u32::from(keycode))
+                    .into_iter()
+                    .map(|(entry, keyval)| (entry.group(), entry.level(), Key::from(keyval)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn key_release(&self, event: &EventKey) -> Propagation {
