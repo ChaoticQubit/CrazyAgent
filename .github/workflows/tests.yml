@@ -159,7 +159,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --lib -- --test-threads 1
-          cargo test -p crazyagent-win-sandbox --locked --test private_judge --test private_windows -- --test-threads 1
+      - name: Pure judge rows in crazyagent-win-sandbox
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent-win-sandbox --locked --test private_judge -- --test-threads 1
+      - name: Store label rows with their probe lines
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent-win-sandbox --locked --test private_windows -- --test-threads 1 --show-output
       - name: W2 P2 and D9 pipe rows with their probe lines
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
@@ -181,11 +190,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p crazyagent --lib --locked --no-run
-      - name: D6 ipc row on Windows
+      - name: ipc and storage rows on Windows
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           set -euo pipefail
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 ipc::
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 ipc:: storage::
       - name: W2 pure rows on Linux (#551 r2)
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
