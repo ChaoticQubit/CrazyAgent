@@ -21,8 +21,10 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   TMUX_VERSION: "3.8"
   BASE_SHA: cdf02af79b53347eb64d7d2b0d9d42391d6f71aa
-  TIP_SHA: 3a648557df1cf8b215ad2f141a0218ce2b7733bb
+  TIP_SHA: a7fbf7b9519e8bbb272b27ff6b1c350e8f4a8c49
   BOOT_ROWS: cli_output_failure_cleans_runtime_before_unlock cli_preserves_unrecorded_socket cli_shutdown_preserves_observed_replacements
+  IDE_MODULE: "ide::server::tests::"
+  ASIDE_ROW: ide::server::tests::a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path
   LEAK_ROW: ide::server::tests::a_confined_start_never_reuses_an_earlier_start_s_temp_folder
   NEXT_ROW: ide::server::tests::the_next_confined_start_removes_an_earlier_temp_folder_its_session_shut_and_pinned
   SWEEP_ROW: ide::server::tests::the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned
@@ -33,7 +35,7 @@ defaults:
 
 jobs:
   macos:
-    name: macOS owner_bootstrap rows around the IDE temp rows, ${{ matrix.side }}
+    name: macOS owner_bootstrap rows around the IDE server rows, ${{ matrix.side }}
     runs-on: macos-15
     timeout-minutes: 120
     strategy:
@@ -83,7 +85,7 @@ jobs:
           add-rust-environment-hash-key: false
           cache-bin: false
           save-if: false
-      - name: Bootstrap rows, then the IDE temp rows, then the bootstrap rows again
+      - name: Bootstrap rows, then the IDE server rows, then the bootstrap rows again
         env:
           SIDE: ${{ matrix.side }}
         run: |
@@ -99,7 +101,7 @@ jobs:
           cargo test -p crazyagent --locked --test owner_bootstrap --no-run 2>&1 | tail -3
           read -ra boot <<< "$BOOT_ROWS"
           cargo test -p crazyagent --locked --test owner_bootstrap -- --exact "${boot[@]}" 2>&1 | tee -a "$pre"
-          cargo test -p crazyagent --locked --lib -- --exact "$LEAK_ROW" "$NEXT_ROW" "$SWEEP_ROW" 2>&1 | tee "$lib"
+          cargo test -p crazyagent --locked --lib -- "$IDE_MODULE" 2>&1 | tee "$lib"
           left_after_lib=$(gone)
           echo "gone folders after the IDE rows: $left_after_lib"
           cargo test -p crazyagent --locked --test owner_bootstrap -- --exact "${boot[@]}" 2>&1 | tee "$post"
@@ -107,16 +109,19 @@ jobs:
           result() { grep -E "^test $1 \.\.\. " "$2" | sed -E 's/.* \.\.\. //'; }
           count() { grep -cE "^test [a-z_]+ \.\.\. $1$" "$2"; }
           pre_ok=$(count ok "$pre"); post_ok=$(count ok "$post"); post_failed=$(count FAILED "$post")
-          leak=$(result "$LEAK_ROW" "$lib"); next=$(result "$NEXT_ROW" "$lib"); sweep=$(result "$SWEEP_ROW" "$lib")
+          leak=$(result "$LEAK_ROW" "$lib"); aside=$(result "$ASIDE_ROW" "$lib"); next=$(result "$NEXT_ROW" "$lib"); sweep=$(result "$SWEEP_ROW" "$lib")
+          lib_ok=$(grep -cE "^test $IDE_MODULE[a-z0-9_]+ \.\.\. ok$" "$lib")
+          lib_failed=$(grep -cE "^test $IDE_MODULE[a-z0-9_]+ \.\.\. FAILED$" "$lib")
+          grep -E "^test $IDE_MODULE[a-z0-9_]+ \.\.\. FAILED$" "$lib"
           line=$(grep -c "ide_server_tmp_left" "$post")
           verdict=pass
-          [ "$pre_ok" = 3 ] && [ "$leak" = ok ] || verdict=fail
+          [ "$pre_ok" = 3 ] && [ "$leak" = ok ] && [ "$aside" = ok ] && [ "$lib_ok" -gt 20 ] || verdict=fail
           case "$SIDE" in
-            base) [ "$next" = FAILED ] && [ "$sweep" = FAILED ] && [ "$post_failed" = 3 ] && [ "$line" -ge 1 ] || verdict=fail ;;
-            tip) [ "$next" = ok ] && [ "$sweep" = ok ] && [ "$post_ok" = 3 ] && [ "$line" = 0 ] || verdict=fail ;;
+            base) [ "$next" = FAILED ] && [ "$sweep" = FAILED ] && [ "$lib_failed" = 2 ] && [ "$post_failed" = 3 ] && [ "$line" -ge 1 ] || verdict=fail ;;
+            tip) [ "$next" = ok ] && [ "$sweep" = ok ] && [ "$lib_failed" = 0 ] && [ "$post_ok" = 3 ] && [ "$line" = 0 ] || verdict=fail ;;
           esac
-          { echo "| side | pre ok | leak row | next row | sweep row | gone after lib | post ok | post failed | tmp_left lines | verdict |"; echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"; echo "| $SIDE | $pre_ok | ${leak:-none} | ${next:-none} | ${sweep:-none} | $left_after_lib | $post_ok | $post_failed | $line | $verdict |"; } >> "$GITHUB_STEP_SUMMARY"
-          echo "VERDICT $SIDE pre_ok=$pre_ok leak=${leak:-none} next=${next:-none} sweep=${sweep:-none} gone_after_lib=$left_after_lib post_ok=$post_ok post_failed=$post_failed tmp_left_lines=$line verdict=$verdict"
+          { echo "| side | pre ok | leak | aside | next | sweep | ide ok | ide failed | gone after lib | post ok | post failed | tmp_left lines | verdict |"; echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"; echo "| $SIDE | $pre_ok | ${leak:-none} | ${aside:-none} | ${next:-none} | ${sweep:-none} | $lib_ok | $lib_failed | $left_after_lib | $post_ok | $post_failed | $line | $verdict |"; } >> "$GITHUB_STEP_SUMMARY"
+          echo "VERDICT $SIDE pre_ok=$pre_ok leak=${leak:-none} aside=${aside:-none} next=${next:-none} sweep=${sweep:-none} ide_ok=$lib_ok ide_failed=$lib_failed gone_after_lib=$left_after_lib post_ok=$post_ok post_failed=$post_failed tmp_left_lines=$line verdict=$verdict"
           [ "$verdict" = pass ]
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
