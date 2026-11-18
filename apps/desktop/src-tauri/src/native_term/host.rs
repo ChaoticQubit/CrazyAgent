@@ -109,15 +109,26 @@ fn with_native<T>(work: impl FnOnce(&mut Native) -> T) -> Option<T> {
     })
 }
 
-/// Starts the control client on the checked engine socket, with the tmux the engine uses.
-/// Inputs: the app and the shared inbox. Output: the client, or a plain code.
-fn connect(app: &tauri::AppHandle, inbox: &Arc<Inbox>) -> Result<Control, String> {
+/// The engine socket the switch names, checked, and the engine root that holds it. Output:
+/// (socket, root), or a plain code.
+fn engine() -> Result<(PathBuf, PathBuf), String> {
     let raw = std::env::var_os(super::SOCKET_ENV).unwrap_or_default();
     let socket: PathBuf = super::engine_socket(&raw).map_err(str::to_owned)?;
     let root = socket
         .parent()
         .and_then(|terminal| terminal.parent())
-        .ok_or("native_terminal_socket_invalid")?;
+        .ok_or("native_terminal_socket_invalid")?
+        .to_path_buf();
+    assert!(root.join("engine.db").is_file());
+    assert!(socket.starts_with(&root));
+    Ok((socket, root))
+}
+
+/// Starts the control client on the checked engine socket, with the tmux the engine uses.
+/// Inputs: the app and the shared inbox. Output: the client, or a plain code.
+fn connect(app: &tauri::AppHandle, inbox: &Arc<Inbox>) -> Result<Control, String> {
+    let (socket, root) = engine()?;
+    let root = root.as_path();
     let tmux = crazyagent::terminal::tmux::installed(root).ok_or("native_terminal_tmux_missing")?;
     assert!(tmux.is_absolute());
     assert_eq!(root.join("terminal").join("tmux.sock"), socket);
@@ -229,6 +240,10 @@ impl Native {
     ) -> Result<u64, String> {
         if self.views.len() >= VIEWS_MAX {
             return Err("native_terminal_views_full".into());
+        }
+        let (_, root) = engine()?;
+        if super::own_server(&root, name) {
+            return Err("native_terminal_own_server".into());
         }
         if self.control.is_none() {
             self.control = Some(connect(&self.app, &self.inbox)?);
