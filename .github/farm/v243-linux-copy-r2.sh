@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+fix=295377a778468dbc728170066d22489664e49388
+red=237f2c5f9fc881f6a7c65870f1d5ef083f68db8e
+row="off a Mac, a Shift drag on the normal screen selects the dragged text"
+files="apps/desktop/test/terminal-copy.test.mjs apps/desktop/test/terminal-wall.test.mjs apps/desktop/test/kept-views.test.mjs apps/desktop/test/team-graph.test.mjs apps/desktop/test/terminal-renderer.test.mjs apps/desktop/test/live-master.test.mjs apps/desktop/test/reinstall-offer.test.mjs"
+git -c advice.detachedHead=false checkout -q "$fix"
+echo "=== GREEN at fix $fix: the panel's node test files"
+set +e
+node --test --test-timeout=15000 --test-reporter=spec $files 2>&1 | tee "$RUNNER_TEMP/green.log"
+green=${PIPESTATUS[0]}
+set -e
+echo "GREEN rc=$green"
+git -c advice.detachedHead=false checkout -q "$red"
+echo "=== RED at $red: terminal-copy.test.mjs, the new row must fail"
+set +e
+node --test --test-timeout=15000 --test-reporter=spec apps/desktop/test/terminal-copy.test.mjs 2>&1 | tee "$RUNNER_TEMP/red.log"
+redrc=${PIPESTATUS[0]}
+set -e
+echo "RED rc=$redrc"
+grep -F "✖ $row" "$RUNNER_TEMP/red.log" >/dev/null && redrow=failed || redrow=passed
+echo "RED new row: $redrow"
+[ "$green" -eq 0 ] && [ "$redrc" -ne 0 ] && [ "$redrow" = failed ]
