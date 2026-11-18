@@ -44,7 +44,9 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
 /// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`] and
 /// handed to git as `git_path` gives them, so Git for Windows never gets a verbatim path. The
 /// repository's own `core.excludesFile` is never read, and on Windows a `.git` that points
-/// git elsewhere (`redirected`) gives `project_files_no_repository`.
+/// git elsewhere (`redirected`) gives `project_files_no_repository`. Git is given the `.git`
+/// folder as its common folder on every system, so a `commondir` planted after that check,
+/// or on Unix at any time, redirects nothing.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
@@ -84,6 +86,7 @@ pub(crate) fn list(
         .env_clear()
         .env("LC_ALL", "C")
         .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
+        .env("GIT_COMMON_DIR", git_root.join(".git"))
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE)
