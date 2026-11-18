@@ -55,16 +55,14 @@ impl Wake {
 
     /// Reads away the bytes [`Wake::rouse`] wrote, at most [`DRAIN_READS_MAX`] reads, so the
     /// end stops being ready until the next wake. Input: the end. Output: none.
+    #[cfg(unix)]
     pub(crate) fn drain(&self) {
-        #[cfg(unix)]
-        {
-            use std::io::Read;
-            let mut bytes = [0_u8; 64];
-            for _ in 0..DRAIN_READS_MAX {
-                match (&self.0).read(&mut bytes) {
-                    Ok(count) if count == bytes.len() => {}
-                    Ok(_) | Err(_) => return,
-                }
+        use std::io::Read;
+        let mut bytes = [0_u8; 64];
+        for _ in 0..DRAIN_READS_MAX {
+            match (&self.0).read(&mut bytes) {
+                Ok(count) if count == bytes.len() => {}
+                Ok(_) | Err(_) => return,
             }
         }
     }
