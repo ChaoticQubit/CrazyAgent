@@ -951,17 +951,20 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     let remove = || {
         to_tab(&pty, REPO, "Settings", &SHIFT_RIGHT);
         pty.keys(&["x"]);
-        let ask = pty.until("x asks before removing the project", |screen| {
-            screen.contains(&format!("Remove {REPO} from CrazyAgent?"))
-        });
-        let dialog = ask
-            .lines()
-            .filter_map(|line| line.split_once('│').map(|(_, rest)| rest))
-            .map(|rest| rest.rsplit_once('│').map_or(rest, |(inside, _)| inside))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let words = dialog.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("The project folder stays on disk"), "{ask}");
+        pty.until(
+            "x asks before removing the project and says its folder stays on disk",
+            |screen| {
+                let dialog = screen
+                    .lines()
+                    .filter_map(|line| line.split_once('│').map(|(_, rest)| rest))
+                    .map(|rest| rest.rsplit_once('│').map_or(rest, |(inside, _)| inside))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let words = dialog.split_whitespace().collect::<Vec<_>>().join(" ");
+                screen.contains(&format!("Remove {REPO} from CrazyAgent?"))
+                    && words.contains("The project folder stays on disk")
+            },
+        );
         pty.keys(&["y"]);
         pty.until(
             "the project is removed or the owner is told why not",
