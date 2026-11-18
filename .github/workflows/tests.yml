@@ -136,7 +136,7 @@ jobs:
           chrome="$work/chrome-linux64/chrome"
           "$chrome" --version
           echo "CRAZYAGENT_CHROME=$chrome" >> "$GITHUB_ENV"
-      - name: Native panel red rows at 50397a821, then the panel, settings and command suites and typecheck at the tip
+      - name: Native panel red rows at 50397a821 and 7ddb8db6a, then the panel, settings and command suites and typecheck at the tip
         run: |
           cp .github/farm/native-only-node.sh "$RUNNER_TEMP/native-only-node.sh"
           bash "$RUNNER_TEMP/native-only-node.sh"
