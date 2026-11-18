@@ -740,6 +740,7 @@ impl Drop for View {
 mod tests {
     use super::*;
     use crate::native_term::event::MouseKind;
+    use crate::native_term::linux::clip::Clip;
     use crate::native_term::linux::rows::{checkpoint, pump_for, pump_until, row_dir};
     use crate::native_term::linux::surface::{self, Rect};
     use crate::native_term::pane::Named;
@@ -1037,10 +1038,43 @@ mod tests {
         assert_eq!(pointer.release(3, (110.0, 130.0), false), view(false, None));
         assert_eq!(pointer.motion((110.0, 130.0), false), Route::Page);
         assert_eq!(
-            pointer.press(2, (110.0, 130.0), 0, false, false, DOUBLE),
+            pointer.press(8, (110.0, 130.0), 0, false, false, DOUBLE),
             view(false, None)
         );
-        assert_eq!(pointer.release(2, (110.0, 130.0), false), view(false, None));
+        assert_eq!(pointer.release(8, (110.0, 130.0), false), view(false, None));
+    }
+
+    #[test]
+    fn a_middle_press_inside_reads_primary_and_is_held_until_release() {
+        let mut pointer = placed();
+        assert_eq!(
+            pointer.press(2, (110.0, 130.0), 0, false, false, DOUBLE),
+            Route::Primary
+        );
+        assert_eq!(pointer.motion((120.0, 140.0), false), view(false, None));
+        assert_eq!(pointer.release(2, (120.0, 140.0), false), view(false, None));
+        assert_eq!(
+            pointer.press(2, (99.0, 130.0), 0, false, false, DOUBLE),
+            Route::Page
+        );
+        assert_eq!(
+            pointer.press(2, (110.0, 130.0), 0, false, true, DOUBLE),
+            Route::Page
+        );
+    }
+
+    #[test]
+    fn a_primary_paste_lands_only_on_a_placed_uncovered_view() {
+        let text = || Some("p".to_owned());
+        let paste = Some(ViewEvent::Key(Input::Paste {
+            text: "p".to_owned(),
+        }));
+        let mut focus = Focus::new(true);
+        assert_eq!(primary_paste(focus, true, text()), paste);
+        assert_eq!(primary_paste(focus, false, text()), None);
+        assert_eq!(primary_paste(focus, true, None), None);
+        assert_eq!(focus.cover(true), None);
+        assert_eq!(primary_paste(focus, true, text()), None);
     }
 
     #[test]
@@ -1142,7 +1176,7 @@ mod tests {
         });
         page.grab_focus();
         pump_for(Duration::from_millis(300));
-        let view = View::new(&window, ID, seen).expect("a view");
+        let view = View::new(&window, ID, seen, Rc::new(Clip::desktop())).expect("a view");
 
         step("page");
         pump_until("page typing", || page_text(&page) == "v:xy");
@@ -1291,7 +1325,7 @@ mod tests {
             .translate_coordinates(&window, 0, 0)
             .expect("the page inside the toplevel");
         let rect = surface::rect((100.0, 120.0, 400.0, 240.0), offset).expect("a host rect");
-        let view = View::new(&window, ID, seen).expect("a view");
+        let view = View::new(&window, ID, seen, Rc::new(Clip::desktop())).expect("a view");
         view.place(Some(rect));
         view.cover(true);
         assert_eq!(take_seen(), Vec::new());
@@ -1352,6 +1386,58 @@ mod tests {
             vec![ViewEvent::Focus(false)],
             "a page click releases native focus"
         );
+        drop(view);
+    }
+
+    /// A middle click inside the rectangle reads PRIMARY, which the farm set, and hands
+    /// the text to the view's host as the same paste input Cmd-V makes, so the pane's paste
+    /// checks and bracketed paste apply; the page gets no press. Covered, a middle click
+    /// is the page's and pastes nothing into the view.
+    #[test]
+    #[ignore = "needs a display, the farm's pointer and its clipboard tools: the farm runs it under Xvfb and sway"]
+    fn a_middle_click_pastes_primary_through_the_paste_path() {
+        assert!(
+            row_dir().is_some(),
+            "NATIVE_ROW_DIR: the farm sets PRIMARY and clicks"
+        );
+        gtk::init().expect("a display");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("native-row");
+        window.set_decorated(false);
+        window.set_default_size(640, 480);
+        let page = webkit2gtk::WebView::new();
+        window.add(&page);
+        window.show_all();
+        page.load_html(POINTER_PAGE, None);
+        pump_until("page load", || {
+            !page.is_loading() && counts(&page) == [0, 0, 0]
+        });
+        page.grab_focus();
+        pump_for(Duration::from_millis(300));
+        let offset = page
+            .translate_coordinates(&window, 0, 0)
+            .expect("the page inside the toplevel");
+        let rect = surface::rect((100.0, 120.0, 400.0, 240.0), offset).expect("a host rect");
+        let view = View::new(&window, ID, seen, Rc::new(Clip::desktop())).expect("a view");
+        view.place(Some(rect));
+
+        pointer_step("primary", &window, rect);
+        pump_until("the primary paste", || seen_count() >= 1);
+        pump_for(Duration::from_millis(300));
+        assert_eq!(
+            take_seen(),
+            vec![ViewEvent::Key(Input::Paste {
+                text: "farm-primary-3".to_owned()
+            })]
+        );
+        assert_eq!(counts(&page), [0, 0, 0], "the page gets no press");
+
+        view.cover(true);
+        assert_eq!(take_seen(), Vec::new());
+        pointer_step("covered-primary", &window, rect);
+        pump_until("the overlay press", || counts(&page)[0] == 1);
+        pump_for(Duration::from_millis(500));
+        assert_eq!(take_seen(), Vec::new(), "a covered view pastes nothing");
         drop(view);
     }
 }
