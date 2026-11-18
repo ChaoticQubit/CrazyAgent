@@ -338,12 +338,13 @@ mod tests {
 
     /// A board call from a glib timeout, which runs under no user event, is refused on a
     /// real display, where the guard reads GTK's current event: the write is not made and
-    /// the read gets nothing.
+    /// the read of the seeded board gets nothing, and the seed is still there after.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb and sway"]
     fn a_board_call_from_a_timeout_is_refused() {
         gtk::init().expect("a display");
         let clip = Rc::new(Clip::private());
+        assert!(as_if(KEY, || clip.write(Board::Clipboard, "seeded")));
         let seen = Rc::new(RefCell::new(None));
         {
             let (clip, seen) = (Rc::clone(&clip), Rc::clone(&seen));
@@ -362,6 +363,10 @@ mod tests {
             *seen.borrow(),
             Some((false, Some(None))),
             "a timeout neither writes nor reads a board"
+        );
+        assert_eq!(
+            read_now(&clip, Board::Clipboard, KEY),
+            Some("seeded".to_owned())
         );
     }
 }
