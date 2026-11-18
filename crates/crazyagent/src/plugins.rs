@@ -905,6 +905,22 @@ pub fn check_refused(reason: &str) -> String {
     problem
 }
 
+/// Why a server check is not run on Windows under a network that names hosts or ports: the
+/// AppContainer holds no such limit, so the check would reach the whole internet, which the
+/// owner accepted for agents only (#519 F1).
+const WINDOWS_CHECK_LIMIT: &str = "limiting a Windows agent's network to a few ports needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
+
+/// The refusal of a server check whose network names hosts or ports on Windows (#519 F1).
+/// Inputs: the OS and the check's network. Output: the problem to record, or None when the
+/// check may run.
+pub fn check_network_refused(os: &str, network: &crate::sandbox::SandboxNetwork) -> Option<String> {
+    let limited = matches!(
+        network,
+        crate::sandbox::SandboxNetwork::Only(remotes) if !remotes.is_empty()
+    );
+    (os == "windows" && limited).then(|| check_refused(WINDOWS_CHECK_LIMIT))
+}
+
 /// The start of a recorded check problem for a failed context-mode shared install, followed
 /// by the minutes from the check until a check or an agent launch may try the install again.
 const INSTALL_RETRY: &str = "server_install_failed:";
@@ -1118,6 +1134,42 @@ mod tests {
         assert!(plain_problem("server_name_invalid").is_some());
         assert!(plain_problem("server_secret_name_invalid").is_some());
         assert!(plain_problem("skill_missing_skill_md").is_some());
+    }
+
+    #[test]
+    fn a_windows_check_under_a_host_or_port_limit_is_refused_with_the_firewall_reason() {
+        use crate::sandbox::policy::AgentNetwork;
+        use crate::sandbox::{SandboxNetwork, SandboxRemote};
+        let https = AgentNetwork::Https.sandbox(None);
+        assert_eq!(
+            https,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+        );
+        let refused = check_network_refused("windows", &https).expect("refused on Windows");
+        assert_eq!(refused, check_refused(WINDOWS_CHECK_LIMIT));
+        assert_eq!(
+            check_problem(&refused),
+            format!("CrazyAgent did not run the check: {WINDOWS_CHECK_LIMIT}.")
+        );
+        let loopback = SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)]);
+        assert!(check_network_refused("windows", &loopback).is_some());
+        for open in [
+            AgentNetwork::Open.sandbox(None),
+            AgentNetwork::None.sandbox(None),
+        ] {
+            assert!(
+                check_network_refused("windows", &open).is_none(),
+                "{open:?}"
+            );
+        }
+        for os in ["macos", "linux"] {
+            for network in [&https, &loopback] {
+                assert!(
+                    check_network_refused(os, network).is_none(),
+                    "{os} {network:?}"
+                );
+            }
+        }
     }
 
     #[test]

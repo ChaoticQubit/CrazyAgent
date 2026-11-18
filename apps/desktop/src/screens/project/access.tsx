@@ -48,15 +48,19 @@ export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: stri
   { network: "none", label: "None", help: "None limits agents to their model: a hosted model's own hosts, through the engine's proxy, or only the local model's port. The plugin check reaches nothing." },
 ];
 
-/** The line under a network choice that says what it can't hold on Linux: the engine's own for
- * the choice when it sends one, null where the choice holds, else this desktop's line on Linux,
- * for an engine that sends none. Inputs: the engine's view, the chosen network and this
- * desktop's platform. Output: the line, or null. */
+/** The line under a network choice that says what it can't hold on Linux or Windows: the
+ * engine's own when it sends one, null where the choice holds, else this desktop's line for
+ * its platform, for an engine that sends none. Inputs: the engine's view, the chosen network
+ * and this desktop's platform. Output: the line, or null. */
 export function networkGap(view: Pick<PolicyView, "networks"> | null | undefined, network: AgentNetwork, platform: string = desktopPlatform()): string | null {
   const sent = view?.networks.find((choice) => choice.network === network)?.gap;
   if (sent !== undefined) return sent;
-  return platform === "linux" ? LINUX_PORTS_ANY_HOST : null;
+  if (platform === "linux") return LINUX_PORTS_ANY_HOST;
+  return platform === "windows" && network !== "open" ? WINDOWS_NETWORK_WIDE : null;
 }
+
+/** What a limited network can't hold on Windows, shown there only, the engine's WINDOWS_NETWORK_WIDE_LINE. */
+export const WINDOWS_NETWORK_WIDE = "On Windows, network limits can't hold hosts or ports in this version: with Port 443 only or None, agents reach the whole internet, and a model on this computer, such as a local server or the relay, can't be reached.";
 
 /** What a limited network can't hold on Linux, shown there only, the engine's LINUX_PORTS_ANY_HOST_LINE. */
 export const LINUX_PORTS_ANY_HOST = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";

@@ -1,6 +1,6 @@
 use super::{
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, agent_env, canonical, clean_absolute,
-    invalid,
+    MODEL_LOOPBACK_WINDOWS_LINE, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
+    SandboxRemote, agent_env, canonical, clean_absolute, invalid,
 };
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
@@ -17,9 +17,6 @@ pub const HELPER_NAME: &str = "crazyagent-win-boundary.exe";
 
 /// Why a Windows launch is refused when the boundary helper is missing, in plain words.
 pub const APPCONTAINER_MISSING: &str = "Windows agents start through crazyagent-win-boundary.exe next to the engine, which is missing, so no agent starts unconfined";
-
-/// Why a Windows agent whose network is limited to a few ports is refused, in plain words.
-pub const FIREWALL_RULE_MISSING: &str = "limiting a Windows agent's network to a few ports needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
 
 /// Why a Seatbelt profile is refused on Windows, in plain words.
 pub const SEATBELT_MISSING: &str =
@@ -237,15 +234,24 @@ pub fn agent_command<'a>(
     Ok(command)
 }
 
-/// The AppContainer capabilities for a network reach: the internet client capability when
-/// the network is open, none when no endpoint is allowed, and `Unavailable` with
-/// [`FIREWALL_RULE_MISSING`] for any endpoint limit, which is never widened to open.
-/// Input: the network. Output: the capabilities, or the refusal.
+/// The AppContainer capabilities for a network reach (DESIGN-0256 O2a): the internet client
+/// when open or limited to ports on any host, a limit the AppContainer cannot hold and so
+/// widens; none when no endpoint is allowed; and [`MODEL_LOOPBACK_WINDOWS_LINE`] for any
+/// loopback port, which it cannot reach (P6). Input: the network. Output: the list or refusal.
 pub fn capabilities(network: &SandboxNetwork) -> Result<Vec<Capability>, SandboxError> {
     match network {
         SandboxNetwork::Open => Ok(vec![Capability::InternetClient]),
         SandboxNetwork::Only(remotes) if remotes.is_empty() => Ok(Vec::new()),
-        SandboxNetwork::Only(_) => Err(SandboxError::Unavailable(FIREWALL_RULE_MISSING.into())),
+        SandboxNetwork::Only(remotes)
+            if remotes
+                .iter()
+                .any(|remote| matches!(remote, SandboxRemote::Loopback(_))) =>
+        {
+            Err(SandboxError::Unavailable(
+                MODEL_LOOPBACK_WINDOWS_LINE.into(),
+            ))
+        }
+        SandboxNetwork::Only(_) => Ok(vec![Capability::InternetClient]),
     }
 }
 
@@ -506,22 +512,38 @@ mod tests {
     }
 
     #[test]
-    fn the_network_reach_maps_to_capabilities_and_an_endpoint_limit_is_never_widened() {
-        assert_eq!(
-            capabilities(&SandboxNetwork::Open).unwrap(),
-            vec![Capability::InternetClient]
-        );
+    fn a_host_or_port_limit_widens_to_the_internet_client_and_a_loopback_port_is_refused() {
+        let client = vec![Capability::InternetClient];
+        assert_eq!(capabilities(&SandboxNetwork::Open).unwrap(), client);
         assert!(
             capabilities(&SandboxNetwork::Only(Vec::new()))
                 .unwrap()
                 .is_empty()
         );
-        for remote in [SandboxRemote::Loopback(8080), SandboxRemote::AnyHost(443)] {
-            match capabilities(&SandboxNetwork::Only(vec![remote])) {
-                Err(SandboxError::Unavailable(reason)) => assert_eq!(reason, FIREWALL_RULE_MISSING),
-                other => panic!("expected the firewall refusal, got {other:?}"),
-            }
+        for hosts in [
+            vec![SandboxRemote::AnyHost(443)],
+            vec![SandboxRemote::AnyHost(443), SandboxRemote::AnyHost(8443)],
+        ] {
+            assert_eq!(
+                capabilities(&SandboxNetwork::Only(hosts)).unwrap(),
+                client,
+                "a host or port limit is widened to the internet client on Windows (O2a)"
+            );
         }
+        for remotes in [
+            vec![SandboxRemote::Loopback(11_434)],
+            vec![SandboxRemote::AnyHost(443), SandboxRemote::Loopback(41_300)],
+        ] {
+            let refusal = capabilities(&SandboxNetwork::Only(remotes)).unwrap_err();
+            assert!(
+                crate::sandbox::model_loopback_windows(&refusal),
+                "expected the loopback refusal, got {refusal:?}"
+            );
+        }
+        let model_only = crate::sandbox::policy::AgentNetwork::None
+            .reach("windows", true, SandboxRemote::AnyHost(443), None)
+            .unwrap();
+        assert_eq!(capabilities(&model_only).unwrap(), client);
     }
 
     #[test]
@@ -617,14 +639,27 @@ mod tests {
             &folders,
             SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
         );
+        let widened = folders.profiles.join("b.sb");
+        let _held = WindowsSandbox::install(limited, &helper, &widened, &folders.grants).unwrap();
+        assert_eq!(
+            BoundaryProfile::load(&widened).unwrap().capabilities,
+            vec![Capability::InternetClient]
+        );
+        let local = policy(
+            &folders,
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)]),
+        );
         match WindowsSandbox::install(
-            limited,
+            local,
             &helper,
-            &folders.profiles.join("b.sb"),
+            &folders.profiles.join("c.sb"),
             &folders.grants,
         ) {
-            Err(SandboxError::Unavailable(reason)) => assert_eq!(reason, FIREWALL_RULE_MISSING),
-            other => panic!("expected the firewall refusal, got {other:?}"),
+            Err(error) => assert!(
+                crate::sandbox::model_loopback_windows(&error),
+                "expected the loopback refusal, got {error:?}"
+            ),
+            Ok(_) => panic!("a loopback port is refused on Windows"),
         }
     }
 

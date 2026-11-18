@@ -4516,8 +4516,8 @@ impl TeamRuntime {
         let access = crate::sandbox::policy::load(&self.connection, project.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?
             .access;
-        if let Some(reason) = access.unavailable() {
-            return Err(with_code(reason, Some("agent_access_unavailable")));
+        if let Some((reason, code)) = access.refusal() {
+            return Err(with_code(reason, Some(code)));
         }
         let worker = self.workers.get_mut(&id).expect("worker exists");
         worker.grants = generation;
@@ -9499,8 +9499,8 @@ impl TeamRuntime {
         };
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
-        if let Some(reason) = policy.access.unavailable() {
-            return Err(with_code(reason, Some("agent_access_unavailable")));
+        if let Some((reason, code)) = policy.access.refusal() {
+            return Err(with_code(reason, Some(code)));
         }
         let kept = match (tools, &self.settings) {
             (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
@@ -9519,10 +9519,8 @@ impl TeamRuntime {
             }
             (false, _) => Vec::new(),
         };
-        let proxy = if tools
-            && policy.network == AgentNetwork::None
-            && !matches!(remote, SandboxRemote::Loopback(_))
-        {
+        let os = std::env::consts::OS;
+        let proxy = if policy.network.proxied(os, tools, remote) {
             let hosts = model_hosts(launch, &account.reach)?;
             let proxy = ModelProxy::bind(id, hosts, None, &kept).map_err(|e| {
                 with_code("the agent's model proxy could not start", Some(io_code(&e)))
@@ -9531,11 +9529,10 @@ impl TeamRuntime {
         } else {
             None
         };
-        let network = match &proxy {
-            Some(proxy) => SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]),
-            None if tools => policy.network.sandbox(Some(remote)),
-            None => SandboxNetwork::Only(vec![remote]),
-        };
+        let network = policy
+            .network
+            .reach(os, tools, remote, proxy.as_ref().map(|proxy| proxy.port()))
+            .map_err(sandboxed)?;
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
@@ -13875,6 +13872,9 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
 fn sandbox_code(error: &SandboxError) -> &'static str {
     match error {
         SandboxError::Invalid(_) => "sandbox_refused",
+        SandboxError::Unavailable(_) if crate::sandbox::model_loopback_windows(error) => {
+            crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS
+        }
         SandboxError::Unavailable(_) | SandboxError::Unreadable(_) => "sandbox_unavailable",
         SandboxError::Io(error) => io_code(error),
     }

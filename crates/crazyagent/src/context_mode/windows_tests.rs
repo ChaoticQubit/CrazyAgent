@@ -111,9 +111,9 @@ fn npm_runs_through_node_exe_and_npm_cli_never_npm_cmd() {
     assert!(!npm_ready(&case.bin), "npm.cmd alone never runs");
 }
 
-/// WIN-CONTEXT-MODE: the AppContainer refuses every endpoint limit, so the install step's
-/// npm gets the open network on Windows, for that step only, while `node --version` keeps
-/// no network (leader 04:22 and 04:36, answer A).
+/// WIN-CONTEXT-MODE: the AppContainer widens any host limit to the internet client
+/// (DESIGN-0256 O2a), so the install step's npm gets the open network on Windows, for that
+/// step only, while `node --version` keeps no network (leader 04:22 and 04:36, answer A).
 #[test]
 fn the_install_step_gets_the_open_network_on_windows() {
     assert_eq!(os::npm_network(), crate::sandbox::SandboxNetwork::Open);
