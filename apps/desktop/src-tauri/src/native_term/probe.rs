@@ -50,9 +50,18 @@ pub fn take(
     assert!(page > 0);
     let view = host::look(window, page)?.view;
     match step {
-        Step::Key { characters, code } => key(&view, &checked(&characters)?, code)?,
-        Step::Compose { text } => compose(&view, &checked(&text)?),
-        Step::Commit { text } => commit(&view, &checked(&text)?),
+        Step::Key { characters, code } => {
+            let characters = checked(&characters)?;
+            key(&view, &characters, code)?;
+        }
+        Step::Compose { text } => {
+            let text = checked(&text)?;
+            compose(&view, &text);
+        }
+        Step::Commit { text } => {
+            let text = checked(&text)?;
+            commit(&view, &text);
+        }
         Step::Read => {}
     }
     let look = host::look(window, page)?;
