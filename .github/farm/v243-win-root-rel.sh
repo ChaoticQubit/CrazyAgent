@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -uo pipefail
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
-red=684ccb4a9388da1a715bb960d71f2c2c808f9e3b
-fix=72da0514aefbbf20448b1a7d86e3e163a59b05db
+red=61b802717c48f43cbcaf4a231b370ff9fb2d5dfd
+fix=54ff41ec8f4219884c6997584c0c4f23540ef316
 code=spawn_relative_program_refused
 red_rows=(
-  spawn_gate::tests::a_root_relative_program_is_refused_where_another_user_could_plant_it_and_its_full_path_runs
-  spawn_gate::tests::a_drive_relative_or_folder_relative_program_is_refused_and_a_bare_name_is_not
-  worktrees::windows_tests::the_engine_git_command_is_refused_by_the_spawn_gate_on_windows
+  coord::lane::windows_tests::the_windows_lane_refuses_a_program_named_from_a_drive_root_or_a_drive_s_folder
 )
 fix_rows=(
   "${red_rows[@]}"
+  spawn_gate::tests::a_root_relative_program_is_refused_where_another_user_could_plant_it_and_its_full_path_runs
+  spawn_gate::tests::a_drive_relative_or_folder_relative_program_is_refused_and_a_bare_name_is_not
+  worktrees::windows_tests::the_engine_git_command_is_refused_by_the_spawn_gate_on_windows
   tools::windows_tests::a_program_is_fixed_only_when_absolute_or_a_bare_file_name
   coord::lane::windows_tests::the_windows_lane_still_runs_a_program_named_relative_to_its_folder
   spawn_gate::tests::entering_the_gate_inside_the_gate_panics_instead_of_deadlocking
