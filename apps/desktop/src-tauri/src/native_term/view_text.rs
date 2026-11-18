@@ -55,6 +55,16 @@ pub fn range_or_none(range: Option<(usize, usize)>) -> NSRange {
     ns
 }
 
+/// An attributed string with no attributes, as the input method and VoiceOver read text.
+/// Input: the text. Output: the string, as many UTF-16 units long as the text.
+pub fn attributed(text: &str) -> Retained<NSAttributedString> {
+    let string = NSString::from_str(text);
+    let attributed = NSAttributedString::initWithString(NSAttributedString::alloc(), &string);
+    assert_eq!(string.length(), text.encode_utf16().count());
+    assert_eq!(attributed.length(), string.length());
+    attributed
+}
+
 /// The plain text of what an input method hands over, an NSString or an NSAttributedString.
 /// Input: the object. Output: its text, empty for any other class.
 fn plain_text(string: &AnyObject) -> String {
@@ -231,11 +241,7 @@ impl TermView {
         if !actual.is_null() {
             unsafe { actual.write(NSRange::new(at, length)) };
         }
-        let string = NSString::from_str(&text);
-        Some(NSAttributedString::initWithString(
-            NSAttributedString::alloc(),
-            &string,
-        ))
+        Some(attributed(&text))
     }
 
     /// firstRectForCharacterRange:actualRange: in screen coordinates: the cell after the

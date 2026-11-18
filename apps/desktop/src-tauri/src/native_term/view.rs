@@ -1,10 +1,10 @@
 use super::a11y::Geometry;
 use super::ime::Ime;
 use super::pane::{Input, Named};
-use super::view_text::{Access, KeyDown, range_or_none};
+use super::view_text::{Access, KeyDown, attributed, range_or_none};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2::{define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibilityTextAreaRole, NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient,
@@ -216,8 +216,7 @@ define_class!(
         ) -> Option<Retained<NSAttributedString>> {
             let range = (range.location, range.length);
             let found = self.with_text(|text| text.string_for_range(range));
-            let string = NSString::from_str(&found?.0);
-            Some(NSAttributedString::initWithString(NSAttributedString::alloc(), &string))
+            found.map(|(string, _)| attributed(&string))
         }
 
         #[unsafe(method(accessibilityFrameForRange:))]
