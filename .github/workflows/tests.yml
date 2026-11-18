@@ -160,6 +160,11 @@ jobs:
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --lib -- --test-threads 1
           cargo test -p crazyagent-win-sandbox --locked --test private_judge --test private_windows -- --test-threads 1
+      - name: An AppContainer agent in roots made under the data root
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent-win-sandbox --locked --test boundary -- --test-threads 1 --show-output an_agent_writes_and_reads_a_root_made_under_the_data_root
       - name: Clippy on the crazyagent library
         if: ${{ !cancelled() }}
         run: |
