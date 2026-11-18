@@ -109,13 +109,13 @@ pub(super) fn refusal(bytes: &[u8], code: &str) -> Result<Vec<u8>, EngineError> 
     )
 }
 
-/// How long before the owner's exchange is cut its native-auth answer is due. The reply is
-/// still written after a pending answer: the barrier, the second check and the write all
-/// fit in this margin.
+/// The most time before the owner's exchange is cut that its native-auth answer leaves for
+/// the reply after a pending answer: the barrier, the second check and the write. A short
+/// exchange leaves an eighth of what remains instead, so its answer is never due at once.
 const ANSWER_MARGIN: Duration = Duration::from_millis(250);
 
-/// Serves one native-auth request of the owner, its answer due `ANSWER_MARGIN` before the
-/// exchange is cut, so a pending answer is written, never cut. Inputs: the stream, engine,
+/// Serves one native-auth request of the owner, its answer due a margin before the exchange
+/// is cut, so a pending answer is written, never cut. Inputs: the stream, engine,
 /// authority, packet, admission, request bytes and the exchange deadline. Output: none once
 /// the reply is written, else the refusal.
 pub(super) async fn serve(
@@ -144,9 +144,9 @@ pub(super) async fn serve(
         engine: engine.clone(),
         authority: authority.clone(),
     };
-    let answer_by = deadline
-        .checked_sub(ANSWER_MARGIN)
-        .unwrap_or_else(Instant::now);
+    let margin = ANSWER_MARGIN.min(deadline.saturating_duration_since(Instant::now()) / 8);
+    let answer_by = deadline.checked_sub(margin).unwrap_or(deadline);
+    assert!(answer_by <= deadline);
     let ask = crate::storage::NativeAuthAsk::Owner { answer_by };
     let result = match host
         .native_auth_command(admission.clone(), command, ask)
