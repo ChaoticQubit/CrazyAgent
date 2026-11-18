@@ -22,7 +22,9 @@ env:
   TMUX_VERSION: "3.8"
   PRE_FIX_CLEANUP: 6bfc9bce210062b2d9ce7b1ee2d6dc7fba4c19a7
   PRE_FIX_TOOLCHAINS: 85b38ffb2d36d7de487d823c04d6da61f502f12d
-  MODULES: "team::cleanup::tests:: sandbox::toolchains::tests:: agent_home::tests::"
+  MODULES: "team::cleanup::tests:: sandbox::toolchains::tests:: agent_home::tests:: team::runtime::tests::a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead team::caller::tests::a_hook_asking_while_the_socket_is_bound_again_never_reads_alone"
+  LINUX_MODULES: "team::cleanup::tests:: sandbox::toolchains::tests:: agent_home::tests::"
+  KEPT_ROWS: "team::runtime::tests::a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead team::caller::tests::a_hook_asking_while_the_socket_is_bound_again_never_reads_alone neither_a_native_lead_nor_its_teammates_touch_the_caller_socket_s_binding_name"
   NEW_ROWS: "team::cleanup::tests::opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable sandbox::toolchains::tests::removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned sandbox::toolchains::tests::removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned"
 
 defaults:
