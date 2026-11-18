@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,6 +115,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -145,7 +148,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +195,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +257,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +303,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +467,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -527,7 +532,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,69 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  win-npm-clippy:
+    name: WIN-NPM clippy ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+          - runner: ubuntu-24.04
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - name: Free disk on the Linux runner
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          tip=007db01e98d0c326e1f4ff4d489b3cfdea5c1e54
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
+      - name: Install Linux build packages
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install SQLite for Windows
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Install the Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Clippy on the tip
+        shell: bash
+        run: |
+          set -uo pipefail
+          git log --oneline -1
+          cargo +"$RUST_TOOLCHAIN" clippy -p crazyagent -p crazyagent-win-sandbox --all-targets --locked --keep-going -- -D warnings 2>&1 | tee "$RUNNER_TEMP/clippy.txt"
+          clip=${PIPESTATUS[0]}
+          printf '| %s | exit |\n| --- | --- |\n| clippy -p crazyagent -p crazyagent-win-sandbox --all-targets -D warnings | %s |\n' "$RUNNER_OS" "$clip" >> "$GITHUB_STEP_SUMMARY"
+          exit "$clip"
