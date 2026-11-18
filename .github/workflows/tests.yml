@@ -24,7 +24,7 @@ defaults:
 
 jobs:
   clippy:
-    name: 3a A clippy -D warnings ${{ matrix.runner }}, win-sandbox all targets, crazyagent lib then tests
+    name: 3a A clippy rerun at 898d8f762 -D warnings ${{ matrix.runner }}, win-sandbox all targets, crazyagent lib then tests
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -49,7 +49,7 @@ jobs:
       - name: Put back the tip workflow so the tree is the tip
         run: |
           set -euo pipefail
-          tip=431a10752439c4b528a66bcb35788a41ea1e5df8
+          tip=898d8f7622a6c0cd8815034283d2e463aa5c96ab
           git merge-base --is-ancestor "$tip" HEAD
           test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
           git checkout "$tip" -- .github/workflows/tests.yml
