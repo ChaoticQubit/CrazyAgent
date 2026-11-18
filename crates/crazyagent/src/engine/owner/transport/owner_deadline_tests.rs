@@ -367,32 +367,39 @@ async fn a_skill_import_slower_than_the_owner_deadline_answers_with_the_skill() 
     owner.stop().await;
 }
 
-/// A skill import storage never takes within `IMPORT_TIMEOUT` is refused
-/// storage_busy_not_submitted before the import's own serve bound cuts it, so the owner's
-/// client, which waits that bound, hears the refusal rather than no reply, and nothing is
-/// imported (V243-STORAGE-BUSY-ROWS).
+/// A skill import that first waits 2 s behind a held owner barrier, then finds storage never
+/// takes it within `IMPORT_TIMEOUT`, is refused storage_busy_not_submitted before its own
+/// serve bound cuts it: the wait puts its storage bound past that cut, so the owner hears the
+/// refusal rather than no reply, and nothing is imported (V243-STORAGE-BUSY-ROWS).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_skill_import_storage_never_takes_is_refused_before_its_serve_bound_cuts_it() {
     let owner = Owner::start().await;
     let source = owner.root.path().join("work/release-notes");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), SKILL).unwrap();
+    let engine = &owner.service.owner_runtime().unwrap().engine;
     let (release, held) = oneshot::channel();
-    owner
-        .service
-        .owner_runtime()
-        .unwrap()
-        .engine
+    engine
         .storage
         .sender
         .try_send(crate::storage::Job::Hold(held))
         .unwrap();
+    let barrier = engine.owner_egress.write().await;
 
     let started = std::time::Instant::now();
-    let imported = owner
-        .client
-        .import_skill(source.to_str().unwrap().to_owned(), None)
-        .await;
+    let mut imported = Box::pin(
+        owner
+            .client
+            .import_skill(source.to_str().unwrap().to_owned(), None),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut imported)
+            .await
+            .is_err(),
+        "the import waits behind the held owner barrier"
+    );
+    drop(barrier);
+    let imported = imported.await;
     let waited = started.elapsed();
     drop(release);
     assert_eq!(
