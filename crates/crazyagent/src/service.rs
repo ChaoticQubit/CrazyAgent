@@ -2015,6 +2015,14 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
 /// and an unused bin folder. Output: the folder added, or the refusal.
 #[cfg(not(unix))]
 pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError> {
+    link_cli_under(executable, USER_ENVIRONMENT_KEY)
+}
+
+/// [`link_cli`] on the PATH value stored under one registry key: the user's environment key
+/// in the product, a key of its own in each test row, so no row writes the PATH of the
+/// machine running it. Inputs: the executable and the key. Output: the folder, or the refusal.
+#[cfg(not(unix))]
+fn link_cli_under(executable: &Path, key: &str) -> Result<PathBuf, ServiceError> {
     let folder = executable
         .parent()
         .ok_or_else(|| failure("the executable has no folder"))?
@@ -2025,7 +2033,7 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
             folder.display()
         )));
     }
-    run_process(&mut windows_path_command(&folder))?;
+    run_process(&mut windows_path_command_under(&folder, key))?;
     Ok(folder)
 }
 
@@ -2034,31 +2042,48 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
 /// on the command line.
 pub const WINDOWS_PATH_FOLDER_VARIABLE: &str = "CRAZYAGENT_PATH_FOLDER";
 
-/// The PowerShell command that appends a folder to the user's PATH once. It reads the
-/// stored value as written, %VAR% references unexpanded, and stores it back with the
-/// registry kind it had (REG_EXPAND_SZ for a new value), so references keep following their
-/// variables. Deleting a CrazyAgent-only user variable through .NET then announces the
-/// change to running programs the way a PATH set through .NET would. Input: the folder,
-/// handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never as script.
-/// Output: the command; it fails when that variable arrives empty.
+/// The environment variable that hands the registry key holding the PATH value to the
+/// Windows PATH command, read as data like the folder.
+const WINDOWS_PATH_KEY_VARIABLE: &str = "CRAZYAGENT_PATH_KEY";
+
+/// The registry key of the user's stored environment, where the user's PATH value lives.
+const USER_ENVIRONMENT_KEY: &str = r"HKCU:\Environment";
+
+/// The PowerShell command that appends a folder to the user's PATH once
+/// ([`windows_path_command_under`] on [`USER_ENVIRONMENT_KEY`]). Input: the folder.
+/// Output: the command.
 pub fn windows_path_command(folder: &Path) -> std::process::Command {
+    windows_path_command_under(folder, USER_ENVIRONMENT_KEY)
+}
+
+/// Appends a folder once to the PATH value under a key, read as written (%VAR% unexpanded)
+/// and stored back with its registry kind (REG_EXPAND_SZ when new); deleting a CrazyAgent-only
+/// user variable through .NET then announces the change. Inputs: the folder and an HKCU key,
+/// both handed over in the environment so they are read as data, never as script. Output:
+/// the command; it fails when either arrives empty.
+fn windows_path_command_under(folder: &Path, key: &str) -> std::process::Command {
+    assert!(key.starts_with(r"HKCU:\"), "{key}");
+    assert!(key.len() > r"HKCU:\".len(), "{key}");
     let script = format!(
         "$ErrorActionPreference='Stop'; \
 $f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
-$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+$r=$env:{WINDOWS_PATH_KEY_VARIABLE}; if ([string]::IsNullOrEmpty($r)) {{ exit 2 }}; \
+$k=Get-Item -LiteralPath $r; \
 $p=''; $t=[Microsoft.Win32.RegistryValueKind]::ExpandString; \
 if ($k.GetValueNames() -contains 'Path') {{ \
 $p=[string]$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); \
 $t=$k.GetValueKind('Path') }}; \
 if (-not ((($p -split ';') | ForEach-Object {{ [Environment]::ExpandEnvironmentVariables($_) }}) -contains $f)) {{ \
 $v=(($p.TrimEnd(';'), $f) -join ';').TrimStart(';'); \
-Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $v -Type $t; \
+Set-ItemProperty -LiteralPath $r -Name 'Path' -Value $v -Type $t; \
 [Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User') }}"
     );
+    assert!(!script.contains("HKCU:"));
     let mut command = std::process::Command::new("powershell.exe");
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env(WINDOWS_PATH_FOLDER_VARIABLE, folder);
+        .env(WINDOWS_PATH_FOLDER_VARIABLE, folder)
+        .env(WINDOWS_PATH_KEY_VARIABLE, key);
     command
 }
 
