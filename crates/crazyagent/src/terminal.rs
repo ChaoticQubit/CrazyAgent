@@ -478,6 +478,33 @@ pub trait Host: Send + Sync {
         Ok(false)
     }
 
+    /// The pane an input-only view of an agent stays on: the agent's own pane now, the one
+    /// `attach` would view, and the serial of the connection that found it. Takes the name.
+    /// Returns the pane, `terminal_agent_unknown` once the terminal is gone, or
+    /// `terminal_unavailable` for a host with no pane ids, whose views type by name.
+    fn own_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and 1 to
+    /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.
+    fn paste_at(&self, _agent: &AgentId, _at: &PaneAt, _keys: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Sizes the window of the pane a view stays on, as `resize` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and the
+    /// size. Returns true once sized, false when this host cannot use that pane.
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        _at: &PaneAt,
+        _size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
     /// go through the terminal's line editing, which turns Enter into a newline.
@@ -701,6 +728,18 @@ impl Host for OwnServer {
     }
     fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
         self.0.input_at(agent, at, bytes)
+    }
+
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.0.own_pane_at(agent)
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.0.paste_at(agent, at, keys)
+    }
+
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        self.0.resize_at(agent, at, size)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {

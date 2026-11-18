@@ -625,14 +625,18 @@ async fn fifty_typed_keys_echo_back_within_budget() {
         .unwrap();
 }
 
-/// A host that records each owner paste and typed request it takes, lists the agents a row
-/// gives it as alive, none when it cannot list, and answers `input_live` as the row sets it;
-/// every other call answers at once.
+/// A host that records each owner paste and typed request it takes, by name or straight into
+/// a pinned pane, lists the agents a row gives it as alive, none when it cannot list, and
+/// answers `input_live` and the agent's own pane as the row sets them, no pane ids unless set;
+/// a pinned send lands only while that pane is still the agent's own. Every other call
+/// answers at once.
 struct Recording {
     pasted: std::sync::Mutex<Vec<(AgentId, Vec<u8>)>>,
     typed: std::sync::Mutex<Vec<Vec<u8>>>,
     alive: Option<Vec<AgentId>>,
     live: std::sync::Mutex<Result<bool, String>>,
+    own: std::sync::Mutex<Result<PaneAt, String>>,
+    at_pane: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 impl Recording {
@@ -646,7 +650,25 @@ impl Recording {
             typed: std::sync::Mutex::new(Vec::new()),
             alive,
             live: std::sync::Mutex::new(live.map_err(str::to_owned)),
+            own: std::sync::Mutex::new(Err("terminal_unavailable".into())),
+            at_pane: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Sets what the agent's own pane answers. Takes the answer. Returns nothing.
+    fn own_is(&self, own: Result<PaneAt, &str>) {
+        *self.own.lock().unwrap() = own.map_err(str::to_owned);
+    }
+
+    /// Records a send to a pinned pane while that pane is still the agent's own, as a host
+    /// that still serves it types there. Takes the pane and the bytes. Returns whether it
+    /// landed.
+    fn lands_at(&self, at: &PaneAt, bytes: &[u8]) -> bool {
+        let lands = self.own.lock().unwrap().as_ref().is_ok_and(|own| own == at);
+        if lands {
+            self.at_pane.lock().unwrap().push(bytes.to_vec());
+        }
+        lands
     }
 }
 
@@ -686,6 +708,22 @@ impl Host for Recording {
 
     fn input_live(&self, _: &AgentId) -> Result<bool, HostError> {
         self.live.lock().unwrap().clone().map_err(HostError)
+    }
+
+    fn own_pane_at(&self, _: &AgentId) -> Result<PaneAt, HostError> {
+        self.own.lock().unwrap().clone().map_err(HostError)
+    }
+
+    fn input_at(&self, _: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        Ok(self.lands_at(at, bytes))
+    }
+
+    fn paste_at(&self, _: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        Ok(self.lands_at(at, keys))
+    }
+
+    fn resize_at(&self, _: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        Ok(self.lands_at(at, format!("{}x{}", size.0, size.1).as_bytes()))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -753,6 +791,7 @@ async fn pumped(
         cols: 80,
         rows: 24,
         viewer: None,
+        pinned: None,
     };
     let host: Arc<dyn Host> = host;
     tokio::time::timeout(WAIT, pump(&mut ours, view, &mut asked, host, viewing))
@@ -915,6 +954,7 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
         cols: 80,
         rows: 24,
         viewer: None,
+        pinned: None,
     };
     let viewing = Counted::allowing(usize::MAX);
     let reason =
@@ -1066,7 +1106,7 @@ async fn an_input_only_view_is_gone_only_by_the_call_its_keys_take() {
     ] {
         let host: Arc<dyn Host> = Recording::living(alive.clone(), live);
         assert_eq!(
-            agent_gone(&host, &agent).await,
+            agent_gone(&host, &agent, None).await,
             gone,
             "listed {alive:?}, answer {live:?}"
         );
@@ -1090,6 +1130,7 @@ async fn an_input_only_view_of_a_teammate_its_host_does_not_list_stays_open() {
                 cols: 80,
                 rows: 24,
                 viewer: None,
+                pinned: None,
             };
             let viewing = Counted::allowing(usize::MAX);
             pump(&mut ours, view, &mut asked, host, &viewing).await
@@ -1254,4 +1295,124 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
         .await
         .unwrap()
         .unwrap();
+}
+
+/// V243-NATIVE-INPUT-PIN: a pinned input-only view is gone once its agent's own pane is
+/// another one, or the same id on another connection, or its terminal answers ended; a host
+/// that fails otherwise counts it gone only once it no longer lists the agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_input_only_view_is_gone_once_its_agents_own_pane_is_another() {
+    let agent = AgentId::team(1).unwrap();
+    let pane = |pane: &str, serial| PaneAt {
+        pane: pane.into(),
+        serial,
+    };
+    let at = pane("%3", 7);
+    let listed = || Some(vec![agent.clone()]);
+    for (alive, own, gone) in [
+        (listed(), Ok(at.clone()), false),
+        (listed(), Ok(pane("%4", 7)), true),
+        (listed(), Ok(pane("%3", 8)), true),
+        (listed(), Err("terminal_agent_unknown"), true),
+        (listed(), Err("terminal_command_failed"), false),
+        (Some(Vec::new()), Err("terminal_command_failed"), true),
+    ] {
+        let recording = Recording::living(alive.clone(), Ok(true));
+        recording.own_is(own.clone());
+        let host: Arc<dyn Host> = recording;
+        assert_eq!(
+            agent_gone(&host, &agent, Some(&at)).await,
+            gone,
+            "listed {alive:?}, own pane {own:?}"
+        );
+    }
+}
+
+/// V243-NATIVE-INPUT-PIN: a pinned input-only view types, pastes and sizes only its pane,
+/// never by name, takes no prompt, which types by name, and ends as `terminal_ended` at its
+/// first send once that pane is no longer its agent's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot() {
+    let agent = AgentId::team(1).unwrap();
+    let at = PaneAt {
+        pane: "%3".into(),
+        serial: 7,
+    };
+    let recording = Recording::new(vec![agent.clone()]);
+    recording.own_is(Ok(at.clone()));
+    let (queue, mut asked) = tokio::sync::mpsc::channel(8);
+    let running = {
+        let host: Arc<dyn Host> = recording.clone();
+        let (agent, pinned) = (agent.clone(), Some(at.clone()));
+        tokio::spawn(async move {
+            let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+            let view = View {
+                agent,
+                cols: 80,
+                rows: 24,
+                viewer: None,
+                pinned,
+            };
+            let viewing = Counted::allowing(usize::MAX);
+            pump(&mut ours, view, &mut asked, host, &viewing).await
+        })
+    };
+    for request in [
+        TerminalRequest::Input {
+            bytes: b"a".to_vec(),
+        },
+        TerminalRequest::Paste {
+            bytes: b"p".to_vec(),
+            last: true,
+        },
+        TerminalRequest::Resize { cols: 90, rows: 30 },
+        TerminalRequest::Prompt { text: "hi".into() },
+    ] {
+        queue.send(request).await.unwrap();
+    }
+    let landed = tokio::time::timeout(WAIT, async {
+        loop {
+            let count = recording.at_pane.lock().unwrap().len();
+            if count >= 3 {
+                return count;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        landed,
+        Ok(3),
+        "the key, paste and resize reached the pinned pane"
+    );
+    assert_eq!(
+        *recording.at_pane.lock().unwrap(),
+        vec![b"a".to_vec(), b"p".to_vec(), b"90x30".to_vec()]
+    );
+
+    recording.own_is(Ok(PaneAt {
+        pane: "%4".into(),
+        serial: 7,
+    }));
+    queue
+        .send(TerminalRequest::Input {
+            bytes: b"b".to_vec(),
+        })
+        .await
+        .unwrap();
+    let reason = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
+    assert_eq!(reason, "terminal_ended");
+    assert!(
+        recording.typed.lock().unwrap().is_empty(),
+        "nothing was typed by name"
+    );
+    assert!(
+        recording.pasted.lock().unwrap().is_empty(),
+        "nothing was pasted by name"
+    );
+    assert_eq!(
+        recording.at_pane.lock().unwrap().len(),
+        3,
+        "the key after the move never landed"
+    );
 }
