@@ -1,0 +1,30 @@
+diff --git a/crates/crazyagent/src/harnesses/interactive/tests.rs b/crates/crazyagent/src/harnesses/interactive/tests.rs
+index fcdde8d02..1682090d0 100644
+--- a/crates/crazyagent/src/harnesses/interactive/tests.rs
++++ b/crates/crazyagent/src/harnesses/interactive/tests.rs
+@@ -2135,6 +2135,10 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
+     stand_in(&real.join(name));
+     let found = crate::tools::Places::new(vec![real.clone()], Some(home.clone()));
+     assert!(crate::harnesses::is_shim(found.home(), &shim));
++    eprintln!("DIAG resolve={:?}", crate::tools::resolve(name, &found));
++    eprintln!("DIAG check_place_real={:?}", crate::tools::check_place(&found, &real.join(name)));
++    eprintln!("DIAG by_others_shim={:?}", crate::service::changeable_by_others(&shim));
++    eprintln!("DIAG places={:?}", found);
+     assert_eq!(launch_tool(&shim, &found).unwrap().entry, real.join(name));
+     let none = crate::tools::Places::new(Vec::new(), Some(home));
+     assert_eq!(launch_tool(&shim, &none).unwrap().entry, shim);
+diff --git a/crates/crazyagent/src/tools/tests.rs b/crates/crazyagent/src/tools/tests.rs
+index 1cc56fc01..942828fa3 100644
+--- a/crates/crazyagent/src/tools/tests.rs
++++ b/crates/crazyagent/src/tools/tests.rs
+@@ -689,6 +689,10 @@ fn an_npm_script_starts_with_the_node_of_its_own_prefix() {
+     let script = npm_codex(&prefix);
+     let own = program(&prefix.join("bin/node"), NODE);
+     let places = home_only(&home);
++    eprintln!("DIAG node_prefix={:?}", crate::harnesses::node_prefix(&script));
++    eprintln!("DIAG entry_at_own={:?}", entry_at(&own, &places, 0));
++    eprintln!("DIAG by_others_own={:?}", crate::service::changeable_by_others(&own));
++    eprintln!("DIAG past_sticky_own={:?}", crate::service::changeable_past_sticky(&own));
+     let codex = resolve_entry(&prefix.join("bin/codex"), &places).unwrap();
+     assert_eq!(codex.program, script);
+     assert_eq!(codex.interpreter().unwrap().program, own);
