@@ -62,6 +62,9 @@ fn a_new_private_folder_and_file_list_only_the_user_system_and_administrators() 
         std::io::ErrorKind::AlreadyExists
     );
     drop((file, held));
+    let again = private::dir(&root).expect("an existing private folder opens again");
+    let reopened = private::file(&path, false).expect("an existing private file opens again");
+    drop((reopened, again));
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -72,6 +75,7 @@ fn a_private_file_with_a_second_hard_link_is_refused() {
     let held = private::dir(&root).unwrap();
     let path = root.join("engine.db");
     drop(private::file(&path, true).unwrap());
+    drop(private::file(&path, false).expect("one link opens"));
     std::fs::hard_link(&path, root.join("again.db")).unwrap();
     assert!(private::file(&path, false).is_err());
     drop(held);
@@ -87,6 +91,7 @@ fn a_symbolic_link_to_a_private_file_is_refused() {
     drop(private::file(&target, true).unwrap());
     let link = root.join("link.db");
     std::os::windows::fs::symlink_file(&target, &link).expect("the hosted runner may make links");
+    drop(private::file(&target, false).expect("the link's target opens by its own name"));
     assert!(private::file(&link, false).is_err());
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
@@ -109,6 +114,7 @@ fn a_junction_in_place_of_the_data_folder_is_refused() {
             target.to_str().unwrap(),
         ],
     );
+    drop(private::dir(&target).expect("the junction's target opens by its own name"));
     assert!(private::dir(&junction).is_err());
     std::fs::remove_dir(&junction).unwrap();
     std::fs::remove_dir_all(&target).unwrap();
