@@ -1171,6 +1171,13 @@ fn named_interpreter(
     resolve_at(name, places, depth)
 }
 
+/// Why a resolved script would start under a `node` other than its own npm prefix's, so a
+/// harness launch refuses instead of falling back (V243-OWN-PREFIX-NODE-REFUSE). Inputs:
+/// the tool and the places. Output: why, or none.
+pub(crate) fn own_node_refused(_tool: &Resolved, _places: &Places) -> Option<Missing> {
+    todo!("V243-OWN-PREFIX-NODE-REFUSE: own_node_refused")
+}
+
 /// The most own-prefix `node` files the engine log names, each once per process.
 const OWN_NODE_LOGGED_MAX: usize = 64;
 

@@ -739,6 +739,75 @@ fn a_passed_over_own_node_falls_back_and_is_logged_once_per_file() {
     assert!(!log_own_node_passed_over(&other, &passed));
 }
 
+/// V243-OWN-PREFIX-NODE-REFUSE: a harness launch never starts an npm script under a `node`
+/// other than its own prefix's. When the resolver passes that `node` over, here one every
+/// user can write, the launch is refused with the line naming that file, while
+/// [`resolve_entry`], which npm uses, still falls back to the places' `node` (G1 P7).
+#[test]
+fn a_launch_is_refused_when_its_own_prefix_node_is_passed_over() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    let fallback = resolve_entry(&entry, &places).unwrap();
+    assert_eq!(fallback.interpreter().unwrap().program, places_node);
+    let passed = entry_at(&own, &places, 1).unwrap_err();
+    assert_eq!(passed.reason, Reason::Refused);
+    let crate::harnesses::launch::LaunchError(line, secret) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert!(secret.is_none());
+    let named = Missing {
+        tool: "codex".to_owned(),
+        ..passed
+    };
+    assert_eq!(line, named.line());
+    assert!(line.starts_with("codex can't start: "), "{line}");
+    assert!(line.contains(&own.display().to_string()), "{line}");
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: [`own_node_refused`] answers only for a script that asks
+/// `env` for `node` and whose own prefix holds a `node` the resolver passes over. A prefix
+/// with no `node` or with a usable one, and a script asking for another program, give none,
+/// and the first still launches under the places' `node`.
+#[test]
+fn only_a_passed_over_own_prefix_node_refuses_a_launch() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    program(&home.join(".local/bin/deno"), NODE);
+    let places = home_only(&home);
+    let bare = home.join("bare");
+    npm_codex(&bare);
+    let tool = resolve_entry(&bare.join("bin/codex"), &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, places_node);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let usable = home.join("usable");
+    npm_codex(&usable);
+    let own = program(&usable.join("bin/node"), NODE);
+    let tool = resolve_entry(&usable.join("bin/codex"), &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, own);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let other = home.join("other");
+    let script = program(
+        &other.join("lib/node_modules/pkg/cli.js"),
+        "#!/usr/bin/env deno\n",
+    );
+    let refused = program(&other.join("bin/node"), NODE);
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let tool = resolve_entry(&script, &places).unwrap();
+    assert_eq!(
+        tool.interpreter().unwrap().program,
+        home.join(".local/bin/deno")
+    );
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let launched =
+        crate::harnesses::interactive::launch_tool(&bare.join("bin/codex"), &places).unwrap();
+    assert_eq!(launched.interpreter().unwrap().program, places_node);
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
 /// On Linux a folder of this user's private group is not passed over either, by design
