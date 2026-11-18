@@ -1,3 +1,4 @@
+use super::a11y::ZERO_WIDTH_MAX;
 use super::ime::char_cells;
 use super::style::{Theme, blend};
 use alacritty_terminal::event::VoidListener;
@@ -243,8 +244,9 @@ fn push_fill(fills: &mut Vec<Fill>, row: usize, column: usize, color: Rgb) {
 
 /// Appends one cell's character to a row's spans and folds it into the row's key: a plain
 /// narrow character joins the span it continues; a wide one, or one with zero-width
-/// characters after it, is its own span. Inputs: the row's spans and key, the character and
-/// its zero-width characters, its colour and (bold, italic, marked), its column and wide.
+/// characters after it (the first `ZERO_WIDTH_MAX` only), is its own span. Inputs: the row's
+/// spans and key, the character and its zero-width characters, its colour and (bold,
+/// italic, marked), its column and wide.
 fn push_char(
     spans: &mut Vec<Span>,
     key: &mut u64,
@@ -253,6 +255,8 @@ fn push_char(
     (column, wide): (usize, bool),
 ) {
     let count = spans.len();
+    let zero = &zero[..zero.len().min(ZERO_WIDTH_MAX)];
+    assert!(zero.len() <= ZERO_WIDTH_MAX);
     let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
     let flags = (u64::from(bold) << 24) | (u64::from(italic) << 25) | (u64::from(marked) << 26);
     *key = mix(mix(*key, c as u64), packed | flags);
