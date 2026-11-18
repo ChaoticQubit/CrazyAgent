@@ -576,6 +576,7 @@ async fn a_question_stays_listed_past_other_starts_until_its_answer_starts() {
 /// A job under an id the owner ledger already holds for a different change still ends with
 /// `operation_identity_conflict`: only a plan refused as stale, which records nothing, plans
 /// again under the job's id. The job's folder is not added and the first change's row stays.
+/// The start waits out `job_busy` while the client's add still ends after its reply.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_under_an_id_kept_for_a_different_change_ends_with_the_identity_conflict() {
     let mut jobs = Jobs::start().await;
@@ -606,7 +607,16 @@ async fn a_job_under_an_id_kept_for_a_different_change_ends_with_the_identity_co
         "the client's add is recorded under the id: {:?}",
         reply.response
     );
-    jobs.add("add-same", &second, AddMode::Copy).await.unwrap();
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    let started = loop {
+        match jobs.add("add-same", &second, AddMode::Copy).await {
+            Err(e) if e.0 == "job_busy" && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            started => break started,
+        }
+    };
+    started.expect("the job starts once the client's add has ended");
     let ended = jobs.ended("add-same").await.state;
     assert!(
         matches!(&ended, JobState::Failed { code, .. } if code == "operation_identity_conflict"),
