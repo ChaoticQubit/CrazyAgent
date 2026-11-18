@@ -611,8 +611,17 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
 /// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
 /// the temp folders. Output: the answer.
 pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
-    let inside = |path: &Path| temps.iter().any(|temp| path.starts_with(temp));
-    !inside(written) && inside(real)
+    !under_temp(written, temps) && under_temp(real, temps)
+}
+
+/// Whether a path lies under one of the temp folders given, as written or in its one spelling,
+/// so a macOS path named through the data volume still matches its short-named temp folder.
+/// Inputs: the path and the temp folders. Output: the answer.
+fn under_temp(path: &Path, temps: &[PathBuf]) -> bool {
+    let short = crate::projects_home::one_spelling(path.to_path_buf());
+    temps
+        .iter()
+        .any(|temp| path.starts_with(temp) || short.starts_with(temp))
 }
 
 /// The temp folders: the shared ones and this user's own, as given, with its links resolved
@@ -641,8 +650,8 @@ fn in_temp(folder: &Path) -> bool {
 }
 
 /// Whether a folder is in one of the temp folders given, as written and with its links
-/// resolved; none given refuses nothing. Inputs: the folder and the temp folders. Output:
-/// the answer.
+/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the folder and the
+/// temp folders. Output: the answer.
 pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
     if temps.is_empty() {
         return false;
@@ -650,7 +659,7 @@ pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())
-        .any(|folder| temps.iter().any(|temp| folder.starts_with(temp)))
+        .any(|folder| under_temp(folder, temps))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
