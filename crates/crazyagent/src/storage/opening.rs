@@ -18,6 +18,14 @@ impl Opening {
         opening
     }
 
+    /// The proof for one storage open at the system clock's now, on every platform the open
+    /// runs on. Output: the proof.
+    pub(in crate::storage) fn now() -> Self {
+        let at_ms = crate::state_log::replay::Clock::System.now_ms();
+        assert!(at_ms > 0, "an opening reads the clock");
+        Self { at_ms }
+    }
+
     /// The open's clock, which the events of its writers carry. Output: ms since the epoch.
     pub fn at_ms(&self) -> u64 {
         self.at_ms

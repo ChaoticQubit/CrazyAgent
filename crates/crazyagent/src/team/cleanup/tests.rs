@@ -67,7 +67,7 @@ impl Case {
         write(&repo.join(".gitignore"), b"/.crazyagent/\ntarget/\n");
         git_in(&home, &repo, &["add", "README", ".gitignore"]);
         git_in(&home, &repo, &["commit", "-q", "-m", "Start"]);
-        let db = crate::landing::open(&engine).unwrap();
+        let db = crate::landing_log::seeded(crate::landing::open(&engine).unwrap());
         super::super::initialize(&db).unwrap();
         crate::storage::initialize_authority_schemas(&db).unwrap();
         crate::ide::workspace::tests::add_project(&db, "project-1", &repo);

@@ -53,6 +53,51 @@ pub(crate) fn removal(command: &Command, deleting: bool) -> Option<ProjectRemove
     })
 }
 
+/// The removal an owner request would append, with the agent worktrees a Delete everything
+/// forgets (rv-sec3 #415 F1), read before the request deletes the project's worktree rows;
+/// Remove from dashboard keeps them, as it keeps the change sets naming them. Inputs: the
+/// request's transaction, its command and whether it carries Delete everything's effect.
+/// Output: the removal and its worktrees, none for any other request, or the read's refusal.
+pub(crate) fn removing(
+    tx: &Transaction<'_>,
+    command: &Command,
+    deleting: bool,
+) -> Result<Option<(ProjectRemoved, Vec<String>)>, EngineError> {
+    let Some(removed) = removal(command, deleting) else {
+        return Ok(None);
+    };
+    assert_eq!(removed.kept, !deleting);
+    let worktrees = if removed.kept {
+        Vec::new()
+    } else {
+        crate::landing_log::project_worktrees(tx, removed.project.as_str())?
+    };
+    Ok(Some((removed, worktrees)))
+}
+
+/// Appends a removal and tombstones its project's earlier events, keeping its own: its
+/// admissions, ide and settings events and, for a Delete everything, the landing events of
+/// its agent worktrees, whose rows go in this transaction too. Inputs: the request's
+/// transaction, the moved revision, the admission, the removal and its worktrees. Output:
+/// how many events were tombstoned, or the first refusal.
+pub(crate) fn settle(
+    tx: &Transaction<'_>,
+    revision: u64,
+    admission: &Admission,
+    removed: &ProjectRemoved,
+    worktrees: &[String],
+) -> Result<usize, EngineError> {
+    assert!(!removed.kept || worktrees.is_empty());
+    let seq = append(tx, revision, admission, removed)?;
+    let fence = Fence::Owner(admission.clone());
+    let project = removed.project.as_str();
+    let mut redacted = crate::worktrees::log::forget_project(tx, project, Some(seq), &fence)?;
+    redacted += crate::ide::log::forget_project(tx, project, Some(seq), &fence)?;
+    redacted += crate::settings_log::forget_project(tx, project, Some(seq), &fence)?;
+    redacted += crate::landing_log::forget_worktrees(tx, worktrees, &fence)?;
+    Ok(redacted)
+}
+
 /// Appends a removal at the request's moved revision behind the owner's admission and
 /// applies its projection through the appender, which checks the fence again; the project's
 /// agent texts are marked first, so the request's sessions close after it logs them dropped
@@ -80,17 +125,21 @@ pub(crate) fn append(
     Ok(seq)
 }
 
-/// The projection of a removal, live and in replay (v2.5 L14b, L7): first the project's rule
-/// proposals, schedule override and version, coordination with its stopped and failed agents'
-/// counts, activity, IDE rows and usage (to `<removed>`); then its agent texts, questions,
-/// hidden folders, access, grants, stopped and failed agents and [`TABLES`] rows. Inputs: the
-/// transaction and the body. Output: Ok, `project_removed_body`, or a store failure.
+/// The projection of a removal, live and in replay (v2.5 L14b, L7, L9): first the project's
+/// rule proposals, a Delete's publish prompt answer, schedule override and version,
+/// coordination with its stopped and failed agents' counts, activity, IDE rows and usage (to
+/// `<removed>`); then its agent texts, questions, hidden folders, access, grants, stopped and
+/// failed agents and [`TABLES`] rows. Inputs: the transaction and the body. Output: Ok,
+/// `project_removed_body`, or a store failure.
 pub(crate) fn apply(tx: &Transaction<'_>, body: &[u8]) -> Result<(), EngineError> {
     let removed: ProjectRemoved =
         serde_json::from_slice(body).map_err(|_| EngineError("project_removed_body".into()))?;
     let failed = |error: rusqlite::Error| EngineError(error.to_string());
     let project = removed.project.as_str();
     crate::github::proposals::forget_project(tx, &removed.project)?;
+    if !removed.kept {
+        crate::github::forget_prompt(tx, &removed.project)?;
+    }
     crate::scheduling::forget_project(tx, project)?;
     crate::coord::forget_project(tx, &removed.project)?;
     crate::activity::forget_project(tx, &removed.project)?;

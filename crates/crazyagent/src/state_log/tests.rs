@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 37] = [
+const KINDS: [&str; 54] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -502,6 +502,23 @@ const KINDS: [&str; 37] = [
     crate::ide::log::FILE_UNLOCKED,
     crate::ide::log::WORKSPACE_WRITTEN,
     crate::ide::log::WORKSPACE_FORGOTTEN,
+    crate::landing_log::AGENT_BRANCH_SET,
+    crate::landing_log::AGENT_BRANCH_FORGOTTEN,
+    crate::landing_log::BASE_SET,
+    crate::landing_log::BASE_FORGOTTEN,
+    crate::landing_log::OWNER_EDIT_KEPT,
+    crate::landing_log::OWNER_EDITS_SETTLED,
+    crate::landing_log::OWNER_EDITS_DROPPED,
+    crate::landing_log::OWNER_EDITS_FORGOTTEN,
+    crate::landing_log::WORKTREE_OWNER_EDITS_FORGOTTEN,
+    crate::landing_log::CHANGE_SET_NUMBERED,
+    crate::landing_log::BASELINE_APPROVED,
+    crate::landing_log::PUBLISH_PROMPT_SNOOZED,
+    crate::landing_log::PUBLISH_PROMPT_NEVER,
+    crate::landing_log::CHANGE_SET_SAVED,
+    crate::landing_log::RULE_REQUEST_SAVED,
+    crate::landing_log::VERIFICATION_SAVED,
+    crate::landing_log::VERIFICATION_FORGOTTEN,
     crate::memory::log::KIND,
     crate::settings_log::KIND_SANDBOX,
     crate::settings_log::KIND_CLEANUP,
@@ -520,13 +537,18 @@ const KINDS: [&str; 37] = [
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
 /// path inside a worktree, which decodes only through `landing::owner_edit::check_path`, so
 /// it is never empty, absolute, NUL-bearing, `.` or `..` in a part, or over its byte bound.
-const FREE_FORM: [(&str, &str); 1] = [(crate::ide::log::FILE_UNLOCKED, "path")];
+const FREE_FORM: [(&str, &str); 2] = [
+    (crate::ide::log::FILE_UNLOCKED, "path"),
+    (crate::landing_log::OWNER_EDIT_KEPT, "path"),
+];
 
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
-/// ide/log.rs writes `change.kind()`, which maps each `Change` variant to one of its kinds.
-const WRITERS: [(&str, &[&str]); 8] = [
+/// ide/log.rs and landing_log.rs write `change.kind()`, which maps each `Change` variant to
+/// one of their kinds.
+const WRITERS: [(&str, &[&str]); 9] = [
     ("ide/log.rs", &["change.kind(),"]),
+    ("landing_log.rs", &["change.kind(),"]),
     ("memory/log.rs", &["KIND,"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
     (
@@ -576,10 +598,26 @@ const WRITERS: [(&str, &[&str]); 8] = [
 /// The writers outside this module that take a snapshot, each with the only tables its runs
 /// may carry. A run copies those tables' stored columns as they stand, rows the typed events
 /// wrote; the run does not check them again.
-const SNAPSHOTS: [(&str, &[&str]); 4] = [
+const SNAPSHOTS: [(&str, &[&str]); 5] = [
     (
         "worktrees/log.rs",
         &["repository_admissions", "worktree_leases"],
+    ),
+    (
+        "landing_log.rs",
+        &[
+            "landing_change_sets",
+            "github_rule_requests",
+            "verification_baselines",
+            "verification_candidates",
+            "verification_attempts",
+            "landing_agent_branches",
+            "landing_bases",
+            "landing_owner_edits",
+            "landing_change_set_numbers",
+            "verification_current",
+            "github_publish_prompt",
+        ],
     ),
     (
         "settings_log.rs",
@@ -664,17 +702,7 @@ fn worktrees_runs_carry_only_their_named_tables() {
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     crate::worktrees::log::snapshot(&mut log, 9).unwrap();
     drop(log);
-    let mut statement = tx
-        .prepare("SELECT body FROM state_log WHERE kind=?1")
-        .unwrap();
-    let tables: Vec<String> = statement
-        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
-        .unwrap()
-        .map(|body| {
-            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
-            chunk["table"].as_str().unwrap().to_owned()
-        })
-        .collect();
+    let tables = chunk_tables(&tx);
     assert_eq!(tables.len(), named.len(), "one chunk per empty table");
     assert!(
         tables.iter().all(|table| named.contains(&table.as_str())),
@@ -687,7 +715,7 @@ fn worktrees_runs_carry_only_their_named_tables() {
 /// Output: none.
 #[cfg(unix)]
 fn memory_runs_carry_only_their_named_tables() {
-    let (writer, named) = SNAPSHOTS[2];
+    let (writer, named) = SNAPSHOTS[3];
     assert_eq!(writer, "memory/log.rs");
     let mut db = db();
     crate::memory::initialize(&db).unwrap();
@@ -844,6 +872,7 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
         );
     }
     worktrees_runs_carry_only_their_named_tables();
+    landing_runs_carry_only_their_named_tables();
     settings_runs_carry_only_their_named_tables();
     #[cfg(unix)]
     memory_runs_carry_only_their_named_tables();
@@ -854,7 +883,7 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
 /// sessions_log.rs, one chunk each in order, on a store where none of them exists yet.
 /// Output: none.
 fn sessions_runs_carry_only_their_named_tables() {
-    let (writer, named) = SNAPSHOTS[3];
+    let (writer, named) = SNAPSHOTS[4];
     assert_eq!(writer, "sessions_log.rs");
     let mut db = db();
     let tx = db.transaction().unwrap();
@@ -990,10 +1019,39 @@ fn sessions_body_is_closed(kind: &str) {
     closed_body(kind, decodes, sample, keys);
 }
 
+/// Checks that a landing run carries only the tables [`SNAPSHOTS`] names for its writer, in
+/// that order, one empty chunk each in a store without them. Output: none.
+fn landing_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[1];
+    assert_eq!(writer, "landing_log.rs");
+    let mut db = db();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::landing_log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    assert_eq!(chunk_tables(&tx), named, "one chunk per empty table");
+}
+
+/// The table of each snapshot chunk in a transaction's log, in seq order. Input: the
+/// transaction. Output: the tables.
+fn chunk_tables(tx: &rusqlite::Transaction<'_>) -> Vec<String> {
+    let mut statement = tx
+        .prepare("SELECT body FROM state_log WHERE kind=?1 ORDER BY seq")
+        .unwrap();
+    statement
+        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| {
+            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            chunk["table"].as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
 /// Checks that a settings snapshot run carries only the tables [`SNAPSHOTS`] names for
 /// settings_log.rs, one chunk each on a store holding every settings table. Output: none.
 fn settings_runs_carry_only_their_named_tables() {
-    let (writer, named) = SNAPSHOTS[1];
+    let (writer, named) = SNAPSHOTS[2];
     assert_eq!(writer, "settings_log.rs");
     let mut db = db();
     crate::settings_log::initialize(&db).unwrap();
@@ -1001,18 +1059,7 @@ fn settings_runs_carry_only_their_named_tables() {
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     crate::settings_log::snapshot(&mut log, 9).unwrap();
     drop(log);
-    let mut statement = tx
-        .prepare("SELECT body FROM state_log WHERE kind=?1 ORDER BY seq")
-        .unwrap();
-    let tables: Vec<String> = statement
-        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
-        .unwrap()
-        .map(|body| {
-            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
-            chunk["table"].as_str().unwrap().to_owned()
-        })
-        .collect();
-    assert_eq!(tables, named, "one chunk per empty table, in order");
+    assert_eq!(chunk_tables(&tx), named, "one chunk per table, in order");
 }
 
 /// Checks the closed body of one settings kind (v2.5 L10): the setting and, for a project
@@ -1207,6 +1254,74 @@ fn ide_body_is_closed(kind: &str) {
     }
 }
 
+/// Checks the closed body of one landing kind through `landing_log::Change::parse`, which
+/// refuses ids, absolute paths, a branch or object ids that are not closed and any key more;
+/// an owner edit's path is its [`FREE_FORM`] key. Input: the kind. Output: none.
+fn landing_body_is_closed(kind: &str) {
+    assert!(KINDS.contains(&kind), "{kind} is a listed kind");
+    assert!(
+        crate::landing_log::KINDS.contains(&kind),
+        "{kind} is a landing kind"
+    );
+    let sample = landing_sample(kind);
+    let named: Vec<String> = sample.as_object().unwrap().keys().cloned().collect();
+    let keys: Vec<&str> = named.iter().map(String::as_str).collect();
+    let decodes = |body: &[u8]| {
+        let logged = replay::Logged {
+            seq: 1,
+            revision: 1,
+            aggregate: Aggregate::Landing,
+            kind: kind.to_owned(),
+            schema: crate::landing_log::SCHEMA,
+            at_ms: 0,
+            body: body.to_vec(),
+        };
+        crate::landing_log::Change::parse(&logged).is_ok()
+    };
+    closed_body(kind, decodes, sample, &keys);
+}
+
+/// A closed sample body of one landing kind. Input: the kind. Output: the body.
+fn landing_sample(kind: &str) -> serde_json::Value {
+    use crate::landing_log as landing;
+    let (worktree, change_set) = ("/repo/.wt/one", "c".repeat(32));
+    match kind {
+        landing::AGENT_BRANCH_SET => {
+            json!({"worktree": worktree, "repository": "/repo", "branch": "crazyagent/task-one"})
+        }
+        landing::BASE_SET => json!({"worktree": worktree, "base": "a".repeat(40)}),
+        landing::OWNER_EDIT_KEPT => {
+            json!({"worktree": worktree, "path": "src/main file.rs", "at_ms": 5})
+        }
+        landing::OWNER_EDITS_SETTLED => json!({"worktree": worktree, "change_set": change_set}),
+        landing::AGENT_BRANCH_FORGOTTEN
+        | landing::BASE_FORGOTTEN
+        | landing::OWNER_EDITS_DROPPED
+        | landing::WORKTREE_OWNER_EDITS_FORGOTTEN => json!({"worktree": worktree}),
+        landing::OWNER_EDITS_FORGOTTEN => json!({"change_set": change_set}),
+        landing::CHANGE_SET_NUMBERED => {
+            json!({"change_set": change_set, "project": "app", "number": 1})
+        }
+        landing::BASELINE_APPROVED => json!({"project": "app", "baseline": "b".repeat(64)}),
+        landing::PUBLISH_PROMPT_SNOOZED => json!({"project": "app", "until_ms": 5}),
+        landing::PUBLISH_PROMPT_NEVER => json!({"project": "app"}),
+        landing::CHANGE_SET_SAVED => json!({
+            "change_set": change_set, "project": "app", "row": ["d".repeat(64)], "number": 1
+        }),
+        landing::RULE_REQUEST_SAVED => {
+            json!({"request": 3, "project": "app", "row": ["d".repeat(64)]})
+        }
+        landing::VERIFICATION_SAVED => json!({
+            "table": "verification_baselines", "id": "b".repeat(64), "project": "app",
+            "row": ["d".repeat(64)]
+        }),
+        landing::VERIFICATION_FORGOTTEN => {
+            json!({"table": "verification_attempts", "id": "attempt"})
+        }
+        other => panic!("{other} is not a landing kind"),
+    }
+}
+
 /// L1-N1: no event body can carry a secret, a key, a token or prompt text. Each kind's body
 /// has closed keys whose decoder refuses free text and any key more (ids: 1 to 128 safe ASCII
 /// bytes), but for one [`FREE_FORM`] path that refuses what `check_path` refuses. A closing
@@ -1218,6 +1333,12 @@ fn no_event_body_can_carry_a_secret() {
         assert!(
             KINDS.contains(&kind),
             "the ide kind {kind} needs a body rule"
+        );
+    }
+    for kind in crate::landing_log::KINDS {
+        assert!(
+            KINDS.contains(&kind),
+            "the landing kind {kind} needs a body rule"
         );
     }
     let writers = writer_sources();
@@ -1273,6 +1394,7 @@ fn no_event_body_can_carry_a_secret() {
             | crate::ide::log::FILE_UNLOCKED
             | crate::ide::log::WORKSPACE_WRITTEN
             | crate::ide::log::WORKSPACE_FORGOTTEN => ide_body_is_closed(kind),
+            kind if crate::landing_log::KINDS.contains(&kind) => landing_body_is_closed(kind),
             crate::memory::log::KIND => closed_body(
                 kind,
                 crate::memory::log::closed,

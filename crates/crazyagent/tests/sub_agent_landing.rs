@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+mod owner_support;
 
 const PROJECT: &str = "project-1";
 
@@ -69,7 +70,7 @@ struct Agent {
 /// One owner repository with the engine store beside it and a lead, team agent 1, in its
 /// own clone on `crazyagent/lead`, recorded as the engine records a team agent's worktree.
 struct Team {
-    _temp: tempfile::TempDir,
+    _temp: (owner_support::Owner, tempfile::TempDir),
     #[cfg(target_os = "macos")]
     root: PathBuf,
     project: PathBuf,
@@ -101,11 +102,10 @@ impl Team {
         fs::create_dir_all(project.join(".git/info")).unwrap();
         fs::write(project.join(".git/info/exclude"), ".crazyagent/\n").unwrap();
         fs::create_dir_all(project.join(".crazyagent/worktrees")).unwrap();
+        let owner = owner_support::owner_on(&root, &engine);
         let db = landing::open(&engine).unwrap();
         crazyagent::team::initialize(&db).unwrap();
         crazyagent::coord::ensure(&db).unwrap();
-        db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
-            .unwrap();
         db.execute(
             "INSERT INTO projects(id, body) VALUES (?1, '{}')",
             [PROJECT],
@@ -123,7 +123,7 @@ impl Team {
             branch,
         };
         let team = Self {
-            _temp: temp,
+            _temp: (owner, temp),
             #[cfg(target_os = "macos")]
             root,
             project,

@@ -17,6 +17,7 @@ static REQUESTED: AtomicBool = AtomicBool::new(false);
 static STOP: LazyLock<Notify> = LazyLock::new(Notify::new);
 
 /// The name prefix of the dated copy a restore keeps of the data it replaces.
+#[cfg(unix)]
 const COPY_PREFIX: &str = "replaced-";
 
 /// How the owner's last restore of the pinned 2.4 backup stands, as the record beside

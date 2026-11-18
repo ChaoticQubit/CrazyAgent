@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
+mod owner_support;
 
 const PROJECT: &str = "project-1";
 const GOAL: &str = "Ship the login page";
@@ -58,7 +59,7 @@ fn now_ms() -> i64 {
 /// activity reads, and one team sub-agent, agent 1, in its own clone, recorded as the
 /// engine records a team agent's worktree.
 struct Project {
-    _temp: tempfile::TempDir,
+    _temp: (owner_support::Owner, tempfile::TempDir),
     project: PathBuf,
     home: PathBuf,
     worktree: PathBuf,
@@ -89,12 +90,11 @@ impl Project {
         fs::create_dir_all(project.join(".git/info")).unwrap();
         fs::write(project.join(".git/info/exclude"), ".crazyagent/\n").unwrap();
         fs::create_dir_all(project.join(".crazyagent/worktrees")).unwrap();
+        let owner = owner_support::owner_on(&root, &engine);
         let db = landing::open(&engine).unwrap();
         crazyagent::team::initialize(&db).unwrap();
         crazyagent::team::events::initialize(&db).unwrap();
         crazyagent::coord::ensure(&db).unwrap();
-        db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
-            .unwrap();
         activity::initialize(&db).unwrap();
         let worktree = project.join(".crazyagent/worktrees/agent-1");
         let branch = landing::claim_task_branch(&db, &project, &worktree, "login").unwrap();
@@ -118,7 +118,7 @@ impl Project {
         .unwrap();
         landing::record_worktree_start(&db, &project, &worktree, &git_dir).unwrap();
         Self {
-            _temp: temp,
+            _temp: (owner, temp),
             project,
             home,
             worktree,

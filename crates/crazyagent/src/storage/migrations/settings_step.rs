@@ -33,8 +33,8 @@ pub(super) fn sessions_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineErro
     Ok(())
 }
 
-/// The step after it (v2.5 L13c): master turns, preparations, waiting Resolves and profile
-/// receipts go on the state log. It gives the sessions marks table its seven-table check,
+/// Step 18 (v2.5 L13c): master turns, preparations, waiting Resolves and profile receipts
+/// go on the state log. It gives the sessions marks table its seven-table check,
 /// then rows of the four written before the log reach replay through one snapshot run of
 /// all seven sessions tables, unless the log already holds an event or chunk of them. Input:
 /// the open upgrade transaction. Output: Ok or the log's refusal.
