@@ -1688,6 +1688,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub folder: &'a Path,
     #[cfg(unix)]
     pub prompt: &'a str,
+    #[cfg_attr(windows, expect(dead_code))]
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
     #[cfg(unix)]
