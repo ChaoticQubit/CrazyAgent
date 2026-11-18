@@ -793,7 +793,7 @@ mod tests {
     use super::*;
     use crate::native_term::event::MouseKind;
     use crate::native_term::linux::clip::Clip;
-    use crate::native_term::linux::rows::{checkpoint, pump_for, pump_until, row_dir};
+    use crate::native_term::linux::rows::{STEP_WAIT, checkpoint, pump_for, pump_until, row_dir};
     use crate::native_term::linux::surface::{self, Rect};
     use crate::native_term::pane::Named;
     use serde_json::json;
@@ -1414,17 +1414,24 @@ mod tests {
         assert_eq!(take_seen(), Vec::new());
         pump_until("toplevel focus", || window.has_toplevel_focus());
         pointer_step("uncovered", &window, rect);
-        pump_until("view click and wheel", || {
-            SEEN.with(|seen| {
+        let waited = std::time::Instant::now();
+        while waited.elapsed() < STEP_WAIT
+            && !SEEN.with(|seen| {
                 seen.borrow()
                     .iter()
                     .any(|(_, event)| matches!(event, ViewEvent::Wheel { .. }))
             })
-        });
+        {
+            pump_for(Duration::from_millis(5));
+        }
         pump_for(Duration::from_millis(300));
         let got = take_seen();
         let center = (200.0, 120.0);
-        assert!(got.len() >= 4, "{got:?}");
+        assert!(
+            got.len() >= 4,
+            "the view got {got:?}; the page counts are {:?}",
+            counts(&page)
+        );
         assert_eq!(got[0], ViewEvent::Focus(true), "{got:?}");
         assert!(
             matches!(got[1], ViewEvent::Mouse { kind: MouseKind::Press, point, option: false, clicks: 1 } if near(point, center)),
