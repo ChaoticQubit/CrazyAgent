@@ -1902,31 +1902,47 @@ fn probe_failure(probe: &mut Command) -> Option<String> {
     Some(probe_reason(&said, &ended))
 }
 
-/// Runs a probe with no environment and no input, keeping what it says on stderr. Input: the
-/// probe command. Output: none when it ran and exited 0, else its stderr and how it ended.
+/// Runs a probe with no environment and no input, keeping at most [`PROBE_SAID_MAX`] bytes of
+/// what it says on stderr. The pipe closes before the wait, so a probe that says more gets
+/// `EPIPE` and ends rather than blocking. Input: the probe command. Output: none when it ran
+/// and exited 0, else its stderr and how it ended.
 fn probe_said(probe: &mut Command) -> Option<(String, String)> {
-    let ran = crate::spawn_gate::output(
+    let started = crate::spawn_gate::spawn(
         probe
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped()),
     );
-    match ran {
-        Ok(output) if output.status.success() => None,
-        Ok(output) => Some((
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-            output.status.to_string(),
-        )),
-        Err(error) => Some((String::new(), error.to_string())),
-    }
+    let mut child = match started {
+        Ok(child) => child,
+        Err(error) => return Some((String::new(), error.to_string())),
+    };
+    let mut bytes = Vec::new();
+    let read = child
+        .stderr
+        .take()
+        .map(|pipe| pipe.take(PROBE_SAID_MAX as u64).read_to_end(&mut bytes));
+    let status = match child.wait() {
+        Ok(status) if status.success() => return None,
+        Ok(status) => status.to_string(),
+        Err(error) => error.to_string(),
+    };
+    let ended = match read {
+        Some(Err(error)) => format!("{status}, stderr unread: {error}"),
+        Some(Ok(_)) | None => status,
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let said = text[..text.floor_char_boundary(PROBE_SAID_MAX)].to_owned();
+    assert!(said.len() <= PROBE_SAID_MAX);
+    Some((said, ended))
 }
 
 /// The log line for a failed probe, naming its flags, how it ended and what it said on
-/// stderr. Inputs: the flags, how it ended and what it said. Output: the line, without its
-/// newline.
+/// stderr, which is quoted with its control characters escaped so it stays one line. Inputs:
+/// the flags, how it ended and what it said. Output: the line, without its newline.
 fn probe_log(flags: &[&OsStr], ended: &str, said: &str) -> String {
-    format!("linux_probe_failed: {flags:?} {ended}: {said}")
+    format!("linux_probe_failed: {flags:?} {ended}: {said:?}")
 }
 
 /// The reason a refusal carries for a failed probe: the first line it said, or how it ended
