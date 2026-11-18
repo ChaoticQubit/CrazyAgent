@@ -380,7 +380,7 @@ fn t7_quoting_round_trips_every_non_nul_byte_and_never_expands_a_dollar() {
 #[test]
 fn t7_a_full_request_pasted_through_a_buffer_reaches_the_window_pane_byte_exact() {
     let home = tempfile::tempdir().unwrap();
-    let (host, _server, agent, received) = raw_cat_pane(home.path());
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), false);
     let control = host.live_control().unwrap();
     let target = host.agent_target(&control, &agent).unwrap();
     assert!(!pane_id_valid(&target));
@@ -406,7 +406,7 @@ fn t7_a_full_request_pasted_through_a_buffer_reaches_the_window_pane_byte_exact(
 #[test]
 fn t6_a_full_request_sent_back_to_back_reaches_the_window_pane_whole_and_in_order() {
     let home = tempfile::tempdir().unwrap();
-    let (host, _server, agent, received) = raw_cat_pane(home.path());
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), false);
     let control = host.live_control().unwrap();
     let target = host.agent_target(&control, &agent).unwrap();
     assert!(!pane_id_valid(&target));
@@ -417,11 +417,54 @@ fn t6_a_full_request_sent_back_to_back_reaches_the_window_pane_whole_and_in_orde
     assert_eq!(received_bytes(&received, bytes.len()), bytes);
 }
 
-/// A real tmux server whose one agent pane runs `cat` on a raw terminal, writing what it
-/// receives to a file. Takes the test's home folder. Returns the host, the guard that stops
-/// the server, the agent and the file.
+/// DEC-202 T7 (h4 22:08): while a paste's named buffer waits between `set-buffer` and
+/// `paste-buffer`, a pane's OSC 52 clipboard query gets no reply even with `set-clipboard on`,
+/// since tmux answers that query only from an unnamed buffer; the same query does get an
+/// unnamed buffer back, which shows the row would see a leak.
 #[cfg(target_os = "macos")]
-fn raw_cat_pane(home: &Path) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
+#[test]
+fn t7_a_pending_named_paste_buffer_is_not_read_by_a_panes_osc_52_query() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), true);
+    let control = host.live_control().unwrap();
+    let target = host.agent_target(&control, &agent).unwrap();
+    control.run("set-option -s set-clipboard on").unwrap();
+    let lines = paste_buffer_lines(&target, "crazyagent-t7-osc52-1", b"secret $HOME");
+    assert!(lines[0].starts_with("set-buffer -b crazyagent-t7-osc52-1 -- "));
+    control.run(&lines[0]).unwrap();
+    let go = home.path().join("go");
+    std::fs::write(&go, b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while go.exists() {
+        assert!(Instant::now() < deadline, "the pane never sent its query");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(std::fs::read(&received).unwrap_or_default(), b"");
+    control.run("set-buffer -- \"control\"").unwrap();
+    std::fs::write(&go, b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let reply = b"\x1b]52;c;Y29udHJvbA==";
+    while !std::fs::read(&received)
+        .unwrap_or_default()
+        .windows(reply.len())
+        .any(|window| window == reply)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "an unnamed buffer never came back to the same query"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A real tmux server whose one agent pane runs `cat` on a raw terminal, writing what it
+/// receives to a file. With `osc52_queries`, the pane also prints an OSC 52 clipboard query
+/// each time a `go` file appears in the home folder and removes it, for at most 20 s and
+/// while `cat` lives. Takes the test's home folder and that choice. Returns the host, the
+/// guard that stops the server, the agent and the file.
+#[cfg(target_os = "macos")]
+fn raw_cat_pane(home: &Path, osc52_queries: bool) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let folder = home.join("terminal");
     std::fs::create_dir(&folder).unwrap();
@@ -434,8 +477,19 @@ fn raw_cat_pane(home: &Path) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
     };
     let ready = home.join("ready");
     let received = home.join("received");
+    let queries = if osc52_queries {
+        let go = home.join("go");
+        format!(
+            "( n=0; while [ $n -lt 1000 ] && kill -0 $$ 2>/dev/null; do \
+             if [ -e '{go}' ]; then rm -f '{go}'; printf '\\033]52;c;?\\007'; fi; \
+             n=$((n + 1)); sleep 0.02; done ) & ",
+            go = go.display()
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
-        "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+        "stty raw -echo; : > '{}'; {queries}exec /bin/cat > '{}'",
         ready.display(),
         received.display()
     );
