@@ -103,6 +103,12 @@ pub fn window_name(name: &str) -> Result<String, &'static str> {
     if !plain || crate::bridge::terminal::agent(name).is_err() {
         return Err("native_terminal_agent_invalid");
     }
+    assert!(
+        !name
+            .bytes()
+            .any(|b| matches!(b, b';' | b':' | b'.' | b' ' | b'=' | b'"'))
+    );
+    assert!(name.len() <= NAME_BYTES_MAX);
     Ok(name.to_owned())
 }
 
@@ -152,6 +158,52 @@ pub struct HookEvent {
     pub input: HookInput,
 }
 
+/// The longest text one typed test-hook event may carry.
+const TEXT_BYTES_MAX: usize = 4096;
+
+/// The longest key name one test-hook event may carry.
+const KEY_BYTES_MAX: usize = 32;
+
+/// The longest paste one test-hook event may carry, the most a copy holds.
+const PASTE_BYTES_MAX: usize = 1 << 20;
+
+/// The largest point or wheel delta one test-hook event may carry, in CSS pixels.
+const POINT_ABS_MAX: f64 = 1.0e5;
+
+/// The longest text a test-hook event may wait to see on screen.
+const EXPECT_CHARS_MAX: usize = 256;
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(EXPECT_CHARS_MAX == pane::EXPECT_CHARS_MAX);
+#[cfg(target_os = "macos")]
+const _: () = assert!(PASTE_BYTES_MAX == codec::COPY_BYTES_MAX);
+
+impl HookEvent {
+    /// Whether every value the page supplied is inside its bound, so nothing a page sends can
+    /// reach an assertion below: a finite dispatch time, finite points and wheel deltas, a
+    /// DOM wheel mode, and text, key, paste and awaited-text sizes. Output: the answer.
+    pub fn valid(&self) -> bool {
+        let point = |v: f64| v.is_finite() && v.abs() <= POINT_ABS_MAX;
+        let expect = self
+            .expect
+            .as_ref()
+            .is_none_or(|t| t.chars().count() <= EXPECT_CHARS_MAX);
+        let input = match &self.input {
+            HookInput::Text { text } => text.len() <= TEXT_BYTES_MAX,
+            HookInput::Key { key, .. } => key.len() <= KEY_BYTES_MAX,
+            HookInput::Wheel { dy, mode, x, y } => {
+                point(*dy) && *mode <= 2 && point(*x) && point(*y)
+            }
+            HookInput::Press { x, y, .. }
+            | HookInput::Drag { x, y, .. }
+            | HookInput::Release { x, y, .. } => point(*x) && point(*y),
+            HookInput::Copy => true,
+            HookInput::Paste { text } => text.len() <= PASTE_BYTES_MAX,
+        };
+        self.t0.is_finite() && expect && input
+    }
+}
+
 /// What a native view tells its page: its mirror is ready, one timed input finished, or
 /// the view ended with a plain code and the page falls back to today's renderer.
 #[derive(serde::Serialize, Clone, Debug)]
@@ -191,9 +243,18 @@ pub fn desktop_native_terminal_open(
     }
     #[cfg(target_os = "macos")]
     {
-        let pointer = window
-            .ns_window()
-            .map_err(|_| "native_terminal_window_missing")? as usize;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        window
+            .with_webview(move |webview| {
+                let _ = sender.send(webview.inner() as usize);
+            })
+            .map_err(|_| "native_terminal_webview_missing")?;
+        let pointer = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| "native_terminal_webview_missing")?;
+        if pointer == 0 {
+            return Err("native_terminal_webview_missing".into());
+        }
         host::open(
             &app,
             (window.label().to_owned(), pointer),
@@ -261,8 +322,11 @@ pub fn desktop_native_terminal_input(
     id: u64,
     event: HookEvent,
 ) -> Result<(), String> {
-    if !enabled() || !event.t0.is_finite() {
+    if !enabled() {
         return Err("native_terminal_off".into());
+    }
+    if !event.valid() {
+        return Err("native_terminal_input_invalid".into());
     }
     #[cfg(target_os = "macos")]
     return host::input(&app, window.label().to_owned(), id, event);
@@ -367,6 +431,76 @@ mod tests {
         assert!(window_name("team-1;kill-server").is_err());
         assert!(window_name("a b").is_err());
         assert!(window_name(&"x".repeat(NAME_BYTES_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn hook_events_out_of_bounds_are_refused() {
+        let event = |input: HookInput| HookEvent {
+            seq: 1,
+            t0: 1.0,
+            expect: None,
+            input,
+        };
+        assert!(event(HookInput::Text { text: "a".into() }).valid());
+        assert!(
+            event(HookInput::Wheel {
+                dy: -120.0,
+                mode: 0,
+                x: 4.0,
+                y: 4.0
+            })
+            .valid()
+        );
+        assert!(
+            !event(HookInput::Wheel {
+                dy: f64::NAN,
+                mode: 0,
+                x: 4.0,
+                y: 4.0
+            })
+            .valid()
+        );
+        assert!(
+            !event(HookInput::Wheel {
+                dy: 1.0,
+                mode: 3,
+                x: 4.0,
+                y: 4.0
+            })
+            .valid()
+        );
+        assert!(
+            !event(HookInput::Press {
+                x: f64::INFINITY,
+                y: 0.0,
+                option: false
+            })
+            .valid()
+        );
+        assert!(
+            !event(HookInput::Text {
+                text: "a".repeat(TEXT_BYTES_MAX + 1)
+            })
+            .valid()
+        );
+        assert!(
+            !event(HookInput::Paste {
+                text: "a".repeat(PASTE_BYTES_MAX + 1)
+            })
+            .valid()
+        );
+        let long = HookEvent {
+            expect: Some("x".repeat(EXPECT_CHARS_MAX + 1)),
+            ..event(HookInput::Copy)
+        };
+        assert!(!long.valid());
+        assert!(
+            !HookEvent {
+                t0: f64::NAN,
+                ..event(HookInput::Copy)
+            }
+            .valid()
+        );
     }
 
     #[test]

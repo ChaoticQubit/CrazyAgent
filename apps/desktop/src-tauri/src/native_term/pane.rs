@@ -179,7 +179,8 @@ pub enum Input {
 
 /// One timed input: what it was, when it began (wall ms), when its command went to tmux
 /// and tmux took it all, when the pane's first output after it came, when the screen showed
-/// the text it waits for, and when the frame showing that was handed to the display.
+/// the text it waits for, and when the frame showing that was handed to the display, with
+/// that frame's build time and its wait for a drawable (ms).
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Probe {
     pub seq: u64,
@@ -192,6 +193,8 @@ pub struct Probe {
     pub output: Option<f64>,
     pub render: Option<f64>,
     pub frame: Option<f64>,
+    pub build_ms: Option<f64>,
+    pub acquire_ms: Option<f64>,
     pub local: bool,
     pub failed: bool,
     #[serde(skip)]

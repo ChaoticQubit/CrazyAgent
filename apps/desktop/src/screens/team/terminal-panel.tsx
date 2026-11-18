@@ -11,7 +11,7 @@ import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../
 import { displayText } from "../conversation";
 import type { Seed } from "../project/console-model";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
-import { NativeScreen, nativeTerminalOn } from "./native-terminal";
+import { NativeScreen, nativeTerminalOn, noteEnded } from "./native-terminal";
 import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
 import { autoStartFailed, gpuStartFailed, gpuWanted, probeGpu, rendererChosen } from "./terminal-renderer";
 import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, readableScreen, seedText, selectNote, settleAfterWrites, terminalEvent, terminalSize, type GpuDrawing } from "./terminal-io";
@@ -1053,7 +1053,10 @@ export function TerminalPanel(props: PanelProps) {
   const name = props.node.terminal;
   const native = nativeTerminalOn() && Boolean(name) && teammatePane(props.node) === null && ended?.name !== name;
   if (!native || !name) return <WebTerminalPanel {...props} />;
-  return <NativeTerminalPanel {...props} name={name} onEnded={(code) => setEnded({ name, code })} />;
+  return <NativeTerminalPanel {...props} name={name} onEnded={(code) => {
+    noteEnded(name, code);
+    setEnded({ name, code });
+  }} />;
 }
 
 /** The panel around a native view: the same head as today's panel, an opening line until the

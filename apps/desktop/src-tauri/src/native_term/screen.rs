@@ -1,7 +1,7 @@
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 
@@ -127,6 +127,31 @@ fn mix(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
+/// The colours one cell draws in: its resolved foreground and background, swapped once for
+/// inverse video and once more when selected, the foreground dimmed for faint text and
+/// equal to the background for hidden text. Inputs: the cell, the palette and whether the
+/// cell is selected. Output: (foreground, background).
+fn cell_colors(cell: &Cell, colors: &Colors, selected: bool) -> (Rgb, Rgb) {
+    let pair = (resolve(cell.fg, colors), resolve(cell.bg, colors));
+    let (mut fg, mut bg) = pair;
+    if cell.flags.contains(Flags::INVERSE) {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if selected {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if cell.flags.contains(Flags::DIM) {
+        fg = dim(fg);
+    }
+    if cell.flags.contains(Flags::HIDDEN) {
+        fg = bg;
+    }
+    assert!(!cell.flags.contains(Flags::HIDDEN) || fg == bg);
+    let faint = cell.flags.intersects(Flags::DIM | Flags::HIDDEN);
+    assert!(faint || (fg, bg) == pair || (bg, fg) == pair);
+    (fg, bg)
+}
+
 /// Builds the frame for the visible screen. Input: the terminal. Output: rows, fills and the
 /// cursor; wide-character spacer cells add no text, and selected cells show swapped colours.
 pub fn frame(term: &Term<VoidListener>) -> Frame {
@@ -142,20 +167,8 @@ pub fn frame(term: &Term<VoidListener>) -> Frame {
         let row = usize::try_from(indexed.point.line.0 + offset).unwrap_or(usize::MAX);
         assert!(row < lines, "display row inside the screen");
         let cell = indexed.cell;
-        let mut fg = resolve(cell.fg, content.colors);
-        let mut bg = resolve(cell.bg, content.colors);
-        if cell.flags.contains(Flags::INVERSE) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        if selection.is_some_and(|range| range.contains(indexed.point)) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        if cell.flags.contains(Flags::DIM) {
-            fg = dim(fg);
-        }
-        if cell.flags.contains(Flags::HIDDEN) {
-            fg = bg;
-        }
+        let selected = selection.is_some_and(|range| range.contains(indexed.point));
+        let (fg, bg) = cell_colors(cell, content.colors, selected);
         let column = indexed.point.column.0;
         if bg != BACKGROUND {
             match fills.last_mut() {

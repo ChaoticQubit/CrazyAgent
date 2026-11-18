@@ -18,9 +18,14 @@ export type NativeProbe = {
   output: number | null;
   render: number | null;
   frame: number | null;
+  build_ms: number | null;
+  acquire_ms: number | null;
   local: boolean;
   failed: boolean;
 };
+
+/** One native view that ended and fell back to today's renderer: its agent and plain code. */
+export type NativeEnded = { name: string; code: string };
 
 /** What a native view reports: ready, one finished timed input, or ended with a plain code. */
 export type NativeReport = { type: "ready" } | { type: "ended"; code: string } | ({ type: "probe" } & NativeProbe);
@@ -38,11 +43,28 @@ const OVERLAYS = '[role="dialog"],[role="menu"],[role="listbox"],[role="tooltip"
 const NAMED_KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
   "Home", "End", "PageUp", "PageDown", "Delete"]);
 
+/** The most ended views a page keeps for the harness to read. */
+const ENDED_MAX = 256;
+
 declare global {
   interface Window {
     __nativeTerminalReports?: NativeProbe[];
     __nativeTerminalExpect?: string | null;
+    __nativeTerminalEnded?: NativeEnded[];
   }
+}
+
+/** Records a native view that ended, so a harness can tell a fallback to today's renderer
+ * from a native run: kept in `window.__nativeTerminalEnded` (the oldest dropped past
+ * `ENDED_MAX`) and told to listeners of `native-terminal-ended`. Inputs: the agent and the
+ * plain code. */
+export function noteEnded(name: string, code: string): void {
+  const kept = window.__nativeTerminalEnded ?? [];
+  if (kept.length >= ENDED_MAX) kept.splice(0, kept.length - ENDED_MAX + 1);
+  kept.push({ name, code });
+  if (kept.length > ENDED_MAX) throw new Error("ended native terminals are bounded");
+  window.__nativeTerminalEnded = kept;
+  window.dispatchEvent(new CustomEvent("native-terminal-ended", { detail: { name, code } }));
 }
 
 let enabled = false;

@@ -6,9 +6,9 @@ use super::render::{Shared, Surface};
 use super::screen;
 use super::view::{MouseKind, TermView};
 use super::{HookEvent, HookInput, Rect, Report};
+use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, Message};
-use objc2_app_kit::{NSView, NSWindow, NSWindowOrderingMode};
+use objc2_app_kit::{NSView, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -27,9 +27,6 @@ const FEEDS_MAX: usize = 1 << 20;
 
 /// How long a command from another thread waits for the main thread.
 const MAIN_WAIT: Duration = Duration::from_secs(5);
-
-/// How deep the webview is searched for under the window's content view.
-const WEBVIEW_DEPTH: usize = 8;
 
 thread_local! {
     static NATIVE: RefCell<Option<Native>> = const { RefCell::new(None) };
@@ -88,6 +85,7 @@ pub fn on_main<T: Send + 'static>(
     if let Some(mtm) = MainThreadMarker::new() {
         return Ok(work(mtm));
     }
+    assert!(MainThreadMarker::new().is_none());
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
         let Some(mtm) = MainThreadMarker::new() else {
@@ -104,25 +102,11 @@ pub fn on_main<T: Send + 'static>(
 /// Runs work on the native state when it exists and is not already in use. Input: the
 /// work. Output: its result, or none.
 fn with_native<T>(work: impl FnOnce(&mut Native) -> T) -> Option<T> {
+    assert!(MainThreadMarker::new().is_some());
     NATIVE.with(|cell| {
         let mut held = cell.try_borrow_mut().ok()?;
         held.as_mut().map(work)
     })
-}
-
-/// Finds the WKWebView under a view, depth first, at most `depth` levels down.
-fn find_webview(view: &NSView, depth: usize) -> Option<Retained<NSView>> {
-    let is_webview =
-        objc2::runtime::AnyClass::get(c"WKWebView").is_some_and(|class| view.isKindOfClass(class));
-    if is_webview {
-        return Some(view.retain());
-    }
-    if depth == 0 {
-        return None;
-    }
-    view.subviews()
-        .iter()
-        .find_map(|child| find_webview(&child, depth - 1))
 }
 
 /// Starts the control client on the checked engine socket, with the tmux the engine uses.
@@ -135,6 +119,8 @@ fn connect(app: &tauri::AppHandle, inbox: &Arc<Inbox>) -> Result<Control, String
         .and_then(|terminal| terminal.parent())
         .ok_or("native_terminal_socket_invalid")?;
     let tmux = crazyagent::terminal::tmux::installed(root).ok_or("native_terminal_tmux_missing")?;
+    assert!(tmux.is_absolute());
+    assert_eq!(root.join("terminal").join("tmux.sock"), socket);
     let (app, inbox) = (app.clone(), Arc::clone(inbox));
     let sink = move |feed: Feed| {
         let mut queue = inbox
@@ -155,8 +141,9 @@ fn connect(app: &tauri::AppHandle, inbox: &Arc<Inbox>) -> Result<Control, String
 }
 
 /// Takes every waiting feed on the main thread and applies it, then draws what changed. When
-/// the state is in use further up this thread's stack, the feeds stay queued and the drain
-/// runs again from the main loop.
+/// the state is in use further up this thread's stack, the feeds stay queued, the drain stays
+/// marked scheduled, and a helper thread queues it on the main loop again: Tauri runs a task
+/// sent from the main thread at once, which would re-enter here while the state is held.
 fn drain() {
     assert!(MainThreadMarker::new().is_some());
     let applied = with_native(|native| {
@@ -175,15 +162,19 @@ fn drain() {
         native.draw_dirty();
     });
     if applied.is_none()
-        && let Some(app) = APP.get()
+        && let Some(app) = APP.get().cloned()
     {
-        let _ = app.run_on_main_thread(drain);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1));
+            assert!(MainThreadMarker::new().is_none());
+            let _ = app.run_on_main_thread(drain);
+        });
     }
 }
 
-/// Opens one native view for an engine-server agent window in the calling window, above
-/// its webview, and asks tmux for the pane. Inputs: the app, the window's label and
-/// NSWindow pointer, the checked window name, the page rectangle and the timing channel.
+/// Opens one native view for an engine-server agent window above the calling page's own
+/// webview, and asks tmux for the pane. Inputs: the app, the window's label and its
+/// WKWebView pointer, the checked window name, the page rectangle and the timing channel.
 /// Output: the view id, or a plain code.
 pub fn open(
     app: &tauri::AppHandle,
@@ -192,6 +183,8 @@ pub fn open(
     rect: Rect,
     output: Channel<Report>,
 ) -> Result<u64, String> {
+    assert!(rect.valid());
+    assert!(super::window_name(&name).is_ok());
     let app_clone = app.clone();
     let _ = APP.set(app.clone());
     on_main(app, move |mtm| {
@@ -240,14 +233,11 @@ impl Native {
         if self.control.is_none() {
             self.control = Some(connect(&self.app, &self.inbox)?);
         }
-        let pointer = window.1 as *mut NSWindow;
-        let ns_window =
-            unsafe { Retained::retain(pointer) }.ok_or("native_terminal_window_missing")?;
-        let content = ns_window
-            .contentView()
-            .ok_or("native_terminal_window_missing")?;
+        let pointer = window.1 as *mut NSView;
         let webview =
-            find_webview(&content, WEBVIEW_DEPTH).ok_or("native_terminal_webview_missing")?;
+            unsafe { Retained::retain(pointer) }.ok_or("native_terminal_webview_missing")?;
+        let class = objc2::runtime::AnyClass::get(c"WKWebView");
+        assert!(class.is_some_and(|class| webview.isKindOfClass(class)));
         let host = unsafe { webview.superview() }.ok_or("native_terminal_webview_missing")?;
         let id = self.next;
         self.next += 1;
@@ -285,7 +275,9 @@ impl Native {
         match feed {
             Feed::Output { pane, bytes, .. } => {
                 crazyagent::hop_trace::hop("native_output", bytes.len(), &pane);
-                for id in self.by_pane.get(&pane).cloned().unwrap_or_default() {
+                let ids = self.by_pane.get(&pane).cloned().unwrap_or_default();
+                assert!(ids.len() <= VIEWS_MAX);
+                for id in ids {
                     if let Some(view) = self.views.get_mut(&id) {
                         view.pane.on_output(&bytes);
                     }
@@ -306,6 +298,7 @@ impl Native {
                         code: "native_terminal_tmux_closed".into(),
                     });
                 }
+                assert!(self.control.is_none());
             }
         }
     }
@@ -317,7 +310,12 @@ impl Native {
         match want.kind {
             WantKind::Startup | WantKind::Command => {}
             WantKind::State => match view.pane.on_state(lines, ok) {
-                Ok(pane) => self.by_pane.entry(pane).or_default().push(want.view),
+                Ok(pane) => {
+                    assert!(codec::pane_id_valid(&pane));
+                    let list = self.by_pane.entry(pane).or_default();
+                    list.push(want.view);
+                    assert!(list.len() <= VIEWS_MAX);
+                }
                 Err(code) => {
                     let _ = view.output.send(Report::Ended { code: code.into() });
                 }
@@ -345,6 +343,7 @@ impl Native {
         if !shown {
             return;
         }
+        assert!(rect.valid() && rect.w >= 1.0 && rect.h >= 1.0);
         let css = NSRect::new(NSPoint::new(rect.x, rect.y), NSSize::new(rect.w, rect.h));
         let host = unsafe { view.ns.superview() };
         let frame = view.webview.convertRect_toView(css, host.as_deref());
@@ -404,13 +403,17 @@ impl Native {
             };
             let frame = screen::frame(term);
             view.pane.dirty = false;
-            if shared.draw(surface, &frame).is_err() {
+            assert!(!view.ns.isHidden());
+            let Ok(timing) = shared.draw(surface, &frame) else {
                 continue;
-            }
+            };
+            assert!(timing.build_ms >= 0.0 && timing.acquire_ms >= 0.0);
             let now = pane::wall_ms();
             let label = view.pane.pane_id().unwrap_or_default();
             crazyagent::hop_trace::hop("native_frame", 0, &label);
-            for probe in view.pane.on_frame(now) {
+            for mut probe in view.pane.on_frame(now) {
+                probe.build_ms = Some(timing.build_ms);
+                probe.acquire_ms = Some(timing.acquire_ms);
                 let _ = view.output.send(Report::Probe(probe));
             }
         }
@@ -425,6 +428,7 @@ impl Native {
         };
         use alacritty_terminal::grid::Dimensions;
         let scale = f64::from(shared.scale);
+        assert!((1.0..=4.0).contains(&scale));
         let cell = (f64::from(shared.cell.0), f64::from(shared.cell.1));
         let at = codec::cell_at(
             point.0 * scale,
@@ -441,6 +445,7 @@ impl Native {
     /// Applies one input to a view and, when timed, tracks it until its frame. Inputs: the
     /// view id, the input and the probe to track, if any.
     fn apply(&mut self, id: u64, input: Input, probe: Option<Probe>) {
+        assert!(self.views.len() <= VIEWS_MAX);
         let Some(control) = self.control.as_mut() else {
             return;
         };
@@ -448,6 +453,7 @@ impl Native {
             return;
         };
         let seq = probe.as_ref().map(|p| p.seq);
+        assert!(seq.is_none_or(|seq| seq > 0));
         if let Some(probe) = probe
             && let Some(dropped) = view.pane.track(probe)
         {
@@ -496,6 +502,8 @@ pub fn page_key(key: &str, ctrl: bool) -> Option<Input> {
         }
         _ => None,
     };
+    assert!(byte.is_none_or(|b| b < 0x80));
+    assert!(byte.is_none() || !key.is_empty());
     byte.map(|b| Input::Text(vec![b]))
 }
 
@@ -508,6 +516,7 @@ pub fn input(
     id: u64,
     event: HookEvent,
 ) -> Result<(), String> {
+    assert!(event.valid());
     if event
         .expect
         .as_ref()
@@ -527,6 +536,7 @@ pub fn input(
                 Some(Input::Paste { text }) => text.len(),
                 _ => 0,
             };
+            assert!(bytes <= codec::COPY_BYTES_MAX);
             let probe = Probe {
                 seq: event.seq,
                 kind: kind.into(),
@@ -557,6 +567,8 @@ impl Native {
     fn hook_input(&mut self, id: u64, input: HookInput) -> (&'static str, Option<Input>) {
         let scale = self.shared.as_ref().map_or(2.0, |s| f64::from(s.scale));
         let line_px = self.shared.as_ref().map_or(30.0, |s| f64::from(s.cell.1));
+        assert!((1.0..=4.0).contains(&scale));
+        assert!(line_px > 0.0);
         match input {
             HookInput::Text { text } => (
                 "text",
@@ -607,12 +619,14 @@ impl Native {
 /// Moves a view to a new page rectangle. Inputs: the app, the window label, the view id
 /// and the rectangle. Output: unit, or a plain code.
 pub fn place(app: &tauri::AppHandle, window: String, id: u64, rect: Rect) -> Result<(), String> {
+    assert!(rect.valid());
     on_main(app, move |_| {
         with_native(|native| {
             let Some(view) = native.views.get_mut(&id).filter(|v| v.window == window) else {
                 return Err("native_terminal_view_unknown".to_owned());
             };
             view.rect = rect;
+            assert!(view.rect == rect);
             native.layout(id);
             native.draw_dirty();
             Ok(())
@@ -662,6 +676,13 @@ pub fn close(app: &tauri::AppHandle, window: String, id: Option<u64>) -> Result<
             if native.views.is_empty() {
                 native.control = None;
             }
+            assert!(
+                native
+                    .by_pane
+                    .values()
+                    .flatten()
+                    .all(|key| !ids.contains(key))
+            );
             assert!(native.views.keys().all(|key| !ids.contains(key)));
         })
         .ok_or_else(|| "native_terminal_main_busy".to_owned())
@@ -699,6 +720,7 @@ pub fn on_wheel(id: u64, point: (f64, f64), delta: f64, precise: bool, _timestam
         let cell = native.cell_at(id, point);
         let scale = native.shared.as_ref().map_or(2.0, |s| f64::from(s.scale));
         let line_px = native.shared.as_ref().map_or(30.0, |s| f64::from(s.cell.1));
+        assert!(line_px > 0.0);
         let Some(view) = native.views.get_mut(&id) else {
             return;
         };
