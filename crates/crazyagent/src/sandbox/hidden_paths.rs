@@ -693,6 +693,26 @@ mod tests {
         }
     }
 
+    /// V243-WIN-HIDDEN-GIT: a tracked folder two levels down is found, and so is the folder
+    /// holding it; on Windows, where folder names ignore case, the folder typed in another case
+    /// is found too, since git is asked about its canonical spelling joined by `/`.
+    #[test]
+    fn a_tracked_folder_inside_another_is_found_in_any_case_spelling_windows_accepts() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        git_in(&path, &["init", "-q"]);
+        let nested = path.join("conf").join("secret");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("key.txt"), "k\n").unwrap();
+        git_in(&path, &["add", "conf/secret/key.txt"]);
+        assert_eq!(git_tracks(&path, &nested), Ok(true));
+        assert_eq!(git_tracks(&path, &path.join("conf")), Ok(true));
+        if cfg!(windows) {
+            let typed = path.join("CONF").join("Secret");
+            assert_eq!(git_tracks(&path, &typed), Ok(true));
+        }
+    }
+
     /// V243-WIN-HIDDEN-GIT (leader 08:33): times `none_tracked` per call on one untracked
     /// folder, one git run as each launch gate makes it, over 20 calls, and prints the median
     /// and the slowest. The farm runs it quiet and under a CPU load step; it asserts only the
