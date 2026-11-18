@@ -861,8 +861,17 @@ impl Tmux {
     /// pane gets the bytes unchanged in one write and the buffer is deleted; on a failure a
     /// best-effort `delete-buffer` follows. Takes the control client, the target and bytes
     /// without a NUL. Returns once tmux took them all.
-    fn send_pasted(_control: &Control, _target: &str, _bytes: &[u8]) -> Result<(), HostError> {
-        Err(failure("terminal_input_bounds"))
+    fn send_pasted(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(bytes.len() > SEND_KEYS_BYTES_MAX);
+        assert!(!bytes.contains(&0));
+        crate::hop_trace::hop("tmux_t7_start", bytes.len(), target);
+        let buffer = paste_buffer_name();
+        let pasted = control.run_all(&paste_buffer_lines(target, &buffer, bytes));
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        crate::hop_trace::hop("tmux_t7_done", 0, target);
+        pasted
     }
 
     /// Types bytes longer than one run into one tmux target as hex keys (DEC-202 T6, parked
@@ -2590,9 +2599,13 @@ enum Route {
 /// tmux buffer (DEC-202 T7) when its toggle is on and the bytes hold no NUL, which ends a
 /// buffer, else back to back (T6) when that toggle is on; any other request goes one by one.
 /// Takes at most `INPUT_BYTES_MAX` bytes and whether T6 and T7 are on. Returns the route.
-fn input_route(bytes: &[u8], interleave: bool, _paste_buffer: bool) -> Route {
+fn input_route(bytes: &[u8], interleave: bool, paste_buffer: bool) -> Route {
     assert!(bytes.len() <= INPUT_BYTES_MAX);
-    let route = if interleave && bytes.len() > SEND_KEYS_BYTES_MAX {
+    let route = if bytes.len() <= SEND_KEYS_BYTES_MAX {
+        Route::OneByOne
+    } else if paste_buffer && !bytes.contains(&0) {
+        Route::PasteBuffer
+    } else if interleave {
         Route::BackToBack
     } else {
         Route::OneByOne
@@ -2609,8 +2622,38 @@ const COMMANDS_SENT_MAX: usize = super::input_runs_max(INPUT_BYTES_MAX, SEND_KEY
 /// octal escape inside double quotes, so tmux's parser decodes each exactly and expands no
 /// `$`, `~` or `#`, then `paste-buffer -d -r -S`, which writes the bytes unchanged and deletes
 /// the buffer. Takes the target, the buffer name and bytes without a NUL. Returns the commands.
-fn paste_buffer_lines(_target: &str, _buffer: &str, _bytes: &[u8]) -> Vec<String> {
-    Vec::new()
+fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let mut set = String::with_capacity(24 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer -b {buffer} -- \"");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() {
+            set.push(char::from(byte));
+        } else {
+            let _ = write!(set, "\\{byte:03o}");
+        }
+    }
+    set.push('"');
+    assert!(set.len() <= "set-buffer -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    vec![
+        set,
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// A tmux buffer name no other paste of this engine uses, `crazyagent-t7-<pid>-<n>`, plain
+/// enough to sit unquoted in a command. Takes nothing. Returns the name.
+fn paste_buffer_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(next < u64::MAX);
+    let name = format!("crazyagent-t7-{}-{next}", std::process::id());
+    assert!(
+        name.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    );
+    name
 }
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
