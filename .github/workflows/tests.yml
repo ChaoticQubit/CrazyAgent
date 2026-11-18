@@ -28,7 +28,7 @@ env:
   OLD_SWAP_TESTS: f463fce5371903efd3504a937b7197b0adbc1b05
   SWAP_RUNS: "20"
   SWAP_ROWS: "team::cleanup::tests::removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_to team::cleanup::tests::an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to"
-  NEW_ROWS: "team::cleanup::tests::opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable sandbox::toolchains::tests::removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned sandbox::toolchains::tests::removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned"
+  NEW_ROWS: "team::cleanup::tests::removing_an_agent_tree_clears_an_acl_that_refuses_a_look_at_a_shut_folder team::cleanup::tests::opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable sandbox::toolchains::tests::removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned sandbox::toolchains::tests::removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned"
 
 defaults:
   run:

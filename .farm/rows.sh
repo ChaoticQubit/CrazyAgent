@@ -4,6 +4,12 @@ out="$RUNNER_TEMP/open-up-$PLATFORM-$SIDE.txt"
 git log --oneline -1 | tee "$out"
 git status --short | tee -a "$out"
 cargo +"$RUST_TOOLCHAIN" test -p crazyagent --locked --lib --no-run 2>&1 | tail -3
+if [ "$PLATFORM" = linux ]; then
+  cargo +"$RUST_TOOLCHAIN" build -p crazyagent --bin crazyagent --bin crazyagent-landlock --locked 2>&1 | tail -3
+  mkdir -p target/debug/deps
+  cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
+  ls -l target/debug/deps/crazyagent-landlock
+fi
 if [ "$SIDE" = mutant ] || [ "$SIDE" = mutant-old ]; then
   bash .farm/swap.sh
   swaps="$RUNNER_TEMP/open-up-swap-$SIDE.txt"
