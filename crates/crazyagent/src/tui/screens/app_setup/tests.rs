@@ -2861,6 +2861,60 @@ fn first_run_keeps_its_own_fix_outcome_when_the_held_run_ends_with_a_problem() {
     }
 }
 
+/// V243-SETUP-TUI-HELD-OUTCOME (#521 rv-code F1): when one read ends both the run and this
+/// screen's own fix, the fix's outcome is the lead, never replaced by the run's end, in first
+/// run and in Settings, whether the tool can run now or is still not used.
+#[test]
+fn a_run_and_its_own_fix_ending_in_one_read_lead_with_the_fix_outcome() {
+    for first in [true, false] {
+        for (ended, line) in [
+            (
+                DependencyState::Missing {
+                    line: String::new(),
+                },
+                "Permissions changed, but Graphify command is still not used.",
+            ),
+            (
+                installed_status().dependencies[2].state.clone(),
+                "Permissions fixed. Graphify command can run now.",
+            ),
+        ] {
+            let mut shell = if first {
+                first_run(120, 36)
+            } else {
+                settings(120, 36)
+            };
+            shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+                crate::setup::RefusedTool::FixButton,
+            )))));
+            if !first {
+                for _ in 0..5 {
+                    shell.key(Key::Down);
+                }
+                shell.key(Key::Char(' '));
+            }
+            shell.key(Key::Enter);
+            assert!(
+                jobs(&mut shell)
+                    .iter()
+                    .any(|job| matches!(job, AppSetupJob::Run { .. })),
+                "first run {first}"
+            );
+            shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+            jobs(&mut shell);
+            shell.key(Key::Char('p'));
+            shell.key(Key::Char('y'));
+            fix_sent(&mut shell);
+            shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+            jobs(&mut shell);
+            let mut done = installed_status();
+            done.dependencies[2].state = ended.clone();
+            shell.arrive(event(AppSetupEvent::Status(Ok(done))));
+            assert_eq!(lead(&shell), line, "first run {first}");
+        }
+    }
+}
+
 /// V243-SETUP-TUI-FIX-PENDING (#381 F3 r2): in Settings a run that ends while this screen's
 /// own permission fix runs says so at once, and the fix's outcome, said when it ends, is the
 /// last word, never overwritten by the run's end.
