@@ -3,6 +3,13 @@ pub mod ide;
 pub mod theme;
 mod updates;
 
+#[cfg(target_os = "macos")]
+#[expect(
+    dead_code,
+    reason = "the native views are wired to the engine feed in feat/v243-native-wiring (DEC-203)"
+)]
+mod native_term;
+
 #[cfg(feature = "native-webdriver")]
 mod e2e_window;
 #[cfg(feature = "native-webdriver")]
