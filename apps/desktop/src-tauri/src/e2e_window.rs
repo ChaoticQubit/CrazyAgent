@@ -8,6 +8,28 @@ use tauri::{AppHandle, Manager, Runtime, Window};
 const LEVELS_FILE: &str = "CRAZYAGENT_E2E_WINDOW_LEVELS";
 const LOOK_EVERY: Duration = Duration::from_millis(500);
 const LOOKS_MAX: usize = 3_600;
+const PLACE: &str = "CRAZYAGENT_E2E_WINDOW_AT";
+const PLACE_MAX: f64 = 100_000.0;
+
+/// Test builds only: where the environment asks the main window to open, as `x,y` in
+/// logical points from the main display's top left, so a trial window opens on a display
+/// the owner is not using, unfocused, and the app starts without coming forward. Input:
+/// none. Output: the place, none when unset, or why the value is not a place.
+pub(crate) fn place() -> Result<Option<(f64, f64)>, String> {
+    let Ok(text) = std::env::var(PLACE) else {
+        return Ok(None);
+    };
+    let parsed = text
+        .split_once(',')
+        .and_then(|(x, y)| Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?)))
+        .filter(|(x, y)| [x, y].iter().all(|v| v.is_finite() && v.abs() <= PLACE_MAX));
+    let Some((x, y)) = parsed else {
+        return Err(format!("{PLACE} must be x,y in points, not {text:?}"));
+    };
+    assert!(x.abs() <= PLACE_MAX);
+    assert!(y.abs() <= PLACE_MAX);
+    Ok(Some((x, y)))
+}
 
 /// Test builds only: keeps every app window above other apps' windows and on every desktop
 /// Space, so the owner's windows never cover the app and stop its WebKit pages drawing. With

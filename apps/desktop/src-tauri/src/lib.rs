@@ -6257,8 +6257,13 @@ pub fn run() {
                             .0
                             .page_started(window.label());
                     }
-                })
-                .build()?;
+                });
+            #[cfg(feature = "native-webdriver")]
+            let main = match e2e_window::place()? {
+                Some((x, y)) => main.position(x, y).focused(false),
+                None => main,
+            };
+            let main = main.build()?;
             let handle = app.handle().clone();
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -6280,28 +6285,37 @@ pub fn run() {
             Ok(())
         });
     #[cfg(feature = "native-webdriver")]
-    let builder = {
-        let observer = native_refresh_observation::NativeObserver::from_environment();
-        builder
-            .on_page_load(move |webview, payload| {
-                if let Some(observer) = &observer {
-                    let phase = match payload.event() {
-                        tauri::webview::PageLoadEvent::Started => {
-                            native_refresh_observation::Phase::Started
-                        }
-                        tauri::webview::PageLoadEvent::Finished => {
-                            native_refresh_observation::Phase::Finished
-                        }
-                    };
-                    observer.observe(webview.label(), payload.url().as_str(), phase);
-                }
-            })
-            .plugin(tauri_plugin_wdio_webdriver::init())
-            .plugin(e2e_window::plugin())
-    };
+    let builder = trial(builder);
     builder
         .run(tauri::generate_context!())
         .expect("native desktop exited with an error");
+}
+
+/// Test builds only: adds the refresh observer, the WebDriver server and the trial window
+/// plugin, and on macOS starts the app without bringing it forward when the environment
+/// places the main window. Input: the app builder. Output: the builder with them.
+#[cfg(feature = "native-webdriver")]
+fn trial(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    let observer = native_refresh_observation::NativeObserver::from_environment();
+    let builder = builder
+        .on_page_load(move |webview, payload| {
+            if let Some(observer) = &observer {
+                let phase = match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => {
+                        native_refresh_observation::Phase::Started
+                    }
+                    tauri::webview::PageLoadEvent::Finished => {
+                        native_refresh_observation::Phase::Finished
+                    }
+                };
+                observer.observe(webview.label(), payload.url().as_str(), phase);
+            }
+        })
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .plugin(e2e_window::plugin());
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(!matches!(e2e_window::place(), Ok(Some(_))));
+    builder
 }
 
 #[cfg(test)]

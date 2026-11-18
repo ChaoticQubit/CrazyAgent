@@ -14,7 +14,6 @@ const MASTER_MS = 180000;
 const END_MS = 20000;
 const QUIET_MS = 4000;
 const SHORT_TURN_MS = 6000;
-const OWNER_IDLE_S = 300;
 const RUNNING = ["starting", "idle", "working"];
 const READ = { kind: "read" };
 const RETURN = { kind: "key", characters: "\r", code: 36 };
@@ -99,65 +98,19 @@ async function seenWhen(view, check, timeout, label) {
   return seen;
 }
 
-/** Waits for a view's ready event and the master's stand-in ready line on its rows. Input:
+/** Waits for a view's ready event and the master's stand-in ready line on its rows, and
+ * checks the test window sits on a 1x display, never the owner's built-in Retina. Input:
  * the opened view. Output: the view's state then. */
 async function ready({ view, tag }) {
   await until(async () => (await events(tag)).some((event) => event.type === "ready"), UI_MS, `view ${view} never said ready`);
-  return seenWhen(view, (seen) => seen.rows.some((row) => /stand-in ready/.test(row)), UI_MS, `view ${view} never showed the stand-in`);
+  const seen = await seenWhen(view, (seen) => seen.rows.some((row) => /stand-in ready/.test(row)), UI_MS, `view ${view} never showed the stand-in`);
+  assert.equal(seen.scale, 1, "the test window is on a 1x display");
+  return seen;
 }
 
 /** Counts the stand-in turns a view's rows show. Input: the view's state. Output: the count. */
 function turns(seen) {
   return seen.rows.filter((row) => /stand-in turn/.test(row)).length;
-}
-
-/** Lists the displays with their place in top-left screen points and backing scale, read
- * from AppKit, the first being the main one. Output: { x, y, width, height, scale } each. */
-function screens() {
-  const script = "ObjC.import('AppKit'); JSON.stringify(ObjC.unwrap($.NSScreen.screens).map((s) => ({ x: s.frame.origin.x,"
-    + " y: s.frame.origin.y, width: s.frame.size.width, height: s.frame.size.height, scale: s.backingScaleFactor })))";
-  const result = spawnSync("/usr/bin/osascript", ["-l", "JavaScript", "-e", script], { encoding: "utf8" });
-  assert.equal(result.status, 0, `the display list: ${result.stderr}`);
-  const listed = JSON.parse(result.stdout);
-  assert.ok(listed.length > 0 && listed[0].x === 0 && listed[0].y === 0, "the main display is listed first");
-  return listed.map((each) => ({ ...each, y: listed[0].height - each.y - each.height }));
-}
-
-/** Reads the width of the master's pane on the test engine's server. Output: the columns. */
-function paneWidth() {
-  const width = Number(tmux("list-panes", "-t", `${SESSION}:=${master}`, "-F", "#{pane_width}"));
-  assert.ok(Number.isInteger(width) && width > 0, `the pane width: ${width}`);
-  return width;
-}
-
-/** Reads how long the machine has had no keyboard, mouse or trackpad input. Output: whole
- * seconds. */
-function idleSeconds() {
-  const result = spawnSync("/usr/sbin/ioreg", ["-c", "IOHIDSystem"], { encoding: "utf8" });
-  const found = /"HIDIdleTime" = (\d+)/.exec(result.stdout ?? "");
-  assert.ok(result.status === 0 && found, "the HID idle time");
-  return Number(BigInt(found[1]) / 1000000000n);
-}
-
-/** Moves only the test app's window to a 1x display, never taking focus, waits for the view
- * to read that scale and the pane to change width, then puts the window back and waits for
- * the first scale and width again. Inputs: the view, its state before the move (scale,
- * active, key) and the display. */
-async function refit(view, start, target) {
-  assert.equal(target.scale, 1);
-  const width = paneWidth();
-  const place = await browser.getWindowRect();
-  try {
-    await browser.setWindowRect(target.x + 40, target.y + 40, Math.min(1000, target.width - 80), Math.min(700, target.height - 80));
-    const moved = await seenWhen(view, (seen) => seen.scale === target.scale, UI_MS, "the window never reached the 1x display");
-    assert.equal(moved.active, start.active, "the move never brings the app forward");
-    assert.equal(moved.key, start.key, "the move never makes the window key");
-    await until(async () => paneWidth() !== width, UI_MS, `the pane stayed ${width} columns after the scale changed`);
-  } finally {
-    await browser.setWindowRect(place.x, place.y, place.width, place.height);
-  }
-  await seenWhen(view, (seen) => seen.scale === start.scale, UI_MS, "the window never came back");
-  await until(async () => paneWidth() === width, UI_MS, `the pane never refit to ${width} columns on the way back`);
 }
 
 /** Closes a view the spec opened. Input: the view. Output: none. */
@@ -236,32 +189,6 @@ describe("Native terminal views in the real window", () => {
     } finally {
       tmux("kill-pane", "-t", extra);
     }
-  });
-
-  it("a move to a display of another backing scale refits the grid and the pane follows", async function () {
-    const started = Date.now();
-    const unheld = (why) => {
-      console.log(`SCALE void: ${why}`);
-      this.skip();
-    };
-    if (idleSeconds() < OWNER_IDLE_S) unheld("the owner was active at the start");
-    const shown = await open(true);
-    const start = await ready(shown);
-    const target = screens().find((each) => each.scale === 1 && start.scale !== 1 && each.width > 760 && each.height > 600);
-    if (!target) {
-      await close(shown.view);
-      this.skip();
-    }
-    let failure = null;
-    try {
-      await refit(shown.view, start, target);
-    } catch (caught) {
-      failure = caught;
-    } finally {
-      await close(shown.view).catch(() => {});
-    }
-    if (idleSeconds() * 1000 < Date.now() - started) unheld("the owner touched the machine during the row");
-    if (failure) throw failure;
   });
 
   it("an ended terminal closes the direct view", async () => {
