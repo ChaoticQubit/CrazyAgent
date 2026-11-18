@@ -281,7 +281,7 @@ fn a_private_file_with_a_low_label_is_refused() {
     let held = private::dir(&root).unwrap();
     let path = root.join("engine.db");
     drop(private::file(&path, true).unwrap());
-    drop(private::file(&path, false).expect("a file with no label opens"));
+    drop(private::file(&path, false).expect("a file with its own medium label opens"));
     run(
         "icacls",
         &[path.to_str().unwrap(), "/setintegritylevel", "low"],
@@ -360,4 +360,33 @@ fn repair_refuses_a_folder_that_already_holds_a_file_and_changes_nothing() {
     assert!(private::repair(&folder).is_err());
     assert_eq!(std::fs::read_to_string(&kept).unwrap(), "x");
     std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// #512 r2 (rv-sec2 N1, leader 05:03): the data root is made with a medium label that keeps
+/// a lower integrity process of the user from reading or writing, handed on to what is made
+/// in it, so a private file and a side file SQLite would make there both carry no-read-up.
+#[test]
+fn a_file_made_in_the_data_root_carries_no_read_up() {
+    const MEDIUM: u32 = 0x2000;
+    const NO_READ_UP: u32 = 0x2;
+    let root = scratch("no-read-up");
+    let held = private::dir(&root).unwrap();
+    let own = private::facts(&held).unwrap();
+    let sacl = own.label.expect("the data root carries a label");
+    assert_eq!(dacl::label(&sacl), Ok(Some((MEDIUM, 0x3))));
+    assert_eq!(dacl::inherited_label(&sacl), Ok(Some((MEDIUM, 0x3))));
+    drop(private::file(&root.join("account-key"), true).unwrap());
+    std::fs::write(root.join("engine.db-wal"), "x").unwrap();
+    for name in ["account-key", "engine.db-wal"] {
+        let file = std::fs::File::open(root.join(name)).unwrap();
+        let facts = private::facts(&file).unwrap();
+        let sacl = facts
+            .label
+            .unwrap_or_else(|| panic!("{name} carries no label"));
+        let (level, policy) = dacl::label(&sacl).unwrap().expect("a label applies");
+        assert_eq!(level, MEDIUM, "{name}");
+        assert_ne!(policy & NO_READ_UP, 0, "{name} must carry no-read-up");
+    }
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
 }
