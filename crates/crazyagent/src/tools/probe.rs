@@ -655,7 +655,7 @@ fn searchable(folder: &Path, real_home: Option<&Path>) -> bool {
     };
     real.is_dir()
         && !crate::harnesses::in_crazyagent_folder(&real)
-        && !super::in_project(real_home, &real)
+        && !super::in_project(&super::home_names(real_home), &real)
         && crate::service::changeable_by_others(folder).is_none()
 }
 
