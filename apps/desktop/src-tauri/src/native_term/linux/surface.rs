@@ -118,13 +118,15 @@ pub fn rect(page: (f64, f64, f64, f64), offset: (i32, i32)) -> Result<Rect, &'st
     Ok(rect)
 }
 
-/// When a child may present: only while shown, only with a change to draw, never before
-/// the last present's frame callback, and never after its toplevel unmapped. A FIFO present
+/// When a child may present: only while shown with a part inside the webview, only with a
+/// change to draw, never before the last present's frame callback, and never after its
+/// toplevel unmapped. A FIFO present
 /// waits for the last present's callback, which a hidden or unmapped surface may never get
 /// (spike run 3: a present after a null-buffer hide blocked the main thread 40 s).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Pacing {
     shown: bool,
+    clipped: bool,
     waiting: bool,
     dirty: bool,
     gone: bool,
@@ -135,6 +137,7 @@ impl Pacing {
     const fn new() -> Pacing {
         Pacing {
             shown: true,
+            clipped: false,
             waiting: false,
             dirty: true,
             gone: false,
@@ -143,7 +146,7 @@ impl Pacing {
 
     /// Whether a present may happen now. Output: the answer.
     fn ready(&self) -> bool {
-        self.shown && self.dirty && !self.waiting && !self.gone
+        self.on_screen() && self.dirty && !self.waiting
     }
 
     /// Notes a change to draw: output, a size or a style.
@@ -190,15 +193,24 @@ impl Pacing {
         self.gone
     }
 
-    /// Notes the child's rectangle having no part inside the webview. Not tracked yet.
-    fn clip(&mut self) {}
+    /// Notes the child's rectangle having no part inside the webview.
+    fn clip(&mut self) {
+        self.clipped = true;
+    }
 
-    /// Notes a part of the rectangle back inside the webview. Not tracked yet.
-    fn unclip(&mut self) {}
+    /// Notes a part of the rectangle inside the webview; one coming back is redrawn, since
+    /// an X11 window off screen lost its pixels.
+    fn unclip(&mut self) {
+        if self.clipped {
+            self.clipped = false;
+            self.dirty = true;
+        }
+    }
 
-    /// Whether the child is on screen: shown and its toplevel mapped. Output: the answer.
+    /// Whether the child is on screen: shown, with a part inside the webview, and its
+    /// toplevel mapped. Output: the answer.
     fn on_screen(&self) -> bool {
-        self.shown && !self.gone
+        self.shown && !self.clipped && !self.gone
     }
 }
 
