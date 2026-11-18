@@ -121,6 +121,23 @@ impl Jobs {
         crate::storage::reinstall::at(&db, folder).unwrap()
     }
 
+    /// Reads the owner ledger's result kept under one request id straight from the engine's
+    /// database. Input: the id. Output: the recorded result, or None when the id has no row.
+    fn recorded(&self, id: &str) -> Option<OwnerResult> {
+        use rusqlite::OptionalExtension;
+        let db = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        let bytes: Option<Vec<u8>> = db
+            .query_row(
+                "SELECT result FROM owner_operations \
+                 WHERE origin = 'native_owner' AND operation_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        bytes.map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
     /// Starts an add of `path` under the request id `id`. Inputs: the id, the folder and the
     /// mode. Output: the start's answer.
     async fn add(&mut self, id: &str, path: &str, mode: AddMode) -> Result<JobView, EngineError> {
@@ -369,6 +386,11 @@ async fn waiting_jobs_start_by_themselves_and_a_start_past_the_waiting_list_is_b
     release.send(()).unwrap();
     for n in 0..total {
         assert_eq!(jobs.ended(&format!("add-{n}")).await.state, JobState::Done);
+        assert_eq!(
+            jobs.recorded(&format!("add-{n}")),
+            Some(OwnerResult::Applied),
+            "add-{n} keeps one ledger row, the applied one"
+        );
         let landed = jobs.home().join(format!("folder-{n}"));
         assert_eq!(note(&landed), n.to_string());
     }
@@ -548,6 +570,51 @@ async fn a_question_stays_listed_past_other_starts_until_its_answer_starts() {
     );
     assert!(listed.iter().any(|id| id == "add-linked-anyway"));
     jobs.ended("add-linked-anyway").await;
+    jobs.stop().await;
+}
+
+/// A job under an id the owner ledger already holds for a different change still ends with
+/// `operation_identity_conflict`: only a plan refused as stale, which records nothing, plans
+/// again under the job's id. The job's folder is not added and the first change's row stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_under_an_id_kept_for_a_different_change_ends_with_the_identity_conflict() {
+    let mut jobs = Jobs::start().await;
+    let first = jobs.folder("first", "1");
+    let second = jobs.folder("second", "2");
+    let read = jobs.owner.read(OwnerRead::ProjectsHome).await.unwrap();
+    let request = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("add-same").unwrap(),
+        expected_revision: read.revision,
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder {
+                source: first,
+                mode: AddMode::Copy,
+                overrides: Vec::new(),
+            },
+        },
+    };
+    let reply = jobs
+        .owner
+        .owner_client()
+        .unwrap()
+        .request(request)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply.response, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "the client's add is recorded under the id: {:?}",
+        reply.response
+    );
+    jobs.add("add-same", &second, AddMode::Copy).await.unwrap();
+    let ended = jobs.ended("add-same").await.state;
+    assert!(
+        matches!(&ended, JobState::Failed { code, .. } if code == "operation_identity_conflict"),
+        "a different change under a kept id is refused: {ended:?}"
+    );
+    assert!(!jobs.home().join("second").exists());
+    assert_eq!(note(&jobs.home().join("first")), "1");
+    assert_eq!(jobs.recorded("add-same"), Some(OwnerResult::Applied));
     jobs.stop().await;
 }
 
