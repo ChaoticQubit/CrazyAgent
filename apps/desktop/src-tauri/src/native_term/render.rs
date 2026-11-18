@@ -966,4 +966,38 @@ mod tests {
         assert_eq!(loaded, Err("native_terminal_style_invalid"));
         assert_eq!(db.len(), 0);
     }
+
+    #[test]
+    fn each_platform_draws_with_its_own_backends() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(BACKENDS, wgpu::Backends::METAL);
+        #[cfg(target_os = "linux")]
+        assert_eq!(BACKENDS, wgpu::Backends::VULKAN | wgpu::Backends::GL);
+        #[cfg(windows)]
+        assert_eq!(BACKENDS, wgpu::Backends::DX12);
+    }
+
+    #[test]
+    fn every_present_fallback_file_loads_its_faces() {
+        let fonts = load_fallbacks();
+        let present: Vec<std::path::PathBuf> = FALLBACKS
+            .iter()
+            .filter_map(FontSource::file)
+            .filter(|path| path.is_file())
+            .collect();
+        for path in &present {
+            let faces = fonts
+                .db()
+                .faces()
+                .filter(|face| match &face.source {
+                    fontdb::Source::File(file) | fontdb::Source::SharedFile(file, _) => {
+                        file == path
+                    }
+                    fontdb::Source::Binary(_) => false,
+                })
+                .count();
+            assert!(faces > 0, "{} loaded no face", path.display());
+        }
+        assert!(present.len() <= FALLBACKS.len());
+    }
 }

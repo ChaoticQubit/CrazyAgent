@@ -480,4 +480,54 @@ mod tests {
         let long = "x,".repeat(FONT_LIST_BYTES_MAX);
         assert_eq!(font_for(&long), Err("native_terminal_style_invalid"));
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_monospace_is_dejavu_sans_mono_else_the_built_in_font() {
+        let dejavu = DEJAVU_SANS_MONO
+            .iter()
+            .any(|source| source.file().is_some_and(|path| path.is_file()));
+        let want = if dejavu {
+            "DejaVu Sans Mono"
+        } else {
+            "JetBrains Mono"
+        };
+        for list in [
+            "monospace",
+            "ui-monospace",
+            "Courier, monospace",
+            "Menlo, ui-monospace",
+        ] {
+            assert_eq!(font_for(list).map(|f| f.0), Ok(want), "{list}");
+        }
+        let panel = "\"JetBrains Mono\", ui-monospace, \"SF Mono\", Menlo, monospace";
+        assert_eq!(font_for(panel).map(|f| f.0), Ok("JetBrains Mono"));
+        assert_eq!(font_for("Menlo"), Err("native_terminal_style_invalid"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_ui_monospace_is_cascadia_mono_then_consolas_then_the_built_in_font() {
+        let folder = fonts_folder().expect("the fonts folder");
+        assert!(folder.is_absolute() && folder.is_dir());
+        let present = |source: FontSource| source.file().is_some_and(|path| path.is_file());
+        let want = if present(CASCADIA_MONO) {
+            "Cascadia Mono"
+        } else if present(CONSOLAS) {
+            "Consolas"
+        } else {
+            "JetBrains Mono"
+        };
+        for list in [
+            "ui-monospace",
+            "monospace",
+            "Courier, monospace",
+            "Menlo, ui-monospace",
+        ] {
+            assert_eq!(font_for(list).map(|f| f.0), Ok(want), "{list}");
+        }
+        let panel = "\"JetBrains Mono\", ui-monospace, \"SF Mono\", Menlo, monospace";
+        assert_eq!(font_for(panel).map(|f| f.0), Ok("JetBrains Mono"));
+        assert_eq!(font_for("Menlo"), Err("native_terminal_style_invalid"));
+    }
 }
