@@ -633,24 +633,101 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    /// Runs the test's own git in `path` with no system or global config, as the owner makes
+    /// a repository: `/usr/bin/git` on Unix, the git on PATH on Windows. Inputs: the folder and
+    /// the arguments.
+    fn git_in(path: &Path, args: &[&str]) {
+        let program = if cfg!(unix) { "/usr/bin/git" } else { "git" };
+        let mut command = std::process::Command::new(program);
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
+            .current_dir(path)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let status = crate::spawn_gate::status(&mut command).unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A repository with `secret/key.txt` tracked and `scratch/tmp.txt` not. Input: the
+    /// canonical project folder. Output: the tracked and the untracked folder.
+    fn tracked_and_untracked(path: &Path) -> (PathBuf, PathBuf) {
+        git_in(path, &["init", "-q"]);
+        let tracked = path.join("secret");
+        let untracked = path.join("scratch");
+        std::fs::create_dir(&tracked).unwrap();
+        std::fs::create_dir(&untracked).unwrap();
+        std::fs::write(tracked.join("key.txt"), "k\n").unwrap();
+        std::fs::write(untracked.join("tmp.txt"), "t\n").unwrap();
+        git_in(path, &["add", "secret/key.txt"]);
+        (tracked, untracked)
+    }
+
+    /// V243-WIN-HIDDEN-GIT: a `commondir` planted in `.git`, naming a common folder whose config
+    /// holds an unknown repository extension, redirects nothing. On Unix git's common folder is
+    /// pinned to `.git`, so the tracked folder is still found; on Windows the check before git
+    /// starts refuses a `.git` that points elsewhere, so the folder is unchecked.
+    #[test]
+    fn a_commondir_planted_in_the_git_folder_redirects_nothing() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        let (tracked, _) = tracked_and_untracked(&path);
+        let store = project();
+        for name in ["objects", "refs"] {
+            std::fs::create_dir(store.path().join(name)).unwrap();
+        }
+        std::fs::write(
+            store.path().join("config"),
+            "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tplanted = true\n",
+        )
+        .unwrap();
+        let common = format!("{}\n", canonical(store.path()).unwrap().display());
+        std::fs::write(path.join(".git").join("commondir"), common).unwrap();
+        let answer = git_tracks(&path, &tracked);
+        if cfg!(windows) {
+            assert_eq!(answer, Err("hidden_path_unchecked"));
+        } else {
+            assert_eq!(answer, Ok(true));
+        }
+    }
+
+    /// V243-WIN-HIDDEN-GIT (leader 08:33): times `none_tracked` per call on one untracked
+    /// folder, one git run as each launch gate makes it, over 20 calls, and prints the median
+    /// and the slowest. The farm runs it quiet and under a CPU load step; it asserts only the
+    /// answers.
+    #[test]
+    #[ignore = "timing, run by the farm quiet and under a CPU load step"]
+    fn none_tracked_time_per_call() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        let (tracked, untracked) = tracked_and_untracked(&path);
+        assert_eq!(none_tracked(&path, &[tracked]), Err("hidden_path_tracked"));
+        let mut times: Vec<std::time::Duration> = (0..20)
+            .map(|_| {
+                let start = std::time::Instant::now();
+                assert_eq!(
+                    none_tracked(&path, std::slice::from_ref(&untracked)),
+                    Ok(())
+                );
+                start.elapsed()
+            })
+            .collect();
+        times.sort();
+        let ms = |time: std::time::Duration| time.as_secs_f64() * 1000.0;
+        println!(
+            "TIMING none_tracked calls=20 median_ms={:.1} max_ms={:.1}",
+            ms(times[10]),
+            ms(times[19])
+        );
+    }
+
     #[test]
     fn a_folder_git_tracks_is_refused_and_an_untracked_one_is_accepted() {
         let root = project();
-        let path = root.path().canonicalize().unwrap();
-        let git = |args: &[&str]| {
-            let mut command = std::process::Command::new("/usr/bin/git");
-            command
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .current_dir(&path)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let status = crate::spawn_gate::status(&mut command).unwrap();
-            assert!(status.success(), "git {args:?}");
-        };
+        let path = canonical(root.path()).unwrap();
+        let git = |args: &[&str]| git_in(&path, args);
         git(&["init", "-q"]);
         let tracked = path.join("secret");
         let untracked = path.join("scratch");
@@ -668,11 +745,10 @@ mod tests {
         assert_eq!(none_tracked(&path, &[untracked]), Ok(()));
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_folder_with_no_repository_is_not_tracked() {
         let root = project();
-        let path = root.path().canonicalize().unwrap();
+        let path = canonical(root.path()).unwrap();
         let folder = path.join("plain");
         std::fs::create_dir(&folder).unwrap();
         assert_eq!(git_tracks(&path, &folder), Ok(false));
@@ -714,23 +790,11 @@ mod tests {
         assert!(!marker.exists(), "fsmonitor command ran: marker written");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_corrupt_index_fails_the_check_closed() {
         let root = project();
-        let path = root.path().canonicalize().unwrap();
-        let git = |args: &[&str]| {
-            let mut command = std::process::Command::new("/usr/bin/git");
-            command
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .current_dir(&path)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
-        };
+        let path = canonical(root.path()).unwrap();
+        let git = |args: &[&str]| git_in(&path, args);
         git(&["init", "-q"]);
         let folder = path.join("secret");
         std::fs::create_dir(&folder).unwrap();
