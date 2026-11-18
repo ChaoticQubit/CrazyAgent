@@ -9,6 +9,7 @@ use gtk::prelude::*;
 
 use super::clip::{self, Board, Clip};
 use super::keys;
+use super::signals::Handlers;
 use super::surface::Rect;
 use crate::native_term::event::{MouseKind, Sink, ViewEvent};
 use crate::native_term::pane::Input;
@@ -648,7 +649,7 @@ impl Inner {
 /// back on release; the page taking GTK focus releases native focus.
 pub struct View {
     inner: Rc<Inner>,
-    handlers: Vec<SignalHandlerId>,
+    handlers: Handlers,
     commit: Option<SignalHandlerId>,
 }
 
@@ -689,7 +690,8 @@ impl View {
             })
         };
         let me = || Rc::clone(&inner);
-        let handlers = vec![
+        let mut handlers = Handlers::new(toplevel);
+        for id in [
             {
                 let me = me();
                 toplevel.connect_key_press_event(move |_, event| me.key_press(event))
@@ -730,7 +732,9 @@ impl View {
                     Some(stop.to_value())
                 })
             },
-        ];
+        ] {
+            handlers.push(id);
+        }
         Ok(View {
             inner,
             handlers,
@@ -765,9 +769,7 @@ impl Drop for View {
     fn drop(&mut self) {
         let inner = &self.inner;
         let native = inner.focus.get().is_native();
-        for handler in self.handlers.drain(..) {
-            inner.toplevel.disconnect(handler);
-        }
+        self.handlers.disconnect();
         if let Some(commit) = self.commit.take() {
             inner.im.disconnect(commit);
         }

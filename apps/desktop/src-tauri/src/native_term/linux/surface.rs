@@ -7,7 +7,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gtk::gdk::{Display, Window};
-use gtk::glib::SignalHandlerId;
 use gtk::glib::translate::ToGlibPtr;
 use gtk::prelude::*;
 use raw_window_handle::{
@@ -24,6 +23,8 @@ use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
 use wayland_client::protocol::wl_subsurface::WlSubsurface;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, delegate_noop};
+
+use super::signals::Handlers;
 
 /// The plain code for a toplevel no child surface can be made in: not mapped, a display
 /// that is neither X11 nor Wayland, or a server without the parts a child needs.
@@ -308,7 +309,7 @@ pub struct Child {
     native: Native,
     pacing: Rc<Cell<Pacing>>,
     toplevel: gtk::Window,
-    handlers: Vec<SignalHandlerId>,
+    handlers: Handlers,
     rect: Rect,
     scale: i32,
 }
@@ -332,10 +333,12 @@ impl Child {
             return Err(UNAVAILABLE);
         };
         let pacing = Rc::new(Cell::new(Pacing::new()));
+        let mut handlers = Handlers::new(toplevel);
         let unmap = {
             let pacing = Rc::clone(&pacing);
             toplevel.connect_unmap(move |_| mark_gone(&pacing))
         };
+        handlers.push(unmap);
         let root = match &native {
             Native::X11 { x11, .. } => Some(Rc::clone(x11)),
             Native::Wayland(_) => None,
@@ -349,11 +352,12 @@ impl Child {
                 }
             })
         };
+        handlers.push(unrealize);
         let child = Child {
             native,
             pacing,
             toplevel: toplevel.clone(),
-            handlers: vec![unmap, unrealize],
+            handlers,
             rect,
             scale,
         };
@@ -574,9 +578,7 @@ impl Drop for Child {
     /// Disconnects the toplevel handlers and destroys the window or subsurface; a gone
     /// Wayland toplevel's surface is not committed, since GDK destroyed it. Output: none.
     fn drop(&mut self) {
-        for handler in self.handlers.drain(..) {
-            self.toplevel.disconnect(handler);
-        }
+        self.handlers.disconnect();
         let gone = self.pacing.get().is_gone();
         match &self.native {
             Native::X11 { x11, .. } => x11.trapped(|xlib, display, window| unsafe {
