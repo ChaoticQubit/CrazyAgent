@@ -67,16 +67,24 @@ pub fn install_root(git: &Path) -> Option<&Path> {
 }
 
 /// The policy owner git runs under for one project: no network, the project and its own home
-/// and temp folder writable, nothing guarded in the project, since publish's `git init` makes
-/// `.git` and its config there, and Git for Windows' install folder readable. Inputs: the
-/// canonical project, git's program and the places. Output: the policy, or the refusal.
+/// and temp folder writable, nothing guarded, since publish's `git init` makes `.git` there, and
+/// Git for Windows' install folder readable once it holds the markers ([`marked`]) and neither
+/// is nor holds the project or owner git's folder (the owner home is `allow_read`'s check).
+/// Inputs: the canonical project, git's program and the places. Output: the policy, or why not.
 pub fn policy(
     project: &Path,
     git: &Path,
     places: &OwnerGitPlaces,
 ) -> Result<ProjectSandbox, SandboxError> {
     let root = install_root(git)
+        .filter(|root| marked(root))
         .ok_or_else(|| invalid("git is not in a Git for Windows install folder"))?;
+    let root = canonical(root)?;
+    if project.starts_with(&root) || places.profile.starts_with(&root) {
+        return Err(invalid(
+            "Git for Windows' install folder holds the project or owner git's own folder",
+        ));
+    }
     ProjectSandbox::new(
         project,
         &places.home,
@@ -84,7 +92,18 @@ pub fn policy(
         SandboxNetwork::Only(Vec::new()),
     )?
     .as_job_folder()
-    .allow_read(&canonical(root)?)
+    .allow_read(&root)
+}
+
+/// True when a folder holds Git for Windows' markers, as every installer and MinGit lay them
+/// out: `cmd\git.exe` and a platform folder such as `mingw64`, so a `git.exe` that sits in any
+/// folder's `cmd` or `bin` never makes that whole folder readable (rv-sec3 #628 F1). Input:
+/// the folder above the program. Output: the answer.
+fn marked(root: &Path) -> bool {
+    root.join("cmd").join("git.exe").is_file()
+        && PLATFORM_FOLDERS
+            .iter()
+            .any(|platform| root.join(platform).is_dir())
 }
 
 /// The owner's git for one project, run inside an AppContainer of its own with no capability
