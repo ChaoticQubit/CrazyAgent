@@ -1528,6 +1528,9 @@ fn boundary_check(
         ForCheck::Refused("context_mode_node_folder_unreadable") => {
             return Err("server_node_folder_unreadable".into());
         }
+        ForCheck::Refused(crate::context_mode::NODE_DRIVE_ROOT_UNREADABLE) => {
+            return Err("server_node_drive_root_unreadable".into());
+        }
         ForCheck::Refused(code) => {
             eprintln!("plugin_check_install_refused cause={code}");
             return Err("server_cant_start".into());

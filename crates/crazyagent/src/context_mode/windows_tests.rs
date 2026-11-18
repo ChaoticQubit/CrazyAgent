@@ -484,6 +484,32 @@ fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_
     assert!(!staged.join(MODULES).exists());
 }
 
+/// V244-WIN-ADMIN-STEP: where the root of the drive Node.js sits on keeps every app container
+/// from reading its attributes, as on the test farm's runners before the installer's
+/// administrator step, an install whose Node.js passes the version probe is refused by the
+/// drive root's own code before npm starts, never as a failed set-up.
+#[test]
+#[ignore = "needs the farm runner's Node.js and a system drive root without the entry (test farm)"]
+fn a_drive_root_no_app_container_reads_refuses_the_install_by_its_own_code() {
+    let bin = system_bin();
+    assert!(
+        crazyagent_win_sandbox::unreadable_drive_root([bin.as_path()]).is_some(),
+        "{}",
+        bin.display()
+    );
+    let case = case();
+    assert_eq!(node_supported(&case.root, &bin), Ok(true));
+    assert_eq!(
+        can_install(&case.root, &bin, VERSION),
+        Some(Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE))
+    );
+    assert_eq!(
+        begin_install(&case.root, &bin, VERSION),
+        Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE)
+    );
+    assert!(!install_folder(&case.root, VERSION).exists());
+}
+
 /// V244-WIN-NPM r2 F3: an agent launch whose npx folder no app container reads and this
 /// standard user cannot change, since an OWNER RIGHTS entry takes the owner's right to change
 /// its list while the user keeps modify, leaves context-mode out as Node.js's folder, never as

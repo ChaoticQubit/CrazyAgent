@@ -408,9 +408,9 @@ pub struct LaunchServer {
 
 /// Why a launch left the default pack's context-mode server out rather than run its npx
 /// spec: the shared install is still being set up, setting it up failed or cannot run, the
-/// installed files did not match the pinned hashes, the Node.js beside npx is too old or sits
-/// in a folder Windows sandboxes cannot read and this user cannot open to them, or the tool
-/// resolver does not find that npx.
+/// installed files did not match the pinned hashes, the Node.js beside npx is too old, sits in
+/// a folder Windows sandboxes cannot read and this user cannot change, or meets a drive root
+/// they cannot read, or the tool resolver does not find that npx.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextModeOff {
     SettingUp,
@@ -418,6 +418,7 @@ pub enum ContextModeOff {
     Mismatch,
     NodeTooOld,
     NodeFolderUnreadable,
+    NodeDriveRootUnreadable,
     NpxNotFound,
 }
 
@@ -809,7 +810,11 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "server_node_folder_unreadable",
-        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.",
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.",
+    ),
+    (
+        "server_node_drive_root_unreadable",
+        "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.",
     ),
     (
         "server_output_too_large",
@@ -1317,11 +1322,11 @@ mod tests {
     }
 
     /// V244-WIN-NPM: a check whose context-mode install met a Node.js folder no Windows
-    /// sandbox may read, and only an administrator can open, reads one sentence of its own,
+    /// sandbox may read, and this Windows user cannot open, reads one sentence of its own,
     /// a code the desktop knows; a boundary reason that names a folder shows that folder.
     #[test]
     fn a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence() {
-        let words = "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.";
+        let words = "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.";
         assert_eq!(check_problem("server_node_folder_unreadable"), words);
         assert_eq!(plain_problem("server_node_folder_unreadable"), Some(words));
         assert_eq!(
@@ -1332,6 +1337,28 @@ mod tests {
         let reason = crate::sandbox::unreadable_reason(folder);
         assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
         assert!(check_problem(&check_refused(&reason)).contains(&reason));
+    }
+
+    /// V244-WIN-ADMIN-STEP: a check whose context-mode install met a drive root no Windows
+    /// sandbox may read reads its own sentence, apart from the Node.js folder one, naming the
+    /// installer's administrator step that adds the entry; a code the desktop knows.
+    #[test]
+    fn a_check_on_a_drive_root_windows_sandboxes_cannot_read_names_the_administrator_step() {
+        let words = "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.";
+        assert_eq!(check_problem("server_node_drive_root_unreadable"), words);
+        assert_eq!(
+            plain_problem("server_node_drive_root_unreadable"),
+            Some(words)
+        );
+        assert_eq!(
+            known_code("server_node_drive_root_unreadable"),
+            Some("server_node_drive_root_unreadable")
+        );
+        assert_ne!(
+            plain_problem("server_node_folder_unreadable"),
+            Some(words),
+            "one sentence per cause"
+        );
     }
 
     /// RV-DS241-153: the pinned context-mode launch is read from the full npx path that

@@ -45,6 +45,14 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
     runnable(&npm_cli(bin))
 }
 
+/// The first drive root among `paths` whose list keeps every app container from reading its
+/// attributes, so a boxed Node.js script there fails to resolve its own path
+/// ([`crazyagent_win_sandbox::unreadable_drive_root`]). Input: the paths. Output: that root,
+/// or none.
+pub(super) fn unreadable_drive_root(paths: &[&Path]) -> Option<PathBuf> {
+    crazyagent_win_sandbox::unreadable_drive_root(paths.iter().copied())
+}
+
 /// The network the install's npm may reach on Windows: open, for this step only, because the
 /// pinned program needs npm's dependencies and the AppContainer widens any host limit to the
 /// internet client anyway (DESIGN-0256 O2a). Scripts stay off and both pins are checked first.
