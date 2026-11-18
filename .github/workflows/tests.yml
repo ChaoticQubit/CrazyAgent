@@ -53,6 +53,7 @@ defaults:
   run:
     shell: bash
 
+jobs:
   build-macos:
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
