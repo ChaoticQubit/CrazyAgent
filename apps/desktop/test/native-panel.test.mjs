@@ -584,3 +584,22 @@ test("V243-NATIVE-INPUT r2 (rv-sec2 #509 N1): with Message box only saved, the a
   `);
   assert.deepEqual(seen, { loaded: true, keys: false, calls: 0 });
 });
+
+test("V243-NATIVE-INPUT r2 (fix11 05:22): each native open carries the project its terminal is in, which a wall window needs: the panel's project, the remembered key's at app start, or null for a panel without one", async () => {
+  const preloaded = await page(`
+    await F.stage({ nodes: [${MASTER}] });
+    F.preload([{ key: { project: "p1", terminal: "team-1", pane: null }, size: { width: 640, height: 380 } }], ["p1"]);
+    if (!(await F.until(() => F.calls("desktop_native_terminal_open").length === 1))) return { loaded: false };
+    return { loaded: true, project: F.calls("desktop_native_terminal_open")[0].args.project };
+  `);
+  assert.deepEqual(preloaded, { loaded: true, project: "p1" });
+  const panels = await page(`
+    await F.stage();
+    F.mount("a", F.agent("sub", "Brook", "team-2"), { projectId: "p2" });
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.mount("b", F.agent("sub", "Wren", "team-3"), { projectId: undefined });
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 2);
+    return F.calls("desktop_native_terminal_open").map((entry) => [entry.args.name, entry.args.project]);
+  `);
+  assert.deepEqual(panels, [["team-2", "p2"], ["team-3", null]]);
+});
