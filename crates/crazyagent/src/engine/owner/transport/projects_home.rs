@@ -411,9 +411,13 @@ pub(super) async fn serve(
     };
     let planned = match recorded {
         Some(step) => Ok(Planned::Step(step)),
-        None => tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
-            .await
-            .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+        None => {
+            let expected = client.then(|| request.expected_revision.clone());
+            let planning = plan(engine, a, &request, expected, deadline, exchange);
+            tokio::time::timeout_at(deadline, planning)
+                .await
+                .unwrap_or_else(|_| Err(failure(UNKNOWN)))
+        }
     };
     let moving = matches!(
         &request.operation,
@@ -512,7 +516,6 @@ pub(super) async fn serve(
         Ok(Step::Deleted(outcome)) => Some(outcome.as_ref().map(|_| ()).map_err(String::as_str)),
         _ => None,
     };
-    let replanned = !client && !ran && stale(&step);
     let trashed = deleting && reached_trash(outcome, ran);
     let placed =
         adding.is_some() && ran && (matches!(&step, Ok(Step::Record(Ok(_)))) || tally.clearing());
@@ -520,7 +523,6 @@ pub(super) async fn serve(
         let mut barrier = Some(engine.owner_egress.write().await);
         let changed = disk_changed(trashed, moving, moving_project, adding.is_some(), ran);
         let mut result = match regranted(authority.authenticate(packet), a, changed) {
-            Ok(()) if replanned => Err(failure(crate::storage::versioned::STALE_CODE)),
             Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
         };
@@ -640,10 +642,15 @@ async fn settled(
     false
 }
 
+/// Plans the request's change, or answers a replay or a read. A client's change is checked
+/// against the revision its request names; a job's, whose `expected` is none (from the sink,
+/// never the request), plans at the current revision. Inputs: the engine, admission, request,
+/// expected revision, deadline and exchange. Output: the work or the step, or an engine error.
 async fn plan(
     engine: &Arc<Engine>,
     a: &Admission,
     request: &OwnerRequest,
+    expected: Option<Cursor>,
     deadline: Instant,
     exchange: u64,
 ) -> Result<Planned, EngineError> {
@@ -669,7 +676,6 @@ async fn plan(
     if let Some(step) = replayed(engine, a, request).await? {
         return Ok(Planned::Step(step));
     }
-    let expected = request.expected_revision.clone();
     let work = match mutation {
         OwnerMutation::AddExistingFolder {
             source,
@@ -691,6 +697,7 @@ async fn plan(
             let id = request.request_id.clone();
             engine
                 .owner_job(|reply| {
+                    let expected = request.expected_revision.clone();
                     Job::HomeMovePlan(a.clone(), expected, picked, id, exchange, reply)
                 })
                 .await
@@ -724,7 +731,9 @@ async fn plan(
             let request = Box::new(request.clone());
             return Ok(
                 match engine
-                    .owner_job(|reply| Job::DeletePlan(a.clone(), request, exchange, reply))
+                    .owner_job(|reply| {
+                        Job::DeletePlan(a.clone(), request, expected, exchange, reply)
+                    })
                     .await?
                 {
                     Ok((plan, research)) => Planned::Work(Work::Delete(plan, research)),
@@ -737,7 +746,7 @@ async fn plan(
             let request = Box::new(request.clone());
             return Ok(
                 match engine
-                    .owner_job(|reply| Job::SetupPlan(a.clone(), request, reply))
+                    .owner_job(|reply| Job::SetupPlan(a.clone(), request, expected, reply))
                     .await?
                 {
                     Ok(plan) if demo => Planned::Work(Work::Demo(plan)),
@@ -870,18 +879,6 @@ async fn files(
         }
         Err(e) => rejected(&e.0),
     })
-}
-
-/// Whether a step is a plan refused because the revision moved, before any disk work: a job
-/// answered so records nothing under its id and plans again under it, while a client's stays
-/// recorded. Input: the step. Output: true for a record, New Project or Delete step refused
-/// with `stale_revision`.
-fn stale(step: &Result<Step, EngineError>) -> bool {
-    matches!(
-        step,
-        Ok(Step::Record(Err(code)) | Step::Staged(Err(code)) | Step::Deleted(Err(code)))
-            if code == crate::storage::versioned::STALE_CODE
-    )
 }
 
 fn rejected(code: &str) -> Step {

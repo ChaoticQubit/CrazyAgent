@@ -237,8 +237,8 @@ pub(super) fn read(
 }
 
 /// Plans an AddExistingFolder before the owner transport moves or copies it.
-/// Input: the connection, database path, owner admission, the revision the
-/// owner saw, source and mode. Output: the checked plan, or the refusal code
+/// Input: the connection, database path, owner admission, the revision a client saw (none
+/// for a job), source and mode. Output: the checked plan, or the refusal code
 /// (`stale_revision` when the engine moved on, `move_project_in_progress` while
 /// a project move is pending); nothing on disk changes.
 #[allow(clippy::too_many_arguments)]
@@ -246,7 +246,7 @@ pub(super) fn add_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
-    expected: &Cursor,
+    expected: Option<&Cursor>,
     request: &RequestId,
     source: &str,
     mode: AddMode,
@@ -256,7 +256,7 @@ pub(super) fn add_plan(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_admission(&tx, a)?;
-    if owner_revision(&tx)? != expected.value() {
+    if behind(&tx, expected)? {
         return Err(error("stale_revision"));
     }
     if pending_move(&tx)?.is_some() {
@@ -1124,13 +1124,15 @@ const DELETE_FILES_PER_START: i64 = 1024;
 /// and the plan's hold on projects home moves are recorded in the same write, so the runtime
 /// stops the project's agents while the transport waits and no move starts until the
 /// exchange settles. Inputs: the connection, database path, admission, the DeleteProject
-/// request and the transport exchange running it. Output: the plan with the project's
-/// research jobs, or the refusal code, with nothing written on a refusal.
+/// request, the revision a client saw (none for a job) and the transport exchange running
+/// it. Output: the plan with the project's research jobs, or the refusal code, with nothing
+/// written on a refusal.
 pub(super) fn delete_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
     request: &OwnerRequest,
+    expected: Option<&Cursor>,
     exchange: u64,
 ) -> Result<DeletePlanned, EngineError> {
     let exchange = i64::try_from(exchange).map_err(error)?;
@@ -1145,7 +1147,7 @@ pub(super) fn delete_plan(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_admission(&tx, a)?;
-    if owner_revision(&tx)? != request.expected_revision.value() {
+    if behind(&tx, expected)? {
         return Ok(Err("stale_revision".into()));
     }
     let Some(checked) = delete_check(&tx, project_id)? else {
@@ -1260,8 +1262,8 @@ pub(super) fn move_plan(
 /// Plans a MoveProjectHome before the owner transport moves or copies the project's folder
 /// and records the move as pending in the same write, which is also the hold on launches
 /// in that folder (`crate::projects_home::move_holds`). Input: the connection, database
-/// path, owner admission, the revision the owner saw, the project, Move or Copy with the
-/// owner's overrides, the request and the transport exchange that will run the move.
+/// path, owner admission, the revision a client saw (none for a job), the project, Move or
+/// Copy with the owner's overrides, the request and the transport exchange that will run it.
 /// Output: the checked plan, or the refusal code (`stale_revision` when the engine moved
 /// on, `home_move_in_progress` or `home_move_delete_in_progress` while the projects home
 /// itself is being changed, `home_add_in_progress` while an add runs, else what
@@ -1271,7 +1273,7 @@ pub(super) fn project_move_plan(
     db: &mut Connection,
     path: &Path,
     a: &Admission,
-    expected: &Cursor,
+    expected: Option<&Cursor>,
     project: &ProjectId,
     mode: AddMode,
     overrides: &[AddOverride],
@@ -1283,7 +1285,7 @@ pub(super) fn project_move_plan(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_admission(&tx, a)?;
-    if owner_revision(&tx)? != expected.value() {
+    if behind(&tx, expected)? {
         return Err(error("stale_revision"));
     }
     if pending_move(&tx)?.is_some() {

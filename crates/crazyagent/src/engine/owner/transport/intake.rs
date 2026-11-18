@@ -8,12 +8,7 @@ use crate::projects_home::job::{
 use crate::projects_home::reinstall;
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
-/// How many times a job reads the current revision and plans its change again when another
-/// change moved the revision between the read and the plan.
-const REVISION_TRIES: usize = 3;
-
-/// The most jobs that run at once (DEC-197). Each other running job's record may move the
-/// revision once between a job's read and its plan, so the bound stays within the tries.
+/// The most jobs that run at once (DEC-197).
 pub(super) const JOBS_RUNNING_MAX: usize = 3;
 
 /// The most jobs that wait for their turn beyond the running ones (DEC-197); a start past
@@ -38,7 +33,6 @@ const JOBS_LIST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 64;
 const JOBS_NAMELESS_LIST_BYTES_MAX: usize =
     JOBS_HELD_MAX * JOB_VIEW_NAMELESS_BYTES_MAX + JOBS_HELD_MAX + 2;
 
-const _: () = assert!(JOBS_RUNNING_MAX <= REVISION_TRIES);
 const _: () = assert!(JOBS_NAMELESS_LIST_BYTES_MAX <= JOBS_LIST_BYTES_MAX);
 const _: () = assert!(JOB_VIEW_BYTES_MAX + 64 <= crate::protocol::FRAME_BYTES_MAX);
 
@@ -987,34 +981,12 @@ pub(super) async fn fetch_with(
     Ok(())
 }
 
-/// Serves the job's change, planning it again while another change moved the revision
-/// between the read and the plan. Inputs: the engine, the authority, the packet, the
-/// admission, the job and its subject. Output: Ok once the change is recorded as applied,
-/// else its code.
-async fn served(
-    engine: &Arc<Engine>,
-    authority: &Arc<Authority>,
-    packet: &[u8; 37],
-    a: &Admission,
-    job: &IntakeJob,
-    subject: &JobSubject,
-) -> Result<(), EngineError> {
-    let mut result = Err(failure("stale_revision"));
-    for _ in 0..REVISION_TRIES {
-        result = served_once(engine, authority, packet, a, job, subject).await;
-        if !matches!(&result, Err(e) if e.0 == "stale_revision") {
-            break;
-        }
-    }
-    result
-}
-
-/// Reads the current revision and serves the job's change once, with a fresh owner deadline
-/// taken after the download: an AddExistingFolder for an add, a MoveProjectHome for a
+/// Serves the job's change once, with a fresh owner deadline taken after the download and
+/// planned at the current revision: an AddExistingFolder for an add, a MoveProjectHome for a
 /// project move, a DeleteProject with the typed name for a delete, a SetupProject with the
-/// owner's answers for a New Project. Inputs: as [`served`]. Output: as [`served`],
-/// `stale_revision` included.
-async fn served_once(
+/// owner's answers for a New Project. Inputs: the engine, the authority, the packet, the
+/// admission, the job and its subject. Output: Ok once recorded as applied, else its code.
+async fn served(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
