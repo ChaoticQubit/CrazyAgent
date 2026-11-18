@@ -1,5 +1,5 @@
 #[cfg(windows)]
-pub use crate::win::pipe::{INSTANCES_MAX, client, create};
+pub use crate::win::pipe::{INSTANCES_MAX, client, create, pin_of, server};
 
 const MEDIUM_LEVEL: u32 = 0x2000;
 
@@ -31,6 +31,39 @@ pub fn judge_peer(peer: &Peer, user: &[u8]) -> Result<(), &'static str> {
     }
     if peer.integrity < MEDIUM_LEVEL {
         return Err("a lower integrity process is at the other end of the pipe");
+    }
+    Ok(())
+}
+
+/// A process pinned by its ID and creation time (DESIGN-0256 D10 step 1): a reused ID
+/// belongs to a process made at another time, so the pair names one process for its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pin {
+    pub pid: u32,
+    pub created: u64,
+}
+
+/// What a client reads off its connected pipe before writing a byte (DESIGN-0256 D10): the
+/// pin of the process that serves it, that process's token, and the pipe's integrity label
+/// level, None when the pipe carries no label, which Windows treats as medium.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Served {
+    pub pin: Pin,
+    pub peer: Peer,
+    pub label: Option<u32>,
+}
+
+/// Judges who serves a pipe, in D10's order: the pin must be the expected server's, its
+/// token must pass [`judge_peer`], and the pipe's label must not be below medium. Inputs:
+/// what the client read, the expected server's pin and the user's SID. Output: Ok, or why
+/// the client refuses before writing.
+pub fn judge_server(served: &Served, expected: Pin, user: &[u8]) -> Result<(), &'static str> {
+    if served.pin != expected {
+        return Err("another process serves the pipe");
+    }
+    judge_peer(&served.peer, user)?;
+    if served.label.is_some_and(|level| level < MEDIUM_LEVEL) {
+        return Err("the pipe carries a label below medium");
     }
     Ok(())
 }
