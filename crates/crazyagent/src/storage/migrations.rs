@@ -585,17 +585,26 @@ fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Creates `<root>/backups` as a W1 private folder when missing, or opens and checks the one
-/// there (DESIGN-0256 D5). A folder that is not private is refused as unsafe; repairing it
-/// the way Unix does is W1c. Input: the engine root. Output: the backups folder path.
+/// there, and makes a local folder of this user there private again when an older build or
+/// a copy left it open to others (F36, DESIGN-0256 D5). A link, a file or a folder of another
+/// user is refused as unsafe. Input: the engine root. Output: the backups folder path.
 #[cfg(windows)]
 fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     let folder = root.join(BACKUPS);
     match private::dir(&folder) {
         Ok(_) => Ok(folder),
-        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => Err(error(format!(
-            "{BACKUP_UNSAFE}: {} must be a private folder of this user",
-            folder.display()
-        ))),
+        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => {
+            match private::repair(&folder) {
+                Ok(_) => {
+                    eprintln!("storage_backup_folder_made_private");
+                    Ok(folder)
+                }
+                Err(_) => Err(error(format!(
+                    "{BACKUP_UNSAFE}: {} must be a private folder of this user",
+                    folder.display()
+                ))),
+            }
+        }
         Err(cause) => Err(backup_failed(cause)),
     }
 }

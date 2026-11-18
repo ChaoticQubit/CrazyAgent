@@ -11,12 +11,14 @@ use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE,
     INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+use windows_sys::Win32::Security::Authorization::{
+    GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
+};
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
-    OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-    SetSecurityDescriptorOwner,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
@@ -24,7 +26,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    OPEN_EXISTING, READ_CONTROL, UnlockFileEx,
+    OPEN_EXISTING, READ_CONTROL, UnlockFileEx, WRITE_DAC,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -60,6 +62,48 @@ pub fn dir(path: &Path) -> io::Result<File> {
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
     )?;
+    private_as(&folder, &user, true)?;
+    Ok(folder)
+}
+
+/// Makes an existing folder of the engine's user private again when an older build or a
+/// copy left it open to others, the twin of a Unix chmod to 0700: opened without following a
+/// link, it must be a local folder the user owns; its list is replaced by the protected list
+/// of [`list`] and then judged as [`dir`] judges. Input: the absolute path. Output: the held
+/// folder, or why it is not this user's folder or did not become private.
+pub fn repair(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let folder = open(
+        &name,
+        FILE_LIST_DIRECTORY | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )?;
+    let (facts, attributes) = read(&folder)?;
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || facts.reparse
+        || facts.remote
+        || facts.owner != user
+    {
+        return Err(refused("only a local folder of this user is made private"));
+    }
+    let wanted = Words::from_bytes(&list(&user, true));
+    let status = unsafe {
+        SetSecurityInfo(
+            folder.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            wanted.words.as_ptr().cast(),
+            std::ptr::null(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(code(status));
+    }
     private_as(&folder, &user, true)?;
     Ok(folder)
 }
