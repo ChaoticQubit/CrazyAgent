@@ -127,6 +127,7 @@ runs:
         tar -xzf "$work/uv.tar.gz" -C "$work" "uv-$UV_TARGET/uv"
         install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"
         test "$("$work/bin/uv" --version | cut -d' ' -f2)" = "$UV_VERSION"
+        echo "$work/bin" >> "$GITHUB_PATH"
         venv="$RUNNER_TEMP/graphify"
         export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache" UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/uv-python" UV_PYTHON_BIN_DIR="$RUNNER_TEMP/uv-python-bin" UV_NO_CONFIG=1 UV_NO_PROGRESS=1 UV_PYTHON_PREFERENCE=only-managed
         "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
