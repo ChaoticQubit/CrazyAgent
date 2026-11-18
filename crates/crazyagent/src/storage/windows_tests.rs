@@ -128,6 +128,25 @@ async fn a_settings_file_other_users_may_read_is_refused() {
     assert!(error.0.contains("settings_metadata_invalid"), "{}", error.0);
 }
 
+/// W1c D1: preparing a data folder on Windows makes the root, the logs folder and both
+/// default settings files private, and refuses a root other users may change.
+#[test]
+fn layout_prepare_makes_every_entry_private_and_refuses_an_open_root() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = crate::paths::Layout::new(root.path().join("data")).unwrap();
+    layout.prepare().unwrap();
+    for folder in [layout.root().to_path_buf(), layout.logs()] {
+        private::check(&private::dir(&folder).unwrap()).unwrap();
+    }
+    for file in [layout.global_settings(), layout.project_settings()] {
+        private::check(&private::read_only(&file).unwrap()).unwrap();
+    }
+    let open = root.path().join("open");
+    std::fs::create_dir(&open).unwrap();
+    open_to_other_users(&open);
+    assert!(crate::paths::Layout::new(open).unwrap().prepare().is_err());
+}
+
 /// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
 /// the blanket `storage_unavailable` refusal the port replaces.
 #[tokio::test]
