@@ -32,7 +32,9 @@ const quantiles = (samples) => {
 };
 const STEPS = {
   async plain() {
-    await report("plain", await invoke("plain"));
+    await invoke("plain_open");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await report("plain", await invoke("plain_run"));
   },
   async placed() {
     await frameDone();
@@ -58,24 +60,40 @@ const STEPS = {
     byId("pop").style.display = "none";
     await report("shown", { show_ms: await invoke("show") });
   },
+  async click() {
+    const clicks = [];
+    const onClick = (event) => clicks.push([event.clientX, event.clientY]);
+    byId("host").addEventListener("click", onClick);
+    await invoke("checkpoint", { name: "click" });
+    await frameDone();
+    byId("host").removeEventListener("click", onClick);
+    await report("click", { count: clicks.length, clicks: clicks.slice(0, 8) });
+  },
   async type_a() {
     const typing = byId("typing");
     const trips = [];
     const draws = [];
+    const gtk = [];
     typing.value = "";
     typing.focus();
     const onKey = (event) => {
       const started = performance.now();
-      invoke("key", { text: event.key.slice(0, 16) }).then((drawMs) => {
+      invoke("key", { text: event.key.slice(0, 16) }).then((reply) => {
         trips.push(performance.now() - started);
-        draws.push(drawMs);
+        draws.push(reply.draw_ms);
+        if (reply.gtk_ms != null) gtk.push(reply.gtk_ms);
       });
     };
     typing.addEventListener("keydown", onKey);
     await invoke("checkpoint", { name: "type_a" });
     await frameDone();
     typing.removeEventListener("keydown", onKey);
-    await report("type_a", { key_to_present_ms: quantiles(trips), draw_ms: quantiles(draws), typed: typing.value.length });
+    await report("type_a", {
+      gtk_key_to_frame_ms: quantiles(gtk),
+      page_round_trip_ms: quantiles(trips),
+      draw_ms: quantiles(draws),
+      typed: typing.value.length,
+    });
   },
   async type_b() {
     await invoke("native_focus", { on: true, rect: rect() });

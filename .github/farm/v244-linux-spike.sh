@@ -80,7 +80,7 @@ start_x11() {
 }
 
 start_wayland() {
-  export XDG_RUNTIME_DIR="$root/xdg-$cell"
+  export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-$cell"
   mkdir -p -m 700 "$XDG_RUNTIME_DIR"
   local major
   major=$(weston --version 2>&1 | grep -oE '[0-9]+' | head -1)
@@ -128,12 +128,33 @@ probe() {
   record "$cell" "pixel_$name" "$(jq -nc --arg got "$got" --arg want "$want" --argjson x "$x" --argjson y "$y" '{x:$x, y:$y, got:$got, want:$want, pass:($got == $want)}')"
 }
 
+geometry_of() {
+  grep '^SPIKE ' "$1/app.log" | cut -c7- | jq -c 'select(.row == "placed" or .row == "moved") | .value.placed' | tail -1
+}
+
+click_host() {
+  local cell=$1 kind=$2 out=$3 geometry cx cy
+  if [ "$kind" != x11 ]; then
+    record "$cell" click_driver '{"measurable":false,"why":"weston headless has no pointer device to drive"}'
+    return
+  fi
+  geometry=$(geometry_of "$out")
+  if [ -z "$geometry" ] || [ "$geometry" = null ]; then
+    record "$cell" click_driver '{"geometry":false}'
+    return
+  fi
+  read -r cx cy < <(jq -r '[((.root[0] // .device[0]) + (.device[2] / 2 | floor)), ((.root[1] // .device[1]) + (.device[3] / 2 | floor))] | @tsv' <<< "$geometry")
+  timeout 10 xdotool mousemove --sync "$cx" "$cy" click 1
+  sleep 0.5
+  record "$cell" click_driver "$(jq -nc --argjson x "$cx" --argjson y "$cy" '{measurable:true, x:$x, y:$y}')"
+}
+
 pixels() {
   local cell=$1 kind=$2 step=$3 out=$4
   local file="$out/$step.png"
   shot "$kind" "$file" || { record "$cell" "pixels_$step" '{"shot":false}'; return; }
   local geometry
-  geometry=$(grep '^SPIKE ' "$out/app.log" | cut -c7- | jq -c 'select(.row == "placed" or .row == "moved") | .value.placed' | tail -1)
+  geometry=$(geometry_of "$out")
   if [ -z "$geometry" ] || [ "$geometry" = null ]; then
     record "$cell" "pixels_$step" '{"geometry":false}'
     return
@@ -161,7 +182,7 @@ focus_app() {
 }
 
 clipboard() {
-  local cell=$1 kind=$2 clip prim
+  local cell=$1 kind=$2 clip prim measurable=true
   if [ "$kind" = x11 ]; then
     clip=$(timeout 5 xclip -o -selection clipboard 2>&1)
     prim=$(timeout 5 xclip -o -selection primary 2>&1)
@@ -172,14 +193,16 @@ clipboard() {
     prim=$(timeout 5 wl-paste -p -n 2>&1)
     timeout 5 wl-copy 'pasted-into-app'
     timeout 5 wl-copy -p 'primary-into-app'
+    if grep -qiE 'seat|not supported|compositor' <<< "$clip$prim"; then measurable=false; fi
   fi
-  record "$cell" clip_out "$(jq -nc --arg clip "$clip" --arg prim "$prim" '{clipboard:$clip, primary:$prim, clipboard_pass:($clip == "crazyagent-clipboard-row"), primary_pass:($prim == "crazyagent-primary-row")}')"
+  record "$cell" clip_out "$(jq -nc --arg clip "$clip" --arg prim "$prim" --argjson measurable "$measurable" '{measurable:$measurable, clipboard:$clip, primary:$prim, clipboard_pass:($clip == "crazyagent-clipboard-row"), primary_pass:($prim == "crazyagent-primary-row")}')"
 }
 
 act() {
   local cell=$1 kind=$2 step=$3 out=$4
   case "$step" in
     placed | moved | hidden) pixels "$cell" "$kind" "$step" "$out" ;;
+    click) click_host "$cell" "$kind" "$out" ;;
     type_a | type_b)
       focus_app
       xdotool type --delay 40 "$typed"
@@ -214,7 +237,7 @@ run_cell() {
   fi
   started=$(date +%s)
   env SPIKE_OUT="$out" SPIKE_CELL="$cell" SPIKE_GPU="$gpu" SPIKE_SYNC="$sync" SPIKE_PRESENT="$present" \
-    SPIKE_STEPS="$steps" GDK_BACKEND="$kind" GDK_SCALE="$scale" timeout 300 "$app" > "$out/app.log" 2>&1 &
+    SPIKE_STEPS="$steps" GDK_BACKEND="$kind" GDK_SCALE="$scale" timeout 120 "$app" > "$out/app.log" 2>&1 &
   local app_pid=$!
   while kill -0 "$app_pid" 2> /dev/null; do
     for ready in "$out"/ready-*; do
@@ -230,19 +253,28 @@ run_cell() {
   local rc=$?
   grep '^SPIKE ' "$out/app.log" | cut -c7- >> "$results"
   record "$cell" exit "$(jq -nc --argjson rc "$rc" --argjson seconds "$(($(date +%s) - started))" '{rc:$rc, seconds:$seconds}')"
+  if [ "$rc" -ne 0 ]; then
+    echo "::group::$cell app.log tail (rc $rc)"
+    tail -n 40 "$out/app.log"
+    echo "::endgroup::"
+  fi
   stop_display
 }
 
-run_cell x11-vulkan x11 vulkan sync vsync 1 plain,placed,moved,hidden,type_a,type_b,ime_a,ime_b,clip,a11y
-run_cell x11-gl x11 gl sync vsync 1 plain,placed,moved,hidden
+run_cell x11-vulkan-plain x11 vulkan sync vsync 1 plain
+run_cell x11-gl-plain x11 gl sync vsync 1 plain
+run_cell wl-vulkan-plain wayland vulkan sync vsync 1 plain
+run_cell wl-gl-plain wayland gl sync vsync 1 plain
+run_cell x11-vulkan x11 vulkan sync vsync 1 placed,moved,hidden,click,type_a,type_b,ime_a,ime_b,clip,a11y
+run_cell x11-gl x11 gl sync vsync 1 placed,moved,hidden,click
 run_cell x11-vulkan-scale2 x11 vulkan sync vsync 2 placed,moved,hidden
 run_cell x11-vulkan-novsync x11 vulkan sync immediate 1 placed
-run_cell wl-vulkan-sync wayland vulkan sync vsync 1 plain,placed,moved,hidden,clip
+run_cell wl-vulkan-sync wayland vulkan sync vsync 1 placed,moved,hidden,click,clip
 run_cell wl-vulkan-desync wayland vulkan desync vsync 1 placed,moved,hidden
-run_cell wl-gl-sync wayland gl sync vsync 1 plain,placed,moved,hidden
+run_cell wl-gl-sync wayland gl sync vsync 1 placed,moved,hidden
 
 {
-  printf '## Native terminal Linux embed spike\n\nSoftware rendering only (lavapipe / llvmpipe on a GitHub runner). WEBKIT_DISABLE_DMABUF_RENDERER=1.\n\n'
+  printf '## Native terminal Linux embed spike\n\nSoftware rendering only (lavapipe / llvmpipe on a GitHub runner). WEBKIT_DISABLE_DMABUF_RENDERER=1. Frames only clear the surface: they time the present path, not glyph drawing.\n\n'
   printf '| cell | row | result |\n| --- | --- | --- |\n'
   jq -r '[.cell, .row, (.value | tostring | .[0:400] | gsub("\\|"; "/"))] | "| \(.[0]) | \(.[1]) | \(.[2]) |"' "$results"
   printf '\npixel rows passed: %s of %s\n' "$(jq -s '[.[] | select(.row | startswith("pixel_")) | select(.value.pass)] | length' "$results")" "$(jq -s '[.[] | select(.row | startswith("pixel_"))] | length' "$results")"

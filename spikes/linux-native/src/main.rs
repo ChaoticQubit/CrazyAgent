@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -25,9 +26,10 @@ use wayland_client::{delegate_noop, Connection, Dispatch, EventQueue, Proxy, Que
 
 const SHAPE_INPUT: i32 = 2;
 const FRAMES: usize = 60;
-const CHECKPOINT_WAIT: Duration = Duration::from_secs(180);
+const CHECKPOINT_WAIT: Duration = Duration::from_secs(60);
 const RECT_MAX: f64 = 16_384.0;
 const KEY_TEXT_MAX: usize = 16;
+const STAMPS_MAX: usize = 256;
 const CLIP_TEXT: &str = "crazyagent-clipboard-row";
 const PRIMARY_TEXT: &str = "crazyagent-primary-row";
 const GREEN: wgpu::Color = wgpu::Color {
@@ -84,10 +86,26 @@ enum Native {
         surface: WlSurface,
         subsurface: WlSubsurface,
         parent: WlSurface,
+        synced: bool,
     },
 }
 
 impl Native {
+    /// After each present: a synced subsurface's commit waits for its parent's, so the
+    /// parent is committed here; X11 and desynced subsurfaces need nothing. Output: none.
+    fn after_present(&self) {
+        if let Native::Wayland {
+            conn,
+            parent,
+            synced: true,
+            ..
+        } = self
+        {
+            parent.commit();
+            let _ = conn.flush();
+        }
+    }
+
     /// The raw handles wgpu draws through. Output: the display and window handles.
     fn handles(&self) -> Result<(RawDisplayHandle, RawWindowHandle), String> {
         match self {
@@ -263,12 +281,14 @@ struct Drawn {
     keys: u32,
 }
 
-/// What the native input path saw: whether it owns the keys, its IM context, the time of
-/// the key in progress and its timings, commits and preedit strings.
+/// What the input paths saw: whether input B owns the keys, its IM context, the toplevel's
+/// stamp of each key input A has not drawn yet (one clock for A and B), the time of the key
+/// in progress and B's timings, commits and preedit strings.
 #[derive(Default)]
 struct NativeInput {
     on: bool,
     im: Option<gtk::IMMulticontext>,
+    stamps: VecDeque<Instant>,
     key_started: Option<Instant>,
     handled_ms: Vec<f64>,
     commit_ms: Vec<f64>,
@@ -289,6 +309,7 @@ struct Host {
 thread_local! {
     static DRAWN: RefCell<Option<Drawn>> = const { RefCell::new(None) };
     static NATIVE: RefCell<NativeInput> = RefCell::new(NativeInput::default());
+    static PLAIN: RefCell<Option<gtk::Window>> = const { RefCell::new(None) };
 }
 
 /// Milliseconds since a start. Input: the start. Output: the milliseconds.
@@ -463,7 +484,8 @@ fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Resu
     let surface = compositor.create_surface(&handle, ());
     let subsurface = subcompositor.get_subsurface(&surface, &parent, &handle, ());
     subsurface.set_position(origin.0, origin.1);
-    if std::env::var("SPIKE_SYNC").as_deref() == Ok("desync") {
+    let synced = std::env::var("SPIKE_SYNC").as_deref() != Ok("desync");
+    if !synced {
         subsurface.set_desync();
     }
     let region = compositor.create_region(&handle, ());
@@ -476,12 +498,13 @@ fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Resu
         .roundtrip(&mut WaylandState)
         .map_err(|error| error.to_string())?;
     Ok(Native::Wayland {
-        display,
+        display: display.cast(),
         conn,
         _queue: queue,
         surface,
         subsurface,
         parent,
+        synced,
     })
 }
 
@@ -533,9 +556,10 @@ fn gpu(native: &Native, size: (u32, u32)) -> Result<Gpu, String> {
     })
 }
 
-/// Clears the surface to one color and presents it. Inputs: the GPU objects and the color.
+/// Clears the surface to one color and presents it; frames only clear, so they time the
+/// present path, not glyph drawing. Inputs: the GPU objects, the window and the color.
 /// Output: milliseconds to present and to the GPU finishing.
-fn frame(gpu: &Gpu, color: wgpu::Color) -> Result<(f64, f64), String> {
+fn frame(gpu: &Gpu, native: &Native, color: wgpu::Color) -> Result<(f64, f64), String> {
     let started = Instant::now();
     let texture = gpu
         .surface
@@ -563,6 +587,7 @@ fn frame(gpu: &Gpu, color: wgpu::Color) -> Result<(f64, f64), String> {
     }));
     gpu.queue.submit([encoder.finish()]);
     texture.present();
+    native.after_present();
     let presented = ms(started);
     gpu.device
         .poll(wgpu::PollType::Wait)
@@ -588,7 +613,7 @@ fn draw_key() -> Result<f64, String> {
         let mut drawn = cell.borrow_mut();
         let placed = drawn.as_mut().ok_or("no surface is placed")?;
         placed.keys += 1;
-        frame(&placed.gpu, key_color(placed.keys)).map(|_| ())
+        frame(&placed.gpu, &placed.native, key_color(placed.keys)).map(|_| ())
     })?;
     Ok(ms(started))
 }
@@ -600,20 +625,32 @@ fn config() -> Value {
     json!({ "cell": cell(), "steps": steps.split(',').filter(|step| !step.is_empty()).collect::<Vec<_>>() })
 }
 
-/// Row 0: a surface on a bare GTK window with no webview presents 60 frames. Output: the
-/// adapter and frame timings, or why it cannot present.
+/// Row 0, first half: opens a bare GTK window with no webview and returns, so the main loop
+/// maps it before plain_run draws. Output: none.
 #[tauri::command]
-fn plain() -> Result<Value, String> {
+fn plain_open() {
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.set_decorated(false);
     window.set_default_size(640, 400);
     window.show_all();
-    for _ in 0..200 {
-        if !gtk::events_pending() {
-            break;
-        }
-        gtk::main_iteration_do(false);
-    }
+    PLAIN.with(|cell| *cell.borrow_mut() = Some(window));
+}
+
+/// Row 0, second half: a surface on the bare window presents 60 frames, then the window
+/// closes. Output: the adapter and frame timings, or why it cannot present.
+#[tauri::command]
+fn plain_run() -> Result<Value, String> {
+    let window = PLAIN
+        .with(|cell| cell.borrow_mut().take())
+        .ok_or("plain_open has not run")?;
+    let result = plain_frames(&window);
+    window.close();
+    result
+}
+
+/// Times 60 frames on a surface over a bare window. Input: the window. Output: the adapter
+/// and frame timings, or why it cannot present.
+fn plain_frames(window: &gtk::Window) -> Result<Value, String> {
     let gdk = window.window().ok_or("the bare window has no GdkWindow")?;
     let scale = window.scale_factor();
     let logical = (40, 40, 320, 200);
@@ -627,14 +664,13 @@ fn plain() -> Result<Value, String> {
         let mut presented = Vec::with_capacity(FRAMES);
         let mut done = Vec::with_capacity(FRAMES);
         for index in 0..FRAMES {
-            let (shown, finished) = frame(&gpu, key_color(index as u32))?;
+            let (shown, finished) = frame(&gpu, &native, key_color(index as u32))?;
             presented.push(shown);
             done.push(finished);
         }
         Ok(json!({ "adapter": gpu.adapter, "presented_ms": stats(&mut presented), "done_ms": stats(&mut done) }))
     });
     drop(native);
-    window.close();
     result
 }
 
@@ -662,6 +698,7 @@ fn place(window: WebviewWindow, rect: Rect) -> Result<Value, String> {
                     wayland_child(&host.gdk, (logical.0, logical.1), host.scale)?
                 };
                 let gpu = gpu(&native, (size.2, size.3))?;
+                ensure_wired(&host);
                 Drawn {
                     gpu,
                     native,
@@ -669,7 +706,7 @@ fn place(window: WebviewWindow, rect: Rect) -> Result<Value, String> {
                 }
             }
         };
-        let (_, done) = frame(&placed.gpu, GREEN)?;
+        let (_, done) = frame(&placed.gpu, &placed.native, GREEN)?;
         let reply = json!({
             "adapter": placed.gpu.adapter,
             "x11": host.x11,
@@ -694,11 +731,11 @@ fn frame_times() -> Result<Value, String> {
         let mut presented = Vec::with_capacity(FRAMES);
         let mut done = Vec::with_capacity(FRAMES);
         for index in 0..FRAMES {
-            let (shown, finished) = frame(&placed.gpu, key_color(index as u32))?;
+            let (shown, finished) = frame(&placed.gpu, &placed.native, key_color(index as u32))?;
             presented.push(shown);
             done.push(finished);
         }
-        frame(&placed.gpu, GREEN)?;
+        frame(&placed.gpu, &placed.native, GREEN)?;
         Ok(json!({ "presented_ms": stats(&mut presented), "done_ms": stats(&mut done) }))
     })
 }
@@ -724,24 +761,38 @@ fn show() -> Result<f64, String> {
         let drawn = cell.borrow();
         let placed = drawn.as_ref().ok_or("no surface is placed")?;
         placed.native.show();
-        frame(&placed.gpu, GREEN).map(|_| ())
+        frame(&placed.gpu, &placed.native, GREEN).map(|_| ())
     })?;
     Ok(ms(started))
 }
 
 /// Input A: the page saw a key and sends it here; one frame is drawn for it. Input: the
-/// key's text, at most 16 characters. Output: the milliseconds to draw it.
+/// key's text, at most 16 characters. Output: the milliseconds to draw it, and from the
+/// toplevel's stamp of the oldest undrawn key to the frame (the clock input B uses).
 #[tauri::command]
-fn key(text: String) -> Result<f64, String> {
+fn key(text: String) -> Result<Value, String> {
     if text.chars().count() > KEY_TEXT_MAX {
         return Err(format!("a key carries at most {KEY_TEXT_MAX} characters"));
     }
-    draw_key()
+    let stamp = NATIVE.with(|cell| cell.borrow_mut().stamps.pop_front());
+    let draw_ms = draw_key()?;
+    Ok(json!({ "draw_ms": draw_ms, "gtk_ms": stamp.map(ms) }))
 }
 
-/// Wires input B once: the toplevel's key-press-event, ahead of the webview, feeds an IM
-/// multicontext (IBus when GTK_IM_MODULE says so) and draws a frame per key or commit.
-/// Inputs: the toplevel and its GDK window. Output: the IM context.
+/// Wires the toplevel's key handler once, so every key gets a stamp from the first place
+/// on. Input: the host. Output: none.
+fn ensure_wired(host: &Host) {
+    if NATIVE.with(|cell| cell.borrow().im.is_some()) {
+        return;
+    }
+    let im = wire(&host.toplevel, &host.gdk);
+    NATIVE.with(|cell| cell.borrow_mut().im = Some(im));
+}
+
+/// Wires the toplevel's key-press-event, ahead of the webview: it stamps every key. With
+/// input B off the key goes on to the page and its stamp waits for `key`; with B on it
+/// feeds an IM multicontext (IBus when GTK_IM_MODULE says so) and draws a frame per key or
+/// commit. Inputs: the toplevel and its GDK window. Output: the IM context.
 fn wire(toplevel: &gtk::ApplicationWindow, gdk: &gtk::gdk::Window) -> gtk::IMMulticontext {
     let im = gtk::IMMulticontext::new();
     im.set_client_window(Some(gdk));
@@ -765,6 +816,11 @@ fn wire(toplevel: &gtk::ApplicationWindow, gdk: &gtk::gdk::Window) -> gtk::IMMul
             let mut input = cell.borrow_mut();
             if input.on {
                 input.key_started = Some(started);
+            } else {
+                if input.stamps.len() >= STAMPS_MAX {
+                    input.stamps.pop_front();
+                }
+                input.stamps.push_back(started);
             }
             (input.on, input.im.clone())
         });
@@ -787,16 +843,15 @@ fn wire(toplevel: &gtk::ApplicationWindow, gdk: &gtk::gdk::Window) -> gtk::IMMul
 fn native_focus(window: WebviewWindow, on: bool, rect: Rect) -> Result<(), String> {
     let host = host(&window)?;
     let logical = logical(&host, rect)?;
-    let wired = NATIVE.with(|cell| cell.borrow().im.clone());
-    let im = match wired {
-        Some(im) => im,
-        None => {
-            let im = wire(&host.toplevel, &host.gdk);
-            NATIVE.with(|cell| cell.borrow_mut().im = Some(im.clone()));
-            im
-        }
-    };
-    NATIVE.with(|cell| cell.borrow_mut().on = on);
+    ensure_wired(&host);
+    let im = NATIVE
+        .with(|cell| cell.borrow().im.clone())
+        .ok_or("the key handler is not wired")?;
+    NATIVE.with(|cell| {
+        let mut input = cell.borrow_mut();
+        input.on = on;
+        input.stamps.clear();
+    });
     if on {
         im.set_cursor_location(&gtk::gdk::Rectangle::new(logical.0, logical.1, 1, 16));
         im.focus_in();
@@ -813,6 +868,8 @@ fn native_report() -> Value {
     NATIVE.with(|cell| {
         let mut input = cell.borrow_mut();
         let reply = json!({
+            "im_module": std::env::var("GTK_IM_MODULE").ok(),
+            "im_context": input.im.as_ref().map(|im| format!("{:?}", im.context_id())),
             "handled_ms": stats(&mut input.handled_ms),
             "commit_ms": stats(&mut input.commit_ms),
             "commits": input.commits.iter().take(64).collect::<Vec<_>>(),
@@ -851,7 +908,7 @@ fn clip_read() -> Value {
 }
 
 /// Hands the screen to the farm script: writes ready-<name> in SPIKE_OUT and waits up to
-/// three minutes for go-<name>. Input: the checkpoint name. Output: none, or why not.
+/// one minute for go-<name>. Input: the checkpoint name. Output: none, or why not.
 #[tauri::command(async)]
 fn checkpoint(name: String) -> Result<(), String> {
     let name = checked_name(&name)?;
@@ -890,7 +947,8 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             config,
-            plain,
+            plain_open,
+            plain_run,
             place,
             frame_times,
             hide,
