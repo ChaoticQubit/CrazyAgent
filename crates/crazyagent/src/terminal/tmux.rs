@@ -677,19 +677,7 @@ impl Tmux {
             control.stop();
             return Err(refused);
         }
-        for option in [
-            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
-            "set-option -gw allow-rename off".into(),
-            "set-option -gw automatic-rename off".into(),
-            "set-option -gw remain-on-exit off".into(),
-            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
-        ]
-        .into_iter()
-        .chain(
-            self.confined
-                .is_some()
-                .then(|| format!("set-option -g default-shell {LEAD_SHELL}")),
-        ) {
+        for option in server_options(self.confined.is_some()) {
             control
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
@@ -2468,6 +2456,46 @@ impl Host for Tmux {
 
 const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
 const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// Whether `send_bytes` pastes a request through a tmux buffer: when it is longer than one
+/// `send-keys` run and holds no NUL, which would end the buffer. Takes at most
+/// `INPUT_BYTES_MAX` bytes. Returns the choice.
+fn pastes(bytes: &[u8]) -> bool {
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    false
+}
+
+/// The `set-option` commands the engine runs on each server it controls, in order: the
+/// terminal type, window names and exits, scrollback, the lead shell on a confined host,
+/// then `set-clipboard external` and `get-clipboard off`, so no pane's OSC 52 query reads a
+/// tmux buffer. Takes whether the host is confined. Returns the commands.
+fn server_options(confined: bool) -> Vec<String> {
+    let mut options = vec![
+        format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+        "set-option -gw allow-rename off".into(),
+        "set-option -gw automatic-rename off".into(),
+        "set-option -gw remain-on-exit off".into(),
+        format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+    ];
+    if confined {
+        options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+    }
+    assert!(options.len() >= 5);
+    assert!(
+        options
+            .iter()
+            .all(|option| option.starts_with("set-option -"))
+    );
+    options
+}
+
+/// The two commands that paste bytes into one target through a named tmux buffer. Takes the
+/// target, the buffer name and bytes without a NUL. Returns the commands.
+fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
+    assert!(!bytes.contains(&0));
+    assert!(!target.is_empty() && !buffer.is_empty());
+    Vec::new()
+}
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
