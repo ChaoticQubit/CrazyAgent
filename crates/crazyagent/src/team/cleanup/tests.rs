@@ -1144,7 +1144,8 @@ fn denies(path: &Path) -> bool {
 /// RV-DS241-181: removing an agent's tree while a process of its keeps swapping folders in
 /// it for links to an owner folder never clears an ACL there or opens up a mode there, since
 /// ACLs and modes change only through entries reached from the tree's own handles. A later
-/// removal with nothing swapping still finishes.
+/// removal with nothing swapping still finishes. Owner folders sit at 0555, a mode neither a
+/// change by path (0500) nor one through a handle (0700) leaves.
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_to() {
