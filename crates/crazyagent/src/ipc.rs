@@ -90,6 +90,38 @@ mod tests {
     }
 }
 
+/// The Windows pipe name of an owner-class endpoint (DESIGN-0256 D7):
+/// `\\.\pipe\crazyagent-<32 hex of sha256(root)>-<purpose>-<32 hex random>`, the root being
+/// the protected folder's final name, hashed as little-endian UTF-16. Inputs: that name, the
+/// endpoint's plain purpose (1-32 of a-z, 0-9, '.' and '-') and the per-start random part.
+/// Output: the pipe name.
+#[cfg(any(windows, test))]
+#[cfg_attr(
+    all(windows, not(test)),
+    expect(dead_code, reason = "the D8 Windows listener is its first caller")
+)]
+pub(crate) fn pipe_name(root: &[u16], purpose: &str, random: &[u8; 16]) -> String {
+    use sha2::{Digest, Sha256};
+    assert!(!root.is_empty(), "a protected root has a final name");
+    assert!(
+        (1..=32).contains(&purpose.len())
+            && purpose
+                .bytes()
+                .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-')),
+        "a pipe purpose is a plain name"
+    );
+    let bytes: Vec<u8> = root.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    let digest = Sha256::digest(&bytes);
+    let hex = |part: &[u8]| -> String { part.iter().map(|byte| format!("{byte:02x}")).collect() };
+    let name = format!(
+        r"\\.\pipe\crazyagent-{}-{purpose}-{}",
+        hex(&digest[..16]),
+        hex(random)
+    );
+    assert!(name.len() <= 256);
+    name
+}
+
 #[cfg(test)]
 mod name_tests {
     use super::pipe_name;
