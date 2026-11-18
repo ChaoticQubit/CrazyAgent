@@ -1894,29 +1894,28 @@ impl TeamRuntime {
         follow: impl FnOnce(&Connection, &Path) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         if self.follow_due()? {
+            let version = self.data_version()?;
             follow(&self.connection, self.root.as_path())?;
-            self.followed = Some(self.database_mark()?);
+            self.followed = Some((version, self.connection.total_changes()));
         }
         Ok(())
     }
 
     /// Tells whether the IDE workspaces may need a rewrite: on the first tick and whenever
     /// the database changed since they were last followed, by another connection
-    /// (`PRAGMA data_version`) or by this one (`total_changes`), since a workspace is built
-    /// from stored rows alone. Takes the runtime. Returns the answer, or a failed read.
+    /// (`PRAGMA data_version`, read before that follow so a commit during it stays due) or
+    /// by this one (`total_changes`, read after it, so its own writes do not). Takes the
+    /// runtime. Returns the answer, or a failed read.
     fn follow_due(&self) -> Result<bool, EngineError> {
-        Ok(self.followed != Some(self.database_mark()?))
+        Ok(self.followed != Some((self.data_version()?, self.connection.total_changes())))
     }
 
-    /// Marks how far the database has moved, as [`TeamRuntime::follow_due`] compares it:
-    /// the commits of other connections (`PRAGMA data_version`) and the rows this one
-    /// changed. Takes the runtime. Returns the mark, or a failed read.
-    fn database_mark(&self) -> Result<(i64, u64), EngineError> {
-        let version: i64 = self
-            .connection
+    /// Reads how many commits other connections made, as `PRAGMA data_version` counts
+    /// them for this connection. Takes the runtime. Returns the count, or a failed read.
+    fn data_version(&self) -> Result<i64, EngineError> {
+        self.connection
             .query_row("PRAGMA data_version", [], |row| row.get(0))
-            .map_err(error)?;
-        Ok((version, self.connection.total_changes()))
+            .map_err(error)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's
