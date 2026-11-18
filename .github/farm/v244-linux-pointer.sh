@@ -142,7 +142,15 @@ fi
 log "ibus ready $ibus_ready, latn-pre engines $(grep -c 'm17n:t:latn-pre' "$root/ibus-engines.txt" 2> /dev/null)"
 
 display_pid=""
+holder_pid=""
 load_pids=()
+
+sway_keyboards() {
+  local sock
+  sock=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock 2> /dev/null | head -1)
+  [ -n "$sock" ] || { echo "no sway ipc socket"; return; }
+  SWAYSOCK=$sock timeout 5 swaymsg -t get_inputs -r 2> /dev/null | jq -r '[.[] | select(.type == "keyboard")] | length'
+}
 cell=""
 
 start_x11() {
@@ -169,6 +177,11 @@ start_sway() {
     socket=$(ls "$XDG_RUNTIME_DIR" 2> /dev/null | grep -E '^wayland-[0-9]+$' | head -1)
     if [ -n "$socket" ]; then
       export WAYLAND_DISPLAY=$socket
+      log "  $cell sway keyboards before the holder: $(sway_keyboards)"
+      wtype -s 3600000 -k Shift_L > "$root/holder-$cell.log" 2>&1 &
+      holder_pid=$!
+      sleep 1
+      log "  $cell sway keyboards with the holder: $(sway_keyboards)"
       return 0
     fi
     sleep 0.1
@@ -177,6 +190,8 @@ start_sway() {
 }
 
 stop_display() {
+  [ -n "$holder_pid" ] && kill "$holder_pid" 2> /dev/null
+  holder_pid=""
   [ -n "$display_pid" ] && kill "$display_pid" 2> /dev/null
   wait "$display_pid" 2> /dev/null
   display_pid=""
@@ -220,7 +235,7 @@ type_keys() {
   else
     local args=()
     for name in "$@"; do args+=(-k "$name"); done
-    timeout 30 wtype -d 80 "${args[@]}"
+    timeout 30 wtype -s 300 -d 80 "${args[@]}"
   fi
 }
 
@@ -349,6 +364,7 @@ run_row() {
     fi
     reached=$((reached + 1))
     last=$step
+    [ "$kind" = sway ] && log "  $cell at $step sway keyboards: $(sway_keyboards)"
     "act_$name" "$kind" "$step" "$dir"
     : > "$dir/go-$step"
   done
