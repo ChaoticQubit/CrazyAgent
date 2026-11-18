@@ -1416,3 +1416,32 @@ async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot
         "the key after the move never landed"
     );
 }
+
+/// V243-NATIVE-INPUT-PIN: a pin that is no pane id is a programmer error, so a pinned paste,
+/// send or liveness check stops at once instead of handing the host a name-like target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
+    let agent = AgentId::team(1).unwrap();
+    let bogus = PaneAt {
+        pane: "first".into(),
+        serial: 7,
+    };
+    assert!(!crate::terminal::pane_id_valid(&bogus.pane));
+    let host: Arc<dyn Host> = Recording::new(vec![agent.clone()]);
+    let pasting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        paste(&host, &agent, Some(bogus.clone()), b"p".to_vec())
+    }));
+    assert!(pasting.is_err(), "a pinned paste to no pane id panics");
+    let sending = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let request = TerminalRequest::Input {
+            bytes: b"a".to_vec(),
+        };
+        send(&host, &agent, None, Some(bogus.clone()), request)
+    }));
+    assert!(sending.is_err(), "a pinned send to no pane id panics");
+    let checking = tokio::spawn(async move { agent_gone(&host, &agent, Some(&bogus)).await });
+    assert!(
+        checking.await.is_err_and(|join| join.is_panic()),
+        "a pinned liveness check of no pane id panics"
+    );
+}

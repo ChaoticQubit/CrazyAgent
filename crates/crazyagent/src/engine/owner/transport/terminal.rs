@@ -581,6 +581,12 @@ impl Pasting {
 #[cfg(unix)]
 fn paste(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<PaneAt>, keys: Vec<u8>) -> Sending {
     assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
+    assert!(
+        pinned
+            .as_ref()
+            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+        "a pin is a pane id"
+    );
     let host = host.clone();
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || match &pinned {
@@ -599,6 +605,12 @@ async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneA
     let host = host.clone();
     let agent = agent.clone();
     let pinned = pinned.cloned();
+    assert!(
+        pinned
+            .as_ref()
+            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+        "a pin is a pane id"
+    );
     tokio::task::spawn_blocking(move || {
         let stays = match &pinned {
             Some(at) => host.own_pane_at(&agent).map(|now| now == *at),
@@ -631,6 +643,12 @@ fn send(
     assert!(
         at.is_none() || pinned.is_none(),
         "a pinned view has no viewer pane"
+    );
+    assert!(
+        pinned
+            .as_ref()
+            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+        "a pin is a pane id"
     );
     let host = host.clone();
     let agent = agent.clone();
