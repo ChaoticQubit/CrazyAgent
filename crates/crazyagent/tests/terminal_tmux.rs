@@ -1242,12 +1242,12 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
     let mut attached = 0;
     for _ in 0..30 {
         tmux_reply(&tmux, &socket, &["clear-history", "-t", &target]);
-        let screen = host.attach(&forger).expect("an attach under load").screen;
-        heights.insert(screen.iter().filter(|b| **b == b'\n').count());
+        let opened = host.attach(&forger).expect("an attach under load");
+        heights.insert(opened.history.windows(2).filter(|w| *w == b"\r\n").count());
         assert!(
-            contains(&screen, b"flood-"),
+            contains(&opened.screen, b"flood-"),
             "{}",
-            String::from_utf8_lossy(&screen)
+            String::from_utf8_lossy(&opened.screen)
         );
         attached += 1;
     }
@@ -1259,7 +1259,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
         attached == 30 && !forged && live && heights.len() > 1,
         "every attach of a printing pane opens ({attached} of 30); no planted row reaches \
          another pane's viewer (forged: {forged}); the sibling stays live ({live}); the \
-         screens held different row counts, so some ran under the history cap ({heights:?})",
+         attaches held different history row counts, so some ran under the cap ({heights:?})",
     );
     host.kill(&forger).unwrap();
     host.kill(&sibling).unwrap();
