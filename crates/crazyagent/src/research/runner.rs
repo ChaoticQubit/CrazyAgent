@@ -2058,11 +2058,10 @@ fn job_kept_ports(
 }
 
 /// The sandbox network a research job runs under and the model proxy it reaches its model
-/// through, decided as for a team agent by `AgentNetwork::proxied` and `reach` (S4B-M1, O2a).
-/// Inputs: the OS, the project's agent policy, whether the job has tools, its account, its id
-/// for the proxy's refusal lines, and the owner's model ports the proxy leaves alone. Output:
-/// the network and the proxy, which must outlive the job, or the refusal of a model this OS
-/// cannot reach, of an endpoint no proxy can name, or of a proxy that could not start.
+/// through, decided as for a team agent by `AgentNetwork::proxied` and `reach`. Inputs: the OS,
+/// the agent policy, whether the job has tools, its account, its id and the owner's model ports
+/// the proxy leaves alone. Output: the network and the proxy, which must outlive the job, or the
+/// refusal of a model this OS cannot reach, an endpoint no proxy names or a proxy that failed.
 pub(crate) fn job_reach(
     os: &str,
     policy: &crate::sandbox::policy::AgentPolicy,
