@@ -701,18 +701,12 @@ fn wayland_child(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_term::linux::rows::{STEP_WAIT, ms, pump, pump_for, pump_until, row_dir};
     use crate::native_term::render::{Shared, Surface};
     use crate::native_term::screen::Frame;
     use crate::native_term::style::{Style, Theme, font_for};
     use alacritty_terminal::vte::ansi::Rgb;
     use serde_json::{Value, json};
-    use std::path::PathBuf;
-
-    /// How long the display row waits for one step: the window to map or a frame callback.
-    const STEP_WAIT: Duration = Duration::from_secs(10);
-
-    /// How long the display row waits for the farm to take a step's screenshot.
-    const SHOT_WAIT: Duration = Duration::from_secs(60);
 
     /// The longest one present may take: under the 16.7 ms of a 60 Hz output, so a present
     /// that waited on a frame callback fails the row.
@@ -850,24 +844,6 @@ mod tests {
         pacing.presenting();
     }
 
-    fn pump() {
-        while gtk::events_pending() {
-            gtk::main_iteration_do(false);
-        }
-    }
-
-    fn pump_for(wait: Duration) {
-        let end = Instant::now() + wait;
-        while Instant::now() < end {
-            pump();
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    fn ms(since: Instant) -> f64 {
-        since.elapsed().as_secs_f64() * 1000.0
-    }
-
     fn stats(samples: &[f64]) -> Value {
         assert!(!samples.is_empty());
         let mut sorted = samples.to_vec();
@@ -876,29 +852,13 @@ mod tests {
         json!({"n": sorted.len(), "p50": at(0.5), "p95": at(0.95), "max": at(1.0)})
     }
 
-    fn row_dir() -> Option<PathBuf> {
-        std::env::var_os("NATIVE_ROW_DIR").map(PathBuf::from)
-    }
-
     fn wait_ready(child: &mut Child) -> f64 {
         let started = Instant::now();
-        loop {
-            pump();
-            if child.ready() {
-                return ms(started);
-            }
-            assert!(
-                started.elapsed() < STEP_WAIT,
-                "no frame callback within the step wait"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        pump_until("frame callback", || child.ready());
+        ms(started)
     }
 
     fn checkpoint(step: &str, child: &Child) {
-        let Some(dir) = row_dir() else {
-            return;
-        };
         let (x, y, w, h) = child.device_rect();
         let line = json!({
             "step": step,
@@ -906,17 +866,7 @@ mod tests {
             "root": child.root_origin().map(|(rx, ry)| [rx, ry]),
             "scale": child.scale(),
         });
-        std::fs::write(dir.join(format!("{step}.json")), format!("{line}\n")).expect("step file");
-        let go = dir.join(format!("go-{step}"));
-        let started = Instant::now();
-        while !go.exists() {
-            assert!(
-                started.elapsed() < SHOT_WAIT,
-                "the farm took no {step} shot"
-            );
-            pump();
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        crate::native_term::linux::rows::checkpoint(step, &line);
     }
 
     fn present(
