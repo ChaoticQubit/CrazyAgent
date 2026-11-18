@@ -2619,7 +2619,10 @@ fn server_options(confined: bool, paste_buffer: bool) -> Vec<String> {
     if confined {
         options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
     }
-    let _ = paste_buffer;
+    if paste_buffer {
+        options.push("set-option -sq set-clipboard external".into());
+        options.push("set-option -sq get-clipboard off".into());
+    }
     assert!(options.len() >= 5);
     assert!(
         options
