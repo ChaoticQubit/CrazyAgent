@@ -820,3 +820,61 @@ fn civil(days: i64) -> (i64, u32, u32) {
     assert!((1..=12).contains(&month) && (1..=31).contains(&day));
     (year, month, day)
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crazyagent_win_sandbox::private;
+    use std::path::Path;
+
+    /// Runs a Windows tool and fails the test when it fails. Inputs: the program and its
+    /// arguments.
+    fn run(program: &str, args: &[&str]) {
+        let status = std::process::Command::new(program)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{program} {args:?} failed: {status}");
+    }
+
+    /// Lets authenticated users change a folder and what it will hold. Input: the folder.
+    fn open_to_other_users(folder: &Path) {
+        run(
+            "icacls",
+            &[folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"],
+        );
+    }
+
+    /// W1c D5 (F36): a backups folder of this user that other users may change is made
+    /// private again, the twin of the Unix chmod, and a junction in its place is refused as
+    /// unsafe.
+    #[test]
+    fn an_open_backups_folder_is_repaired_and_a_junction_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = data.join(super::BACKUPS);
+        std::fs::create_dir(&backups).unwrap();
+        open_to_other_users(&backups);
+        assert!(private::dir(&backups).is_err());
+        assert_eq!(super::backups_folder(&data).unwrap(), backups);
+        private::check(&private::dir(&backups).unwrap()).unwrap();
+        std::fs::remove_dir(&backups).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        open_to_other_users(&elsewhere);
+        run(
+            "cmd",
+            &[
+                "/C",
+                "mklink",
+                "/J",
+                backups.to_str().unwrap(),
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        let refused = super::backups_folder(&data).unwrap_err();
+        assert!(refused.0.starts_with(super::BACKUP_UNSAFE), "{}", refused.0);
+        assert!(private::dir(&elsewhere).is_err());
+        std::fs::remove_dir(&backups).unwrap();
+    }
+}
