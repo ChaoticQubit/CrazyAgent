@@ -97,6 +97,7 @@ jobs:
       - name: Machine and harness facts
         run: |
           set -uo pipefail
+          set +e
           nproc
           free -m
           echo "TMPDIR=${TMPDIR:-unset} HOME=$HOME"
