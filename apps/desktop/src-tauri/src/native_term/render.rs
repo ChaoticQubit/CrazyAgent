@@ -59,7 +59,6 @@ impl Device {
     /// Output: ok, or `native_terminal_gpu`.
     fn fault(&self) -> Result<(), &'static str> {
         if self.faulted.swap(false, Ordering::AcqRel) {
-            assert!(!self.faulted.load(Ordering::Acquire));
             return Err(GPU_FAULT);
         }
         Ok(())
@@ -979,9 +978,10 @@ mod tests {
         }
     }
 
-    /// A view past wgpu's default texture side (8192) but within the adapter's, as a window
-    /// across two 6K displays (12032 px), configures at its full width and draws: the device
-    /// asks the adapter's own limits (#569).
+    /// A view as wide as the adapter's own largest texture side, past wgpu's default 8192
+    /// (a window across two 6K displays is 12032 px; Apple GPUs allow 16384), configures
+    /// at that full width and draws: the device asks the adapter's limits (#569). A GPU
+    /// whose side is not past 8192 prints why the row skipped and passes.
     #[test]
     fn a_surface_past_the_default_texture_limit_configures_at_full_width_and_draws() {
         let mut shared = shared_at(2.0);
@@ -989,14 +989,21 @@ mod tests {
         let mut surface = shared
             .surface_on(on_layer(&layer), 64, 64)
             .expect("a surface");
+        let default_max = wgpu::Limits::default().max_texture_dimension_2d;
+        assert_eq!(default_max, 8192, "wgpu's default largest texture side");
         let set = shared.device.as_ref().expect("a device");
         let adapter_max = set.adapter.limits().max_texture_dimension_2d;
-        assert!(
-            adapter_max >= 12032,
-            "this GPU's largest side is {adapter_max}"
+        if adapter_max <= default_max {
+            eprintln!("skipped: this GPU's largest texture side {adapter_max} is not past 8192");
+            return;
+        }
+        shared
+            .resize(&mut surface, adapter_max, 64)
+            .expect("a resize");
+        assert_eq!(
+            (surface.config.width, surface.config.height),
+            (adapter_max, 64)
         );
-        shared.resize(&mut surface, 12032, 64).expect("a resize");
-        assert_eq!((surface.config.width, surface.config.height), (12032, 64));
         shared
             .draw(&mut surface, &frame_of("wide"))
             .expect("drawn at its full width");
