@@ -1211,6 +1211,11 @@ async fn host_command(engine: &Engine, revision: &mut u64, id: &str, command: Co
 async fn owner_knowledge_reviews_exact_versions_and_reevaluates_source_revocation() {
     use crazyagent::memory::*;
     let (root, config, engine) = owner_fixture().await;
+    let (server, _host) = OwnerServer::bind(root.path(), engine.clone(), &config)
+        .await
+        .unwrap();
+    let (stop, rx) = oneshot::channel();
+    let task = tokio::spawn(server.run(rx));
     let mut revision = 0;
     let project = ProjectId::new("p").unwrap();
     host_command(
@@ -1314,11 +1319,6 @@ async fn owner_knowledge_reviews_exact_versions_and_reevaluates_source_revocatio
         },
     )
     .await;
-    let (server, _host) = OwnerServer::bind(root.path(), engine.clone(), &config)
-        .await
-        .unwrap();
-    let (stop, rx) = oneshot::channel();
-    let task = tokio::spawn(server.run(rx));
     let tui =
         OwnerClient::attach(root.path(), OwnerClientKind::Tui, Duration::from_secs(2)).unwrap();
     let desktop = OwnerClient::attach(

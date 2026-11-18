@@ -477,7 +477,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 25] = [
+const KINDS: [&str; 26] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -491,6 +491,7 @@ const KINDS: [&str; 25] = [
     crate::ide::log::FILE_UNLOCKED,
     crate::ide::log::WORKSPACE_WRITTEN,
     crate::ide::log::WORKSPACE_FORGOTTEN,
+    crate::memory::log::KIND,
     crate::settings_log::KIND_SANDBOX,
     crate::settings_log::KIND_CLEANUP,
     crate::settings_log::KIND_QUIT,
@@ -513,8 +514,9 @@ const FREE_FORM: [(&str, &str); 1] = [(crate::ide::log::FILE_UNLOCKED, "path")];
 /// The source files outside tests that name the log's appender, as paths under `src` in
 /// sorted order, each with what it may put after `kind: `: the constants of its own kinds.
 /// ide/log.rs writes `change.kind()`, which maps each `Change` variant to one of its kinds.
-const WRITERS: [(&str, &[&str]); 6] = [
+const WRITERS: [(&str, &[&str]); 7] = [
     ("ide/log.rs", &["change.kind(),"]),
+    ("memory/log.rs", &["KIND,"]),
     ("project_setup/removed/event.rs", &["KIND,"]),
     (
         "settings_log.rs",
@@ -547,7 +549,7 @@ const WRITERS: [(&str, &[&str]); 6] = [
 /// The writers outside this module that take a snapshot, each with the only tables its runs
 /// may carry. A run copies those tables' stored columns as they stand, rows the typed events
 /// wrote; the run does not check them again.
-const SNAPSHOTS: [(&str, &[&str]); 2] = [
+const SNAPSHOTS: [(&str, &[&str]); 3] = [
     (
         "worktrees/log.rs",
         &["repository_admissions", "worktree_leases"],
@@ -567,6 +569,25 @@ const SNAPSHOTS: [(&str, &[&str]); 2] = [
             "configured_master_time",
             "configured_master_frames",
             "user_profile",
+        ],
+    ),
+    (
+        "memory/log.rs",
+        &[
+            "knowledge_principals",
+            "knowledge_sources",
+            "knowledge_activity",
+            "knowledge_nominations",
+            "knowledge_entries",
+            "knowledge_heads",
+            "knowledge_globals",
+            "knowledge_jobs",
+            "knowledge_watermarks",
+            "memory_library",
+            "memory_settings",
+            "memory_agent_scope",
+            "asset_sources",
+            "asset_snapshots",
         ],
     ),
 ];
@@ -603,6 +624,38 @@ fn worktrees_runs_carry_only_their_named_tables() {
     let tx = db.transaction().unwrap();
     let mut log = Appender::own(&tx, fence::engine()).unwrap();
     crate::worktrees::log::snapshot(&mut log, 9).unwrap();
+    drop(log);
+    let mut statement = tx
+        .prepare("SELECT body FROM state_log WHERE kind=?1")
+        .unwrap();
+    let tables: Vec<String> = statement
+        .query_map([SNAPSHOT_CHUNK], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| {
+            let chunk: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+            chunk["table"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    assert_eq!(tables.len(), named.len(), "one chunk per empty table");
+    assert!(
+        tables.iter().all(|table| named.contains(&table.as_str())),
+        "{tables:?}"
+    );
+}
+
+/// Checks that a memory snapshot run carries only the tables [`SNAPSHOTS`] names for
+/// memory/log.rs, on a store holding the 14 memory tables, one chunk for each empty table.
+/// Output: none.
+#[cfg(unix)]
+fn memory_runs_carry_only_their_named_tables() {
+    let (writer, named) = SNAPSHOTS[2];
+    assert_eq!(writer, "memory/log.rs");
+    let mut db = db();
+    crate::memory::initialize(&db).unwrap();
+    crate::assets::initialize(&db).unwrap();
+    let tx = db.transaction().unwrap();
+    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    crate::memory::log::snapshot(&mut log, 9).unwrap();
     drop(log);
     let mut statement = tx
         .prepare("SELECT body FROM state_log WHERE kind=?1")
@@ -753,6 +806,8 @@ fn only_named_writers_take_a_snapshot(writers: &[(String, String)]) {
     }
     worktrees_runs_carry_only_their_named_tables();
     settings_runs_carry_only_their_named_tables();
+    #[cfg(unix)]
+    memory_runs_carry_only_their_named_tables();
 }
 
 /// Checks that a settings snapshot run carries only the tables [`SNAPSHOTS`] names for
@@ -1038,6 +1093,16 @@ fn no_event_body_can_carry_a_secret() {
             | crate::ide::log::FILE_UNLOCKED
             | crate::ide::log::WORKSPACE_WRITTEN
             | crate::ide::log::WORKSPACE_FORGOTTEN => ide_body_is_closed(kind),
+            crate::memory::log::KIND => closed_body(
+                kind,
+                crate::memory::log::closed,
+                json!({
+                    "action": "knowledge",
+                    "deleted": [{"table": "knowledge_jobs", "key": [{"id": "j1"}]}],
+                    "put": [{"table": "memory_settings", "cells": [{"int": 1}, {"id": "ask"}]}]
+                }),
+                &["action", "deleted", "put"],
+            ),
             settings if crate::settings_log::KINDS.contains(&settings) => {
                 settings_body_is_closed(settings)
             }

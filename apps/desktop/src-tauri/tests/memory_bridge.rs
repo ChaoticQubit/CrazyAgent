@@ -13,6 +13,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+/// The longest the agent-call row waits between mailbox checks: a mailbox change wakes it
+/// sooner, and this bound re-checks the mailbox even when a folder event is coalesced or
+/// lost, so a missed wake can neither hang the row nor pass it.
+const CALL_RECHECK_MAX: Duration = Duration::from_millis(500);
+
 const COMMANDS: [&str; 10] = [
     "desktop_save_selection_to_memory",
     "desktop_cancel_master_turn",
@@ -632,18 +637,25 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": REMEMBER_TOOL, "arguments": {"text": "Recipes print on one page.", "scope": "project"}}})
     );
+    let (wake, woken) = std::sync::mpsc::channel::<()>();
+    let changed = wake.clone();
+    let mut watcher = notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
+        let _ = changed.send(());
+    })?;
+    notify::Watcher::watch(&mut watcher, &mailbox, notify::RecursiveMode::NonRecursive)?;
     let served = mailbox.clone();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        serve_live(std::io::Cursor::new(request), &mut output, &served, &[]).map(|()| output)
+        let answered =
+            serve_live(std::io::Cursor::new(request), &mut output, &served, &[]).map(|()| output);
+        let _ = wake.send(());
+        answered
     });
     let agents = root.join("agents");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !server.is_finished() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the team tool never answered"
-        );
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "the team tool never answered");
         crazyagent::team::history::serve_agent_calls(
             &mut connection,
             &project,
@@ -661,7 +673,7 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
             },
             &mut |_, _, _| None,
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = woken.recv_timeout(left.min(CALL_RECHECK_MAX));
     }
     let output = server.join().unwrap()?;
     let answer: serde_json::Value = serde_json::from_slice(&output)?;

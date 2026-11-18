@@ -817,6 +817,7 @@ version = "2.4.2"
 dependencies = [
  "crazyagent",
  "getrandom 0.4.3",
+ "notify",
  "objc2 0.6.5",
  "objc2-app-kit",
  "objc2-foundation 0.3.2",

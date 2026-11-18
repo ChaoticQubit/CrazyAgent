@@ -818,8 +818,8 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     );
     assert_eq!(
         tables_holding(&engine.database(), "households plan meals"),
-        ["memory_library"],
-        "only the global copy the owner promoted keeps the research text"
+        ["memory_library", "kept_texts"],
+        "only the global copy the owner promoted keeps the research text, logged under its key"
     );
     let forgotten = approved_direct(&engine, &meals);
     assert!(
@@ -1881,7 +1881,7 @@ fn agent_library() -> (tempfile::TempDir, rusqlite::Connection, EffectiveConfig)
     let db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
     db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}'); INSERT INTO projects VALUES ('beta','{}');")
         .unwrap();
-    crate::memory::initialize(&db).unwrap();
+    crate::memory::log::seed(&db);
     let config =
         crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
             .unwrap();

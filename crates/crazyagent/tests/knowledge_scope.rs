@@ -131,6 +131,7 @@ impl Harness {
         let engine = Engine::open(&root.path().join("db"), config.clone())
             .await
             .unwrap();
+        engine.start_owner_runtime().await.unwrap();
         Self {
             root,
             engine,
@@ -309,6 +310,7 @@ async fn nominations_are_not_knowledge_and_curation_is_provisional_scoped_and_du
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     assert_eq!(h.read("worker", false).await, entries);
     let Outcome::Configuration { config } = h
         .command(Command::TaskConfig {
@@ -386,6 +388,7 @@ async fn revoked_curator_releases_pending_work_without_losing_activity() {
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     h.applied(KnowledgeAction::QueueExtraction {
         principal_id: id("replacement-curator"),
         job_id: id("replacement"),
@@ -1094,6 +1097,7 @@ async fn knowledge_saved_with_hidden_characters_before_the_check_is_never_read_b
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     let entries = h.read("worker", false).await;
     assert!(entries.iter().all(|e| !e.text.contains(hidden)));
     assert_eq!(ids(entries), ["clean"]);

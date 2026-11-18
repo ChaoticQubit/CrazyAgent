@@ -75,12 +75,27 @@ fn remember(id: u64, text: &str) -> String {
 
 /// Runs one turn of the project's live master while the engine process is stopped: the real
 /// `team-mcp-live` server takes the master's calls and the engine's own `serve_calls`
-/// answers them on the engine database, the live switch on for that turn only.
+/// answers them on the engine database, the live switch on for that turn only. An engine
+/// opened in this process, its owner runtime started, hosts the store for the turn, as the
+/// engine process does, so a remembered memory reaches the log behind the engine's fence.
 /// Inputs: the stopped engine, the master agent and the calls numbered from 2.
 /// Output: each answer's text and error flag, in call order.
 fn master_turn(engine: &Engine, master: i64, calls: &[String]) -> Vec<(String, bool)> {
     let root = engine.path();
     let project = ProjectId::new(PROJECT).unwrap();
+    let config =
+        crazyagent::config::resolve_config(&root.join("global.toml"), &root.join("project.toml"))
+            .unwrap();
+    let handle = tokio::runtime::Handle::current();
+    let host = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let host = crazyagent::engine::Engine::open(&root.join("engine.db"), config)
+                .await
+                .unwrap();
+            host.start_owner_runtime().await.unwrap();
+            host
+        })
+    });
     let mut connection = database(engine);
     crazyagent::team::master::initialize(&connection).unwrap();
     set_live(&connection, &project, true).unwrap();
@@ -159,6 +174,7 @@ fn master_turn(engine: &Engine, master: i64, calls: &[String]) -> Vec<(String, b
             [PROJECT],
         )
         .unwrap();
+    tokio::task::block_in_place(|| handle.block_on(host.close())).unwrap();
 
     let output = reader.join().unwrap();
     let answers: Vec<Value> = output
