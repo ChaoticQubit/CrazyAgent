@@ -3688,7 +3688,8 @@ async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_fir
 
 /// #590 (leader 10:37): where the boundary cannot hold a hidden folder, Linux here, the read
 /// says so, a save that hides any folder is refused in plain words and changes nothing, and
-/// an empty save still lands, so a list saved before this can be cleared.
+/// an empty save still lands, so a list saved before this can be cleared. It goes once the
+/// Linux boundary holds hidden folders (V243-LINUX-HIDDEN-BOUNDARY).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn hidden_folders_are_refused_where_the_boundary_cannot_hold_them_and_a_list_still_clears() {
@@ -3746,6 +3747,7 @@ async fn hidden_folders_are_refused_where_the_boundary_cannot_hold_them_and_a_li
 }
 
 /// Where hidden folders are held (macOS), a save from a stale read never un-hides a folder.
+/// It comes back on Linux once the Linux boundary holds them (V243-LINUX-HIDDEN-BOUNDARY).
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_folder() {
@@ -3878,7 +3880,8 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
 
 /// SA-VID14-R2-N2: the hidden folders read names the kind of an engine run that started
 /// before a folder was hidden while it runs, and nothing once it ends, where hidden folders are
-/// held (macOS).
+/// held (macOS); it comes back on Linux once the Linux boundary holds them
+/// (V243-LINUX-HIDDEN-BOUNDARY).
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hidden() {
