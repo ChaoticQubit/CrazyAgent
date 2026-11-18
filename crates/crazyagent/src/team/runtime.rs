@@ -13057,13 +13057,17 @@ const NOTE_PROBLEM_BYTES_MAX: usize = 200;
 const NOTE_PLACE_BYTES_MAX: usize = 120;
 const NOTES_PER_TICK_MAX: i64 = 16;
 /// The read behind `active_projects`: every project with pending owner messages, live or
-/// undelivered master tasks, Keep warm, live agents or a live master switched on.
+/// undelivered master tasks, Keep warm, live agents or a live master switched on. Each arm
+/// seeks an index led by the column it filters (`team_messages_state`, `team_tasks_status`,
+/// `team_tasks_undelivered`, `team_agents_status`), so no arm walks ended history, and
+/// UNION ALL builds no temp tree: the caller collects the rows into a set.
 const ACTIVE_PROJECTS_SQL: &str = "SELECT project FROM team_messages WHERE state='pending'
- UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
-     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
- UNION SELECT project FROM team_settings WHERE keep_warm=1
- UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
- UNION SELECT project FROM team_live_masters WHERE live=1";
+ UNION ALL SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running')
+ UNION ALL SELECT project FROM team_tasks WHERE delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured'))
+ UNION ALL SELECT project FROM team_settings WHERE keep_warm=1
+ UNION ALL SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
+ UNION ALL SELECT project FROM team_live_masters WHERE live=1";
 
 /// One task a conversation master handed off that has ended, as the note sweep reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
