@@ -87,8 +87,22 @@ enum Native {
         subsurface: WlSubsurface,
         parent: WlSurface,
         parent_commit: Cell<ParentCommit>,
+        hide_mode: HideMode,
+        origin: Cell<(i32, i32)>,
     },
 }
+
+/// How a Wayland subsurface leaves the screen, from SPIKE_HIDE: a null buffer, a place
+/// below the parent surface (whose opaque page then covers it), or a move off the output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HideMode {
+    Null,
+    Below,
+    Offscreen,
+}
+
+/// How far off the output an off-screen subsurface goes, in logical pixels.
+const OFFSCREEN: i32 = -100_000;
 
 /// When the probe commits the parent after a present: after every one (a synced subsurface,
 /// whose commit waits for its parent's), once after the first (a desynced one, to see whether
@@ -167,8 +181,10 @@ impl Native {
                 conn,
                 subsurface,
                 parent,
+                origin,
                 ..
             } => {
+                origin.set(logical);
                 subsurface.set_position(logical.0, logical.1);
                 parent.commit();
                 let _ = conn.flush();
@@ -176,7 +192,8 @@ impl Native {
         }
     }
 
-    /// Takes the window off screen until the next frame or show. Output: none.
+    /// Takes the window off screen until show: X11 unmaps it; Wayland uses SPIKE_HIDE's
+    /// mode. Output: none.
     fn hide(&self) {
         match self {
             Native::X11 {
@@ -191,30 +208,57 @@ impl Native {
             Native::Wayland {
                 conn,
                 surface,
+                subsurface,
                 parent,
+                hide_mode,
                 ..
             } => {
-                surface.attach(None, 0, 0);
-                surface.commit();
+                match hide_mode {
+                    HideMode::Null => {
+                        surface.attach(None, 0, 0);
+                        surface.commit();
+                    }
+                    HideMode::Below => subsurface.place_below(parent),
+                    HideMode::Offscreen => subsurface.set_position(OFFSCREEN, OFFSCREEN),
+                }
                 parent.commit();
                 let _ = conn.flush();
             }
         }
     }
 
-    /// Puts an X11 window back on screen; a Wayland surface comes back with its next frame.
+    /// Puts the window back: X11 maps it; a Wayland null-buffer surface comes back with its
+    /// next frame, a lowered one goes back above the parent, a moved one back to its origin.
     /// Output: none.
     fn show(&self) {
-        if let Native::X11 {
-            xlib,
-            display,
-            window,
-            ..
-        } = self
-        {
-            unsafe {
+        match self {
+            Native::X11 {
+                xlib,
+                display,
+                window,
+                ..
+            } => unsafe {
                 (xlib.XMapRaised)(*display, *window);
                 (xlib.XFlush)(*display);
+            },
+            Native::Wayland {
+                conn,
+                subsurface,
+                parent,
+                hide_mode,
+                origin,
+                ..
+            } => {
+                match hide_mode {
+                    HideMode::Null => return,
+                    HideMode::Below => subsurface.place_above(parent),
+                    HideMode::Offscreen => {
+                        let (x, y) = origin.get();
+                        subsurface.set_position(x, y);
+                    }
+                }
+                parent.commit();
+                let _ = conn.flush();
             }
         }
     }
@@ -511,6 +555,11 @@ fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Resu
     if parent_commit != ParentCommit::Always {
         subsurface.set_desync();
     }
+    let hide_mode = match std::env::var("SPIKE_HIDE").as_deref() {
+        Ok("below") => HideMode::Below,
+        Ok("offscreen") => HideMode::Offscreen,
+        _ => HideMode::Null,
+    };
     let region = compositor.create_region(&handle, ());
     surface.set_input_region(Some(&region));
     region.destroy();
@@ -528,6 +577,8 @@ fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Resu
         subsurface,
         parent,
         parent_commit: Cell::new(parent_commit),
+        hide_mode,
+        origin: Cell::new(origin),
     })
 }
 

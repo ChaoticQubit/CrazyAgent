@@ -195,6 +195,10 @@ pixels() {
       probe "$cell" hidden_popover "$file" $((ox + 240 * s)) $((oy + 130 * s)) 255,255,0
       probe "$cell" hidden_host "$file" $((ox + 20 * s)) $((oy + 20 * s)) 255,0,255
       ;;
+    shown)
+      probe "$cell" shown_surface "$file" $((ox + w / 2)) $((oy + h / 2)) 0,255,0
+      probe "$cell" shown_page "$file" $((ox - 15 * s)) $((oy + 10 * s)) 255,255,255
+      ;;
   esac
 }
 
@@ -208,7 +212,7 @@ type_keys() {
     focus_app
     xdotool type --delay "$delay" "$text"
   else
-    timeout 30 wtype -d "$delay" "$text"
+    timeout 30 wtype -s 300 -d "$delay" "$text"
   fi
 }
 
@@ -257,6 +261,10 @@ clipboard() {
     prim=$(timeout 5 wl-paste -p -n 2>&1)
     timeout 5 wl-copy 'pasted-into-app'
     timeout 5 wl-copy -p 'primary-into-app'
+    for _ in $(seq 1 20); do
+      [ "$(timeout 2 wl-paste -p -n 2> /dev/null)" = primary-into-app ] && break
+      sleep 0.1
+    done
   fi
   record "$cell" clip_out "$(jq -nc --arg clip "$clip" --arg prim "$prim" '{clipboard:$clip, primary:$prim, clipboard_pass:($clip == "crazyagent-clipboard-row"), primary_pass:($prim == "crazyagent-primary-row")}')"
 }
@@ -264,7 +272,7 @@ clipboard() {
 act() {
   local cell=$1 kind=$2 step=$3 out=$4
   case "$step" in
-    placed | moved | hidden) pixels "$cell" "$kind" "$step" "$out" ;;
+    placed | moved | hidden | shown) pixels "$cell" "$kind" "$step" "$out" ;;
     click) click_host "$cell" "$kind" "$out" ;;
     type_a | type_b)
       type_keys "$kind" "$typed" 40
@@ -286,7 +294,7 @@ backtrace() {
 
 run_cell() {
   cell=$1
-  local kind=$2 gpu=$3 sync=$4 present=$5 scale=$6 steps=$7 limit=${8:-120}
+  local kind=$2 gpu=$3 sync=$4 present=$5 scale=$6 steps=$7 limit=${8:-120} hide=${9:-null}
   local out="$root/$cell" backend=wayland debug="" size=1280x800 started dumped=false
   mkdir -p "$out"
   [ "$kind" = x11 ] && backend=x11
@@ -303,7 +311,7 @@ run_cell() {
   }
   started=$(date +%s)
   env SPIKE_OUT="$out" SPIKE_CELL="$cell" SPIKE_GPU="$gpu" SPIKE_SYNC="$sync" SPIKE_PRESENT="$present" \
-    SPIKE_STEPS="$steps" GDK_BACKEND="$backend" GDK_SCALE="$scale" ${debug:+WAYLAND_DEBUG=$debug} \
+    SPIKE_STEPS="$steps" SPIKE_HIDE="$hide" GDK_BACKEND="$backend" GDK_SCALE="$scale" ${debug:+WAYLAND_DEBUG=$debug} \
     timeout "$limit" "$app" > "$out/app.log" 2>&1 &
   local app_pid=$!
   while kill -0 "$app_pid" 2> /dev/null; do
@@ -332,22 +340,14 @@ run_cell() {
   stop_display
 }
 
-run_cell x11-vulkan x11 vulkan sync vsync 1 placed,moved,hidden,click,type_a,type_b,ime_a,ime_b,clip,a11y
-run_cell x11-gl x11 gl sync vsync 1 placed,moved,hidden,click
-run_cell x11-vulkan-scale2 x11 vulkan sync vsync 2 placed,moved,hidden
-run_cell wl-vulkan-sync weston vulkan sync vsync 1 placed,moved,hidden,clip
-run_cell wl-gl-sync weston gl sync vsync 1 placed,moved,hidden
-run_cell wl-vulkan-desync weston vulkan desync vsync 1 placed 40
-run_cell wl-vulkan-desync-immediate weston vulkan desync immediate 1 placed 40
-run_cell wl-vulkan-desync-first weston vulkan desync-first vsync 1 placed 40
-run_cell wl-gl-desync weston gl desync vsync 1 placed 40
-run_cell sway-vulkan-sync sway vulkan sync vsync 1 placed,moved,hidden,type_a,type_b,ime_a,ime_b,clip
-run_cell sway-vulkan-desync sway vulkan desync vsync 1 placed 40
-load_on
-run_cell x11-vulkan-loaded x11 vulkan sync vsync 1 placed,type_a,type_b
-run_cell wl-vulkan-sync-loaded weston vulkan sync vsync 1 placed
-run_cell sway-vulkan-sync-loaded sway vulkan sync vsync 1 placed,type_a,type_b
-load_off
+run_cell wl-desync-hide-null weston vulkan desync vsync 1 placed,hidden 40 null
+run_cell wl-desync-hide-below weston vulkan desync vsync 1 placed,hidden 40 below
+run_cell wl-desync-hide-offscreen weston vulkan desync vsync 1 placed,hidden 40 offscreen
+run_cell sway-desync-hide-null sway vulkan desync vsync 1 placed,hidden 40 null
+run_cell sway-desync-hide-below sway vulkan desync vsync 1 placed,hidden 40 below
+run_cell sway-desync-hide-offscreen sway vulkan desync vsync 1 placed,hidden 40 offscreen
+run_cell sway-sync-hide-below sway vulkan sync vsync 1 placed,hidden 40 below
+run_cell sway-desync-input sway vulkan desync vsync 1 placed,type_a,type_b,ime_a,ime_b,clip 120 below
 
 {
   printf '## Native terminal Linux embed spike\n\nSoftware rendering only (lavapipe / llvmpipe on a GitHub runner). WEBKIT_DISABLE_DMABUF_RENDERER=1. Frames only clear the surface: they time the present path, not glyph drawing. Cells ending in -loaded run with every core busy.\n\n'

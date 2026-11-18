@@ -59,6 +59,8 @@ const STEPS = {
     await invoke("checkpoint", { name: "hidden" });
     byId("pop").style.display = "none";
     await report("shown", { show_ms: await invoke("show") });
+    await frameDone();
+    await invoke("checkpoint", { name: "shown" });
   },
   async click() {
     const clicks = [];
