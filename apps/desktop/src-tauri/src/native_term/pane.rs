@@ -700,9 +700,15 @@ impl Pane {
                 probe.output = Some(now);
                 probe.render = Some(now);
             }
-            Effect::Nothing => probe.failed = true,
+            Effect::Nothing => {
+                probe.failed = true;
+                probe.render = Some(now);
+            }
         }
         assert!(probe.seq == seq);
+        if matches!(effect, Effect::Nothing) {
+            self.dirty = true;
+        }
     }
 }
 
