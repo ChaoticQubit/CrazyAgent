@@ -17,7 +17,8 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  RED_SHA: 2d7b69bdd96a06ee39073eb688b08cbd62fae45a
+  BASE_SHA: 07538ecd57027cb17432bd6758fc31f029fd310c
+  TIP_SHA: d3fccbb1c64cf0dd6cbf711b1d686db579a1a03a
   MODULE: "tui::screens::app_setup::tests::"
   F1: tui::screens::app_setup::tests::a_fix_ending_with_a_run_that_left_items_keeps_the_run_failure_under_its_line
   F2: tui::screens::app_setup::tests::in_settings_a_fix_ending_with_a_run_that_installed_everything_keeps_its_line
@@ -49,14 +50,18 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Check out the side; the mutant drops the fix-line gate on Setup finished.
+      - name: Check out the side; red is the base code with the tip rows, the mutant drops the fix-line gate on Setup finished.
         env:
           SIDE: ${{ matrix.side }}
         run: |
           set -euo pipefail
           file=crates/crazyagent/src/tui/screens/app_setup.rs
           case "$SIDE" in
-            red) git checkout --detach "$RED_SHA" ;;
+            red)
+              git checkout --detach "$BASE_SHA"
+              git checkout "$TIP_SHA" -- crates/crazyagent/src/tui/screens/app_setup/tests.rs
+              git status --short
+              ;;
             mutant)
               test "$(grep -c 'if said.is_none() {' "$file")" = 1
               sed -i 's/^            if said\.is_none() {$/            if true {/' "$file"
