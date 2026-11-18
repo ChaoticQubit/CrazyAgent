@@ -119,7 +119,7 @@ jobs:
           done
           echo "red ok: 5 rows failed at $red"
           git checkout HEAD -- crates/crazyagent-win-sandbox || exit 1
-          git diff --quiet HEAD || exit 1
+          git diff --quiet 431a10752439c4b528a66bcb35788a41ea1e5df8 || { echo "TREE IS NOT THE TIP"; exit 1; }
           cargo test -p crazyagent-win-sandbox --lib --locked --no-run || exit 1
           cargo test -p crazyagent-win-sandbox --lib --locked > "$RUNNER_TEMP/green.txt" 2>&1
           rc=$?
@@ -215,7 +215,7 @@ jobs:
           done
           echo "red ok: 4 rows failed at $red"
           git checkout HEAD -- crates/crazyagent-win-sandbox || exit 1
-          git diff --quiet HEAD || exit 1
+          git diff --quiet 431a10752439c4b528a66bcb35788a41ea1e5df8 || { echo "TREE IS NOT THE TIP"; exit 1; }
           cargo test -p crazyagent-win-sandbox --lib --locked --no-run || exit 1
           cargo test -p crazyagent-win-sandbox --lib --locked -- --test-threads 1 win::owner::tests:: dacl::tests:: > "$RUNNER_TEMP/green.txt" 2>&1
           rc=$?
