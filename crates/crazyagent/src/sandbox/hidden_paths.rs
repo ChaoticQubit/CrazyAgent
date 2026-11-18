@@ -405,37 +405,51 @@ const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's answer the check reads; a tracked folder shows in the first bytes.
 const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
-/// Whether git tracks any file inside this folder, asked through
-/// [`crate::project_files::owner_git`] with `ls-files` on its one literal path joined by `/`,
-/// killed after 5 s; a tracked file lives in every agent's worktree and in history. Inputs:
-/// the project root and the canonical folder. Output: `Ok(true)` when git names any path, else
-/// `Ok(false)` outside the root, with no `.git` or on a clean empty answer, else unchecked.
-pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
+/// Whether git tracks any file inside any of these folders, asked with one `ls-files -z` run
+/// through [`crate::project_files::owner_git`] on their literal paths joined by `/`, killed
+/// after 5 s; a tracked file lives in every agent's worktree and in history. Inputs: the project
+/// root and the folders. Output: [`answer`]'s, `Ok(false)` with no folder inside the root or no
+/// `.git`, or unchecked when a folder or git cannot be read.
+fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'static str> {
     use crate::project_files::NoOwnerGit;
     use std::io::Read;
+    use std::path::Component;
     use std::process::Stdio;
     let unchecked = "hidden_path_unchecked";
-    let root = canonical(project_root).map_err(|_| unchecked)?;
-    let real = canonical(folder).map_err(|_| unchecked)?;
-    let Ok(relative) = real.strip_prefix(&root) else {
+    if folders.is_empty() {
         return Ok(false);
-    };
+    }
+    let root = canonical(project_root).map_err(|_| unchecked)?;
+    let mut specs = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let real = canonical(folder).map_err(|_| unchecked)?;
+        let Ok(relative) = real.strip_prefix(&root) else {
+            continue;
+        };
+        let parts = relative
+            .components()
+            .map(|part| match part {
+                Component::Normal(name) => name.to_str(),
+                _ => None,
+            })
+            .collect::<Option<Vec<&str>>>()
+            .filter(|parts| !parts.is_empty())
+            .ok_or(unchecked)?;
+        specs.push(parts.join("/"));
+    }
+    assert!(specs.len() <= folders.len());
+    if specs.is_empty() {
+        return Ok(false);
+    }
     let mut command = match crate::project_files::owner_git(&root) {
         Ok(command) => command,
         Err(NoOwnerGit::Absent) => return Ok(false),
         Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => return Err(unchecked),
     };
-    let mut pathspec = std::ffi::OsString::new();
-    for part in relative.components() {
-        if !pathspec.is_empty() {
-            pathspec.push("/");
-        }
-        pathspec.push(part.as_os_str());
-    }
     command
         .env("GIT_LITERAL_PATHSPECS", "1")
         .args(["ls-files", "-z", "--"])
-        .arg(pathspec)
+        .args(&specs)
         .stdout(Stdio::piped());
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
     let mut stdout = child.stdout.take().ok_or(unchecked)?;
@@ -463,25 +477,48 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
         std::thread::sleep(CHECK_POLL);
     };
     let bytes = reader.join().map_err(|_| unchecked)?;
-    if !bytes.is_empty() {
-        Ok(true)
-    } else if status.success() {
-        Ok(false)
-    } else {
-        Err(unchecked)
+    assert!(bytes.len() as u64 <= CHECK_BYTES_MAX);
+    answer(&bytes, &specs, status.success())
+}
+
+/// Judges git's NUL-separated answer for these literal paths: `Ok(true)` when it names a path
+/// in one of them, `Ok(false)` when it is empty and git exited clean, else unchecked, also when
+/// any line is empty, falls in none of them, or is cut short before the read cap. Inputs: the
+/// bytes read, the paths joined by `/` and whether git exited clean. Output: the answer.
+fn answer(bytes: &[u8], specs: &[String], clean: bool) -> Result<bool, &'static str> {
+    let unchecked = "hidden_path_unchecked";
+    let capped = bytes.len() as u64 >= CHECK_BYTES_MAX;
+    let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == 0).collect();
+    let tail = lines.pop().unwrap_or_default();
+    if !tail.is_empty() && !capped {
+        return Err(unchecked);
+    }
+    let within = |line: &[u8]| {
+        specs.iter().any(|spec| {
+            let spec = spec.as_bytes();
+            line == spec || (line.starts_with(spec) && line.get(spec.len()) == Some(&b'/'))
+        })
+    };
+    if !lines.iter().all(|line| within(line)) {
+        return Err(unchecked);
+    }
+    match (lines.is_empty(), capped, clean) {
+        (false, _, _) => Ok(true),
+        (true, false, true) => Ok(false),
+        _ => Err(unchecked),
     }
 }
 
 /// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
-/// cannot answer for any folder. Inputs: the project root and the checked folders. Output:
-/// ok, `hidden_path_tracked` for the first tracked folder, or `hidden_path_unchecked`.
+/// cannot answer for it, with one git run for the whole list (`any_tracked`). Inputs: the
+/// project root and the checked folders. Output: ok, `hidden_path_tracked` or
+/// `hidden_path_unchecked`.
 pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
-    for folder in folders {
-        if git_tracks(project_root, folder)? {
-            return Err("hidden_path_tracked");
-        }
+    if any_tracked(project_root, folders)? {
+        Err("hidden_path_tracked")
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -584,6 +621,43 @@ mod tests {
         for bad in ["/tmp/a\"b", "/tmp/a\\b", "/tmp/a'b", "/tmp/a\nb"] {
             assert_eq!(checked(bad, root.path()), Err("hidden_path_not_plain"));
         }
+    }
+
+    /// The check for one folder, as a list of one. Inputs: the project root and the folder.
+    /// Output: what [`any_tracked`] answers.
+    fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
+        any_tracked(project_root, &[folder.to_path_buf()])
+    }
+
+    /// V243-WIN-HIDDEN-GIT (leader 09:21): git's answer counts only when every line is whole and
+    /// falls in an asked folder, itself or below it; an empty line, a line in no asked folder
+    /// (a sibling sharing the name's start, another case), or one cut short before the read cap
+    /// is unchecked. Past the cap the cut tail is dropped and the whole lines still count.
+    #[test]
+    fn an_answer_line_cut_short_or_in_no_asked_folder_is_unchecked() {
+        let specs = ["secret".to_owned(), "conf/keys".to_owned()];
+        let unchecked = Err("hidden_path_unchecked");
+        assert_eq!(answer(b"", &specs, true), Ok(false));
+        assert_eq!(answer(b"", &specs, false), unchecked);
+        assert_eq!(answer(b"secret/key.txt\0", &specs, true), Ok(true));
+        assert_eq!(answer(b"conf/keys\0secret/a/b\0", &specs, false), Ok(true));
+        for doubt in [
+            &b"secrets/key.txt\0"[..],
+            &b"conf/key\0"[..],
+            &b"secret/key.txt\0Secret/x\0"[..],
+            &b"secret/key.txt\0\0"[..],
+            &b"secret/key.txt"[..],
+            &b"\0"[..],
+        ] {
+            let shown = String::from_utf8_lossy(doubt).into_owned();
+            assert_eq!(answer(doubt, &specs, true), unchecked, "{shown:?}");
+        }
+        let cap = usize::try_from(CHECK_BYTES_MAX).unwrap();
+        let mut full = b"secret/key.txt\0".repeat(cap / 15 + 1);
+        full.truncate(cap);
+        assert_ne!(full.last(), Some(&0));
+        assert_eq!(answer(&full, &specs, false), Ok(true));
+        assert_eq!(answer(&b"x".repeat(cap), &specs, false), unchecked);
     }
 
     /// Runs the test's own git in `path` with no system or global config, as the owner makes
