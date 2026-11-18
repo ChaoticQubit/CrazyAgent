@@ -19,8 +19,7 @@ const WINDOWS_UNAVAILABLE: &str =
 const LINUX_UNAVAILABLE: &str = "On Linux, agents run Sandboxed in this version.";
 
 #[cfg(target_os = "windows")]
-const FULL_WINDOWS_UNAVAILABLE: &str =
-    "Full access isn't available on Windows: agents there always run in the Windows sandbox.";
+const FULL_WINDOWS_UNAVAILABLE: &str = "Full access isn't available on Windows in this version.";
 
 /// The code a level that cannot run here is refused with.
 pub const AGENT_ACCESS_UNAVAILABLE: &str = "agent_access_unavailable";
@@ -182,6 +181,11 @@ impl AgentNetwork {
             self.proxied(os, tools, model),
             "a proxy port is given exactly when the agent is proxied"
         );
+        if os == "windows" && matches!(model, super::SandboxRemote::Loopback(_)) {
+            return Err(super::SandboxError::Unavailable(
+                super::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+            ));
+        }
         Ok(match proxy {
             Some(port) => super::SandboxNetwork::Only(vec![super::SandboxRemote::Loopback(port)]),
             None if !tools || (self == Self::None && os == "windows") => {

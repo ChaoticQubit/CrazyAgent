@@ -910,8 +910,11 @@ const WINDOWS_CHECK_LIMIT: &str = "limiting a Windows agent's network to a few p
 /// Inputs: the OS and the check's network. Output: the problem to record, or None when the
 /// check may run.
 pub fn check_network_refused(os: &str, network: &crate::sandbox::SandboxNetwork) -> Option<String> {
-    let _ = (os, network);
-    None
+    let limited = matches!(
+        network,
+        crate::sandbox::SandboxNetwork::Only(remotes) if !remotes.is_empty()
+    );
+    (os == "windows" && limited).then(|| check_refused(WINDOWS_CHECK_LIMIT))
 }
 
 /// The start of a recorded check problem for a failed context-mode shared install, followed

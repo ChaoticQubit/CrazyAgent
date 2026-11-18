@@ -537,7 +537,8 @@ test("on Windows Full access is refused with its own sentence, a loopback model 
     const sentence = api.knownError(code);
     assert.ok(sentence, `${code} has its own sentence`);
     assert.equal(client.errorMessage({ code }), sentence, `${code} reads the same on the owner path`);
-    assert.ok(config.includes(`"${code}" => Some(`) && config.includes(`"${sentence}"`), `${code} reads the same in the TUI`);
+    const arm = config.slice(config.indexOf(`"${code}" =>`)).match(/^"[a-z_]+" => \{?\s*Some\(\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+    assert.equal(arm, sentence, `${code} reads the same in the TUI`);
   }
   const full = api.knownError("sandbox_full_unavailable_windows");
   assert.match(full, /Full access[\s\S]*Windows/);
