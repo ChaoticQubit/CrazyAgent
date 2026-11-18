@@ -26,6 +26,14 @@ pub struct Grid {
     pub selection: Option<((usize, usize), (usize, usize))>,
 }
 
+/// The cursor cell and the selection's first and last cells of one frame, both on the
+/// screen; a change between frames is what VoiceOver hears as a selection change.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marks {
+    pub cursor: Option<(usize, usize)>,
+    pub selection: Option<((usize, usize), (usize, usize))>,
+}
+
 /// The size of one cell and the padding in physical pixels, and the display scale, which
 /// turn cells into view points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,11 +82,28 @@ pub fn visible(term: &Term<VoidListener>) -> Grid {
         if !spacer {
             let leading = cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER);
             text.push(if leading { ' ' } else { cell.c });
-            let marks = cell.zerowidth().unwrap_or(&[]);
-            text.extend(marks.iter().take(ZERO_WIDTH_MAX));
+            let zero_width = cell.zerowidth().unwrap_or(&[]);
+            text.extend(zero_width.iter().take(ZERO_WIDTH_MAX));
         }
         rows[row][column] = Glyph { text, spacer };
     }
+    let Marks { cursor, selection } = marks(term);
+    assert!(cursor.is_none_or(|(row, column)| row < lines && column < columns));
+    Grid {
+        rows,
+        columns,
+        cursor,
+        selection,
+    }
+}
+
+/// Reads the cursor cell (even while the cursor is hidden) and the selection of a terminal,
+/// both clamped to the screen. Input: the terminal. Output: the marks.
+pub fn marks(term: &Term<VoidListener>) -> Marks {
+    let content = term.renderable_content();
+    let (lines, columns) = (term.screen_lines(), term.columns());
+    assert!(lines > 0 && columns > 0);
+    let offset = content.display_offset as i32;
     let last = lines as i32 - 1;
     let point = content.cursor.point;
     let cursor_row = point.line.0 + offset;
@@ -103,12 +128,16 @@ pub fn visible(term: &Term<VoidListener>) -> Grid {
         Some((first, final_cell))
     });
     assert!(cursor.is_none_or(|(row, column)| row < lines && column < columns));
-    Grid {
-        rows,
-        columns,
-        cursor,
-        selection,
-    }
+    Marks { cursor, selection }
+}
+
+/// One hash of a frame's row hashes, so a view posts a value change only when a row did.
+/// Input: the row hashes. Output: the hash.
+pub fn rows_key(keys: &[u64]) -> u64 {
+    assert!(keys.len() <= super::pane::GRID_MAX);
+    keys.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, row| {
+        (hash ^ row).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Builds the accessibility text of a grid. Input: the grid. Output: the text.

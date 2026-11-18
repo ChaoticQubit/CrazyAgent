@@ -1,14 +1,40 @@
+use super::a11y::Geometry;
+use super::ime::Ime;
 use super::pane::{Input, Named};
+use super::view_text::{Access, KeyDown, range_or_none};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSResponder, NSView};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
-use std::cell::Cell;
+use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{define_class, msg_send};
+use objc2_app_kit::{
+    NSAccessibilityTextAreaRole, NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient,
+    NSView,
+};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSInteger, NSNotFound, NSPoint, NSRange,
+    NSRect, NSSize, NSString, NSUInteger,
+};
+use std::cell::{Cell, RefCell};
 
-/// The native view's own state: the id of the terminal view it draws.
+/// The native view's own state: the id of the terminal view it draws, its marked text, the
+/// key `interpretKeyEvents` works on, the cursor cell and geometry of the last frame, and
+/// what VoiceOver reads; nothing a getter needs waits on the native state.
 pub struct Ivars {
     id: Cell<u64>,
+    pub(super) ime: RefCell<Ime>,
+    pub(super) key: RefCell<Option<KeyDown>>,
+    pub(super) cursor: Cell<Option<(usize, usize)>>,
+    pub(super) geometry: Cell<Option<Geometry>>,
+    pub(super) access: RefCell<Access>,
+}
+
+impl Ivars {
+    /// The id of the terminal view this native view draws. Output: the id, never 0.
+    pub(super) fn id(&self) -> u64 {
+        let id = self.id.get();
+        assert!(id > 0);
+        id
+    }
 }
 
 define_class!(
@@ -19,6 +45,65 @@ define_class!(
     pub struct TermView;
 
     unsafe impl NSObjectProtocol for TermView {}
+
+    unsafe impl NSTextInputClient for TermView {
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _replacement: NSRange) {
+            self.text_inserted(string);
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command(&self, _selector: Sel) {}
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
+            self.marked_set(string, selected);
+        }
+
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            self.marked_committed();
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            range_or_none(self.ivars().ime.borrow().selected_range())
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            range_or_none(self.ivars().ime.borrow().marked_range())
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            self.ivars().ime.borrow().composing()
+        }
+
+        #[unsafe(method(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(
+            &self,
+            range: NSRange,
+            actual: *mut NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            self.marked_substring(range, actual)
+        }
+
+        #[unsafe(method(validAttributesForMarkedText))]
+        fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, range: NSRange, actual: *mut NSRange) -> NSRect {
+            self.marked_rect(range, actual)
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index(&self, _point: NSPoint) -> NSUInteger {
+            NSNotFound as NSUInteger
+        }
+    }
 
     impl TermView {
         #[unsafe(method(isFlipped))]
@@ -31,20 +116,111 @@ define_class!(
             true
         }
 
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            self.cancel_marked();
+            unsafe { msg_send![super(self), resignFirstResponder] }
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            let flags = event.modifierFlags();
-            if flags.contains(NSEventModifierFlags::Command) {
-                return;
-            }
-            let chars = event.characters().map(|s| s.to_string()).unwrap_or_default();
-            let bare = event
-                .charactersIgnoringModifiers()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-            if let Some(input) = key_input(&chars, &bare) {
-                super::on_native(self.ivars().id.get(), input, event.timestamp());
-            }
+            self.key_event(event);
+        }
+
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(accessibilityRole))]
+        fn accessibility_role(&self) -> Option<Retained<NSString>> {
+            Some(unsafe { NSAccessibilityTextAreaRole }.retain())
+        }
+
+        #[unsafe(method(accessibilityLabel))]
+        fn accessibility_label(&self) -> Option<Retained<NSString>> {
+            Some(NSString::from_str("Terminal"))
+        }
+
+        #[unsafe(method(accessibilityValue))]
+        fn accessibility_value(&self) -> Option<Retained<NSString>> {
+            Some(self.with_text(|text| NSString::from_str(&text.string)))
+        }
+
+        #[unsafe(method(accessibilityNumberOfCharacters))]
+        fn accessibility_characters(&self) -> NSInteger {
+            self.with_text(|text| text.units() as NSInteger)
+        }
+
+        #[unsafe(method(accessibilityVisibleCharacterRange))]
+        fn accessibility_visible_range(&self) -> NSRange {
+            self.with_text(|text| NSRange::new(0, text.units()))
+        }
+
+        #[unsafe(method(accessibilityInsertionPointLineNumber))]
+        fn accessibility_insertion_line(&self) -> NSInteger {
+            self.with_text(|text| text.line_for_index(text.cursor) as NSInteger)
+        }
+
+        #[unsafe(method(accessibilitySelectedTextRange))]
+        fn accessibility_selected_range(&self) -> NSRange {
+            self.with_text(|text| {
+                let (at, length) = text.selection.unwrap_or((text.cursor, 0));
+                NSRange::new(at, length)
+            })
+        }
+
+        #[unsafe(method(accessibilitySelectedText))]
+        fn accessibility_selected_text(&self) -> Option<Retained<NSString>> {
+            let selected = self.with_text(|text| {
+                let range = text.selection?;
+                text.string_for_range(range).map(|found| found.0)
+            });
+            Some(NSString::from_str(&selected.unwrap_or_default()))
+        }
+
+        #[unsafe(method(accessibilityLineForIndex:))]
+        fn accessibility_line_for_index(&self, index: NSInteger) -> NSInteger {
+            let index = usize::try_from(index).unwrap_or(0);
+            self.with_text(|text| text.line_for_index(index) as NSInteger)
+        }
+
+        #[unsafe(method(accessibilityRangeForLine:))]
+        fn accessibility_range_for_line(&self, line: NSInteger) -> NSRange {
+            let line = usize::try_from(line).ok();
+            range_or_none(self.with_text(|text| line.and_then(|line| text.range_for_line(line))))
+        }
+
+        #[unsafe(method(accessibilityRangeForIndex:))]
+        fn accessibility_range_for_index(&self, index: NSInteger) -> NSRange {
+            let index = usize::try_from(index).ok();
+            let found = self.with_text(|text| {
+                index.and_then(|index| text.string_for_range((index, 1)).map(|found| found.1))
+            });
+            range_or_none(found)
+        }
+
+        #[unsafe(method(accessibilityStringForRange:))]
+        fn accessibility_string_for_range(&self, range: NSRange) -> Option<Retained<NSString>> {
+            let range = (range.location, range.length);
+            let found = self.with_text(|text| text.string_for_range(range));
+            found.map(|(string, _)| NSString::from_str(&string))
+        }
+
+        #[unsafe(method(accessibilityAttributedStringForRange:))]
+        fn accessibility_attributed_string_for_range(
+            &self,
+            range: NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            let range = (range.location, range.length);
+            let found = self.with_text(|text| text.string_for_range(range));
+            let string = NSString::from_str(&found?.0);
+            Some(NSAttributedString::initWithString(NSAttributedString::alloc(), &string))
+        }
+
+        #[unsafe(method(accessibilityFrameForRange:))]
+        fn accessibility_frame_for_range(&self, range: NSRange) -> NSRect {
+            self.range_frame(range)
         }
 
         #[unsafe(method(performKeyEquivalent:))]
@@ -81,6 +257,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            self.cancel_marked();
             if let Some(window) = self.window() {
                 let responder: &NSResponder = self;
                 window.makeFirstResponder(Some(responder));
@@ -122,7 +299,14 @@ impl TermView {
     /// thread marker and the terminal view id. Output: the view.
     pub fn new(mtm: MainThreadMarker, id: u64) -> Retained<TermView> {
         assert!(id > 0);
-        let this = Self::alloc(mtm).set_ivars(Ivars { id: Cell::new(id) });
+        let this = Self::alloc(mtm).set_ivars(Ivars {
+            id: Cell::new(id),
+            ime: RefCell::new(Ime::default()),
+            key: RefCell::new(None),
+            cursor: Cell::new(None),
+            geometry: Cell::new(None),
+            access: RefCell::new(Access::default()),
+        });
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
         let view: Retained<TermView> = unsafe { msg_send![super(this), initWithFrame: frame] };
         assert_eq!(view.ivars().id.get(), id);

@@ -18,9 +18,11 @@ mod render;
 mod screen;
 #[cfg(target_os = "macos")]
 mod view;
+#[cfg(target_os = "macos")]
+mod view_text;
 
 #[cfg(target_os = "macos")]
-use host::{Clips, on_copy, on_mouse, on_native, on_paste, on_wheel};
+use host::{Clips, a11y_grid, on_copy, on_mouse, on_native, on_paste, on_redraw, on_wheel};
 #[cfg(target_os = "macos")]
 pub use pane::Probe;
 use std::ffi::OsStr;

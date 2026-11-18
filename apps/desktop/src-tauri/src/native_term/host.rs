@@ -1,3 +1,4 @@
+use super::a11y::{self, Geometry};
 use super::clip::Clip;
 use super::codec;
 use super::control::{Control, Feed, Want, WantKind};
@@ -356,6 +357,7 @@ impl Native {
         let shown = view.pane.ready && rect.w >= 1.0 && rect.h >= 1.0 && !view.covered;
         view.ns.setHidden(!shown);
         if !shown {
+            view.ns.cancel_marked();
             return;
         }
         assert!(rect.valid() && rect.w >= 1.0 && rect.h >= 1.0);
@@ -408,6 +410,11 @@ impl Native {
         let Some(shared) = self.shared.as_mut() else {
             return;
         };
+        let geometry = Geometry {
+            cell: (f64::from(shared.cell.0), f64::from(shared.cell.1)),
+            pad: f64::from(shared.pad),
+            scale: f64::from(shared.scale),
+        };
         for view in self.views.values_mut() {
             if !view.pane.dirty || view.ns.isHidden() {
                 continue;
@@ -416,8 +423,11 @@ impl Native {
             else {
                 continue;
             };
-            let frame = screen::frame(term, None);
+            let marked = view.ns.marked_text();
+            let frame = screen::frame(term, marked.as_deref());
             view.pane.dirty = false;
+            view.ns
+                .drawn(geometry, a11y::marks(term), a11y::rows_key(&frame.keys));
             assert!(!view.ns.isHidden());
             let Ok(timing) = shared.draw(surface, &frame) else {
                 continue;
@@ -681,6 +691,7 @@ pub fn close(app: &tauri::AppHandle, window: String, id: Option<u64>) -> Result<
                 .collect();
             for key in &ids {
                 if let Some(view) = native.views.remove(key) {
+                    view.ns.cancel_marked();
                     view.ns.removeFromSuperview();
                 }
                 for list in native.by_pane.values_mut() {
@@ -702,6 +713,22 @@ pub fn close(app: &tauri::AppHandle, window: String, id: Option<u64>) -> Result<
         })
         .ok_or_else(|| "native_terminal_main_busy".to_owned())
     })?
+}
+
+/// The visible screen of a view for its accessibility text. Input: the view id. Output: the
+/// grid, or none when the view, its screen or the native state (busy) is not there.
+pub fn a11y_grid(id: u64) -> Option<a11y::Grid> {
+    with_native(|native| native.views.get(&id)?.pane.term.as_ref().map(a11y::visible)).flatten()
+}
+
+/// Redraws a view whose marked text changed. Input: the view id.
+pub fn on_redraw(id: u64) {
+    with_native(|native| {
+        if let Some(view) = native.views.get_mut(&id) {
+            view.pane.dirty = true;
+        }
+        native.draw_dirty();
+    });
 }
 
 /// Applies a key or text the native view got from AppKit. Inputs: the view id, the input
