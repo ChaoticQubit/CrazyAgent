@@ -315,10 +315,11 @@ fn rect_pipeline(
     (pipeline, layout)
 }
 
-/// Makes a device for a surface, the first one or the first after a loss: the low-power
-/// adapter that can present to it, with the adapter's own limits instead of wgpu's defaults
-/// (a 2D texture side of 8192), an error handler that logs a wgpu error and records it
-/// instead of panicking, and a lost callback that logs the loss and marks it lost and faulted.
+/// Makes a device for a surface when none is held (the first, or after a loss or a failed
+/// attempt): the low-power adapter that can present to it, with the adapter's own limits
+/// instead of wgpu's defaults (a 2D texture side of 8192), an error handler that logs a wgpu
+/// error and records it instead of panicking, and a lost callback that logs the loss and
+/// marks the device lost and faulted.
 fn device_for(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'static>,
