@@ -364,7 +364,7 @@ test("copy works in the master and agent terminal of every harness kind at every
  * app and xterm take off a Mac: Shift forces a drag to select and Ctrl+C copies. */
 const LINUX_PAGE = { userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", platform: "Linux x86_64" };
 
-test("off a Mac, a Shift drag on the normal screen selects the dragged text with nothing selected before and after a click elsewhere, and a Shift click still extends a selection that shows", async () => {
+test("off a Mac, a Shift drag on the normal screen selects the dragged text with nothing selected before and after a click elsewhere, and a Shift click without a drag still extends a selection that shows or from the last click", async () => {
   let server = null;
   const seen = await withPage(async ({ evaluate, send, context }) => {
     await send("Emulation.setUserAgentOverride", LINUX_PAGE);
@@ -389,15 +389,22 @@ test("off a Mac, a Shift drag on the normal screen selects the dragged text with
     await mouse(send, spot(200, 1).x, spot(200, 1).y, "left");
     await drag(send, spot(2, 0), spot(140, 0), 8);
     const afterClick = await copied();
+    const shiftClick = async (at) => {
+      await send("Input.dispatchMouseEvent", { type: "mousePressed", ...at, button: "left", buttons: 1, clickCount: 1, modifiers: 8 });
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", buttons: 0, clickCount: 1, modifiers: 8 });
+    };
     await drag(send, spot(2, 0), spot(60, 0));
-    await send("Input.dispatchMouseEvent", { type: "mousePressed", ...spot(140, 0), button: "left", buttons: 1, clickCount: 1, modifiers: 8 });
-    await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...spot(140, 0), button: "left", buttons: 0, clickCount: 1, modifiers: 8 });
+    await shiftClick(spot(140, 0));
     const extended = await copied();
-    return { platform, fresh, afterClick, extended };
+    await mouse(send, spot(2, 0).x, spot(2, 0).y, "left");
+    await shiftClick(spot(140, 0));
+    const fromClick = await copied();
+    return { platform, fresh, afterClick, extended, fromClick };
   }).finally(() => server?.close());
   assert.equal(seen.platform, "Linux x86_64", "the page took the Linux platform");
   const dragged = (text) => text.trimEnd().length >= 5 && "first line of output".startsWith(text.trimEnd());
   assert.ok(dragged(seen.fresh), `with nothing selected, the Shift drag selected the start of the first row and Ctrl+C copied it, got ${JSON.stringify(seen.fresh)}`);
   assert.equal(seen.afterClick, seen.fresh, "after a click elsewhere, the Shift drag selected the dragged text, not from the click");
   assert.equal(seen.extended, seen.fresh, "a Shift click extended the selection that showed to the click");
+  assert.equal(seen.fromClick, seen.fresh, "with nothing showing, a Shift click without a drag still selected from the last click to it, as xterm does");
 });
