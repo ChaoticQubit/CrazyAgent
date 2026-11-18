@@ -7,7 +7,8 @@ const DRAIN_FIRST_WAIT: Duration = Duration::from_millis(100);
 const DRAIN_LONGEST_WAIT: Duration = Duration::from_secs(2);
 
 /// A narrowing change whose submit storage refused while the engine runs, kept on disk and
-/// queued for the one drainer, which submits the same job again until storage takes it.
+/// queued for the one drainer, which submits the same job again until storage takes it. A
+/// revocation carries its intent's name; storage ends a sign-out's intent by its request id.
 #[derive(Clone)]
 pub(super) enum Pending {
     Revoke {
@@ -17,7 +18,6 @@ pub(super) enum Pending {
     Logout {
         admission: Admission,
         logout: NativeAuthLogout,
-        id: IntentId,
     },
 }
 
@@ -139,9 +139,7 @@ impl OwnerRuntimeHandle {
         loop {
             let taken = match &pending {
                 Pending::Revoke { control, id } => self.land_revocation(control, id).await,
-                Pending::Logout {
-                    admission, logout, ..
-                } => {
+                Pending::Logout { admission, logout } => {
                     let answer = self
                         .native_auth_submit(admission.clone(), Command::Logout(logout.clone()))
                         .await;

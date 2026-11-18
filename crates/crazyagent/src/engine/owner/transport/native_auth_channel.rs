@@ -1158,11 +1158,7 @@ impl OwnerRuntimeHandle {
         let answer = self.native_auth_submit(admission.clone(), command).await;
         self.pending_unless_taken(
             answer,
-            kept.map(|id| super::narrowing::Pending::Logout {
-                admission,
-                logout,
-                id,
-            }),
+            kept.map(|_| super::narrowing::Pending::Logout { admission, logout }),
         )
     }
 
