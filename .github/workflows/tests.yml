@@ -19,7 +19,7 @@ env:
   TMUX_VERSION: "3.8"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  TIP: a3984be848b358642c487cbdc0080fce14f3f5b8
+  TIP: 71feb4035ea53beec2f1c836697271e9f85b6314
   RED: dbef54bdc4c7e573416fec26e9f675133f291ce9
   VALUE_WIN: research::runner::program_tests::engine_and_ide_git_name_a_missing_system_folder_file_for_hooks_programs_and_ssh
   VALUE_UNIX: research::runner::program_tests::engine_and_ide_git_name_dev_null_for_hooks_programs_and_ssh
@@ -49,14 +49,16 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Make the tree the red commit
+      - name: Make the tree the tip's planted-program row over the red commit's code and value rows
         run: |
           set -euo pipefail
           git merge-base --is-ancestor "$TIP" HEAD
           git merge-base --is-ancestor "$RED" "$TIP"
           test "$(git diff --name-only "$TIP" HEAD)" = .github/workflows/tests.yml
-          git checkout "$RED" -- .github/workflows/tests.yml crates/crazyagent/src/research/runner.rs crates/crazyagent/src/ide/git.rs crates/crazyagent/src/research/runner/program_tests.rs
-          git diff --quiet "$RED" || { echo "TREE IS NOT THE RED COMMIT"; git diff --stat "$RED"; exit 1; }
+          git checkout "$TIP" -- .github/workflows/tests.yml
+          git checkout "$RED" -- crates/crazyagent/src/research/runner.rs crates/crazyagent/src/ide/git.rs crates/crazyagent/src/research/runner/program_tests.rs
+          test "$(git diff --name-only "$TIP" | sort | tr '\n' ' ')" = "crates/crazyagent/src/ide/git.rs crates/crazyagent/src/research/runner.rs crates/crazyagent/src/research/runner/program_tests.rs " || { echo "TREE IS NOT THE TIP WITH THE RED CODE"; git diff --stat "$TIP"; exit 1; }
+          test "$(git diff --name-only "$RED")" = crates/crazyagent/src/github/publish/windows_tests.rs || { echo "TREE DIFFERS FROM THE RED COMMIT BEYOND THE ROW LINT FIX"; git diff --stat "$RED"; exit 1; }
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail
