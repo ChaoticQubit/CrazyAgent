@@ -17,6 +17,7 @@ pub const MOVE_STOP_WAIT: Duration = super::DELETE_STOP_WAIT;
 const MOVE_POLL: Duration = Duration::from_millis(100);
 const LANDING_REPOSITORIES_MAX: usize = 16;
 const COPIES_MAX: i64 = 4096;
+const KEPT_LOGGED_MAX: i64 = 64;
 
 /// Every stored column that holds an absolute path inside a project's folder and must
 /// follow the folder when it moves: the onboarding records keyed by the folder, each agent
@@ -151,6 +152,33 @@ fn collapsed(tx: &Connection, from: &str, to: &str) -> Result<Vec<&'static str>,
     }
     assert!(found.len() <= PATH_COLUMNS.len());
     Ok(found)
+}
+
+/// Logs each key of `column` that a finished move kept on the old folder's stored name
+/// because the short name held the same key, which went live in the new folder: the table,
+/// the column and the key's place inside the folder, at most [`KEPT_LOGGED_MAX`] keys.
+/// Inputs: the write, the table, the column and the stored folder. Output: Ok.
+fn log_kept(tx: &Connection, table: &str, column: &str, origin: &Path) -> Result<(), EngineError> {
+    let mut statement = tx
+        .prepare(&format!(
+            "SELECT {column} FROM {table} WHERE {} LIMIT ?2",
+            under(column)
+        ))
+        .map_err(sql)?;
+    let rows = statement
+        .query_map(params![text(origin)?, KEPT_LOGGED_MAX], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(sql)?;
+    for row in rows {
+        let key = PathBuf::from(row.map_err(sql)?);
+        let inside = key.strip_prefix(origin).unwrap_or(Path::new(""));
+        eprintln!(
+            "move_project_rows_kept table={table} column={column} key={} long=kept_on_old_folder short=live_in_new_folder",
+            inside.display()
+        );
+    }
+    Ok(())
 }
 
 /// Says where a path inside the old project folder, under either of its names, is after
@@ -897,10 +925,11 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
 /// new folder. A stale row already at the new path gives way to
 /// the moved one; [`plan`] refused a destination any other project still names, so such a
 /// row belongs to no project, and a plain UPDATE that failed here would leave a folder
-/// already moved unrecorded. A table where the old folder's two names hold one key keeps
-/// its short-name rows as they were, logged as `move_project_rows_kept`: [`plan`] refuses
-/// such a move, so only rows written after the plan get here, and none is replaced.
-/// Records of what was said or done (prompts, messages, events)
+/// already moved unrecorded. Where the old folder's two names hold one key, the short
+/// name's row goes live in the new folder and the stored name's row stays on the old path,
+/// logged by [`log_kept`]: rows are now written in the short name, so it is the newer one.
+/// [`plan`] refuses such a move, so only rows written after the plan get here; none is
+/// deleted. Records of what was said or done (prompts, messages, events)
 /// and of the master's identity-pinned working copies keep the old path. Inputs: the
 /// transaction, the project and both folders. Output: Ok, or the bound a moved path breaks.
 fn rewrite(
@@ -972,26 +1001,36 @@ fn rewrite(
     }
     let names = origin_names(origin);
     let kept = held_twice(tx, origin)?;
-    for table in &kept {
-        eprintln!("move_project_rows_kept table={table}");
-    }
     for (table, column) in PATH_COLUMNS {
         if !present(tx, table).map_err(sql)? {
             continue;
         }
-        for (index, name) in names.iter().enumerate() {
-            if index > 0 && kept.contains(&table) {
-                continue;
-            }
+        let held = kept.contains(&table);
+        let passes: Vec<(&Path, &str)> = if held {
+            assert_eq!(names.len(), 2);
+            vec![
+                (names[1].as_path(), "REPLACE"),
+                (names[0].as_path(), "IGNORE"),
+            ]
+        } else {
+            names
+                .iter()
+                .map(|name| (name.as_path(), "REPLACE"))
+                .collect()
+        };
+        for (name, conflict) in passes {
             tx.execute(
                 &format!(
-                    "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
+                    "UPDATE OR {conflict} {table} SET {column}=?2||substr({column},length(?1)+1)
                      WHERE {}",
                     under(column)
                 ),
                 params![text(name)?, to],
             )
             .map_err(sql)?;
+        }
+        if held {
+            log_kept(tx, table, column, origin)?;
         }
     }
     Ok(())

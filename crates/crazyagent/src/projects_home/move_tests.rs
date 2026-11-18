@@ -1066,10 +1066,10 @@ fn a_long_stored_project_holding_one_key_under_both_names_is_refused_with_nothin
     assert_eq!(rows, 2);
 }
 
-/// #460 sec F1, the window after the plan: a landing base recorded under both names of a
-/// long-stored project's folder only after its move was planned is not lost when the move
-/// finishes. The stored name's row follows the folder into the home and the short name's
-/// row is kept as it was.
+/// #460 sec F1, the window after the plan (leader 20:43): a landing base recorded under both
+/// names of a long-stored project's folder only after its move was planned is not lost when
+/// the move finishes. The short name's row, the newer one since rows are written short,
+/// follows the folder into the home, and the stored name's row is kept on the old path.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_move_keeps_a_key_held_under_both_names_after_its_plan() {
@@ -1113,11 +1113,11 @@ fn a_move_keeps_a_key_held_under_both_names_after_its_plan() {
         rows,
         BTreeSet::from([
             (
-                text(&case.target().join(&inside)).to_owned(),
+                text(&case.repo.join(&inside)).to_owned(),
                 "base-long".to_owned()
             ),
             (
-                text(&short.join(&inside)).to_owned(),
+                text(&case.target().join(&inside)).to_owned(),
                 "base-short".to_owned()
             ),
         ])
