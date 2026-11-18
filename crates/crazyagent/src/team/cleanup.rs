@@ -1093,9 +1093,9 @@ fn remove_home_below(
 /// folder this user can list: one that opens but will not list, as reopening it as `.` the
 /// way [`rustix::fs::Dir::read_from`] does needs search on it, counts as one that stopped
 /// (code r1 F2 ds137-reset-walk). An open that stops on an entry that is still a folder
-/// clears its immutable and append-only flags ([`unpin_home_entry`]), gives this user rwx on
-/// it ([`open_up`]) and clears its ACL ([`release_home_acls`]), each through the parent's
-/// handle by name, then opens it once more. Inputs: the parent handle and the name.
+/// clears its flags ([`unpin_home_entry`]), opens it up ([`open_up`]) and clears its ACL
+/// ([`release_home_acls`]) through the parent's handle by name, then opens it once more and
+/// gives this user rwx through that folder handle. Inputs: the parent handle and the name.
 /// Output: the folder, None once the name is gone or names no folder, or the error.
 #[cfg(unix)]
 pub(crate) fn open_home_folder(
@@ -1126,6 +1126,9 @@ pub(crate) fn open_home_folder(
     let _ = open_up(parent, name);
     release_home_acls(parent, &[name]);
     let reopened = open();
+    if let Ok(opened) = &reopened {
+        let _ = rustix::fs::fchmod(opened, Mode::RWXU);
+    }
     if reopened.is_err() && !folder()? {
         return Ok(None);
     }
@@ -1726,23 +1729,30 @@ fn open_up<P: rustix::path::Arg>(
     )
 }
 
-/// Gives this user rwx on the folder `name` under `parent` without following a link, through
-/// `chmodat` with `AT_SYMLINK_NOFOLLOW`. Inputs: the parent handle and the name. Output: Ok,
-/// or the error that left the folder as it was.
+/// Gives this user read and search, never write, on `name` under `parent` once a look through
+/// the parent's handle that never follows a link shows a folder; `chmodat` takes any entry,
+/// so one an agent swaps for a hard link to the owner's file after that look gains no write
+/// (#571 sec F1). The caller adds write through the handle it opens as a folder. Inputs: the
+/// parent handle and the name. Output: Ok, `ENOTDIR` for no folder, or the error.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn open_up<P: rustix::path::Arg>(
+fn open_up<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
     name: P,
 ) -> rustix::io::Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode};
     #[cfg(all(test, target_os = "macos"))]
     open_up_step(OpenUpPoint::Start, &name);
+    let found = rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
+        return Err(rustix::io::Errno::NOTDIR);
+    }
     #[cfg(all(test, target_os = "macos"))]
     open_up_step(OpenUpPoint::BeforeMode, &name);
     rustix::fs::chmodat(
         parent,
         name,
-        rustix::fs::Mode::RWXU,
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        Mode::RUSR | Mode::XUSR,
+        AtFlags::SYMLINK_NOFOLLOW,
     )
 }
 
