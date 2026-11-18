@@ -730,9 +730,7 @@ impl Viewing for Counted {
         }
     }
 
-    fn heard(&self, _: String) -> impl Future<Output = ()> + Send {
-        async {}
-    }
+    async fn heard(&self, _: String) {}
 }
 
 /// Runs an input-only view's loop over requests queued up front, then closed, so the loop
