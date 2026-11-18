@@ -35,6 +35,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Select Xcode 26.3, whose git the engine runs
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
+          version="$("$git" --version)"
+          echo "engine git $git: $version"
+          IFS=. read -r major minor _ <<< "${version#git version }"
+          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
+          echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
