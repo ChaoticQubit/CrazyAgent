@@ -1,5 +1,14 @@
+/// The commands only the webview terminal calls. A macOS build draws every terminal natively
+/// (DEC-203), so it neither builds nor grants them; Windows and Linux keep that terminal.
+const WEBVIEW_TERMINAL_COMMANDS: [&str; 4] = [
+    "desktop_terminal_attach",
+    "desktop_terminal_input",
+    "desktop_terminal_resize",
+    "desktop_terminal_detach",
+];
+
 fn main() {
-    let manifest = tauri_build::AppManifest::new().commands(&[
+    let mut commands = vec![
         "desktop_connect",
         "desktop_status",
         "desktop_harness_catalog",
@@ -92,11 +101,7 @@ fn main() {
         "desktop_coord_questions",
         "desktop_coord_answer",
         "desktop_team_attention",
-        "desktop_terminal_attach",
-        "desktop_terminal_input",
         "desktop_terminal_prompt",
-        "desktop_terminal_resize",
-        "desktop_terminal_detach",
         "desktop_team_terminals_per_window",
         "desktop_terminals_per_window",
         "desktop_open_terminal_windows",
@@ -359,7 +364,12 @@ fn main() {
         "desktop_overview_reject",
         "desktop_overview_set_refresh",
         "desktop_overview_set_apply",
-    ]);
+    ];
+    let os = std::env::var("CARGO_CFG_TARGET_OS").expect("cargo sets CARGO_CFG_TARGET_OS");
+    if os != "macos" {
+        commands.extend(WEBVIEW_TERMINAL_COMMANDS);
+    }
+    let manifest = tauri_build::AppManifest::new().commands(commands.leak());
     let windows = tauri_build::WindowsAttributes::new_without_app_manifest();
     tauri_build::try_build(
         tauri_build::Attributes::new()

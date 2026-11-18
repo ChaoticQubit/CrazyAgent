@@ -1,0 +1,13 @@
+{
+  "identifier": "webview-terminal",
+  "description": "The main window and terminal wall windows attach to, type into, resize and detach from agent terminals drawn by the webview terminal. Windows and Linux only: macOS draws every terminal natively (DEC-203), so its build has no such command.",
+  "local": true,
+  "platforms": ["linux", "windows"],
+  "webviews": ["main", "terminals-*"],
+  "permissions": [
+    "allow-desktop-terminal-attach",
+    "allow-desktop-terminal-input",
+    "allow-desktop-terminal-resize",
+    "allow-desktop-terminal-detach"
+  ]
+}

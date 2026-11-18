@@ -84,7 +84,9 @@ use crazyagent::usage::spend::SpendChoice;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
+#[cfg(not(target_os = "macos"))]
+use tauri::ipc::InvokeResponseBody;
+use tauri::ipc::{Channel, Invoke};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
@@ -1950,6 +1952,7 @@ async fn attach_place(
     Ok((key, place))
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn desktop_terminal_attach(
     webview: Webview,
@@ -1981,6 +1984,7 @@ async fn desktop_terminal_attach(
 /// one is named. Inputs: the window, the terminals, the terminal name, the bytes, whether
 /// the view made them from the owner's mouse wheel, which never counts as the owner typing,
 /// and the pane. Output: ok once queued, or a bridge error.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn desktop_terminal_input(
     webview: Webview,
@@ -2018,6 +2022,7 @@ async fn desktop_terminal_prompt(
 /// Sets an attached agent terminal's size, the view of exactly that pane when one is
 /// named. Inputs: the window, the terminals, the terminal name, columns, rows and the pane.
 /// Output: ok once queued, or a bridge error.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn desktop_terminal_resize(
     webview: Webview,
@@ -2039,6 +2044,7 @@ async fn desktop_terminal_resize(
         .await
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn desktop_terminal_detach(
     webview: Webview,
@@ -5371,15 +5377,21 @@ fn admit_pages<R: Runtime>(
 }
 
 /// Declares the native commands once: their names for whoever must walk them and their
-/// handler behind the page check. Input: the command functions. Output: `NATIVE_COMMANDS`
-/// and `native_handler`.
+/// handler behind the page check. The commands after the `;` serve only the webview
+/// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only.
+/// Input: the command functions. Output: `NATIVE_COMMANDS` and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+) => {
-        #[cfg(test)]
+    ($($command:ident,)+ ; $($webview:ident,)+) => {
+        #[cfg(all(test, not(target_os = "macos")))]
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($webview),)+];
+        #[cfg(all(test, target_os = "macos"))]
         const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
-            admit_pages::<tauri::Wry>(tauri::generate_handler![$($command,)+])
+            admit_pages::<tauri::Wry>(tauri::generate_handler![
+                $($command,)+
+                $(#[cfg(not(target_os = "macos"))] $webview,)+
+            ])
         }
     };
 }
@@ -5477,11 +5489,7 @@ native_commands! {
     desktop_coord_questions,
     desktop_coord_answer,
     desktop_team_attention,
-    desktop_terminal_attach,
-    desktop_terminal_input,
     desktop_terminal_prompt,
-    desktop_terminal_resize,
-    desktop_terminal_detach,
     desktop_team_terminals_per_window,
     desktop_terminals_per_window,
     desktop_open_terminal_windows,
@@ -5744,6 +5752,11 @@ native_commands! {
     desktop_install_update,
     desktop_restart_app,
     desktop_link_cli,
+    ;
+    desktop_terminal_attach,
+    desktop_terminal_input,
+    desktop_terminal_resize,
+    desktop_terminal_detach,
 }
 
 pub fn run() {
@@ -6153,5 +6166,24 @@ mod tests {
             assert_eq!(ask(wall.as_ref(), command, json!({})), Ok(()), "{command}");
         }
         assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
+    }
+
+    #[test]
+    fn a_macos_build_answers_no_webview_terminal_attach_input_resize_or_detach() {
+        let webview = [
+            "desktop_terminal_attach",
+            "desktop_terminal_input",
+            "desktop_terminal_resize",
+            "desktop_terminal_detach",
+        ];
+        for command in webview {
+            assert_eq!(
+                NATIVE_COMMANDS.contains(&command),
+                cfg!(not(target_os = "macos")),
+                "{command}",
+            );
+        }
+        assert!(NATIVE_COMMANDS.contains(&"desktop_terminal_prompt"));
+        assert!(NATIVE_COMMANDS.contains(&"desktop_team_terminals_per_window"));
     }
 }

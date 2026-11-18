@@ -12,12 +12,20 @@ import { displayText } from "../conversation";
 import type { Seed } from "../project/console-model";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
 import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
+import { NativeTerminalPanel, NativeView } from "./native-panel";
+import type { NativeCopy } from "./native-terminal";
+import { terminalKind } from "./terminal-kind";
 import { autoStartFailed, gpuStartFailed, gpuWanted, probeGpu, rendererChosen } from "./terminal-renderer";
 import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, readableScreen, seedText, selectNote, settleAfterWrites, terminalEvent, terminalSize, type GpuDrawing } from "./terminal-io";
 
-const COPIED_MS = 2000;
-const COPY_REFUSED = "The clipboard refused the copy.";
-const FOLLOW_MS = 1000;
+/** How long a copy's note stays in a terminal's status line. */
+export const COPIED_MS = 2000;
+/** The note when the clipboard refused a copy. */
+export const COPY_REFUSED = "The clipboard refused the copy.";
+/** The note after a copy, by what was copied. */
+export const COPIED: Record<NativeCopy, string> = { selection: "Copied the selection.", output: "Copied the output." };
+/** How long a following view waits before it opens its terminal again. */
+export const FOLLOW_MS = 1000;
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
@@ -347,6 +355,23 @@ export type MenuAt = { x: number; y: number; selection: string };
  * closing it. Inputs: the terminal, where it opened and the close action, given the note to
  * show after a copy or null. Output: the menu. */
 export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at: MenuAt; onDone: (note: string | null) => void }) {
+  const back = (note: string | null) => {
+    terminal.focus();
+    onDone(note);
+  };
+  const copy = async (what: NativeCopy) => await copyText(what === "selection" ? at.selection : terminalOutput(terminal)) ? COPIED[what] : COPY_REFUSED;
+  return <CopyMenu at={at} selection={at.selection !== ""} copy={copy} back={back} onDone={onDone} />;
+}
+
+/** A terminal's copy menu, whatever draws the terminal: Copy and Copy output placed inside
+ * its panel near the click, the arrow keys moving between items, Escape and a copy calling
+ * `back` and a press outside calling `onDone`. Inputs: where it opened in page pixels, whether
+ * Copy has a selection to take, the copy, which answers the note to show, and both close
+ * actions, given that note or null. Output: the menu. */
+export function CopyMenu({ at, selection, copy, back, onDone }: {
+  at: { x: number; y: number }; selection: boolean; copy: (what: NativeCopy) => Promise<string>;
+  back: (note: string | null) => void; onDone: (note: string | null) => void;
+}) {
   const list = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const menu = list.current;
@@ -364,11 +389,7 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
     document.addEventListener("pointerdown", outside, true);
     return () => document.removeEventListener("pointerdown", outside, true);
   }, [onDone]);
-  const back = (note: string | null) => {
-    terminal.focus();
-    onDone(note);
-  };
-  const copy = async (text: string, done: string) => back(await copyText(text) ? done : COPY_REFUSED);
+  const take = async (what: NativeCopy) => back(await copy(what));
   const move = (step: number) => {
     const items = [...(list.current?.querySelectorAll<HTMLElement>("[role=menuitem]:not(:disabled)") ?? [])];
     const index = items.indexOf(document.activeElement as HTMLElement);
@@ -381,8 +402,8 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
     else return;
     event.preventDefault();
   }}>
-    <button type="button" role="menuitem" className="menu-item" disabled={!at.selection} onClick={() => void copy(at.selection, "Copied the selection.")}><Icon name="copy" size={14} />Copy</button>
-    <button type="button" role="menuitem" className="menu-item" onClick={() => void copy(terminalOutput(terminal), "Copied the output.")}><Icon name="file-text" size={14} />Copy output</button>
+    <button type="button" role="menuitem" className="menu-item" disabled={!selection} onClick={() => void take("selection")}><Icon name="copy" size={14} />Copy</button>
+    <button type="button" role="menuitem" className="menu-item" onClick={() => void take("output")}><Icon name="file-text" size={14} />Copy output</button>
   </div>;
 }
 
@@ -394,7 +415,7 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
  * input there is no Message at all. Inputs: the node, the harness lookup, the tile layout,
  * whether this terminal has a message box, whether it can take a message now, the actions,
  * the report and the hint. Output: the head. */
-function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, onClose, reported, swaps }: {
+export function TerminalHead({ node, harness, tile, message, boxed, onMessage, onStop, onClose, reported, swaps }: {
   node: GraphNode; harness: (id: string) => string; tile: boolean; message: boolean; boxed: boolean; onMessage: () => void;
   onStop?: () => void; onClose?: () => void; reported?: string; swaps: boolean;
 }) {
@@ -850,39 +871,80 @@ export class KeptView implements Held {
   }
 }
 
-const kept = new KeptSet<KeptView>(KEPT_MAX);
+/** A view the main window keeps: a webview terminal's, or a native one's on a build that
+ * draws terminals natively. One window holds views of one kind only. */
+type AnyView = KeptView | NativeView;
 
-function letGo(dropped: KeptView[]): void {
+const kept = new KeptSet<AnyView>(KEPT_MAX);
+
+function letGo(dropped: AnyView[]): void {
   for (const view of dropped) view.drop();
 }
 
-/** The main window's kept view for a key, marked most recently used, or a new one made,
- * attached and kept, which drops the least recently used hidden view past `KEPT_MAX`.
- * Input: the key. Output: the view. */
-function keptView(key: KeptKey): KeptView {
+/** The main window's kept view for a key, marked most recently used, or the one `make`
+ * gives, kept, which drops the least recently used hidden view past `KEPT_MAX`. Inputs: the
+ * key and the maker. Output: the view. */
+function keptOrMade(key: KeptKey, make: () => AnyView): AnyView {
   const found = kept.get(key);
-  const view = found ?? new KeptView(key);
+  const view = found ?? make();
   if (found) kept.touch(key);
   else letGo(kept.add(view));
   rememberShown(view);
   return view;
 }
 
-function savedOf(view: KeptView): SavedView | null {
+/** The main window's kept view for a key, marked most recently used, or a new one made,
+ * attached and kept, which drops the least recently used hidden view past `KEPT_MAX`.
+ * Input: the key. Output: the view. */
+function keptView(key: KeptKey): KeptView {
+  const view = keptOrMade(key, () => new KeptView(key));
+  assert(view instanceof KeptView, "a window keeps views of one kind");
+  return view;
+}
+
+/** The main window's kept native view for a key, marked most recently used, or a new one
+ * made and kept, as `keptView` does for the webview terminal (DEC-187). Inputs: the key and
+ * the agent's label. Output: the view. */
+export function keptNativeView(key: KeptKey, label: string): NativeView {
+  const view = keptOrMade(key, () => new NativeView(key, label));
+  assert(view instanceof NativeView, "a window keeps views of one kind");
+  return view;
+}
+
+/** The main window's kept native view for a key, not marked used. Input: the key. Output:
+ * the view, or null when none is kept. */
+export function heldNativeView(key: KeptKey): NativeView | null {
+  const view = kept.get(key);
+  return view instanceof NativeView ? view : null;
+}
+
+/** Lets go of the least recently used hidden views past `KEPT_MAX`, as a closing panel does.
+ * Output: none. */
+export function trimKept(): void {
+  letGo(kept.trim());
+}
+
+/** Remembers the size a kept view's panel has now, for the next app start; a view the window
+ * does not keep, as a wall tile's, is not remembered. Input: the view. Output: none. */
+export function rememberKeptSize(view: AnyView): void {
+  if (kept.get(view.key) === view) rememberSize(view);
+}
+
+function savedOf(view: AnyView): SavedView | null {
   const { project, terminal, pane } = view.key;
   return project === null ? null : { key: { project, terminal, pane }, size: view.parked };
 }
 
 /** Remembers a view the owner shows as the most recently used, for the next app start. Input:
  * the view. Output: none. */
-function rememberShown(view: KeptView): void {
+function rememberShown(view: AnyView): void {
   const entry = savedOf(view);
   if (entry) writeSaved(shownFirst(readSaved(), entry));
 }
 
 /** Remembers the size a remembered view's panel has now, in the same order. Input: the view.
  * Output: none. */
-function rememberSize(view: KeptView): void {
+function rememberSize(view: AnyView): void {
   const entry = savedOf(view);
   if (entry?.size) writeSaved(resized(readSaved(), entry.key, entry.size));
 }
@@ -896,16 +958,25 @@ export function keepTerminalsOf(open: (project: string | null) => boolean): void
 
 let epoch = 0;
 
-/** Loads a remembered terminal hidden, behind the views the owner opened since, when the set
- * has room and the project's team still lists that terminal. Inputs: the entry, the session it
- * was read in, and the project's team graph when the caller already read it, so app start
- * reads each graph once; with none given it is read here. Output: none. */
+/** Loads a remembered terminal hidden, behind the views opened since, when the set has room
+ * and the team still lists it; a native build loads it covered, only at its saved size, so a
+ * guessed size never resizes the agent's terminal. Inputs: the entry, the session it was read
+ * in, and the team graph when the caller already read it (app start reads each graph once).
+ * Output: none. */
 async function preloadView(entry: SavedView, at: number, read: Result<TeamGraph> | null = null): Promise<void> {
   assert(read === null || read.kind === "ok", "a team graph passed in is one that was read");
   const graph = read ?? await loadTeamGraph(entry.key.project);
   if (at !== epoch || graph.kind !== "ok" || !kept.roomBehind(entry.key)) return;
-  if (!graph.value.nodes.some((node) => node.terminal === entry.key.terminal && teammatePane(node) === entry.key.pane)) return;
-  kept.keepBehind(new KeptView(entry.key, entry.size));
+  const node = graph.value.nodes.find((listed) => listed.terminal === entry.key.terminal && teammatePane(listed) === entry.key.pane);
+  if (!node) return;
+  if (terminalKind().kind === "web") {
+    kept.keepBehind(new KeptView(entry.key, entry.size));
+    return;
+  }
+  if (entry.size === null) return;
+  const view = new NativeView(entry.key, node.label, entry.size);
+  kept.keepBehind(view);
+  view.load();
 }
 
 /** Loads the terminals the owner used last, most recent first, hidden and unfocused; with none
@@ -913,6 +984,7 @@ async function preloadView(entry: SavedView, at: number, read: Result<TeamGraph>
  * count and nothing is started: a terminal the team does not list is skipped. Inputs: the
  * listed projects and the session. Output: none. */
 async function preloadKept(listed: ReadonlySet<string>, at: number): Promise<void> {
+  if (terminalKind().kind === "failed") return;
   const saved = readSaved().filter((entry) => listed.has(entry.key.project));
   for (const entry of saved) await preloadView(entry, at);
   const last = readLastProject();
@@ -952,41 +1024,66 @@ export function useKeptTerminalProjects(projects: Loaded<ProjectRow[]>, more: bo
   }, [projects, more]);
 }
 
-const still = () => () => {};
+/** Everything a terminal panel takes, whatever draws its terminal. Where the owner types (the
+ * terminal, the message box under it, or both) is not a prop: it is the one Terminal input
+ * in Settings, for every agent on every screen. */
+export type PanelProps = {
+  /** The agent's graph node. */
+  node: GraphNode;
+  /** Names a harness id for the head. */
+  harness?: (id: string) => string;
+  /** Closes the panel; with none there is no Close. */
+  onClose?: () => void;
+  /** Stops the agent; with none there is no Stop. */
+  onStop?: () => void;
+  /** A console around the panel owns the head. */
+  embedded?: boolean;
+  /** A terminal wall tile, whose view goes with the tile. */
+  tile?: boolean;
+  /** The one panel a graph click replaces, which says so in its head. */
+  swaps?: boolean;
+  /** An ended terminal opens again on its own, cleared, for an agent that restarts in a new pane. */
+  follow?: boolean;
+  /** The one-line report of what the agent's harness loaded and invoked, shown in the head. */
+  reported?: string;
+  /** The project the view is kept under and a wall window attaches for. */
+  projectId?: string;
+  /** Hears the terminal open at its first frame and close, so the live master's wait ends only then. */
+  onOpened?: (open: boolean) => void;
+  /** A drafted message the terminal takes once live, as a paste, then marks used. */
+  seed?: Seed | null;
+};
+
+/** Hears nothing, for a panel with no view yet. Output: the call that stops hearing. */
+export const still = () => () => {};
 const idle = () => IDLE;
 
-/** One agent's live terminal beside the graph: the screen at attach, live output, and every
- * key typed straight into the agent's real terminal, sized to the panel, with a way back to
- * the latest output once scrolled up, and Copy and Copy output on right-click and in its
- * status line, which also says how to select text while the app in the terminal reads the
- * mouse; that selection stays until the owner copies it or clicks. In the main window the
- * view stays loaded and attached after the panel closes, among the two most recently used
- * (DEC-187), so showing it again only moves it back; a wall tile's view detaches with the
- * tile. The agent keeps running either way.
- * Inputs: the graph node, a harness name lookup, the close action when the panel can be
- * closed, the stop action when the agent can be stopped, `embedded` when a console around
- * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
- * replaces, `follow` when an ended terminal opens again on its own, cleared, for an agent
- * that restarts in a new pane, and the one-line report of what the agent's harness loaded and
- * invoked, shown in the head, the project the view is kept under and a wall window attaches
- * for, and what hears the
- * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
- * types (the terminal, the message box under it, or both) is the one Terminal input in
- * Settings, for every agent on every screen. Output: the panel. */
-export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: {
-  node: GraphNode;
-  harness?: (id: string) => string;
-  onClose?: () => void;
-  onStop?: () => void;
-  embedded?: boolean;
-  tile?: boolean;
-  swaps?: boolean;
-  follow?: boolean;
-  reported?: string;
-  projectId?: string;
-  onOpened?: (open: boolean) => void;
-  seed?: Seed | null;
-}) {
+/** One agent's live terminal beside the graph, in a console or as a wall tile: the head, the
+ * terminal sized to the panel, Copy and Copy output, Jump to latest and the message box, the
+ * view kept after the panel closes among the two most recently used (DEC-187). The webview
+ * terminal on Windows and Linux, the native view on macOS (DEC-203), the plain reason when the
+ * desktop's answer could not be read. Input: `PanelProps`. Output: the panel. */
+export function TerminalPanel(props: PanelProps) {
+  const kind = terminalKind();
+  if (kind.kind === "native") return <NativeTerminalPanel {...props} />;
+  if (kind.kind === "failed") return <FailedTerminalPanel {...props} message={kind.message} />;
+  return <WebTerminalPanel {...props} />;
+}
+
+/** A panel on a desktop whose terminal kind could not be read: the head and the plain
+ * reason, with no terminal at all. Inputs: `PanelProps` and the reason. Output: the panel. */
+function FailedTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, reported, message }: PanelProps & { message: string }) {
+  assert(message.length > 0, "a failed terminal kind says why");
+  return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal wall-tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
+    {!embedded && <TerminalHead node={node} harness={harness} tile={tile} message={false} boxed={false} onMessage={() => {}}
+      onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
+    <p className="tg-terminal-state" role="alert">{displayText(message)}</p>
+  </section>;
+}
+
+/** Today's panel over the webview terminal (xterm), for Windows and Linux in 2.4.3: what
+ * `TerminalPanel` describes. Input: `PanelProps`. Output: the panel. */
+function WebTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: PanelProps) {
   if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
   if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
   const input = readTerminalInput();
@@ -1002,7 +1099,8 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   const key: KeptKey | null = name ? { project: projectId ?? null, terminal: name, pane } : null;
   const id = key ? keyId(key) : null;
   const [made, setMade] = useState<KeptView | null>(null);
-  const found = key && !tile ? kept.get(key) ?? null : null;
+  const held = key && !tile ? kept.get(key) : undefined;
+  const found = held instanceof KeptView ? held : null;
   const entry = found ?? (made && made.id === id && !made.gone ? made : null);
   const current = useRef(entry);
   current.current = entry;
@@ -1085,7 +1183,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
     {view.kind === "live" && <div className="tg-terminal-note">
       <span role="status">{copied ?? liveNote(node, input, state.mouse)}</span>
       {state.behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => entry?.latest()}>Jump to latest</Button>}
-      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(terminal ? terminalOutput(terminal) : "", "Copied the output.")}>Copy output</Button>
+      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(terminal ? terminalOutput(terminal) : "", COPIED.output)}>Copy output</Button>
     </div>}
     {boxed && <Composer node={node} live={view.kind === "live"} onSend={(text) => entry?.prompt?.(text) ?? false} compact={!embedded} box={box} />}
   </section>;

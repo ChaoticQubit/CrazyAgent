@@ -45,16 +45,26 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
         .and_then(|rest| rest.split('}').next())
         .unwrap()
         .split(',')
-        .map(str::trim)
+        .map(|name| name.trim().trim_start_matches(';').trim())
         .filter(|name| !name.is_empty())
         .collect();
     let wall_only = [
         "desktop_extend_terminal_windows",
         "desktop_focus_terminal_window",
     ];
+    let webview = [
+        "desktop_terminal_attach",
+        "desktop_terminal_input",
+        "desktop_terminal_resize",
+        "desktop_terminal_detach",
+    ];
     assert!(handlers.len() >= 34);
     assert!(wall_only.iter().all(|name| handlers.contains(name)));
-    assert_eq!(permissions.len() + wall_only.len(), handlers.len());
+    assert!(webview.iter().all(|name| handlers.contains(name)));
+    assert_eq!(
+        permissions.len() + wall_only.len() + webview.len(),
+        handlers.len()
+    );
     for handler in &handlers {
         assert_eq!(
             build.matches(&format!("\"{handler}\"")).count(),
@@ -67,8 +77,8 @@ fn project_creation_has_one_named_native_command_and_local_main_window_permissio
                 .iter()
                 .filter(|permission| **permission == allowed.as_str())
                 .count(),
-            usize::from(!wall_only.contains(handler)),
-            "{handler} needs one main-window permission, none when only a wall window calls it"
+            usize::from(!wall_only.contains(handler) && !webview.contains(handler)),
+            "{handler} needs one main-window permission, none when only a wall window or the webview terminal calls it"
         );
     }
     assert_eq!(

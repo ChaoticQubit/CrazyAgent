@@ -108,6 +108,14 @@ export function copyNativeTerminal(view: number, what: NativeCopy): Promise<Resu
   return call<void>("desktop_native_terminal_copy", { view, what });
 }
 
+/** Pastes text into a view as the owner's paste would, for a console seed (DEC-203 seed
+ * exception): the desktop flattens line breaks when the pane is not bracketed, applies the
+ * paste keys and sends it through the engine under the grant check. Inputs: the view and the
+ * text. Output: ok once sent. */
+export function pasteNativeTerminal(view: number, text: string): Promise<Result<void>> {
+  return call<void>("desktop_native_terminal_paste", { view, text });
+}
+
 /** Scrolls a view back to the bottom of its output. Input: the view. Output: ok. */
 export function jumpNativeTerminal(view: number): Promise<Result<void>> {
   return call<void>("desktop_native_terminal_jump", { view });
