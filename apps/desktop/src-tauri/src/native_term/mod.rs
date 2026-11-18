@@ -104,18 +104,20 @@ pub fn engine_socket(raw: &OsStr) -> Result<PathBuf, &'static str> {
 /// any file at that server's private socket path, read by `lstat` only and never connected
 /// to, since a tmux server can make its client run a command. Such an agent keeps today's
 /// renderer, whose engine reaches that server only from inside the lead's profile. Inputs:
-/// the engine root and the checked window name. Output: the answer; a name that is not a team
-/// agent has no own server.
-pub fn own_server(engine_root: &std::path::Path, name: &str) -> bool {
+/// the engine root and a name `window_name` passed. Output: the answer, or a plain code when
+/// it cannot be told, which refuses the view: only a clean "no such file" means no server.
+pub fn own_server(engine_root: &std::path::Path, name: &str) -> Result<bool, &'static str> {
     assert!(engine_root.is_absolute());
-    let Ok(agent) = crate::bridge::terminal::agent(name) else {
-        return false;
-    };
-    let Ok(socket) = crazyagent::terminal::harness_socket(engine_root, &agent) else {
-        return false;
-    };
+    let agent = crate::bridge::terminal::agent(name).map_err(|_| "native_terminal_name_invalid")?;
+    let socket = crazyagent::terminal::harness_socket(engine_root, &agent)
+        .map_err(|_| "native_terminal_own_server_unknown")?;
+    assert!(socket.is_absolute());
     assert!(!socket.starts_with(engine_root.join("terminal")));
-    std::fs::symlink_metadata(socket).is_ok()
+    match std::fs::symlink_metadata(socket) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("native_terminal_own_server_unknown"),
+    }
 }
 
 /// Checks the agent window name a page asks for: a team agent id, plain letters, digits,
@@ -510,6 +512,26 @@ mod tests {
         std::fs::remove_file(&socket).expect("remove");
         let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
         assert_eq!(engine_socket(socket.as_os_str()), Ok(socket.clone()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_agent_with_its_own_server_socket_is_refused() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let root = root.path();
+        assert_eq!(own_server(root, "team-1"), Ok(false));
+        let agent = crate::bridge::terminal::agent("team-1").expect("agent");
+        let socket = crazyagent::terminal::harness_socket(root, &agent).expect("socket path");
+        let folder = socket.parent().expect("socket folder").to_path_buf();
+        let made = !folder.exists();
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(&socket, b"").expect("plain file");
+        assert_eq!(own_server(root, "team-1"), Ok(true));
+        std::fs::remove_file(&socket).expect("remove");
+        assert_eq!(own_server(root, "team-1"), Ok(false));
+        if made {
+            std::fs::remove_dir(&folder).expect("remove folder");
+        }
     }
 
     #[test]
