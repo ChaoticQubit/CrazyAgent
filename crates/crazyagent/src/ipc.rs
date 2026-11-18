@@ -370,6 +370,32 @@ mod windows_tests {
         assert_eq!(entries(&root), ["pipes"]);
     }
 
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-sec3 #555 N1, leader 08:08): the pipes file carries a
+    /// medium label with no-write-up and no-read-up from its creation, in a root that holds no
+    /// label of its own, so no lower integrity process can open it to read, hold it and so
+    /// block the next start's rename.
+    #[test]
+    fn a_pipes_file_is_labelled_medium_no_read_up_in_an_unlabelled_root() {
+        let (_temp, root) = private_root();
+        let held = private::dir(&root).unwrap();
+        let root_label = private::facts(&held).unwrap().label;
+        assert_eq!(
+            root_label.map_or(Ok(None), |sacl| crazyagent_win_sandbox::dacl::label(&sacl)),
+            Ok(None)
+        );
+        drop(held);
+        publish(&root, "engine.sock").unwrap();
+        let file = private::read_only(&root.join("pipes")).unwrap();
+        let sacl = private::facts(&file)
+            .unwrap()
+            .label
+            .expect("a labelled pipes file");
+        assert_eq!(
+            crazyagent_win_sandbox::dacl::label(&sacl),
+            Ok(Some((0x2000, 0x3)))
+        );
+    }
+
     /// D7 (leader 07:46): a pipes file already in the root that another account owns is
     /// refused and left as it was, never replaced, and nothing is staged beside it.
     #[test]
