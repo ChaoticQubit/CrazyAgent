@@ -1072,7 +1072,7 @@ async fn pump(
                 sending = None;
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
                     Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
-                    Err(error) => eprintln!("terminal_send_refused code={}", plain_code(&error.0)),
+                    Err(error) => refused(&error),
                     Ok(None) => {}
                     Ok(Some(text)) => viewing.heard(text).await,
                 }
@@ -1118,12 +1118,35 @@ async fn pump(
             }
         }
     };
-    if let Some(sending) = sending
-        && let Ok(Ok(Some(text))) = sending.await
-    {
-        viewing.heard(text).await;
-    }
+    finish(sending, viewing).await;
     reason
+}
+
+/// Finishes the send still running when a view ends, so a prompt it took is heard and a
+/// refusal is logged. Takes the send, if any, and the grant. Returns once it finished.
+#[cfg(unix)]
+async fn finish(sending: Option<Sending>, viewing: &impl Viewing) {
+    let Some(sending) = sending else {
+        return;
+    };
+    match sending
+        .await
+        .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
+    {
+        Ok(Some(text)) => viewing.heard(text).await,
+        Ok(None) => {}
+        Err(error) => refused(&error),
+    }
+}
+
+/// Logs a send the host refused with a code that does not end the view, by its plain code
+/// only, so a dropped request is never silent. Takes the host's error. An ended code is the
+/// view's own end, which the pump reports, so it logs nothing for one.
+#[cfg(unix)]
+fn refused(error: &HostError) {
+    if !crate::terminal::ended_code(&error.0) {
+        eprintln!("terminal_send_refused code={}", plain_code(&error.0));
+    }
 }
 
 /// Serves one owner terminal connection: checks the owner and attaches within the attach
