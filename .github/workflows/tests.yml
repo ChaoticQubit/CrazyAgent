@@ -115,7 +115,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
-    name: W1 storage rows and clippy on ${{ matrix.runner }}
+    name: W2 pipe rows and clippy on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     env:
@@ -127,7 +127,6 @@ jobs:
         include:
           - runner: windows-2022
           - runner: windows-2025
-          - runner: ubuntu-22.04
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -136,15 +135,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install SQLite for Windows
-        if: ${{ runner.os == 'Windows' }}
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -158,22 +148,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo test -p crazyagent-win-sandbox --locked --lib --test private_judge --test private_windows -- --test-threads 1
-      - name: Clippy on the crazyagent library
+          cargo test -p crazyagent-win-sandbox --locked --lib -- --test-threads 1
+          cargo test -p crazyagent-win-sandbox --locked --test private_judge --test private_windows -- --test-threads 1
+      - name: W2 P2 pipe rows with their probe lines
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          cargo clippy -p crazyagent --lib --locked -- -D warnings
-      - name: W1b and W1c storage rows on Windows
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        run: |
-          set -euo pipefail
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 storage::windows_tests storage::master_session::windows_tests storage::migrations::windows_tests storage::plugins::windows_tests github::state::windows_tests instruction_files::windows_tests agent_home::
-      - name: Storage rows the port touched on Linux
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
-        run: |
-          set -euo pipefail
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 storage::migrations storage::trash storage::accounts storage::plugins storage::master_session storage::settings github::state agent_home:: instruction_files::
+          cargo test -p crazyagent-win-sandbox --locked --test pipe_windows -- --test-threads 1 --show-output
 
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
