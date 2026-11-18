@@ -1329,8 +1329,8 @@ async fn a_pinned_input_only_view_is_gone_once_its_agents_own_pane_is_another() 
 }
 
 /// V243-NATIVE-INPUT-PIN: a pinned input-only view types, pastes and sizes only its pane,
-/// never by name, takes no prompt, which types by name, and ends as `terminal_ended` at its
-/// first send once that pane is no longer its agent's own.
+/// never by name, and ends as `terminal_ended` at its first send once that pane is no longer
+/// its agent's own. Its prompt has its own row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot() {
     let agent = AgentId::team(1).unwrap();
@@ -1366,7 +1366,6 @@ async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot
             last: true,
         },
         TerminalRequest::Resize { cols: 90, rows: 30 },
-        TerminalRequest::Prompt { text: "hi".into() },
     ] {
         queue.send(request).await.unwrap();
     }

@@ -1499,16 +1499,51 @@ pub fn paste_keys(text: &str) -> Vec<u8> {
 /// the text. Returns whether it was typed; blank or oversized text types nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
     let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| host.input(agent, keys))
+}
+
+/// Types one prompt into the pane a pinned view stays on, as `type_prompt` does by name: the
+/// same keys and Enter, each straight into that pane, never by name. Takes the host, the
+/// terminal name, the pane and the text. Returns as `type_prompt`, or `terminal_agent_unknown`
+/// once that pane is no longer one the host can type into.
+#[cfg(unix)]
+pub(crate) fn type_prompt_at(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+) -> Result<bool, HostError> {
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| {
+        match host.input_at(agent, at, keys)? {
+            true => Ok(()),
+            false => Err(failure("terminal_agent_unknown")),
+        }
+    })
+}
+
+/// Types one prompt's keys as one submission through the given typing: the keys in chunks of
+/// at most `INPUT_BYTES_MAX`, a settle when they went as a paste, then Enter. Takes the text,
+/// whether the app turned bracketed paste on and the typing. Returns whether it was typed;
+/// blank or oversized text types nothing.
+fn prompt_into(
+    text: &str,
+    bracketed: bool,
+    mut typing: impl FnMut(&[u8]) -> Result<(), HostError>,
+) -> Result<bool, HostError> {
     let Some(keys) = prompt_keys(text, bracketed) else {
         return Ok(false);
     };
+    assert!(!keys.is_empty(), "a prompt that types has keys");
     for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        host.input(agent, chunk)?;
+        assert!(chunk.len() <= INPUT_BYTES_MAX);
+        typing(chunk)?;
     }
     if bracketed {
         std::thread::sleep(PASTE_SETTLE);
     }
-    host.input(agent, b"\r")?;
+    typing(b"\r")?;
     Ok(true)
 }
 

@@ -10,6 +10,7 @@ use crate::terminal::{
 #[cfg(unix)]
 use crate::terminal::{
     CHUNK_BYTES_MAX, PASTE_BYTES_MAX, attach_again, paste_keys, type_into, type_prompt,
+    type_prompt_at,
 };
 use tokio::io::AsyncWrite;
 
@@ -628,10 +629,10 @@ async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneA
 }
 
 /// Starts sending one owner request to the host on a blocking thread: typed and wheel keys
-/// into the view's pane, a prompt, or a resize; a pinned view's keys and resize go to its
-/// pane only, and it takes no prompt, which types by name. Takes the host, the agent, the
-/// view's pane, its pin and the request. Returns the send, which answers the prompt's text
-/// once the agent took it as a prompt, none for any other request, or the host's error.
+/// into the view's pane, a prompt, or a resize; a pinned view's keys, prompt and resize go
+/// to its pane only, never by name. Takes the host, the agent, the view's pane, its pin and
+/// the request. Returns the send, which answers the prompt's text once the agent took it as
+/// a prompt, none for any other request, or the host's error.
 #[cfg(unix)]
 fn send(
     host: &Arc<dyn Host>,
@@ -659,8 +660,8 @@ fn send(
         (TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes }, None) => {
             type_into(host.as_ref(), at.as_ref(), &agent, &bytes).map(|()| None)
         }
-        (TerminalRequest::Prompt { .. }, Some(_)) => {
-            Err(HostError("terminal_request_invalid".into()))
+        (TerminalRequest::Prompt { text }, Some(pin)) => {
+            type_prompt_at(host.as_ref(), &agent, pin, &text).map(|heard| heard.then_some(text))
         }
         (TerminalRequest::Prompt { text }, None) => {
             type_prompt(host.as_ref(), &agent, &text).map(|heard| heard.then_some(text))
@@ -1069,7 +1070,11 @@ async fn pump(
                 sending = None;
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
                     Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
-                    Err(_) | Ok(None) => {}
+                    Err(error) => {
+                        let code = crate::protocol::plain_code(&error.0);
+                        eprintln!("terminal_send_refused code={code}");
+                    }
+                    Ok(None) => {}
                     Ok(Some(text)) => viewing.heard(text).await,
                 }
             },
