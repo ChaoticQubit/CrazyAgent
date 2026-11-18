@@ -2915,6 +2915,97 @@ fn a_run_and_its_own_fix_ending_in_one_read_lead_with_the_fix_outcome() {
     }
 }
 
+/// Runs setup with this screen's own Graphify permission fix and ends both in one status
+/// read, the fixed tool reading `ended`. Inputs: first run or Settings, whether serena (never
+/// installed by the run) is ticked first, and the tool's state at the end. Output: the shell
+/// after that read.
+fn run_and_fix_in_one_read(first: bool, serena: bool, ended: DependencyState) -> Shell {
+    let mut shell = if first {
+        first_run(120, 36)
+    } else {
+        settings(120, 36)
+    };
+    shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+        crate::setup::RefusedTool::FixButton,
+    )))));
+    if serena {
+        for _ in 0..5 {
+            shell.key(Key::Down);
+        }
+        shell.key(Key::Char(' '));
+    }
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Run { .. })),
+        "first run {first}, serena {serena}"
+    );
+    shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+    jobs(&mut shell);
+    shell.key(Key::Char('p'));
+    shell.key(Key::Char('y'));
+    fix_sent(&mut shell);
+    shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+    jobs(&mut shell);
+    let mut done = installed_status();
+    done.dependencies[2].state = ended;
+    shell.arrive(event(AppSetupEvent::Status(Ok(done))));
+    shell
+}
+
+/// V243-SETUP-TUI-SAME-READ (#523 rv-code r2 F1): when one read ends this screen's own fix and
+/// a run that left items uninstalled, the fix's line leads and the run's failure stays under
+/// it as a warning that does not clear, whether the fix worked or the tool is still not used.
+#[test]
+fn a_fix_ending_with_a_run_that_left_items_keeps_the_run_failure_under_its_line() {
+    let missing = DependencyState::Missing {
+        line: String::new(),
+    };
+    let fixed = installed_status().dependencies[2].state.clone();
+    let changed = "Permissions changed, but Graphify command is still not used.";
+    let works = "Permissions fixed. Graphify command can run now.";
+    for (first, ended, line, rest) in [
+        (
+            true,
+            missing.clone(),
+            changed,
+            "Setup finished, but 1 item did not install. See the reasons below.",
+        ),
+        (
+            false,
+            missing,
+            changed,
+            "Setup finished, but 2 items did not install. See the reasons below.",
+        ),
+        (
+            false,
+            fixed,
+            works,
+            "Setup finished, but 1 item did not install. See the reasons below.",
+        ),
+    ] {
+        let shell = run_and_fix_in_one_read(first, !first, ended);
+        let said = shell.ctx.message().expect("a message shows").clone();
+        assert_eq!(said.lead, line, "first run {first}");
+        assert_eq!(said.rest, rest, "first run {first}, lead {line}");
+        assert_eq!(said.tone, crate::tui::frame::Tone::Warning, "{said:?}");
+    }
+}
+
+/// V243-SETUP-TUI-SAME-READ (#523 rv-code r2 F2): in Settings, when one read ends this screen's
+/// own working fix and a run that installed everything, the fix's line is the last word and
+/// "Setup finished." never replaces it.
+#[test]
+fn in_settings_a_fix_ending_with_a_run_that_installed_everything_keeps_its_line() {
+    let fixed = installed_status().dependencies[2].state.clone();
+    let shell = run_and_fix_in_one_read(false, false, fixed);
+    assert_eq!(
+        lead(&shell),
+        "Permissions fixed. Graphify command can run now."
+    );
+}
+
 /// V243-SETUP-TUI-FIX-PENDING (#381 F3 r2): in Settings a run that ends while this screen's
 /// own permission fix runs says so at once, and the fix's outcome, said when it ends, is the
 /// last word, never overwritten by the run's end.
