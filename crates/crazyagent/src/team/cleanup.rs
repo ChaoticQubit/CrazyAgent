@@ -1744,6 +1744,8 @@ fn open_up<P: rustix::path::Arg + Copy>(
     open_up_step(OpenUpPoint::Start, &name);
     let found = match rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::ACCESS) => {
+            #[cfg(all(test, target_os = "macos"))]
+            open_up_step(OpenUpPoint::BeforeClear, &name);
             clear_refused_acl(parent.as_fd(), name)?;
             rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?
         }
@@ -1791,12 +1793,14 @@ fn clear_refused_acl<P: rustix::path::Arg>(
     Err(rustix::io::Errno::ACCESS)
 }
 
-/// Where in [`open_up`] a cleanup test's step ([`OPEN_UP_STEP`]) runs: as it starts, or
-/// just before it changes the entry's mode.
+/// Where in [`open_up`] a cleanup test's step ([`OPEN_UP_STEP`]) runs: as it starts, once a
+/// deny entry refused its look and before it clears that ACL, or just before it changes the
+/// entry's mode.
 #[cfg(all(test, target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenUpPoint {
     Start,
+    BeforeClear,
     BeforeMode,
 }
 
@@ -1852,6 +1856,11 @@ thread_local! {
     /// owner's file meanwhile. Runs once; None runs nothing.
     pub(super) static OPEN_UP_STEP: std::cell::RefCell<Option<OpenUpStep>> =
         const { std::cell::RefCell::new(None) };
+
+    /// How many looks [`open_up`] took on this thread after clearing the ACL of an entry
+    /// whose look a deny entry refused that showed no folder, each reported as
+    /// `cleanup_open_up_swapped`, so a row can see the report.
+    pub(super) static OPEN_UP_SWAPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A step a cleanup test runs in [`open_up`] ([`OPEN_UP_STEP`]): where, for which entry
