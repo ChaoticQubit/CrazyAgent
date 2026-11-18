@@ -18,6 +18,8 @@ mod flow;
 mod git;
 #[cfg(unix)]
 pub(crate) use git::owner_excludes_setting;
+#[cfg(unix)]
+pub(crate) use git::{OPEN_VERSION_MIN, refuse_older, version_numbers};
 mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;
