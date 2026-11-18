@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::{Admission, OwnerData, OwnerProvenance, OwnerResult, is_hex_id};
 use crate::protocol::{ConfigId, Cursor, FRAME_BYTES_MAX, Outcome, ProjectId, RequestId};
-use rusqlite::{Row, Transaction, params};
+use rusqlite::{OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 
 pub const TEXT_BYTES_MAX: usize = 8192;
@@ -236,11 +236,22 @@ pub(crate) fn apply(
         )
         .map_err(error)?;
     if count >= ENTRIES_MAX as i64 {
-        tx.execute(
-            "DELETE FROM conversation_entries WHERE project=?1 AND event_cursor=(SELECT c.event_cursor FROM conversation_entries c WHERE c.project=?1 AND NOT (c.kind='brief' AND c.brief_version=(SELECT MAX(brief_version) FROM conversation_entries WHERE project=?1 AND kind='brief')) AND NOT EXISTS(SELECT 1 FROM master_turns t WHERE t.input=c.event_cursor) ORDER BY c.event_cursor LIMIT 1)",
+        let oldest: Option<i64> = tx.query_row(
+            "SELECT c.event_cursor FROM conversation_entries c WHERE c.project=?1 AND NOT (c.kind='brief' AND c.brief_version=(SELECT MAX(brief_version) FROM conversation_entries WHERE project=?1 AND kind='brief')) AND NOT EXISTS(SELECT 1 FROM master_turns t WHERE t.input=c.event_cursor) ORDER BY c.event_cursor LIMIT 1",
             [project.as_str()],
+            |r| r.get(0),
         )
+        .optional()
         .map_err(error)?;
+        if let Some(oldest) = oldest {
+            let cursor = u64::try_from(oldest).map_err(error)?;
+            crate::sessions_log::mark_entry(tx, project.as_str(), cursor)?;
+            tx.execute(
+                "DELETE FROM conversation_entries WHERE project=?1 AND event_cursor=?2",
+                params![project.as_str(), oldest],
+            )
+            .map_err(error)?;
+        }
     }
     let next = revision
         .checked_add(1)
@@ -253,6 +264,7 @@ pub(crate) fn apply(
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
+    crate::sessions_log::mark_entry(tx, project.as_str(), next)?;
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }

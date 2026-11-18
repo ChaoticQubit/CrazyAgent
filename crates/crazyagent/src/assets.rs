@@ -114,7 +114,18 @@ pub(crate) fn is_mutation(action: &AssetAction) -> bool {
     !matches!(action, AssetAction::Read { .. })
 }
 
+/// Runs one asset action in a savepoint, so an action that does not apply leaves no row
+/// (v2.5 L8 E5). Inputs: the transaction, the config and the action. Output: the action's
+/// outcome, or the store's refusal.
 pub(crate) fn execute(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    action: &AssetAction,
+) -> Result<Outcome, EngineError> {
+    crate::memory::log::atomic(tx, || act(tx, config, action))
+}
+
+fn act(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &AssetAction,

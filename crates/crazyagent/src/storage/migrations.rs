@@ -9,9 +9,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod landing_step;
+mod memory_step;
 mod settings_step;
 #[cfg(test)]
 mod tests;
+mod worktrees_step;
 
 /// The folder beside engine.db that holds one folder per upgrade backup, each with a full
 /// engine.db copy and the settings texts kept with it, and the dated copies a restore keeps
@@ -106,7 +108,7 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 13,
-        run: worktrees_on_the_log,
+        run: worktrees_step::worktrees_on_the_log,
     },
     Step {
         to: 14,
@@ -114,24 +116,17 @@ pub(crate) const STEPS: &[Step] = &[
     },
     Step {
         to: 15,
+        run: memory_step::memory_on_the_log,
+    },
+    Step {
+        to: 16,
+        run: settings_step::sessions_on_the_log,
+    },
+    Step {
+        to: 17,
         run: landing_step::landing_on_the_log,
     },
 ];
-
-/// Step 13 (v2.5 L6): the worktrees aggregate goes on the state log. Worktree rows written
-/// before the log reach replay through one snapshot run, appended through the open's proof
-/// since no engine host runs during an upgrade; a store with no worktree row gets none.
-/// Input: the open upgrade transaction. Output: Ok or the log's refusal.
-fn worktrees_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
-    let at_ms = crate::state_log::replay::Clock::System.now_ms();
-    let opening = super::opening::Opening::new(at_ms);
-    crate::worktrees::log::first_run(tx, opening)?;
-    assert!(
-        !tx.is_autocommit(),
-        "a step leaves the upgrade transaction open"
-    );
-    Ok(())
-}
 
 /// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step
 /// shipped: a wider record needs a step of its own, which the check below demands at build

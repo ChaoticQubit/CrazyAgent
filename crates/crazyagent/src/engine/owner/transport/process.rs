@@ -1463,7 +1463,7 @@ fn save_agent_text(
     let writer = Writer::Owner {
         force_after_conflict: opened.is_some(),
     };
-    match crate::storage::agent_text::save(&tx, project, agent, text, version, &writer) {
+    match crate::sessions_log::agent_text(&tx, project, agent, text, version, &writer) {
         Ok(next) => {
             tx.commit().map_err(|_| unknown())?;
             assert_eq!(next, version + 1);

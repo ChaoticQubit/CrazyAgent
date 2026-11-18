@@ -331,10 +331,10 @@ fn a_project_removed_body_holds_only_its_project_and_whether_notes_are_kept() {
 }
 
 /// v2.5 L14a: Remove from dashboard logs one `ProjectRemoved` at the request's new
-/// revision, with the notes kept, and its projection leaves the project no row in any area
-/// but its working agent's; the other project keeps all of its rows. Replaying the log into
-/// a copy taken before the removal rebuilds every area equal, and a projection that skips
-/// the removal does not.
+/// revision, with the notes kept, then (v2.5 L13) its agent texts dropped at the same
+/// revision, and its projection leaves the project no row in any area but its working
+/// agent's; the other project keeps all of its rows. Replaying the log into a copy taken
+/// before the removal rebuilds every area equal, and a projection that skips it does not.
 #[test]
 fn remove_from_dashboard_logs_project_removed_and_its_replay_leaves_no_row_of_the_project() {
     let mut s = store();
@@ -352,13 +352,14 @@ fn remove_from_dashboard_logs_project_removed_and_its_replay_leaves_no_row_of_th
     assert_eq!(applied.result, OwnerResult::Applied);
 
     let events = logged(&s.db);
-    assert_eq!(events.len(), 1, "one removal, one event");
+    assert_eq!(events.len(), 2, "the removal, then its agent texts dropped");
     let (seq, aggregate, kind, revision, body) = &events[0];
     assert_eq!(
         (aggregate.as_str(), kind.as_str(), *revision as u64),
         ("projects", event::KIND, applied.current_revision.value())
     );
     assert_eq!(body.as_slice(), br#"{"project":"removed","kept":true}"#);
+    texts_dropped_with(&events[1], *revision);
     assert_eq!(held(&s.db, REMOVED, 10), kept_after_removal());
     assert_eq!(held(&s.db, OTHER, 20), SEEDED.to_vec());
 
@@ -379,8 +380,28 @@ fn remove_from_dashboard_logs_project_removed_and_its_replay_leaves_no_row_of_th
     );
 }
 
+/// The sessions event a removal of [`REMOVED`] logs after its own (v2.5 L13): its three
+/// agents' own instructions dropped, at the removal's revision, ids only. Inputs: the
+/// logged event and the removal's revision. Output: none.
+fn texts_dropped_with(logged: &(i64, String, String, i64, Vec<u8>), revision: i64) {
+    let (_, aggregate, kind, at, body) = logged;
+    assert_eq!(
+        (aggregate.as_str(), kind.as_str(), *at),
+        (
+            "sessions",
+            crate::sessions_log::KIND_TEXTS_DROPPED,
+            revision
+        )
+    );
+    assert_eq!(
+        body.as_slice(),
+        br#"{"project":"removed","agents":[10,11,12]}"#
+    );
+}
+
 /// v2.5 L14a: Delete everything, its disk effect done, logs one `ProjectRemoved` with the
-/// notes forgotten, and the projection clears the same areas.
+/// notes forgotten, then its agent texts dropped (v2.5 L13), and the projection clears the
+/// same areas.
 #[test]
 fn delete_everything_logs_project_removed_with_its_notes_forgotten() {
     let mut s = store();
@@ -404,13 +425,14 @@ fn delete_everything_logs_project_removed_with_its_notes_forgotten() {
     .unwrap();
     assert_eq!(applied.result, OwnerResult::Applied);
     let events = logged(&s.db);
-    assert_eq!(events.len(), 1, "one removal, one event");
+    assert_eq!(events.len(), 2, "the removal, then its agent texts dropped");
     let (_, aggregate, kind, revision, body) = &events[0];
     assert_eq!(
         (aggregate.as_str(), kind.as_str(), *revision as u64),
         ("projects", event::KIND, applied.current_revision.value())
     );
     assert_eq!(body.as_slice(), br#"{"project":"removed","kept":false}"#);
+    texts_dropped_with(&events[1], *revision);
     assert_eq!(held(&s.db, REMOVED, 10), kept_after_removal());
 }
 

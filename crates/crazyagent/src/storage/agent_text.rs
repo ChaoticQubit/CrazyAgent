@@ -102,7 +102,9 @@ pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), E
     Ok(())
 }
 
-fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
+/// Makes the agent texts table when it is missing, for a save and for the sessions replay
+/// (v2.5 L13). Input: the transaction. Output: Ok, or `versioned_unavailable`.
+pub(crate) fn ensure(tx: &Transaction<'_>) -> Result<(), EngineError> {
     if exists(tx)? {
         return Ok(());
     }

@@ -9,6 +9,12 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod agent;
+mod read;
+
+pub(crate) use agent::{agent_remember, agent_scope, agent_writes, recall};
+pub(crate) use read::{approved_for_project, get, page};
+
 pub const NOTE_BYTES_MAX: usize = 2000;
 pub const CONTEXT_PATH_BYTES_MAX: usize = 512;
 pub const SEARCH_BYTES_MAX: usize = 100;
@@ -467,18 +473,34 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
-const ORPHAN_AGENT_ROW: &str = "project IS NOT NULL
-    AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)
-    AND (CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind') END)='agent'";
+/// A memory library row of a project the engine no longer records.
+const ORPHANED: &str = "project IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)";
+
+/// A memory library row an agent saved with its `remember` tool.
+const AGENT_ORIGIN: &str =
+    "(CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind') END)='agent'";
 
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    connection.execute_batch(TABLE).map_err(error)?;
-    let forgotten = forget_orphan_agent_memories(connection)?;
-    if forgotten > 0 {
-        eprintln!("memory_orphan_agent_rows_removed count={forgotten}");
-    }
-    Ok(())
+    connection.execute_batch(TABLE).map_err(error)
+}
+
+/// Deletes the memories agents saved for one project, as its removal does whether or not
+/// its notes are kept (v2.5 L8 R1). Inputs: the open transaction and the project. Output:
+/// the rows deleted.
+pub(crate) fn forget_agent_memories(
+    connection: &rusqlite::Connection,
+    project: &ProjectId,
+) -> Result<usize, EngineError> {
+    let forgotten = connection
+        .execute(
+            &format!("DELETE FROM memory_library WHERE project=?1 AND {AGENT_ORIGIN}"),
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    assert!(!connection.is_autocommit(), "a removal runs in its request");
+    Ok(forgotten)
 }
 
 /// Deletes the memories agents saved for projects CrazyAgent no longer has, so a trial or
@@ -491,7 +513,7 @@ pub(crate) fn forget_orphan_agent_memories(
 ) -> Result<usize, EngineError> {
     let orphans: i64 = connection
         .query_row(
-            &format!("SELECT COUNT(*) FROM memory_library WHERE {ORPHAN_AGENT_ROW}"),
+            &format!("SELECT COUNT(*) FROM memory_library WHERE {ORPHANED} AND {AGENT_ORIGIN}"),
             [],
             |row| row.get(0),
         )
@@ -501,7 +523,7 @@ pub(crate) fn forget_orphan_agent_memories(
     }
     let forgotten = connection
         .execute(
-            &format!("DELETE FROM memory_library WHERE {ORPHAN_AGENT_ROW}"),
+            &format!("DELETE FROM memory_library WHERE {ORPHANED} AND {AGENT_ORIGIN}"),
             [],
         )
         .map_err(error)?;
@@ -540,7 +562,19 @@ fn rejected(code: &str) -> Result<Outcome, EngineError> {
 /// Applies one owner change to saved memory inside the owner transaction.
 /// Input: the transaction, current config, the action and the current revision.
 /// Output: Applied, or a plain rejection that leaves storage unchanged.
+/// Runs one owner library action in a savepoint, so an action that does not apply leaves
+/// no row (v2.5 L8 E5). Inputs: the transaction, the config, the action and the request's
+/// revision. Output: the action's outcome, or the store's refusal.
 pub(crate) fn execute(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    action: &LibraryAction,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    super::log::atomic(tx, || act(tx, config, action, revision))
+}
+
+fn act(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
     action: &LibraryAction,
@@ -713,137 +747,6 @@ fn set_agent_scope(tx: &Transaction<'_>, scope: AgentScope) -> Result<Outcome, E
     .map_err(error)?;
     assert_eq!(agent_scope(tx)?, scope);
     Ok(Outcome::Applied)
-}
-
-/// Reads the owner's Where agents save memories setting, This project only until the owner
-/// chose. Input: the engine connection. Output: the choice.
-pub(crate) fn agent_scope(connection: &rusqlite::Connection) -> Result<AgentScope, EngineError> {
-    let stored: Option<String> = connection
-        .query_row(
-            "SELECT scope FROM memory_agent_scope WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    Ok(match stored.as_deref() {
-        Some("agent") => AgentScope::Agent,
-        _ => AgentScope::Project,
-    })
-}
-
-/// Reads the owner's Agent memory writes setting, Save directly until the owner chose.
-/// Input: the engine connection. Output: the choice.
-pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWrites, EngineError> {
-    let stored: Option<String> = connection
-        .query_row(
-            "SELECT agent_writes FROM memory_settings WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    Ok(match stored.as_deref() {
-        Some("ask") => AgentWrites::Ask,
-        _ => AgentWrites::Save,
-    })
-}
-
-/// Saves one memory an agent gave with its `remember` tool, with the agent named as its
-/// origin: held for the owner's approval under Ask me first, else saved at once, and an
-/// app-wide ask kept in the agent's project under This project only. The text is untrusted
-/// and checked like a hand-written note. Inputs: the engine connection, the agent's project,
-/// its label, whether it asked for app-wide and the text. Output: what was stored, or a
-/// refusal code `plain_problem` explains.
-pub(crate) fn agent_remember(
-    connection: &mut rusqlite::Connection,
-    project: &ProjectId,
-    agent: &str,
-    app: bool,
-    text: &str,
-) -> Result<Result<AgentSaved, String>, EngineError> {
-    let text = text.trim();
-    if let Err(problem) = validate_note(text) {
-        return Ok(Err(problem.0));
-    }
-    let agent = agent.trim();
-    if agent.is_empty()
-        || agent.len() > AGENT_LABEL_BYTES_MAX
-        || agent.chars().any(char::is_control)
-    {
-        return Ok(Err("memory_agent_invalid".into()));
-    }
-    let tx = connection
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(error)?;
-    if !project_exists(&tx, project)? {
-        return Ok(Err("memory_project_missing".into()));
-    }
-    let narrowed = app && agent_scope(&tx)? == AgentScope::Project;
-    let scope = if app && !narrowed {
-        MemoryScope::Global
-    } else {
-        MemoryScope::Project {
-            project_id: project.clone(),
-        }
-    };
-    let digest = hash(format!("agent\n{}\n{text}", scope.project().unwrap_or("")).as_bytes());
-    let id = RequestId::new(format!("agent-{}", &digest[..32])).map_err(error)?;
-    if let Some(code) = blocked(&tx, &id, &scope, text, "memory_duplicate")? {
-        return Ok(Err(code.into()));
-    }
-    let ask = agent_writes(&tx)? == AgentWrites::Ask;
-    let origin = if ask {
-        MemoryOrigin::Requested {
-            agent: agent.into(),
-        }
-    } else {
-        MemoryOrigin::Agent {
-            agent: agent.into(),
-        }
-    };
-    insert(&tx, &id, &scope, &origin, text)?;
-    tx.commit().map_err(error)?;
-    assert!(!narrowed || scope.project().is_some());
-    Ok(Ok(AgentSaved {
-        waiting: ask,
-        narrowed,
-    }))
-}
-
-/// Finds the saved memories an agent of a project may read for its `recall` tool: the
-/// project's and the app-wide ones not waiting for the owner's approval, whose text holds
-/// the query, newest first, at most `RECALL_ITEMS_MAX`. Inputs: the engine connection, the
-/// project and the untrusted query, blank for the newest. Output: the memories, or a refusal
-/// code for a query that is not one line of up to 100 bytes.
-pub(crate) fn recall(
-    connection: &mut rusqlite::Connection,
-    project: &ProjectId,
-    query: &str,
-) -> Result<Result<Vec<SavedMemory>, String>, EngineError> {
-    let query = query.trim();
-    let search = (!query.is_empty()).then_some(query);
-    if let Err(problem) = validate_page(search, PAGE_ITEMS_MAX) {
-        return Ok(Err(problem.0));
-    }
-    let tx = connection.transaction().map_err(error)?;
-    let mut found = Vec::new();
-    for scope in [
-        MemoryScope::Project {
-            project_id: project.clone(),
-        },
-        MemoryScope::Global,
-    ] {
-        found.extend(
-            scoped(&tx, &scope, search, None, SCOPE_ITEMS_MAX)?
-                .into_iter()
-                .filter(|memory| !memory.origin.waiting() && !super::hidden_text(&memory.text)),
-        );
-    }
-    found.sort_by_key(|memory| std::cmp::Reverse(memory.ordinal));
-    found.truncate(RECALL_ITEMS_MAX);
-    assert!(found.iter().all(|memory| !memory.origin.waiting()));
-    Ok(Ok(found))
 }
 
 fn save_selection(
@@ -1288,130 +1191,6 @@ fn forget(
     Ok(Outcome::Applied)
 }
 
-fn row(
-    ordinal: i64,
-    id: String,
-    project: Option<String>,
-    origin: String,
-    text: String,
-) -> Result<SavedMemory, EngineError> {
-    let scope = match project {
-        None => MemoryScope::Global,
-        Some(project) => MemoryScope::Project {
-            project_id: ProjectId::new(project).map_err(error)?,
-        },
-    };
-    let memory = SavedMemory {
-        id: RequestId::new(id).map_err(error)?,
-        ordinal: u64::try_from(ordinal).map_err(error)?,
-        scope,
-        origin: serde_json::from_str(&origin).map_err(error)?,
-        text,
-    };
-    assert!(memory.ordinal > 0);
-    assert!(!memory.text.is_empty() && memory.text.len() <= TEXT_BYTES_MAX);
-    Ok(memory)
-}
-
-/// Reads one saved memory by id for the owner's detail view.
-/// Input: the transaction and memory id. Output: the memory, or None once deleted.
-pub(crate) fn get(
-    tx: &Transaction<'_>,
-    id: &RequestId,
-) -> Result<Option<SavedMemory>, EngineError> {
-    tx.query_row(
-        "SELECT ordinal,id,project,origin,text FROM memory_library WHERE id=?1",
-        [id.as_str()],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-    )
-    .optional()
-    .map_err(error)?
-    .map(|(ordinal, id, project, origin, text)| row(ordinal, id, project, origin, text))
-    .transpose()
-}
-
-fn scoped(
-    tx: &Transaction<'_>,
-    scope: &MemoryScope,
-    search: Option<&str>,
-    before: Option<u64>,
-    limit: usize,
-) -> Result<Vec<SavedMemory>, EngineError> {
-    assert!(limit <= SCOPE_ITEMS_MAX + 1);
-    let before = before.map_or(i64::MAX, |n| i64::try_from(n).unwrap_or(i64::MAX));
-    let mut statement = tx
-        .prepare(
-            "SELECT ordinal,id,project,origin,text FROM memory_library
-            WHERE project IS ?1 AND ordinal<?2 AND (?3 IS NULL OR instr(lower(text),lower(?3))>0)
-            ORDER BY ordinal DESC LIMIT ?4",
-        )
-        .map_err(error)?;
-    let rows = statement
-        .query_map(
-            params![scope.project(), before, search, limit as i64],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .map_err(error)?;
-    let mut items = Vec::new();
-    for found in rows {
-        let (ordinal, id, project, origin, text) = found.map_err(error)?;
-        items.push(row(ordinal, id, project, origin, text)?);
-    }
-    assert!(items.len() <= limit);
-    assert!(
-        items
-            .windows(2)
-            .all(|pair| pair[0].ordinal > pair[1].ordinal)
-    );
-    Ok(items)
-}
-
-/// Lists saved memories in one scope, newest first, with optional search.
-/// Input: scope, case-insensitive search text, the `next` cursor of the previous
-/// page and the page size. Output: owner data holding one bounded page.
-pub(crate) fn page(
-    tx: &Transaction<'_>,
-    scope: &MemoryScope,
-    search: Option<&str>,
-    before: Option<u64>,
-    limit: u8,
-) -> Result<OwnerData, EngineError> {
-    validate_page(search, limit)?;
-    if let MemoryScope::Project { project_id } = scope
-        && !project_exists(tx, project_id)?
-    {
-        return Err(error("memory_project_missing"));
-    }
-    let found = scoped(tx, scope, search, before, usize::from(limit) + 1)?;
-    let mut items = Vec::new();
-    let mut bytes = 0;
-    let mut more = found.len() > usize::from(limit);
-    for memory in found.into_iter().take(usize::from(limit)) {
-        let size = serde_json::to_vec(&memory).map_err(error)?.len() + 1;
-        if bytes + size > PAGE_BYTES_MAX {
-            more = true;
-            break;
-        }
-        bytes += size;
-        items.push(memory);
-    }
-    let next = if more {
-        items.last().map(|memory| memory.ordinal)
-    } else {
-        None
-    };
-    assert!(items.len() <= usize::from(limit));
-    assert!(bytes <= PAGE_BYTES_MAX);
-    Ok(OwnerData::Memories {
-        page: MemoryPage {
-            items,
-            next,
-            agent_writes: agent_writes(tx)?,
-            agent_scope: agent_scope(tx)?,
-        },
-    })
-}
-
 fn rendered_item(text: &str) -> String {
     format!("- {}\n", text.trim().replace('\n', "\n  "))
 }
@@ -1444,91 +1223,6 @@ impl Collector {
         });
         assert!(self.bytes <= LAUNCH_BYTES_MAX);
     }
-}
-
-fn kept_research(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-) -> Result<Vec<KnowledgeEntry>, EngineError> {
-    let mut statement = tx
-        .prepare(
-            "SELECT e.body FROM knowledge_heads h JOIN knowledge_entries e ON h.id=e.id AND h.version=e.version
-            WHERE h.project=?1 ORDER BY h.id LIMIT ?2",
-        )
-        .map_err(error)?;
-    let rows = statement
-        .query_map(params![project.as_str(), RESEARCH_ROWS_MAX], |r| {
-            r.get::<_, String>(0)
-        })
-        .map_err(error)?;
-    let mut entries = Vec::new();
-    for body in rows {
-        let entry: KnowledgeEntry = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
-        entry.assert_consistent();
-        if entry.status == KnowledgeStatus::Confirmed && live_entry(tx, &entry)? {
-            entries.push(entry);
-        }
-    }
-    entries.sort_by_key(|a| std::cmp::Reverse(a.revision.value()));
-    assert!(entries.iter().all(|e| &e.project_id == project));
-    Ok(entries)
-}
-
-fn kind_of(origin: &MemoryOrigin) -> ApprovedKind {
-    match origin {
-        MemoryOrigin::Written
-        | MemoryOrigin::Imported { .. }
-        | MemoryOrigin::Agent { .. }
-        | MemoryOrigin::Requested { .. } => ApprovedKind::Note,
-        MemoryOrigin::Promoted { .. } => ApprovedKind::Promoted,
-        MemoryOrigin::Selected { .. } => ApprovedKind::Selection,
-    }
-}
-
-/// Returns the bounded owner-approved memories an agent in this project may read.
-/// Input: the engine transaction and project id. Output: project notes and kept
-/// project research first, then global memory, newest first, within the launch bounds.
-/// A memory saved before the hidden-text check that still holds hidden characters is
-/// never delivered.
-pub(crate) fn approved_for_project(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-) -> Result<ApprovedMemories, EngineError> {
-    let mut collector = Collector {
-        items: Vec::new(),
-        seen: BTreeSet::new(),
-        bytes: 0,
-        complete: true,
-    };
-    let local = MemoryScope::Project {
-        project_id: project.clone(),
-    };
-    for memory in scoped(tx, &local, None, None, SCOPE_ITEMS_MAX)?
-        .into_iter()
-        .filter(|memory| !memory.origin.waiting())
-    {
-        collector.push(
-            ApprovedScope::Project,
-            kind_of(&memory.origin),
-            &memory.text,
-        );
-    }
-    for entry in kept_research(tx, project)? {
-        collector.push(ApprovedScope::Project, ApprovedKind::Research, &entry.text);
-    }
-    for memory in scoped(tx, &MemoryScope::Global, None, None, SCOPE_ITEMS_MAX)?
-        .into_iter()
-        .filter(|memory| !memory.origin.waiting())
-    {
-        collector.push(ApprovedScope::Global, kind_of(&memory.origin), &memory.text);
-    }
-    let memories = ApprovedMemories {
-        items: collector.items,
-        complete: collector.complete,
-    };
-    assert!(memories.items.len() <= LAUNCH_ITEMS_MAX);
-    assert!(memories.render().len() <= LAUNCH_BYTES_MAX + RENDER_HEADER_BYTES_MAX);
-    Ok(memories)
 }
 
 #[cfg(all(test, unix))]

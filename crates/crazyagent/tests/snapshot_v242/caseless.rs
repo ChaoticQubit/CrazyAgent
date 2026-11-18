@@ -186,20 +186,48 @@ pub(super) fn escaped_name(text: &str) -> (String, usize) {
     (name, at)
 }
 
+/// The Data volume firmlink, read back in lowercase, that a path below it may be spelled
+/// after.
+const FIRMLINK: &str = "/system/volumes/data";
+
+/// Says whether text ends in the /System/Volumes/Data firmlink in plain letters of any case,
+/// starting a path, so a folder written right after it starts the path the firmlink leads to.
+/// Input: the text before a place. Output: true when it ends that way.
+pub(super) fn ends_in_firmlink(text: &str) -> bool {
+    let Some(start) = text.len().checked_sub(FIRMLINK.len()) else {
+        return false;
+    };
+    text.is_char_boundary(start)
+        && text[start..].eq_ignore_ascii_case(FIRMLINK)
+        && !text[..start].chars().next_back().is_some_and(inside_path)
+}
+
 /// Finds a caseless spelling that still names a user folder or a path below a temp folder
 /// once read back, the per-user temp parents below /var/folders included, which the plain
-/// checks cannot see. Input: the text. Output: the kind of path it holds, never the path,
-/// or none.
+/// checks cannot see; a path read below the /System/Volumes/Data firmlink, with or without
+/// an optional group around it, is checked as the path it leads to. Input: the text. Output:
+/// the kind of path it holds, never the path, or none.
 pub(super) fn private(text: &str) -> Option<String> {
     for (at, _) in text.match_indices('/') {
         if text[..at].chars().next_back().is_some_and(inside_path) {
             continue;
         }
         let read = unspell(&text[at..]);
-        if !read.folded {
+        let mut whole: String = read.plain.iter().collect();
+        let mut folded = read.folded;
+        let end = at + read.ends.last().copied().unwrap_or(0);
+        if whole == FIRMLINK && text[end..].starts_with(")/") {
+            let below = unspell(&text[end + 1..]);
+            whole.extend(below.plain.iter());
+            folded |= below.folded;
+        }
+        if !folded {
             continue;
         }
-        let plain: String = read.plain.iter().collect();
+        let plain = whole
+            .strip_prefix(FIRMLINK)
+            .filter(|rest| rest.starts_with('/'))
+            .unwrap_or(&whole);
         if ["/users/", "/home/"]
             .iter()
             .any(|folder| plain.starts_with(folder))
@@ -393,6 +421,17 @@ fn a_caseless_user_or_per_user_temp_path_is_refused_and_a_masked_one_is_not() {
         ),
         format!("\"{}((s|S|ſ)|ß)?\"", spell("/var/folders/ab")),
         format!("\"^{}/.+\"", spell("/private/tmp/ca-p5-home-Ab12")),
+        format!("\"^{}/x\"", spell("/System/Volumes/Data/Users/someone")),
+        format!(
+            "\"^({}){}/x\"",
+            spell("/System/Volumes/Data"),
+            spell("/Users/someone")
+        ),
+        format!(
+            "\"^({}){}\"",
+            spell("/System/Volumes/Data"),
+            spell("/private/var/folders/_c/ab12/T")
+        ),
     ] {
         assert!(private(&leak).is_some(), "{leak}");
         assert!(
@@ -404,8 +443,61 @@ fn a_caseless_user_or_per_user_temp_path_is_refused_and_a_masked_one_is_not() {
         format!("\"<path-1>{}\"", spell("/home/x")),
         format!("\"{}\"", spell("/private/var/folders")),
         format!("\"{}\"", spell("/Applications/Xcode.app")),
+        format!("\"^{}\"", spell("/System/Volumes/Data")),
         "\"/Users-like plain text\"".to_owned(),
     ] {
         assert_eq!(private(&clean), None, "{clean}");
     }
+}
+
+#[test]
+fn a_plain_firmlink_user_path_is_refused_and_a_firmlink_temp_path_masks_as_its_plain_spelling() {
+    let names = (Some("/Users/owner"), Some("owner"));
+    for leak in [
+        "\"/System/Volumes/Data/Users/someone/x\"",
+        "\"/system/volumes/data/home/someone/x\"",
+    ] {
+        assert!(
+            super::refuse_private(leak, names.0, names.1).is_err(),
+            "{leak}"
+        );
+    }
+    for clean in [
+        "\"/System/Volumes/Data\"",
+        "\"/System/Volumes/Data/Applications/x\"",
+        "\"/opt/System/Volumes/Data/Users/x\"",
+    ] {
+        assert_eq!(
+            super::refuse_private(clean, names.0, names.1),
+            Ok(()),
+            "{clean}"
+        );
+    }
+    let real = std::env::temp_dir().canonicalize().unwrap();
+    let real = real.to_string_lossy();
+    let entry = ".tmpAb12st";
+    let text = normalise(&json!([
+        format!("/System/Volumes/Data{real}/{entry}/x"),
+        format!(
+            "(regex #\"^/System/Volumes/Data{}/{}/y(/.*)?$\")",
+            spell(&real),
+            spell(entry)
+        ),
+    ]))
+    .unwrap();
+    assert!(
+        text.contains("\"/System/Volumes/Data<path-1>/x\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("^/System/Volumes/Data<path-1>/y(/.*)?$"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("tmpAb12st") && !text.contains("var/folders"),
+        "{text}"
+    );
+    assert_eq!(super::refuse_private(&text, names.0, names.1), Ok(()));
+    assert!(ends_in_firmlink("x /System/Volumes/Data") && ends_in_firmlink("/SYSTEM/volumes/data"));
+    assert!(!ends_in_firmlink("/opt/System/Volumes/Data") && !ends_in_firmlink("Data"));
 }

@@ -511,16 +511,17 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
     let base = root.path().canonicalize().unwrap();
     let database = base.join("engine.db");
     let config = crazyagent::config::resolve_config(&base.join("g"), &base.join("p")).unwrap();
-    tokio::runtime::Builder::new_current_thread()
+    let host = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async {
-            let engine = crazyagent::engine::Engine::open(&database, config)
-                .await
-                .unwrap();
-            engine.close().await.unwrap();
-        });
+        .unwrap();
+    let stand_in = host.block_on(async {
+        let engine = crazyagent::engine::Engine::open(&database, config)
+            .await
+            .unwrap();
+        engine.start_owner_runtime().await.unwrap();
+        engine
+    });
     let mut connection = rusqlite::Connection::open(&database).unwrap();
     let project = crazyagent::protocol::ProjectId::new("memory-bin").unwrap();
     connection
@@ -816,6 +817,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         ]
     );
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+    host.block_on(stand_in.close()).unwrap();
 }
 
 /// Removes a placeholder harness socket a test created, and its folder once empty, when the

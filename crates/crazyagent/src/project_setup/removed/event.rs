@@ -99,7 +99,9 @@ pub(crate) fn settle(
 }
 
 /// Appends a removal at the request's moved revision behind the owner's admission and
-/// applies its projection through the appender, which checks the fence again. Inputs: the
+/// applies its projection through the appender, which checks the fence again; the project's
+/// agent texts are marked first, so the request's sessions close after it logs them dropped
+/// and lets their texts go, with the sessions the removal closed (v2.5 L13). Inputs: the
 /// request's transaction, the revision it moved to, the admission and the event. Output:
 /// the event's seq, or the fence's, the revision's or a bound's refusal.
 pub(crate) fn append(
@@ -117,7 +119,9 @@ pub(crate) fn append(
         at_ms: Clock::System.now_ms(),
         body: &body,
     })?;
+    crate::sessions_log::mark_project_texts(tx, removed.project.as_str())?;
     log.project(|tx| apply(tx, &body))?;
+    crate::sessions_log::close(&mut log)?;
     Ok(seq)
 }
 

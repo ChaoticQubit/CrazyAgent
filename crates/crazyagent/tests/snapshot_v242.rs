@@ -307,11 +307,12 @@ impl Masks {
             }),
             Value::String(text) => Ok(Value::from(self.text(text))),
             Value::Array(items) => {
+                let known = self.paths.len();
                 let mut masked = items
                     .iter()
                     .map(|item| self.value(key, item))
                     .collect::<Result<Vec<_>, _>>()?;
-                random_names::sort_socket_places(&mut masked);
+                random_names::sort_socket_places(&mut masked, known)?;
                 Ok(Value::Array(masked))
             }
             Value::Object(map) => {
@@ -389,7 +390,9 @@ impl Masks {
         while index < text.len() {
             let rest = &text[index..];
             let slash = rest.starts_with('/');
-            let start = slash && !out.chars().next_back().is_some_and(caseless::inside_path);
+            let start = slash
+                && (!out.chars().next_back().is_some_and(caseless::inside_path)
+                    || caseless::ends_in_firmlink(&out));
             let found = start.then(|| self.caseless_at(rest)).flatten().or_else(|| {
                 let below_temp = random_names::ends_in_temp(&out);
                 slash.then(|| self.caseless_component(rest, below_temp))?
@@ -491,9 +494,10 @@ fn temp_parents(real_temp: &Path) -> Vec<(String, String)> {
     parents
 }
 
-/// Replaces each folder spelling that starts and ends at a path boundary. Inputs: the string,
-/// the spellings (longest first) and a mask that gets the spelling's index and the text after
-/// it and gives how many more bytes it takes and the placeholder. Output: the masked string.
+/// Replaces each folder spelling that starts at a path boundary, or right after the plain
+/// /System/Volumes/Data firmlink, and ends at one. Inputs: the string, the spellings (longest
+/// first) and a mask that gets the spelling's index and the text after it and gives how many
+/// more bytes it takes and the placeholder. Output: the masked string.
 fn replace_folders(
     text: &str,
     folders: &[String],
@@ -506,7 +510,8 @@ fn replace_folders(
         let boundary = out
             .chars()
             .next_back()
-            .is_none_or(|before| !path_char(before));
+            .is_none_or(|before| !path_char(before))
+            || caseless::ends_in_firmlink(&out);
         for (which, folder) in folders.iter().enumerate() {
             let Some(after) = rest.strip_prefix(folder.as_str()) else {
                 continue;
@@ -797,7 +802,9 @@ fn has_word(text: &str, word: &str) -> bool {
 fn refuse_private(text: &str, home: Option<&str>, user: Option<&str>) -> Result<(), String> {
     let bytes = text.as_bytes();
     let path_start = |start: usize| {
-        start == 0 || !(path_char(char::from(bytes[start - 1])) || bytes[start - 1] == b'>')
+        start == 0
+            || !(path_char(char::from(bytes[start - 1])) || bytes[start - 1] == b'>')
+            || caseless::ends_in_firmlink(&text[..start])
     };
     for user_folder in ["/Users/", "/home/"] {
         if text

@@ -450,3 +450,145 @@ async fn deleting_a_deleted_session_again_logs_a_second_event_and_redacts_the_fi
     assert_eq!(count(&case, TEAM, &parked), 0);
     case.close().await;
 }
+
+/// The master sessions and conversation entries as they stand, then as a replay of the
+/// sessions events rebuilds them, both read in one write transaction that is rolled back.
+/// Input: the case. Output: the live rows and the rebuilt rows.
+fn live_and_rebuilt(
+    case: &Case,
+) -> (
+    Vec<Vec<Vec<rusqlite::types::Value>>>,
+    Vec<Vec<Vec<rusqlite::types::Value>>>,
+) {
+    let mut db = case.db();
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let read = |tx: &rusqlite::Transaction<'_>| {
+        ["master_sessions", "conversation_entries"]
+            .map(|table| crate::state_log::replay::rows(tx, table).unwrap())
+            .to_vec()
+    };
+    let live = read(&tx);
+    crate::sessions_log::rebuild(&tx).unwrap();
+    let rebuilt = read(&tx);
+    tx.rollback().unwrap();
+    (live, rebuilt)
+}
+
+/// The logged sessions events of one kind whose body is not a tombstone, as seq and JSON
+/// body. Inputs: the events and the kind. Output: the pairs.
+fn kept_of(rows: &[LogRow], kind: &str) -> Vec<(i64, serde_json::Value)> {
+    rows.iter()
+        .filter(|row| row.2 == "sessions" && row.3 == kind && row.4 != TOMBSTONE)
+        .map(|row| (row.0, serde_json::from_slice(&row.4).unwrap()))
+        .collect()
+}
+
+/// v2.5 L13: every owner write of a session and its conversation, an open, a message and a
+/// new session parking the used one, reaches the log at its request's revision, the message
+/// as a digest, and a replay of the log rebuilds both tables as they stand.
+#[tokio::test]
+async fn every_owner_session_write_reaches_the_log_and_replays_to_the_live_rows() {
+    let case = Case::new().await;
+    let (parked, live) = parked_with_conversation(&case).await;
+    assert_eq!(
+        case.submit("live-line", &live, "Write the release notes")
+            .await,
+        OwnerResult::Applied
+    );
+    let rows = log_rows(&case);
+    let saved = kept_of(&rows, crate::sessions_log::KIND_SESSION);
+    for session in [&parked, &live] {
+        assert!(
+            saved
+                .iter()
+                .any(|(_, body)| body["session"] == session.as_str()),
+            "{session:?} is logged"
+        );
+    }
+    let entries = kept_of(&rows, crate::sessions_log::KIND_ENTRY);
+    assert!(entries.len() >= 2, "{entries:?}");
+    assert!(
+        rows.iter()
+            .all(|row| !String::from_utf8_lossy(&row.4).contains("release notes")),
+        "no prompt text in the log"
+    );
+    let (live_rows, rebuilt) = live_and_rebuilt(&case);
+    assert!(!live_rows[0].is_empty() && !live_rows[1].is_empty());
+    assert_eq!(rebuilt, live_rows, "replay equals the live tables");
+    case.close().await;
+}
+
+/// v2.5 L13 with L12: a Delete logs the session's final save after its SessionDeleted and
+/// redaction, so only that save names the session, logs its turns' messages dropped, and a
+/// replay equals the live tables; a second Delete of the closed session does the same.
+#[tokio::test]
+async fn a_delete_logs_the_final_save_after_its_redaction_and_drops_the_session_s_messages() {
+    let case = Case::new().await;
+    let (parked, _) = parked_with_conversation(&case).await;
+    let inputs: Vec<u64> = {
+        let db = case.db();
+        let mut statement = db
+            .prepare("SELECT input FROM master_turns WHERE session=?1 ORDER BY input")
+            .unwrap();
+        statement
+            .query_map([parked.as_str()], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .map(|input| input.unwrap() as u64)
+            .collect()
+    };
+    assert!(!inputs.is_empty(), "the parked session has a message");
+    for id in ["delete-parked", "delete-again"] {
+        assert_eq!(case.delete(id, &parked).await, OwnerResult::Applied, "{id}");
+        let rows = log_rows(&case);
+        let deleted = kept_of(&rows, SESSION_DELETED);
+        assert_eq!(deleted.len(), 1, "{id}");
+        let saves: Vec<i64> = kept_of(&rows, crate::sessions_log::KIND_SESSION)
+            .into_iter()
+            .filter(|(_, body)| body["session"] == parked.as_str())
+            .map(|(seq, _)| seq)
+            .collect();
+        assert_eq!(
+            saves.len(),
+            1,
+            "{id}: only the final save names the session"
+        );
+        assert!(saves[0] > deleted[0].0, "{id}: logged after the delete");
+        let (live_rows, rebuilt) = live_and_rebuilt(&case);
+        assert_eq!(rebuilt, live_rows, "{id}: replay equals the live tables");
+    }
+    let dropped: Vec<u64> = kept_of(&log_rows(&case), crate::sessions_log::KIND_ENTRIES_DROPPED)
+        .into_iter()
+        .flat_map(|(_, body)| {
+            body["cursors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|cursor| cursor.as_u64().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for input in &inputs {
+        assert!(dropped.contains(input), "message {input} is logged dropped");
+    }
+    case.close().await;
+}
+
+/// v2.5 L13: a master request the engine rejects, a message to a parked session, logs no
+/// event.
+#[tokio::test]
+async fn a_rejected_master_request_logs_no_sessions_event() {
+    let case = Case::new().await;
+    let (parked, _) = parked_with_conversation(&case).await;
+    let before = log_rows(&case);
+    let refused = case
+        .submit("parked-again", &parked, "Write the import guide")
+        .await;
+    assert!(
+        matches!(refused, OwnerResult::Rejected { .. }),
+        "{refused:?}"
+    );
+    assert_eq!(log_rows(&case), before);
+    case.close().await;
+}

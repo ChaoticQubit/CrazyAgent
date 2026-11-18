@@ -37,6 +37,7 @@ impl Store {
         let engine = Engine::open(&root.path().join("db"), config.clone())
             .await
             .unwrap();
+        engine.start_owner_runtime().await.unwrap();
         Self {
             root,
             engine,

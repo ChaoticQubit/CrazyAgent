@@ -383,7 +383,7 @@ fn first_run(db: &Connection) -> bool {
     appended
 }
 
-/// V250-L9 step 15: landing rows written before the log reach replay through one snapshot
+/// V250-L9 step 17: landing rows written before the log reach replay through one snapshot
 /// run at one revision, through the open's proof; integers and empty cells come back as
 /// they were, and a table the store lacks (verification_current) is an empty chunk.
 #[test]
@@ -415,7 +415,7 @@ fn the_first_run_puts_landing_rows_from_before_the_log_on_it() {
     assert_eq!(landing_rows(&db), live);
 }
 
-/// V250-L9 step 15: a store with no landing row, or without the `state` table, gets no run,
+/// V250-L9 step 17: a store with no landing row, or without the `state` table, gets no run,
 /// so the step moves no revision.
 #[test]
 fn the_first_run_writes_nothing_without_landing_rows() {
@@ -595,7 +595,7 @@ fn a_row_cell_the_table_lacks_fails_replay_and_a_missing_cell_takes_its_default(
     assert_eq!(summary, "", "the column default");
 }
 
-/// V250-L9 step 15 (QUESTION-1056 A): a change set stored before the log reaches replay
+/// V250-L9 step 17 (QUESTION-1056 A): a change set stored before the log reaches replay
 /// through the run as its id, project and the digest of its row, kept as an owner text, so
 /// no text rides in a chunk; a later save releases that text and the rebuild takes its row.
 #[test]
@@ -696,7 +696,7 @@ fn past_the_bound(root: &std::path::Path) -> Record {
 
 /// V250-L9 (QUESTION-1115 A): a row past 64 parts or 64 MiB is refused at save with its
 /// named error and nothing stored, and a store holding one from before the log still opens:
-/// step 15's run leaves it out instead of refusing.
+/// step 17's run leaves it out instead of refusing.
 #[test]
 fn a_row_past_the_bound_is_refused_at_save_and_never_at_open() {
     let (root, db) = store();

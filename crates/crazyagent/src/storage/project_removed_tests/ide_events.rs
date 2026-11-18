@@ -105,11 +105,15 @@ fn a_removed_projects_ide_events_are_tombstoned_and_an_ide_rebuild_brings_none_b
     assert_eq!(applied.result, OwnerResult::Applied);
 
     let after = logged(&s.db);
-    let (_, aggregate, kind, _, body) = after.last().unwrap();
+    let (_, aggregate, kind, _, body) = after
+        .iter()
+        .rev()
+        .find(|event| event.1 != Aggregate::Sessions.name())
+        .unwrap();
     assert_eq!(
         (aggregate.as_str(), kind.as_str()),
         (Aggregate::Projects.name(), event::KIND),
-        "the removal is the last event and is kept"
+        "the removal is the last event but its own sessions close's, and is kept"
     );
     assert_eq!(body.as_slice(), br#"{"project":"removed","kept":true}"#);
     only_removed_ide_is_gone(&s, &before);

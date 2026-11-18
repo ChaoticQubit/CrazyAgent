@@ -1168,6 +1168,29 @@ fn the_chatgpt_sign_in_parse_reads_the_token_account_id_and_expiry_only() {
     assert_eq!(chatgpt_refused(&json!({"tokens": null})), unreadable);
 }
 
+/// HSYNC-CHATGPT-TOKENS-PARSE: the ChatGPT sign-in reads a Codex record as the agent copy
+/// does, so a record naming a key twice, at its top or inside its tokens table, is refused
+/// rather than read with the last value.
+#[test]
+fn the_chatgpt_sign_in_refuses_a_record_naming_a_key_twice() {
+    let expires = now() + 3600;
+    let access = chatgpt_token(expires);
+    let tokens = json!({"id_token": token(expires), "access_token": access});
+    let pair = format!(r#""access_token": "{access}""#);
+    let twice = format!(r#"{{"tokens": {tokens}, "tokens": {tokens}}}"#);
+    let inner = format!(r#"{{"tokens": {{{pair}, {pair}}}}}"#);
+    for record in [twice, inner] {
+        let read = agent_copy::chatgpt_tokens(record.as_bytes())
+            .err()
+            .map(|problem| problem.0);
+        assert_eq!(
+            read.as_deref(),
+            Some("native_profile_codex_token_unreadable"),
+            "{record}"
+        );
+    }
+}
+
 fn offline_codex(case: &UseCase) -> PathBuf {
     let harness = case.root.path().join("offline-codex");
     std::fs::write(&harness, "#!/bin/sh\n: > \"$0.ran\"\nexit 1\n").unwrap();
