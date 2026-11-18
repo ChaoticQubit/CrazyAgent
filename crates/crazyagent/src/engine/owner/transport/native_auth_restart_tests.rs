@@ -2165,12 +2165,12 @@ impl Run {
     /// engine does when it dies with the sign-out pending. Input: the case. Output: none.
     async fn sign_out_then_die(&self, restart: &Restart) {
         let scope = self.scope(restart.config().id).await;
+        let client = self.client();
         let path = std::fs::canonicalize(restart.root.path())
             .unwrap()
             .join("engine.db");
         let hold = crate::storage::hold_claims(&path);
-        let sent = self
-            .client()
+        let sent = client
             .logout_native_auth(NativeAuthLogout {
                 request_id: request("restart-logout-pending"),
                 scope,
@@ -2183,6 +2183,13 @@ impl Run {
         );
         crate::storage::die_at_claim(&path);
         drop(hold);
+        for _ in 0..250 {
+            if !crate::storage::dying(&path) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the storage worker never died at its claim");
     }
 
     /// Stops a run whose storage worker died, whatever its stop reports.
@@ -2195,6 +2202,20 @@ impl Run {
             .await
             .expect("a run whose storage died still stops within 10 seconds");
     }
+}
+
+/// Waits up to 40 seconds for this run's engine-start re-proof to end, which here runs a
+/// real custodian for a sign-out and a status check. Input: the run. Output: true once it
+/// ended.
+async fn re_proof_ended(run: &Run) -> bool {
+    let flag = run.handle.reproving();
+    for _ in 0..400 {
+        if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
 }
 
 /// V243-NARROWING-DURABLE: a sign-out still pending when the engine dies takes effect at the
@@ -2210,7 +2231,7 @@ async fn a_sign_out_pending_when_the_engine_dies_signs_the_profile_out_at_the_ne
         first.sign_out_then_die(&restart).await;
         first.stop_dead().await;
         let second = restart.start().await;
-        assert!(cleared(&second.handle.reproving()).await);
+        assert!(re_proof_ended(&second).await);
         assert!(
             restart.launch().is_err(),
             "the leftover sign-out is lost: the profile launches on its old sign-in"
@@ -2239,7 +2260,7 @@ async fn a_leftover_sign_out_the_harness_cannot_finish_keeps_the_profile_blocked
         first.stop_dead().await;
         restart.fail_sign_out();
         let second = restart.start().await;
-        assert!(cleared(&second.handle.reproving()).await);
+        assert!(re_proof_ended(&second).await);
         assert!(
             restart.launch().is_err(),
             "a failed harness sign-out leaves the profile blocked"

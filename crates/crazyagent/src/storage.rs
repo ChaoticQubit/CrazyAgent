@@ -142,6 +142,18 @@ pub(crate) fn die_at_claim(path: &Path) {
     dying.push(path.to_path_buf());
 }
 
+/// Whether the mark [`die_at_claim`] left for `path` is still unused, so a row waits until
+/// the worker stopped before it opens the same database again. Input: the database path.
+/// Output: true while the mark waits for a claim.
+#[cfg(all(test, unix))]
+pub(crate) fn dying(path: &Path) -> bool {
+    DYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|other| other == path)
+}
+
 /// Takes the mark [`die_at_claim`] left for `path`. Input: the database path.
 /// Output: true once for a marked worker, which then stops.
 #[cfg(all(test, unix))]

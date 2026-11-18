@@ -865,6 +865,20 @@ fn stored_tui(root: &Path) -> (i64, String) {
     .unwrap()
 }
 
+/// Waits until the storage worker of `path` used up its death mark, so the next open of the
+/// same database never meets it. Input: the database path. Output: whether it did within
+/// `PUBLISHED_WAIT`.
+async fn worker_died(path: &Path) -> bool {
+    let deadline = tokio::time::Instant::now() + PUBLISHED_WAIT;
+    while crate::storage::dying(path) {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
 /// Waits until storage holds the TUI identity revoked one epoch past `epoch`.
 /// Inputs: the engine folder and the epoch the revocation expected. Output: whether it
 /// did within `PUBLISHED_WAIT`.
@@ -970,6 +984,10 @@ async fn a_revocation_pending_when_the_engine_dies_lands_at_the_next_open() {
     );
     crate::storage::die_at_claim(&path);
     drop(hold);
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at its claim"
+    );
     let restarted = owner.restarted().await;
     assert_eq!(
         stored_tui(restarted.root.path()),
@@ -1005,6 +1023,10 @@ async fn a_revocation_refused_at_the_barrier_lands_at_the_next_open_when_the_eng
     tokio::time::sleep(IN_FLIGHT).await;
     crate::storage::die_at_claim(&path);
     drop(hold);
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at the drain's claim"
+    );
     let restarted = owner.restarted().await;
     assert_eq!(
         stored_tui(restarted.root.path()),
