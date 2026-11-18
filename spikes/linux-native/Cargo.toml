@@ -1,0 +1,24 @@
+[package]
+name = "linux-native-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+tauri = { version = "=2.12.4", features = [] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+wgpu = "=25.0.2"
+pollster = "=0.4.0"
+raw-window-handle = "=0.6.2"
+gtk = "=0.18.2"
+gdkx11 = "=0.18.2"
+gdkwayland-sys = "=0.18.2"
+x11-dl = "=2.21.0"
+wayland-client = "=0.31.15"
+wayland-backend = { version = "=0.3.17", features = ["client_system"] }
