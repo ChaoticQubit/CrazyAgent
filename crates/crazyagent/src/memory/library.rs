@@ -474,6 +474,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 }
 
 /// A memory library row of a project the engine no longer records.
+#[cfg(unix)]
 const ORPHANED: &str = "project IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)";
 
@@ -508,6 +509,7 @@ pub(crate) fn forget_agent_memories(
 /// imports, memories waiting for approval and app-wide memories stay for a project removed
 /// from the dashboard, which brings them back from its own folder (DEC-178 addendum 1).
 /// Input: the engine connection or an open transaction. Output: the rows deleted.
+#[cfg(unix)]
 pub(crate) fn forget_orphan_agent_memories(
     connection: &rusqlite::Connection,
 ) -> Result<usize, EngineError> {

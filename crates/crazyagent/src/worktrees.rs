@@ -1490,6 +1490,7 @@ pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<Strin
     Ok(record.lease.branch)
 }
 
+#[cfg(unix)]
 fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError> {
     assert_record_consistent(record);
     let count = connection

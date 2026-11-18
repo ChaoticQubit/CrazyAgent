@@ -987,11 +987,12 @@ mod windows_tests {
         std::fs::copy(&shipped, &curl).unwrap();
         assert!(version_if_runs(&curl, &home, &places).is_some());
 
-        let granted = std::process::Command::new("icacls")
-            .arg(&kept)
-            .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"])
-            .output()
-            .unwrap();
+        let granted = crate::spawn_gate::collected(
+            std::process::Command::new("icacls")
+                .arg(&kept)
+                .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
+        )
+        .unwrap();
         assert!(granted.status.success(), "{granted:?}");
         assert_eq!(version_if_runs(&curl, &home, &places), None);
         assert_eq!(super::super::version_under_home(&curl), None);
