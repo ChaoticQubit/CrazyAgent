@@ -117,7 +117,7 @@ export class NativeView implements Held {
   private started = false;
   private told = true;
   private wantsFocus = false;
-  private keys = true;
+  private keys = inputMode(readTerminalInput()).keys;
   private placed = "";
   private tries = 0;
   private dropped = false;
