@@ -8,12 +8,14 @@ import type { AddFolderMode, AddOverride, FolderSize, IntakeJob, IntentReceipt }
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, Notice, Segmented } from "../../ui";
 import { displayText } from "../conversation";
-import { AnywayDialog } from "../intake/add-folder";
-import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, refusalLine, sizeLine, worktreesLine } from "../intake/intake";
+import { AnywayDialog, leftInIcloud } from "../intake/add-folder";
+import { anywayIssues, anywayOverrides, asksAgain, folderName, joinPath, jobRunning, receiptRefusal, sizeLine, withEverything, worktreesLine } from "../intake/intake";
 import { folderLabel, projectFolder } from "./overview";
 import type { ProjectData } from "./shared";
 
 export { moveCopy };
+
+const NO_JOBS: readonly IntakeJob[] = [];
 
 const WAYS: { value: AddFolderMode; label: string; icon: "folder-input" | "copy" }[] = [
   { value: "move", label: "Move", icon: "folder-input" },
@@ -55,11 +57,29 @@ export async function stopThenMove(id: string, mode: AddFolderMode, overrides: A
   return { stopped: true, result: await steps.move(id, mode, overrides) };
 }
 
+/** Whether a move's folder read ended without a reading: an error, a build without the read, or
+ * an ok reply carrying the engine's size problem (timeout, too large, unreadable), which the
+ * bridge sends with no bytes. Input: the read. Output: the answer, false while it loads or before
+ * it starts. */
+function readFailed(size: Loaded<FolderSize> | null): boolean {
+  if (size === null || size.kind === "loading") return false;
+  return size.kind !== "ok" || size.value.size_problem != null;
+}
+
+/** The overrides a project move sends: the owner's, plus download_everything when the switch is
+ * on or the folder read failed, as a move never leaves folders in iCloud it did not show first
+ * (DEC-198, leader 16:30). Inputs: the overrides, the switch and the folder read. Output: the
+ * overrides to send. */
+export function moveOverrides(overrides: AddOverride[], everything: boolean, size: Loaded<FolderSize> | null): AddOverride[] {
+  return withEverything(overrides, everything || readFailed(size));
+}
+
 /** The question before a project moves: what happens to the team and its work, Move or Copy,
- * where the folder goes, its size and what a move or copy can lose. Inputs: whether it is open,
- * the project name, its folder, the projects folder, the way, the folder read, a busy flag, the
- * last problem and the handlers. Output: the dialog, or nothing. */
-export function MoveHomeDialog({ open, name, folder, home, way, size, busy, problem, onWay, onConfirm, onCancel }: {
+ * where the folder goes, its size, the rebuildable folders it leaves in iCloud with the Download
+ * everything (slow) switch, and what a move or copy can lose. Inputs: whether it is open, the
+ * project name, its folder, the projects folder, the way, the folder read, a busy flag, the last
+ * problem, the switch and the handlers. Output: the dialog, or nothing. */
+export function MoveHomeDialog({ open, name, folder, home, way, size, busy, problem, everything, onEverything, onWay, onConfirm, onCancel }: {
   open: boolean;
   name: string;
   folder: string;
@@ -68,6 +88,8 @@ export function MoveHomeDialog({ open, name, folder, home, way, size, busy, prob
   size: Loaded<FolderSize> | null;
   busy: boolean;
   problem: string;
+  everything: boolean;
+  onEverything: (everything: boolean) => void;
   onWay: (way: AddFolderMode) => void;
   onConfirm: () => void;
   onCancel: () => void;
@@ -88,6 +110,8 @@ export function MoveHomeDialog({ open, name, folder, home, way, size, busy, prob
     <p><span className="pj-mono">{displayText(folderLabel(folder))}</span> {way === "move" ? "moves" : "is copied"} to <span className="pj-mono">{displayText(folderLabel(joinPath(home, folderName(folder))))}</span>.</p>
     {!ready && <p className="pj-secondary" role="status">Reading the folder...</p>}
     {ready && (line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>)}
+    {leftInIcloud({ skipped: read?.skipped ?? [], skippedMore: read?.skipped_more ?? null, everything, onEverything, source: folder, job: way })}
+    {readFailed(size) && <Notice tone="info">CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.</Notice>}
     {way === "copy" && <Notice tone="info">The copy becomes the project. The old folder stays where it is, with the agents' old copies in it.</Notice>}
     {way === "copy" && (read?.worktrees ?? 0) > 0 && <Notice tone="info">{worktreesLine(read?.worktrees ?? 0)}</Notice>}
     <Notice tone="warn">{loss.map((text) => <p key={text}>{text}</p>)}</Notice>
@@ -110,6 +134,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   const root = home.kind === "ok" ? home.value.path : null;
   const [open, setOpen] = useState(false);
   const [way, setWay] = useState<AddFolderMode>("move");
+  const [everything, setEverything] = useState(false);
   const [size, setSize] = useState<Loaded<FolderSize> | null>(null);
   const [asking, setAsking] = useState(false);
   const [refused, setRefused] = useState<string | null>(null);
@@ -117,7 +142,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   const [problem, setProblem] = useState("");
   const [started, setStarted] = useState<string | null>(null);
   const seen = useRef(false);
-  const job = session?.intake ?? null;
+  const jobs = session?.intake ?? NO_JOBS;
   useEffect(() => {
     if (!open) return;
     let live = true;
@@ -127,13 +152,13 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   }, [open, folder]);
   useEffect(() => {
     if (started === null) return;
-    const ours = job !== null && job.id === started;
-    if (ours && jobRunning(job)) { seen.current = true; return; }
-    if (!ours && !seen.current) return;
+    const ours = jobs.find((job) => job.id === started) ?? null;
+    if (jobRunning(ours)) { seen.current = true; return; }
+    if (ours === null && !seen.current) return;
     seen.current = false;
     setStarted(null);
     data.reload();
-  }, [started, job]);
+  }, [started, jobs]);
   if (root === null || insideHome(folder, root)) return null;
   const name = data.name || folderName(folder);
 
@@ -147,7 +172,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     if (busy) return;
     setBusy(true);
     setProblem("");
-    const { stopped, result } = await stopThenMove(data.id, chosen, overrides, { stop: setTeamStopped, move: moveProjectHome });
+    const { stopped, result } = await stopThenMove(data.id, chosen, moveOverrides(overrides, everything, size), { stop: setTeamStopped, move: moveProjectHome });
     setBusy(false);
     setAsking(false);
     setRefused(null);
@@ -155,7 +180,7 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
     if (result.kind === "not_ready") { setProblem("Moving a project isn't in this build."); return; }
     if (result.kind === "error") {
       if (stopped && asksAgain(result.code, overrides)) { setRefused(result.code); setAsking(true); return; }
-      setProblem(`${await refusalLine(result.code, moveCopy(result))}${after}`);
+      setProblem(`${moveCopy(result)}${after}`);
       return;
     }
     close();
@@ -171,9 +196,9 @@ export function MoveHome({ data, setup }: { data: Pick<ProjectData, "id" | "name
   };
 
   return <>
-    <MoveHomeRow folder={folder} home={root} onOpen={() => { setProblem(""); setOpen(true); }} />
+    <MoveHomeRow folder={folder} home={root} onOpen={() => { setProblem(""); setEverything(false); setOpen(true); }} />
     <MoveHomeDialog open={open && !asking} name={displayText(name)} folder={folder} home={root} way={way} size={size} busy={busy}
-      problem={problem} onWay={setWay} onConfirm={() => proceed(way)} onCancel={close} />
+      problem={problem} everything={everything} onEverything={setEverything} onWay={setWay} onConfirm={() => proceed(way)} onCancel={close} />
     <AnywayDialog open={open && asking} way={way} name={displayText(name)} size={size} refused={refused} busy={busy} keepLabel="Keep it here"
       onUseHere={close} onAnyway={() => void move(anywayOverrides(way, anywayIssues(way, size, refused), size))}
       onCancel={() => { setAsking(false); setRefused(null); }} />

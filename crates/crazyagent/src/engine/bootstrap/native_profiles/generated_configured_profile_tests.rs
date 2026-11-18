@@ -429,6 +429,66 @@ fn a_save_stopped_at_any_step_never_strands_the_account_on_a_config_it_does_not_
     assert!(stopped > 0);
 }
 
+/// #179 rv-code4 F1, QUESTION-1837 A: a changed save whose staging directory is replaced
+/// after its manifest moved into the slot fails the staging check, a tamper check, so the
+/// pin stays on the old manifest and the account is refused until recovery. Output: the
+/// staging check's refusal, then neither connection saves.
+#[test]
+fn a_save_whose_staging_directory_is_replaced_after_the_rename_stays_refused() {
+    let mut case = ConfiguredCase::new(false, false);
+    case.custody
+        .prepare_configured_rcli_profile(&case.host, &case.connection, &case.profile, None)
+        .unwrap();
+    let root = case.root.path().join("state").join(ROOT);
+    let moved = case.root.path().join("moved-staging");
+    let target = moved.clone();
+    staging::AT_STEP.set(Some(Box::new(move || {
+        let named: Vec<PathBuf> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(staging::STAGING))
+            })
+            .collect();
+        assert_eq!(named.len(), 1, "{named:?}");
+        std::fs::rename(&named[0], &target).unwrap();
+        private_dir(&named[0]);
+    })));
+    let mut changed = case.connection.clone();
+    changed.model.id = "another-local-model".into();
+    staging::INTERRUPT.set(10);
+    let saved =
+        case.custody
+            .prepare_configured_rcli_profile(&case.host, &changed, &case.profile, None);
+    staging::INTERRUPT.set(0);
+    assert!(staging::AT_STEP.take().is_none(), "step 10 ran the swap");
+    assert_eq!(
+        saved.err().map(|error| error.0).as_deref(),
+        Some("native_profile_custody_unsafe")
+    );
+    assert_eq!(
+        std::fs::read_dir(&moved).unwrap().count(),
+        0,
+        "the manifest had left the staging directory before the swap"
+    );
+    for connection in [&case.connection, &changed] {
+        let again = case.custody.prepare_configured_rcli_profile(
+            &case.host,
+            connection,
+            &case.profile,
+            None,
+        );
+        assert_eq!(
+            again.err().map(|error| error.0).as_deref(),
+            Some("rcli_profile_binding_conflict"),
+            "{}",
+            connection.model.id
+        );
+    }
+}
+
 /// Writes other bytes over a generated home's config and then its own bytes back, in place,
 /// and resets its modified time, the way a confined master can, so only its change time
 /// moves. Input: the config file. Output: none; the row's own asserts check the result.

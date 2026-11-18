@@ -653,10 +653,10 @@ async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease
 
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, PIPE_HOLDING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
-        Ok(processes.leader)
+        Ok(processes.group)
     );
     assert_eq!(
         fixture
@@ -675,6 +675,8 @@ async fn cancelling_a_claude_master_kills_its_whole_group_and_releases_the_lease
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
+/// A process that left the harness group holds neither cleanup nor the lease, by backend
+/// ([`HarnessProcesses::assert_stopped_by`]).
 #[cfg(not(target_os = "macos"))]
 #[tokio::test]
 async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_lease() {
@@ -683,26 +685,18 @@ async fn a_claude_master_process_that_left_its_group_cannot_hold_cleanup_or_the_
     };
 
     let mut fixture = MasterFixture::new("claude");
+    let check = fixture.lineage_check();
     let mut claude = stand_in_master(&mut fixture, GROUP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
     );
     let started = std::time::Instant::now();
-    let cancelled = claude.cancel().await;
+    let cancelled = claude.cancel().await.map_err(|error| error.0);
     let elapsed = started.elapsed();
-    assert_eq!(
-        cancelled.map_err(|error| error.0),
-        Err("claude_host_cleanup_uncertain".to_owned()),
-        "after {elapsed:?}"
-    );
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
-    processes.assert_harness_gone();
-    assert_eq!(
-        rustix::process::test_kill_process(processes.descendant),
-        Ok(())
-    );
+    processes.assert_stopped_by(check, cancelled, "claude_host_cleanup_uncertain");
     assert!(fixture.sign_in("claude-group-next", 3).is_ok());
 }
 
@@ -715,7 +709,7 @@ async fn a_claude_master_process_that_left_its_group_is_stopped_with_the_master(
 
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, GROUP_LEAVING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
@@ -738,7 +732,7 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
 
     let mut fixture = MasterFixture::new("claude");
     let mut claude = stand_in_master(&mut fixture, ZOMBIE_HOLDING_HARNESS).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     assert_eq!(
         rustix::process::getpgid(Some(processes.descendant)),
         Ok(processes.descendant)
@@ -756,7 +750,7 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    while rustix::process::test_kill_process_group(processes.group) != Err(rustix::io::Errno::SRCH)
     {
         assert!(
             started.elapsed() < Duration::from_secs(12),
@@ -780,7 +774,7 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
 
     let clock = Duration::from_secs(2);
     let mut fixture = MasterFixture::new("claude");
-    let quiet = "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/cat > /dev/null\n";
+    let quiet = "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n";
     let mut claude = stand_in_master_under(&mut fixture, quiet, false, Some(clock)).await;
     tokio::time::sleep(clock + Duration::from_secs(1)).await;
     let closed = claude.close().await;
@@ -793,7 +787,7 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
     let mut fixture = MasterFixture::new("claude");
     let mut claude =
         stand_in_master_under(&mut fixture, ZOMBIE_HOLDING_HARNESS, false, Some(clock)).await;
-    let processes = HarnessProcesses::wait(&fixture.project);
+    let processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     tokio::time::sleep(clock + Duration::from_secs(1)).await;
     let closed = claude.close().await;
     assert_eq!(
@@ -803,7 +797,7 @@ async fn a_claude_master_is_settled_only_when_its_cleanup_left_no_doubt_whatever
     );
     assert!(!claude.settled(), "a cleanup in doubt is never settled");
     let started = std::time::Instant::now();
-    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    while rustix::process::test_kill_process_group(processes.group) != Err(rustix::io::Errno::SRCH)
     {
         assert!(
             started.elapsed() < Duration::from_secs(12),
@@ -825,7 +819,7 @@ async fn a_claude_master_whose_harness_it_can_never_reap_still_ends_and_releases
             "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
         )
         .await;
-        if !reap_before_the_host(&fixture.project) {
+        if !reap_before_the_host(&fixture.project, || claude.process_group()) {
             continue;
         }
         let started = std::time::Instant::now();
@@ -2190,6 +2184,7 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     };
     assert_ne!(check, LineageCheck::FullAccess);
     let mut claude = stand_in_master(&mut fixture, HELD_STOP_LEAVING_HARNESS).await;
+    let _processes = HarnessProcesses::wait(&fixture.project, || claude.process_group());
     fs::write(fixture.project.join(RUN_FOLDER).join("go"), "").unwrap();
     let own_end = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -2211,7 +2206,6 @@ async fn a_claude_master_held_stop_that_left_a_process_closes_by_backend() {
     );
     let closed = claude.close().await.map_err(|error| error.0);
     if check == LineageCheck::Sandboxed {
-        let _processes = HarnessProcesses::wait(&fixture.project);
         assert!(closed.is_err(), "{closed:?}");
         assert_ne!(closed, Err(crate::sandbox::HELD_STOP_CAUSE.to_owned()));
     } else {
@@ -2531,4 +2525,192 @@ async fn a_claude_master_takes_a_turn_up_to_its_frame_size_limit() {
         );
         let _ = claude.close().await;
     }
+}
+
+/// A stand-in Claude Code master whose turn writes its first stream line, marks the `run`
+/// folder, then stays quiet with its stdout and stderr open until a group kill ends it.
+const WAKE_IDLE_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session",'
+printf '%s\n' '"model":"observed-model","capabilities":[]}'
+: > run/quiet
+exec /bin/sleep 120
+"#;
+
+/// Measurement row for V243-WAKEUP-MEASURE B, run alone: holds a Claude master host's drive
+/// loop in a turn that stays quiet for 60 s, after printing `wake-row ready pid=<pid>` for a
+/// sampler. Asserts only that the turn was still running when the host was stopped.
+#[tokio::test]
+#[ignore = "measurement row: run alone for V243-WAKEUP-MEASURE"]
+async fn wake_idle_claude_drive() {
+    use crate::adapters::events::EventKind;
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let clock = Some(Duration::from_secs(300));
+    let mut claude = stand_in_master_under(&mut fixture, WAKE_IDLE_HARNESS, false, clock).await;
+    let turn = RequestId::new("wake-idle-turn").unwrap();
+    claude.start_turn(turn, "Stay quiet.").await.unwrap();
+    let quiet = fixture.project.join("run/quiet");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !quiet.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never went quiet"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    eprintln!("wake-row ready pid={}", std::process::id());
+    let end = tokio::time::Instant::now() + Duration::from_secs(60);
+    while let Ok(event) = tokio::time::timeout_at(end, claude.next_event()).await {
+        let finished = matches!(event.unwrap().kind, EventKind::TurnFinished { .. });
+        assert!(!finished, "the turn finished before the stop");
+    }
+    claude.cancel().await.unwrap();
+}
+
+/// A stand-in Claude Code master that finishes its turn, marks the `run` folder, then closes
+/// its stdout and stderr and lives on, so its host waits for an exit no pipe reports.
+const PIPES_CLOSED_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session",'
+printf '%s\n' '"model":"observed-model","capabilities":[]}'
+printf '%s' '{"type":"assistant","uuid":"said-1","session_id":"native-session",'
+printf '%s' '"parent_tool_use_id":null,"message":{"id":"message-1","type":"message",'
+printf '%s' '"role":"assistant","model":"observed-model",'
+printf '%s\n' '"content":[{"type":"text","text":"DONE"}]}}'
+printf '%s' '{"type":"result","subtype":"success","uuid":"result-1",'
+printf '%s\n' '"session_id":"native-session","is_error":false,"result":"DONE"}'
+: > run/closed
+exec >&- 2>&-
+exec /bin/sleep 120
+"#;
+
+/// Starts a stand-in master running `body` under a 300 s clock, starts one turn and waits up
+/// to 10 s for the stand-in to write `run/<mark>`. Inputs: the fixture, the script body and
+/// the mark. Output: the host, its turn started.
+async fn turn_until_marked(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    mark: &str,
+) -> ClaudeHost {
+    let clock = Some(Duration::from_secs(300));
+    let mut claude = stand_in_master_under(fixture, body, false, clock).await;
+    let turn = RequestId::new("wake-turn").unwrap();
+    claude.start_turn(turn, "Wait.").await.unwrap();
+    let marked = fixture.project.join("run").join(mark);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !marked.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never wrote {mark}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    claude
+}
+
+/// Counts the passes a host's drive loop makes in one second, after waiting `settle`.
+/// Inputs: the host and the settle time. Output: the count.
+async fn passes_in_a_second(claude: &ClaudeHost, settle: Duration) -> u64 {
+    tokio::time::sleep(settle).await;
+    let passes = claude.drive_passes();
+    let before = passes.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    passes.load(Ordering::SeqCst) - before
+}
+
+#[tokio::test]
+async fn a_quiet_claude_turn_wakes_the_drive_loop_a_few_times_a_second() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = turn_until_marked(&mut fixture, WAKE_IDLE_HARNESS, "quiet").await;
+    let passes = passes_in_a_second(&claude, Duration::from_millis(300)).await;
+    assert!(passes <= 10, "{passes} drive passes in a quiet second");
+    claude.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_a_quiet_claude_turn_wakes_its_drive_loop_at_once() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = turn_until_marked(&mut fixture, WAKE_IDLE_HARNESS, "quiet").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let passes = claude.drive_passes();
+    let before = passes.load(Ordering::SeqCst);
+    let noticed = async {
+        let started = std::time::Instant::now();
+        while passes.load(Ordering::SeqCst) == before && started.elapsed() < Duration::from_secs(2)
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        started.elapsed()
+    };
+    let (cancelled, took) = tokio::join!(claude.cancel(), noticed);
+    assert!(cancelled.is_ok(), "{cancelled:?}");
+    assert!(
+        took < Duration::from_millis(50),
+        "the drive loop saw the stop after {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_harness_that_closed_its_pipes_after_its_turn_is_waited_for_without_spinning() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = turn_until_marked(&mut fixture, PIPES_CLOSED_HARNESS, "closed").await;
+    let passes = passes_in_a_second(&claude, Duration::from_millis(600)).await;
+    assert!(
+        passes <= 10,
+        "{passes} drive passes in a second with no pipe open"
+    );
+    claude.cancel().await.unwrap();
+}
+
+/// A stand-in Claude Code master that never reads its turn, leaves a descendant holding its
+/// stdout and stderr but not its stdin, marks the `run` folder and exits a second later, so
+/// its host keeps a half-written turn for a reaped harness whose pipes stay open.
+const HALF_READ_HARNESS: &str = r#"#!/bin/sh
+/bin/sleep 120 </dev/null &
+/bin/sleep 1
+: > run/exited
+exit 0
+"#;
+
+#[tokio::test]
+async fn a_reaped_claude_harness_with_a_half_written_turn_is_waited_for_without_spinning() {
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::master_frame_limit::FrameSize;
+
+    let mut fixture = MasterFixture::new("claude");
+    let clock = Some(Duration::from_secs(300));
+    let frames = FrameSize::Mib1;
+    let mut claude =
+        stand_in_master_framed(&mut fixture, HALF_READ_HARNESS, false, clock, frames).await;
+    let text = "x".repeat(frames.bytes() / 2);
+    let turn = RequestId::new("half-written-turn").unwrap();
+    let wait = Duration::from_millis(500);
+    let started = tokio::time::timeout(wait, claude.start_turn(turn, &text)).await;
+    assert!(
+        started.is_err(),
+        "the stand-in took the whole turn: {started:?}"
+    );
+    let exited = fixture.project.join("run").join("exited");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !exited.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stand-in never exited"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let passes = passes_in_a_second(&claude, Duration::from_millis(300)).await;
+    assert!(
+        passes <= 10,
+        "{passes} drive passes in a second for a reaped harness"
+    );
+    claude.cancel().await.unwrap();
 }

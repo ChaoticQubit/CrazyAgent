@@ -33,6 +33,10 @@ fn version_prints_semver_channel_and_short_commit() {
 
 #[test]
 fn default_engine_form_refuses_relative_home_and_unknown_flags_before_starting() {
+    #[cfg(unix)]
+    const HOMES: [&str; 2] = ["/a", "/b"];
+    #[cfg(not(unix))]
+    const HOMES: [&str; 2] = [r"C:\a", r"C:\b"];
     let relative = crazyagent(&["engine", "--home", "relative/root"]);
     assert!(!relative.status.success());
     assert!(
@@ -42,7 +46,7 @@ fn default_engine_form_refuses_relative_home_and_unknown_flags_before_starting()
     for args in [
         &["engine", "--unknown", "/x"][..],
         &["engine", "--home"][..],
-        &["engine", "--home", "/a", "--home", "/b"][..],
+        &["engine", "--home", HOMES[0], "--home", HOMES[1]][..],
     ] {
         let output = crazyagent(args);
         assert!(!output.status.success(), "{args:?}");

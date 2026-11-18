@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod resend_support;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
@@ -1174,7 +1175,7 @@ async fn a_resend_or_a_check_of_an_add_still_copying_answers_in_progress_and_cop
             if operation.result == OwnerResult::Applied && !operation.historical_replay),
         "{answered:?}"
     );
-    let replayed = client.request(sent).await.unwrap().response;
+    let replayed = resend_support::settled(&second, &sent).await;
     assert!(
         matches!(&replayed, OwnerResponse::Applied { operation }
             if operation.result == OwnerResult::Applied && operation.historical_replay),
@@ -1219,12 +1220,20 @@ async fn homed(engine: &Engine, home: &Path) -> Owner {
     owner
 }
 
+/// The one intake job a status read lists, for a row that holds one job at a time.
+/// Inputs: the listed jobs and what the one job is, for the failure message.
+/// Output: that job; fails when the read lists none or several.
+fn only(jobs: Vec<JobView>, what: &str) -> JobView {
+    assert_eq!(jobs.len(), 1, "{what}: {jobs:?}");
+    jobs.into_iter().next().expect("the one job")
+}
+
 /// Reads the intake job until `want` holds, failing at once when it ended otherwise.
 async fn job_until(owner: &OwnerController, want: impl Fn(&JobView) -> bool) -> JobView {
     let client = owner.owner_client().unwrap();
     let start = Instant::now();
     loop {
-        let job = client.job_status().await.unwrap().expect("a job");
+        let job = only(client.job_status().await.unwrap(), "a job");
         if want(&job) {
             return job;
         }
@@ -1236,6 +1245,31 @@ async fn job_until(owner: &OwnerController, want: impl Fn(&JobView) -> bool) -> 
                 | JobState::NeedsAnswer { .. }
         );
         assert!(!ended, "the job ended otherwise: {job:?}");
+        assert!(start.elapsed() < Duration::from_secs(30), "{job:?}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// Reads the intake job `name` until `want` holds, failing at once when it ended otherwise,
+/// for a row that holds several jobs at once (DEC-197). Inputs: the owner, the job id and
+/// the wanted state. Output: the job's view.
+async fn job_named(
+    owner: &OwnerController,
+    name: &str,
+    want: impl Fn(&JobView) -> bool,
+) -> JobView {
+    let client = owner.owner_client().unwrap();
+    let start = Instant::now();
+    loop {
+        let jobs = client.job_status().await.unwrap();
+        let job = jobs
+            .into_iter()
+            .find(|job| job.id == id(name))
+            .unwrap_or_else(|| panic!("job {name} is listed"));
+        if want(&job) {
+            return job;
+        }
+        assert!(!job.state.over(), "the job ended otherwise: {job:?}");
         assert!(start.elapsed() < Duration::from_secs(30), "{job:?}");
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
@@ -1305,7 +1339,7 @@ async fn an_intake_job_adds_a_folder_apart_from_its_client_and_records_the_add()
         "{recorded:?}"
     );
     assert!(client.job_dismiss(id("intake-copy")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     engine.stop().await;
 }
 
@@ -1349,8 +1383,10 @@ async fn a_stopped_intake_job_ends_cancelled_with_no_copy_and_the_source_whole()
     engine.stop().await;
 }
 
+/// DEC-197: while an add copies, a start of the same folder under another id is refused
+/// `job_same_folder`, and a folder of another name starts beside it; both land.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for_it() {
+async fn a_second_start_of_the_same_folder_is_refused_and_another_folder_runs_beside_it() {
     let disk = tempfile::tempdir().unwrap();
     let place = disk.path().canonicalize().unwrap();
     let home = place.join("projects");
@@ -1370,13 +1406,17 @@ async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for
     let again = client
         .job_start(id("intake-again"), folder(&big), copy, Vec::new())
         .await
-        .unwrap();
-    assert_eq!(again.id, id("intake-first"), "the same folder attaches");
+        .unwrap_err();
+    assert_eq!(again.0, "job_same_folder", "the same folder is refused");
     let other = client
         .job_start(id("intake-other"), folder(&small), copy, Vec::new())
         .await
-        .unwrap_err();
-    assert_eq!(other.0, "job_busy");
+        .unwrap();
+    assert_eq!(
+        other.id,
+        id("intake-other"),
+        "another folder starts beside it"
+    );
     let check = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: id("check-intake-first"),
@@ -1391,14 +1431,12 @@ async fn a_second_start_attaches_to_the_running_job_and_another_folder_waits_for
         operation_id: id("intake-first"),
     };
     assert_eq!(checked, still, "a check of the running job");
-    job_until(&owner.controller, |job| job.state == JobState::Done).await;
-    let next = client
-        .job_start(id("intake-other"), folder(&small), copy, Vec::new())
-        .await
-        .unwrap();
-    assert_eq!(next.id, id("intake-other"), "an ended job makes room");
-    job_until(&owner.controller, |job| {
-        job.id == id("intake-other") && job.state == JobState::Done
+    job_named(&owner.controller, "intake-first", |job| {
+        job.state == JobState::Done
+    })
+    .await;
+    job_named(&owner.controller, "intake-other", |job| {
+        job.state == JobState::Done
     })
     .await;
     assert_eq!(
@@ -1549,7 +1587,10 @@ async fn a_job_start_is_refused_job_busy_while_a_direct_add_copies() {
         refused.0, "job_busy",
         "a job start while a direct add copies"
     );
-    assert_eq!(client.job_status().await.unwrap(), None, "no job was made");
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
+        "no job was made"
+    );
     let answered = running.await.unwrap().unwrap();
     assert!(
         matches!(&answered, OwnerResponse::Applied { operation }
@@ -1764,7 +1805,7 @@ async fn an_engine_stop_ends_a_running_intake_job_with_no_copy_left() {
     );
     let after = engine.owner().await;
     let status = after.owner_client().unwrap().job_status().await.unwrap();
-    assert_eq!(status, None, "a new engine has no job");
+    assert!(status.is_empty(), "a new engine has no job");
     engine.stop().await;
 }
 
@@ -1837,7 +1878,7 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
     engine.restart().await;
     let after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client.job_status().await.unwrap().expect("the cut add");
+    let restored = only(client.job_status().await.unwrap(), "the cut add");
     assert_eq!(restored.id, id("cut-1"));
     let interrupted = JobState::Failed {
         code: "home_add_interrupted".into(),
@@ -1850,14 +1891,14 @@ async fn an_engine_start_clears_an_add_cut_short_and_shows_how_it_ended() {
         "1 1\n"
     );
     assert!(client.job_dismiss(id("cut-1")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
 
     fs::create_dir(&landed).unwrap();
     sql(&database, &cut("cut-2"));
     engine.restart().await;
     let again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    let restored = client.job_status().await.unwrap().expect("the landed move");
+    let restored = only(client.job_status().await.unwrap(), "the landed move");
     let left = JobState::Failed {
         code: "home_move_source_left".into(),
         phase: Phase::Clearing,
@@ -1987,7 +2028,7 @@ async fn an_intake_job_downloads_a_real_icloud_folder_with_moving_counts_and_cop
     let start = Instant::now();
     let mut counts = std::collections::BTreeSet::new();
     let ended = loop {
-        let job = client.job_status().await.unwrap().expect("a job");
+        let job = only(client.job_status().await.unwrap(), "a job");
         match &job.state {
             JobState::Downloading { progress } => {
                 counts.insert(progress.done);
@@ -2057,7 +2098,7 @@ async fn an_evicted_icloud_folder_is_not_asked_about_a_linked_checkout_before_it
         .unwrap();
     let start = Instant::now();
     let ended = loop {
-        let job = client.job_status().await.unwrap().expect("a job");
+        let job = only(client.job_status().await.unwrap(), "a job");
         match &job.state {
             JobState::Downloading { .. } | JobState::Copying { .. } | JobState::Clearing => {}
             _ => break job,
@@ -2183,9 +2224,12 @@ async fn a_move_job_moves_a_project_apart_from_its_client_and_records_the_move()
         .await
         .unwrap_err();
     assert_eq!(again.0, "move_project_already_home");
-    assert_eq!(client.job_status().await.unwrap().unwrap().id, id("move-1"));
+    assert_eq!(
+        only(client.job_status().await.unwrap(), "move-1").id,
+        id("move-1")
+    );
     assert!(client.job_dismiss(id("move-1")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     engine.stop().await;
 }
 
@@ -2312,10 +2356,11 @@ async fn a_move_job_stopped_while_its_agents_stop_moves_nothing() {
     engine.stop().await;
 }
 
-/// DEC-177 answer 1: one job runs at a time whatever its kind. A project move asked while an
-/// add copies is refused `job_busy`; once the add ended, the move starts and lands.
+/// DEC-197: only adds run side by side. A project move asked while an add copies waits its
+/// turn behind the add with nothing moved; once the add ended, the move starts by itself and
+/// lands.
 #[tokio::test(flavor = "multi_thread")]
-async fn one_job_runs_at_a_time_across_an_add_and_a_project_move() {
+async fn a_project_move_asked_while_an_add_copies_waits_for_it_then_lands() {
     let disk = tempfile::tempdir().unwrap();
     let place = disk.path().canonicalize().unwrap();
     let big = place.join("sources/big");
@@ -2328,24 +2373,27 @@ async fn one_job_runs_at_a_time_across_an_add_and_a_project_move() {
         .await
         .unwrap();
     job_until(&owner.controller, copying).await;
-    let busy = client
-        .job_start(id("move-busy"), moving(&reading), AddMode::Move, Vec::new())
-        .await
-        .unwrap_err();
-    assert_eq!(busy.0, "job_busy");
-    assert!(origin.is_dir() && !target.exists());
-    assert!(client.job_stop(id("add-big")).await.unwrap());
-    job_until(&owner.controller, |job| {
-        matches!(job.state, JobState::Cancelled { .. })
-    })
-    .await;
-    let started = client
+    let waiting = client
         .job_start(id("move-next"), moving(&reading), AddMode::Move, Vec::new())
         .await
         .unwrap();
-    assert_eq!(started.kind, JobKind::MoveProject);
-    let done = job_until(&owner.controller, |job| job.state == JobState::Done).await;
-    assert_eq!(done.id, id("move-next"));
+    assert_eq!(waiting.kind, JobKind::MoveProject);
+    assert_eq!(
+        waiting.state,
+        JobState::Waiting {
+            behind: "big".into()
+        }
+    );
+    assert!(origin.is_dir() && !target.exists());
+    assert!(client.job_stop(id("add-big")).await.unwrap());
+    job_named(&owner.controller, "add-big", |job| {
+        matches!(job.state, JobState::Cancelled { .. })
+    })
+    .await;
+    job_named(&owner.controller, "move-next", |job| {
+        job.state == JobState::Done
+    })
+    .await;
     assert!(target.is_dir() && !origin.exists());
     engine.stop().await;
 }
@@ -2410,7 +2458,7 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     engine.restart().await;
     let mut after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client.job_status().await.unwrap().expect("the cut move");
+    let restored = only(client.job_status().await.unwrap(), "the cut move");
     assert_eq!(restored.id, id("move-cut"));
     assert_eq!(restored.kind, JobKind::MoveProject);
     assert_eq!(restored.project_id.as_ref(), Some(&reading));
@@ -2424,14 +2472,13 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     assert_eq!(repositories(&database, &reading), [text(&origin)]);
     assert_eq!(pending_moves(&database), 0);
     assert!(client.job_dismiss(id("move-cut")).await.unwrap());
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     after.detach();
     engine.restart().await;
     let mut again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    assert_eq!(
-        client.job_status().await.unwrap(),
-        None,
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
         "a dismissed move stays gone"
     );
 
@@ -2441,7 +2488,7 @@ async fn an_engine_start_shows_a_project_move_an_engine_stop_cut_short() {
     engine.restart().await;
     let last = engine.owner().await;
     let client = last.owner_client().unwrap();
-    let landed = client.job_status().await.unwrap().expect("the landed move");
+    let landed = only(client.job_status().await.unwrap(), "the landed move");
     assert_eq!(landed.id, id("move-landed"));
     assert_eq!(landed.state, JobState::Done);
     assert_eq!(repositories(&database, &reading), [text(&target)]);
@@ -2497,8 +2544,7 @@ async fn a_resent_project_move_whose_old_folder_was_left_answers_that_code_again
     fs::create_dir(&origin).unwrap();
     fs::write(origin.join("notes.txt"), b"newer than the copy\n").unwrap();
     mark_left(&database, sent.request_id.as_str(), &origin);
-    let client = owner.controller.owner_client().unwrap();
-    let resent = client.request(sent.clone()).await.unwrap().response;
+    let resent = resend_support::settled(&owner.controller, &sent).await;
     assert_eq!(
         resent,
         OwnerResponse::Rejected {
@@ -2511,7 +2557,7 @@ async fn a_resent_project_move_whose_old_folder_was_left_answers_that_code_again
         "a resend deletes nothing"
     );
     fs::remove_dir_all(&origin).unwrap();
-    let replayed = client.request(sent).await.unwrap().response;
+    let replayed = resend_support::settled(&owner.controller, &sent).await;
     assert!(
         matches!(&replayed, OwnerResponse::Applied { operation }
             if operation.result == OwnerResult::Applied && operation.historical_replay),
@@ -2545,14 +2591,10 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
     engine.restart().await;
     let mut after = engine.owner().await;
     let client = after.owner_client().unwrap();
-    let restored = client
-        .job_status()
-        .await
-        .unwrap()
-        .map(|job| (job.id, job.kind, job.project_id, job.source, job.state));
+    let job = only(client.job_status().await.unwrap(), "the left move");
     assert_eq!(
-        restored,
-        Some((
+        (job.id, job.kind, job.project_id, job.source, job.state),
+        (
             id("move-left"),
             JobKind::MoveProject,
             Some(reading.clone()),
@@ -2561,7 +2603,7 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
                 code: "move_project_old_folder_left".into(),
                 phase: Phase::Clearing,
             }
-        ))
+        )
     );
     assert_eq!(fs::read(origin.join("notes.txt")).unwrap(), b"left\n");
     assert!(client.job_dismiss(id("move-left")).await.unwrap());
@@ -2569,9 +2611,8 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
     engine.restart().await;
     let mut again = engine.owner().await;
     let client = again.owner_client().unwrap();
-    assert_eq!(
-        client.job_status().await.unwrap(),
-        None,
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
         "a dismissed warning stays gone"
     );
 
@@ -2581,14 +2622,15 @@ async fn an_engine_start_shows_a_project_move_whose_old_folder_was_left() {
     engine.restart().await;
     let last = engine.owner().await;
     let client = last.owner_client().unwrap();
-    assert_eq!(client.job_status().await.unwrap(), None);
+    assert!(client.job_status().await.unwrap().is_empty());
     engine.stop().await;
 }
 
 /// DEC-177 step 1b (leader 13:26): one folder change at a time for every client. While a
 /// project move job waits for its agents, a direct add and a direct move of that project
-/// from an owner client are refused `job_busy` before any plan, and an add job too; once the
-/// move ended, the same direct add goes.
+/// from an owner client are refused `job_busy` before any plan, while an add job waits its
+/// turn (DEC-197); once the move ended the add job lands, and a direct add goes once every
+/// job ended.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_direct_folder_change_is_refused_job_busy_while_a_job_runs_and_goes_once_it_ended() {
     let disk = tempfile::tempdir().unwrap();
@@ -2626,28 +2668,45 @@ async fn a_direct_folder_change_is_refused_job_busy_while_a_job_runs_and_goes_on
         job_busy(),
         "a direct move while a move job runs"
     );
-    let busy = owner
+    let waiting = owner
         .controller
         .owner_client()
         .unwrap()
         .job_start(id("add-beside"), folder(&source), AddMode::Copy, Vec::new())
         .await
-        .unwrap_err();
-    assert_eq!(busy.0, "job_busy", "an add job while a move job runs");
+        .unwrap();
+    assert!(
+        matches!(waiting.state, JobState::Waiting { .. }),
+        "an add job while a move job runs waits its turn: {:?}",
+        waiting.state
+    );
     assert!(!landed.exists(), "nothing was added");
     sql(
         &database,
         "UPDATE team_agents SET status='stopped' WHERE id=44;",
     );
-    job_until(&owner.controller, |job| job.state == JobState::Done).await;
+    job_named(&owner.controller, "move-hold", |job| {
+        job.state == JobState::Done
+    })
+    .await;
     assert!(target.is_dir(), "{target:?}");
-    assert_eq!(
-        owner.apply(add(&source, AddMode::Copy)).await,
-        OwnerResult::Applied,
-        "the same direct add once the job ended"
-    );
+    job_named(&owner.controller, "add-beside", |job| {
+        job.state == JobState::Done
+    })
+    .await;
     assert_eq!(
         fs::read_to_string(landed.join("p1/f1.txt")).unwrap(),
+        "1 1\n"
+    );
+    let more = place.join("more-notes");
+    tree(&more, 2, 2);
+    assert_eq!(
+        owner.apply(add(&more, AddMode::Copy)).await,
+        OwnerResult::Applied,
+        "a direct add once every job ended"
+    );
+    assert_eq!(
+        fs::read_to_string(place.join("second/more-notes/p1/f1.txt")).unwrap(),
         "1 1\n"
     );
     engine.stop().await;

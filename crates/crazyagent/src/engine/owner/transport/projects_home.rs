@@ -21,9 +21,10 @@ static EXCHANGES: AtomicU64 = AtomicU64::new(1);
 /// or a check of one still running answers `InProgress` instead of planning it again.
 pub(super) type RunningSet = Mutex<std::collections::HashSet<(String, RequestId)>>;
 
-/// The most owner changes running at once: one per deferred place and the one intake job,
-/// which holds no deferred place.
-const RUNNING_MAX: usize = DEFERRED_MAX + 1;
+/// The most owner changes running at once: one per deferred place and one per live intake
+/// job, running or waiting, which holds no deferred place.
+const RUNNING_MAX: usize =
+    DEFERRED_MAX + super::intake::JOBS_RUNNING_MAX + super::intake::JOBS_WAITING_MAX;
 
 /// One owner change's claim on its request id while this exchange or the intake job runs
 /// it. Dropping it, after the record and the reply, lets a later resend reach the recorded
@@ -160,6 +161,15 @@ enum Work {
 }
 
 impl Work {
+    /// The folder an add or a project move lands in; None for other work.
+    fn landing(&self) -> Option<&Path> {
+        match self {
+            Self::Add(plan) => Some(plan.destination()),
+            Self::MoveProject(plan) => Some(plan.destination()),
+            Self::Move(_) | Self::New(_) | Self::Demo(_) | Self::Delete(..) => None,
+        }
+    }
+
     fn interrupted(&self) -> &'static str {
         match self {
             Self::Add(_) => "home_add_interrupted",
@@ -358,7 +368,7 @@ pub(super) async fn serve(
     assert!(exchange > 0);
     let client = matches!(sink, Sink::Client(_));
     let _running = match mutation && client {
-        true => match Running::claim(authority, &a.owner_id, &id) {
+        true => match trace::claim(&id, Running::claim(authority, &a.owner_id, &id)) {
             Some(running) => Some(running),
             None => {
                 let reply =
@@ -468,6 +478,9 @@ pub(super) async fn serve(
                     if let Work::MoveProject(plan) = &work {
                         _moved_ide =
                             Some(authority.ide_servers.hold_for_delete(plan.project()).await);
+                    }
+                    if let Some(landing) = work.landing() {
+                        tally.land_at(landing);
                     }
                     let interrupted = work.interrupted();
                     let tallied = Arc::clone(&tally);
@@ -895,6 +908,8 @@ async fn finish(
             state.data = OwnerData::FolderSize {
                 bytes: measured.bytes,
                 placeholders: measured.placeholders,
+                skipped: measured.skipped.listed,
+                skipped_more: measured.skipped.more,
             };
             OwnerResponse::Read { state }
         }

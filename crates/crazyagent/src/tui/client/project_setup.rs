@@ -788,6 +788,16 @@ mod tests {
                 project_id: project.clone(),
             },
         ] {
+            let expected = match &action {
+                SetupAction::RetryResearch { .. }
+                    if !crate::project_setup::retryable(ResearchStatus::Cancelled) =>
+                {
+                    crate::engine::owner::OwnerResult::Rejected {
+                        code: crate::project_setup::RESEARCH_UNAVAILABLE_HERE.into(),
+                    }
+                }
+                _ => crate::engine::owner::OwnerResult::Applied,
+            };
             app.request_setup_change(action.clone()).unwrap();
             let query = app.take_setup_query().unwrap();
             let event = native.project_setup(query).await;
@@ -795,10 +805,8 @@ mod tests {
             assert!(
                 matches!(
                     &app.setup_view,
-                    Some((
-                        SetupQuery::Change { .. },
-                        SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
-                    ))
+                    Some((SetupQuery::Change { .. }, SetupView::Changed(result)))
+                        if *result == expected
                 ),
                 "{action:?}"
             );

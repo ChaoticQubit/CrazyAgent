@@ -64,10 +64,10 @@ export function messageCount(line) {
   return found ? Number(found[1]) : null;
 }
 
-/** Reads the rows of the live master terminal as text. Output: one string per row. */
+/** Reads the rows of the live master terminal as text, from its buffer, so they read the
+ * same under every Terminal renderer. Output: one string per row. */
 export function masterRows() {
-  return browser.execute(() => [...document.querySelectorAll(".pj-master-live .tg-terminal-screen .xterm-rows > div")]
-    .map((row) => row.textContent.replace(/\u00a0/g, " ")));
+  return browser.execute(() => document.querySelector(".pj-master-live .tg-terminal-screen .tg-terminal-host")?.readScreen?.() ?? []);
 }
 
 /** Reads the Sessions bar's live session line. Output: its text, or "" when it is not shown. */

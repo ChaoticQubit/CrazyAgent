@@ -376,7 +376,7 @@ test("a move waits on Home for the project's agents to stop, says how many are l
   assert.equal(readFileSync(join(target, "notes.md"), "utf8"), "kept\n");
 });
 
-test("one job at a time: another project's move is refused naming the running move, the same project's start finds it, and a new window shows it on Home (DEC-177)", { timeout: 300000 }, async () => {
+test("jobs take turns: another project's move waits behind the running move and starts by itself once it ends, the same project's start finds the running one, and a new window shows both on Home (DEC-197)", { timeout: 300000 }, async () => {
   const first = await keptOutside("Busy First");
   tree(first.folder, 200, 200);
   const second = await keptOutside("Busy Second");
@@ -385,22 +385,25 @@ test("one job at a time: another project's move is refused naming the running mo
   const again = await startMove(first.id, "copy");
   assert.equal(again.id, running.id, "the same project's start finds the running move");
   const moving = basename(first.folder);
-  await onPage("busy", async (page, me) => {
+  const waiting = basename(second.folder);
+  await onPage("waiting", async (page, me) => {
     await openMove(page, me, second.id, "Busy Second");
     await me.click("Stop the team and move", "dialog[open] button");
-    await me.waitFor("the busy line", (text) => text.includes(`Moving ${moving} is running. Wait for it to finish on Home.`), MOVE_MS);
-    await me.capture("move-job-busy");
+    await me.waitFor("the dialog closed", (text) => !text.includes("Stop the team and move"), MOVE_MS);
   });
   await onPage("reopened", async (page, me) => {
     await openHome(page);
-    await me.waitFor("the running move", (text) => text.includes(`Copying ${moving}`) || text.includes(`Checking the copy of ${moving}`), MOVE_MS);
-    await me.capture("move-job-reopened");
+    await me.waitFor("both jobs", (text) => (text.includes(`Copying ${moving}`) || text.includes(`Checking the copy of ${moving}`))
+      && text.includes(`Waiting for ${moving} to finish...`), MOVE_MS);
+    await me.capture("move-job-waiting");
     await me.click("Stop", ".in-row button");
-    await me.waitFor("the stopped line", (text) => text.includes(`Moving ${moving} stopped. Nothing was moved or copied.`), MOVE_MS);
+    await me.waitFor("the first stopped and the second moved", (text) => text.includes(`Moving ${moving} stopped. Nothing was moved or copied.`)
+      && text.includes(`${waiting} is now in your projects folder`), MOVE_MS);
+    await me.capture("move-job-turn-taken");
   });
   assert.equal(await projectFolder(first.id), first.folder, "the stopped move leaves its project where it was");
-  assert.equal(await projectFolder(second.id), second.folder, "the refused move never started");
-  assert.ok(!existsSync(join(second.home, basename(second.folder))), "nothing of the refused project reached the projects folder");
+  assert.equal(await projectFolder(second.id), join(second.home, waiting), "the waiting move ran once the first ended");
+  assert.ok(!existsSync(second.folder), "the second project's old folder is gone");
 });
 
 test("a move an engine stop cut short shows on Home after the next start, and Dismiss forgets it across another start (DEC-177)", { timeout: 300000 }, async () => {

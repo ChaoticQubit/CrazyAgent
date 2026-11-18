@@ -1,7 +1,6 @@
 use super::*;
 use crate::plugins::{EffectiveSecret, EffectiveServer};
 use crate::project_setup::TeamPlan;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 fn stored(folder: &Path) -> StoredSetup {
@@ -2274,6 +2273,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                 }],
             }],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -2401,6 +2402,8 @@ impl LeftPane {
                     }],
                 }],
                 context_mode_off: None,
+                batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             instructions: "# Project context from CrazyAgent\n".into(),
@@ -2795,6 +2798,8 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
 
@@ -2830,6 +2835,8 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3020,11 +3027,129 @@ fn a_codex_launch_pins_only_its_own_hooks_and_never_bypasses_hook_trust() {
     );
     assert_eq!(
         codex_pinned_keys(&codex),
-        Some(vec![key]),
+        Ok(vec![key]),
         "the engine reads back the keys it asks Codex about (PA1213R2-F2)"
     );
-    assert_eq!(codex_pinned_keys(&root.join("no-home")), None);
+    assert_eq!(
+        codex_pinned_keys(&root.join("no-home")),
+        Err(HookKeysUnread::Absent)
+    );
     drop(installed);
+}
+
+/// SECRET-PARSE-COPIES R2: the engine reads back a Codex launch's pinned hook keys from the
+/// launch's own key list, never by parsing `config.toml`, whose MCP env and header tables
+/// hold secrets that a parse tree would copy into memory no wipe reaches. An edited or
+/// missing `config.toml` changes nothing, and a home with no key list is unreadable even
+/// when its `config.toml` pins keys.
+#[test]
+fn a_codex_launch_s_pinned_keys_come_from_its_own_key_list_never_from_its_config_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = root.join("bin").join("crazyagent");
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_relay(&engine, &root.join("mailbox-codex"))
+        .install("codex", &codex, true)
+        .unwrap();
+    let key = format!(
+        "{}:pre_tool_use:0:0",
+        codex.canonicalize().unwrap().join("config.toml").display()
+    );
+    assert_eq!(codex_pinned_keys(&codex), Ok(vec![key.clone()]));
+    let planted = r#"[hooks.state."planted:pre_tool_use:0:0"]
+trusted_hash = "sha256:00"
+
+[mcp_servers.tools.env]
+TOKEN = "secret-value"
+"#;
+    let config = codex.join("config.toml");
+    fs::write(&config, planted).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&codex),
+        Ok(vec![key.clone()]),
+        "an edited config.toml is never parsed for the keys"
+    );
+    fs::remove_file(&config).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&codex),
+        Ok(vec![key]),
+        "the keys need no config.toml at all"
+    );
+    let bare = private_home(&root, "bare");
+    fs::write(bare.join("config.toml"), planted).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&bare),
+        Err(HookKeysUnread::Absent),
+        "a home with no key list has none, never read from its config.toml"
+    );
+    drop(installed);
+}
+
+/// #166 N0 and N1: a Codex home tells a missing hook key list, as an agent an earlier
+/// CrazyAgent started has, apart from one it cannot read. A link in the list's place is not
+/// followed, and a list past `CODEX_HOOK_KEYS_BYTES_MAX` or not a list of strings is
+/// unreadable, never a guess at keys.
+#[test]
+fn a_missing_codex_hook_key_list_is_told_apart_from_a_linked_oversized_or_malformed_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_home(&root, "codex");
+    assert_eq!(codex_pinned_keys(&home), Err(HookKeysUnread::Absent));
+    fs::create_dir(home.join(STATE)).unwrap();
+    assert_eq!(codex_pinned_keys(&home), Err(HookKeysUnread::Absent));
+    let list = home.join(STATE).join(CODEX_HOOK_KEYS);
+    let planted = root.join("planted.json");
+    fs::write(&planted, r#"["planted:pre_tool_use:0:0"]"#).unwrap();
+    std::os::unix::fs::symlink(&planted, &list).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Err(HookKeysUnread::Unreadable),
+        "a link in the list's place is never followed"
+    );
+    fs::remove_file(&list).unwrap();
+    fs::write(&list, r#"{"keys": ["k:pre_tool_use:0:0"]}"#).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Err(HookKeysUnread::Unreadable),
+        "a list that is not a list of strings"
+    );
+    let bound = usize::try_from(CODEX_HOOK_KEYS_BYTES_MAX).unwrap();
+    fs::write(&list, format!("[\"{}\"]", "k".repeat(bound))).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Err(HookKeysUnread::Unreadable),
+        "a well-formed list past the bound"
+    );
+    fs::write(&list, r#"["k:pre_tool_use:0:0"]"#).unwrap();
+    assert_eq!(
+        codex_pinned_keys(&home),
+        Ok(vec!["k:pre_tool_use:0:0".to_owned()])
+    );
+}
+
+/// KEYLIST-OPEN-NONBLOCK (#168 F1): a FIFO an agent put in the hook key list's place is
+/// unreadable at once. Opening it never waits for a writer, so the team tick that asks for
+/// the keys is never held by an agent's home.
+#[test]
+fn a_fifo_in_the_codex_hook_key_list_s_place_is_unreadable_without_waiting_for_a_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_home(&root, "codex");
+    fs::create_dir(home.join(STATE)).unwrap();
+    let made = crate::spawn_gate::collected(
+        std::process::Command::new("/usr/bin/mkfifo").arg(home.join(STATE).join(CODEX_HOOK_KEYS)),
+    )
+    .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let asked = home.clone();
+    std::thread::spawn(move || sender.send(codex_pinned_keys(&asked)));
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)),
+        Ok(Err(HookKeysUnread::Unreadable)),
+        "a FIFO with no writer never holds the caller"
+    );
 }
 
 #[test]
@@ -3188,6 +3313,8 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                 }],
                 servers: vec![command_server("context-mode")],
                 context_mode_off: None,
+                batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             Vec::new(),
@@ -3268,6 +3395,8 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             false => vec![command_server("graph")],
         },
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = |tools: &[&str]| {
@@ -3393,6 +3522,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3512,6 +3643,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             skills: Vec::new(),
             servers: vec![command_server("graph")],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         Vec::new(),
@@ -5076,6 +5209,8 @@ fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_
         skills: Vec::new(),
         servers: vec![command_server("graph")],
         context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let claude = private_home(&root, "claude");
@@ -5143,6 +5278,8 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
             skills: Vec::new(),
             servers: vec![command_server("graph")],
             context_mode_off: Some(off),
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         };
         let home = private_home(&root, &format!("{off:?}").to_lowercase());
@@ -5312,6 +5449,8 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
                 },
             ],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -5332,3 +5471,6 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
         .keep();
     assert!(Path::new(&home).join("config.toml").is_file());
 }
+
+#[path = "batch_files_tests.rs"]
+mod batch_files_tests;

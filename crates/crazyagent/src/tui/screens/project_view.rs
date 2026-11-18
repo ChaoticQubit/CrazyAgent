@@ -1,3 +1,4 @@
+use super::add_folder::left_texts;
 use super::console;
 use super::new_project::{any_harness_total, display_path, harness_name, size_label, team_summary};
 use super::new_project_input::cells;
@@ -25,6 +26,7 @@ use crate::project_overview::{
 use crate::project_setup::{
     ContextItem, ContextKind, Platform, ResearchJob, ResearchKind, ResearchStatus,
 };
+use crate::projects_home::icloud::SkippedFolders;
 use crate::roadmap_status::Refresh;
 use ratatui::style::Style;
 
@@ -429,7 +431,7 @@ pub(in crate::tui) fn project_screen(
     }
     if screen.confirm_move {
         let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
-        let body = move_ask(screen, box_width - 4, look);
+        let (body, keys) = move_ask(screen, box_width - 4, body_height.saturating_sub(4), look);
         rows = modal(
             &rows,
             width,
@@ -439,12 +441,7 @@ pub(in crate::tui) fn project_screen(
             2,
             look,
         );
-        help = vec![
-            ("m", "Move"),
-            ("c", "Copy"),
-            ("n", "Keep it here"),
-            ("Esc", "Keep it here"),
-        ];
+        help = keys;
     }
     if let Some(path) = &screen.confirm_delete {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -593,11 +590,17 @@ pub(in crate::tui) const MOVE_ASK_TEAM: &str = "Stop the team first (Stop all on
 /// What the move ask says about its two ways.
 pub(in crate::tui) const MOVE_ASK_WAYS: &str = "Move takes the folder into your CrazyAgent folder. Copy leaves the old folder where it is and the project uses the copy.";
 
-/// Draws the move ask: that the team must be stopped and its work follows, then Move, Copy
-/// or keeping the project where it is. Inputs: the screen, the box's inner width and the
-/// look. Output: the box rows.
-fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
+/// What the move ask says when its folder read failed, so the move downloads everything.
+pub(in crate::tui) const MOVE_ASK_UNREAD: &str = "CrazyAgent couldn't read this folder. Anything in it only in iCloud is downloaded first, rebuildable folders too, which can be slow.";
+
+/// Draws the move ask: that the team must be stopped and its work follows; once the folder
+/// read lands, the rebuildable folders a move leaves in iCloud, as many named as fit the
+/// rows, with the Download everything switch; then Move, Copy or keeping the project where
+/// it is. Inputs: the screen, the box's inner width and rows, and the look. Output: the box
+/// rows and the help keys.
+fn move_ask(screen: &ProjectScreen, inner: usize, room: usize, look: &Look) -> (Vec<Row>, Help) {
     assert!(inner >= REMOVE_BOX_MIN - 4);
+    assert!(screen.confirm_move);
     let mut body = vec![
         Row::of(
             format!("Move {} into your CrazyAgent folder?", screen.name),
@@ -613,6 +616,44 @@ fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
         );
         body.push(Row::default());
     }
+    let keep = [("n", "Keep it here"), ("Esc", "Keep it here")];
+    let Some(left) = screen.move_left.as_ref() else {
+        body.push(Row::of("Reading the folder...", look.muted));
+        return (body, keep.to_vec());
+    };
+    let mut help = vec![("m", "Move"), ("c", "Copy")];
+    if screen.move_unread {
+        body.extend(
+            wrap_words(MOVE_ASK_UNREAD, inner)
+                .iter()
+                .map(|line| Row::of(line.as_str(), look.muted)),
+        );
+        body.push(Row::default());
+    }
+    if !left.is_empty() {
+        let fixed = body.len() + 2;
+        let place = folder(screen);
+        let mut cap = left.listed.len();
+        let lines = loop {
+            let (listed, more) = left.cut(cap);
+            let shown = SkippedFolders { listed, more };
+            let lines: Vec<String> = left_texts(&shown, screen.move_everything, &place, "move")
+                .iter()
+                .flat_map(|text| wrap_words(text, inner))
+                .collect();
+            if fixed + lines.len() <= room || cap == 0 {
+                break lines;
+            }
+            cap -= 1;
+        };
+        let tight = fixed + lines.len() > room;
+        body.extend(lines.iter().map(|line| Row::of(line.as_str(), look.muted)));
+        if !tight {
+            body.push(Row::default());
+        }
+        help.push(("Space", "Download everything"));
+    }
+    help.extend(keep);
     body.push(
         Row::of("[ m Move ]", look.fg)
             .push("   ", Style::new())
@@ -620,7 +661,7 @@ fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
             .push("   ", Style::new())
             .push("[> Keep it here ]", look.selection),
     );
-    body
+    (body, help)
 }
 
 /// Draws the remove ask in at most `room` rows: with Remove from dashboard chosen, both choices
@@ -1775,7 +1816,8 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         Vec::new()
     };
     let prompt_extra = if typed { prompt.len() - 1 } else { 0 };
-    let available = room.saturating_sub(4 + prompt_extra + below.len());
+    let notice = reinstall_rows(screen, content, look);
+    let available = room.saturating_sub(4 + prompt_extra + below.len() + notice.len());
     let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if !screen.pool_ready {
         (
             vec![Row::of(
@@ -1912,10 +1954,64 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         lines.extend(std::iter::repeat_n(Row::default(), gap));
     }
     lines.extend(below);
+    lines.extend(notice);
     lines.push(Row::of(look.glyph("\u{2500}").repeat(content), look.muted));
     let cursor = typed.then(|| (at.1, lines.len() + at.0));
     lines.extend(input);
     (lines, cursor, help)
+}
+
+/// What the reinstall offer adds while the master's accounts aren't signed in, as the desktop.
+pub(in crate::tui) const REINSTALL_SIGN_IN: &str =
+    "Add an account first; the master can reinstall them once one is signed in.";
+
+/// What the reinstall offer says, as the desktop: the folders a job left in iCloud, the first
+/// three named and the rest counted, and why. Takes the offer. Returns the sentence.
+pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Offer) -> String {
+    let names = &offer.folders;
+    let count = names.len() as u64 + offer.more;
+    let listed = match (names.as_slice(), offer.more) {
+        (_, more) if more > 0 => format!("{} and {more} more", names.join(", ")),
+        ([one], _) => one.clone(),
+        ([head @ .., last], _) => format!("{} and {last}", head.join(", ")),
+        ([], _) => String::new(),
+    };
+    let (verb, pronoun) = match count {
+        1 => ("was", "it"),
+        _ => ("were", "they"),
+    };
+    format!(
+        "{listed} {verb} left out when this project came into your projects folder, as \
+         {pronoun} can be rebuilt."
+    )
+}
+
+/// The reinstall offer's rows above the input: its sentence, the sign-in sentence while the
+/// master's accounts aren't signed in, and the keys that act on it, `a` only while the
+/// master can take a message; while typing they come after Tab. Takes the screen, the width and
+/// the look. Returns the rows, none without an offer.
+fn reinstall_rows(screen: &ProjectScreen, content: usize, look: &Look) -> Vec<Row> {
+    let Some(offer) = screen.reinstall.as_ref() else {
+        return Vec::new();
+    };
+    let mut text = reinstall_line(offer);
+    if screen.reinstall_signed_out() {
+        text.push(' ');
+        text.push_str(REINSTALL_SIGN_IN);
+    }
+    let keys = match screen.reinstall_ask() {
+        true => "a to put the drafted message in your input, d to dismiss this.",
+        false => "d to dismiss this.",
+    };
+    let lead = match screen.typing {
+        true => "Press Tab, then",
+        false => "Press",
+    };
+    text.push_str(&format!(" {lead} {keys}"));
+    wrap_words(&text, content)
+        .into_iter()
+        .map(|line| Row::of(line, look.fg))
+        .collect()
 }
 
 fn input_row(screen: &ProjectScreen, look: &Look) -> Row {
@@ -1957,8 +2053,8 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running => {
             Some(("x", "Stop"))
         }
-        ResearchStatus::Failed | ResearchStatus::Cancelled => Some(("r", "Retry")),
-        ResearchStatus::Done => None,
+        ResearchStatus::Failed | ResearchStatus::Cancelled if job.retryable => Some(("r", "Retry")),
+        ResearchStatus::Failed | ResearchStatus::Cancelled | ResearchStatus::Done => None,
     }));
     help.extend([
         ("Enter", "Open report"),
@@ -2634,7 +2730,7 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
 /// hidden folder covers, so an empty list never reads as "nothing can open it" (SA-VID14-A
 /// r1): team agents, taken-over panes included, and the engine runs that started before
 /// (SA-VID14-R2-N2).
-const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with h Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named there too, and keep their access until they end.";
+const HIDDEN_SEERS_COVER: &str = "Team agents that started before you hid a folder, including ones CrazyAgent took over when it opened again, are named under Hidden with R Restart them. Master turns, research jobs and overview, roadmap, onboarding, code graph and lockfile rebuild runs that started before are named there too, and keep their access until they end.";
 
 /// The Settings line naming the running agents that can still open a folder hidden after
 /// they started, with the key that restarts them (SA-VID14-A). Takes the screen and look.
@@ -2646,7 +2742,7 @@ fn seers_line(screen: &ProjectScreen, look: &Look) -> Option<Row> {
             format!("{} can still open a hidden folder", seers.join(", ")),
             look.warning,
         )
-        .push("   h Restart them", look.muted)
+        .push("   R Restart them", look.muted)
     })
 }
 
@@ -2732,7 +2828,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             "Folder",
             Row::of(folder(screen), look.fg)
                 .push("   x Remove project", look.muted)
-                .push("   m Move into CrazyAgent folder", look.muted),
+                .push("   M Move into CrazyAgent folder", look.muted),
         ),
         entry("Pool", pool),
         entry(
@@ -2747,14 +2843,16 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
-        entry("Hidden", hidden_line(screen, look)),
     ];
-    lines.extend(seers_line(screen, look).map(|row| entry("", row)));
-    lines.extend(
-        runs_lines(screen, content.saturating_sub(10), look)
-            .into_iter()
-            .map(|row| entry("", row)),
-    );
+    if screen.hidden_offered() {
+        lines.push(entry("Hidden", hidden_line(screen, look)));
+        lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+        lines.extend(
+            runs_lines(screen, content.saturating_sub(10), look)
+                .into_iter()
+                .map(|row| entry("", row)),
+        );
+    }
     lines.extend([
         entry(
             "Access",

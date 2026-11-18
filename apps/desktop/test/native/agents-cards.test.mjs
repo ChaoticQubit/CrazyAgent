@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TURN_MS, UI_MS, cardOf, copyRow, finishedRow, fromRows, inTurn, moved, notShown, offTab, overlapping, paired, redrawMove, roleName, showsTask, spilled, statusWord, turnUp } from "./agents-cards.mjs";
+import { TURN_MS, UI_MS, cardOf, copyRow, finishedRow, fromRows, inTurn, moved, notShown, offTab, overlapping, paired, redrawMove, roleName, rowTexts, selectRow, showsTask, spilled, statusWord, terminalView, turnUp } from "./agents-cards.mjs";
+import { masterRows } from "./trial4/n-d8-master-reply.mjs";
 
 /** A card as readCards reads it, at a place and size, with one text box inside it unless
  * given others. Inputs: the title, the box and the text boxes. Output: the card. */
@@ -187,4 +188,29 @@ test("a window is off a project tab when its hash shows another page, another ta
   assert.equal(offTab("#/projects/ca-trial-4/agents", "ca-trial-4b", "agents"), "#/projects/ca-trial-4/agents");
   assert.equal(offTab("#/projects/ca-trial-4b/agents-old", "ca-trial-4b", "agents"), "#/projects/ca-trial-4b/agents-old");
   assert.equal(offTab("", "ca-trial-4b", "agents"), "");
+});
+
+test("#358 r1 F1: a terminal shown before its view sets up the buffer reader reads as empty, not as an error", async () => {
+  const host = {};
+  const screen = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 340 }) };
+  const section = {
+    getAttribute: () => "Ada terminal",
+    getClientRects: () => [{}],
+    querySelector: (selector) => ({ ".tg-terminal-host": host, ".xterm-screen": screen })[selector] ?? null,
+    querySelectorAll: () => [],
+  };
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector === "section.tg-terminal" ? [section] : []),
+    querySelector: (selector) => (selector === ".pj-master-live .tg-terminal-screen .tg-terminal-host" ? host : null),
+  };
+  globalThis.browser = { execute: async (fn, ...args) => fn(...args) };
+  try {
+    assert.deepEqual(await rowTexts("Ada"), []);
+    assert.deepEqual(await terminalView("Ada"), { state: "", rows: "", lines: [], top: 0, mouse: false, live: false, jump: false });
+    assert.equal(await selectRow("Ada", 0), null);
+    assert.deepEqual(await masterRows(), []);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.browser;
+  }
 });

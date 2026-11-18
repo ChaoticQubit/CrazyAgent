@@ -1,4 +1,5 @@
-import type { IFunctionIdentifier, IParser } from "@xterm/xterm";
+import type { WebglAddon } from "@xterm/addon-webgl";
+import type { IFunctionIdentifier, IParser, Terminal } from "@xterm/xterm";
 import type { TerminalMessage } from "../../engine-client";
 
 export const INPUT_BYTES_MAX = 4096;
@@ -283,6 +284,64 @@ export function muteQueries(terminal: { parser: Pick<IParser, "registerCsiHandle
   for (const id of QUERY_OSC) terminal.parser.registerOscHandler(id, (data) => data.split(";").includes("?"));
 }
 
+/** A view's drawing on the GPU, released at most once. */
+export type GpuDrawing = { release(): void };
+
+/** Moves an opened view's drawing onto the GPU with xterm's WebGL addon, so a busy pane stops
+ * rebuilding DOM rows on every frame. A load that fails, as on a machine without WebGL2, keeps
+ * the DOM renderer. Releasing disposes the addon, which hands drawing back to DOM rows, then
+ * loses its context and empties its canvas, so the GPU memory goes at once; disposing first
+ * means a release never reads as a context loss. A lost context releases it and tells `lost`.
+ * Inputs: the opened terminal, the addon class and what hears a loss. Output: the drawing, or
+ * null when the GPU refused it. */
+export function drawOnGpu(terminal: Pick<Terminal, "element" | "loadAddon">, Webgl: new () => WebglAddon, lost: () => void): GpuDrawing | null {
+  const element = terminal.element;
+  assert(element !== undefined, "the view is open before its GPU renderer loads");
+  const before = new Set(element.querySelectorAll("canvas"));
+  const addon = new Webgl();
+  try {
+    terminal.loadAddon(addon);
+  } catch {
+    addon.dispose();
+    return null;
+  }
+  const canvases = [...element.querySelectorAll("canvas")].filter((canvas) => !before.has(canvas));
+  const contexts = canvases.flatMap((canvas) => canvas.getContext("webgl2") ?? []);
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    addon.dispose();
+    for (const context of contexts) if (!context.isContextLost()) context.getExtension("WEBGL_lose_context")?.loseContext();
+    for (const canvas of canvases) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  };
+  addon.onContextLoss(() => {
+    release();
+    lost();
+  });
+  return { release };
+}
+
+/** The lines a terminal shows now, read from its buffer, so they read the same whichever
+ * renderer draws them. Input: the terminal. Output: one line per row of the screen, with
+ * trailing blanks cut. */
+export function screenLines(terminal: Pick<Terminal, "buffer" | "rows">): string[] {
+  const buffer = terminal.buffer.active;
+  const lines: string[] = [];
+  for (let row = 0; row < terminal.rows; row += 1) lines.push(buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? "");
+  return lines;
+}
+
+/** Lets a reader on the page, such as an end-to-end check, read a view's screen from its
+ * element: `readScreen()` on the element returns `screenLines` of its terminal, read only when
+ * asked, so nothing runs per write. Inputs: the view's element and its terminal. Output: none. */
+export function readableScreen(host: HTMLElement, terminal: Pick<Terminal, "buffer" | "rows">): void {
+  Object.defineProperty(host, "readScreen", { configurable: true, value: () => screenLines(terminal) });
+}
+
 /** The text a clipboard paste may type into an agent: every control character is dropped
  * except tab, new line and carriage return, so pasted text can never end the app's
  * bracketed paste or press Escape, Ctrl keys or other keys inside it. Input: the clipboard
@@ -291,6 +350,18 @@ export function pasteText(text: string): string {
   const kept = text.replace(PASTE_CONTROLS, "");
   assert(!kept.includes("\x1b"), "pasted text keeps no Escape");
   return kept;
+}
+
+/** The text a drafted message types into an agent's terminal: as a clipboard paste, with each
+ * run of line breaks made one space while the app has not turned on bracketed paste, as a bare
+ * line break there presses Enter and would send the draft unasked. Inputs: the draft and
+ * whether the app reads pastes bracketed. Output: the text to paste. */
+export function seedText(text: string, bracketed: boolean): string {
+  const kept = pasteText(text);
+  if (bracketed) return kept;
+  const flat = kept.replace(/[\r\n]+/g, " ");
+  assert(!/[\r\n]/.test(flat), "an unbracketed seed keeps no line break");
+  return flat;
 }
 
 /** The key that makes a drag select text while the app in a terminal reads the mouse: xterm

@@ -20,7 +20,7 @@ pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
-mod migrations;
+pub(crate) mod migrations;
 #[cfg(all(test, unix))]
 pub(crate) use master_session::turn_task_id;
 pub(crate) use master_session::{
@@ -35,6 +35,7 @@ mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
+pub(crate) mod reinstall;
 pub(crate) mod setup;
 pub(crate) mod trash;
 #[cfg(unix)]
@@ -178,7 +179,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
-    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Vec<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
     HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
@@ -210,11 +211,22 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeSetupMarkEnd(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeReinstallKeep(
+        std::path::PathBuf,
+        Option<std::path::PathBuf>,
+        crate::projects_home::reinstall::Kept,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeReinstallRead(
+        ProjectId,
+        oneshot::Sender<Result<Option<crate::projects_home::reinstall::Offer>, EngineError>>,
+    ),
+    HomeReinstallDismiss(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCheck(
         Admission,
         ProjectId,
         crate::projects_home::AddMode,
-        oneshot::Sender<Result<String, EngineError>>,
+        oneshot::Sender<Result<(String, bool), EngineError>>,
     ),
     HomeMovePlan(
         Admission,
@@ -782,6 +794,25 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::HomeReinstallKeep(landed, old, kept, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                reinstall::keep(&mut connection, &landed, old.as_deref(), &kept)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeReinstallRead(project, reply) => {
+                            let _ = reply.send(reinstall::offer(&connection, &project));
+                        }
+                        Job::HomeReinstallDismiss(project, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                reinstall::dismiss(&connection, &project)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::HomeProjectMoveCheck(admission, project, mode, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
@@ -989,8 +1020,21 @@ impl Storage {
                                     mutation: OwnerMutation::RemoveProject { .. }
                                 }
                             );
+                            let team = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::Team { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if team
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied)
+                            {
+                                crate::team::runtime::wake_loops();
+                            }
                             let restart = set_home && result.is_ok();
                             let forgotten = forgetting
                                 && result
@@ -1258,7 +1302,7 @@ fn open_actor_database(
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
         let started = std::time::Instant::now();
-        if let Some(held) = crate::project_setup::removed::hold_left(&connection)? {
+        if let Some(held @ 1..) = crate::project_setup::removed::hold_left(&connection)? {
             eprintln!(
                 "projects_removed_backfill held={held} ms={}",
                 started.elapsed().as_millis()
@@ -3020,6 +3064,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
+                unavailable: crate::sandbox::hidden_paths::UNAVAILABLE,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())

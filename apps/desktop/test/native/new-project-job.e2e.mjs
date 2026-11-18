@@ -45,12 +45,12 @@ async function poolProjects() {
   return pool.pool.projects;
 }
 
-/** Reads the engine's job until `done` says it is the one wanted, as Home's poll does. Inputs:
- * what is waited for and the check. Output: the job read last. */
+/** Reads the engine's newest job until `done` says it is the one wanted, as Home's poll does.
+ * Inputs: what is waited for and the check. Output: the job read last, or null for none. */
 async function jobUntil(what, done) {
   const deadline = Date.now() + JOB_MS;
   for (;;) {
-    const job = await value(run.bridge, "desktop_intake_status");
+    const job = (await value(run.bridge, "desktop_intake_status")).at(-1) ?? null;
     if (done(job)) return job;
     assert.ok(Date.now() < deadline, `the engine's job never reached ${what}: ${JSON.stringify(job)}`);
     await pause(POLL_MS);
@@ -292,7 +292,7 @@ test("a New Project that failed with no page following shows on Home with Try ag
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes(line), JOB_MS);
   });
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the failed job");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "Dismiss forgets the failed job");
   assert.ok(!(await projectNames()).includes(name), "the engine has no such project");
 });
 
@@ -307,12 +307,12 @@ test("a name whose folder is already in the projects folder is refused at the st
     await me.capture("np-refused");
     assert.equal(await keptName(page, me), name, "the answers are kept");
   });
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "a refused start holds no job");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "a refused start holds no job");
   assert.equal(readFileSync(join(taken, "notes.md"), "utf8"), "already here\n", "the folder already there is untouched");
   assert.ok(!(await projectNames()).includes(name), "the engine has no such project");
 });
 
-test("while another project's move waits for its agents, Create project is refused naming the running move, and the move stops from Home (DEC-177 step 3)", { timeout: 300000 }, async () => {
+test("while another project's move waits for its agents, Create project waits its turn behind it and builds once the move stops from Home (DEC-197)", { timeout: 300000 }, async () => {
   const holder = await setUpProject(run.bridge, { name: "Busy Holder", repositories: [] }, {
     about: "Busy Holder for the New Project job", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [],
   });
@@ -326,21 +326,21 @@ test("while another project's move waits for its agents, Create project is refus
   assert.equal(move.kind, "move_project", JSON.stringify(move));
   await jobUntil("the move waiting for its agent", (job) => job?.id === move.id && job.state.state === "stopping");
   const name = "Waits For Move";
-  await onPage("np-busy", async (page, me) => {
+  await onPage("np-waiting", async (page, me) => {
     await create(page, me, name);
-    await me.waitFor("the busy note naming the move", (text) => text.includes(`${KEPT} Moving busy-holder is running. Wait for it to finish on Home.`), JOB_MS);
-    await me.capture("np-busy");
     await open(page, "/");
-    await me.waitFor("Home's waiting line", (text) => text.includes("Waiting for 1 agent of busy-holder to stop..."), JOB_MS);
+    await me.waitFor("Home's two rows", (text) => text.includes("Waiting for 1 agent of busy-holder to stop...") && text.includes("Waiting for busy-holder to finish..."), JOB_MS);
+    await me.capture("np-waiting");
     await me.click("Stop", "div.in-row button");
     await me.waitFor("the stopped move", (text) => text.includes("Moving busy-holder stopped. Nothing was moved or copied."), JOB_MS);
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes("Moving busy-holder stopped"), JOB_MS);
   });
+  await jobUntil("the waiting New Project built", (job) => job?.kind === "setup" && job.state.state === "done");
   sql("UPDATE team_agents SET status='stopped' WHERE id=91");
   assert.equal(await projectFolder(holder), folder, "the stopped move leaves its project where it was");
-  assert.ok(!(await projectNames()).includes(name), "the refused New Project made no project");
-  assert.deepEqual(readdirSync(elsewhere), [], "nothing reached the other projects folder");
+  assert.ok((await projectNames()).includes(name), "the waiting New Project made its project once the move stopped");
+  assert.equal(readdirSync(elsewhere).length, 1, "only the New Project's folder reached the other projects folder");
   assert.equal((await value(run.bridge, "desktop_set_projects_home", { path: run.projects, generation: run.generation++ })).outcome, "applied");
 });
 
@@ -350,7 +350,7 @@ test("a New Project an engine stop cut short shows on Home after the next start 
   const payload = JSON.stringify({ project, request: "setup-cut-1", name });
   await restart(() => sql(`INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_setup','${project}','${payload}',${Date.now()});`));
   assert.equal(sql("SELECT count(*) FROM ledger_actions WHERE kind='project_setup' AND outcome IS NULL"), "0", "the start ends the mark");
-  const held = await value(run.bridge, "desktop_intake_status");
+  const held = (await value(run.bridge, "desktop_intake_status")).at(-1);
   assert.deepEqual([held?.kind, held?.project_id, held?.source, held?.state], ["setup", project, name, { state: "failed", code: "home_new_project_interrupted", phase: "building" }], JSON.stringify(held));
   const line = `${name}: Setting up the project stopped part way. Nothing was kept; set it up again from New Project.`;
   await onPage("np-interrupted", async (page, me) => {
@@ -365,7 +365,7 @@ test("a New Project an engine stop cut short shows on Home after the next start 
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes(line), JOB_MS);
   });
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the cut-short job");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "Dismiss forgets the cut-short job");
   assert.ok(!(await projectNames()).includes(name), "a cut-short New Project leaves no project");
 });
 
@@ -395,7 +395,7 @@ test("a New Project left right after Create still gets its pool and agent access
     assert.ok(!home.includes(`${name} is set up. Choose its pool and agent access in its Settings.`), `the Done line no longer sends the owner to Settings:\n${home}`);
     assert.ok(!home.includes("Couldn't assign") && !home.includes("Its agents stay Sandboxed"), `both follow-ups applied:\n${home}`);
     await me.capture("np-left-home");
-    assert.equal((await value(run.bridge, "desktop_intake_status"))?.id, ended.id, "no page dismissed the job: the owner left before Done");
+    assert.ok((await value(run.bridge, "desktop_intake_status")).some((job) => job.id === ended.id), "no page dismissed the job: the owner left before Done");
     await open(page, `/projects/${encodeURIComponent(id)}/settings?section=pool`);
     await me.waitFor("the project's Settings", (text) => text.includes("Agent access"), JOB_MS);
     assert.equal(await checked(page, "ps-pool"), "local-pool", "Settings shows the pool picked in New Project");

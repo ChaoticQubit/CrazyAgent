@@ -325,9 +325,9 @@ pub fn target_spec(url: bool, typed: &str) -> Result<ServerSpec, &'static str> {
         .map_err(|error| plugin_plain(&error.0))
 }
 
-/// Splits a typed command line into words. Single quotes keep spaces and a
-/// backslash keeps the next character, so a server's `runs` line reads back
-/// as the same command.
+/// Splits a typed command line into words. Single quotes keep spaces and a backslash keeps
+/// the next character, so a server's `runs` line reads back as the same command. On Windows
+/// a backslash separates folders, so it keeps only a following quote and is otherwise kept.
 /// Input: the line. Output: the words, or the plain reason it cannot be read.
 pub fn words(line: &str) -> Result<Vec<String>, &'static str> {
     let mut words = Vec::new();
@@ -344,6 +344,9 @@ pub fn words(line: &str) -> Result<Vec<String>, &'static str> {
                         None => return Err("A quote is not closed."),
                     }
                 }
+            }
+            '\\' if cfg!(windows) && !characters.as_str().starts_with('\'') => {
+                word.get_or_insert_with(String::new).push('\\');
             }
             '\\' => {
                 let kept = characters.next().ok_or("A backslash ends the line.")?;

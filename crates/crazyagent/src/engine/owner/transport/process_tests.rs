@@ -1582,11 +1582,22 @@ fn process_adoption_round_trip() {
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
     let unknown = ProjectId::new("never-set-up").unwrap();
+    let project = ProjectId::new("process-1").unwrap();
     {
-        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
         crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let tx = connection.transaction().unwrap();
+        let spec = crate::protocol::ProjectSpec {
+            name: "Process".into(),
+            repositories: vec![],
+        };
+        assert!(matches!(
+            crate::storage::create_project(&tx, &project, &spec).unwrap(),
+            crate::protocol::Outcome::Applied
+        ));
+        tx.commit().unwrap();
     }
-    let project = with_project(&root, &folder);
+    assert_eq!(with_project(&root, &folder), project);
     let master = team_agent(&root, project.as_str(), "master", "claude-code");
     let sub = team_agent(&root, project.as_str(), "sub", "codex");
     team_agent(&root, "another-project", "sub", "codex");
@@ -1701,17 +1712,7 @@ fn process_adoption_round_trip() {
     }
 
     {
-        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
-        let tx = connection.transaction().unwrap();
-        let spec = crate::protocol::ProjectSpec {
-            name: "Process".into(),
-            repositories: vec![],
-        };
-        assert!(matches!(
-            crate::storage::create_project(&tx, &project, &spec).unwrap(),
-            crate::protocol::Outcome::Applied
-        ));
-        tx.commit().unwrap();
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
         let on = crate::coord::settings::CoordSettings {
             nudges: crate::coord::settings::Nudges::TenMinutes,
             ..Default::default()
@@ -1949,6 +1950,7 @@ fn an_empty_file_a_failed_run_and_an_unusable_reply_change_nothing() {
         (Err(cleanup::FAILED), "instructions_cleanup_failed"),
         (Err(cleanup::TIMED_OUT), "instructions_cleanup_timed_out"),
         (Err(cleanup::BUSY), "instructions_cleanup_busy"),
+        (Err(cleanup::FULL), "instructions_cleanup_full"),
         (Err(cleanup::NO_ACCOUNT), "instructions_cleanup_no_account"),
         (Err(cleanup::PAUSED), "instructions_cleanup_paused"),
         (
@@ -2182,7 +2184,7 @@ fn the_edit_names_a_skill_its_agents_do_not_get() {
     );
     assert!(!seen.contains("`grill-me` is not"), "{seen}");
     assert!(!seen.contains("`superpowers:grill-me` is not"), "{seen}");
-    assert!(!seen.contains("`plain-word`"), "{seen}");
+    assert!(!seen.contains("`plain-word` is not"), "{seen}");
     save(&root, None, own, 0).unwrap();
     let app = check_prompt(&root, None);
     assert!(
@@ -2374,7 +2376,7 @@ fn process_import_never_labels_the_project_text() {
             "carried",
         ][..],
     ] {
-        let done = crate::spawn_gate::output(
+        let done = crate::spawn_gate::collected(
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&folder)

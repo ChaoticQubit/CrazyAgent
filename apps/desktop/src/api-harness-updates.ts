@@ -6,7 +6,7 @@ export interface LastUpdate { ok: boolean; code: string | null; output: string; 
 /** What an installed harness lacks before it can run, as the engine's tool resolver reads it: the
  * program its first line asks for, such as node, and the resolver's one owner line. */
 export interface HarnessNeeds { program: string | null; line: string }
-export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null; sign_in_min?: string | null }
+export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null; sign_in_min?: string | null; waiting?: string | null }
 export type UpdateMode = "check_and_update" | "check_only" | "off";
 export type CheckWhen = "on_button" | "on_open";
 export type OnlineLookup = "on" | "off";
@@ -28,7 +28,7 @@ const COPY: Record<string, string> = {
   harness_update_as_root: "CrazyAgent is running as the root user, so it won't run an update.",
   harness_update_off: "Harness updates are off in settings.",
   harness_update_check_only: "Harness updates are set to Check only.",
-  harness_update_busy: "Another harness update or install is running.",
+  harness_update_busy: "This harness is already updating or installing.",
   harness_update_not_installed: "It isn't installed on this Mac.",
   harness_update_timeout: "The update took too long and was stopped.",
   harness_update_failed: "The update didn't finish.",
@@ -147,15 +147,29 @@ export async function readForConfirm(id: string, job: HarnessJob, read: ReadVers
   return { read: fresh, open: fresh.kind === "ok" && !fresh.value.running && jobLine(fresh.value, job) !== null };
 }
 
+/** What a running row says: the harness its job waits behind, named from the catalog, else
+ * that it installs or updates. Inputs: the read, whether the harness is missing and the
+ * catalog's names. Output: the sentence. */
+export function runningLine(versions: HarnessVersions, missing: boolean, nameOf: (id: string) => string): string {
+  if (versions.waiting) return `Waiting for ${nameOf(versions.waiting)} to finish...`;
+  return missing ? "Installing..." : "Updating...";
+}
+
 /** Re-reads a harness while its update or install runs, every `UPDATE_POLL_MS`, at most
- * `UPDATE_POLLS_MAX` reads, and stops once `live` says the row is gone. Inputs: the id, the
- * reader, the wait and whether the row still shows. Output: the last read, or its failure. */
+ * `UPDATE_POLLS_MAX` reads for its own run plus as many for each other harness's job it waited
+ * behind, and stops once `live` says the row is gone. Inputs: the id, the reader, the wait and
+ * whether the row still shows. Output: the last read, or its failure. */
 export async function pollWhileRunning(id: string, read: ReadVersions, wait: (ms: number) => Promise<void>, live: () => boolean = () => true): Promise<Result<HarnessVersions>> {
-  let last = await read(id, false);
-  for (let polls = 1; polls < UPDATE_POLLS_MAX && live() && last.kind === "ok" && last.value.running; polls += 1) {
+  const behind = new Set<string>();
+  const note = (result: Result<HarnessVersions>) => {
+    if (result.kind === "ok" && result.value.waiting) behind.add(result.value.waiting);
+    return result;
+  };
+  let last = note(await read(id, false));
+  for (let polls = 1; polls < UPDATE_POLLS_MAX * (1 + behind.size) && live() && last.kind === "ok" && last.value.running; polls += 1) {
     await wait(UPDATE_POLL_MS);
     if (!live()) break;
-    last = await read(id, false);
+    last = note(await read(id, false));
   }
   assert(last.kind !== "ok" || last.value.id === id, "versions for another harness");
   return last;
