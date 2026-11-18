@@ -150,10 +150,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
     }
     let home = crate::team::runtime::agent_home(state_folder, lead);
     let tmp = answering.agents.join(format!("agent-{lead}")).join("tmp");
-    let sandbox = answering
-        .stored
-        .project_folder()
-        .canonicalize()
+    let sandbox = crate::sandbox::canonical(&answering.stored.project_folder())
         .ok()
         .and_then(|root| {
             ProjectSandbox::new(&root, &home, &tmp, SandboxNetwork::Only(Vec::new())).ok()

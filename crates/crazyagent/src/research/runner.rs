@@ -958,8 +958,11 @@ impl ResearchRunner {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
         still_held(jobs, job)?;
-        let root = project.root.canonicalize()?;
-        if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
+        let root = crate::sandbox::canonical(project.root)?;
+        if root != crate::projects_home::one_spelling(project.root.to_path_buf())
+            || !root.is_dir()
+            || root.starts_with(&self.state)
+        {
             return Err(RunError::Invalid("project folder must be canonical".into()));
         }
         let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
@@ -1770,8 +1773,11 @@ impl ResearchRunner {
         }
         let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
         let account = &behind;
-        let folder = run.folder.canonicalize()?;
-        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+        let folder = crate::sandbox::canonical(run.folder)?;
+        if folder != crate::projects_home::one_spelling(run.folder.to_path_buf())
+            || !folder.is_dir()
+            || folder.starts_with(&self.state)
+        {
             return Err(RunError::Invalid(
                 "read-only folder must be canonical".into(),
             ));

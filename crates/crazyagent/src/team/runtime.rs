@@ -4193,7 +4193,7 @@ impl TeamRuntime {
         if stale.is_empty() {
             return;
         }
-        let root = stored.project_folder().canonicalize().ok();
+        let root = crate::sandbox::canonical(&stored.project_folder()).ok();
         for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running =
@@ -8527,9 +8527,7 @@ impl TeamRuntime {
     ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
         let unavailable = |_| "lead_sandbox_unavailable";
         let sandbox = ProjectSandbox::new(
-            &repository
-                .canonicalize()
-                .map_err(|_| "lead_sandbox_unavailable")?,
+            &crate::sandbox::canonical(repository).map_err(|_| "lead_sandbox_unavailable")?,
             &agent_home(&self.state, lead),
             &self.agent_folder(lead).join("tmp"),
             SandboxNetwork::Only(Vec::new()),
@@ -9341,9 +9339,7 @@ impl TeamRuntime {
                 Some(sandbox_code(&e)),
             )
         };
-        let root = stored
-            .project_folder()
-            .canonicalize()
+        let root = crate::sandbox::canonical(&stored.project_folder())
             .map_err(|e| with_code("the project folder could not be opened", Some(io_code(&e))))?;
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());

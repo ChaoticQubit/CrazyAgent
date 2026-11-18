@@ -102,9 +102,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
         crate::project_setup::load_setup(&tx, project).map_err(|error| error.to_string())?
     }
     .ok_or("the project is unknown")?;
-    let folder = setup
-        .project_folder()
-        .canonicalize()
+    let folder = super::canonical(&setup.project_folder())
         .map_err(|_| "the project folder is missing".to_owned())?;
     let extra_reads = super::extra_paths::load(&db, project.as_str())
         .map_err(|_| "the project's read-only folders could not be read".to_owned())?;

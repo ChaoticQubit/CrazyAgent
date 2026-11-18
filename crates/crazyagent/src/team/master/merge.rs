@@ -65,10 +65,7 @@ pub(super) fn merge(
             "Master's branch",
         ),
     };
-    let target = answering
-        .stored
-        .project_folder()
-        .canonicalize()
+    let target = crate::sandbox::canonical(&answering.stored.project_folder())
         .map_err(|_| EngineError("changes_workspace_invalid".into()))
         .and_then(|repository| crate::landing::land_on(connection, &repository, project));
     let target = match target {

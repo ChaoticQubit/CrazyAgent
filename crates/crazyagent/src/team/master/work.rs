@@ -1107,10 +1107,7 @@ fn unmerged_for_finish(
     let Some((worktree, git_dir)) = worktree else {
         return Ok(Vec::new());
     };
-    let repository = answering
-        .stored
-        .project_folder()
-        .canonicalize()
+    let repository = crate::sandbox::canonical(&answering.stored.project_folder())
         .map_err(|_| EngineError("changes_workspace_invalid".into()))?;
     let db = crate::landing::open(answering.landing)?;
     let mut unmerged = crate::landing::unlanded_teammates(

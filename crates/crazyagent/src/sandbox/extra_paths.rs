@@ -81,8 +81,9 @@ pub fn save(connection: &Connection, project: &str, paths: &[PathBuf]) -> rusqli
 }
 
 /// Reads a project's extra read-only folders in the order the owner saved them; none when
-/// nothing was ever saved. Inputs: the open connection or transaction and the project id.
-/// Output: the folders, or the database error.
+/// nothing was ever saved. A folder saved under the data volume's long name comes back under
+/// its short name, the one a sandbox rule matches. Inputs: the open connection or transaction
+/// and the project id. Output: the folders, or the database error.
 pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<PathBuf>> {
     let present: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_read_paths')",
@@ -97,7 +98,8 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     )?;
     let paths = statement
         .query_map(params![project, EXTRA_PATHS_MAX as i64], |row| {
-            row.get::<_, String>(0).map(PathBuf::from)
+            row.get::<_, String>(0)
+                .map(|text| crate::projects_home::one_spelling(PathBuf::from(text)))
         })?
         .collect::<rusqlite::Result<Vec<PathBuf>>>()?;
     assert!(paths.len() <= EXTRA_PATHS_MAX);

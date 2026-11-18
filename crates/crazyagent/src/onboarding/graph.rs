@@ -155,6 +155,7 @@ pub(crate) fn update(
     else {
         return Ok(GraphEnding::Failed(GRAPHIFY_MISSING));
     };
+    let repo = &crate::sandbox::canonical(repo).unwrap_or_else(|_| repo.to_path_buf());
     let out = repo.join(GRAPH_OUT);
     let existing = match std::fs::symlink_metadata(&out) {
         Ok(metadata) if metadata.file_type().is_dir() => true,
