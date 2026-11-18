@@ -12,7 +12,7 @@ workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}
 exe=""
 [ "${RUNNER_OS:-}" != Windows ] || exe=.exe
 rows=$(grep -E '^[a-z_]+(::[a-z0-9_]+)+$' .github/farm/baseline-47.txt | sed -E 's/^(.*)$/test(=\1)/' | paste -sd'|' -)
-[ "$(grep -c . .github/farm/baseline-47.txt)" = 47 ] || { echo "::error::the baseline list is not 47 rows"; exit 2; }
+[ "$(grep -cE '^[a-z_]+(::[a-z0-9_]+)+$' .github/farm/baseline-47.txt)" = 47 ] || { echo "::error::the baseline list is not 47 library rows"; exit 2; }
 filter="package(=crazyagent) & kind(lib) & ($rows)"
 echo "filter: the 47 baseline rows"
 export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$workspace/target/debug/crazyagent$exe"
