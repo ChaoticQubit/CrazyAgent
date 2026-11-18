@@ -646,8 +646,9 @@ struct Checked {
 /// (`move_project_already_home`) or reached through a link (`move_project_folder_link`),
 /// another project using the folder (`home_move_project`), what [`busy`] names, a key the
 /// folder's two names both hold (`move_project_two_spellings`), and a Copy while an agent
-/// works in a linked worktree (`move_project_copy_worktrees`). Nothing is written. Inputs: the transaction, the guarded projects, the project and the mode.
-/// Output: the project's real folder, or the refusal code.
+/// works in a linked worktree (`move_project_copy_worktrees`). Nothing is written. Inputs:
+/// the transaction, the guarded projects, the project and the mode. Output: the project's
+/// real folder, or the refusal code.
 pub(crate) fn check(
     tx: &Transaction<'_>,
     registered: &[Registered],
@@ -722,8 +723,9 @@ fn checked(
 /// already in the home (`move_project_already_home`), a folder reached through a link or
 /// stored under the data volume with no short name (`move_project_folder_link`), another
 /// project using the folder (`home_move_project`), what [`busy`] names, a key the
-/// folder's two names both hold (`move_project_two_spellings`), a Copy while an agent works in a linked worktree
-/// (`move_project_copy_worktrees`), a Move that breaks git worktrees kept outside the
+/// folder's two names both hold (`move_project_two_spellings`), a Copy while an agent
+/// works in a linked worktree (`move_project_copy_worktrees`), a Move that breaks git
+/// worktrees kept outside the
 /// folder unless the owner went past it (`home_move_worktrees`), every refusal of
 /// [`plan_add`], and a destination another project's folder or repository still names,
 /// even one gone from disk (`home_destination_exists`), whose stored rows the move would
