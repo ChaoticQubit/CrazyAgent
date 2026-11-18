@@ -40,6 +40,64 @@ fn a_home_move_rechecks_agent_work_under_its_hold_before_the_first_write() {
     );
 }
 
+/// V243-FIRMLINK-HELD-INSIDE (sweep #1, rv-code4 F1): agent work recorded under either name
+/// of the home holds a home move, whichever name the home was saved under and whether the
+/// recorded worktree exists on disk or is gone or not made yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_move_sees_agent_work_recorded_under_either_name_of_the_home() {
+    let long =
+        |path: &Path| std::path::PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let cases = [false, true]
+        .into_iter()
+        .flat_map(|long_home| [false, true].map(|long_record| (long_home, long_record)))
+        .flat_map(|(long_home, long_record)| {
+            [false, true].map(|made| (long_home, long_record, made))
+        });
+    for (long_home, long_record, made) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let worktree = home.join("demo").join("agent-3");
+        std::fs::create_dir_all(&home).unwrap();
+        if made {
+            std::fs::create_dir_all(&worktree).unwrap();
+        }
+        assert!(long(&home).is_dir(), "{}", long(&home).display());
+        let saved = if long_home { long(&home) } else { home.clone() };
+        let recorded = if long_record {
+            long(&worktree)
+        } else {
+            worktree.clone()
+        };
+        let mut connection = Connection::open(base.join("engine.db")).unwrap();
+        initialize_authority_schemas(&connection).unwrap();
+        crate::projects_home::save(&connection, &saved).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"demo\"]')",
+                params![saved.to_str().unwrap(), base.join("next").to_str().unwrap()],
+            )
+            .unwrap();
+        let repository = recorded.parent().unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (3,'demo',?1,?2,?3)",
+                params![
+                    repository.to_str().unwrap(),
+                    recorded.to_str().unwrap(),
+                    recorded.join(".git").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            projects_home::recheck(&mut connection, 7).unwrap(),
+            Err("home_move_agent_work".to_owned()),
+            "home saved long: {long_home}, record long: {long_record}, record made: {made}"
+        );
+    }
+}
+
 /// rv-sec3 S5b F2: a projects home move carries each moved project's GitHub publish job,
 /// named by the project's folder, to the project's folder in the new home, so a recorded
 /// publish is still found there and nothing is left under the old folder.

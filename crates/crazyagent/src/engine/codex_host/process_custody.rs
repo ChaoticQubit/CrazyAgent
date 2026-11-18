@@ -358,6 +358,12 @@ impl OwnedChild {
         if self.status.is_some() {
             return;
         }
+        #[cfg(all(test, unix))]
+        let held = crate::engine::master_host_fixture::reap_lock();
+        #[cfg(all(test, unix))]
+        if held.contains(&self.child.id()) {
+            return;
+        }
         match self.child.try_wait() {
             Ok(Some(status)) => self.status = Some(status),
             Ok(None) => {}

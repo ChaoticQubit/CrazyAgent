@@ -258,6 +258,7 @@ const MOVE_COPY: Record<string, string> = {
   move_project_copy_worktrees: "An agent works in a git worktree of this project, which a copy would leave behind. Move the project instead.",
   move_project_folder_link: "This project's folder is reached through a link, so it can't be moved from here.",
   move_project_in_progress: "A project is being moved. Try again when it is done.",
+  move_project_two_spellings: "Some of this project's saved records name its folder in two ways, and a move would overwrite one with the other. Nothing was moved.",
   move_project_unavailable: "CrazyAgent couldn't check the team, so nothing was moved. Try again.",
   move_project_interrupted: "The move stopped part way. Check the project folder before trying again.",
   move_project_record_invalid: "CrazyAgent couldn't read the move it recorded. Check the project folder before trying again.",

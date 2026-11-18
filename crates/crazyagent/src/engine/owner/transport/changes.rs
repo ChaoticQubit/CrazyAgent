@@ -1284,19 +1284,40 @@ mod tests {
         assert_eq!(shown(asked("not-a-commit")), "changes_stale");
     }
 
-    /// Reads the plain codes a source file refuses with, before its tests: the leading code
-    /// of each string literal that starts with `changes_`, so a log line naming a code, such
-    /// as `"changes_git_old found={} ..."`, counts as that code. Input: the file text.
-    /// Output: each `changes_` code once.
+    /// Reads the codes a source file names before its tests: each string literal that starts
+    /// with `changes_`, up to its closing quote or first space, so a log line such as
+    /// `"changes_git_old found={} ..."` counts as its code and a longer code reads whole.
+    /// Input: the file text. Output: each `changes_` code once.
     fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
         let code = source.split("mod tests").next().unwrap();
         code.match_indices("\"changes_")
             .filter_map(|(at, _)| {
                 let rest = &code[at + 1..];
-                rest.find(|letter: char| !(letter.is_ascii_lowercase() || letter == '_'))
+                rest.find(|letter: char| letter == '"' || letter.is_whitespace())
                     .map(|end| &rest[..end])
             })
             .collect()
+    }
+
+    /// V243-REFUSALS-PREFIX: a code that only starts like a listed one is read whole, so it
+    /// fails the coverage row instead of passing as the listed code, and a log line still
+    /// reads as the code it names.
+    #[test]
+    fn refusals_read_a_longer_code_whole_and_a_log_line_as_its_code() {
+        let read = refusals(
+            r#"failure("changes_stale2"); failure("changes_Stale"); log("changes_git_old found={}");"#,
+        );
+        assert_eq!(
+            read,
+            std::collections::BTreeSet::from([
+                "changes_Stale",
+                "changes_git_old",
+                "changes_stale2"
+            ])
+        );
+        assert!(
+            !CHANGES_CODES.contains(&"changes_stale2") && CHANGES_CODES.contains(&"changes_stale")
+        );
     }
 
     /// The listed codes cover every refusal the landing engine and this protocol make,

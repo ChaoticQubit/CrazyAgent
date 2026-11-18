@@ -1522,11 +1522,11 @@ fn a_released_skills_folder_leaves_an_owner_s_linked_file_and_a_link_s_target_as
     drop(held);
 }
 
-/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write, which cannot move to a
-/// new parent, gains the owner's write through the descriptor its release opened, never its
-/// name: a process an earlier run left that moves the folder aside and links an owner's read
-/// only file with an ACL entry at `skills` meanwhile leaves the owner's file with its mode and
-/// ACL entry, the moved folder opened up, and the launch with an empty `skills` folder.
+/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write gains the owner's write
+/// through the descriptor its release opened, never its name: a process an earlier run left
+/// that moves it aside (with write given and taken off again) and links an owner's read only
+/// file with an ACL entry at `skills` leaves that file's mode and ACL entry, the moved folder
+/// opened up, and the launch with an empty `skills` folder.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_name() {
@@ -1555,7 +1555,9 @@ fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_n
     let (swapped, aside, linked) = (skills.clone(), moved.clone(), owner.clone());
     AFTER_SKILLS_OPEN.with(|step| {
         *step.borrow_mut() = Some(Box::new(move || {
+            fs::set_permissions(&swapped, fs::Permissions::from_mode(0o700)).unwrap();
             fs::rename(&swapped, &aside).unwrap();
+            fs::set_permissions(&aside, fs::Permissions::from_mode(0o500)).unwrap();
             fs::hard_link(&linked, &swapped).unwrap();
         }));
     });

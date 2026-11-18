@@ -1,6 +1,11 @@
 use super::super::REMOTES_MAX;
 use super::bridge::UNSHARE_NET;
-use super::{BWRAP_PATHS, HelperRequest, NEST_ARGS, die_with_parent, trusted_file};
+use super::{
+    BWRAP_PATHS, FS_ABI, HelperRequest, NEST_ARGS, accepted, die_with_parent, trusted_file,
+};
+use landlock::{
+    Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError, path_beneath_rules,
+};
 use rustix::fs::FileType;
 use rustix::thread::{CapabilitySet, CapabilitySets, LinkNameSpaceType};
 use std::ffi::{OsStr, OsString};
@@ -9,6 +14,7 @@ use std::fs;
 use std::io::{PipeReader, PipeWriter, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::str::FromStr;
@@ -16,6 +22,21 @@ use std::time::Duration;
 
 pub(super) const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
+pub(super) const SLIRP: &str = "--slirp";
+/// What slirp4netns reads and executes under its rules ([`confine_slirp`]), Landlock's read
+/// rights holding execute: its program and libraries, the loader cache, the resolver file it
+/// forwards names to, whose rule binds the file a link there points to, and the random
+/// source, as a trace on the farm runner showed (V243 linux routed r1, arm C). A path
+/// missing on this computer adds no rule.
+const SLIRP_READ: &[&str] = &[
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/etc/ld.so.cache",
+    RESOLV_CONF,
+    "/dev/urandom",
+];
+const TUN: &str = "/dev/net/tun";
 /// The flag stage 1 writes right after this helper's name in a routed nest: the descriptor
 /// the setup child's go byte reaches stage 2 on ([`started`]).
 pub(super) const ROUTE_FD: &str = "--route-fd";
@@ -58,8 +79,8 @@ const SANDBOX_RESOLVER: &str = "10.0.2.3";
 /// alias, which maps to this computer's DNS address on any port. No route-port rule reaches
 /// it (rv-sa241 LEAD-1).
 const SLIRP_NETWORK: &str = "10.0.2.0/24";
-/// The loopback addresses: dropped after the `lo` accept, so only the agent's own loopback,
-/// where its bridged ports listen, is ever reached at one (rv-sa241 LEAD-1).
+/// The loopback addresses: refused after the `lo` accept ([`REFUSE`]), so only the agent's own
+/// loopback, where its bridged ports listen, is ever reached at one (rv-sa241 LEAD-1).
 const LOOPBACK_NETWORK: &str = "127.0.0.0/8";
 /// The link-local addresses, where a cloud VM answers its metadata service: no route port
 /// reaches them, even 80 or 443 on any host (rv-sa241 NOTE-1).
@@ -88,6 +109,12 @@ const CHAINS: &str = concat!(
     ":OUTPUT DROP [0:0]\n",
     "-A OUTPUT -o lo -j ACCEPT\n",
 );
+/// How the IPv4 rules refuse a packet: with an answer, so an agent's refused connect fails
+/// at once with "connection refused" instead of waiting out its SYN retries, written as
+/// `iptables-save` prints it so the read-back matches (V243-LINUX-EGRESS-REJECT).
+const REFUSE: &str = "-j REJECT --reject-with icmp-port-unreachable";
+/// How the IPv6 rules refuse a packet, as [`REFUSE`] does for IPv4.
+const REFUSE_V6: &str = "-j REJECT --reject-with icmp6-port-unreachable";
 
 /// Reads a decimal number written with digits alone, so no sign, space or other spelling
 /// passes. Input: the text. Output: the number, or none.
@@ -458,8 +485,8 @@ fn build(child: u32, ports: &[u16]) -> Result<Slirp, String> {
     if (own.dev(), own.ino()) == (theirs.dev(), theirs.ino()) {
         return Err(NETWORK_SHARED.into());
     }
-    let slirp = tools()?;
-    let slirp = start_slirp(slirp, child)?;
+    tools()?;
+    let slirp = start_slirp(child)?;
     let joined = |kind: LinkNameSpaceType, file: &fs::File| {
         rustix::thread::move_into_link_name_space(file.as_fd(), Some(kind))
             .map_err(|error| format!("the agent's namespaces: {error}"))
@@ -475,15 +502,21 @@ fn build(child: u32, ports: &[u16]) -> Result<Slirp, String> {
     Ok(slirp)
 }
 
-/// Finds the tools at their fixed places, each a file [`trusted_file`] accepts, with both
-/// restore programs on the nf_tables backend ([`nf_tables`]). No input. Output: the
-/// slirp4netns path, or the reason.
-fn tools() -> Result<&'static str, String> {
-    let slirp = SLIRP_PATHS
+/// Finds slirp4netns at its fixed place, a file [`trusted_file`] accepts. No input.
+/// Output: its path, or the reason.
+fn slirp_path() -> Result<&'static str, String> {
+    SLIRP_PATHS
         .iter()
         .copied()
         .find(|path| trusted_file(Path::new(path)).is_some())
-        .ok_or("slirp4netns is not at its fixed place or others may change it")?;
+        .ok_or_else(|| "slirp4netns is not at its fixed place or others may change it".into())
+}
+
+/// Finds the tools at their fixed places, each a file [`trusted_file`] accepts, with both
+/// restore programs on the nf_tables backend ([`nf_tables`]). No input. Output: Ok, or the
+/// reason.
+fn tools() -> Result<(), String> {
+    slirp_path()?;
     for path in IPTABLES_PATHS {
         if trusted_file(Path::new(path)).is_none() {
             return Err(format!("{path} is not there or others may change it"));
@@ -503,36 +536,28 @@ fn tools() -> Result<&'static str, String> {
             return Err(format!("{restore} is not the nf_tables iptables"));
         }
     }
-    Ok(slirp)
+    Ok(())
 }
 
-/// Starts slirp4netns for the agent's network, from this computer's network, and waits up
-/// to [`READY_TIME`] for its ready byte. Its input is the read end of its exit pipe; its
-/// ready end is the only other descriptor it inherits. Inputs: its path and the agent's
-/// process id. Output: slirp4netns, or the reason.
-fn start_slirp(slirp: &str, child: u32) -> Result<Slirp, String> {
+/// Starts slirp4netns for the agent's network, from this computer's network, through this
+/// helper's [`SLIRP`] mode, which confines it first ([`slirp`]), and waits up to
+/// [`READY_TIME`] for its ready byte. Its input is the read end of its exit pipe; its ready
+/// end is the only other descriptor it inherits. Input: the agent's process id. Output:
+/// slirp4netns, or the reason.
+fn start_slirp(child: u32) -> Result<Slirp, String> {
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
+    let helper = std::env::current_exe().map_err(failed)?;
     let (exit_read, exit_write) = std::io::pipe().map_err(failed)?;
     let (ready, handed) = crate::spawn_gate::unix_pair_std().map_err(failed)?;
     ready.set_read_timeout(Some(READY_TIME)).map_err(failed)?;
     let handed = OwnedFd::from(handed);
     let fd = handed.as_raw_fd();
     assert!(fd > 2);
-    let mut command = Command::new(slirp);
+    let mut command = Command::new(helper);
     command
-        .args([
-            "--configure",
-            "--mtu=65520",
-            "--disable-host-loopback",
-            "--enable-sandbox",
-            "--enable-seccomp",
-            "--netns-type=path",
-        ])
-        .arg(format!("--userns-path=/proc/{child}/ns/user"))
-        .arg("--exit-fd=0")
-        .arg(format!("--ready-fd={fd}"))
-        .arg(format!("/proc/{child}/ns/net"))
-        .arg(TAP)
+        .arg(SLIRP)
+        .arg(child.to_string())
+        .arg(fd.to_string())
         .env_clear()
         .stdin(Stdio::from(exit_read))
         .stdout(Stdio::null())
@@ -548,6 +573,115 @@ fn start_slirp(slirp: &str, child: u32) -> Result<Slirp, String> {
         Ok(1) if byte[0] == READY => Ok(started),
         _ => Err("slirp4netns did not start".into()),
     }
+}
+
+/// Opens the agent's user and network namespaces while Landlock still lets it, then confines
+/// this thread and its children under no new privileges: read and execute beneath
+/// [`SLIRP_READ`], all rights on [`TUN`], signals scoped where the kernel can, and no new
+/// Unix-domain socket through `socket(2)`; a socket pair, which reaches no path, still opens.
+/// Input: the agent's process id. Output: the two namespaces, user first, or the reason.
+pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
+    assert!(child > 1);
+    let failed = |error: std::io::Error| format!("slirp4netns: {error}");
+    let user = fs::File::open(format!("/proc/{child}/ns/user")).map_err(failed)?;
+    let net = fs::File::open(format!("/proc/{child}/ns/net")).map_err(failed)?;
+    let refused = |error: RulesetError| format!("slirp4netns's rules: {error}");
+    let status = Ruleset::default()
+        .handle_access(AccessFs::from_all(FS_ABI))
+        .map_err(refused)?
+        .create()
+        .map_err(refused)?
+        .add_rules(path_beneath_rules(SLIRP_READ, AccessFs::from_read(FS_ABI)))
+        .map_err(refused)?
+        .add_rules(path_beneath_rules([TUN], AccessFs::from_all(FS_ABI)))
+        .map_err(refused)?
+        .restrict_self()
+        .map_err(refused)?;
+    if !accepted(&status.ruleset, status.no_new_privs) {
+        return Err(format!(
+            "this kernel cannot hold slirp4netns's rules ({:?})",
+            status.ruleset
+        ));
+    }
+    super::scope_signals().map_err(refused)?;
+    super::refuse_sockets(false, false)?;
+    Ok([user.into(), net.into()])
+}
+
+/// The helper's [`SLIRP`] mode, the setup child's hop to slirp4netns: it confines itself
+/// ([`confine_slirp`]), lets the two namespaces through exec, and becomes slirp4netns, which
+/// joins them by those descriptors with its own seccomp filter and no sandbox of its own (a
+/// user who is not root cannot start it). Inputs: the agent's process id and the ready
+/// descriptor. Output: 3 when it cannot be confined, 126 when slirp4netns cannot start.
+pub(super) fn slirp(child: u32, ready: RawFd) -> ExitCode {
+    assert!(child > 1 && ready > 2);
+    let threads = fs::read_dir("/proc/self/task").map(Iterator::count);
+    assert!(
+        threads.is_ok_and(|threads| threads == 1),
+        "the rules hold the whole slirp process"
+    );
+    let confined = slirp_path().and_then(|program| {
+        let namespaces = confine_slirp(child)?;
+        for namespace in &namespaces {
+            rustix::io::fcntl_setfd(namespace, rustix::io::FdFlags::empty())
+                .map_err(|error| format!("slirp4netns: {error}"))?;
+        }
+        Ok((program, namespaces))
+    });
+    let (program, [user, net]) = match confined {
+        Ok(confined) => confined,
+        Err(reason) => {
+            eprintln!("crazyagent-landlock: {reason}");
+            return ExitCode::from(3);
+        }
+    };
+    let error = Command::new(program)
+        .args(slirp_args(user.as_raw_fd(), net.as_raw_fd(), ready))
+        .exec();
+    eprintln!("crazyagent-landlock: cannot start {program}: {error}");
+    ExitCode::from(126)
+}
+
+/// The arguments slirp4netns starts with: the agent's namespaces by this process's
+/// descriptors, its exit on the input pipe, its ready byte on `ready`, its seccomp filter,
+/// and no `--enable-sandbox`. Inputs: the user and network namespace descriptors and the
+/// ready descriptor. Output: the arguments.
+fn slirp_args(user: RawFd, net: RawFd, ready: RawFd) -> Vec<String> {
+    assert!(user > 2 && net > 2 && ready > 2);
+    vec![
+        "--configure".into(),
+        "--mtu=65520".into(),
+        "--disable-host-loopback".into(),
+        "--enable-seccomp".into(),
+        "--netns-type=path".into(),
+        format!("--userns-path=/proc/self/fd/{user}"),
+        "--exit-fd=0".into(),
+        format!("--ready-fd={ready}"),
+        format!("/proc/self/fd/{net}"),
+        TAP.into(),
+    ]
+}
+
+/// Reads the slirp mode's arguments, `--slirp` first: the agent's process id above 1, then
+/// the ready descriptor above 2, digits alone. Input: the helper arguments. Output: the
+/// request, or the reason they are refused.
+pub(super) fn slirp_request(args: Vec<OsString>) -> Result<HelperRequest, String> {
+    assert!(args.first().is_some_and(|flag| flag == SLIRP));
+    let refused = || format!("{SLIRP} takes a process id above 1, then a descriptor above 2");
+    let [_, child, ready] = args.as_slice() else {
+        return Err(refused());
+    };
+    let child = child
+        .to_str()
+        .and_then(number::<u32>)
+        .filter(|child| *child > 1 && i32::try_from(*child).is_ok())
+        .ok_or_else(refused)?;
+    let ready = ready
+        .to_str()
+        .and_then(number::<RawFd>)
+        .filter(|ready| *ready > 2)
+        .ok_or_else(refused)?;
+    Ok(HelperRequest::Slirp { child, ready })
 }
 
 /// Raises exactly [`ambient_wanted`] into the ambient set, after keeping only those in the
@@ -665,12 +799,11 @@ fn stop(parent: u32, child: u32) {
     }
 }
 
-/// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and in the
-/// form `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's
-/// resolver alone, then nothing to slirp's network ([`SLIRP_NETWORK`]), a loopback address
-/// off `lo` ([`LOOPBACK_NETWORK`]), a link-local one ([`LINK_LOCAL_NETWORK`]) or a cloud's
-/// metadata service outside it ([`crate::sandbox::CLOUD_METADATA`], each IPv4 one, in order),
-/// then out through `tap0` to each port. Input: the ports on any host. Output: the rules.
+/// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and
+/// `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's resolver,
+/// each fenced network refused ([`SLIRP_NETWORK`], [`LOOPBACK_NETWORK`] off `lo`,
+/// [`LINK_LOCAL_NETWORK`], each IPv4 [`crate::sandbox::CLOUD_METADATA`]), then `tap0` to each
+/// port and every other packet answered ([`REFUSE`]). Input: the ports. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
     assert!(!any.contains(&0));
@@ -679,19 +812,19 @@ fn egress_rules(any: &[u16]) -> String {
         rules,
         "-A OUTPUT -d {SANDBOX_RESOLVER}/32 -o {TAP} -p tcp -m tcp --dport 53 -j ACCEPT"
     );
-    let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} -j DROP");
-    let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} -j DROP");
-    let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} -j DROP");
+    let _ = writeln!(rules, "-A OUTPUT -d {SLIRP_NETWORK} {REFUSE}");
+    let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} {REFUSE}");
+    let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} {REFUSE}");
     let mut metadata = 0;
     for address in crate::sandbox::CLOUD_METADATA {
         if let std::net::IpAddr::V4(address) = address {
-            let _ = writeln!(rules, "-A OUTPUT -d {address}/32 -j DROP");
+            let _ = writeln!(rules, "-A OUTPUT -d {address}/32 {REFUSE}");
             metadata += 1;
         }
     }
     assert!(metadata > 0);
     assert_eq!(rules.matches(" -j ACCEPT\n").count(), 2);
-    assert_eq!(rules.matches(" -j DROP\n").count(), 3 + metadata);
+    assert_eq!(rules.matches(REFUSE).count(), 3 + metadata);
     assert_eq!(rules.matches(SANDBOX_RESOLVER).count(), 1);
     for port in any {
         let _ = writeln!(
@@ -699,14 +832,18 @@ fn egress_rules(any: &[u16]) -> String {
             "-A OUTPUT -o {TAP} -p tcp -m tcp --dport {port} -j ACCEPT"
         );
     }
+    let _ = writeln!(rules, "-A OUTPUT {REFUSE}");
+    assert_eq!(rules.matches(REFUSE).count(), 4 + metadata);
+    assert!(!rules.contains(" -j DROP\n"));
     rules.push_str("COMMIT\n");
     rules
 }
 
 /// The IPv6 rules inside the agent's network: out over loopback only, since slirp4netns
-/// runs without IPv6. No input. Output: the rules.
+/// runs without IPv6, and every other packet answered ([`REFUSE_V6`]). No input. Output:
+/// the rules.
 fn egress_rules_v6() -> String {
-    format!("{CHAINS}COMMIT\n")
+    format!("{CHAINS}-A OUTPUT {REFUSE_V6}\nCOMMIT\n")
 }
 
 /// The rules as the read-back compares them: the table, chain policy and `-A` lines and
@@ -907,12 +1044,13 @@ mod tests {
         ":OUTPUT DROP [0:0]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
-        "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
-        "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
-        "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
-        "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
-        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
+        "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
+        "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n",
         "COMMIT\n",
     );
 
@@ -922,6 +1060,7 @@ mod tests {
         ":FORWARD DROP [0:0]\n",
         ":OUTPUT DROP [0:0]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
+        "-A OUTPUT -j REJECT --reject-with icmp6-port-unreachable\n",
         "COMMIT\n",
     );
 
@@ -933,12 +1072,13 @@ mod tests {
         ":OUTPUT DROP [12:720]\n",
         "-A OUTPUT -o lo -j ACCEPT\n",
         "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
-        "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
-        "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
-        "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
-        "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
-        "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
+        "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable\n",
+        "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable\n",
         "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
+        "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n",
         "COMMIT\n",
         "# Completed on Sun Nov 15 23:10:00 2026\n",
     );
@@ -956,11 +1096,9 @@ mod tests {
     #[test]
     fn the_rules_let_an_agent_out_only_through_its_ports_and_tcp_53_to_the_sandbox_resolver() {
         assert_eq!(egress_rules(&[443]), ONE_PORT);
-        let second = "-A OUTPUT -o tap0 -p tcp -m tcp --dport 8443 -j ACCEPT\nCOMMIT\n";
-        assert_eq!(
-            egress_rules(&[443, 8443]),
-            ONE_PORT.replace("COMMIT\n", second)
-        );
+        let last = "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n";
+        let second = format!("-A OUTPUT -o tap0 -p tcp -m tcp --dport 8443 -j ACCEPT\n{last}");
+        assert_eq!(egress_rules(&[443, 8443]), ONE_PORT.replace(last, &second));
         assert_eq!(egress_rules_v6(), V6);
         for rules in [
             egress_rules(&[443]),
@@ -986,11 +1124,12 @@ mod tests {
     fn no_route_port_rule_reaches_the_slirp_network_or_loopback_and_only_dns_reaches_its_resolver()
     {
         let dns = "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT";
-        let fence = "-A OUTPUT -d 10.0.2.0/24 -j DROP";
-        let belt = "-A OUTPUT -d 127.0.0.0/8 -j DROP";
-        let link = "-A OUTPUT -d 169.254.0.0/16 -j DROP";
-        let metadata = "-A OUTPUT -d 100.100.100.200/32 -j DROP";
-        let wire = "-A OUTPUT -d 168.63.129.16/32 -j DROP";
+        let fence = "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable";
+        let belt = "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable";
+        let link = "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable";
+        let metadata =
+            "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable";
+        let wire = "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable";
         for ports in [&[443][..], &[53, 443], &[1, 8443, 65535]] {
             let rules = egress_rules(ports);
             let lines: Vec<&str> = rules.lines().collect();
@@ -1021,6 +1160,42 @@ mod tests {
         }
     }
 
+    /// V243-LINUX-EGRESS-REJECT: every rule that refuses a packet answers it, so an agent's
+    /// refused connect fails at once instead of waiting out its SYN retries, about 127 s
+    /// each. A last rule answers whatever no rule let out, and the DROP policy stays behind it.
+    #[test]
+    fn a_refused_packet_is_answered_so_a_refused_connect_fails_at_once() {
+        for (rules, refuse) in [
+            (
+                egress_rules(&[443]),
+                "-j REJECT --reject-with icmp-port-unreachable",
+            ),
+            (
+                egress_rules(&[443, 8443]),
+                "-j REJECT --reject-with icmp-port-unreachable",
+            ),
+            (
+                egress_rules_v6(),
+                "-j REJECT --reject-with icmp6-port-unreachable",
+            ),
+        ] {
+            let output: Vec<&str> = rules
+                .lines()
+                .filter(|line| line.starts_with("-A OUTPUT "))
+                .collect();
+            assert!(
+                output.iter().all(|line| !line.ends_with(" -j DROP")),
+                "{rules}"
+            );
+            assert_eq!(
+                output.last().copied(),
+                Some(format!("-A OUTPUT {refuse}").as_str()),
+                "{rules}"
+            );
+            assert!(rules.contains("\n:OUTPUT DROP [0:0]\n"), "{rules}");
+        }
+    }
+
     #[test]
     fn the_read_back_drops_comments_and_counters_and_keeps_every_policy_and_rule() {
         let canonical = concat!(
@@ -1030,22 +1205,27 @@ mod tests {
             ":OUTPUT DROP\n",
             "-A OUTPUT -o lo -j ACCEPT\n",
             "-A OUTPUT -d 10.0.2.3/32 -o tap0 -p tcp -m tcp --dport 53 -j ACCEPT\n",
-            "-A OUTPUT -d 10.0.2.0/24 -j DROP\n",
-            "-A OUTPUT -d 127.0.0.0/8 -j DROP\n",
-            "-A OUTPUT -d 169.254.0.0/16 -j DROP\n",
-            "-A OUTPUT -d 100.100.100.200/32 -j DROP\n",
-            "-A OUTPUT -d 168.63.129.16/32 -j DROP\n",
+            "-A OUTPUT -d 10.0.2.0/24 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 127.0.0.0/8 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 169.254.0.0/16 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 100.100.100.200/32 -j REJECT --reject-with icmp-port-unreachable\n",
+            "-A OUTPUT -d 168.63.129.16/32 -j REJECT --reject-with icmp-port-unreachable\n",
             "-A OUTPUT -o tap0 -p tcp -m tcp --dport 443 -j ACCEPT\n",
+            "-A OUTPUT -j REJECT --reject-with icmp-port-unreachable\n",
             "COMMIT\n",
         );
         assert_eq!(canonical_rules(ONE_PORT), canonical);
         assert_eq!(canonical_rules(SAVED), canonical);
+        let without = |rule: &str| SAVED.replace(&format!("-A OUTPUT {rule}\n"), "");
         let widened = SAVED.replace(":OUTPUT DROP [12:720]", ":OUTPUT ACCEPT [12:720]");
         let added = SAVED.replace("COMMIT\n", "-A OUTPUT -o tap0 -p udp -j ACCEPT\nCOMMIT\n");
-        let dropped = SAVED.replace("-A OUTPUT -d 10.0.2.0/24 -j DROP\n", "");
-        let reached = SAVED.replace("-A OUTPUT -d 100.100.100.200/32 -j DROP\n", "");
-        let wired = SAVED.replace("-A OUTPUT -d 168.63.129.16/32 -j DROP\n", "");
-        for changed in [widened, added, dropped, reached, wired] {
+        let dropped = without(&format!("-d 10.0.2.0/24 {REFUSE}"));
+        let reached = without(&format!("-d 100.100.100.200/32 {REFUSE}"));
+        let wired = without(&format!("-d 168.63.129.16/32 {REFUSE}"));
+        let silent = without(REFUSE);
+        let hung = SAVED.replace(&format!("-A OUTPUT {REFUSE}\n"), "-A OUTPUT -j DROP\n");
+        for changed in [widened, added, dropped, reached, wired, silent, hung] {
+            assert_ne!(changed, SAVED);
             assert_ne!(canonical_rules(&changed), canonical, "{changed}");
         }
         assert_eq!(
@@ -1331,5 +1511,86 @@ mod tests {
             assert!(asked(words(refused)).is_err(), "{refused:?}");
         }
         assert!(asked(outer).is_err(), "stage 1 takes no go descriptor");
+    }
+
+    /// V243 linux routed: slirp4netns runs confined to the files it needs, so a read and a
+    /// write in a folder outside them are refused, while the loader cache it needs still
+    /// reads. The rules go on a thread of the row's own, so no other row runs under them.
+    #[test]
+    fn slirp_reads_and_writes_only_the_files_it_needs() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        fs::write(&secret, b"secret").unwrap();
+        assert_eq!(
+            fs::read(&secret).unwrap(),
+            b"secret",
+            "the control: it reads unconfined"
+        );
+        let child = std::process::id();
+        let (opened, read, written, cache) = std::thread::spawn(move || {
+            let opened = confine_slirp(child);
+            let read = fs::read(&secret);
+            let written = fs::write(secret.with_file_name("written"), b"written");
+            let cache = fs::read("/etc/ld.so.cache");
+            (opened, read, written, cache)
+        })
+        .join()
+        .unwrap();
+        assert!(opened.is_ok(), "{opened:?}");
+        let refused = |error: &std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
+        assert!(
+            read.as_ref().is_err_and(refused),
+            "slirp read outside its files: {read:?}"
+        );
+        assert!(
+            written.as_ref().is_err_and(refused),
+            "slirp wrote outside its files: {written:?}"
+        );
+        assert!(
+            cache.is_ok(),
+            "slirp cannot read the loader cache: {cache:?}"
+        );
+    }
+
+    /// V243 linux routed r2, rv-sec3 F1: slirp4netns runs in this computer's mount namespace,
+    /// where Landlock does not mediate a pathname socket connect, so a confined slirp must
+    /// not reach a socket such as the engine's tmux server's. A socket pair, which carries
+    /// its tap descriptor, and a UDP socket, which carries the agent's traffic, still open.
+    #[test]
+    fn slirp_connects_to_no_unix_socket() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("tmux.sock");
+        assert_eq!(
+            crate::socket_address::address(&path).unwrap(),
+            path,
+            "the socket is reached at its own path, so no file opens on the way"
+        );
+        let _server = crate::spawn_gate::bind_unix_std(&path).unwrap();
+        assert!(
+            crate::spawn_gate::connect_unix_std(&path).is_ok(),
+            "the control: it connects unconfined"
+        );
+        let child = std::process::id();
+        let (opened, connected, pair, udp) = std::thread::spawn(move || {
+            let opened = confine_slirp(child);
+            let connected = crate::spawn_gate::connect_unix_std(&path);
+            let pair = crate::spawn_gate::unix_pair_std();
+            let udp = crate::spawn_gate::bind_udp_std((std::net::Ipv4Addr::LOCALHOST, 0));
+            (opened, connected, pair, udp)
+        })
+        .join()
+        .unwrap();
+        assert!(opened.is_ok(), "{opened:?}");
+        assert!(
+            connected
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
+            "slirp connected to a pathname socket: {connected:?}"
+        );
+        assert!(
+            pair.is_ok(),
+            "slirp cannot make its tap socket pair: {pair:?}"
+        );
+        assert!(udp.is_ok(), "slirp cannot open a UDP socket: {udp:?}");
     }
 }

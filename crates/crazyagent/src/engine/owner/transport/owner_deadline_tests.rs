@@ -15,10 +15,13 @@ const LOCK_HELD: Duration = Duration::from_millis(1000);
 const SKILL: &str = "---\nname: release-notes\ndescription: Writes release notes from merged changes.\n---\n\n# Release notes\n";
 
 /// The codes of an engine start whose own check of its new sockets missed the owner
-/// deadline, which bounds that check as well: such a start has already stopped itself.
-const START_MISSED: [&str; 2] = [
+/// deadline, which bounds that check as well, including a check storage did not take in
+/// time: such a start has already stopped itself.
+const START_MISSED: [&str; 4] = [
     "owner_outcome_unknown_reconcile_same_identity",
     "ordinary_readiness_timeout",
+    "storage_starting_not_submitted",
+    "storage_busy_not_submitted",
 ];
 
 /// The most engine starts one row tries before a start that misses the deadline fails it.

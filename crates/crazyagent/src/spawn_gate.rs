@@ -86,9 +86,10 @@ pub fn guarded<T>(create: impl FnOnce() -> T) -> T {
 }
 
 /// Starts a child process while no other thread of this process starts one or creates a
-/// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program is
-/// refused, since Windows would run it through cmd.exe ([`crate::tools::batch_file`]).
-/// Input: the configured command. Output: the child, or the error that kept it from starting.
+/// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program
+/// ([`crate::tools::batch_file`]) and a program neither absolute nor a bare file name
+/// ([`crate::tools::fixed_program`]) are refused. Input: the configured command. Output: the
+/// child, or the error that kept it from starting.
 #[allow(clippy::disallowed_methods)]
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     #[cfg(windows)]
@@ -96,6 +97,13 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "spawn_batch_file_refused",
+        ));
+    }
+    #[cfg(windows)]
+    if !crate::tools::fixed_program(std::path::Path::new(command.get_program())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "spawn_relative_program_refused",
         ));
     }
     #[cfg(test)]
@@ -118,6 +126,43 @@ pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io:
         drop(handed);
         child
     })
+}
+
+/// The custody of a child started by [`kept`]: the thread that forked it waits until this
+/// drops. Linux sends a child's parent-death signal, which bubblewrap's `--die-with-parent`
+/// sets, when the thread that forked it exits, so the child ends with this keeper or with
+/// the process, never with the thread that asked for it.
+#[must_use = "dropping the keeper ends the thread that forked the child"]
+pub struct Keeper {
+    _release: std::sync::mpsc::SyncSender<()>,
+}
+
+/// Runs `start`, which forks a child, on a thread of its own that waits until the returned
+/// keeper drops, so the child outlives the calling thread and still ends with the engine
+/// (V243 P6). Input: the start, which may enter the gate. Output: what the start returned
+/// and its keeper, or the error that kept the thread or the child from starting.
+pub fn kept<T: Send + 'static>(
+    start: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<(T, Keeper)> {
+    assert!(
+        !HELD.get(),
+        "a kept start waits on a thread that already holds the spawn gate"
+    );
+    let (started_sender, started) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+    std::thread::Builder::new()
+        .name("spawn-keeper".to_owned())
+        .spawn(move || {
+            let result = start();
+            let holds = result.is_ok();
+            if started_sender.send(result).is_ok() && holds {
+                let _released = released.recv();
+            }
+        })?;
+    let result = started
+        .recv()
+        .map_err(|_| io::Error::other("spawn_keeper_lost"))??;
+    Ok((result, Keeper { _release: release }))
 }
 
 /// Starts a child through the gate and waits for it outside the gate.
@@ -396,14 +441,15 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     Ok(listener)
 }
 
-/// Holds a free loopback TCP port that refuses every connect, as a model provider that is
-/// down: a listener takes one connection from this process and is closed, so the port stays
-/// in use by that connection with nothing listening on it. On unix the system then gives the
-/// port to no port-0 bind and refuses a bind that names it without `SO_REUSEADDR`. Input:
-/// none. Output: the connection's two ends, which free the port when dropped, and the port.
+/// Holds a free loopback TCP port from the low block that refuses every connect, as a model
+/// provider that is down, where an owner's model port would be: a listener takes one connection
+/// from this process and is closed, so nothing listens and a unix bind without `SO_REUSEADDR`
+/// fails. Input: none. Output: the connection's two ends, which free the port when dropped,
+/// and the port.
 pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
-    let listener = bind_tcp_std("127.0.0.1:0")?;
+    let listener = low_tcp_listener()?;
     let address = listener.local_addr()?;
+    assert!(LOW_PORTS.contains(&address.port()));
     let near = connect_tcp_std(address)?;
     let (far, _) = accept_tcp_std(&listener)?;
     drop(listener);
@@ -434,6 +480,16 @@ const _: () = {
 /// sandboxed child's, binds it. Each call in this process starts past the port the last call
 /// gave. Input: none. Output: the port, which nothing holds when this returns.
 pub fn free_low_tcp_port() -> io::Result<u16> {
+    let port = low_tcp_listener()?.local_addr()?.port();
+    assert!(LOW_PORTS.contains(&port));
+    Ok(port)
+}
+
+/// Binds a loopback listener on a low block port nothing holds now. The bind itself takes
+/// the port, so another process racing for it fails its own bind and moves on; each call in
+/// this process starts past the port the last call took. Input: none. Output: the
+/// listener, or `AddrInUse` when every low port is taken.
+fn low_tcp_listener() -> io::Result<std::net::TcpListener> {
     static NEXT: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
     let span = u32::from(LOW_PORTS.end() - LOW_PORTS.start()) + 1;
     let mut next = NEXT
@@ -445,10 +501,10 @@ pub fn free_low_tcp_port() -> io::Result<u16> {
         let offset = (first + step) % span;
         let port = LOW_PORTS.start() + u16::try_from(offset).map_err(io::Error::other)?;
         let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-        if bind_tcp_std_exclusive(address).is_ok() {
+        if let Ok(listener) = bind_tcp_std_exclusive(address) {
             assert!(LOW_PORTS.contains(&port));
             *next = Some((offset + 1) % span);
-            return Ok(port);
+            return Ok(listener);
         }
     }
     Err(io::Error::new(

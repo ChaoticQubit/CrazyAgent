@@ -560,6 +560,7 @@ pub fn start_for_engine(
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|error| format!("research runtime: {error}"))?;
     let state = runtime.join("research");
     let projects = runtime.join("projects");

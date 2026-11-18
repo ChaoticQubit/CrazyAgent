@@ -383,9 +383,10 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
 
     let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, PROJECT);
-    let screen = pty.screen();
-    assert!(screen.contains("Master"), "{screen}");
-    assert!(!screen.contains("Not ready yet"), "{screen}");
+    pty.until(
+        "the team tree shows the Master and no Not ready yet",
+        |screen| screen.contains("Master") && !screen.contains("Not ready yet"),
+    );
     drop(pty);
     engine.stop();
 }
@@ -552,16 +553,16 @@ fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
         on_team(screen, STOPPED_PROJECT) && !screen.contains("in Finished: press Esc")
     });
     pty.keys(&["f"]);
-    let finished = pty.until("f lists the stopped agents", |screen| {
-        screen.contains("Finished (3)")
-            && screen.contains(&lead_name)
-            && worker_names
-                .iter()
-                .all(|worker| screen.contains(worker.as_str()))
-    });
-    assert!(
-        finished.contains("Finished agents: Hide. They leave the team tree for this list."),
-        "{finished}"
+    pty.until(
+        "f lists the stopped agents and says Hide takes them out of the team tree",
+        |screen| {
+            screen.contains("Finished (3)")
+                && screen.contains(&lead_name)
+                && worker_names
+                    .iter()
+                    .all(|worker| screen.contains(worker.as_str()))
+                && screen.contains("Finished agents: Hide. They leave the team tree for this list.")
+        },
     );
     drop(pty);
     engine.stop();
@@ -743,9 +744,27 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     });
 
     let review = pty.until_within(
-        "both setup steps finish and the draft shows",
+        "both setup steps finish and the draft shows the graph step's end and any mapping failure whole",
         SETTLE_TIME,
-        |screen| screen.contains("Confirm setup"),
+        |screen| {
+            let line =
+                |label: &str| screen.lines().find(|line| line.contains(label)).unwrap_or_default();
+            let graph = line("Build the code graph");
+            let reason = line("Mapping failed:")
+                .split("Mapping failed:")
+                .nth(1)
+                .unwrap_or_default()
+                .trim();
+            screen.contains("Confirm setup")
+                && ["Done", "Failed", "Turned off", "Not installed"]
+                    .iter()
+                    .any(|end| graph.contains(end))
+                && (!graph.contains("Turned off") || screen.contains("Graphify is off in Setup"))
+                && (!graph.contains("Not installed") || screen.contains("Graphify isn't installed"))
+                && (!screen.contains("Mapping failed:")
+                    || (!reason.is_empty()
+                        && screen.contains("Fill in the setup yourself to skip it")))
+        },
     );
     let status = runtime.block_on(setup_status(&engine));
     let graph_state = status
@@ -822,15 +841,13 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     if review.contains("Plan a roadmap after research") {
         pty.keys(&["Tab"]);
     }
-    let confirm = pty.until("Confirm is focused", |screen| {
-        screen.contains("Enter Confirm setup")
-    });
-    if mapping_failed {
-        assert!(
-            confirm.contains("r Retry mapping"),
-            "a failed mapping offers Retry on Confirm:\n{confirm}"
-        );
-    }
+    pty.until(
+        "Confirm is focused, with Retry mapping after a failed mapping",
+        |screen| {
+            screen.contains("Enter Confirm setup")
+                && (!mapping_failed || screen.contains("r Retry mapping"))
+        },
+    );
     pty.keys(&["Enter"]);
     pty.until("the setup is saved and the project opens", |screen| {
         screen.contains(&format!("{REPO} is ready."))
@@ -951,17 +968,20 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     let remove = || {
         to_tab(&pty, REPO, "Settings", &SHIFT_RIGHT);
         pty.keys(&["x"]);
-        let ask = pty.until("x asks before removing the project", |screen| {
-            screen.contains(&format!("Remove {REPO} from CrazyAgent?"))
-        });
-        let dialog = ask
-            .lines()
-            .filter_map(|line| line.split_once('│').map(|(_, rest)| rest))
-            .map(|rest| rest.rsplit_once('│').map_or(rest, |(inside, _)| inside))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let words = dialog.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(words.contains("The project folder stays on disk"), "{ask}");
+        pty.until(
+            "x asks before removing the project and says its folder stays on disk",
+            |screen| {
+                let dialog = screen
+                    .lines()
+                    .filter_map(|line| line.split_once('│').map(|(_, rest)| rest))
+                    .map(|rest| rest.rsplit_once('│').map_or(rest, |(inside, _)| inside))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let words = dialog.split_whitespace().collect::<Vec<_>>().join(" ");
+                screen.contains(&format!("Remove {REPO} from CrazyAgent?"))
+                    && words.contains("The project folder stays on disk")
+            },
+        );
         pty.keys(&["y"]);
         pty.until(
             "the project is removed or the owner is told why not",
@@ -2556,26 +2576,23 @@ fn version_arm(line: Option<String>) -> String {
     )
 }
 
-/// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: on
-/// macOS this user's cache folder, never the shared temp folder, whose `ca-` folders are the
-/// agents' own and which every user can write, nor the engine's own temp folder, which agents
-/// with the owner's temp folder grant write; elsewhere the temp folder. Input: a name prefix.
-/// Output: the folder, removed when dropped.
+/// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: this
+/// user's cache folder (`~/Library/Caches` on macOS, `~/.cache` elsewhere), outside every
+/// temp folder, since the engine reads no version from a harness folder in one (`getconf`'s
+/// macOS cache folder is one). Input: a name prefix. Output: the folder, removed when dropped.
 fn harness_home(prefix: &str) -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt;
-    let base = if cfg!(target_os = "macos") {
-        let cache = crazyagent::spawn_gate::output(
-            Command::new("/usr/bin/getconf")
-                .arg("DARWIN_USER_CACHE_DIR")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
-        )
-        .unwrap();
-        PathBuf::from(String::from_utf8(cache.stdout).unwrap().trim())
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let cache = if cfg!(target_os = "macos") {
+        "Library/Caches"
     } else {
-        std::env::temp_dir()
+        ".cache"
     };
+    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(cache);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&base)
+        .unwrap();
     let home = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(std::fs::canonicalize(base).unwrap())
@@ -2708,11 +2725,22 @@ fn start_sign_in(engine: &Engine, home: &Path, tile: &str, method: &str) -> Scri
     pty
 }
 
-/// DEC-166: whether the screen shows a sign-in that ran the harness: its failure line with
-/// the key to try again and no too-old line. Input: the screen. Output: the answer.
-fn ran_the_harness(screen: &str) -> bool {
-    !screen.contains(TOO_OLD_WORDS)
-        && (screen.contains("Press n to try again.") || screen.contains("Press n for a new code."))
+/// DEC-166: whether the screen shows a sign-in that ran this harness's stand-in: the line the
+/// engine gives only once the started stand-in ended, its key line and no too-old line, so a
+/// harness not found never matches. Inputs: the harness name and the screen. Output: the answer.
+fn ran_the_harness(name: &str, screen: &str) -> bool {
+    let (ended, key) = match name {
+        "Codex" => (
+            screen.contains("Codex stopped before it finished. Try again.")
+                || screen.contains("CrazyAgent lost contact with Codex. Try again."),
+            "Press n for a new code.",
+        ),
+        _ => (
+            screen.contains(&format!("{name} stopped before it finished. Try again.")),
+            "Press n to try again.",
+        ),
+    };
+    ended && screen.contains(key) && !screen.contains(TOO_OLD_WORDS)
 }
 
 /// DEC-166: one harness below its sign-in minimum in the TUI: the sign-in stops with the
@@ -2758,7 +2786,7 @@ fn too_old_then_updated_in_the_tui(
     pty.until_within(
         "a sign-in that runs the harness at its minimum",
         SIGN_IN_TIME,
-        ran_the_harness,
+        |screen| ran_the_harness(name, screen),
     );
     drop(pty);
     engine.stop();
@@ -2810,7 +2838,7 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
     pty.until_within(
         "a Claude sign-in that runs Claude Code",
         SIGN_IN_TIME,
-        ran_the_harness,
+        |screen| ran_the_harness("Claude Code", screen),
     );
     for _ in 0..STEPS_MAX {
         if pty.screen().contains("Where does the model come from?") {
@@ -2824,7 +2852,7 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
     pty.until_within(
         "a ChatGPT sign-in that runs Codex",
         SIGN_IN_TIME,
-        ran_the_harness,
+        |screen| ran_the_harness("Codex", screen),
     );
     drop(pty);
     engine.stop();
@@ -2882,7 +2910,8 @@ fn start_at(prefix: &str, home: &Path) -> Engine {
 }
 
 /// Makes the project `gone-app` the way New project does, saves the owner's note on it, then
-/// removes it from the dashboard, or with its files when `everything`, as both apps do.
+/// removes it from the dashboard, or with its files when `everything`, as both apps do; before
+/// Delete everything it cancels the research that waits for a pool, which the delete refuses.
 /// Inputs: the engine, the projects home and the choice. Output: the project's folder.
 async fn noted_then_removed(engine: &Engine, home: &Path, everything: bool) -> PathBuf {
     let mut owner = Owner::attach(engine).await;
@@ -2913,6 +2942,23 @@ async fn noted_then_removed(engine: &Engine, home: &Path, everything: bool) -> P
         .unwrap()
         .expect("the new project has its setup");
     let folder = PathBuf::from(setup.folder.trim_end_matches("/.crazyagent"));
+    if everything {
+        let jobs = owner
+            .controller
+            .research_jobs(project.clone())
+            .await
+            .unwrap();
+        assert!(!jobs.is_empty(), "New project queues its research");
+        for job in jobs {
+            let generation = owner.next();
+            let cancelled = owner
+                .controller
+                .cancel_research(project.clone(), job.id, generation)
+                .await
+                .unwrap();
+            assert_eq!(result(cancelled), OwnerResult::Applied);
+        }
+    }
     let generation = owner.next();
     let removed = if everything {
         owner
@@ -2945,6 +2991,13 @@ async fn in_setup_with_note(engine: &Engine, id: &str) -> (bool, bool) {
         .is_ok_and(|notes| notes.items.iter().any(|item| item.text == NOTE));
     owner.controller.detach();
     (setting_up, noted)
+}
+
+/// Tells whether Home shows `gone-app`'s folder, still in the projects folder, as a found
+/// folder that is not set up: the way back from a removal, and the folder made again after
+/// Delete everything. Input: the screen. Output: the answer.
+fn found_gone_app(screen: &str) -> bool {
+    screen.contains("gone-app") && screen.contains("Not set up")
 }
 
 /// Sets up a folder where it is from Home's Existing folder page as the owner does, waits for
@@ -3009,7 +3062,7 @@ fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
     );
 
     let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
-    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    reach_home(&pty, found_gone_app);
     set_up_here(&pty, &folder);
     assert_eq!(
         runtime.block_on(in_setup_with_note(&engine, "gone-app")),
@@ -3136,7 +3189,7 @@ fn after_delete_everything_the_same_folder_is_a_new_project_in_the_tui() {
     std::fs::write(folder.join("notes.md"), "made again\n").unwrap();
 
     let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
-    reach_home(&pty, |screen| screen.contains("No projects yet."));
+    reach_home(&pty, found_gone_app);
     set_up_here(&pty, &folder);
     assert_eq!(
         runtime.block_on(in_setup_with_note(&engine, "gone-app-2")),

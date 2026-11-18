@@ -375,8 +375,9 @@ pub fn save(connection: &Connection, project: &str, paths: &[PathBuf]) -> rusqli
 }
 
 /// Reads a project's hidden folders in the order the owner saved them; none when nothing was
-/// ever saved. Inputs: the open connection or transaction and the project id. Output: the
-/// folders, or the database error.
+/// ever saved. A folder saved under the data volume's long name comes back under its short
+/// name, the one a sandbox root has. Inputs: the open connection or transaction and the
+/// project id. Output: the folders, or the database error.
 pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<PathBuf>> {
     let present: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_hidden_paths')",
@@ -391,7 +392,8 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     )?;
     let paths = statement
         .query_map(params![project, HIDDEN_PATHS_MAX as i64], |row| {
-            row.get::<_, String>(0).map(PathBuf::from)
+            row.get::<_, String>(0)
+                .map(|text| crate::projects_home::one_spelling(PathBuf::from(text)))
         })?
         .collect::<rusqlite::Result<Vec<PathBuf>>>()?;
     assert!(paths.len() <= HIDDEN_PATHS_MAX);
