@@ -5,12 +5,13 @@ use crate::dacl::{
 
 #[cfg(windows)]
 pub use crate::win::private::{
-    check, dir, facts, file, free, identity, lock, read_only, repair, same, sync_folder, unlock,
-    user_sid,
+    check, dir, facts, file, free, identity, lock, read_only, repair, same, store_dir, sync_folder,
+    unlock, user_sid,
 };
 
 const FULL_ACCESS: u32 = 0x001f_01ff;
 const FOLDER_INHERIT: u8 = 0x03;
+const FILES_IN_FOLDER: u8 = 0x01 | 0x04 | 0x08;
 const ANY_RIGHT: u32 = u32::MAX;
 const MEDIUM_LEVEL: u32 = 0x2000;
 const NO_WRITE_UP: u32 = 0x1;
@@ -102,11 +103,24 @@ pub fn list(user: &[u8], folder: bool) -> Vec<u8> {
     planned
 }
 
-/// The system list a new private folder or file is created with (#512 r2, rv-sec2 N1): a
-/// medium label with no-write-up and no-read-up, so a lower integrity process of the user can
-/// neither change nor read it, handed on by a folder to everything made in it, SQLite's side
-/// files included. Input: whether the object is a folder. Output: the list bytes.
-pub fn label_list(folder: bool) -> Vec<u8> {
-    let flags = if folder { FOLDER_INHERIT } else { 0 };
+/// The engine stores that carry the no-read-up label (#524 r3): a secret store (account keys,
+/// MCP secrets) and the database folder, the data root, whose files engine.db, its SQLite
+/// side files and the GitHub sign-in are. Every other private folder carries no label, as it
+/// may hold a root granted to an AppContainer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Store {
+    Secret,
+    Database,
+}
+
+/// The system list a new store folder is created with (rv-sec2 N1, #524 r3): a medium label
+/// with no-write-up and no-read-up, so a lower integrity process of the user can neither
+/// change nor read what it covers. A secret folder labels itself and all made in it; the
+/// database folder only the files made directly in it. Input: the store. Output: the bytes.
+pub fn label_list(store: Store) -> Vec<u8> {
+    let flags = match store {
+        Store::Secret => FOLDER_INHERIT,
+        Store::Database => FILES_IN_FOLDER,
+    };
     labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP, flags)
 }
