@@ -7,6 +7,9 @@ fixfiles=$(git diff --name-only "$red" HEAD -- crates apps)
 new_rows="engine::tests::an_apply_before_the_storage_worker_receives_is_refused_unsent engine::tests::an_apply_the_busy_worker_does_not_take_in_time_is_withdrawn_and_never_lands engine::tests::an_apply_waits_for_a_storage_worker_that_starts_receiving_within_its_bound"
 race_rows="engine::tests::a_job_whose_bound_runs_out_at_the_claim_is_withdrawn_and_the_worker_skips_it engine::tests::the_claim_race_at_the_bound_has_one_outcome_and_applies_at_most_once"
 saturation=real_sqlite_contention_and_queue_saturation_are_bounded
+narrow_red=aa5315755
+narrow_fix=d1def7994
+narrow_rows="engine::owner::transport::barrier_tests::a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once engine::owner::transport::barrier_tests::a_lapsed_reactivation_is_withdrawn_and_admits_no_one storage::owner_actor_tests::only_a_change_whose_loss_leaves_more_access_is_classed_narrowing"
 suites="storage:: engine::tests:: engine::owner:: config:: tui::text::"
 cpus=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 bad=0
@@ -88,11 +91,24 @@ lib_rows mutant 1 "$race_rows"
 git checkout HEAD -- crates/crazyagent/src/storage.rs
 clean_tree mutant
 
+echo "== RED-NARROW: the files of the narrowing fix $narrow_fix at $narrow_red (uniform withdrawal)"
+narrow_files=$(git diff --name-only "$narrow_red" "$narrow_fix" -- crates apps | grep -v '_tests\.rs$')
+echo "$narrow_files"
+git checkout "$narrow_red" -- $narrow_files
+build_lib red-narrow
+lib_rows red-narrow 1 "${narrow_rows% *}"
+git checkout HEAD -- $narrow_files
+clean_tree red-narrow
+
 echo "== GREEN: the tip $(git rev-parse --short=9 HEAD)"
 build_lib green
 lib_rows green-quiet 5 "$new_rows $race_rows"
 load_on
 lib_rows green-loaded 5 "$new_rows $race_rows"
+load_off
+lib_rows green-quiet 3 "$narrow_rows"
+load_on
+lib_rows green-loaded 3 "$narrow_rows"
 load_off
 build_replay green
 replay_rows green-quiet 10
@@ -126,6 +142,7 @@ fi
 cat "$out/counts"
 awk '$1 ~ /^green/ && $3 > 0 {print "::error::green row failed: " $0; f = 1} END {exit f}' "$out/counts" || bad=1
 awk '$1 == "red" && $2 != "an_apply_waits_for_a_storage_worker_that_starts_receiving_within_its_bound" && $3 == 0 {print "::error::red row passed before the fix: " $0; f = 1} END {exit f}' "$out/counts" || bad=1
+awk '$1 == "red-narrow" && $2 == "a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once" && $3 == 0 {print "::error::the revocation row passed under uniform withdrawal: " $0; f = 1} END {exit f}' "$out/counts" || bad=1
 awk '$1 == "mutant" && $3 == 0 {print "::error::race row passed against the mutant: " $0; f = 1} END {exit f}' "$out/counts" || bad=1
 [ ! -s "$out/new-reds.txt" ] || { echo "::error::$(wc -l < "$out/new-reds.txt") suite rows went red with the fix"; bad=1; }
 exit "$bad"
