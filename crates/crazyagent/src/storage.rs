@@ -130,6 +130,32 @@ fn wait_while_held(path: &Path, stage: Stage) {
 }
 
 #[cfg(all(test, unix))]
+static DYING: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Marks the storage worker of the database at `path` to stop at its next claim, running
+/// neither that job nor any queued after it, as the worker of an engine that dies does.
+/// Input: the path given to `Storage::open`. Output: none; the mark is used up once.
+#[cfg(all(test, unix))]
+pub(crate) fn die_at_claim(path: &Path) {
+    let mut dying = DYING.lock().unwrap();
+    assert!(!dying.iter().any(|other| other == path));
+    dying.push(path.to_path_buf());
+}
+
+/// Takes the mark [`die_at_claim`] left for `path`. Input: the database path.
+/// Output: true once for a marked worker, which then stops.
+#[cfg(all(test, unix))]
+fn dies(path: &Path) -> bool {
+    let mut dying = DYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = dying.len();
+    dying.retain(|other| other != path);
+    assert!(before - dying.len() <= 1);
+    before != dying.len()
+}
+
+#[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
 mod native_auth_host_tests;
@@ -727,6 +753,10 @@ impl Storage {
                         Job::Claimed(job, claim) => {
                             #[cfg(all(test, unix))]
                             wait_while_held(&path, Stage::Claim);
+                            #[cfg(all(test, unix))]
+                            if dies(&path) {
+                                break;
+                            }
                             if !claim.decide(TAKEN) {
                                 continue;
                             }
