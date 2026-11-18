@@ -643,35 +643,46 @@ fn icacls(path: &Path, args: &[&str]) {
     assert!(done.status.success(), "{}", ran(&done));
 }
 
-/// V244-WIN-NESTED-READ-ROOT (rv-code2 #529 r2 F1): a read root inside a granted one is checked
-/// once the grant is written. One that inherits the grant runs. One under a root every package
-/// reads through an entry for that folder only, which the helper leaves alone, and one whose
-/// own inheritance is cut under a root the helper grants, are named and nothing starts, though
-/// the check before the helper passes both, since this user could open them.
+/// V244-WIN-NESTED-READ-ROOT (rv-code2 #529 r2 F1, rv-code4 #541 F1): a read root inside a
+/// granted one is checked once the grant is written. One that inherits the grant runs, and so
+/// does one with its inheritance cut whose own entries pass read and run down to its files and
+/// subfolders, split as on `C:\Program Files`. Under a root every package reads through an
+/// entry for that folder only, cut off, or cut off with such an entry of its own, it is named.
 #[test]
 fn a_read_root_the_grant_around_it_does_not_reach_is_refused_by_name() {
     let case = case("crazyagent.test.reach");
     let reached = case.outside.join("reached");
     let cut = case.outside.join("cut");
+    let own = case.outside.join("own");
+    let split = case.outside.join("split");
     let shelf = case.project.parent().unwrap().join("shelf");
     let inner = shelf.join("inner");
-    for folder in [&reached, &cut, &inner] {
+    for folder in [&reached, &cut, &own, &split, &inner] {
         fs::create_dir_all(folder).unwrap();
         fs::write(folder.join("note.txt"), "nested note\r\n").unwrap();
     }
-    icacls(&cut, &["/inheritance:d"]);
-    icacls(&shelf, &["/grant", "*S-1-15-2-1:(RX)"]);
+    for folder in [&cut, &own, &split] {
+        icacls(folder, &["/inheritance:d"]);
+    }
+    for folder in [&own, &split, &shelf] {
+        icacls(folder, &["/grant", "*S-1-15-2-1:(RX)"]);
+    }
+    icacls(&split, &["/grant", "*S-1-15-2-1:(OI)(CI)(IO)(GR,GE)"]);
 
     let mut profile = case.base.clone();
-    profile.read_roots = vec![plain(&case.outside), plain(&reached)];
-    install(&case, &profile);
-    let read = run(&case, &["/C", "type", &plain(&reached.join("note.txt"))]);
-    assert!(read.status.success(), "{}", ran(&read));
-    assert!(String::from_utf8_lossy(&read.stdout).contains("nested note"));
+    for root in [&reached, &split] {
+        profile.read_roots = vec![plain(&case.outside), plain(root)];
+        install(&case, &profile);
+        let read = run(&case, &["/C", "type", &plain(&root.join("note.txt"))]);
+        assert!(read.status.success(), "{}", ran(&read));
+        assert!(String::from_utf8_lossy(&read.stdout).contains("nested note"));
+    }
 
-    profile.read_roots = vec![plain(&case.outside), plain(&cut)];
-    assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
-    refuses_unreached(&case, &profile, &cut);
+    for root in [&cut, &own] {
+        profile.read_roots = vec![plain(&case.outside), plain(root)];
+        assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
+        refuses_unreached(&case, &profile, root);
+    }
 
     profile.read_roots = vec![plain(&shelf), plain(&inner)];
     assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
