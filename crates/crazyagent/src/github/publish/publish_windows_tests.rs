@@ -2,6 +2,7 @@ use super::*;
 use std::process::{Command, Stdio};
 
 const HOST: &str = "github.com";
+const TOKEN: &str = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
 const SHAPES: [&str; 5] = [
     "commondir",
     "include",
@@ -250,22 +251,53 @@ fn a_windows_publish_of_a_project_with_no_nested_git_entry_still_commits() {
         name: "Ada".into(),
         email: "ada@example.invalid".into(),
     };
-    let judged = |code: &str| {
-        [
-            "github_publish_nested_repository",
-            "github_publish_tree_too_large",
-            "github_publish_not_plain_repo",
-        ]
-        .contains(&code)
-    };
     let scan = secret_findings(&git, home, &folder, GitHubHistory::Empty);
-    assert!(
-        !matches!(&scan, Err(EngineError(code)) if judged(code)),
-        "secrets: {scan:?}"
-    );
+    assert!(scan.is_ok(), "secrets: {scan:?}");
     let made_commit = commit(&git, home, &folder, &[], &ada);
+    assert!(made_commit.is_ok(), "commit: {made_commit:?}");
+}
+
+#[test]
+fn a_windows_publish_opens_no_file_the_repository_config_names_outside_the_tree() {
+    let made = project();
+    let (git, home, folder) = (git().unwrap(), made.home.path(), made.path());
+    let outside = made.place.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("excludes"), "notes.txt\n").unwrap();
+    std::fs::write(outside.join("attributes"), "").unwrap();
+    std::fs::write(outside.join("mailmap"), "").unwrap();
+    for (key, file) in [
+        ("core.excludesFile", "excludes"),
+        ("core.attributesFile", "attributes"),
+        ("mailmap.file", "mailmap"),
+    ] {
+        owner_git(
+            &folder,
+            &["config", key, outside.join(file).to_str().unwrap()],
+        );
+    }
+    std::fs::write(folder.join("notes.txt"), format!("token = {TOKEN}\n")).unwrap();
+    let scan = secret_findings(&git, home, &folder, GitHubHistory::Empty).unwrap();
     assert!(
-        !matches!(&made_commit, Err(EngineError(code)) if judged(code)),
-        "commit: {made_commit:?}"
+        scan.findings
+            .iter()
+            .any(|finding| finding.path == "notes.txt"),
+        "the outside excludes file hid notes.txt: {scan:?}"
     );
+    let args: Vec<String> = project_git(&git, home, &folder)
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    for set in [
+        "core.excludesFile=/dev/null",
+        "core.attributesFile=/dev/null",
+        "log.mailmap=false",
+        "mailmap.file=/dev/null",
+    ] {
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == set),
+            "{set}: {args:?}"
+        );
+    }
 }
