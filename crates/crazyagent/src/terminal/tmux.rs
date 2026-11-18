@@ -859,12 +859,36 @@ impl Tmux {
     /// reaches that pane, then all the runs are written at once and each answer is awaited
     /// in order. Takes the control client, the target and the bytes. Returns once tmux took
     /// them all.
-    fn send_back_to_back(
-        _control: &Control,
-        _target: &str,
-        _bytes: &[u8],
-    ) -> Result<(), HostError> {
-        Err(failure("terminal_input_bounds"))
+    fn send_back_to_back(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(bytes.len() > SEND_KEYS_BYTES_MAX);
+        assert!(bytes.len() <= INPUT_BYTES_MAX);
+        crate::hop_trace::hop("tmux_t6_start", bytes.len(), target);
+        let pane = if pane_id_valid(target) {
+            target.to_owned()
+        } else {
+            Self::pane_of(control, target)?
+        };
+        crate::hop_trace::hop("tmux_t6_pane", 0, &pane);
+        let lines = send_keys_lines(&pane, bytes);
+        assert!(lines.len() >= 2);
+        control.run_all(&lines)?;
+        crate::hop_trace::hop("tmux_t6_done", 0, target);
+        Ok(())
+    }
+
+    /// The id of the pane a target names now. Takes the control client and the target.
+    /// Returns the pane id, or `terminal_agent_unknown` for an answer that is not one.
+    fn pane_of(control: &Control, target: &str) -> Result<String, HostError> {
+        let lines = control.ask(&format!(
+            "display-message -p -t {target} '#{{pane_id}}{FORMAT_END}'"
+        ))?;
+        let pane = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .filter(|pane| pane_id_valid(pane))
+            .ok_or_else(|| failure("terminal_agent_unknown"))?;
+        assert!(pane.starts_with('%'));
+        Ok(pane.to_owned())
     }
 
     /// Types bytes into one tmux target as hex keys, one command after another, in order, as
@@ -993,21 +1017,37 @@ impl Control {
     }
 
     fn send(&self, line: &str, pending: Pending) -> Result<(), HostError> {
-        assert!(!line.contains('\n') && !line.contains('\r'));
+        self.send_all(vec![(line, pending)])
+    }
+
+    /// Queues each command's pending reply in order and writes all the commands in one write
+    /// under one hold of the client's input, so no other caller's command lands between them
+    /// (DEC-202 T6, parked 6b0a84dc2). Takes the commands with their pendings, at most
+    /// `COMMANDS_SENT_MAX`. Returns once they are written, or the closed client's error.
+    fn send_all(&self, commands: Vec<(&str, Pending)>) -> Result<(), HostError> {
+        assert!(!commands.is_empty());
+        assert!(commands.len() <= COMMANDS_SENT_MAX);
+        assert!(
+            commands
+                .iter()
+                .all(|(line, _)| !line.contains('\n') && !line.contains('\r'))
+        );
         let mut input = self.input.lock().map_err(|_| closed())?;
         let Some(writer) = input.as_mut() else {
             return Err(closed());
         };
+        let mut bytes = Vec::with_capacity(commands.iter().map(|(line, _)| line.len() + 1).sum());
         {
             let mut state = self.state.lock().map_err(|_| closed())?;
             if state.closed {
                 return Err(closed());
             }
-            state.pending.push_back(pending);
+            for (line, pending) in commands {
+                state.pending.push_back(pending);
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+            }
         }
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
         if writer
             .write_all(&bytes)
             .and_then(|()| writer.flush())
@@ -1030,6 +1070,27 @@ impl Control {
             }
             Err(RecvTimeoutError::Disconnected) => Err(closed()),
         }
+    }
+
+    /// Runs commands back to back: sends them all at once through `send_all`, then waits for
+    /// each answer in order. Takes the commands. Returns once all succeeded, or the first error.
+    fn run_all(&self, lines: &[String]) -> Result<(), HostError> {
+        assert!(!lines.is_empty());
+        let mut answers = Vec::with_capacity(lines.len());
+        let commands = lines
+            .iter()
+            .map(|line| {
+                let (reply, answer) = sync_channel(1);
+                answers.push(answer);
+                (line.as_str(), Pending::Reply(reply))
+            })
+            .collect();
+        self.send_all(commands)?;
+        assert_eq!(answers.len(), lines.len());
+        for answer in &answers {
+            self.wait(answer)?;
+        }
+        Ok(())
     }
 
     fn run(&self, line: &str) -> Answer {
@@ -2515,10 +2576,19 @@ enum Route {
 /// The route `send_bytes` takes for one request: back to back (DEC-202 T6) when its toggle is
 /// on and the bytes take more than one `send-keys` run, else one by one. Takes at most
 /// `INPUT_BYTES_MAX` bytes and whether T6 is on. Returns the route.
-fn input_route(bytes: &[u8], _interleave: bool) -> Route {
+fn input_route(bytes: &[u8], interleave: bool) -> Route {
     assert!(bytes.len() <= INPUT_BYTES_MAX);
-    Route::OneByOne
+    let route = if interleave && bytes.len() > SEND_KEYS_BYTES_MAX {
+        Route::BackToBack
+    } else {
+        Route::OneByOne
+    };
+    assert!(route == Route::OneByOne || bytes.len() > SEND_KEYS_BYTES_MAX);
+    route
 }
+
+/// The most commands one `Control::send_all` writes: the runs of the longest input.
+const COMMANDS_SENT_MAX: usize = super::input_runs_max(INPUT_BYTES_MAX, SEND_KEYS_BYTES_MAX);
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
