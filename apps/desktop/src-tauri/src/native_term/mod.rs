@@ -100,15 +100,33 @@ pub fn window_name(name: &str) -> Result<String, &'static str> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn no_native_file_activates_the_app_or_makes_a_window_key() {
-        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
+    fn focus_call(text: &str) -> Option<String> {
         let needles = [
             ["acti", "vate"].concat(),
             ["make", "KeyWindow"].concat(),
             ["make", "KeyAndOrderFront"].concat(),
             ["order", "FrontRegardless"].concat(),
         ];
+        needles
+            .into_iter()
+            .find(|needle| text.contains(needle.as_str()))
+    }
+
+    #[test]
+    fn the_focus_scan_finds_a_planted_call() {
+        let planted = format!("window.{}{}();", "makeKey", "Window");
+        assert_eq!(
+            focus_call(&planted).as_deref(),
+            Some(planted[7..20].as_ref())
+        );
+        let app = format!("app.{}IgnoringOtherApps(true);", ["acti", "vate"].concat());
+        assert!(focus_call(&app).is_some());
+        assert_eq!(focus_call("window.setFrame(rect);"), None);
+    }
+
+    #[test]
+    fn no_native_file_activates_the_app_or_makes_a_window_key() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
         let mut read = 0;
         for entry in std::fs::read_dir(&folder).expect("native_term folder") {
             let path = entry.expect("folder entry").path();
@@ -116,10 +134,8 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("source file");
-            for needle in &needles {
-                let shown = path.display();
-                assert!(!text.contains(needle.as_str()), "{shown} names {needle}");
-            }
+            let shown = path.display();
+            assert_eq!(focus_call(&text), None, "{shown}");
             read += 1;
         }
         assert!(read >= 14, "read {read} files");

@@ -39,6 +39,11 @@ fn a_seed_flattens_line_breaks_unless_the_pane_reads_pastes_bracketed() {
         text: "a b c d".into(),
     };
     assert_eq!(pane.seed("a\r\n\r\nb\rc\nd"), Ok(flat));
+    let Ok(Action::Paste { text }) = pane.seed("a\r\x0b\x0c\u{85}\u{2028}b\n\r") else {
+        panic!("a seed with odd line breaks is a paste");
+    };
+    let keys = crazyagent::terminal::paste_keys(&text);
+    assert!(!keys.contains(&b'\r') && !keys.contains(&b'\n'), "{keys:?}");
     assert_eq!(pane.seed(""), Ok(Action::Nothing));
     let over = "x".repeat(PASTE_BYTES_MAX + 1);
     assert_eq!(pane.seed(&over), Err("native_terminal_paste_too_large"));
