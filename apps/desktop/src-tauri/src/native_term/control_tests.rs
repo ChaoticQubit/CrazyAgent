@@ -3,12 +3,14 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-const FACTS: &str = "%0 1 80 24 0 0 0 0 1 0 0 0 0";
+const TARGET: &str = "crazyagent:=team-1";
+
+const FACTS: &str = "%0 crazyagent:=team-1 1 80 24 0 0 0 0 1 0 0 0 0";
 
 fn asked(views: &[u64]) -> Mutex<Binds> {
     let mut binds = Binds::default();
     for view in views {
-        binds.views.insert(*view, Slot::Asked);
+        binds.views.insert(*view, Slot::Asked(TARGET.into()));
         binds.wants.push_back(Want {
             view: *view,
             kind: WantKind::State,
@@ -84,21 +86,21 @@ fn parse_lines() {
 
 #[test]
 fn state_line_parses_and_refuses_split_windows() {
-    let state = parse_state(b"%4 1 80 24 3 5 1 1 1 0 0 0 1").expect("state parses");
+    let state = parse_state(b"%4 s:=w 1 80 24 3 5 1 1 1 0 0 0 1").expect("state parses");
     assert_eq!(
         (state.pane.as_str(), state.columns, state.lines),
         ("%4", 80, 24)
     );
     assert!(state.alternate && state.app_cursor && state.mouse[3]);
-    assert!(parse_state(b"%4 2 80 24 3 5 1 1 1 0 0 0 1").is_none());
-    assert!(parse_state(b"4 1 80 24 3 5 1 1 1 0 0 0 1").is_none());
-    assert!(parse_state(b"%4 1 1 24 3 5 1 1 1 0 0 0 1").is_none());
-    assert!(parse_state(b"%4 1 80 24 3 24 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"%4 s:=w 2 80 24 3 5 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"4 s:=w 1 80 24 3 5 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"%4 s:=w 1 1 24 3 5 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"%4 s:=w 1 80 24 3 24 1 1 1 0 0 0 1").is_none());
 }
 
 #[test]
 fn restore_replays_modes_and_ends_at_the_cursor() {
-    let state = parse_state(b"%1 1 10 3 2 1 0 1 0 1 0 0 1").expect("state parses");
+    let state = parse_state(b"%1 s:=w 1 10 3 2 1 0 1 0 1 0 0 1").expect("state parses");
     let bytes = restore_bytes(&state, &[b"a".to_vec(), b"b".to_vec()]);
     let text = String::from_utf8(bytes).expect("ascii");
     assert!(text.starts_with("\x1b[H\x1b[2Ja\r\nb\x1b[0m\x1b[?1h\x1b[?1000h\x1b[?1006h"));
@@ -203,6 +205,23 @@ fn each_direct_path_refusal_ends_only_that_view() {
             Event::Closed,
         ]
     );
+    assert!(locked(&binds).views.is_empty());
+}
+
+#[test]
+fn facts_answered_for_another_window_are_refused_as_window_unknown() {
+    let binds = asked(&[5]);
+    let other = FACTS.replace(TARGET, "crazyagent:=holder");
+    let stream = format!(
+        "%begin 1 1 1\n{other}\n%end 1 1 1\n%begin 1 2 1\nscreen\n%end 1 2 1\n\
+         %output %0 holder\n"
+    );
+    let events = read(&stream, &binds);
+    let unknown = Event::Refused {
+        view: 5,
+        code: "native_terminal_window_unknown",
+    };
+    assert_eq!(events, vec![unknown, Event::Closed]);
     assert!(locked(&binds).views.is_empty());
 }
 

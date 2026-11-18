@@ -24,9 +24,11 @@ const WANTS_MAX: usize = 2 * DESKTOP_VIEWS_MAX;
 /// The only PATH the control client gets, the one the engine gives its own clients' tmux.
 const CLIENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// The pane facts read once at bind: its id, its window's pane count, size, cursor and the
-/// modes a capture does not carry.
-pub const STATE_FORMAT: &str = "#{pane_id} #{window_panes} #{pane_width} #{pane_height} \
+/// The pane facts read once at bind: its id, the target it answered for (tmux 3.8 answers a
+/// missing window from the client's current one), its window's pane count, size, cursor and
+/// the modes a capture does not carry.
+pub const STATE_FORMAT: &str = "#{pane_id} #{session_name}:=#{window_name} #{window_panes} \
+#{pane_width} #{pane_height} \
 #{cursor_x} #{cursor_y} #{alternate_on} #{keypad_cursor_flag} #{cursor_flag} \
 #{mouse_standard_flag} #{mouse_button_flag} #{mouse_any_flag} #{mouse_sgr_flag}";
 
@@ -114,6 +116,7 @@ pub fn parse(line: &[u8]) -> Notice<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaneState {
     pub pane: String,
+    pub target: String,
     pub columns: usize,
     pub lines: usize,
     cursor_x: usize,
@@ -126,10 +129,11 @@ pub struct PaneState {
 
 /// Parses a bind's pane facts; a window with more than one pane is refused, since an
 /// engine-server agent window holds only its agent. Input: the reply line. Output: the
-/// facts, or none.
+/// facts, or none. The caller checks the target.
 pub fn parse_state(line: &[u8]) -> Option<PaneState> {
     let text = std::str::from_utf8(line).ok()?;
     let (pane, rest) = text.split_once(' ')?;
+    let (target, rest) = rest.split_once(' ')?;
     let n: Vec<usize> = rest
         .split(' ')
         .map(|w| w.parse().ok())
@@ -158,6 +162,7 @@ pub fn parse_state(line: &[u8]) -> Option<PaneState> {
     let plain = codec::pane_id_valid(pane) && panes == 1;
     let state = (fits && plain && x <= columns && y < lines).then(|| PaneState {
         pane: pane.to_owned(),
+        target: target.to_owned(),
         columns,
         lines,
         cursor_x: x,
@@ -209,7 +214,7 @@ pub fn restore_bytes(state: &PaneState, rows: &[Vec<u8>]) -> Vec<u8> {
 /// after its capture, the only state whose pane output is read.
 #[derive(Debug, Clone, PartialEq)]
 enum Slot {
-    Asked,
+    Asked(String),
     Facts(PaneState),
     Bound(String),
 }
@@ -246,8 +251,12 @@ impl Binds {
         let view = want.view;
         let refused = |code| (None, Event::Refused { view, code });
         let (next, event) = match (want.kind, slot) {
-            (WantKind::State, Slot::Asked) if !ok => refused("native_terminal_window_unknown"),
-            (WantKind::State, Slot::Asked) => match lines.first().and_then(|l| parse_state(l)) {
+            (WantKind::State, Slot::Asked(_)) if !ok => refused("native_terminal_window_unknown"),
+            (WantKind::State, Slot::Asked(target)) => match lines
+                .first()
+                .and_then(|l| parse_state(l))
+            {
+                Some(state) if state.target != target => refused("native_terminal_window_unknown"),
                 Some(state) => {
                     self.views.insert(view, Slot::Facts(state));
                     return None;
@@ -442,7 +451,7 @@ impl Control {
         writer
             .send([state, capture].concat().into_bytes())
             .map_err(|_| "native_terminal_control_closed")?;
-        binds.views.insert(view, Slot::Asked);
+        binds.views.insert(view, Slot::Asked(target));
         binds.wants.push_back(Want {
             view,
             kind: WantKind::State,
