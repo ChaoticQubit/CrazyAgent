@@ -38,7 +38,9 @@ async fn key_account(
         )
         .await
         .unwrap();
-    assert_eq!(holders(&engine_root(owner.root.path()), key.as_bytes()), 1);
+    let root = engine_root(owner.root.path());
+    assert_eq!(holders(&root, key.as_bytes()), 1);
+    assert_eq!(account_rows(&database(owner), &added.id), 1);
     (added.id, key, listener)
 }
 
@@ -69,6 +71,10 @@ async fn secret_server(owner: &Usage, name: &str) -> (String, String) {
         .await
         .unwrap();
     assert_eq!(holders(&engine_root(owner.root.path()), value.as_bytes()), 1);
+    assert_eq!(
+        stored_secret_names(&database(owner), &server.id),
+        [SECRET_NAME]
+    );
     (server.id, value)
 }
 
@@ -81,20 +87,17 @@ fn engine_root(root: &Path) -> PathBuf {
 
 /// Opens engine.db read-only through a connection of its own, so a row reads what storage
 /// committed without going through the engine.
-/// Input: the engine folder. Output: the connection.
-fn stored(root: &Path) -> rusqlite::Connection {
-    rusqlite::Connection::open_with_flags(
-        root.join("engine.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap()
+/// Input: the database path. Output: the connection.
+fn stored(path: &Path) -> rusqlite::Connection {
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
 }
 
 /// Counts the stored account rows with this id, which is 0 once storage committed its
 /// removal.
-/// Inputs: the engine folder and the id. Output: the count, 0 or 1.
-fn account_rows(root: &Path, id: &CredentialRef) -> i64 {
-    stored(root)
+/// Inputs: the database path and the id. Output: the count, 0 or 1.
+fn account_rows(path: &Path, id: &CredentialRef) -> i64 {
+    stored(path)
         .query_row(
             "SELECT COUNT(*) FROM accounts WHERE id=?1",
             [id.as_str()],
@@ -105,9 +108,9 @@ fn account_rows(root: &Path, id: &CredentialRef) -> i64 {
 
 /// Names the secrets the stored record of one MCP server keeps, which lacks a name once
 /// storage committed its detach.
-/// Inputs: the engine folder and the server id. Output: the secret names, in stored order.
-fn stored_secret_names(root: &Path, id: &str) -> Vec<String> {
-    let body: String = stored(root)
+/// Inputs: the database path and the server id. Output: the secret names, in stored order.
+fn stored_secret_names(path: &Path, id: &str) -> Vec<String> {
+    let body: String = stored(path)
         .query_row(
             "SELECT body FROM plugin_items WHERE id=?1 AND kind='server'",
             [id],
@@ -164,14 +167,15 @@ async fn an_account_removal_the_full_queue_refuses_is_pending_and_lands_while_th
     .await;
     let (id, key, _listener) = key_account(&owner, "remove-queue").await;
     let root = engine_root(owner.root.path());
-    let hold = crate::storage::hold_claims(&database(&owner));
+    let path = database(&owner);
+    let hold = crate::storage::hold_claims(&path);
     let filler = fill_queue(&owner);
     tokio::time::sleep(IN_FLIGHT).await;
     let answer = owner.client.remove_account(id.clone()).await;
     drop(hold);
     filler.await.unwrap().unwrap();
     assert!(
-        landed(|| account_rows(&root, &id) == 0).await,
+        landed(|| account_rows(&path, &id) == 0).await,
         "a removal the full queue refused lands while the engine runs: {answer:?}"
     );
     assert!(
@@ -202,7 +206,7 @@ async fn an_account_removal_pending_when_the_engine_dies_lands_at_the_next_open(
     let restarted = owner.restarted().await;
     let root = engine_root(restarted.root.path());
     assert_eq!(
-        account_rows(&root, &id),
+        account_rows(&path, &id),
         0,
         "the next open removes the account the dead engine never removed: {answer:?}"
     );
@@ -226,7 +230,8 @@ async fn a_secret_detach_the_full_queue_refuses_is_pending_and_drains_and_delete
     .await;
     let (id, value) = secret_server(&owner, "detach-queue").await;
     let root = engine_root(owner.root.path());
-    let hold = crate::storage::hold_claims(&database(&owner));
+    let path = database(&owner);
+    let hold = crate::storage::hold_claims(&path);
     let filler = fill_queue(&owner);
     tokio::time::sleep(IN_FLIGHT).await;
     let answer = owner
@@ -237,7 +242,7 @@ async fn a_secret_detach_the_full_queue_refuses_is_pending_and_drains_and_delete
     drop(hold);
     filler.await.unwrap().unwrap();
     assert!(
-        landed(|| stored_secret_names(&root, &id).is_empty()).await,
+        landed(|| stored_secret_names(&path, &id).is_empty()).await,
         "a detach the full queue refused lands while the engine runs: {answer:?}"
     );
     assert!(
@@ -272,7 +277,7 @@ async fn a_secret_detach_pending_when_the_engine_dies_lands_at_the_next_open() {
     let restarted = owner.restarted().await;
     let root = engine_root(restarted.root.path());
     assert!(
-        stored_secret_names(&root, &id).is_empty(),
+        stored_secret_names(&path, &id).is_empty(),
         "the next open detaches the secret the dead engine never detached: {answer:?}"
     );
     assert!(
