@@ -606,6 +606,20 @@ impl Job {
         }
     }
 
+    /// Tells whether this job records a projects home step whose disk work may already have
+    /// run, so a wait its caller drops leaves it queued to land late rather than withdrawn.
+    /// Input: the job. Output: true for HomeRecord, SetupRecord, DeleteRecord and
+    /// HomeProjectMoveCleared.
+    fn records_disk_work(&self) -> bool {
+        matches!(
+            self,
+            Self::HomeRecord(..)
+                | Self::SetupRecord(..)
+                | Self::DeleteRecord(..)
+                | Self::HomeProjectMoveCleared(..)
+        )
+    }
+
     /// Chooses how long a caller waits for this job's reply.
     /// Input: the owner request timeout from settings. Output: that timeout, or at
     /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
@@ -622,9 +636,9 @@ impl Job {
 impl Storage {
     /// Queues one timed job and waits until the worker takes it, a non-narrowing job first
     /// waiting for the worker to receive. Inputs: the job, the deadline for both waits (earlier
-    /// inside a `before_cut` request), the refusal for a full queue. Output: `Taken`, the reply
-    /// timer starting at the take; else storage_starting_not_submitted, storage_busy_not_submitted
-    /// or `full` with nothing run, or access_change_pending for a narrowing job left queued.
+    /// inside a `before_cut` request), the refusal for a full queue. Output: `Taken`; else a
+    /// not-submitted refusal with nothing run, or access_change_pending for a narrowing job left
+    /// queued. A dropped wait withdraws the job unless it narrows access or records disk work.
     pub(crate) async fn submit(
         &self,
         job: Job,
@@ -634,6 +648,7 @@ impl Storage {
         assert!(!matches!(job, Job::Claimed(..)));
         let deadline = decided_by(deadline);
         let narrowing = job.narrows_access();
+        let kept = narrowing || job.records_disk_work();
         if !narrowing {
             let mut receiving = self.receiving.clone();
             match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
@@ -655,7 +670,7 @@ impl Storage {
         self.sender
             .try_send(Job::Claimed(Box::new(job), claim.clone()))
             .map_err(|_| error(full))?;
-        let mut dropped = WithdrawnOnDrop((!narrowing).then(|| claim.clone()));
+        let mut dropped = WithdrawnOnDrop((!kept).then(|| claim.clone()));
         let late = tokio::time::timeout_at(deadline, claim.taken.notified())
             .await
             .is_err();
