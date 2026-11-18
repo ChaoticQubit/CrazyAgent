@@ -24,9 +24,13 @@ impl Dimensions for GridSize {
     }
 }
 
-/// A run of cells in one row that share colour and style.
+/// A run of cells in one row that share colour and style: `cells` cells from `column` on,
+/// one character per cell, or a single wide character over two cells.
 pub struct Span {
     pub text: String,
+    pub column: usize,
+    pub cells: usize,
+    pub wide: bool,
     pub fg: Rgb,
     pub bold: bool,
     pub italic: bool,
@@ -210,11 +214,23 @@ pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Fr
         let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
         let style = (u64::from(bold) << 24) | (u64::from(italic) << 25);
         keys[row] = mix(mix(keys[row], cell.c as u64), packed | style);
+        let wide = cell.flags.contains(Flags::WIDE_CHAR);
         let spans = &mut rows[row];
         match spans.last_mut() {
-            Some(s) if s.fg == fg && s.bold == bold && s.italic == italic => s.text.push(cell.c),
+            Some(s)
+                if !wide
+                    && !s.wide
+                    && s.column + s.cells == column
+                    && (s.fg, s.bold, s.italic) == (fg, bold, italic) =>
+            {
+                s.text.push(cell.c);
+                s.cells += 1;
+            }
             _ => spans.push(Span {
                 text: cell.c.to_string(),
+                column,
+                cells: if wide { 2 } else { 1 },
+                wide,
                 fg,
                 bold,
                 italic,
@@ -223,6 +239,7 @@ pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Fr
     }
     assert_eq!(rows.len(), lines);
     assert!(cursor.is_none_or(|c| c.row < lines));
+    assert!(rows.iter().flatten().all(|s| !s.wide || s.cells == 2));
     Frame {
         rows,
         keys,
@@ -303,6 +320,9 @@ mod tests {
             fg,
             vec![theme.ansi[9], theme.ansi[1], back, fore, back, fore]
         );
+        let cells: Vec<(usize, usize)> =
+            frame.rows[0].iter().map(|s| (s.column, s.cells)).collect();
+        assert_eq!(cells, vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 5)]);
         assert_eq!(
             frame.rows[0]
                 .iter()
@@ -322,6 +342,22 @@ mod tests {
             shape: CursorShape::Block,
         };
         assert_eq!(frame.cursor, Some(cursor));
+    }
+
+    #[test]
+    fn a_wide_character_is_its_own_two_cell_span() {
+        let theme = Theme::default();
+        let term = screen("a\u{4e2d}b".as_bytes());
+        let frame = frame(&term, &theme, false);
+        let spans: Vec<(&str, usize, usize, bool)> = frame.rows[0]
+            .iter()
+            .map(|s| (s.text.as_str(), s.column, s.cells, s.wide))
+            .collect();
+        let wide = ("\u{4e2d}", 1, 2, true);
+        assert_eq!(
+            spans,
+            vec![("a", 0, 1, false), wide, ("b      ", 3, 7, false)]
+        );
     }
 
     #[test]

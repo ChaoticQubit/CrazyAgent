@@ -1,6 +1,7 @@
 use super::screen::{Cursor, Frame, Span};
 use super::style::{FaceEm, FontSource, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
+use glyphon::cosmic_text::{FeatureTag, FontFeatures};
 use glyphon::{
     Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
     Style as FontStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -55,6 +56,7 @@ pub struct Shared {
     scale: f32,
     family: String,
     font_px: f32,
+    advance_px: f32,
     cell: (f32, f32),
     theme: Theme,
     generation: u64,
@@ -292,6 +294,7 @@ impl Shared {
             scale,
             family: String::new(),
             font_px: 0.0,
+            advance_px: 0.0,
             cell: (0.0, 0.0),
             theme: style.theme,
             generation: 0,
@@ -315,6 +318,7 @@ impl Shared {
         let (width, height) = cell_px(face, style.font_px, f64::from(self.scale));
         self.family = style.family.to_owned();
         self.font_px = (style.font_px * f64::from(self.scale)) as f32;
+        self.advance_px = (face.advance * style.font_px * f64::from(self.scale)) as f32;
         self.cell = (width as f32, height as f32);
         self.theme = style.theme;
         self.generation += 1;
@@ -426,7 +430,6 @@ impl Shared {
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         buffer.set_wrap(&mut self.fonts, Wrap::None);
         buffer.set_size(&mut self.fonts, None, Some(self.cell.1));
-        buffer.set_monospace_width(&mut self.fonts, Some(self.cell.0));
         assert_eq!(buffer.metrics(), metrics);
         buffer
     }
@@ -465,8 +468,6 @@ impl Shared {
             }
         }
         let mut spare: Vec<Row> = old.into_iter().flatten().collect();
-        let family = self.family.clone();
-        let base = Attrs::new().family(Family::Name(&family));
         let mut shaped = 0;
         for (index, spans) in frame.rows.iter().enumerate() {
             if next[index].is_some() {
@@ -479,12 +480,7 @@ impl Shared {
                     key: 0,
                 },
             };
-            let pieces = spans
-                .iter()
-                .map(|s: &Span| (s.text.as_str(), span_attrs(s, &family)));
-            row.buffer
-                .set_rich_text(&mut self.fonts, pieces, &base, Shaping::Advanced, None);
-            row.buffer.shape_until_scroll(&mut self.fonts, false);
+            self.shape_row(&mut row.buffer, spans);
             row.key = frame.keys[index];
             next[index] = Some(row);
             shaped += 1;
@@ -493,6 +489,79 @@ impl Shared {
         assert_eq!(surface.rows.len(), lines, "every row has a buffer");
         assert!(shaped <= lines);
         shaped
+    }
+
+    /// The letter spacing, in em, that makes a glyph `natural` device pixels wide fill
+    /// `cells` cells.
+    fn spacing(&self, cells: usize, natural: f32) -> f32 {
+        assert!(cells == 1 || cells == 2);
+        assert!(self.font_px > 0.0);
+        (cells as f32 * self.cell.0 - natural) / self.font_px
+    }
+
+    /// Sets a row's rich text with ligatures off: each run of characters of one span that
+    /// share a letter spacing is one piece. Inputs: the buffer, the spans, their characters
+    /// and each character's spacing.
+    fn set_row(&mut self, buffer: &mut Buffer, spans: &[Span], places: &[Place], spacing: &[f32]) {
+        assert_eq!(places.len(), spacing.len());
+        let family = self.family.clone();
+        let base = Attrs::new().family(Family::Name(&family));
+        let mut features = FontFeatures::new();
+        features
+            .disable(FeatureTag::STANDARD_LIGATURES)
+            .disable(FeatureTag::CONTEXTUAL_LIGATURES)
+            .disable(FeatureTag::CONTEXTUAL_ALTERNATES);
+        let mut pieces: Vec<(&str, Attrs<'_>)> = Vec::new();
+        let mut first = 0;
+        for last in 0..places.len() {
+            let ends = places.get(last + 1).is_none_or(|next| {
+                next.span != places[first].span || spacing[last + 1] != spacing[first]
+            });
+            if !ends {
+                continue;
+            }
+            let span = &spans[places[first].span];
+            let end = places[last].local + places[last].len;
+            let attrs = span_attrs(span, &family)
+                .letter_spacing(spacing[first])
+                .font_features(features.clone());
+            pieces.push((&span.text[places[first].local..end], attrs));
+            first = last + 1;
+        }
+        assert!(pieces.len() <= places.len());
+        buffer.set_rich_text(&mut self.fonts, pieces, &base, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+    }
+
+    /// Shapes one row so each glyph starts on its own cell and fills it, as xterm draws:
+    /// every character first gets the spacing that fits the family's advance to its cells;
+    /// a character whose glyphs still miss (a fallback font, a wide character) is spaced
+    /// again from its measured width. Inputs: the buffer and the row's spans. Output: whether
+    /// the second pass ran.
+    fn shape_row(&mut self, buffer: &mut Buffer, spans: &[Span]) -> bool {
+        let places = places(spans);
+        let mut spacing: Vec<f32> = places
+            .iter()
+            .map(|p| self.spacing(p.cells, self.advance_px))
+            .collect();
+        self.set_row(buffer, spans, &places, &spacing);
+        let widths = glyph_widths(buffer);
+        let mut refit = false;
+        for (place, space) in places.iter().zip(spacing.iter_mut()) {
+            let Some(&(width, glyphs)) = widths.get(&place.byte) else {
+                continue;
+            };
+            let target = place.cells as f32 * self.cell.0;
+            if (width - target).abs() > 0.01 {
+                *space += (target - width) / (glyphs as f32 * self.font_px);
+                refit = true;
+            }
+        }
+        if refit {
+            self.set_row(buffer, spans, &places, &spacing);
+        }
+        assert!(places.len() >= spans.len());
+        refit
     }
 
     /// The rectangle of a cursor drawn over its cell: a beam 1 point wide, an underline 1
@@ -648,6 +717,52 @@ fn text_color(color: Rgb) -> TextColor {
     TextColor::rgb(color.r, color.g, color.b)
 }
 
+/// One character of a row: its byte in the row's text, its span, its byte and length in
+/// that span's text, and the cells it covers.
+struct Place {
+    byte: usize,
+    span: usize,
+    local: usize,
+    len: usize,
+    cells: usize,
+}
+
+fn places(spans: &[Span]) -> Vec<Place> {
+    let mut out = Vec::new();
+    let mut byte = 0;
+    for (index, span) in spans.iter().enumerate() {
+        let cells = if span.wide { 2 } else { 1 };
+        for (local, c) in span.text.char_indices() {
+            let len = c.len_utf8();
+            out.push(Place {
+                byte,
+                span: index,
+                local,
+                len,
+                cells,
+            });
+            byte += len;
+        }
+    }
+    assert_eq!(byte, spans.iter().map(|s| s.text.len()).sum::<usize>());
+    assert!(out.len() >= spans.len());
+    out
+}
+
+/// The width in device pixels and the glyph count of each character's glyphs in a shaped
+/// row, by the character's byte in the row.
+fn glyph_widths(buffer: &Buffer) -> HashMap<usize, (f32, usize)> {
+    let mut out: HashMap<usize, (f32, usize)> = HashMap::new();
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let entry = out.entry(glyph.start).or_insert((0.0, 0));
+            entry.0 += glyph.w;
+            entry.1 += 1;
+        }
+    }
+    out
+}
+
 fn span_attrs<'a>(span: &Span, family: &'a str) -> Attrs<'a> {
     Attrs::new()
         .family(Family::Name(family))
@@ -677,6 +792,80 @@ mod tests {
         load(fonts.db_mut(), source).expect("faces load");
         let id = face_for(fonts.db(), family).expect("an upright face");
         face_em(&mut fonts, id).expect("face metrics")
+    }
+
+    fn shared_at(scale: f32) -> Shared {
+        let (family, source) = font_for("JetBrains Mono").expect("built in");
+        let theme = Theme::default();
+        let style = Style {
+            family,
+            source,
+            font_px: 13.0,
+            blink: true,
+            theme,
+        };
+        Shared::new(scale, &style).expect("shared state")
+    }
+
+    fn span(text: &str, column: usize, wide: bool) -> Span {
+        let cells = if wide { 2 } else { text.chars().count() };
+        let fg = Theme::default().foreground;
+        Span {
+            text: text.into(),
+            column,
+            cells,
+            wide,
+            fg,
+            bold: false,
+            italic: false,
+        }
+    }
+
+    fn glyphs(buffer: &Buffer) -> Vec<(usize, f32, u16)> {
+        let runs = buffer.layout_runs();
+        runs.flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.x, g.glyph_id)))
+            .collect()
+    }
+
+    #[test]
+    fn every_glyph_starts_on_its_cell() {
+        for scale in [1.0, 2.0] {
+            let mut shared = shared_at(scale);
+            let cell = shared.cell.0;
+            let mut buffer = shared.row_buffer();
+            assert!(!shared.shape_row(&mut buffer, &[span("WWWW", 0, false)]));
+            let xs: Vec<f32> = glyphs(&buffer).iter().map(|g| g.1).collect();
+            assert_eq!(xs.len(), 4);
+            for (k, x) in xs.iter().enumerate() {
+                assert!(
+                    (x - k as f32 * cell).abs() < 0.05,
+                    "{scale}x glyph {k} at {x}"
+                );
+            }
+            let row = [
+                span("a", 0, false),
+                span("\u{4e2d}", 1, true),
+                span("b", 3, false),
+            ];
+            shared.shape_row(&mut buffer, &row);
+            let xs: Vec<f32> = glyphs(&buffer).iter().map(|g| g.1).collect();
+            assert_eq!(xs.len(), 3);
+            for (x, column) in xs.iter().zip([0.0, 1.0, 3.0]) {
+                assert!((x - column * cell).abs() < 0.05, "{scale}x glyph at {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn ligatures_are_off() {
+        let mut shared = shared_at(2.0);
+        let mut buffer = shared.row_buffer();
+        shared.shape_row(&mut buffer, &[span("-", 0, false)]);
+        let alone = glyphs(&buffer)[0].2;
+        for pair in ["->", "-=", "--"] {
+            shared.shape_row(&mut buffer, &[span(pair, 0, false)]);
+            assert_eq!(glyphs(&buffer)[0].2, alone, "{pair}");
+        }
     }
 
     #[test]
