@@ -7,6 +7,7 @@ use crate::engine::EngineError;
 use crate::project_setup::{StoredSetup, TeamPlan};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -982,6 +983,50 @@ fn a_long_stored_project_holds_a_change_set_recorded_under_the_short_spelling() 
     let project = ProjectId::new(PROJECT).unwrap();
     let roots = super::move_project::landing_repositories(&case.db, &project, &case.repo).unwrap();
     assert!(roots.contains(&short), "{roots:?}");
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN (advisor 19:5x): the landing holds of a project stored by its
+/// /System/Volumes/Data spelling take its folder under both names, since landing work keys
+/// its hold on the path text and an agent's landing runs under the short root.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_holds_its_folder_under_both_names() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let project = ProjectId::new(PROJECT).unwrap();
+    let roots = super::move_project::landing_repositories(&case.db, &project, &case.repo).unwrap();
+    assert_eq!(roots, BTreeSet::from([case.repo.clone(), short]));
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN (leader ask 19:56): a project stored by its
+/// /System/Volumes/Data spelling whose rows name its folder by the short name, as hidden
+/// folders saved through the sandbox's canonical form do, has those rows re-rooted into the
+/// home by its move, not left on the old folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    crate::sandbox::hidden_paths::save(&case.db, PROJECT, &[short.join("drafts")]).unwrap();
+    assert_eq!(
+        case.move_project(AddMode::Move, &[]).unwrap(),
+        Finished::Moved { repointed: 1 }
+    );
+    assert_eq!(case.stored_folder(), case.target());
+    assert_eq!(
+        crate::sandbox::hidden_paths::load(&case.db, PROJECT).unwrap(),
+        vec![case.target().join("drafts")]
+    );
 }
 
 /// #433 F1 (rv-sec2 18:57): a project stored by its /System/Volumes/Data spelling still sees
