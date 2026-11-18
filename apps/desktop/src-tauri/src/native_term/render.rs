@@ -1,4 +1,4 @@
-use super::screen::{Cursor, Frame, Span};
+use super::screen::{Cursor, Frame, Preedit, Span};
 use super::style::{FaceEm, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use glyphon::{
@@ -72,6 +72,14 @@ pub struct Surface {
     rect_buffer: wgpu::Buffer,
     screen_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+/// The underline under marked text: one line as tall as a cursor's underline, along the
+/// bottom of its cells. Inputs: the marked cells, the cell size and the line height in
+/// pixels. Output: x, y, width and height in pixels.
+fn preedit_rect(preedit: Preedit, cell: (f32, f32), line: f32) -> [f32; 4] {
+    let _ = (preedit, cell, line);
+    [0.0; 4]
 }
 
 fn linear(channel: u8) -> f64 {
@@ -647,4 +655,28 @@ fn span_attrs<'a>(span: &Span, family: &'a str) -> Attrs<'a> {
         } else {
             FontStyle::Normal
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marked_text_is_underlined_along_the_bottom_of_its_cells() {
+        let wide = Preedit {
+            row: 2,
+            column: 5,
+            cells: 3,
+        };
+        assert_eq!(
+            preedit_rect(wide, (8.0, 17.0), 2.0),
+            [40.0, 49.0, 24.0, 2.0]
+        );
+        let one = Preedit {
+            row: 0,
+            column: 0,
+            cells: 1,
+        };
+        assert_eq!(preedit_rect(one, (7.0, 15.0), 1.0), [0.0, 14.0, 7.0, 1.0]);
+    }
 }
