@@ -946,10 +946,10 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
 
 /// Deletes the agent folder and sandbox profile of a deleted project's agent, with a native
 /// lead's teammates' profile, teammates' setup profile and the records of its teammates'
-/// socket name and server pid (rv-audit TTDL F2, OP-9b, PLC c PC-L1), making its read-only
-/// folders writable first, such as a module cache a toolchain left. The folder goes last, so
-/// a retry after a failure still finds what a delete's record matches. Inputs: the team state
-/// folder and the agent. Output: Ok once all are gone.
+/// socket name and server pid (rv-audit TTDL F2, OP-9b, PLC c PC-L1). The folder holds the
+/// agent's home and temp folder, so it goes as an agent's tree ([`remove_agent_tree`], #616
+/// r2), and goes last, so a retry after a failure still finds what a delete's record matches.
+/// Inputs: the team state folder and the agent. Output: Ok once all are gone.
 pub(crate) fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
     for file in [
         profile(team, id),
@@ -960,7 +960,7 @@ pub(crate) fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError
     ] {
         gone(std::fs::remove_file(file))?;
     }
-    remove_tree(&agent_folder(team, id))
+    remove_agent_tree(&agent_folder(team, id))
 }
 
 fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
@@ -972,26 +972,25 @@ fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
     }
 }
 
-/// Deletes a folder and everything in it without following a link, making its read-only
-/// folders writable first when a plain delete stops on one. Input: the folder. Output: Ok
-/// once nothing has its name.
-pub(crate) fn remove_tree(folder: &Path) -> Result<(), EngineError> {
+/// Deletes a folder an agent wrote and everything in it without following a link. When a
+/// plain delete stops, the folder is walked clearing the immutable and append-only flags of
+/// this user's entries and the ACLs of folders that will not open or list, so a delete a mode
+/// change lets through starts no child (RV-DS241-182); when it still stays, it is walked once
+/// more clearing every ACL in it too ([`writable`]). So an agent's `chflags uchg`, `chmod
+/// 0500` or deny entry in its own home, temp folder, tool cache, run folder or worktree keeps
+/// neither Clean up nor a project's delete from removing it (T8 r1 L3, T8-R2-N4, RV-DS241-137
+/// sec r1 F2, #616 r2). ACLs go only through entries the walk reached from the tree's own
+/// handles, but those of the tree's own folder, by its path as its open is (RV-DS241-181).
+/// Input: the folder. Output: Ok once nothing has its name.
+pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
-        writable(folder, Flags::Kept, Acls::Kept);
-        gone(std::fs::remove_dir_all(folder))?;
+        writable(folder, Acls::Stuck);
+        if std::fs::remove_dir_all(folder).is_err() {
+            writable(folder, Acls::All);
+            gone(std::fs::remove_dir_all(folder))?;
+        }
     }
     Ok(())
-}
-
-/// Deletes a folder an agent wrote as [`remove_tree`] does and, when a plain delete stops,
-/// also clears the immutable and append-only flags of this user's entries on the way and
-/// the extended ACLs in it ([`remove_pinned_tree`]), so an agent's `chflags uchg`,
-/// `chmod 0500` or deny entry in its own tool cache or worktree keeps neither Clean up nor
-/// a project's delete from removing it (T8 r1 L3, T8-R2-N4, RV-DS241-137 sec r1 F2). ACLs
-/// go only through entries the walk reached from the tree's own handles, never a path
-/// (RV-DS241-181). Input: the folder. Output: Ok once nothing has its name.
-pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
-    remove_pinned_tree(folder, Flags::Cleared)
 }
 
 /// The deepest folder below an entry of an agent home that a launch's reset removes. Past
@@ -1329,39 +1328,10 @@ pub(crate) fn home_code(problem: &EngineError, otherwise: &'static str) -> &'sta
     }
 }
 
-/// Deletes a folder. When a plain delete stops, it is walked clearing flags as `flags`
-/// says and the ACLs of folders that will not open or list, so a delete a mode change lets
-/// through starts no child (RV-DS241-182); when it still stays, it is walked once more
-/// clearing every ACL in it too ([`writable`]). Inputs: the folder and what to do with the
-/// flags. Output: Ok once nothing has its name.
-fn remove_pinned_tree(folder: &Path, flags: Flags) -> Result<(), EngineError> {
-    assert!(flags != Flags::Kept);
-    if std::fs::remove_dir_all(folder).is_err() {
-        writable(folder, flags, Acls::Stuck);
-        if std::fs::remove_dir_all(folder).is_err() {
-            writable(folder, flags, Acls::All);
-            gone(std::fs::remove_dir_all(folder))?;
-        }
-    }
-    Ok(())
-}
-
-/// What a walk that opens up a folder for removal does with the immutable and append-only
-/// flags an agent may set.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Flags {
-    /// Leaves them.
-    Kept,
-    /// Clears them through each entry's own handle ([`unpin`]).
-    Cleared,
-}
-
 /// What a walk that opens up a folder for removal does with the extended ACLs an agent may
 /// set, which only macOS clears.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Acls {
-    /// Leaves them.
-    Kept,
     /// Clears those of folders that will not open or list, then walks those folders.
     Stuck,
     /// Also clears those of every folder walked and of every entry in them.
@@ -1476,16 +1446,6 @@ impl AclClears {
     }
 }
 
-/// Clears the flags of one entry as `flags` says. Inputs: what to do, the entry's open
-/// parent and its name there.
-#[cfg(unix)]
-fn clear_flags<P: rustix::path::Arg + Copy>(flags: Flags, parent: impl std::os::fd::AsFd, name: P) {
-    match flags {
-        Flags::Kept => {}
-        Flags::Cleared => unpin(parent, name),
-    }
-}
-
 /// Clears the extended ACL of each entry without following a link in its last part, through
 /// `/bin/chmod -f -h -N` on its path, as [`release_acls`] does. A deny entry an agent set
 /// binds the owner too, so it would keep an entry from going or being written (RV-DS241-137
@@ -1566,35 +1526,29 @@ fn chmod_acls(flags: &[&str], entries: &[&Path]) {
 /// Lets the owner delete inside every real folder under `folder`, visiting at most
 /// `DISK_ENTRIES_MAX` folders. Every folder is opened relative to its parent's open
 /// handle without following a link, and changed and listed through its own handle, so a
-/// link swapped in meanwhile is never followed. Unless `pins` keeps them, the flags
-/// [`unpin`] clears go first from the folder, each folder below it and each entry in them.
-/// ACLs go as `acls` says, each relative to a handle the walk holds ([`AclClears`]), but the
-/// folder's own when it will not open, which goes by its path as its open does: a folder
-/// that will not open or list has its own ACL cleared, or its parent's when even its status
-/// cannot be read there ([`stuck_clear`]), and is walked again after that clear, with at
-/// most [`STUCK_MAX`] such folders waiting at once; [`Acls::All`] also clears every folder
-/// walked and every entry in them. Inputs: the folder, what to do with those flags and what
-/// to do with ACLs.
+/// link swapped in meanwhile is never followed. The flags [`unpin`] clears go first from the
+/// folder, each folder below it and each entry in them. ACLs go as `acls` says, each relative
+/// to a handle the walk holds ([`AclClears`]), but the folder's own when it will not open,
+/// which goes by its path as its open does: a folder whose look a deny entry refuses has
+/// that ACL cleared ([`open_up`]), a folder that will not open or list has its own ACL
+/// cleared, or its parent's when even its status cannot be read there ([`stuck_clear`]), and
+/// is walked again after that clear, with at most [`STUCK_MAX`] such folders waiting at once;
+/// [`Acls::All`] also clears every folder walked and every entry in them. Inputs: the folder
+/// and what to do with ACLs.
 #[cfg(unix)]
-fn writable(folder: &Path, pins: Flags, acls: Acls) {
+fn writable(folder: &Path, acls: Acls) {
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
     use rustix::path::Arg;
     use std::ffi::CString;
     use std::os::fd::AsFd;
     use std::rc::Rc;
-    let pinned = pins != Flags::Kept;
     let flags =
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
     let mut clears = AclClears::new();
-    if pinned {
-        clear_flags(pins, rustix::fs::CWD, folder);
-        let _ = open_up(rustix::fs::CWD, folder);
-    }
+    unpin(rustix::fs::CWD, folder);
+    let _ = open_up(rustix::fs::CWD, folder);
     let open = || rustix::fs::open(folder, flags, Mode::empty());
-    let opened = open().or_else(|problem| {
-        if acls == Acls::Kept {
-            return Err(problem);
-        }
+    let opened = open().or_else(|_| {
         let found = rustix::fs::statat(rustix::fs::CWD, folder, AtFlags::SYMLINK_NOFOLLOW)?;
         let named = folder.as_cow_c_str()?;
         clears.add(rustix::fs::CWD, Some(&*named), &found);
@@ -1622,20 +1576,20 @@ fn writable(folder: &Path, pins: Flags, acls: Acls) {
             None => Ok(Rc::clone(&parent)),
             Some(name) => rustix::fs::openat(&*parent, name.as_c_str(), flags, Mode::empty())
                 .or_else(|_| {
-                    clear_flags(pins, &*parent, name.as_c_str());
+                    unpin(&*parent, name.as_c_str());
                     open_up(&*parent, name.as_c_str())?;
                     rustix::fs::openat(&*parent, name.as_c_str(), flags, Mode::empty())
                 })
                 .map(Rc::new),
         };
         let listed = opened.and_then(|handle| {
-            clear_flags(pins, &*handle, c".");
+            unpin(&*handle, c".");
             let _ = rustix::fs::fchmod(&*handle, Mode::RWXU);
             let entries = Dir::read_from(&*handle)?;
             Ok((handle, entries))
         });
         let Ok((handle, entries)) = listed else {
-            if acls != Acls::Kept && stuck_clear(&mut clears, &parent, name.as_deref()) {
+            if stuck_clear(&mut clears, &parent, name.as_deref()) {
                 stuck.push((parent, name));
                 #[cfg(test)]
                 STUCK_PEAK.set(STUCK_PEAK.get().max(stuck.len()));
@@ -1659,7 +1613,7 @@ fn writable(folder: &Path, pins: Flags, acls: Acls) {
                 continue;
             }
             if !matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
-                clear_flags(pins, &*handle, child);
+                unpin(&*handle, child);
                 if acls == Acls::All
                     && let Ok(found) =
                         rustix::fs::statat(&*handle, child, AtFlags::SYMLINK_NOFOLLOW)
@@ -1674,7 +1628,7 @@ fn writable(folder: &Path, pins: Flags, acls: Acls) {
 }
 
 #[cfg(not(unix))]
-fn writable(_: &Path, _: Flags, _: Acls) {}
+fn writable(_: &Path, _: Acls) {}
 
 /// Clears the ACL after which a folder a walk could not open or list may open: its own, or
 /// its parent's through the parent's handle when even its status cannot be read there, which
@@ -1733,7 +1687,10 @@ fn open_up<P: rustix::path::Arg>(
 /// the parent's handle that never follows a link shows a folder, first clearing an ACL of
 /// the entry that refuses that look ([`clear_refused_acl`]). A hard link to an owner file
 /// swapped in after the look gains no write (#571 sec F1); the caller adds write through a
-/// folder handle. Inputs: the parent handle and the name. Output: Ok, `ENOTDIR`, or the error.
+/// folder handle. One swapped in between a refused look and its clear loses its ACL, which
+/// no handle can stop, so a look after that clear that shows no folder is reported as
+/// `cleanup_open_up_swapped` (#616 r2 sec N1). Inputs: the parent handle and the name, or
+/// the current folder and a walk top's path. Output: Ok, `ENOTDIR`, or the error.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn open_up<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
@@ -1747,7 +1704,13 @@ fn open_up<P: rustix::path::Arg + Copy>(
             #[cfg(all(test, target_os = "macos"))]
             open_up_step(OpenUpPoint::BeforeClear, &name);
             clear_refused_acl(parent.as_fd(), name)?;
-            rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?
+            let found = rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+            if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
+                eprintln!("cleanup_open_up_swapped");
+                #[cfg(all(test, target_os = "macos"))]
+                OPEN_UP_SWAPPED.set(OPEN_UP_SWAPPED.get() + 1);
+            }
+            found
         }
         found => found?,
     };
@@ -1765,17 +1728,20 @@ fn open_up<P: rustix::path::Arg + Copy>(
 }
 
 /// Clears the whole ACL of the entry `name` under `parent` by that name, never following a
-/// link, for a look there that a deny entry an agent set refused (#611 code F1). The callers
-/// of [`open_up`] name an entry they listed or looked at as a folder, so a swap after that
-/// read is the residual [`AclClears`] names. Inputs: the parent and the name. Output: Ok,
-/// `EACCES` for a name of more than one part, or the system's error.
+/// link in its last part, for a look there that a deny entry an agent set refused (#611 code
+/// F1): a plain name in a folder a walk holds open, or a walk top's path from the current
+/// folder, as the top's open and [`AclClears`] name it ([`writable`], #616 r2 code F1). A
+/// swap of that entry after the look is reported by [`open_up`]. Inputs: the parent and the
+/// name. Output: Ok, `EACCES` for any other name of more than one part, or the system's error.
 #[cfg(target_os = "macos")]
 fn clear_refused_acl<P: rustix::path::Arg>(
     parent: std::os::fd::BorrowedFd<'_>,
     name: P,
 ) -> rustix::io::Result<()> {
+    use std::os::fd::AsRawFd;
     let named = name.as_cow_c_str()?;
-    if !plain_name(&named) {
+    let top = parent.as_raw_fd() == rustix::fs::CWD.as_raw_fd();
+    if !(top || plain_name(&named)) {
         return Err(rustix::io::Errno::ACCESS);
     }
     crazyagent_macos_fs::clear_acl_at(parent, &named).map_err(|error| {

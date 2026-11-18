@@ -1557,7 +1557,7 @@ fn a_folder_that_denies_listing_has_its_acl_cleared_through_its_parents_handle_a
         }));
     });
 
-    writable(&tree, Flags::Kept, Acls::Stuck);
+    writable(&tree, Acls::Stuck);
 
     std::fs::set_permissions(&above, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(
