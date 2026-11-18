@@ -744,6 +744,7 @@ async fn native_auth_custody_dropped_dispatch_ack_keeps_real_actor_fence() {
         .try_send(Job::NativeAuth(
             admission.clone(),
             start(scope.clone(), "lost-dispatch-ack"),
+            crate::storage::NativeAuthAsk::Engine,
             send,
         ))
         .unwrap_or_else(|_| panic!("begin queue"));
@@ -769,6 +770,7 @@ async fn native_auth_custody_dropped_dispatch_ack_keeps_real_actor_fence() {
                 scope,
                 operation_id: begun.reply.fact.operation_id,
             }),
+            crate::storage::NativeAuthAsk::Engine,
             send,
         ))
         .unwrap_or_else(|_| panic!("barrier queue"));
@@ -880,6 +882,7 @@ async fn native_auth_custody_that_ended_during_a_renewal_is_settled_by_a_later_r
         Job::NativeAuth(
             admission.clone(),
             start(scope.clone(), "ended-during-renewal"),
+            crate::storage::NativeAuthAsk::Engine,
             send,
         )
     })
@@ -924,7 +927,12 @@ async fn native_auth_custody_that_ended_during_a_renewal_is_settled_by_a_later_r
         };
         let admission = admission.clone();
         move |send: oneshot::Sender<Result<NativeAuthBegin, EngineError>>| {
-            Job::NativeAuth(admission, Command::Read(query), send)
+            Job::NativeAuth(
+                admission,
+                Command::Read(query),
+                crate::storage::NativeAuthAsk::Engine,
+                send,
+            )
         }
     };
     let during = ask(&storage, read("read-during-renewal")).await.unwrap();
