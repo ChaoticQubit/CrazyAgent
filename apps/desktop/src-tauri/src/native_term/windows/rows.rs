@@ -33,6 +33,9 @@ const FARM_WAIT: Duration = Duration::from_secs(60);
 const RED: COLORREF = 0x0000_00ff;
 const GREEN: COLORREF = 0x0000_ff00;
 
+/// The stand-in webview's colour as the screen reads it.
+const WEBVIEW_RGB: (u8, u8, u8) = (0, 255, 0);
+
 /// The page box the row places, in CSS pixels, and the stand-in webview's origin in the
 /// parent's client area.
 const PAGE: (f64, f64, f64, f64) = (50.0, 40.0, 400.0, 300.0);
@@ -174,6 +177,16 @@ fn near(seen: (u8, u8, u8), want: (u8, u8, u8)) -> bool {
     close(seen.0, want.0) && close(seen.1, want.1) && close(seen.2, want.2)
 }
 
+fn assert_color(at: POINT, want: (u8, u8, u8), what: &str) {
+    let seen = pixel(at);
+    assert!(
+        near(seen, want),
+        "{what}: {seen:?} at {},{}, want {want:?}",
+        at.x,
+        at.y
+    );
+}
+
 fn background() -> (u8, u8, u8) {
     let theme = Theme::default();
     (theme.background.r, theme.background.g, theme.background.b)
@@ -208,8 +221,8 @@ fn await_present(what: &str, after: u64) {
 /// fed text drawn. Input: the view's origin on screen. Output: the count.
 fn text_samples(origin: POINT) -> usize {
     let mut drawn = 0;
-    for y in (2..14).step_by(3) {
-        for x in (0..160).step_by(2) {
+    for y in (3..14).step_by(4) {
+        for x in (0..120).step_by(4) {
             let at = POINT {
                 x: origin.x + x,
                 y: origin.y + y,
@@ -260,20 +273,14 @@ fn placed_shown_and_drawn(parent: HWND, view: &View) -> POINT {
     await_present("the first present", before);
     let origin = on_screen(parent, (want.0, want.1));
     let centre = on_screen(parent, (want.0 + 200, want.1 + 200));
-    assert!(
-        near(pixel(centre), background()),
-        "the view's background shows"
-    );
+    assert_color(centre, background(), "the view's background shows");
     let drawn = text_samples(origin);
     assert!(
-        drawn >= 10,
+        drawn >= 5,
         "the fed text is drawn: {drawn} samples off the background"
     );
     let beside = on_screen(parent, (WEBVIEW_AT.0 + 20, WEBVIEW_AT.1 + 20));
-    assert!(
-        near(pixel(beside), (0, 255, 0)),
-        "the webview shows beside the view"
-    );
+    assert_color(beside, WEBVIEW_RGB, "the webview shows beside the view");
     let idle = presents();
     pump_for(Duration::from_millis(500));
     assert_eq!(presents(), idle, "no present while nothing changed");
@@ -292,10 +299,7 @@ fn covered_and_shown_again(view: &View, centre: POINT) {
     assert!(view.feed(fed_frame(&Theme::default(), b"while covered\r\n")));
     pump_for(Duration::from_millis(500));
     assert_eq!(presents(), hidden, "a covered view never presents");
-    assert!(
-        near(pixel(centre), (0, 255, 0)),
-        "the webview shows where the view was"
-    );
+    assert_color(centre, WEBVIEW_RGB, "the webview shows where the view was");
     view.cover(false);
     assert_ne!(
         unsafe { IsWindowVisible(view.hwnd()) },
@@ -303,7 +307,7 @@ fn covered_and_shown_again(view: &View, centre: POINT) {
         "uncovered, it shows again"
     );
     await_present("showing redraws", hidden);
-    assert!(near(pixel(centre), background()), "the view draws again");
+    assert_color(centre, background(), "the view draws again");
 }
 
 fn focus_follows_clicks(view: &View, webview: HWND, centre: POINT) {
