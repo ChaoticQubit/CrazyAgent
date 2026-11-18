@@ -1828,3 +1828,6 @@ pub(super) fn push(
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod publish_windows_tests;

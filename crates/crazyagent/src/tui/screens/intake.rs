@@ -430,6 +430,30 @@ mod tests {
     }
 
     #[test]
+    fn the_publish_judge_refusals_read_the_same_in_the_tui_and_the_desktop() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/desktop/src/api-intake.ts"
+        ))
+        .unwrap();
+        for code in [
+            "github_publish_nested_repository",
+            "github_publish_not_plain_repo",
+            "github_publish_tree_too_large",
+        ] {
+            let text = known(code).unwrap_or_else(|| panic!("{code} has no TUI sentence"));
+            assert!(
+                source.contains(&format!("  {code}: \"{text}\",\n")),
+                "{code}: the desktop words differ from {text:?}"
+            );
+            assert!(
+                !text.contains('_') && text.ends_with('.'),
+                "{code} shows {text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_known_problem_reads_as_a_plain_sentence_and_an_unknown_one_names_its_code() {
         for code in [
             "github_device_expired",

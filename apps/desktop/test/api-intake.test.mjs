@@ -70,6 +70,9 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("home_destination_exists"), "Your projects folder already has a folder with this name. Rename one of them first.");
   assert.equal(api.intakeCopy("clone_destination_exists"), "Your projects folder already has a folder with this repository's name.");
   assert.equal(api.intakeCopy("github_sign_in_expired"), "The GitHub code expired before it was entered. Start again.");
+  assert.equal(api.intakeCopy("github_publish_nested_repository"), "A folder in the project holds a git repository of its own, such as a submodule, so CrazyAgent won't publish this project. Move that repository out of the project, then try again.");
+  assert.equal(api.intakeCopy("github_publish_not_plain_repo"), "The project's .git is a link or a file, or points git at another place, so CrazyAgent won't publish it.");
+  assert.equal(api.intakeCopy("github_publish_tree_too_large"), "The project folder holds over 2,000,000 files and folders, ignored ones too, more than CrazyAgent checks before it publishes.");
   assert.equal(api.intakeCopy("home_move_partial"), "Some projects were moved and couldn't be moved back. Check both folders.");
   assert.equal(api.intakeCopy("home_move_worktrees"), "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it.");
   assert.equal(api.intakeCopy("home_copy_linked_checkout"), "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.");

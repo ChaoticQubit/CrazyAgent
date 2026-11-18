@@ -654,4 +654,136 @@ mod windows_tests {
         let stop = Instant::now() + LISTING_TIME;
         assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["empty.txt"]);
     }
+
+    /// Makes a repository with one commit, packed refs and an index, the `.git` an owner's
+    /// project holds, with an untracked `notes.txt` beside the tracked `README.md`. Input:
+    /// the temp folder. Output: the repository folder.
+    fn committed(place: &Path) -> std::path::PathBuf {
+        let (repo, home) = repository(place);
+        fs::write(repo.join("README.md"), "readme").unwrap();
+        git(&home, &repo, &["add", "README.md"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@example.invalid",
+                "commit",
+                "-q",
+                "--no-gpg-sign",
+                "-m",
+                "start",
+            ],
+        );
+        git(&home, &repo, &["pack-refs", "--all"]);
+        fs::create_dir_all(repo.join(".git").join("info")).unwrap();
+        fs::write(repo.join("notes.txt"), "untracked").unwrap();
+        repo
+    }
+
+    /// Replaces one entry of a `.git` folder with a link to a new place outside it: a
+    /// junction for a folder, which needs no privilege, a file link for anything else,
+    /// which the farm's elevated runner may make. Inputs: the `.git` folder, the entry and
+    /// the outside folder.
+    fn linked(git_dir: &Path, entry: &str, outside: &Path) {
+        let inside = git_dir.join(entry);
+        let target = outside.join(entry.replace('/', "-"));
+        if inside.is_dir() {
+            fs::create_dir_all(&target).unwrap();
+            fs::remove_dir_all(&inside).unwrap();
+            junction(&inside, &target);
+        } else {
+            fs::write(&target, "").unwrap();
+            if fs::symlink_metadata(&inside).is_ok() {
+                fs::remove_file(&inside).unwrap();
+            }
+            std::os::windows::fs::symlink_file(&target, &inside)
+                .unwrap_or_else(|problem| panic!("file link {entry}: {problem}"));
+        }
+    }
+
+    /// Asserts `answer` is the refusal a judged `.git` gets, `project_files_no_repository`.
+    /// Inputs: the answer and the planted shape, which names the failure.
+    /// Output: none; any other answer fails the test.
+    fn judged(answer: Result<Vec<String>, EngineError>, shape: &str) {
+        assert!(
+            matches!(&answer, Err(EngineError(code)) if code == "project_files_no_repository"),
+            "{shape}: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_windows_git_folder_with_an_alternates_file_of_any_kind_is_not_listed() {
+        for (name, text) in [
+            ("alternates", "\\\\127.0.0.1\\x\\objects\n"),
+            ("alternates", "C:\\elsewhere\\objects\n"),
+            ("alternates", ""),
+            ("http-alternates", "http://127.0.0.1/x\n"),
+            ("http-alternates", ""),
+        ] {
+            let place = tempfile::tempdir().unwrap();
+            let repo = committed(place.path());
+            let info = repo.join(".git").join("objects").join("info");
+            fs::create_dir_all(&info).unwrap();
+            fs::write(info.join(name), text).unwrap();
+            let stop = Instant::now() + LISTING_TIME;
+            judged(
+                list(&repo, "", FILES_MAX, stop),
+                &format!("{name} {text:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_git_folder_whose_fixed_entry_is_a_link_is_not_listed() {
+        for entry in [
+            "HEAD",
+            "index",
+            "config",
+            "packed-refs",
+            "shallow",
+            "info/exclude",
+            "info/attributes",
+            "info",
+            "objects",
+            "objects/info",
+            "refs",
+        ] {
+            let place = tempfile::tempdir().unwrap();
+            let repo = committed(place.path());
+            let outside = place.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            linked(&repo.join(".git"), entry, &outside);
+            let stop = Instant::now() + LISTING_TIME;
+            judged(list(&repo, "", FILES_MAX, stop), entry);
+        }
+    }
+
+    #[test]
+    fn a_windows_link_deeper_in_the_git_folder_is_not_listed() {
+        for entry in ["refs/heads/side", "objects/pack/pack-0.pack"] {
+            let place = tempfile::tempdir().unwrap();
+            let repo = committed(place.path());
+            let git_dir = repo.join(".git");
+            fs::create_dir_all(git_dir.join(entry).parent().unwrap()).unwrap();
+            let outside = place.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            linked(&git_dir, entry, &outside);
+            let stop = Instant::now() + LISTING_TIME;
+            judged(list(&repo, "", FILES_MAX, stop), entry);
+        }
+    }
+
+    #[test]
+    fn a_plain_windows_git_folder_with_history_passes_the_judge() {
+        let place = tempfile::tempdir().unwrap();
+        let repo = committed(place.path());
+        let stop = Instant::now() + LISTING_TIME;
+        let mut listed = list(&repo, "", FILES_MAX, stop).unwrap();
+        listed.sort();
+        assert_eq!(listed, ["README.md", "notes.txt"]);
+        assert!(!redirected(&repo.join(".git")));
+    }
 }
