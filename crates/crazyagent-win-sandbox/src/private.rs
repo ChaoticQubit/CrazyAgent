@@ -58,7 +58,7 @@ pub fn judge_folder(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
 /// second label entry, is refused. Inputs: the facts and the user's SID. Output: Ok, or the
 /// reason it is not private.
 pub fn judge_store_before_label(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
-    folder_judged(facts, user, NO_WRITE_UP)
+    folder_judged(facts, user, FULL_POLICY)
 }
 
 /// The work of [`judge`]: an own label must be medium or above and carry every bit of
