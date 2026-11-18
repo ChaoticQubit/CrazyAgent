@@ -876,8 +876,10 @@ impl View {
         self.inner.reshow();
     }
 
-    /// Gives or takes native focus, as a click in the host rectangle or the page asks;
-    /// refused while covered. Input: on or off. Output: none.
+    /// Gives or takes native focus, as a click in the host rectangle or the page asks.
+    /// Refused while covered or while no part of the rectangle shows, which includes a view
+    /// not yet placed, so a host focuses a new view only after its first `place`. Input: on
+    /// or off. Output: none.
     pub fn focus(&self, on: bool) {
         self.inner.moving(|f| f.native(on), true);
     }
