@@ -135,42 +135,16 @@ jobs:
           ref: ${{ env.RCLI_SOURCE_REVISION }}
           path: .local-state/tools/rcli-source
           persist-credentials: false
-      - name: Find an Xcode whose actool builds the app icon
+      - name: Check this runner reads the prebuilt app icon
         if: matrix.os == 'macos'
         run: |
           set -euo pipefail
-          shim="$GITHUB_WORKSPACE/scripts/release/actool-xcode26/actool"
-          resolve() { [ -n "$1" ] && (cd "$1" 2>/dev/null && pwd -P); }
-          default="$(resolve "$(xcode-select -p 2>/dev/null || true)" || true)"
-          best=""
-          best_version=""
-          best_major=0
-          best_minor=0
-          for candidate in "$default" /Applications/Xcode*.app/Contents/Developer; do
-            developer="$(resolve "$candidate")" || continue
-            case "$developer" in *[Bb]eta*) continue ;; esac
-            [ -x "$developer/usr/bin/actool" ] || continue
-            out="$(CRAZYAGENT_ACTOOL_XCODE="$developer" "$shim" --version --output-format=human-readable-text 2>/dev/null)" || continue
-            version="$(sed -n 's/^short-bundle-version: *//p' <<< "$out")"
-            [[ "$version" =~ ^([0-9]+)(\.([0-9]+))? ]] || continue
-            major="${BASH_REMATCH[1]}"
-            minor="${BASH_REMATCH[3]:-0}"
-            echo "$developer: actool $version"
-            [ "$major" -ge 26 ] || continue
-            if [ "$developer" = "$default" ]; then best="$developer"; best_version="$version"; break; fi
-            if [ -z "$best" ] || [ "$major" -gt "$best_major" ] || { [ "$major" -eq "$best_major" ] && [ "$minor" -gt "$best_minor" ]; }; then
-              best="$developer"
-              best_version="$version"
-              best_major="$major"
-              best_minor="$minor"
-            fi
-          done
-          if [ -z "$best" ]; then
-            echo "::error::no Xcode on this runner has actool 26 or newer; icons/AppIcon.icon needs it for Assets.car and its dark look (DEC-181), default Xcode is '${default:-none}'"
-            exit 1
-          fi
-          echo "CRAZYAGENT_ACTOOL_XCODE=$best" >> "$GITHUB_ENV"
-          echo "app icon actool $best_version from $best; the desktop compile, tmux and rcli keep the default Xcode"
+          car=apps/desktop/src-tauri/icons/Assets.car
+          info="$(assetutil --info "$car")" || { echo "::error::this runner's assetutil cannot read $car, so Tauri sets no CFBundleIconName (DEC-181)"; exit 1; }
+          grep -Eq '"AssetType"[[:space:]]*:[[:space:]]*"Icon Image"' <<< "$info" || { echo "::error::this runner's assetutil lists no Icon Image in $car, so Tauri sets no CFBundleIconName (DEC-181)"; exit 1; }
+          grep -Eq '"Name"[[:space:]]*:[[:space:]]*"Icon"' <<< "$info" || { echo "::error::this runner's assetutil names no Icon in $car, so Tauri sets no CFBundleIconName (DEC-181)"; exit 1; }
+          grep -q '"NSAppearanceNameDarkAqua"' <<< "$info" || { echo "::error::this runner's assetutil shows no dark look in $car (DEC-181)"; exit 1; }
+          echo "app icon: this runner reads $car with its Icon Image and dark look"
       - if: runner.environment == 'github-hosted'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -547,7 +521,6 @@ jobs:
             export TMPDIR="$RUNNER_TEMP/macos-tmp"
             mkdir -p "$TMPDIR"
             export PATH="$GITHUB_WORKSPACE/scripts/release/hdiutil-retry:$PATH"
-            export PATH="$GITHUB_WORKSPACE/scripts/release/actool-xcode26:$PATH"
           fi
           if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then
             security_line() { printf '%s\n' "$1" | security -i; }
@@ -643,7 +616,7 @@ jobs:
         run: |
           set -euo pipefail
           app="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle/macos/CrazyAgent.app"
-          test -s "$app/Contents/Resources/Assets.car" || { echo "::error::no Assets.car: icons/AppIcon.icon needs actool from Xcode 26 or newer (DEC-181)"; exit 1; }
+          test -s "$app/Contents/Resources/Assets.car" || { echo "::error::no Assets.car: tauri.conf.json bundle.icon lists the prebuilt icons/Assets.car (DEC-181)"; exit 1; }
           name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$app/Contents/Info.plist")"
           test "$name" = Icon || { echo "::error::CFBundleIconName is '$name', not Icon"; exit 1; }
           test -s "$app/Contents/Resources/icon.icns" || { echo "::error::the icon.icns fallback for macOS before 26 is missing"; exit 1; }

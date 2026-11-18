@@ -1470,7 +1470,6 @@ test("on macOS the release build puts the hdiutil retry first on PATH before Tau
     '            export TMPDIR="$RUNNER_TEMP/macos-tmp"',
     '            mkdir -p "$TMPDIR"',
     '            export PATH="$GITHUB_WORKSPACE/scripts/release/hdiutil-retry:$PATH"',
-    '            export PATH="$GITHUB_WORKSPACE/scripts/release/actool-xcode26:$PATH"',
     "          fi",
   ].join("\n");
   assert(build.includes(macos), "the macOS block exports the hdiutil retry folder ahead of PATH");
@@ -1478,47 +1477,6 @@ test("on macOS the release build puts the hdiutil retry first on PATH before Tau
   assert.equal((await workflow("release.yml")).split("\n").filter((line) => line.includes("hdiutil-retry")).length, 1, "only the macOS desktop build uses it");
   assert.deepEqual(readdirSync(HDIUTIL_RETRY), ["hdiutil"], "the folder that sits ahead of /usr/bin while codesign and notarytool run holds nothing but hdiutil");
   assert.notEqual(statSync(join(HDIUTIL_RETRY, "hdiutil")).mode & 0o111, 0, "the hdiutil retry is executable");
-});
-
-const ACTOOL_XCODE26 = fileURLToPath(new URL("./actool-xcode26/", import.meta.url));
-
-test("on macOS only the app icon's actool runs from an Xcode with actool 26 or newer, found and proven before the long compile, while the desktop compile, tmux and rcli keep the default Xcode (DEC-181)", async () => {
-  const release = await workflow("release.yml");
-  const build = steps(release, "build");
-  const index = (name) => build.findIndex((step) => new RegExp(`^\\s*(- )?name: ${name}$`, "m").test(step));
-  const find = index("Find an Xcode whose actool builds the app icon");
-  assert(find > build.findIndex((step) => step.includes("actions/checkout@")), "the shim it runs is checked out first");
-  assert(find < index("Build command line binaries"), "a runner without actool 26 fails before the long compile");
-  const step = build[find];
-  assert.match(step, /^ {8}if: matrix\.os == 'macos'$/m);
-  assert.match(step, /CRAZYAGENT_ACTOOL_XCODE="\$developer" "\$shim" --version --output-format=human-readable-text/, "each Xcode is asked through the shim with Tauri's own version arguments");
-  assert.match(step, /sed -n 's\/\^short-bundle-version: \*\/\/p'/);
-  assert.match(step, /\[ "\$major" -ge 26 \] \|\| continue/);
-  assert.match(step, /resolve\(\) \{ \[ -n "\$1" \] && \(cd "\$1" 2>\/dev\/null && pwd -P\); \}/);
-  assert.match(step, /developer="\$\(resolve "\$candidate"\)" \|\| continue\n\s+case "\$developer" in \*\[Bb\]eta\*\) continue ;; esac/, "a beta Xcode never builds a release icon, even behind a release-named link");
-  assert.match(step, /if \[ "\$developer" = "\$default" \]; then best="\$developer"; best_version="\$version"; break; fi/, "a default Xcode that qualifies is kept");
-  assert.match(step, /echo "::error::no Xcode on this runner has actool 26 or newer;.*\(DEC-181\).*"\n\s+exit 1/);
-  assert.match(step, /echo "CRAZYAGENT_ACTOOL_XCODE=\$best" >> "\$GITHUB_ENV"/);
-  const desktop = build.find((candidate) => candidate.includes("id: desktop"));
-  const macos = desktop.indexOf('          if [ "$PLATFORM" = macos ]; then');
-  const shim = desktop.indexOf('            export PATH="$GITHUB_WORKSPACE/scripts/release/actool-xcode26:$PATH"');
-  assert(macos >= 0 && macos < shim && shim < desktop.indexOf("tauri.js build"), "the shim is first on PATH inside the macOS block, before Tauri runs actool");
-  assert.equal(release.split("\n").filter((line) => line.includes("actool-xcode26")).length, 2, "the actool step and the macOS desktop build are its only users");
-  assert.deepEqual(release.split("\n").filter((line) => /DEVELOPER_DIR|xcode-select (-s|--switch)|sudo xcode-select/.test(line)), [], "no step switches the Xcode the tmux, rcli and desktop compiles use");
-  assert.deepEqual(readdirSync(ACTOOL_XCODE26), ["actool"], "the folder ahead of /usr/bin while codesign and notarytool run holds nothing but actool");
-  assert.notEqual(statSync(join(ACTOOL_XCODE26, "actool")).mode & 0o111, 0, "the actool shim is executable");
-  const empty = mkdtempSync(join(tmpdir(), "ca-relwf-"));
-  try {
-    for (const developer of [undefined, empty]) {
-      const env = { PATH: process.env.PATH };
-      if (developer) env.CRAZYAGENT_ACTOOL_XCODE = developer;
-      const run = spawnSync(join(ACTOOL_XCODE26, "actool"), ["--version"], { env, encoding: "utf8", timeout: SCRIPT_MS });
-      assert.equal(run.status, 1, `the shim refuses ${developer ?? "an unset folder"}`);
-      assert.match(run.stderr, /actool-xcode26: CRAZYAGENT_ACTOOL_XCODE names no Xcode developer folder with actool/);
-    }
-  } finally {
-    rmSync(empty, { recursive: true, force: true });
-  }
 });
 
 test("the hdiutil retry tries a busy hdiutil create three times, removing the half-made image between tries, and passes the last failure through", () => {
