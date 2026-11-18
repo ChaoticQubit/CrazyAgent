@@ -137,6 +137,17 @@ fn a_chosen_file_inside_the_engine_folder_or_an_agent_temp_folder_is_refused() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", agent.display()));
+    assert!(long.is_file());
+    assert_eq!(case.check("codex", &agent), Err(PATH_AGENT_SPACE.into()));
+    assert_eq!(case.check("codex", &long), Err(PATH_AGENT_SPACE.into()));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_chosen_file_in_a_folder_other_users_can_change_is_refused() {
     let case = Case::new();
     let shared = case.root.join("shared");
