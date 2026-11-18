@@ -956,22 +956,15 @@ fn suffix() -> Result<String, EngineError> {
     Ok(super::bridge::hex(&bytes))
 }
 
-#[cfg(unix)]
+/// Opens an extension file to read as itself, never through a link or junction at its name
+/// ([`crate::platform::open_plain`]), and keeps it only when it is a regular file. Input: the
+/// path. Output: the open file, or the I/O error.
 fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)?;
+    let file = crate::platform::open_plain(path)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
     Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
 }
 
 #[cfg(unix)]
