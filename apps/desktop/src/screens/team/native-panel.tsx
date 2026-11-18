@@ -6,7 +6,8 @@ import { Button, Icon, NotReady } from "../../ui";
 import { displayText } from "../conversation";
 import { keyId, type Held, type KeptKey } from "./kept-terminals";
 import {
-  closeNativeTerminal, copyNativeTerminal, coverNativeTerminal, jumpNativeTerminal, openNativeTerminal, placeNativeTerminal, styleNativeTerminals,
+  closeNativeTerminal, copyNativeTerminal, coverNativeTerminal, focusNativeTerminal, jumpNativeTerminal, openNativeTerminal, pasteNativeTerminal,
+  placeNativeTerminal, styleNativeTerminals,
   type NativeCopy, type NativeEvent, type NativeRect, type NativeStyle, type NativeTheme,
 } from "./native-terminal";
 import { connectingLine, endCopy, followTry, inputMode, jobQueue } from "./terminal-io";
@@ -40,7 +41,8 @@ type View = { kind: "connecting"; reason?: string; tries?: number } | { kind: "l
 type NativeState = { view: View; behind: boolean; mouse: boolean; menu: { x: number; y: number } | null };
 
 /** One open of a native view: its id once the desktop answers, whether it ended or was let
- * go, when it went live, and its own prompt queue, which stops for good with the open. */
+ * go, when its ready event came (it is live once both are in), and its own prompt queue,
+ * which stops for good with the open. */
 type Opened = { id: number | null; ended: boolean; closed: boolean; liveAt: number | null; send: (job: () => Promise<boolean>) => boolean };
 
 const IDLE: NativeState = { view: { kind: "connecting" }, behind: false, mouse: false, menu: null };
@@ -206,6 +208,19 @@ export class NativeView implements Held {
     return result.kind === "error" ? result.message : COPY_REFUSED;
   }
 
+  /** Pastes a drafted message into the live view as the owner's paste would, then gives the
+   * view the keyboard, as today's panel does with a console seed. Input: the text. Output:
+   * null once the view took it, or the plain reason it did not. */
+  async paste(text: string): Promise<string | null> {
+    const id = this.open?.id ?? null;
+    if (id === null || this.state.view.kind !== "live") return "The terminal is not live yet.";
+    const result = await pasteNativeTerminal(id, text);
+    if (result.kind === "not_ready") return "The terminal is not ready yet.";
+    if (result.kind === "error") return result.message;
+    void focusNativeTerminal(id);
+    return null;
+  }
+
   /** Closes the right-click menu. Output: none. */
   closeMenu(): void {
     this.set({ menu: null });
@@ -283,6 +298,7 @@ export class NativeView implements Held {
       if (result.kind === "ok") {
         open.id = result.value;
         if (open.ended) return;
+        if (open.liveAt !== null) this.set({ view: { kind: "live" } });
         if (this.shown) this.watch();
         else if (!this.told) {
           this.told = true;
@@ -303,7 +319,7 @@ export class NativeView implements Held {
     if (open !== this.open || open.ended || open.closed) return;
     if (event.type === "ready") {
       open.liveAt = performance.now();
-      this.set({ view: { kind: "live" } });
+      if (open.id !== null) this.set({ view: { kind: "live" } });
     } else if (event.type === "menu") this.set({ menu: { x: event.x, y: event.y } });
     else if (event.type === "mouse") this.set({ mouse: event.on });
     else if (event.type === "behind") this.set({ behind: event.behind });
@@ -399,7 +415,7 @@ const idle = () => IDLE;
  * The main window keeps the view covered after the panel closes, among the two most recently
  * used (DEC-187); a wall tile's view closes with the tile. Input: `PanelProps`. Output: the
  * panel. */
-export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened }: PanelProps) {
+export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: PanelProps) {
   assert(!(embedded && tile), "a terminal is either embedded in a console or a wall tile, never both");
   assert(!(embedded && swaps), "only a terminal with its own head says it swaps");
   const input = readTerminalInput();
@@ -425,6 +441,16 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
   useEffect(() => { opened.current?.(open); }, [open]);
   useEffect(() => () => opened.current?.(false), []);
   const [copied, setCopied] = useState<string | null>(null);
+  const pasted = useRef<number | null>(null);
+  useEffect(() => {
+    const shown = current.current;
+    if (seed === null || !open || shown === null || pasted.current === seed.id) return;
+    pasted.current = seed.id;
+    void shown.paste(seed.text).then((reason) => {
+      if (reason === null) seed.used();
+      else setCopied(reason);
+    });
+  }, [seed, open]);
 
   useEffect(() => {
     if (!copied) return;
