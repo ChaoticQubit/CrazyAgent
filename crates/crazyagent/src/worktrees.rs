@@ -1151,7 +1151,7 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
 #[cfg(unix)]
 fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
     let found = crate::landing::version_numbers(git(repository, &["version"])?);
-    crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, "worktree_git_old")
+    crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, GIT_OLD)
 }
 
 fn inspect(repository: &str) -> Result<Admission, EngineError> {
@@ -1555,6 +1555,9 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 /// The code of an engine Git command killed at its deadline. It says the machine was
 /// slow, not that the repository broke a rule.
 const GIT_DEADLINE: &str = "git_deadline";
+/// The code of a lease check refused for a git older than the 2.39 floor. It says the
+/// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
+const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
 /// has already held its caller for its whole deadline.
@@ -2759,9 +2762,10 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
 
 /// Settles every stored lease at an engine start. A lease that verifies, Ready,
 /// RecoveryRequired or pinned Uncertain, or a Ready or RecoveryRequired one whose check ran
-/// out of time, becomes RecoveryRequired, checked again before any use; any other lease is
-/// Uncertain. Each failed check is logged. Inputs: the connection, outside any transaction,
-/// and the lease check. Output: success, `lease_capacity` or the storage error.
+/// out of time or met a git older than the floor, becomes RecoveryRequired, checked again
+/// before any use; any other lease is Uncertain. Each failed check is logged. Inputs: the
+/// connection, outside any transaction, and the lease check. Output: success,
+/// `lease_capacity` or the storage error.
 #[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
@@ -2789,7 +2793,7 @@ fn reconcile_with(
             Some(Ok(())) => LeaseState::RecoveryRequired,
             Some(Err((problem, retried))) => {
                 log_failed_check(&record, &problem, retried);
-                if held && problem.0 == GIT_DEADLINE {
+                if held && (problem.0 == GIT_DEADLINE || problem.0 == GIT_OLD) {
                     LeaseState::RecoveryRequired
                 } else {
                     LeaseState::Uncertain
