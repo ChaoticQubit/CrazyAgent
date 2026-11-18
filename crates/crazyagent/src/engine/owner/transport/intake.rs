@@ -1100,3 +1100,51 @@ fn applied(reply: Result<OwnerReply, EngineError>) -> Result<(), EngineError> {
     assert!(!matches!(&result, Err(e) if e.0.is_empty()));
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A held add job of the folder `real` under the request id `id`, holding `turn` while it
+    /// waits. Inputs: the id, the folder and the turn. Output: the held job.
+    fn held(id: &str, real: &str, turn: Option<oneshot::Sender<()>>) -> Held {
+        let job = IntakeJob::new(
+            RequestId::new(id).unwrap(),
+            JobKind::Add,
+            None,
+            real.to_owned(),
+            AddMode::Copy,
+            Vec::new(),
+        );
+        Held {
+            job: Arc::new(job),
+            real: PathBuf::from(real),
+            task: None,
+            turn,
+            seen: false,
+        }
+    }
+
+    /// V243-INTAKE-WAIT-ASSERT: a waiting job whose task was dropped before its turn, as an
+    /// abort or the runtime's end does, is ended by its task's guard while its turn is still
+    /// held. A later admit passes it: it neither waits again behind the running job of the
+    /// same name nor counts as waiting or running, and that job keeps running.
+    #[test]
+    fn an_admit_passes_a_waiting_job_its_guard_ended_before_its_turn() {
+        let (turn, turned) = oneshot::channel();
+        drop(turned);
+        let mut jobs = vec![
+            held("add-running", "/outside/notes", None),
+            held("add-ended", "/elsewhere/notes", Some(turn)),
+        ];
+        let ended = Arc::clone(&jobs[1].job);
+        assert!(ended.stop());
+        ended.end(Err(failure(ended.interrupted())));
+        admit(&mut jobs);
+        assert!(jobs[1].job.ended());
+        assert!(!jobs[1].waiting());
+        assert!(!jobs[1].running());
+        assert!(jobs[0].running());
+        assert_eq!(jobs.iter().filter(|current| current.waiting()).count(), 0);
+    }
+}
