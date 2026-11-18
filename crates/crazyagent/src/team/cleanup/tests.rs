@@ -1223,7 +1223,9 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
 /// 000, for links to owner folders while the next terminal's launch gives that cache's name
 /// to the owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]). No ACL or mode of an
 /// owner folder changes, since each clear goes through an entry read from the walk's own
-/// handles (ds181), and a launch with nothing swapping still links the owner's cache.
+/// handles (ds181), and a launch with nothing swapping still links the owner's cache. A macOS
+/// 15 runner refuses renaming a folder at mode 000, so the swapper gives each folder write
+/// before it moves it and puts its mode back once it is in place again.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to() {
@@ -1273,7 +1275,14 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
                     for name in &names {
                         let real = git.join(parent).join(name);
                         let held = git.join(parent).join(format!("{name}.held"));
-                        if std::fs::rename(&real, &held).is_err() {
+                        let Ok(mode) = std::fs::symlink_metadata(&real).map(|f| f.permissions())
+                        else {
+                            continue;
+                        };
+                        let writable = std::fs::Permissions::from_mode(0o700);
+                        if std::fs::set_permissions(&real, writable).is_err()
+                            || std::fs::rename(&real, &held).is_err()
+                        {
                             continue;
                         }
                         if std::os::unix::fs::symlink(owner.join(name), &real).is_ok() {
@@ -1281,7 +1290,9 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
                             std::thread::sleep(pause);
                             let _ = std::fs::remove_file(&real);
                         }
-                        let _ = std::fs::rename(&held, &real);
+                        if std::fs::rename(&held, &real).is_ok() {
+                            let _ = std::fs::set_permissions(&real, mode);
+                        }
                     }
                     std::thread::sleep(pause);
                 }
@@ -1317,7 +1328,9 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
 /// point of [`open_up`]: as it starts and just before it changes the mode, a process left in
 /// a terminal swaps a cache folder at mode 000 for a link to an owner folder at 0555 under a
 /// deny entry. Neither look nor mode change follows that link, so the owner's folder keeps
-/// its mode and ACL every time, and a walk that follows it fails the row every time.
+/// its mode and ACL every time, and a walk that follows it fails the row every time. The
+/// swap gives the cache folder write before it moves it aside and shuts it again after, since
+/// a macOS 15 runner refuses renaming a folder at mode 000.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_at_open_up() {
@@ -1338,7 +1351,9 @@ fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_a
         std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o555)).unwrap();
         let (moved, held, target) = (shut.clone(), shut.with_file_name("c00.held"), owned.clone());
         let swap: Box<dyn FnOnce()> = Box::new(move || {
+            std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::rename(&moved, &held).unwrap();
+            std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o000)).unwrap();
             std::os::unix::fs::symlink(&target, &moved).unwrap();
         });
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"c00".to_owned(), swap)));
@@ -2631,8 +2646,10 @@ fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own()
 /// V243-CLEANUP-OPEN-UP-FOLDER-PROOF (#571 sec F1): a folder an agent shut, swapped for a
 /// hard link to the owner's read-only file while Clean up opens it up, never makes that
 /// file writable: swapped before the folder check the file keeps its mode, and swapped just
-/// after it, the worst case, the file gains no write bit. The link is made before the file is
-/// read-only, since a macOS 15 runner refused that link with EACCES; the swap renames it in.
+/// after it, the worst case, the file gains no write bit. A macOS 15 runner refuses both a
+/// link to a read-only file and a rename of a folder at mode 000 with EACCES, so the link is
+/// made before the file is read-only, and the swap gives the folder write, moves it aside and
+/// shuts it again before it renames the link in.
 #[cfg(target_os = "macos")]
 #[test]
 fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable() {
@@ -2658,7 +2675,9 @@ fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_w
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
         let (moved, aside) = (shut.clone(), agent.join("aside"));
         let swap: Box<dyn FnOnce()> = Box::new(move || {
+            std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o700)).unwrap();
             std::fs::rename(&moved, &aside).unwrap();
+            std::fs::set_permissions(&aside, std::fs::Permissions::from_mode(0o000)).unwrap();
             std::fs::rename(&linked, &moved).unwrap();
         });
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"shut".to_owned(), swap)));
@@ -2757,7 +2776,9 @@ fn removing_an_agent_tree_whose_own_folder_refuses_a_look_clears_that_acl_and_re
 /// a deny entry for a hard link to an owner file, after the look the entry refused and before
 /// the clear by name, has that file's ACL cleared, which no handle can stop. The look after
 /// the clear then shows no folder, so it is reported once as `cleanup_open_up_swapped`, the
-/// owner's file keeps its mode and bytes, and the tree still goes.
+/// owner's file keeps its mode and bytes, and the tree still goes. A macOS 15 runner refuses
+/// renaming a folder at mode 000, so the swap first clears that folder's ACL and gives it
+/// write, as the agent that owns it can, and shuts it again once it is aside.
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agent_tree_reports_an_owner_file_link_swapped_in_before_an_acl_clear() {
@@ -2777,7 +2798,10 @@ fn removing_an_agent_tree_reports_an_owner_file_link_swapped_in_before_an_acl_cl
     add_acl("everyone deny readattr", std::slice::from_ref(&shut));
     let (moved, put) = (shut.clone(), aside.clone());
     let swap: Box<dyn FnOnce()> = Box::new(move || {
+        drop(AclCleared(moved.clone()));
+        std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::rename(&moved, &put).unwrap();
+        std::fs::set_permissions(&put, std::fs::Permissions::from_mode(0o000)).unwrap();
         std::fs::rename(&linked, &moved).unwrap();
     });
     OPEN_UP_STEP.with(|slot| {
