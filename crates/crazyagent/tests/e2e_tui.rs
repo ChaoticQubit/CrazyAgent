@@ -2556,13 +2556,12 @@ fn version_arm(line: Option<String>) -> String {
     )
 }
 
-/// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: on
-/// macOS this user's cache folder, never the shared temp folder, whose `ca-` folders are the
-/// agents' own and which every user can write, nor the engine's own temp folder, which agents
-/// with the owner's temp folder grant write; elsewhere the temp folder. Input: a name prefix.
-/// Output: the folder, removed when dropped.
+/// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: this
+/// user's cache folder (`getconf` on macOS, `~/.cache` elsewhere), never a temp folder, whose
+/// harness files the engine's search passes over, as agents or other users can change them.
+/// Input: a name prefix. Output: the folder, removed when dropped.
 fn harness_home(prefix: &str) -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let base = if cfg!(target_os = "macos") {
         let cache = crazyagent::spawn_gate::output(
             Command::new("/usr/bin/getconf")
@@ -2574,7 +2573,13 @@ fn harness_home(prefix: &str) -> tempfile::TempDir {
         .unwrap();
         PathBuf::from(String::from_utf8(cache.stdout).unwrap().trim())
     } else {
-        std::env::temp_dir()
+        let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&cache)
+            .unwrap();
+        cache
     };
     let home = tempfile::Builder::new()
         .prefix(prefix)
