@@ -1496,4 +1496,41 @@ mod tests {
             "slirp cannot read the loader cache: {cache:?}"
         );
     }
+
+    /// V243 linux routed r2, rv-sec3 F1: slirp4netns runs in this computer's mount namespace,
+    /// where Landlock does not mediate a pathname socket connect, so a confined slirp must
+    /// not reach a socket such as the engine's tmux server's. A socket pair, which carries
+    /// its tap descriptor, and a UDP socket, which carries the agent's traffic, still open.
+    #[test]
+    fn slirp_connects_to_no_unix_socket() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("tmux.sock");
+        let _server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(
+            std::os::unix::net::UnixStream::connect(&path).is_ok(),
+            "the control: it connects unconfined"
+        );
+        let child = std::process::id();
+        let (opened, connected, pair, udp) = std::thread::spawn(move || {
+            let opened = confine_slirp(child);
+            let connected = std::os::unix::net::UnixStream::connect(&path);
+            let pair = std::os::unix::net::UnixStream::pair();
+            let udp = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0));
+            (opened, connected, pair, udp)
+        })
+        .join()
+        .unwrap();
+        assert!(opened.is_ok(), "{opened:?}");
+        assert!(
+            connected
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied),
+            "slirp connected to a pathname socket: {connected:?}"
+        );
+        assert!(
+            pair.is_ok(),
+            "slirp cannot make its tap socket pair: {pair:?}"
+        );
+        assert!(udp.is_ok(), "slirp cannot open a UDP socket: {udp:?}");
+    }
 }
