@@ -4130,17 +4130,29 @@ fn access_writes(sent: &[Request]) -> Vec<SetupQuery> {
 
 /// DEC-177 add.3 decision 4 (rv-sec2 bgjobs-3b F1): a New Project carried in the background
 /// reads its project's agent policy once it is made and saves the picked access at the
-/// version read; a refused read or save says the project stays Sandboxed.
+/// version read; a refused read or save says the project stays Sandboxed. Where only
+/// Sandboxed runs, as on Linux, the wizard picks Sandboxed, so nothing is read, saved or said.
 #[test]
 fn a_new_project_carried_in_the_background_saves_its_agent_access_or_says_it_stays_sandboxed() {
     use super::project_tests::access_view;
     use crate::engine::owner::OwnerResult;
     use crate::sandbox::policy::AgentAccess;
-    assert!(
-        AgentAccess::NEW_PROJECT.unavailable().is_none(),
-        "the wizard preselects a level it can save"
-    );
     let sandboxed = "The project is made, but its agents stay Sandboxed.";
+    if AgentAccess::NEW_PROJECT.unavailable().is_some() {
+        let (mut shell, _, sent) = made_in_background();
+        assert!(
+            !sent
+                .iter()
+                .any(|request| matches!(request, Request::Setup(SetupQuery::AgentPolicy { .. }))),
+            "a Sandboxed pick reads no agent policy: {sent:?}"
+        );
+        assert!(access_writes(&drain(&mut shell)).is_empty());
+        assert_ne!(
+            shell.ctx.message().map(|message| message.lead.as_str()),
+            Some(sandboxed)
+        );
+        return;
+    }
 
     let (mut shell, project, sent) = made_in_background();
     let read = SetupQuery::AgentPolicy {
