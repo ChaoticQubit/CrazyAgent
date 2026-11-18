@@ -5,6 +5,8 @@ mod keys;
 #[cfg(windows)]
 mod probe;
 #[cfg(windows)]
+mod render;
+#[cfg(windows)]
 mod uia;
 
 use std::time::{Duration, Instant};

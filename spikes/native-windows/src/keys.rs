@@ -249,7 +249,8 @@ fn type_keys(keys: &[u16], layout: isize) {
 /// The real IME rows, run after the language step installs ja-JP and ko-KR: MS-IME types
 /// "ka" and converts twice (the second opens the candidate list, whose window and place
 /// are logged) and Enter commits; the Korean IME types "gksrmf" (한글) and a space
-/// commits. Each logs what reached the view, or INCONCLUSIVE when the layout is missing.
+/// commits, twice, so a slow first open shows apart from a warm one. Each logs its open
+/// time and what reached the view, or INCONCLUSIVE when the layout is missing.
 pub fn real_ime_rows() {
     let installed = layouts();
     let names: Vec<String> = installed
@@ -271,7 +272,8 @@ pub fn real_ime_rows() {
         vec![VK_G, VK_K, VK_S, VK_R, VK_M, VK_F],
         VK_SPACE,
     );
-    for (language, label, mode, compose, commit) in [japanese, korean] {
+    let korean_again = (korean.0, "ko2", korean.2, korean.3.clone(), korean.4);
+    for (language, label, mode, compose, commit) in [japanese, korean, korean_again] {
         let row = format!("ime_real_{label}");
         let Some(&layout) = installed
             .iter()
@@ -281,7 +283,11 @@ pub fn real_ime_rows() {
             continue;
         };
         click_term();
-        let Some((before, line)) = open_ime(layout, mode) else {
+        let opening = std::time::Instant::now();
+        let opened = open_ime(layout, mode);
+        let open_s = opening.elapsed().as_secs_f64();
+        log(&format!("{row}_open_s"), &format!("{open_s:.1}"));
+        let Some((before, line)) = opened else {
             log(&row, "INCONCLUSIVE timeout opening the IME");
             let waited = std::time::Instant::now();
             let back = on_main_within(RECOVER_WAIT, || ()).is_some();

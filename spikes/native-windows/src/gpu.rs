@@ -152,6 +152,24 @@ fn adapters(instance: &wgpu::Instance) -> Vec<String> {
         .collect()
 }
 
+/// Makes a wgpu surface on a Win32 window. Inputs: the instance, the window and module
+/// handles. Output: the surface, or why it could not be made.
+fn window_surface(
+    instance: &wgpu::Instance,
+    window: NonZeroIsize,
+    hinstance: isize,
+) -> Result<wgpu::Surface<'static>, String> {
+    let mut handle = raw_window_handle::Win32WindowHandle::new(window);
+    handle.hinstance = NonZeroIsize::new(hinstance);
+    let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+        raw_display_handle: raw_window_handle::RawDisplayHandle::Windows(
+            raw_window_handle::WindowsDisplayHandle::new(),
+        ),
+        raw_window_handle: raw_window_handle::RawWindowHandle::Win32(handle),
+    };
+    unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())
+}
+
 impl Gpu {
     /// Sets up Direct3D 12 on the child window `hwnd`, sized in physical pixels, Fifo present
     /// mode and a frame latency of one, falling back to the software adapter when no
@@ -170,16 +188,7 @@ impl Gpu {
             ..Default::default()
         });
         let seen = adapters(&instance);
-        let mut handle = raw_window_handle::Win32WindowHandle::new(window);
-        handle.hinstance = NonZeroIsize::new(hinstance);
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_window_handle::RawDisplayHandle::Windows(
-                raw_window_handle::WindowsDisplayHandle::new(),
-            ),
-            raw_window_handle: raw_window_handle::RawWindowHandle::Win32(handle),
-        };
-        let surface =
-            unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())?;
+        let surface = window_surface(&instance, window, hinstance)?;
         let request = |fallback: bool| {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -261,51 +270,59 @@ impl Gpu {
         (self.config.width, self.config.height)
     }
 
+    /// Shapes the typed text into the last row and prepares every row's glyphs for the
+    /// next frame. Input: the typed text. Output: Ok, or why the glyphs could not be
+    /// prepared.
+    fn prepare_text(&mut self, typed: &str) -> Result<(), String> {
+        let (width, height) = (self.config.width, self.config.height);
+        let attrs = Attrs::new().family(Family::Monospace);
+        if let Some(last) = self.rows.last_mut() {
+            last.set_text(&mut self.fonts, &prompt(typed), &attrs, Shaping::Basic);
+            last.shape_until_scroll(&mut self.fonts, false);
+        }
+        self.viewport
+            .update(&self.queue, Resolution { width, height });
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
+        let line_px = self.line_px;
+        let areas = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, buffer)| TextArea {
+                buffer,
+                left: 8.0,
+                top: 8.0 + index as f32 * line_px,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgb(0x10, 0x10, 0x10),
+                custom_glyphs: &[],
+            });
+        self.text
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.fonts,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash,
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Draws one frame: the green clear, and with `text` the 24 rows whose last one shows
     /// the typed text; uploads glyphs, renders and presents. Inputs: whether to draw text
     /// and the typed text. Output: its timing, or why it was skipped.
     pub fn draw(&mut self, text: bool, typed: &str) -> Result<Timing, String> {
         let start = Instant::now();
-        let (width, height) = (self.config.width, self.config.height);
         if text {
-            let attrs = Attrs::new().family(Family::Monospace);
-            if let Some(last) = self.rows.last_mut() {
-                last.set_text(&mut self.fonts, &prompt(typed), &attrs, Shaping::Basic);
-                last.shape_until_scroll(&mut self.fonts, false);
-            }
-            self.viewport
-                .update(&self.queue, Resolution { width, height });
-            let bounds = TextBounds {
-                left: 0,
-                top: 0,
-                right: width as i32,
-                bottom: height as i32,
-            };
-            let line_px = self.line_px;
-            let areas = self
-                .rows
-                .iter()
-                .enumerate()
-                .map(|(index, buffer)| TextArea {
-                    buffer,
-                    left: 8.0,
-                    top: 8.0 + index as f32 * line_px,
-                    scale: 1.0,
-                    bounds,
-                    default_color: Color::rgb(0x10, 0x10, 0x10),
-                    custom_glyphs: &[],
-                });
-            self.text
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.fonts,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash,
-                )
-                .map_err(|e| e.to_string())?;
+            self.prepare_text(typed)?;
         }
         let built = Instant::now();
         let output = self.surface.get_current_texture().map_err(|e| {

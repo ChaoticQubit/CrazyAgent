@@ -267,12 +267,24 @@ fn draw() -> Result<crate::gpu::Timing, String> {
     })
 }
 
-/// Takes one typed character on the window's thread: appends it, draws at once, and when a
-/// timed key is outstanding records event, handler and frame times. Input: the UTF-16 unit.
+/// Takes one typed character on the window's thread: appends it and, with a render thread,
+/// hands it over without waiting; otherwise draws at once. When a timed key is outstanding
+/// it records event, handler and frame times. Input: the UTF-16 unit.
 fn on_char(unit: u32) {
     let handled = Instant::now();
     CHARS.fetch_add(1, Ordering::SeqCst);
     let sent = SENT.lock().ok().and_then(|mut sent| sent.take());
+    if crate::render::active() {
+        if let Some(letter) = char::from_u32(unit)
+            && let Ok(mut typed) = TYPED.lock()
+        {
+            typed.push(letter);
+        }
+        if !crate::render::key(sent, handled) {
+            log("render_queue_full", "");
+        }
+        return;
+    }
     let drawn = STATE.with(|state| {
         let Ok(mut state) = state.try_borrow_mut() else {
             return Err("state busy".to_string());
@@ -986,9 +998,20 @@ fn key_rows() {
     }
     assert!(lost <= KEYS);
     log("summary_key_lost", &format!("{lost} of {KEYS}"));
-    let keys = on_main(|| STATE.with(|state| state.borrow().keys.clone())).unwrap_or_default();
+    let keys = if crate::render::active() {
+        let drained = crate::render::frames(1, FRAMES_BUDGET)
+            .is_some_and(|reply| reply.recv_timeout(FRAMES_TIMEOUT).is_ok());
+        log("render_keys_drained", &drained.to_string());
+        crate::render::take_keys()
+    } else {
+        on_main(|| STATE.with(|state| state.borrow().keys.clone())).unwrap_or_default()
+    };
     let column =
         |pick: fn(&(f64, f64, f64, f64)) -> f64| keys.iter().map(pick).collect::<Vec<f64>>();
+    log(
+        "summary_key_send_to_handler_ms",
+        &percentiles(&mut column(|key| key.0 - key.1)),
+    );
     log(
         "summary_key_send_to_submit_ms",
         &percentiles(&mut column(|key| key.0)),
@@ -1007,9 +1030,87 @@ fn key_rows() {
     );
 }
 
-/// The frame-time row: `FRAMES` text frames drawn back to back on the window's thread,
-/// with build, acquire and interval percentiles.
+/// Logs build, acquire and interval percentiles of back-to-back frames and their wall
+/// time. Inputs: the timings and when the row started.
+fn frame_summary(timings: &[crate::gpu::Timing], start: Instant) {
+    let mut builds: Vec<f64> = timings.iter().map(|timing| timing.build_ms).collect();
+    let mut acquires: Vec<f64> = timings.iter().map(|timing| timing.acquire_ms).collect();
+    let mut intervals: Vec<f64> = timings
+        .windows(2)
+        .map(|pair| (pair[1].submitted - pair[0].submitted).as_secs_f64() * 1000.0)
+        .collect();
+    log("summary_frame_build_ms", &percentiles(&mut builds));
+    log("summary_frame_acquire_ms", &percentiles(&mut acquires));
+    log("summary_frame_interval_ms", &percentiles(&mut intervals));
+    log(
+        "summary_frames_wall_ms",
+        &format!(
+            "{:.1} n={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            timings.len()
+        ),
+    );
+}
+
+/// The frame-time row on the render thread: while it draws `FRAMES` frames back to back,
+/// the window's thread is pinged every 20 ms, so the row shows whether presents leave it
+/// free.
+fn thread_frame_rows() {
+    let start = Instant::now();
+    let Some(reply) = crate::render::frames(FRAMES, FRAMES_BUDGET) else {
+        log("summary_frames", "no render thread");
+        return;
+    };
+    let mut pings = Vec::new();
+    let timings = loop {
+        match reply.recv_timeout(Duration::from_millis(20)) {
+            Ok(timings) => break Some(timings),
+            Err(mpsc::RecvTimeoutError::Timeout) if start.elapsed() < FRAMES_TIMEOUT => {
+                let asked = Instant::now();
+                if on_main(|| ()).is_some() {
+                    pings.push(asked.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            Err(_) => break None,
+        }
+    };
+    log("summary_ui_ping_ms", &percentiles(&mut pings));
+    match timings {
+        Some(timings) => frame_summary(&timings, start),
+        None => log("summary_frames", "timeout"),
+    }
+}
+
+/// Moves drawing to a render thread for the perf rows: drops the window thread's GPU, then
+/// starts the render thread on the same view. Output: whether it runs.
+fn start_render_thread() -> bool {
+    let size = on_main(|| STATE.with(|state| state.borrow_mut().gpu.take().map(|gpu| gpu.size())))
+        .flatten();
+    let Some(size) = size else {
+        log("render_thread", "no gpu to replace");
+        return false;
+    };
+    let scale = LAYOUT.lock().map(|layout| layout.2).unwrap_or(1.0) as f32;
+    let module = unsafe { GetModuleHandleW(std::ptr::null()) } as isize;
+    match crate::render::start(CHILD.load(Ordering::SeqCst), module, size, scale) {
+        Ok(()) => {
+            log("render_thread", "running");
+            true
+        }
+        Err(error) => {
+            log("render_thread", &format!("error {error}"));
+            false
+        }
+    }
+}
+
+/// The frame-time row: `FRAMES` text frames drawn back to back on the window's thread (or
+/// on the render thread when one runs), with build, acquire and interval percentiles.
 fn frame_rows() {
+    if crate::render::active() {
+        thread_frame_rows();
+        return;
+    }
     let start = Instant::now();
     let timings = on_main_within(FRAMES_TIMEOUT, || {
         let mut out = Vec::with_capacity(FRAMES);
@@ -1029,23 +1130,7 @@ fn frame_rows() {
         log("summary_frames", "timeout");
         return;
     };
-    let mut builds: Vec<f64> = timings.iter().map(|timing| timing.build_ms).collect();
-    let mut acquires: Vec<f64> = timings.iter().map(|timing| timing.acquire_ms).collect();
-    let mut intervals: Vec<f64> = timings
-        .windows(2)
-        .map(|pair| (pair[1].submitted - pair[0].submitted).as_secs_f64() * 1000.0)
-        .collect();
-    log("summary_frame_build_ms", &percentiles(&mut builds));
-    log("summary_frame_acquire_ms", &percentiles(&mut acquires));
-    log("summary_frame_interval_ms", &percentiles(&mut intervals));
-    log(
-        "summary_frames_wall_ms",
-        &format!(
-            "{:.1} n={}",
-            start.elapsed().as_secs_f64() * 1000.0,
-            timings.len()
-        ),
-    );
+    frame_summary(&timings, start);
 }
 
 /// The DPI row: the view's DPI against the parent's and its client size against the
@@ -1464,6 +1549,12 @@ fn drive() {
         Rows::Perf => {
             log("foreground", &foreground().to_string());
             click_term();
+            let thread = std::env::var("SPIKE_RENDER").as_deref() == Ok("thread");
+            log("env_render", if thread { "thread" } else { "window" });
+            if thread && !start_render_thread() {
+                log("done", "render thread refused");
+                std::process::exit(6);
+            }
             let before = cpu_times();
             key_rows();
             frame_rows();
