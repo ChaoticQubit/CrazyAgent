@@ -133,10 +133,9 @@ fn read_part(part: &Path) -> Part {
 
 /// Whether the boundary refuses `path` as a read root of `container` before its helper runs
 /// ([`crate::dacl::read_root_refused`]): its list is read where it sits, and only when neither
-/// every app container nor this one may read it, a folder down to its files and subfolders, is
-/// it opened for `WRITE_DAC`, the right the helper's write takes. Anything it cannot read is
-/// left to the helper, which names the path.
-/// Inputs: the read root and the container name. Output: true to refuse.
+/// every app container nor this one reads it ([`crate::dacl::reads_root`]) is it opened for
+/// `WRITE_DAC`, the right the helper's write takes; anything it cannot read is left to the
+/// helper, which names it. Inputs: the read root and the container name. Output: true to refuse.
 pub fn unreadable_root(path: &Path, container: &str) -> bool {
     let (Ok((_, Some(list))), Ok(own)) = (security(path), sid(container)) else {
         return false;
