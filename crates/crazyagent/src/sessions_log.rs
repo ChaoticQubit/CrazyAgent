@@ -140,10 +140,11 @@ pub struct TextsDropped {
 }
 
 /// One sessions event, one kind per change a close finds: a row as it stands or the keys
-/// gone from a table. Each carries ids, words, numbers and kept-text digests, never text.
+/// gone from a table. Each carries ids, words, numbers and kept-text digests, never text;
+/// the stored session is boxed, so an event takes the size of the small variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Session(SessionSaved),
+    Session(Box<SessionSaved>),
     Entry(EntryAppended),
     EntriesDropped(EntriesDropped),
     Text(TextSaved),
@@ -507,7 +508,8 @@ fn settle(db: &Connection, marks: &[Mark]) -> Result<Vec<Event>, EngineError> {
     let mut texts_gone: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     for mark in marks {
         match mark.table {
-            Table::Sessions => events.extend(session_row(db, &mark.key)?.map(Event::Session)),
+            Table::Sessions => events
+                .extend(session_row(db, &mark.key)?.map(|saved| Event::Session(Box::new(saved)))),
             Table::Entries => {
                 let cursor = number(&mark.key)?;
                 let project = project_id(&mark.project)?;
@@ -757,7 +759,7 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
     }
     let body = logged.body.as_slice();
     let event = match logged.kind.as_str() {
-        KIND_SESSION => serde_json::from_slice(body).map(Event::Session),
+        KIND_SESSION => serde_json::from_slice(body).map(|saved| Event::Session(Box::new(saved))),
         KIND_ENTRY => serde_json::from_slice(body).map(Event::Entry),
         KIND_ENTRIES_DROPPED => serde_json::from_slice(body).map(Event::EntriesDropped),
         KIND_TEXT => serde_json::from_slice(body).map(Event::Text),
