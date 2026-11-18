@@ -330,9 +330,14 @@ mod pipes_tests {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use super::windows::{publish, read};
-    use crazyagent_win_sandbox::private;
+    use super::windows::{
+        bind_with, connect, name_of, publish, read, verify_client, verify_server,
+    };
+    use crazyagent_win_sandbox::{pipe, private};
+    use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A private root as the engine holds one, inside a fresh temp folder. Output: the temp
     /// folder, kept alive by the caller, and the root.
@@ -354,17 +359,18 @@ mod windows_tests {
     }
 
     /// DESIGN-0256 D7 pipes file (leader 07:46): the engine publishes a private file its
-    /// clients read back the same, pinning this process; a later start replaces it with a new
-    /// random part through a staged file in the same root, leaving nothing staged behind.
+    /// clients read back the same, pinning this process; a later start replaces it with its
+    /// own random part through a staged file in the same root, leaving nothing staged behind.
     #[test]
     fn a_published_pipes_file_reads_back_private_and_a_later_start_replaces_it() {
         let (_temp, root) = private_root();
-        let first = publish(&root, "engine.sock").unwrap();
+        let first = publish(&root, "engine.sock", [1; 16]).unwrap();
+        assert_eq!(first.random, [1; 16]);
         assert_eq!(first.pid, std::process::id());
         assert_eq!(read(&root, "engine.sock").unwrap(), first);
         drop(private::read_only(&root.join("pipes")).unwrap());
-        let second = publish(&root, "engine.sock").unwrap();
-        assert_ne!(second.random, first.random);
+        let second = publish(&root, "engine.sock", [2; 16]).unwrap();
+        assert_eq!(second.random, [2; 16]);
         assert_eq!((second.pid, second.created), (first.pid, first.created));
         assert_eq!(read(&root, "engine.sock").unwrap(), second);
         assert_eq!(entries(&root), ["pipes"]);
@@ -384,7 +390,7 @@ mod windows_tests {
             Ok(None)
         );
         drop(held);
-        publish(&root, "engine.sock").unwrap();
+        publish(&root, "engine.sock", [7; 16]).unwrap();
         let file = private::read_only(&root.join("pipes")).unwrap();
         let sacl = private::facts(&file)
             .unwrap()
@@ -404,7 +410,7 @@ mod windows_tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
         drop(private::store_dir(&root, private::Store::Database).unwrap());
-        let published = publish(&root, "engine.sock").unwrap();
+        let published = publish(&root, "engine.sock", [7; 16]).unwrap();
         assert_eq!(read(&root, "engine.sock").unwrap(), published);
         let file = private::read_only(&root.join("pipes")).unwrap();
         let sacl = private::facts(&file)
@@ -425,7 +431,7 @@ mod windows_tests {
         let (_temp, root) = private_root();
         drop(private::secret_file(&root.join("pipes.0123456789abcdef.new")).unwrap());
         drop(private::secret_file(&root.join("pipes.keep")).unwrap());
-        publish(&root, "engine.sock").unwrap();
+        publish(&root, "engine.sock", [7; 16]).unwrap();
         assert_eq!(entries(&root), ["pipes", "pipes.keep"]);
     }
 
@@ -435,13 +441,13 @@ mod windows_tests {
     #[test]
     fn a_publish_waits_for_a_client_reading_the_pipes_file() {
         let (_temp, root) = private_root();
-        publish(&root, "engine.sock").unwrap();
+        publish(&root, "engine.sock", [7; 16]).unwrap();
         let reader = private::read_only(&root.join("pipes")).unwrap();
         let released = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(200));
             drop(reader);
         });
-        let second = publish(&root, "engine.sock").unwrap();
+        let second = publish(&root, "engine.sock", [7; 16]).unwrap();
         released.join().unwrap();
         assert_eq!(read(&root, "engine.sock").unwrap(), second);
         assert_eq!(entries(&root), ["pipes"]);
@@ -462,7 +468,7 @@ mod windows_tests {
         )
         .unwrap();
         assert!(set.success());
-        let refused = publish(&root, "engine.sock").unwrap_err();
+        let refused = publish(&root, "engine.sock", [7; 16]).unwrap_err();
         assert_eq!(
             refused.kind(),
             std::io::ErrorKind::PermissionDenied,
@@ -471,6 +477,194 @@ mod windows_tests {
         assert_eq!(std::fs::read(&file).unwrap(), b"theirs\n");
         assert!(read(&root, "engine.sock").is_err());
         assert_eq!(entries(&root), ["pipes"]);
+    }
+
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-sec3 #555, leader 08:08): bind holds the first
+    /// instance of the pipe name before it publishes. A name someone else made first fails
+    /// the bind with access denied and no pipes file is written; after a bind, a first
+    /// instance create of the published name is refused the same way.
+    #[tokio::test]
+    async fn a_bind_holds_the_pipe_name_before_it_publishes() {
+        let (_temp, root) = private_root();
+        let squatted = name_of(&root, "engine.sock", &[3; 16]).unwrap();
+        let squat = pipe::create(&squatted, true, 1).unwrap();
+        let refused = bind_with(&root, "engine.sock", [3; 16], 2).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+        assert!(entries(&root).is_empty());
+        drop(squat);
+        let _listener = bind_with(&root, "engine.sock", [4; 16], 2).unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap().random, [4; 16]);
+        let held = name_of(&root, "engine.sock", &[4; 16]).unwrap();
+        let again = pipe::create(&held, true, 2).unwrap_err();
+        assert_eq!(again.raw_os_error(), Some(5), "{again}");
+    }
+
+    /// DESIGN-0256 D8-D10: a client of this user reaches the published pipe, the client's
+    /// check of the server passes before it writes, the server's check of the client passes,
+    /// bytes go both ways, and each check refuses the end it does not belong to.
+    #[tokio::test]
+    async fn a_bound_pipe_serves_a_client_of_this_user_with_both_checks_passing() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [5; 16], 2).unwrap();
+        let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+        let (mut client, mut served) = (client.unwrap(), served.unwrap());
+        verify_server(&client).unwrap();
+        verify_client(&served).unwrap();
+        assert!(verify_client(&client).is_err());
+        assert!(verify_server(&served).is_err());
+        client.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        served.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"ping");
+        served.write_all(b"pong").await.unwrap();
+        client.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"pong");
+    }
+
+    /// D8 (advisor 08:2x): a reply the server writes just before it drops its end reaches a
+    /// client that reads it later, a short reply and one larger than the pipe's buffer alike,
+    /// since a drop closes the instance and never disconnects it.
+    #[tokio::test]
+    async fn a_reply_written_just_before_the_server_drops_reaches_a_late_reader() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [6; 16], 2).unwrap();
+        for size in [3, 200_000] {
+            let reply: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+            let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+            let (mut client, mut served) = (client.unwrap(), served.unwrap());
+            let sent = reply.clone();
+            let writer = tokio::spawn(async move {
+                served.write_all(&sent).await.unwrap();
+                drop(served);
+            });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let mut bytes = vec![0; size];
+            client.read_exact(&mut bytes).await.unwrap();
+            writer.await.unwrap();
+            assert_eq!(bytes, reply);
+        }
+    }
+
+    /// D8 (advisor 08:2x): clients one after another each reach a fresh instance, so bytes a
+    /// client left unread, or its end of file, never reach the next client's stream.
+    #[tokio::test]
+    async fn bytes_a_client_left_unread_never_reach_the_next_client() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [7; 16], 2).unwrap();
+        for round in 0..3_u8 {
+            let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+            let (mut client, mut served) = (client.unwrap(), served.unwrap());
+            client.write_all(&[round; 4]).await.unwrap();
+            let mut bytes = [0; 2];
+            served.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(bytes, [round; 2]);
+            client.write_all(b"left").await.unwrap();
+            drop((client, served));
+        }
+    }
+
+    /// D8 (advisor 08:2x): the engine holds a handle on its pipe name at every step, so
+    /// through fifty clients back to back on a name capped at two instances a first instance
+    /// create of the name is refused each time, with a client connected and after it left.
+    #[tokio::test]
+    async fn the_pipe_name_is_never_free_while_clients_come_and_go() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [8; 16], 2).unwrap();
+        let name = name_of(&root, "engine.sock", &[8; 16]).unwrap();
+        for _ in 0..50 {
+            let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+            let connected = (client.unwrap(), served.unwrap());
+            let squat = pipe::create(&name, true, 2).unwrap_err();
+            assert_eq!(squat.raw_os_error(), Some(5), "{squat}");
+            drop(connected);
+            let squat = pipe::create(&name, true, 2).unwrap_err();
+            assert_eq!(squat.raw_os_error(), Some(5), "{squat}");
+        }
+    }
+
+    /// D8 (advisor 08:2x): with every instance of a name in use, the listener keeps the one
+    /// connected last and hands out no stream until a stream ends, and a client of the busy
+    /// name waits instead of failing; as each stream ends the next client is served.
+    #[tokio::test]
+    async fn clients_of_a_busy_pipe_wait_and_are_served_as_streams_end() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [9; 16], 2).unwrap();
+        let (first, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+        let first = (first.unwrap(), served.unwrap());
+        let second = connect(&root, "engine.sock").await.unwrap();
+        let third = tokio::spawn({
+            let root = root.clone();
+            async move { connect(&root, "engine.sock").await }
+        });
+        let early = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+        assert!(
+            early.is_err(),
+            "no stream is handed out while the name is at its cap"
+        );
+        drop(first);
+        let next = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        drop((second, next));
+        let last = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let third = third.await.unwrap().unwrap();
+        drop((third, last));
+    }
+
+    /// D8 (PLAN D8 scope): clients that open the pipe and leave at once, unread and
+    /// unanswered, never end the listener's accept, and the client after them is served.
+    #[tokio::test]
+    async fn clients_that_open_and_leave_never_end_accept() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [10; 16], 2).unwrap();
+        let server = async {
+            loop {
+                let mut served = listener.accept().await.unwrap();
+                let mut bytes = [0; 4];
+                if served.read_exact(&mut bytes).await.is_ok() {
+                    return bytes;
+                }
+            }
+        };
+        let clients = async {
+            for _ in 0..5 {
+                drop(connect(&root, "engine.sock").await.unwrap());
+            }
+            let mut client = connect(&root, "engine.sock").await.unwrap();
+            client.write_all(b"ping").await.unwrap();
+            client
+        };
+        let (bytes, _client) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(server, clients)
+        })
+        .await
+        .unwrap();
+        assert_eq!(&bytes, b"ping");
+    }
+
+    /// DESIGN-0256 D10: a client whose pipes file pins another start of the engine refuses
+    /// the server it reached before it writes a byte, with the error the Unix check gives.
+    #[tokio::test]
+    async fn a_server_the_pipes_file_does_not_pin_is_refused() {
+        let (_temp, root) = private_root();
+        let listener = bind_with(&root, "engine.sock", [11; 16], 2).unwrap();
+        let published = read(&root, "engine.sock").unwrap();
+        let other = super::Published {
+            created: published.created + 1,
+            ..published
+        };
+        let mut file = private::secret_file(&root.join("pipes.other")).unwrap();
+        file.write_all(super::encode_pipes("engine.sock", &other).as_bytes())
+            .unwrap();
+        drop(file);
+        std::fs::rename(root.join("pipes.other"), root.join("pipes")).unwrap();
+        let (client, _served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+        let refused = verify_server(&client.unwrap()).unwrap_err();
+        assert_eq!(refused.to_string(), "peer_owner_mismatch");
     }
 
     #[tokio::test]
