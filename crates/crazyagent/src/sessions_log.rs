@@ -17,6 +17,17 @@ use std::collections::BTreeMap;
 
 #[cfg(test)]
 mod tests;
+mod turns;
+#[cfg(test)]
+mod turns_tests;
+
+pub use turns::{
+    PreparationSaved, ProfileSaved, ProfilesDropped, ResolveSaved, ResolvesDropped, TurnSaved,
+};
+pub(crate) use turns::{
+    mark_preparation, mark_profile, mark_profiles, mark_resolve, mark_session_rest, mark_turn,
+    release_session_turns,
+};
 
 /// The kind of the event that logs one master session row as it stands (v2.5 L13).
 pub const KIND_SESSION: &str = "SessionSaved";
@@ -28,6 +39,18 @@ pub const KIND_ENTRIES_DROPPED: &str = "ConversationDropped";
 pub const KIND_TEXT: &str = "AgentTextSaved";
 /// The kind of the event that logs agents' own instructions gone from their table.
 pub const KIND_TEXTS_DROPPED: &str = "AgentTextDropped";
+/// The kind of the event that logs one master turn row, its body as a kept digest (L13c).
+pub const KIND_TURN: &str = "MasterTurnSaved";
+/// The kind of the event that logs one turn's preparation, its body as a kept digest.
+pub const KIND_PREPARATION: &str = "MasterPreparationSaved";
+/// The kind of the event that logs one session's waiting Resolve, its body as a digest.
+pub const KIND_RESOLVE: &str = "WaitingResolveSaved";
+/// The kind of the event that logs waiting Resolves gone from their table.
+pub const KIND_RESOLVES_DROPPED: &str = "WaitingResolveDropped";
+/// The kind of the event that logs one configured profile receipt, its record as a digest.
+pub const KIND_PROFILE: &str = "ConfiguredProfileSaved";
+/// The kind of the event that logs configured profile receipts gone from their table.
+pub const KIND_PROFILES_DROPPED: &str = "ConfiguredProfileDropped";
 /// Every kind this module writes; L12's [`SESSION_DELETED`] is the delete's own.
 pub const KINDS: [&str; 5] = [
     KIND_SESSION,
@@ -862,6 +885,16 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
     let done = snapshot(&mut log, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     Ok(true)
+}
+
+/// The schema step that puts master turns, preparations, waiting Resolves and profile
+/// receipts on the log (v2.5 L13c): gives `sessions_touched` the seven-table check when an
+/// older shape exists, then one full sessions snapshot run when the four tables hold rows
+/// that no event of theirs reached. Inputs: the step's transaction and the open's proof.
+/// Output: whether a run was appended, or the first refusal.
+#[cfg(any(unix, test))]
+pub(crate) fn first_run_turns(_: &Transaction<'_>, _: Opening) -> Result<bool, EngineError> {
+    Err(error("sessions_log_unwritten"))
 }
 
 /// Tombstones, for a demo clear of an earlier id, every logged sessions event naming the

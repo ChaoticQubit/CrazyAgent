@@ -451,9 +451,10 @@ async fn deleting_a_deleted_session_again_logs_a_second_event_and_redacts_the_fi
     case.close().await;
 }
 
-/// The master sessions and conversation entries as they stand, then as a replay of the
-/// sessions events rebuilds them, both read in one write transaction that is rolled back.
-/// Input: the case. Output: the live rows and the rebuilt rows.
+/// The master sessions, conversation entries, turns, preparations, waiting Resolves and
+/// profile receipts as they stand, then as a replay of the sessions events rebuilds them,
+/// both read in one write transaction that is rolled back. Input: the case. Output: the
+/// live rows and the rebuilt rows.
 fn live_and_rebuilt(
     case: &Case,
 ) -> (
@@ -465,9 +466,16 @@ fn live_and_rebuilt(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
     let read = |tx: &rusqlite::Transaction<'_>| {
-        ["master_sessions", "conversation_entries"]
-            .map(|table| crate::state_log::replay::rows(tx, table).unwrap())
-            .to_vec()
+        [
+            "master_sessions",
+            "conversation_entries",
+            "master_turns",
+            "master_preparations",
+            "master_waiting_resolves",
+            "configured_master_profiles",
+        ]
+        .map(|table| crate::state_log::replay::rows(tx, table).unwrap())
+        .to_vec()
     };
     let live = read(&tx);
     crate::sessions_log::rebuild(&tx).unwrap();
@@ -509,13 +517,20 @@ async fn every_owner_session_write_reaches_the_log_and_replays_to_the_live_rows(
     }
     let entries = kept_of(&rows, crate::sessions_log::KIND_ENTRY);
     assert!(entries.len() >= 2, "{entries:?}");
+    let turns = kept_of(&rows, crate::sessions_log::KIND_TURN);
+    assert!(
+        turns
+            .iter()
+            .any(|(_, body)| body["session"] == live.as_str()),
+        "the submitted turn is logged (v2.5 L13c): {turns:?}"
+    );
     assert!(
         rows.iter()
             .all(|row| !String::from_utf8_lossy(&row.4).contains("release notes")),
         "no prompt text in the log"
     );
     let (live_rows, rebuilt) = live_and_rebuilt(&case);
-    assert!(!live_rows[0].is_empty() && !live_rows[1].is_empty());
+    assert!(!live_rows[0].is_empty() && !live_rows[1].is_empty() && !live_rows[2].is_empty());
     assert_eq!(rebuilt, live_rows, "replay equals the live tables");
     case.close().await;
 }
