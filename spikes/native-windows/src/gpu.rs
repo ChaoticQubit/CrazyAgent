@@ -325,11 +325,51 @@ impl Gpu {
             self.prepare_text(typed)?;
         }
         let built = Instant::now();
-        let output = self.surface.get_current_texture().map_err(|e| {
+        let output = self.acquire()?;
+        let acquired = Instant::now();
+        let submitted = self.present_frame(output, text)?;
+        Ok(Timing {
+            build_ms: (built - start).as_secs_f64() * 1000.0,
+            acquire_ms: (acquired - built).as_secs_f64() * 1000.0,
+            submitted,
+        })
+    }
+
+    /// Draws one text frame frame-ready first: waits for the swap chain, then reads the
+    /// text from `typed`, so input that arrived during the wait is in this frame.
+    /// Input: the text source, called after the wait. Output: its timing.
+    pub fn draw_when_ready(&mut self, typed: impl FnOnce() -> String) -> Result<Timing, String> {
+        let start = Instant::now();
+        let output = self.acquire()?;
+        let acquired = Instant::now();
+        self.prepare_text(&typed())?;
+        let built = Instant::now();
+        let submitted = self.present_frame(output, true)?;
+        assert!(acquired <= built);
+        assert!(built <= submitted);
+        Ok(Timing {
+            build_ms: (built - acquired).as_secs_f64() * 1000.0,
+            acquire_ms: (acquired - start).as_secs_f64() * 1000.0,
+            submitted,
+        })
+    }
+
+    /// Waits for the swap chain's next texture; on an error it reconfigures the surface.
+    /// Output: the texture, or the error.
+    fn acquire(&mut self) -> Result<wgpu::SurfaceTexture, String> {
+        self.surface.get_current_texture().map_err(|e| {
             self.surface.configure(&self.device, &self.config);
             e.to_string()
-        })?;
-        let acquired = Instant::now();
+        })
+    }
+
+    /// Clears the texture, draws the prepared rows when `text`, submits and presents.
+    /// Inputs: the texture and whether to draw text. Output: when it was submitted.
+    fn present_frame(
+        &mut self,
+        output: wgpu::SurfaceTexture,
+        text: bool,
+    ) -> Result<Instant, String> {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -359,10 +399,6 @@ impl Gpu {
         output.present();
         let submitted = Instant::now();
         self.atlas.trim();
-        Ok(Timing {
-            build_ms: (built - start).as_secs_f64() * 1000.0,
-            acquire_ms: (acquired - built).as_secs_f64() * 1000.0,
-            submitted,
-        })
+        Ok(submitted)
     }
 }

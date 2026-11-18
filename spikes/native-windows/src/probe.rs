@@ -1089,8 +1089,9 @@ fn thread_frame_rows() {
 }
 
 /// Moves drawing to a render thread for the perf rows: drops the window thread's GPU, then
-/// starts the render thread on the same view. Output: whether it runs.
-fn start_render_thread() -> bool {
+/// starts the render thread on the same view. Input: whether it waits for the swap chain
+/// before reading input. Output: whether it runs.
+fn start_render_thread(ready_first: bool) -> bool {
     let size = on_main(|| STATE.with(|state| state.borrow_mut().gpu.take().map(|gpu| gpu.size())))
         .flatten();
     let Some(size) = size else {
@@ -1099,7 +1100,13 @@ fn start_render_thread() -> bool {
     };
     let scale = LAYOUT.lock().map(|layout| layout.2).unwrap_or(1.0) as f32;
     let module = unsafe { GetModuleHandleW(std::ptr::null()) } as isize;
-    match crate::render::start(CHILD.load(Ordering::SeqCst), module, size, scale) {
+    match crate::render::start(
+        CHILD.load(Ordering::SeqCst),
+        module,
+        size,
+        scale,
+        ready_first,
+    ) {
         Ok(()) => {
             log("render_thread", "running");
             true
@@ -1556,9 +1563,10 @@ fn drive() {
         Rows::Perf => {
             log("foreground", &foreground().to_string());
             click_term();
-            let thread = std::env::var("SPIKE_RENDER").as_deref() == Ok("thread");
-            log("env_render", if thread { "thread" } else { "window" });
-            if thread && !start_render_thread() {
+            let mode = std::env::var("SPIKE_RENDER").unwrap_or_default();
+            let thread = mode == "thread" || mode == "ready";
+            log("env_render", if thread { mode.as_str() } else { "window" });
+            if thread && !start_render_thread(mode == "ready") {
                 log("done", "render thread refused");
                 std::process::exit(6);
             }
