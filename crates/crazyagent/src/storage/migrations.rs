@@ -853,9 +853,9 @@ mod windows_tests {
         );
     }
 
-    /// W1c D5 (F36): a backups folder of this user that other users may change is made
-    /// private again, the twin of the Unix chmod, and a junction in its place is refused as
-    /// unsafe.
+    /// W1c D5 (F36): an empty backups folder of this user that other users may change is made
+    /// private again, the twin of the Unix chmod; one that already holds files (#512 r2) and
+    /// a junction in its place are refused as unsafe.
     #[test]
     fn an_open_backups_folder_is_repaired_and_a_junction_is_refused() {
         let root = tempfile::tempdir().unwrap();
@@ -885,5 +885,12 @@ mod windows_tests {
         assert!(refused.0.starts_with(super::BACKUP_UNSAFE), "{}", refused.0);
         assert!(private::dir(&elsewhere).is_err());
         std::fs::remove_dir(&backups).unwrap();
+        std::fs::create_dir(&backups).unwrap();
+        std::fs::write(backups.join("older"), "x").unwrap();
+        open_to_other_users(&backups);
+        let held = super::backups_folder(&data).unwrap_err();
+        assert!(held.0.starts_with(super::BACKUP_UNSAFE), "{}", held.0);
+        assert!(private::dir(&backups).is_err());
+        std::fs::remove_dir_all(&backups).unwrap();
     }
 }

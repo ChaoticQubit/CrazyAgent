@@ -1,7 +1,7 @@
 use crazyagent_win_sandbox::dacl::{
     self, ADMINISTRATORS, ALL_APPLICATION_PACKAGES, OWNER_RIGHTS, SYSTEM, TRUSTED_INSTALLER,
 };
-use crazyagent_win_sandbox::private::{Facts, judge, list};
+use crazyagent_win_sandbox::private::{Facts, judge, judge_folder, list};
 
 const USER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
@@ -12,6 +12,7 @@ const OTHER_USER: [u8; 28] = [
 const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
 const USERS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 33, 2, 0, 0];
 const AUTHENTICATED_USERS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0];
+const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 const CONTAINER: [u8; 40] = [
     1, 8, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4, 0, 0, 0, 5, 0, 0,
     0, 6, 0, 0, 0, 7, 0, 0, 0,
@@ -26,6 +27,8 @@ const DENY: u8 = 1;
 const OBJECT_ALLOW: u8 = 5;
 const LABEL: u8 = 0x11;
 const NO_WRITE_UP: u32 = 0x1;
+const OBJECT_INHERIT: u8 = 0x01;
+const CONTAINER_INHERIT: u8 = 0x02;
 const INHERITABLE: u8 = 0x03;
 const INHERIT_ONLY: u8 = 0x08;
 const INHERITED: u8 = 0x10;
@@ -107,7 +110,7 @@ fn any_other_principal_with_only_read_is_refused() {
 }
 
 /// W1 D1: deny entries and inherit-only entries do not apply to the object, so they never
-/// refuse it.
+/// refuse a file; a folder's inherit-only entries are judged by `judge_folder` (row below).
 #[test]
 fn deny_and_inherit_only_entries_do_not_count() {
     let list = private_list(&[
@@ -115,6 +118,54 @@ fn deny_and_inherit_only_entries_do_not_count() {
         (ALLOW, INHERITABLE | INHERIT_ONLY, FULL, &EVERYONE[..]),
     ]);
     assert_eq!(judge(&facts(Some(list)), &USER), Ok(()));
+}
+
+/// #512 r2 (rv-sec2 F1, rv-code4 F2): a child is opened by its own path whatever its folder
+/// allows, so a folder handing another account any right on what is made in it, inherit-only
+/// included, is not private. CREATOR OWNER and OWNER RIGHTS stand for trusted accounts there,
+/// deny entries only take rights away, and an unreadable inheritable allow entry is refused.
+#[test]
+fn a_folder_handing_another_account_access_to_what_is_made_in_it_is_refused() {
+    let handed: [(u8, &[u8]); 3] = [
+        (INHERITABLE | INHERIT_ONLY, &EVERYONE),
+        (OBJECT_INHERIT | INHERIT_ONLY, &AUTHENTICATED_USERS),
+        (CONTAINER_INHERIT | INHERIT_ONLY, &USERS),
+    ];
+    for (flags, other) in handed {
+        let granted = private_list(&[(ALLOW, flags, GENERIC_READ, other)]);
+        assert_eq!(judge(&facts(Some(granted.clone())), &USER), Ok(()));
+        assert!(
+            judge_folder(&facts(Some(granted)), &USER).is_err(),
+            "an inheritable entry for {other:?} must refuse a folder"
+        );
+    }
+    let unreadable = private_list(&[(OBJECT_ALLOW, INHERITABLE | INHERIT_ONLY, FULL, &USER[..])]);
+    assert!(judge_folder(&facts(Some(unreadable)), &USER).is_err());
+    let trusted = private_list(&[
+        (ALLOW, INHERITABLE | INHERIT_ONLY, FULL, &CREATOR_OWNER[..]),
+        (ALLOW, INHERITABLE | INHERIT_ONLY, FULL, &OWNER_RIGHTS[..]),
+        (DENY, INHERITABLE | INHERIT_ONLY, FULL, &EVERYONE[..]),
+    ]);
+    assert_eq!(judge_folder(&facts(Some(trusted)), &USER), Ok(()));
+    assert_eq!(judge_folder(&facts(Some(list(&USER, true))), &USER), Ok(()));
+}
+
+/// #512 r2 (rv-sec2 F1): a folder whose label entry for what is made in it is below medium,
+/// or lacks no-write-up, hands that label to SQLite's side files, so the folder is refused,
+/// though its own label (none here) is fine; a high inheritable label stays private.
+#[test]
+fn a_folder_handing_a_low_label_to_what_is_made_in_it_is_refused() {
+    let mut object = facts(Some(private_list(&[])));
+    let handed = |policy: u32, level: &[u8]| {
+        Some(acl(&[(LABEL, INHERITABLE | INHERIT_ONLY, policy, level)]))
+    };
+    object.label = handed(NO_WRITE_UP, &LOW);
+    assert_eq!(judge(&object, &USER), Ok(()));
+    assert!(judge_folder(&object, &USER).is_err());
+    object.label = handed(0, &MEDIUM);
+    assert!(judge_folder(&object, &USER).is_err());
+    object.label = handed(NO_WRITE_UP, &HIGH);
+    assert_eq!(judge_folder(&object, &USER), Ok(()));
 }
 
 /// W1 D2: an inherited entry applies like an explicit one, which is what keeps SQLite's

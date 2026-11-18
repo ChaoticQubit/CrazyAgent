@@ -2172,4 +2172,17 @@ mod windows_tests {
             "y"
         );
     }
+
+    /// #512 r2 (rv-sec2 N2): a link opened as itself is no kept file, even with one name and
+    /// a trusted owner, so a link an agent swaps in for a kept file is never kept as a file.
+    #[test]
+    fn a_link_in_place_of_a_kept_home_file_is_not_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::write(&target, "x").unwrap();
+        let link = root.path().join("kept");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(!super::kept_file(&link).unwrap());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
+    }
 }
