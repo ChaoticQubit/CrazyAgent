@@ -138,6 +138,16 @@ impl Jobs {
         bytes.map(|bytes| serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// The packet the owner client sends and the admission it gets, for rows that serve a
+    /// change the way a job does. Output: the packet and its admission.
+    fn admitted(&self) -> ([u8; 37], Admission) {
+        let mut packet = [0; 37];
+        packet[..4].copy_from_slice(b"CAO1");
+        packet[5..].copy_from_slice(&self.owner.owner_client().unwrap().token);
+        let admission = self.authority().authenticate(&packet).unwrap();
+        (packet, admission)
+    }
+
     /// Starts an add of `path` under the request id `id`. Inputs: the id, the folder and the
     /// mode. Output: the start's answer.
     async fn add(&mut self, id: &str, path: &str, mode: AddMode) -> Result<JobView, EngineError> {
@@ -570,6 +580,80 @@ async fn a_question_stays_listed_past_other_starts_until_its_answer_starts() {
     );
     assert!(listed.iter().any(|id| id == "add-linked-anyway"));
     jobs.ended("add-linked-anyway").await;
+    jobs.stop().await;
+}
+
+/// A job's change plans at the current revision, whatever revision its request carries: an
+/// add served as a job with a revision the engine has moved past ends applied with one applied
+/// ledger row, while the same request from a client stays a recorded stale refusal and moves
+/// nothing, so a client cannot skip the check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_plans_at_the_current_revision_and_a_client_keeps_its_stale_refusal() {
+    let mut jobs = Jobs::start().await;
+    let (by_job, by_client) = (jobs.folder("by-job", "j"), jobs.folder("by-client", "c"));
+    let read = jobs.owner.read(OwnerRead::ProjectsHome).await.unwrap();
+    assert!(
+        read.revision.value() >= 1,
+        "the home's set moved the revision"
+    );
+    let old = crate::protocol::Cursor::new(read.revision.value() - 1);
+    let add = |id: &str, source: &str| OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new(id).unwrap(),
+        expected_revision: old.clone(),
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder {
+                source: source.to_owned(),
+                mode: AddMode::Copy,
+                overrides: Vec::new(),
+            },
+        },
+    };
+    let (packet, admission) = jobs.admitted();
+    let engine = Arc::clone(&jobs.service.owner_runtime().unwrap().engine);
+    let authority = jobs.authority();
+    let tally = Arc::new(crate::projects_home::Tally::default());
+    let mut kept = None;
+    let deadline = tokio::time::Instant::now() + ENGINE_WAIT;
+    super::projects_home::serve(
+        super::projects_home::Sink::Job(tally, &mut kept),
+        &engine,
+        &authority,
+        &packet,
+        &admission,
+        add("job-old", &by_job),
+        deadline,
+    )
+    .await
+    .unwrap();
+    let reply = kept
+        .expect("the job's sink keeps the reply")
+        .expect("a job plans at the current revision");
+    assert!(
+        matches!(&reply.response, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{:?}",
+        reply.response
+    );
+    assert_eq!(note(&jobs.home().join("by-job")), "j");
+    assert_eq!(jobs.recorded("job-old"), Some(OwnerResult::Applied));
+    let stale = OwnerResult::Rejected {
+        code: "stale_revision".into(),
+    };
+    let refused = jobs
+        .owner
+        .owner_client()
+        .unwrap()
+        .request(add("client-old", &by_client))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&refused.response, OwnerResponse::Applied { operation } if operation.result == stale),
+        "{:?}",
+        refused.response
+    );
+    assert_eq!(jobs.recorded("client-old"), Some(stale));
+    assert!(!jobs.home().join("by-client").exists());
+    assert_eq!(note(Path::new(&by_client)), "c");
     jobs.stop().await;
 }
 
