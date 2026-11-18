@@ -290,15 +290,16 @@ export function keepSelection(terminal: Terminal, screen: HTMLElement): IDisposa
   };
 }
 
-/** Off a Mac, Shift forces a drag to select while the app reads the mouse, but on the normal
- * screen xterm reads a Shift press as extending the selection from the last click, so a Shift
- * drag with nothing selected selected nothing (G1 N3). Such a press waits for the gesture: a
- * drag hands it to xterm without Shift, starting a new selection at the press, and a release
- * without moving hands it on as it was. Inputs: the terminal, the element around its screen
- * and whether this is a Mac. Output: the subscription. */
+/** How far a held Shift press moves, in CSS pixels, before it counts as a drag. */
+const SHIFT_DRAG_PX = 4;
+
+/** Off a Mac, a Shift press on the normal screen with nothing selected waits: moved
+ * `SHIFT_DRAG_PX` it goes to xterm without Shift, so the drag selects from the press (G1 N3);
+ * released first it goes on as it was, so xterm extends from the last click. Inputs: the
+ * terminal, the element around its screen and whether this is a Mac. Output: the subscription. */
 export function shiftDragSelects(terminal: Terminal, screen: HTMLElement, mac: boolean = isMac()): IDisposable {
   const page = screen.ownerDocument;
-  let held: { target: EventTarget; init: MouseEventInit } | null = null;
+  let held: { target: EventTarget; x: number; y: number; init: MouseEventInit } | null = null;
   const handOn = (shiftKey: boolean) => {
     if (held === null) return;
     const { target, init } = held;
@@ -313,11 +314,14 @@ export function shiftDragSelects(terminal: Terminal, screen: HTMLElement, mac: b
     event.preventDefault();
     held = {
       target: event.target,
+      x: event.clientX,
+      y: event.clientY,
       init: { bubbles: true, cancelable: true, composed: true, view: event.view, detail: event.detail, screenX: event.screenX, screenY: event.screenY, clientX: event.clientX, clientY: event.clientY, ctrlKey: event.ctrlKey, altKey: event.altKey, metaKey: event.metaKey, button: event.button, buttons: event.buttons },
     };
   };
   const move = (event: MouseEvent) => {
-    if ((event.buttons & 1) !== 0) handOn(false);
+    if (held === null || (event.buttons & 1) === 0) return;
+    if (Math.hypot(event.clientX - held.x, event.clientY - held.y) >= SHIFT_DRAG_PX) handOn(false);
   };
   const up = (event: MouseEvent) => {
     if (event.button === 0) handOn(true);
