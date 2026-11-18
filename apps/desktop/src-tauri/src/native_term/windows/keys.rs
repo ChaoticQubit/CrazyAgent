@@ -57,10 +57,9 @@ fn press(chars: &str, mods: Mods) -> Press<'_> {
     }
 }
 
-/// The named key a VK stands for, Shift+Tab as Back Tab, decided before any text so the
-/// keypad's navigation keys and Delete never type a character. Inputs: the VK and the
-/// modifiers. Output: the named key, or none.
-fn named(vk: u16, mods: Mods) -> Option<Named> {
+/// The named key a VK stands for, decided before any text so the keypad's navigation keys
+/// and Delete never type a character. Input: the VK. Output: the named key, or none.
+fn named(vk: u16) -> Option<Named> {
     let named = match vk {
         VK_UP => Named::Up,
         VK_DOWN => Named::Down,
@@ -72,7 +71,6 @@ fn named(vk: u16, mods: Mods) -> Option<Named> {
         VK_NEXT => Named::PageDown,
         VK_INSERT => Named::Insert,
         VK_DELETE => Named::Delete,
-        VK_TAB if mods.shift => Named::BackTab,
         VK_F1..=VK_F12 => Named::F(u8::try_from(vk - VK_F1 + 1).ok()?),
         _ => return None,
     };
@@ -81,11 +79,13 @@ fn named(vk: u16, mods: Mods) -> Option<Named> {
 }
 
 /// The characters keymap reads for Enter, Backspace, Tab and Escape, as the macOS view
-/// reports them: Backspace as DEL. Input: the VK. Output: the characters, or none.
-fn edit(vk: u16) -> Option<&'static str> {
+/// reports them: Backspace as DEL, Shift+Tab as U+0019, which keymap sends as Back Tab.
+/// Inputs: the VK and Shift. Output: the characters, or none.
+fn edit(vk: u16, shift: bool) -> Option<&'static str> {
     let chars = match vk {
         VK_RETURN => "\r",
         VK_BACK => "\u{7f}",
+        VK_TAB if shift => "\u{19}",
         VK_TAB => "\t",
         VK_ESCAPE => "\u{1b}",
         _ => return None,
@@ -162,10 +162,10 @@ pub fn down(vk: u16, mods: Mods, next: Next, bare: Option<char>) -> Down {
     if let Some(event) = chord(vk, mods) {
         return handled(Some(event));
     }
-    if let Some(key) = named(vk, mods) {
+    if let Some(key) = named(vk) {
         return handled(keymap::named_input(key, &press("", mods)).map(ViewEvent::Key));
     }
-    if let Some(chars) = edit(vk) {
+    if let Some(chars) = edit(vk, mods.shift) {
         return handled(keymap::key_input(&press(chars, mods)).map(ViewEvent::Key));
     }
     let altgr = mods.control && mods.alt && matches!(next, Next::Char(unit) if printable(unit));
@@ -273,11 +273,6 @@ mod tests {
         assert_eq!(sent(VK_DELETE, NONE, Next::Nothing), key(Named::Delete, 0));
         assert_eq!(sent(VK_INSERT, NONE, Next::Nothing), key(Named::Insert, 0));
         assert_eq!(sent(VK_INSERT, CTRL, Next::Nothing), None);
-        assert_eq!(
-            sent(VK_TAB, SHIFTED, Next::Char(9)),
-            key(Named::BackTab, SHIFT)
-        );
-        assert!(down(VK_TAB, SHIFTED, Next::Char(9), None).swallow);
         let f13 = down(VK_F12 + 1, NONE, Next::Nothing, None);
         assert_eq!(
             f13,
@@ -296,6 +291,8 @@ mod tests {
         assert_eq!(sent(VK_BACK, NONE, Next::Char(8)), text(b"\x7f"));
         assert_eq!(sent(VK_BACK, CTRL, Next::Char(0x7f)), text(b"\x08"));
         assert_eq!(sent(VK_TAB, NONE, Next::Char(9)), text(b"\t"));
+        assert_eq!(sent(VK_TAB, SHIFTED, Next::Char(9)), text(b"\x1b[Z"));
+        assert!(down(VK_TAB, SHIFTED, Next::Char(9), None).swallow);
         assert_eq!(sent(VK_ESCAPE, NONE, Next::Char(0x1b)), text(b"\x1b"));
         for vk in [VK_RETURN, VK_BACK, VK_TAB, VK_ESCAPE] {
             assert!(down(vk, NONE, Next::Char(13), None).swallow, "{vk}");

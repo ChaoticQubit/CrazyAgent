@@ -30,7 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::super::event::ViewEvent;
-use super::super::pane::{CONTROL, Input, Named, Pane, SHIFT};
+use super::super::pane::{CONTROL, Input, Named, Pane};
 use super::super::screen::{self, Frame};
 use super::super::style::{Style, Theme, font_for};
 use super::draw;
@@ -162,10 +162,10 @@ fn style() -> Style {
 }
 
 fn fed_frame(theme: &Theme, text: &[u8]) -> Frame {
-    let mut pane = Pane::new(1);
+    let mut pane = Pane::new(true);
     assert!(pane.on_attached(40, 12));
     assert!(pane.on_output(text));
-    screen::frame(pane.term().expect("an attached pane"), theme, true)
+    screen::frame(pane.term().expect("an attached pane"), theme, true, None)
 }
 
 fn on_screen(parent: HWND, client: (i32, i32)) -> POINT {
@@ -563,11 +563,7 @@ fn keys_send_once() {
         ("Shift+Enter", chord(&[VK_SHIFT], VK_RETURN), text(b"\n")),
         ("Backspace", chord(&[], VK_BACK), text(b"\x7f")),
         ("Tab", chord(&[], VK_TAB), text(b"\t")),
-        (
-            "Shift+Tab",
-            chord(&[VK_SHIFT], VK_TAB),
-            named(Named::BackTab, SHIFT),
-        ),
+        ("Shift+Tab", chord(&[VK_SHIFT], VK_TAB), text(b"\x1b[Z")),
         ("Escape", chord(&[], VK_ESCAPE), text(b"\x1b")),
         ("Ctrl+A", chord(&[VK_CONTROL], VK_A), text(b"\x01")),
         ("Alt+A", chord(&[VK_MENU], VK_A), text(b"\x1ba")),
