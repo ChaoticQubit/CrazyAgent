@@ -66,8 +66,16 @@ pub struct Took {
 /// otherwise when it passed a command or took nothing. Input: what it did. Output: true to
 /// send the key's own bytes after any committed text.
 pub fn own_bytes(took: Took) -> bool {
-    let _ = took;
-    false
+    let sends = if took.after {
+        false
+    } else if took.before {
+        took.command
+    } else {
+        took.command || !took.handled
+    };
+    assert!(!sends || !took.after);
+    assert!(!sends || took.command || !took.handled);
+    sends
 }
 
 /// The Meta input of an Option key: Escape before its text, or its named key unchanged.
