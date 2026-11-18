@@ -93,12 +93,11 @@ fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
     Ok(folder)
 }
 
-/// Gives a store folder its store's label when the one it carries reads otherwise, as on a
-/// folder made before the store was labelled or by an earlier build; Windows passes the
-/// change to what the folder holds. Called only on a folder [`judge_store_before_label`]
-/// passed; medium is the engine's own level, so no privilege is needed, and only the label
-/// part of the system list changes. Inputs: the held folder, opened with WRITE_OWNER, and the
-/// store. Output: Ok, or the Windows error.
+/// Gives a store folder its store's label, which Windows passes to what it holds, when the one
+/// it carries reads otherwise, as on a folder made before the store was labelled. Called only
+/// on a folder [`judge_store_before_label`] passed; medium is the engine's own level, so no
+/// privilege is needed, and only the label part of the system list changes. Inputs: the held
+/// folder, opened with WRITE_OWNER, and the store. Output: Ok, or the Windows error.
 fn store_labelled(folder: &File, store: Store) -> io::Result<()> {
     let wanted = label_list(store);
     let readings = |sacl: &[u8]| (label(sacl), inherited_label(sacl));
