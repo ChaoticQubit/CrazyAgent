@@ -376,16 +376,28 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
         .collect();
     assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
     assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
+    assert!(args[3].contains("$r=$env:CRAZYAGENT_PATH_KEY;"));
+    assert!(
+        !args[3].contains("HKCU:"),
+        "the key is handed over as data too"
+    );
     assert!(!args[3].contains("$args"));
     assert!(!args[3].contains("Cra'zy"));
     assert_eq!(args.len(), 4);
-    let envs: Vec<_> = command.get_envs().collect();
+    let mut envs: Vec<_> = command.get_envs().collect();
+    envs.sort();
     assert_eq!(
         envs,
-        [(
-            OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
-            Some(folder.as_os_str())
-        )]
+        [
+            (
+                OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
+                Some(folder.as_os_str())
+            ),
+            (
+                OsStr::new("CRAZYAGENT_PATH_KEY"),
+                Some(OsStr::new(r"HKCU:\Environment"))
+            )
+        ]
     );
 }
 
