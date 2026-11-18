@@ -14,8 +14,9 @@ echo "lsm: $(cat /sys/kernel/security/lsm 2>&1)"
 iptables --version
 bwrap --version
 git log --oneline -3
-if [ "$(git rev-parse --short=9 HEAD~1)" != "$tip" ] || [ "$(git rev-parse --short=9 HEAD~2)" != "$base" ] || ! git diff --quiet HEAD~1 HEAD -- . ':!.github'; then
-  row tip "HEAD~1 $tip on $base, farm commit only .github" "$(git rev-parse --short=9 HEAD~1) on $(git rev-parse --short=9 HEAD~2)"
+code_tip=$(git log -1 --format=%H HEAD -- . ':!.github')
+if [ "$(git rev-parse --short=9 "$code_tip")" != "$tip" ] || [ "$(git rev-parse --short=9 "$code_tip~1")" != "$base" ] || ! git diff --quiet "$code_tip" HEAD -- . ':!.github'; then
+  row tip "$tip on $base, farm commits only .github" "$(git rev-parse --short=9 "$code_tip") on $(git rev-parse --short=9 "$code_tip~1")"
   exit 1
 fi
 block() {

@@ -54,8 +54,8 @@ defaults:
 
 jobs:
   v243-egress-timed-row-r2:
-    name: Timed refused-connect row on a Landlock network kernel, green at c059ae6b4, red with the REJECT fix reverted, on ubuntu-24.04
-    runs-on: ubuntu-24.04
+    name: Timed refused-connect row where Landlock network rules apply, green at c059ae6b4, red with the REJECT fix reverted, on ubuntu-22.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
       - name: Refuse a runner that is not GitHub-hosted
@@ -66,20 +66,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 5
-      - name: Install Linux build packages, slirp4netns and iptables
+      - name: Install Linux build packages
         timeout-minutes: 40
-        run: |
-          bash scripts/ci/linux-packages.sh
-          sudo apt-get install -y --no-install-recommends slirp4netns iptables
-      - name: Let unprivileged user namespaces start, as on Ubuntu 22.04
-        run: |
-          sysctl kernel.apparmor_restrict_unprivileged_userns || true
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: bash scripts/ci/linux-packages.sh
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          prefix-key: farm
+          shared-key: linux
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          save-if: false
       - name: Probe, clippy, rows at c059ae6b4, then the timed row with the REJECT fix reverted, new and old
         run: |
           cp .github/farm/v243-egress-timed-row-r2.sh "$RUNNER_TEMP/rows.sh"
