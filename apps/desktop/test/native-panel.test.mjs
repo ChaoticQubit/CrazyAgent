@@ -304,7 +304,7 @@ test("V243-NATIVE-ONLY: an agent with no terminal yet opens no native view, and 
     const notReady = await F.until(() => document.querySelector("#b .not-ready") !== null);
     return { none, notReady, shown: F.shown("b") };
   `);
-  assert.ok(seen.none.status.includes("This agent has no terminal yet. It opens once the agent starts."), JSON.stringify(seen.none));
+  assert.ok(seen.none.shown.status.includes("This agent has no terminal yet. It opens once the agent starts."), JSON.stringify(seen.none));
   assert.equal(seen.none.opens, 0);
   assert.equal(seen.notReady, true);
   assert.equal(seen.shown.webview, 0);
