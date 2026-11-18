@@ -382,7 +382,7 @@ test("V243-NATIVE-ONLY: a native view whose ready event comes before the desktop
 });
 
 for (const saved of [null, "terminal", "box", "both"]) {
-  test(`V243-NATIVE-INPUT E1: with Terminal input ${saved} saved, the native view takes typed keys only when the choice lets them through, a reopened view is told again, and a choice changed before the next render reaches the open view`, async () => {
+  test(`V243-NATIVE-INPUT E1: with Terminal input ${saved} saved, the native view takes typed keys only when the choice lets them through, each open carries the choice, and a choice changed before the next render reaches the open view`, async () => {
     const keysOn = saved !== "box";
     const flip = keysOn ? "box" : "both";
     const seen = await page(`
@@ -404,14 +404,14 @@ for (const saved of [null, "terminal", "box", "both"]) {
       F.input(${JSON.stringify(flip)});
       F.rerender("a", ${MASTER});
       await pause(200);
-      return { view, first, boxes, reopened, changed: keys() };
+      return { view, first, boxes, reopened, changed: keys(), opened: F.calls("desktop_native_terminal_open").map((entry) => entry.args.keys) };
     `);
-    const off = keysOn ? [] : [{ view: 1, on: false }, { view: 2, on: false }];
     assert.equal(seen.view, 1);
-    assert.deepEqual(seen.first, off.slice(0, 1), "a view starts with keys on, so only a choice without keys is told");
+    assert.deepEqual(seen.opened, [keysOn, keysOn], "each open, the first and Open again's, carries the choice (rv-sec2 #509 N1)");
+    assert.deepEqual(seen.first, [], "the open carried the choice, so no keys call follows it");
     assert.equal(seen.boxes, saved === "box" || saved === "both" ? 1 : 0, "the message box shows as in the web panel");
-    assert.deepEqual(seen.reopened, off, "the view Open again makes is told the choice too");
-    assert.deepEqual(seen.changed, [...off, { view: 2, on: !keysOn }], "the choice read at the next render reaches the open view once");
+    assert.deepEqual(seen.reopened, [], "the view Open again makes carried the choice in its open too");
+    assert.deepEqual(seen.changed, [{ view: 2, on: !keysOn }], "the choice read at the next render reaches the open view once");
   });
 }
 
