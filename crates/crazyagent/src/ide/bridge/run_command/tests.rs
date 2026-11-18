@@ -164,7 +164,7 @@ mod wire {
     use crate::ide::bridge::IdeReply;
     use crate::ide::bridge::reveal::RevealFocus;
     use crate::ide::bridge::reveal::tests::{Desk, read_reply, send, subscribe};
-    use crate::platform::unix_socket::UnixStream;
+    use crate::ipc::Stream;
     use serde_json::json;
     use std::path::Path;
     use std::time::Duration;
@@ -188,7 +188,7 @@ mod wire {
 
     /// Reads the next run event from a subscription. Output: its request, command and
     /// whether Enter follows.
-    async fn next_run(events: &mut UnixStream) -> (RequestId, String, bool) {
+    async fn next_run(events: &mut Stream) -> (RequestId, String, bool) {
         let pushed = tokio::time::timeout(Duration::from_secs(10), read_reply(events))
             .await
             .unwrap();
@@ -206,7 +206,7 @@ mod wire {
     }
 
     /// Whether a subscription stays silent for a moment.
-    async fn quiet(events: &mut UnixStream) -> bool {
+    async fn quiet(events: &mut Stream) -> bool {
         tokio::time::timeout(Duration::from_millis(300), read_reply(events))
             .await
             .is_err()
