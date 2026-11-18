@@ -9,6 +9,8 @@ use crazyagent::sandbox::{
     SandboxError, SandboxNetwork, SandboxRemote,
 };
 
+use crazyagent::spawn_gate::Keeper;
+
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
 
 use std::ffi::{OsStr, OsString};
@@ -16,6 +18,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 
 use std::io::{BufRead, BufReader, Read, Write};
+
+use std::os::fd::AsRawFd;
 
 use std::path::{Path, PathBuf};
 
@@ -2269,7 +2273,8 @@ fn a_nested_agent_neither_signals_nor_lists_a_process_outside_its_own() {
 
 /// A nested agent started with pipes shares no session or terminal with the engine: the
 /// first process, bubblewrap's outer one, leads a group and a session of its own with no
-/// controlling terminal, and the harness, inside the namespace, reads both as 0.
+/// controlling terminal, and the harness, inside the namespace, reads both as 0. Given its
+/// line, the harness ends with 0.
 #[test]
 fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
     let case = case();
@@ -2294,7 +2299,9 @@ fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
         [first.as_str(), first.as_str(), "0"],
         "the first process leads its group and session, with no terminal: {outside:?}"
     );
-    drop(child.stdin.take());
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"done\n").unwrap();
+    drop(input);
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
 }
@@ -2683,6 +2690,70 @@ fn the_bridge_leaves_no_descriptor_in_the_harness() {
     };
     assert_eq!(open(&bridged), "0\n1\n2\n3\n");
     assert_eq!(open(&bridged), open(&shared));
+}
+
+/// Lists the descriptors a wrapped `/bin/sh` holds when its starter also hands it `/dev/null`
+/// under that descriptor's own number, not closed on exec, as a parent of the engine leaves
+/// one open. Inputs: the sandbox and the case. Output: the harness's `ls /proc/self/fd`.
+fn listed_with_inherited(sandbox: &dyn Sandbox, case: &Case) -> String {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", "ls /proc/self/fd"])
+        .current_dir(case.project.join("worktrees"));
+    let mut wrapped = sandbox.wrap(&harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let output = crazyagent::spawn_gate::spawn_handing(&mut wrapped, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A guard, V243-LINUX-HARNESS-FD-LEAK: a descriptor the engine inherited and does not close
+/// on exec reaches no harness, plain, nested or bridged, where a GitHub runner's two open
+/// pipes reached every one. The control shows a plain child does inherit it.
+#[test]
+fn a_descriptor_the_engine_inherited_reaches_no_harness() {
+    let case = case();
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let number = inherited.as_raw_fd().to_string();
+    let mut plain = Command::new("/bin/ls");
+    plain
+        .arg("/proc/self/fd")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
+    let control = crazyagent::spawn_gate::spawn_handing(&mut plain, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        String::from_utf8(control.stdout)
+            .unwrap()
+            .lines()
+            .any(|line| line == number),
+        "the control: a plain child inherits descriptor {number}"
+    );
+    let bridged = SandboxNetwork::Only(vec![SandboxRemote::Loopback(18_080)]);
+    let mut sandboxes = vec![pinned(policy(&case, SandboxNetwork::Open))];
+    sandboxes.extend(nested(policy(&case, SandboxNetwork::Open)));
+    sandboxes.extend(nested(policy(&case, bridged)));
+    for sandbox in &sandboxes {
+        assert_eq!(
+            listed_with_inherited(sandbox, &case),
+            "0\n1\n2\n3\n",
+            "{:?}",
+            sandbox.backend()
+        );
+    }
 }
 
 /// Tells whether a broker that carries a port runs on this machine, by its arguments.
@@ -3137,9 +3208,37 @@ fn bubblewrap_starts_for_a_nested_agent_with_no_new_privileges() {
     assert_eq!(held, Some("1"), "{status}");
 }
 
-/// A gate row for a bubblewrap fact taken from memory: `--die-with-parent` must tie the
-/// namespace to bubblewrap's outer process only. Were that outer process tied to the thread
-/// that started it, an agent would end when an engine thread does.
+/// Starts a wrapped `/bin/sh -c script` as [`started`] does, from a thread kept until the
+/// returned keeper drops, as the rcli master host starts its agent. Inputs: the sandbox,
+/// the case and the script, which prints `ready` first. Output: the running first process,
+/// the reader of the rest of its output and its keeper.
+fn kept_started(
+    sandbox: &dyn Sandbox,
+    case: &Case,
+    script: &str,
+) -> (Child, BufReader<ChildStdout>, Keeper) {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", script])
+        .current_dir(case.project.join("worktrees"));
+    let mut command = sandbox.wrap(&harness).unwrap();
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let (mut child, keeper) =
+        crazyagent::spawn_gate::kept(move || crazyagent::spawn_gate::spawn(&mut command)).unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    (child, output, keeper)
+}
+
+/// V243 P6: bubblewrap's outer process, the first process of a nested agent, dies with the
+/// thread that forked it (`--die-with-parent`), so an agent started on an engine thread that
+/// then ends, as a tokio worker does, would end with it. Started through the custody, as the
+/// rcli master host starts its agent, it outlives the thread that asked for it.
 #[test]
 fn a_nested_agent_outlives_the_thread_that_started_it() {
     let case = case();
@@ -3147,9 +3246,9 @@ fn a_nested_agent_outlives_the_thread_that_started_it() {
         return;
     };
     let script = "echo ready; read -r line; echo \"got $line\"";
-    let (mut child, mut output) = std::thread::scope(|scope| {
+    let (mut child, mut output, _keeper) = std::thread::scope(|scope| {
         scope
-            .spawn(|| started(&sandbox, &case, script))
+            .spawn(|| kept_started(&sandbox, &case, script))
             .join()
             .unwrap()
     });
@@ -3163,6 +3262,62 @@ fn a_nested_agent_outlives_the_thread_that_started_it() {
     assert_eq!(line, "got on\n");
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+/// The token a stand-in engine run of [`a_kept_nested_agent_ends_with_the_engine`] finds in
+/// its environment: its agent sleeps for it, so the row finds that agent by command line.
+const KEPT_ENGINE: &str = "CRAZYAGENT_TEST_KEPT_ENGINE";
+
+/// The file a stand-in engine run of [`a_kept_nested_agent_ends_with_the_engine`] writes once
+/// its agent printed `ready`, so bubblewrap runs and has set its death signal by then.
+const KEPT_READY: &str = "CRAZYAGENT_TEST_KEPT_READY";
+
+/// rv-sec3 N1, a guard for the custody: a nested agent started through it still ends with the
+/// engine. The row runs itself again as a stand-in engine that starts the agent so and waits;
+/// once the stand-in is killed, nothing the agent runs is left. It holds with the agent
+/// forked on the calling thread too, and must keep holding with the custody.
+#[test]
+fn a_kept_nested_agent_ends_with_the_engine() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    if let (Ok(token), Some(ready)) = (std::env::var(KEPT_ENGINE), std::env::var_os(KEPT_READY)) {
+        let script = format!("echo ready; exec sleep {token}");
+        let _kept = kept_started(&sandbox, &case, &script);
+        fs::write(ready, "ready").unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
+    let token = format!("604.{}", std::process::id());
+    let ready = case.tmp.join("kept-engine-ready");
+    let mut engine = crazyagent::spawn_gate::spawn(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "a_kept_nested_agent_ends_with_the_engine",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(KEPT_ENGINE, &token)
+            .env(KEPT_READY, &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in engine never started its agent"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(running(&token), "the stand-in's agent is not running");
+    assert_eq!(engine.try_wait().unwrap(), None);
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+    assert!(ended(&token), "the agent outlived the engine that kept it");
 }
 
 /// A gate row for a bubblewrap fact taken from memory: its outer process exits with the
@@ -3822,16 +3977,25 @@ fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
 const STORM: &str = "import os, signal
 signal.signal(signal.SIGALRM, lambda number, frame: None)
 signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+def made(name):
+    for _ in range(10000):
+        try:
+            return os.mkdir(name)
+        except InterruptedError:
+            pass
+    raise SystemExit('mkdir interrupted 10000 times: ' + name)
 for number in range(300):
     os.close(os.open('storm-%d' % number, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-    os.mkdir('storm-folder-%d' % number)
+    made('storm-folder-%d' % number)
 signal.setitimer(signal.ITIMER_REAL, 0)
 print('made=' + str(len([name for name in os.listdir('.') if name.startswith('storm-')])))
 ";
 
 /// A signal that lands while the supervisor makes an entry must not run the call twice:
-/// the second run would find the entry the first one made. The trapped call waits for its
-/// answer through every signal but a fatal one.
+/// the second run would find the entry the first one made. One that lands before the
+/// supervisor reads the call withdraws it unrun (EINTR, which Python retries for `open` but
+/// not `mkdir`, so the stand-in retries it); once read, the call waits for its answer through
+/// every signal but a fatal one, so a retry that meets the entry fails the row.
 #[test]
 fn a_signal_storm_runs_no_supervised_call_twice() {
     let case = case();

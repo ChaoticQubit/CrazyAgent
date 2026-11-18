@@ -70,6 +70,15 @@ impl Case {
         install(&self.root, &self.bin, VERSION)
     }
 
+    /// Writes the engine database every real engine root holds, with the default sandbox
+    /// settings, so a step's Linux boundary reads the owner's choices instead of refusing a
+    /// root with no store. Input: none. Output: none.
+    fn store(&self) {
+        let connection = rusqlite::Connection::open(self.root.join("engine.db")).unwrap();
+        crate::sandbox_settings::initialize(&connection).unwrap();
+        assert!(self.root.join("engine.db").is_file());
+    }
+
     /// Lists the hidden staging and work folders installs left in `setup/npm`.
     fn staged(&self) -> Vec<String> {
         fs::read_dir(self.npm())
@@ -513,6 +522,7 @@ fn registered(folder: &Path) -> bool {
 #[test]
 fn a_check_inside_the_backoff_after_a_failed_install_gets_the_time_left_and_never_npx() {
     let case = case("/usr/bin/false");
+    case.store();
     fs::write(case.npm().join(FAILED), (now() - 60).to_string()).unwrap();
     match for_check(&case.root, npx_in(&case, VERSION)) {
         ForCheck::Failed(left) => assert!(
@@ -805,6 +815,7 @@ fn only_node_22_5_or_newer_runs_the_shared_install() {
 #[test]
 fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_server() {
     let case = case("/usr/bin/false");
+    case.store();
     node_reports(&case.bin, "v22.4.1");
     assert_eq!(case.install().unwrap_err().0, "context_mode_node_too_old");
     assert_eq!(
