@@ -144,9 +144,9 @@ jobs:
       - name: Run the spike rows
         working-directory: spikes/native-windows
         run: |
-          set -uo pipefail
-          SPIKE_LOG="$RUNNER_TEMP/spike.log" /usr/bin/timeout 300 ./target/release/native-windows-spike.exe
-          code=$?
+          set +e -uo pipefail
+          code=0
+          SPIKE_LOG="$RUNNER_TEMP/spike.log" /usr/bin/timeout 300 ./target/release/native-windows-spike.exe || code=$?
           echo "spike exit $code" | tee -a "$RUNNER_TEMP/spike.log"
           cat "$RUNNER_TEMP/spike.log"
           exit "$code"
