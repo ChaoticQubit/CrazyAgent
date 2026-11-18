@@ -2713,11 +2713,26 @@ fn start_sign_in(engine: &Engine, home: &Path, tile: &str, method: &str) -> Scri
     pty
 }
 
-/// DEC-166: whether the screen shows a sign-in that ran the harness: its failure line with
-/// the key to try again and no too-old line. Input: the screen. Output: the answer.
-fn ran_the_harness(screen: &str) -> bool {
-    !screen.contains(TOO_OLD_WORDS)
-        && (screen.contains("Press n to try again.") || screen.contains("Press n for a new code."))
+/// DEC-166: whether the screen shows a sign-in that ran this harness's stand-in: no too-old
+/// line, and the line the engine gives only once the started stand-in ended without signing
+/// in, with its key line. Claude Code's is `native_auth_claude_native_exit` and "Press n to try
+/// again."; Codex's device code sign-in gives `native_auth_codex_exited_before_observation`, or
+/// `native_auth_codex_io_failed` when Codex ended before the engine's first request reached it,
+/// and "Press n for a new code." A harness not found never matches.
+/// Inputs: the harness name and the screen. Output: the answer.
+fn ran_the_harness(name: &str, screen: &str) -> bool {
+    let (ended, key) = match name {
+        "Codex" => (
+            screen.contains("Codex stopped before it finished. Try again.")
+                || screen.contains("CrazyAgent lost contact with Codex. Try again."),
+            "Press n for a new code.",
+        ),
+        _ => (
+            screen.contains(&format!("{name} stopped before it finished. Try again.")),
+            "Press n to try again.",
+        ),
+    };
+    ended && screen.contains(key) && !screen.contains(TOO_OLD_WORDS)
 }
 
 /// DEC-166: one harness below its sign-in minimum in the TUI: the sign-in stops with the
@@ -2763,7 +2778,7 @@ fn too_old_then_updated_in_the_tui(
     pty.until_within(
         "a sign-in that runs the harness at its minimum",
         SIGN_IN_TIME,
-        ran_the_harness,
+        |screen| ran_the_harness(name, screen),
     );
     drop(pty);
     engine.stop();
@@ -2815,7 +2830,7 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
     pty.until_within(
         "a Claude sign-in that runs Claude Code",
         SIGN_IN_TIME,
-        ran_the_harness,
+        |screen| ran_the_harness("Claude Code", screen),
     );
     for _ in 0..STEPS_MAX {
         if pty.screen().contains("Where does the model come from?") {
@@ -2829,7 +2844,7 @@ fn harnesses_with_an_unknown_version_sign_in_from_the_tui_as_before() {
     pty.until_within(
         "a ChatGPT sign-in that runs Codex",
         SIGN_IN_TIME,
-        ran_the_harness,
+        |screen| ran_the_harness("Codex", screen),
     );
     drop(pty);
     engine.stop();
