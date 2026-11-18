@@ -227,6 +227,7 @@ impl<T> Outbox<T> {
 pub struct Direct<T> {
     queue: VecDeque<T>,
     lost: bool,
+    told: bool,
 }
 
 impl<T> Default for Direct<T> {
@@ -234,6 +235,7 @@ impl<T> Default for Direct<T> {
         Direct {
             queue: VecDeque::new(),
             lost: false,
+            told: false,
         }
     }
 }
@@ -259,15 +261,18 @@ impl<T> Direct<T> {
         assert!(most > 0);
         let count = self.queue.len().min(most);
         let taken: Vec<T> = self.queue.drain(..count).collect();
-        let lost = self.queue.is_empty() && std::mem::take(&mut self.lost);
+        let stop = self.queue.is_empty() && self.lost && !self.told;
+        self.told |= stop;
         assert!(taken.len() <= most);
-        (taken, lost)
+        assert!(!stop || self.lost);
+        (taken, stop)
     }
 
     /// Forgets everything a reader left, as its client is dropped.
     pub fn clear(&mut self) {
         self.queue.clear();
         self.lost = false;
+        self.told = false;
         assert!(self.queue.is_empty());
     }
 }

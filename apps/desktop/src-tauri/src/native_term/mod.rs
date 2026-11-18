@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn no_native_file_activates_the_app_or_makes_a_window_key() {
+    fn no_native_file_brings_the_app_forward_or_makes_a_window_key() {
         let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
         let mut read = 0;
         for entry in std::fs::read_dir(&folder).expect("native_term folder") {

@@ -18,8 +18,8 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSResponder, NSView, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry as Slot;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,8 +38,11 @@ const DRAIN_MAX: usize = 512;
 /// The most rounds the outermost host call spends on events AppKit sent meanwhile.
 const SETTLE_ROUNDS: usize = 8;
 
-/// The most times work queued for the main thread is queued again while a host call
-/// further up the main thread's stack holds the state.
+/// The most host calls parked while a host call further up the main thread's stack holds
+/// the state; that call's settle runs them.
+const PARKED_MAX: usize = 64;
+
+/// The most times work for the main loop is queued again while the park is full.
 const LATER_TRIES: u8 = 8;
 
 /// The cursor blink half period, as the xterm panel blinks.
@@ -56,10 +59,14 @@ const OPEN_CODES: [&str; 4] = [
 
 const _: () = assert!(SETTLE_ROUNDS > 0 && DRAIN_MAX > 0 && DRAIN_MAX < INBOX_MAX);
 
+/// Host work parked until the call holding the state settles.
+type Parked = Box<dyn FnOnce(&mut Native)>;
+
 thread_local! {
     static NATIVE: RefCell<Option<Native>> = const { RefCell::new(None) };
     static OUTBOX: RefCell<Outbox<ViewEvent>> = RefCell::new(Outbox::default());
     static PENDING: Cell<bool> = const { Cell::new(false) };
+    static PARKED: RefCell<VecDeque<Parked>> = const { RefCell::new(VecDeque::new()) };
 }
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
@@ -182,15 +189,25 @@ fn io_code(error: &std::io::Error) -> &'static str {
 }
 
 /// Asks the main loop for one drain, coalesced: a burst of events costs one wake. Runs on
-/// any thread; never touches the native state itself.
+/// any thread and never touches the native state itself; on the main thread it goes through
+/// the async runtime, as tauri runs a main-thread task inline there.
 fn schedule() {
     if SCHEDULED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let sent = APP
-        .get()
-        .is_some_and(|app| app.run_on_main_thread(drain).is_ok());
-    if !sent {
+    let Some(app) = APP.get().cloned() else {
+        SCHEDULED.store(false, Ordering::Release);
+        return;
+    };
+    if MainThreadMarker::new().is_some() {
+        tauri::async_runtime::spawn(async move {
+            if app.run_on_main_thread(drain).is_err() {
+                SCHEDULED.store(false, Ordering::Release);
+            }
+        });
+        return;
+    }
+    if app.run_on_main_thread(drain).is_err() {
         SCHEDULED.store(false, Ordering::Release);
     }
 }
@@ -223,17 +240,26 @@ fn with_native<T, W: FnOnce(&mut Native) -> T>(work: W) -> Result<T, (Held, W)> 
     })
 }
 
-/// Runs work on the native state from the main loop, queued again while a host call holds
-/// the state, at most `tries` more times. Inputs: the app, the tries left and the work.
+/// Runs work on the native state from the main loop after the tasks queued before it. It
+/// goes through the async runtime, as tauri runs a main-thread task inline on the main
+/// thread. Work that finds the state held is parked for the holder's settle, or with the park
+/// full queued again, at most `tries` more times. Inputs: the app, the tries left, the work.
 fn later(app: &AppHandle, tries: u8, work: impl FnOnce(&mut Native) + Send + 'static) {
     assert!(tries <= LATER_TRIES);
-    let again = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        if let Err((Held::Busy, work)) = with_native(work)
-            && tries > 0
-        {
-            later(&again, tries - 1, work);
-        }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let again = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let Err((Held::Busy, work)) = with_native(work) else {
+                return;
+            };
+            let room = PARKED.with(|parked| parked.borrow().len() < PARKED_MAX);
+            if room {
+                PARKED.with(|parked| parked.borrow_mut().push_back(Box::new(work)));
+            } else if tries > 0 {
+                later(&again, tries - 1, work);
+            }
+        });
     });
 }
 
@@ -403,12 +429,15 @@ impl Native {
     }
 
     /// Applies what AppKit sent while this call held the state: overflowed views end, the
-    /// rest apply in order, then a drain that found the state busy runs; then it draws.
+    /// rest apply in order, then parked work and a drain that found the state busy run; then
+    /// it draws.
     fn settle(&mut self) {
         for _ in 0..SETTLE_ROUNDS {
             let (events, over) = OUTBOX.with(|outbox| outbox.borrow_mut().take());
             let pending = PENDING.with(|pending| pending.replace(false));
-            if events.is_empty() && over.is_empty() && !pending {
+            let parked: Vec<Parked> = PARKED.with(|parked| parked.borrow_mut().drain(..).collect());
+            assert!(parked.len() <= PARKED_MAX);
+            if events.is_empty() && over.is_empty() && parked.is_empty() && !pending {
                 self.draw_dirty();
                 return;
             }
@@ -417,6 +446,9 @@ impl Native {
             }
             for (page, event) in events {
                 self.on_view(page, event);
+            }
+            for work in parked {
+                work(self);
             }
             if pending {
                 self.drain();

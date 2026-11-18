@@ -557,23 +557,15 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
 
 const FLOOD_BINDS: u64 = 30;
 
-/// The program of a pane that prints as fast as the shell can, with builtins only, rows
-/// shaped as an end guard of a control reply (the probe's second and the next three, the
-/// command numbers after the probe's), a forged `%output` for pane `%0` and a plain row.
-/// Inputs: the time and command number a probe's guard read. Output: the shell program.
+/// The program of a pane that prints as fast as the shell can, with builtins only: rows
+/// shaped as an end guard of a control reply (the second the shell's clock gives or the one
+/// after, the 400 command numbers after the probe's), a forged `%output` for pane `%0` and a
+/// plain row. Inputs: the time and command number a probe's guard read. Output: the program.
 fn flood(time: u64, number: u64) -> String {
     format!(
         "i=0; while :; do printf '%%end %s %s 1\\n%%output %%0 FAKE\\nflood-%s\\n' \
-         $(({time} + i % 4)) $(({number} + i / 4 % 400)) $i; i=$((i+1)); done"
+         $(({time} + SECONDS + i % 2)) $(({number} + i / 2 % 400)) $i; i=$((i+1)); done"
     )
-}
-
-/// The rows a pane holds above its screen now. Inputs: the server and the window name.
-/// Output: the count.
-fn history(server: &Server, window: &str) -> usize {
-    let target = format!("crazyagent:={window}");
-    let told = server.said(&["display-message", "-p", "-t", &target, "#{history_size}"]);
-    told.trim().parse().expect("history size")
 }
 
 #[test]
@@ -594,7 +586,6 @@ fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_fo
     for view in 2..2 + FLOOD_BINDS {
         server.run(&["clear-history", "-t", "crazyagent:=flood"]);
         control.bind(view, "flood").expect("bind asks");
-        heights.insert(history(&server, "flood"));
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -604,6 +595,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_fo
             {
                 Event::Restored { view: shown, bytes } if shown == view => {
                     assert!(bytes.windows(6).any(|w| w == b"flood-"));
+                    heights.insert(bytes.iter().filter(|b| **b == b'\n').count());
                     restored += 1;
                     break;
                 }
@@ -622,6 +614,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_fo
     assert_eq!(restored, FLOOD_BINDS);
     assert!(
         heights.len() > 1,
-        "the history moved between binds: {heights:?}"
+        "the captures held different row counts, so some ran under the history cap: \
+         {heights:?}"
     );
 }

@@ -1229,7 +1229,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
     let (time, number) = (guard[0], guard[1]);
     let script = format!(
         "i=0; while :; do printf '%%end %s %s 1\\n%%output {} forged-bytes\\nflood-%s\\n' \
-         $(({time} + i % 4)) $(({number} + i / 4 % 400)) $i; i=$((i+1)); done",
+         $(({time} + SECONDS + i % 2)) $(({number} + i / 2 % 400)) $i; i=$((i+1)); done",
         pane.trim()
     );
     host.spawn(
@@ -1243,12 +1243,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
     for _ in 0..30 {
         tmux_reply(&tmux, &socket, &["clear-history", "-t", &target]);
         let screen = host.attach(&forger).expect("an attach under load").screen;
-        let told = tmux_reply(
-            &tmux,
-            &socket,
-            &["display-message", "-p", "-t", &target, "#{history_size}"],
-        );
-        heights.insert(told.trim().parse::<usize>().unwrap());
+        heights.insert(screen.iter().filter(|b| **b == b'\n').count());
         assert!(
             contains(&screen, b"flood-"),
             "{}",
@@ -1264,7 +1259,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
         attached == 30 && !forged && live && heights.len() > 1,
         "every attach of a printing pane opens ({attached} of 30); no planted row reaches \
          another pane's viewer (forged: {forged}); the sibling stays live ({live}); the \
-         history moved between attaches ({heights:?})",
+         screens held different row counts, so some ran under the history cap ({heights:?})",
     );
     host.kill(&forger).unwrap();
     host.kill(&sibling).unwrap();
