@@ -807,6 +807,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
     ),
     (
+        "server_node_folder_unreadable",
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.",
+    ),
+    (
         "server_output_too_large",
         "The server sent too much output.",
     ),
@@ -889,7 +893,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 pub const CHECK_REFUSED: &str = "server_check_refused:";
 
 /// The longest boundary reason a recorded check problem carries.
-const CHECK_REASON_BYTES_MAX: usize = 1024;
+pub const CHECK_REASON_BYTES_MAX: usize = 1024;
 
 /// Records a boundary refusal of a server check with the boundary's reason. Input: the plain
 /// reason, never empty. Output: the problem to record, which [`check_problem`] shows.

@@ -76,8 +76,10 @@ impl WindowsSandbox {
     /// profile its next launch uses; the existing `grants` folder, where the helper records
     /// what it grants each container, must lie outside them too. Inputs: the policy, the
     /// helper, the profile path and the grants folder. Output: the sandbox, `Unavailable` for
-    /// a missing helper or an endpoint limit, or `Invalid` for an unsafe path or policy.
-    /// Before the profile, it makes each missing guarded folder (see
+    /// a missing helper or an endpoint limit, `Unreadable` for a read root no app container
+    /// may read and this user cannot change ([`crazyagent_win_sandbox::unreadable_root`]),
+    /// which the helper could not open to the agent, or `Invalid` for an unsafe path or
+    /// policy. Before the profile, it makes each missing guarded folder (see
     /// [`make_guarded_folders`]).
     pub fn install(
         sandbox: ProjectSandbox,
@@ -90,6 +92,13 @@ impl WindowsSandbox {
             .ok_or_else(|| invalid("grants folder must exist"))?;
         make_guarded_folders(&sandbox)?;
         let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
+        if let Some(root) = boundary
+            .read_roots
+            .iter()
+            .find(|root| crazyagent_win_sandbox::unreadable_root(Path::new(root)))
+        {
+            return Err(SandboxError::Unreadable(PathBuf::from(root)));
+        }
         let helper = existing_helper(helper)?;
         let parent = profile
             .parent()

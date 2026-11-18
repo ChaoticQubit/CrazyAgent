@@ -1525,6 +1525,9 @@ fn boundary_check(
         ForCheck::Refused("context_mode_npx_not_found") => {
             return Err("server_npx_not_found".into());
         }
+        ForCheck::Refused("context_mode_node_folder_unreadable") => {
+            return Err("server_node_folder_unreadable".into());
+        }
         ForCheck::Refused(code) => {
             eprintln!("plugin_check_install_refused cause={code}");
             return Err("server_cant_start".into());
@@ -1563,6 +1566,15 @@ fn boundary_check(
         SandboxError::Unavailable(reason) => {
             eprintln!("plugin_check_boundary_refused cause={reason}");
             crate::plugins::check_refused(&reason)
+        }
+        SandboxError::Unreadable(folder) => {
+            let reason = crate::sandbox::unreadable_reason(&folder);
+            eprintln!("plugin_check_boundary_refused cause={reason}");
+            if reason.len() <= crate::plugins::CHECK_REASON_BYTES_MAX {
+                crate::plugins::check_refused(&reason)
+            } else {
+                "server_cant_start".to_owned()
+            }
         }
         other => refused(&other).to_owned(),
     };

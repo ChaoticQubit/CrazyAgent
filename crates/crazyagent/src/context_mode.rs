@@ -1,4 +1,5 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
+use crate::sandbox::SandboxError;
 use crate::setup::InstallError;
 use base64::Engine;
 use os::{
@@ -24,6 +25,7 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
+const NODE_FOLDER_UNREADABLE: &str = "context_mode_node_folder_unreadable";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
 const NODE_PROFILE: &str = "node.sb";
@@ -450,11 +452,13 @@ fn node_command(
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
-    let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    let real = canonical(bin)?;
+    let sandbox = sandbox.allow_read(&real).map_err(refused)?;
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
     let profile = scratch.join(NODE_PROFILE);
-    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
+    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict)
+        .map_err(|error| boundary_refused(&real, error))?;
     let mut node = std::process::Command::new(bin.join(NODE));
     node.arg("--version").current_dir(&folders[0]);
     sandbox.wrap(&node).map_err(refused)
@@ -689,6 +693,25 @@ fn remove_staged(parent: &Path, prefix: &str, version: &str) {
 
 fn refused<E>(_: E) -> InstallError {
     InstallError("context_mode_sandbox_unavailable")
+}
+
+/// The install code for a boundary that did not install: a read root no app container may
+/// read and this user cannot change is [`NODE_FOLDER_UNREADABLE`] when it is npx's folder,
+/// logged with the folder; every other refusal is `context_mode_sandbox_unavailable`.
+/// Inputs: npx's canonical folder and the refusal. Output: the code.
+fn boundary_refused(bin: &Path, error: SandboxError) -> InstallError {
+    let SandboxError::Unreadable(folder) = error else {
+        return refused(error);
+    };
+    eprintln!(
+        "context_mode_boundary_refused cause=unreadable folder={}",
+        folder.display()
+    );
+    if folder == bin {
+        InstallError(NODE_FOLDER_UNREADABLE)
+    } else {
+        refused(folder)
+    }
 }
 
 /// Installs `source` into the staging folder with package scripts off, so no script of the
