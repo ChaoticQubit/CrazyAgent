@@ -608,12 +608,15 @@ async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
     for day in 1..=BACKUPS_KEPT {
         std::fs::create_dir(folder.join(format!("1-to-2-9999010{day}T000000000Z"))).unwrap();
     }
+    let shaped_file = folder.join("1-to-2-99990106T000000000Z");
+    std::fs::write(&shaped_file, b"not a backup").unwrap();
 
     close(root.open().await.unwrap()).await;
 
     let names: Vec<String> = root
         .backups()
         .iter()
+        .filter(|path| path.is_dir())
         .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
         .collect();
     assert_eq!(names.len(), BACKUPS_KEPT, "{names:?}");
@@ -622,6 +625,8 @@ async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
         "{names:?}"
     );
     assert!(!folder.join("1-to-2-99990101T000000000Z").exists());
+    assert!(folder.join("1-to-2-99990102T000000000Z").is_dir());
+    assert_eq!(std::fs::read(&shaped_file).unwrap(), b"not a backup");
 }
 
 /// #512 r2 (rv-sec2 F1, leader 05:13): only a real folder of this user counts as a backup, so
