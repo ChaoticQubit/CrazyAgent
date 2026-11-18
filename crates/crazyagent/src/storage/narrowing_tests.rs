@@ -36,10 +36,15 @@ fn revocation(name: &str, epoch: i64) -> Intent {
     }
 }
 
-/// The intent file names in the folder, sorted. Input: the engine root. Output: the names.
+/// The intent file names in the folder, sorted; none while the folder was never made, as
+/// before the first write. Input: the engine root. Output: the names.
 fn names(root: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(root.join(FOLDER))
-        .unwrap()
+    let folder = match std::fs::read_dir(root.join(FOLDER)) {
+        Ok(folder) => folder,
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(other) => panic!("the intent folder cannot be read: {other}"),
+    };
+    let mut names: Vec<String> = folder
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
@@ -91,7 +96,7 @@ fn intents_are_listed_in_the_order_they_were_written() {
     let written: Vec<IntentId> = (0..20)
         .map(|index| {
             intents
-                .write(&revocation(&format!("revoke-{index}"), index))
+                .write(&revocation(&format!("revoke-{index}"), index + 1))
                 .unwrap()
         })
         .collect();
