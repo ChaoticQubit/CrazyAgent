@@ -65,7 +65,7 @@ impl Planted {
             let mark = file.with_extension("ran");
             if let Ok(text) = fs::read_to_string(&mark) {
                 ran.insert(text);
-                fs::remove_file(&mark).unwrap();
+                fs::remove_file(mark).unwrap();
             }
         }
         ran.into_iter().collect()
@@ -96,7 +96,7 @@ fn marker(scratch: &Path) -> PathBuf {
     let program = scratch.join("marker.exe");
     let built = Command::new("rustc")
         .arg("-O")
-        .arg(&source)
+        .arg(source)
         .arg("-o")
         .arg(&program)
         .status()
@@ -148,7 +148,7 @@ fn fixture(git: &Path, base: &Path) -> (PathBuf, PathBuf, Vec<(&'static str, Str
     setup(
         plain()
             .args(["config", "gpg.ssh.allowedSignersFile"])
-            .arg(&signers),
+            .arg(signers),
     );
     let mut commits = Vec::new();
     for (armor, begin, end) in ARMORS {
@@ -163,7 +163,7 @@ fn fixture(git: &Path, base: &Path) -> (PathBuf, PathBuf, Vec<(&'static str, Str
         let commit = setup(
             plain()
                 .args(["hash-object", "-t", "commit", "-w"])
-                .arg(&text),
+                .arg(text),
         );
         commits.push((armor, commit));
     }
@@ -219,11 +219,11 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
     let bases = [
         tempfile::Builder::new()
             .prefix("ca-plant")
-            .tempdir_in(&elsewhere)
+            .tempdir_in(elsewhere)
             .unwrap(),
         tempfile::Builder::new()
             .prefix("ca-plant")
-            .tempdir_in(&profile)
+            .tempdir_in(profile)
             .unwrap(),
     ];
     let marker = marker(scratch.path());
@@ -376,7 +376,6 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
             None,
         );
     }
-    drop(check);
     assert!(
         failures.is_empty(),
         "a Windows git ran a planted program or ended wrong: {failures:#?}"
