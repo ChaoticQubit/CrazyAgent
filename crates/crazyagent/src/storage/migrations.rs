@@ -977,9 +977,9 @@ mod windows_tests {
         drop(connection);
     }
 
-    /// V244-WIN-BACKUP-DB-LABEL (leader 06:32, #524 r3 sec LOW): an upgrade backup's engine.db
-    /// copy carries the medium no-read-up label engine.db carries, so a lower integrity
-    /// process of the user can read neither.
+    /// V244-WIN-BACKUP-DB-LABEL (leader 06:32, #524 r3 sec LOW), V244-WIN-STORE-LABEL-NX: an
+    /// upgrade backup's engine.db copy carries the full medium label engine.db carries, so a
+    /// lower integrity process of the user can neither read nor hold either.
     #[test]
     fn a_backup_copy_of_the_database_carries_the_no_read_up_label() {
         let root = tempfile::tempdir().unwrap();
@@ -993,7 +993,7 @@ mod windows_tests {
             .unwrap()
             .label
             .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap());
-        assert_eq!(label, Some((0x2000, 0x3)));
+        assert_eq!(label, Some((0x2000, 0x7)));
         drop((copy, connection));
     }
 }
