@@ -72,11 +72,29 @@ fn account(member: &str, account: ResearchAccount) -> AccountPick {
     }
 }
 
+/// The pick a keyed endpoint member gives a harness: its account where the key relay that
+/// carries the key can start ([`crate::harnesses::keyed_runs_here`]), none where it cannot, as
+/// on Windows. Inputs: the harness, the member and its account. Output: the expected pick.
+fn keyed(harness: &str, member: &str, expected: ResearchAccount) -> AccountPick {
+    assert!(crate::harnesses::KEY_RELAYED.contains(&harness));
+    assert!(matches!(
+        &expected,
+        ResearchAccount::Endpoint { key: Some(_), .. }
+            | ResearchAccount::AnthropicEndpoint { key: Some(_), .. }
+    ));
+    if crate::harnesses::keyed_runs_here(harness) {
+        account(member, expected)
+    } else {
+        AccountPick::NoUsableAccount
+    }
+}
+
 #[test]
 fn research_runs_on_endpoint_accounts_with_or_without_a_key_by_wire_format() {
     assert_eq!(
         picked("openai-keyed", "codex"),
-        account(
+        keyed(
+            "codex",
             "openai-keyed",
             ResearchAccount::Endpoint {
                 base_url: "https://api.openai.com/v1".into(),
@@ -87,7 +105,8 @@ fn research_runs_on_endpoint_accounts_with_or_without_a_key_by_wire_format() {
     );
     assert_eq!(
         picked("anthropic-keyed", "claude-code"),
-        account(
+        keyed(
+            "claude-code",
             "anthropic-keyed",
             ResearchAccount::AnthropicEndpoint {
                 base_url: "https://api.anthropic.com".into(),

@@ -10,8 +10,18 @@ fn codex(entries: &[HarnessEntry]) -> &HarnessStatus {
         .status
 }
 
+/// The file a search finds for Codex in a folder: `codex` off Windows, `codex.exe` on it, the
+/// first name [`crate::paths::executable_names`] tries. Input: the folder. Output: the path.
+fn codex_file(folder: &Path) -> PathBuf {
+    let names = crate::paths::executable_names("codex");
+    assert!(!names.is_empty());
+    let path = folder.join(&names[0]);
+    assert!(path.starts_with(folder));
+    path
+}
+
 fn install(folder: &Path) {
-    let path = folder.join("codex");
+    let path = codex_file(folder);
     std::fs::write(&path, "#!/bin/sh\n").unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -92,7 +102,7 @@ async fn a_cached_catalog_is_served_while_its_re_probe_runs_and_a_check_probes_n
     }
     assert!(ready, "the background probe replaced the cached catalog");
 
-    std::fs::remove_file(folder.path().join("codex")).unwrap();
+    std::fs::remove_file(codex_file(folder.path())).unwrap();
     let checked = cache.entries(search.clone(), true).await.unwrap();
     assert_eq!(
         codex(&checked),
@@ -141,7 +151,7 @@ async fn a_cached_catalog_whose_harness_file_is_gone_is_probed_before_it_answers
     install(folder.path());
     let first = cache.entries(search.clone(), false).await.unwrap();
     assert_eq!(codex(&first), &HarnessStatus::Ready);
-    std::fs::remove_file(folder.path().join("codex")).unwrap();
+    std::fs::remove_file(codex_file(folder.path())).unwrap();
     let served = cache.entries(search, false).await.unwrap();
     assert_eq!(
         codex(&served),
