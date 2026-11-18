@@ -1537,6 +1537,7 @@ mod tests {
         present_unresized(&mut child, &mut shared, &mut surface, &frame, size);
         let larger_size = child.size();
         shared.resize(&mut surface, larger_size.0, larger_size.1);
+        child.changed();
         show_frame(&mut child, &mut shared, &mut surface, &frame, larger_size);
         clip_checkpoint("larger", &child);
         assert_eq!(child.part(), larger_part);
@@ -1553,6 +1554,7 @@ mod tests {
         assert_eq!(child.part(), Some(smaller));
         let smaller_size = child.size();
         shared.resize(&mut surface, smaller_size.0, smaller_size.1);
+        child.changed();
         show_frame(&mut child, &mut shared, &mut surface, &frame, smaller_size);
         clip_checkpoint("smaller", &child);
         assert_eq!(child.part(), Some(smaller));
