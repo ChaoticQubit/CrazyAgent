@@ -444,6 +444,26 @@ mod tests {
         assert_eq!(engine_socket(socket.as_os_str()), Ok(socket.clone()));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_agent_with_its_own_server_socket_is_refused() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let root = root.path();
+        assert_eq!(own_server(root, "team-1"), Ok(false));
+        let agent = crate::bridge::terminal::agent("team-1").expect("agent");
+        let socket = crazyagent::terminal::harness_socket(root, &agent).expect("socket path");
+        let folder = socket.parent().expect("socket folder").to_path_buf();
+        let made = !folder.exists();
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(&socket, b"").expect("plain file");
+        assert_eq!(own_server(root, "team-1"), Ok(true));
+        std::fs::remove_file(&socket).expect("remove");
+        assert_eq!(own_server(root, "team-1"), Ok(false));
+        if made {
+            std::fs::remove_dir(&folder).expect("remove folder");
+        }
+    }
+
     #[test]
     fn window_names_are_plain_agent_ids() {
         assert!(window_name("team-1").is_ok());
