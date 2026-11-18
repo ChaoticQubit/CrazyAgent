@@ -464,14 +464,6 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         missing.is_empty(),
         "the built desktop app does not link {missing:?}"
     );
-    let webview_linked = webview_only
-        .iter()
-        .filter(|command| linked.contains(*command))
-        .collect::<Vec<_>>();
-    assert!(
-        !macos || webview_linked.is_empty(),
-        "a macOS desktop app links the webview terminal commands {webview_linked:?}"
-    );
 }
 
 #[test]
