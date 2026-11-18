@@ -171,6 +171,11 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --lib --locked -- -D warnings
+      - name: Clippy on the crazyagent test rows on Windows
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          cargo clippy -p crazyagent --tests --locked -- -D warnings
       - name: Build the crazyagent library rows
         if: ${{ !cancelled() }}
         run: |
