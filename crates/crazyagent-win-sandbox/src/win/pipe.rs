@@ -3,7 +3,7 @@ use super::owner::{sid_bytes, token_user};
 use super::private::user_sid;
 use super::{Words, last_error};
 use crate::dacl::{SYSTEM, allowing, label};
-use crate::pipe::{Peer, Pin, Served};
+use crate::pipe::{NO_TOKEN, Peer, Pin, Reverted, Served, after_revert};
 use std::io;
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::Foundation::{
@@ -45,6 +45,7 @@ const RESTRICTED_BYTES_MAX: usize = 64 * 1024;
 const LABEL_BYTES_MAX: usize = 256;
 /// The authority of an integrity level SID, S-1-16.
 const LABEL_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 16];
+const _: () = assert!(ERROR_NO_TOKEN == NO_TOKEN);
 
 /// Creates one instance of the local named pipe `name` for the engine (DESIGN-0256 D8):
 /// byte mode, overlapped for Tokio, remote clients refused, at most `instances` instances
@@ -115,9 +116,9 @@ pub fn create(name: &str, first: bool, instances: u32) -> io::Result<OwnedHandle
 
 /// Reads who is at the client end of a connected engine pipe instance (DESIGN-0140 D9 step
 /// 1, NOTE-0145 A2): impersonates the client, opens the thread token as itself and reverts,
-/// with nothing that can panic in between; a failed revert aborts the process. Synchronous,
-/// for a blocking thread. Input: the server end, after the client's first bytes were read.
-/// Output: the peer, or the Windows error.
+/// with nothing that can panic in between. A failed revert, or a thread token still held
+/// after it, aborts the process; a probe that cannot tell refuses the check (#551 F1).
+/// Synchronous, for a blocking thread. Input: the server end. Output: the peer, or the error.
 pub fn client(pipe: BorrowedHandle<'_>) -> io::Result<Peer> {
     if unsafe { ImpersonateNamedPipeClient(pipe.as_raw_handle()) } == 0 {
         return Err(io::Error::last_os_error());
@@ -128,23 +129,26 @@ pub fn client(pipe: BorrowedHandle<'_>) -> io::Result<Peer> {
     if unsafe { RevertToSelf() } == 0 {
         std::process::abort();
     }
-    assert!(thread_token_gone(), "the peer check leaves no thread token");
-    if opened == 0 {
-        return Err(io::Error::from_raw_os_error(failure as i32));
+    let token = (opened != 0).then(|| unsafe { OwnedHandle::from_raw_handle(token) });
+    match left_after_revert() {
+        Reverted::Held => std::process::abort(),
+        Reverted::Unread(error) => return Err(io::Error::from_raw_os_error(error as i32)),
+        Reverted::Clean => {}
     }
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    let token = token.ok_or_else(|| io::Error::from_raw_os_error(failure as i32))?;
     peer_of(&token)
 }
 
-/// Whether this thread acts as the process again, holding no token of its own. Output:
-/// true when opening the thread token fails with ERROR_NO_TOKEN.
-fn thread_token_gone() -> bool {
+/// Probes this thread's own token once the check has reverted, closing any token it opens.
+/// Output: what [`crate::pipe::after_revert`] makes of the probe.
+fn left_after_revert() -> Reverted {
     let mut token: HANDLE = std::ptr::null_mut();
-    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } != 0 {
+    let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } != 0;
+    let error = if opened { 0 } else { last_error() };
+    if opened {
         drop(unsafe { OwnedHandle::from_raw_handle(token) });
-        return false;
     }
-    last_error() == ERROR_NO_TOKEN
+    after_revert(opened, error)
 }
 
 /// Reads who serves a connected engine pipe, before the client writes a byte (DESIGN-0256

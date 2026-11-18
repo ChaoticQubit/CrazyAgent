@@ -2,6 +2,29 @@
 pub use crate::win::pipe::{INSTANCES_MAX, client, create, pin_of, server};
 
 const MEDIUM_LEVEL: u32 = 0x2000;
+/// Windows' ERROR_NO_TOKEN: the thread holds no token of its own.
+pub(crate) const NO_TOKEN: u32 = 1008;
+
+/// What a probe of the thread's own token finds once the D9 check has reverted (rv-code
+/// #551 F1): no token, a token still held, or a probe that failed with this Windows error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reverted {
+    Clean,
+    Held,
+    Unread(u32),
+}
+
+/// Classifies that probe: an open that succeeds means a token is still held, so the process
+/// must abort; ERROR_NO_TOKEN means the thread acts as the process again; any other error
+/// leaves that unknown, so the check is refused. Inputs: whether the open succeeded and its
+/// error. Output: the classification.
+pub fn after_revert(opened: bool, error: u32) -> Reverted {
+    match (opened, error) {
+        (true, _) => Reverted::Held,
+        (false, NO_TOKEN) => Reverted::Clean,
+        (false, error) => Reverted::Unread(error),
+    }
+}
 
 /// What a token says about the process at the other end of an engine pipe (DESIGN-0256 D9,
 /// D10): its user SID, whether it is an AppContainer token, whether it has restricting SIDs,
