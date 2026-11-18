@@ -132,7 +132,21 @@ mod tests {
     }
 
     fn raise_call(text: &str) -> Option<String> {
-        focus_call(text)
+        let needles = [
+            ".present()",
+            "present_with_time",
+            "deiconify",
+            "set_keep_above",
+            ".raise()",
+            "XRaiseWindow",
+            "XSetInputFocus",
+        ];
+        focus_call(text).or_else(|| {
+            needles
+                .into_iter()
+                .find(|needle| text.contains(needle))
+                .map(str::to_owned)
+        })
     }
 
     fn scan(folder: &str, call: fn(&str) -> Option<String>) -> usize {
