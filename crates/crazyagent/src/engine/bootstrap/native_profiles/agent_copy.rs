@@ -68,11 +68,14 @@ fn keychain_unavailable() -> EngineError {
 }
 
 /// Whether an agent home lies in the account profiles folder below the engine folder, or the
-/// profiles folder cannot be read, so no agent keychain is made there. Inputs: the engine
-/// folder and the agent home. Output: the answer.
+/// profiles folder cannot be read, so no agent keychain is made there. Both are compared in
+/// their [`crate::sandbox::canonical`] spelling, so neither passes the other through the
+/// macOS data volume's name; a home that does not resolve is compared as given. Inputs: the
+/// engine folder and the agent home. Output: the answer.
 #[cfg(target_os = "macos")]
 fn inside_profiles(engine: &Path, home: &Path) -> bool {
-    std::fs::canonicalize(engine.join(super::ROOT))
+    let home = crate::sandbox::canonical(home).unwrap_or_else(|_| home.to_path_buf());
+    crate::sandbox::canonical(&engine.join(super::ROOT))
         .map_or(true, |profiles| home.starts_with(profiles))
 }
 

@@ -4673,10 +4673,7 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
 #[cfg(target_os = "windows")]
 fn owner_home() -> Result<PathBuf, SandboxError> {
     let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
-    if !clean_absolute(&home) {
-        return Err(invalid("owner home must be absolute"));
-    }
-    Ok(canonical(&home).unwrap_or(home))
+    settled_home(home)
 }
 
 #[cfg(unix)]
@@ -4688,14 +4685,14 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
 }
 
 /// The owner's home as the sandbox compares it: refused unless absolute and clean, then
-/// resolved when it resolves. Input: the home the account names. Output: the folder, or
-/// `Invalid` for a relative or unclean one.
-#[cfg(unix)]
+/// [`canonical`] when it resolves, so a home named through the macOS data volume has the
+/// short spelling every sandbox root has. Input: the home the account names. Output: the
+/// folder, or `Invalid` for a relative or unclean one.
 fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
     if !clean_absolute(&home) {
         return Err(invalid("owner home must be absolute"));
     }
-    Ok(home.canonicalize().unwrap_or(home))
+    Ok(canonical(&home).unwrap_or(home))
 }
 
 /// Names the credential files and folders the sandbox guards as they appear in a path: the

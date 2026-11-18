@@ -67,7 +67,9 @@ fn invalid() -> EngineError {
 /// objects through `objects/info/alternates` and never writes them, its branch at the
 /// owner's HEAD commit and checked out, with no command the owner's repository configures
 /// run. A clone cut at another commit, such as the Master's branch tip, starts there
-/// instead; the owner repository already holds it. Inputs: the owner checkout root, the
+/// instead; the owner repository already holds it. The worktree's parent must already be
+/// in its [`crate::sandbox::canonical`] spelling, and the worktree is never inside the
+/// repository's `.git` under either macOS name. Inputs: the owner checkout root, the
 /// new worktree folder, absolute, whose parent exists, that commit, None for the owner's
 /// HEAD, and the branch, `agent_git::branch` or a task branch. Output: Ok once the clone
 /// holds the commit, else `changes_workspace_invalid`, `changes_git_unsupported` or
@@ -85,9 +87,11 @@ pub(super) fn add(
     let objects = repository.join(".git").join("objects");
     let line = alternate_line(repository).ok_or_else(invalid)?;
     if !worktree.is_absolute()
-        || std::fs::canonicalize(parent).ok().as_deref() != Some(parent)
+        || crate::sandbox::canonical(parent).ok().as_deref() != Some(parent)
         || std::fs::symlink_metadata(worktree).is_ok()
         || worktree.starts_with(repository.join(".git"))
+        || crate::sandbox::canonical(repository)
+            .map_or(true, |real| worktree.starts_with(real.join(".git")))
         || !std::fs::symlink_metadata(&objects).is_ok_and(|found| found.is_dir())
     {
         return Err(invalid());
