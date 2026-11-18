@@ -975,6 +975,21 @@ pub fn linux_holds_fully(
     })
 }
 
+/// The engine refusal code of a Windows launch whose limited network names a loopback port
+/// (DESIGN-0256 O2a).
+pub const MODEL_LOOPBACK_UNAVAILABLE_WINDOWS: &str = "model_loopback_unavailable_windows";
+
+/// Why a Windows launch is refused when its network names a loopback port: the AppContainer
+/// cannot reach this computer's own network without an admin exemption (probe P6).
+pub const MODEL_LOOPBACK_WINDOWS_LINE: &str = "a Windows agent cannot reach a port on this computer, such as a local model server or the relay, because its AppContainer has no way to this computer's own network";
+
+/// Tells whether a launch refusal is the Windows loopback one ([`MODEL_LOOPBACK_WINDOWS_LINE`]),
+/// so a caller can give it its own code ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]). Input: the
+/// refusal. Output: the answer.
+pub fn model_loopback_windows(error: &SandboxError) -> bool {
+    matches!(error, SandboxError::Unavailable(reason) if reason == MODEL_LOOPBACK_WINDOWS_LINE)
+}
+
 /// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
 /// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
 /// answer.
@@ -5566,6 +5581,28 @@ mod linux_sockets_tests {
                     launched.network
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_windows_loopback_refusal_has_its_own_code_and_reads_plainly() {
+        assert!(model_loopback_windows(&SandboxError::Unavailable(
+            MODEL_LOOPBACK_WINDOWS_LINE.into()
+        )));
+        assert!(!model_loopback_windows(&SandboxError::Unavailable(
+            "other".into()
+        )));
+        assert!(!model_loopback_windows(&SandboxError::Invalid(
+            MODEL_LOOPBACK_WINDOWS_LINE.into()
+        )));
+        for code in [
+            MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
+            crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+        ] {
+            assert!(
+                crate::config::plain_problem(code).is_some(),
+                "{code} has a plain sentence"
+            );
         }
     }
 

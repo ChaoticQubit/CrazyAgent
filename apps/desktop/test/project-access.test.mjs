@@ -523,3 +523,22 @@ test("the access choice shows what the engine says this Linux can't hold for the
     assert.match(readFileSync(new URL(page, import.meta.url), "utf8"), /<AccessLevels [^\n]* gaps=\{/, page);
   }
 });
+
+test("on Windows Full access is refused with its own sentence, a loopback model reads plainly, and a limited network says it reaches the whole internet, in both UIs (DESIGN-0256 O3a, O2a)", async () => {
+  const client = await import("../src/engine-client.ts");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const config = readFileSync(new URL("../../../crates/crazyagent/src/config.rs", import.meta.url), "utf8");
+  const wide = engine.match(/pub const WINDOWS_NETWORK_WIDE_LINE: &str = "([^"]+)";/)?.[1];
+  assert.ok(wide, "the engine names the Windows network line");
+  for (const network of ["https", "none"]) assert.equal(access.networkGap(null, network, "windows"), wide, network);
+  assert.equal(access.networkGap(null, "open", "windows"), null);
+  for (const platform of ["macos", "linux"]) assert.notEqual(access.networkGap(null, "none", platform), wide, platform);
+  for (const code of ["sandbox_full_unavailable_windows", "model_loopback_unavailable_windows"]) {
+    const sentence = api.knownError(code);
+    assert.ok(sentence, `${code} has its own sentence`);
+    assert.equal(client.errorMessage({ code }), sentence, `${code} reads the same on the owner path`);
+    assert.ok(config.includes(`"${code}" => Some(`) && config.includes(`"${sentence}"`), `${code} reads the same in the TUI`);
+  }
+  assert.match(api.knownError("sandbox_full_unavailable_windows"), /Full access[\s\S]*Windows[\s\S]*Windows sandbox/);
+  assert.match(api.knownError("model_loopback_unavailable_windows"), /on this computer[\s\S]*Windows/);
+});
