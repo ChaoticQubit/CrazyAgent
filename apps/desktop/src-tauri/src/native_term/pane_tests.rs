@@ -9,10 +9,29 @@ fn attached(output: &[u8]) -> Pane {
 
 #[test]
 fn named_keys_follow_cursor_mode() {
-    assert_eq!(named_bytes(Named::Up, false), b"\x1b[A");
-    assert_eq!(named_bytes(Named::Up, true), b"\x1bOA");
-    assert_eq!(named_bytes(Named::BackTab, true), b"\x1b[Z");
-    assert_eq!(named_bytes(Named::Delete, false), b"\x1b[3~");
+    assert_eq!(named_bytes(Named::Up, 0, false), b"\x1b[A");
+    assert_eq!(named_bytes(Named::Up, 0, true), b"\x1bOA");
+    assert_eq!(named_bytes(Named::Home, 0, true), b"\x1bOH");
+    assert_eq!(named_bytes(Named::BackTab, 0, true), b"\x1b[Z");
+    assert_eq!(named_bytes(Named::Delete, 0, false), b"\x1b[3~");
+}
+
+#[test]
+fn modified_and_function_keys_match_the_xterm_panel() {
+    assert_eq!(named_bytes(Named::Left, ALT, true), b"\x1b[1;3D");
+    assert_eq!(
+        named_bytes(Named::End, SHIFT | CONTROL, false),
+        b"\x1b[1;6F"
+    );
+    assert_eq!(named_bytes(Named::Delete, SHIFT, false), b"\x1b[3;2~");
+    assert_eq!(named_bytes(Named::PageUp, ALT, false), b"\x1b[5~");
+    assert_eq!(named_bytes(Named::PageDown, CONTROL, false), b"\x1b[6;5~");
+    assert_eq!(named_bytes(Named::Insert, 0, false), b"\x1b[2~");
+    assert_eq!(named_bytes(Named::F(1), 0, false), b"\x1bOP");
+    assert_eq!(named_bytes(Named::F(4), SHIFT, false), b"\x1b[1;2S");
+    assert_eq!(named_bytes(Named::F(5), 0, false), b"\x1b[15~");
+    assert_eq!(named_bytes(Named::F(11), 0, false), b"\x1b[23~");
+    assert_eq!(named_bytes(Named::F(12), CONTROL, false), b"\x1b[24;5~");
 }
 
 #[test]
@@ -38,7 +57,10 @@ fn typed_text_and_keys_ask_for_bytes_that_are_not_wheel() {
     );
     assert!(pane.on_output(b"\x1b[?1h"));
     assert_eq!(
-        pane.apply(Input::Key(Named::Up)),
+        pane.apply(Input::Key {
+            key: Named::Up,
+            mods: 0
+        }),
         Action::Input {
             bytes: b"\x1bOA".to_vec(),
             wheel: false
@@ -89,7 +111,8 @@ fn the_wheel_in_mouse_mode_asks_for_wheel_reports() {
     assert_eq!(
         pane.apply(Input::Press {
             cell: (99, 99),
-            option: false
+            option: false,
+            clicks: 1
         }),
         Action::Input {
             bytes: codec::sgr_button(0, 19, 3, true),
@@ -99,7 +122,8 @@ fn the_wheel_in_mouse_mode_asks_for_wheel_reports() {
     assert_eq!(
         pane.apply(Input::Press {
             cell: (1, 1),
-            option: true
+            option: true,
+            clicks: 1
         }),
         Action::Local
     );
@@ -160,7 +184,8 @@ fn copy_takes_the_selection_or_the_whole_output() {
     assert_eq!(
         pane.apply(Input::Press {
             cell: (0, 0),
-            option: false
+            option: false,
+            clicks: 1
         }),
         Action::Local
     );
@@ -183,4 +208,41 @@ fn resize_reports_only_a_change() {
     assert!(pane.on_attached(80, 24));
     assert_eq!(pane.resize((80, 24)), None);
     assert_eq!(pane.resize((90, 30)), Some((90, 30)));
+}
+
+#[test]
+fn clicks_select_a_word_or_a_line_and_select_all_takes_everything() {
+    let mut pane = attached(b"hello world\r\nnext");
+    let press = |clicks| Input::Press {
+        cell: (7, 0),
+        option: false,
+        clicks,
+    };
+    assert_eq!(pane.apply(press(2)), Action::Local);
+    assert_eq!(pane.copy(false).as_deref(), Ok("world"));
+    assert_eq!(pane.apply(press(3)), Action::Local);
+    assert_eq!(
+        pane.copy(false).as_deref().map(str::trim_end),
+        Ok("hello world")
+    );
+    assert!(pane.select_all());
+    let all = pane.copy(false).expect("all selected");
+    assert!(all.contains("hello world") && all.contains("next"));
+}
+
+#[test]
+fn shift_page_keys_scroll_locally_and_others_go_to_the_agent() {
+    let mut pane = attached(&b"row\r\n".repeat(40));
+    let page = |key, mods| Input::Key { key, mods };
+    assert_eq!(pane.apply(page(Named::PageUp, SHIFT)), Action::Local);
+    assert!(pane.behind());
+    assert_eq!(pane.apply(page(Named::PageDown, SHIFT)), Action::Local);
+    assert!(!pane.behind());
+    assert_eq!(
+        pane.apply(page(Named::PageUp, 0)),
+        Action::Input {
+            bytes: b"\x1b[5~".to_vec(),
+            wheel: false
+        }
+    );
 }

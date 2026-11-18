@@ -1,5 +1,6 @@
 mod codec;
 mod control;
+mod keymap;
 mod pane;
 mod render;
 mod screen;

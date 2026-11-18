@@ -21,7 +21,12 @@ const WHEEL_LINES_MAX: u32 = 50;
 
 const _: () = assert!(WHEEL_LINES_MAX as usize * 16 <= INPUT_BYTES_MAX);
 
-/// A key with no text of its own.
+/// The xterm modifier bits a named key carries: Shift, Alt (Option) and Control.
+pub const SHIFT: u8 = 1;
+pub const ALT: u8 = 2;
+pub const CONTROL: u8 = 4;
+
+/// A key with no text of its own; `F` is a function key, 1 to 12.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Named {
     Up,
@@ -32,49 +37,89 @@ pub enum Named {
     End,
     PageUp,
     PageDown,
+    Insert,
     Delete,
     BackTab,
+    F(u8),
 }
 
-/// The bytes a named key sends, by the pane's cursor-key mode. Inputs: the key and whether
-/// the pane asked for application cursor keys. Output: bytes.
-pub fn named_bytes(key: Named, app_cursor: bool) -> Vec<u8> {
-    let arrow = |c: u8| {
-        if app_cursor {
-            vec![0x1b, b'O', c]
-        } else {
-            vec![0x1b, b'[', c]
+/// The bytes a named key sends, as the xterm panel sends them: with modifiers a CSI with
+/// the modifier parameter, else by the pane's cursor-key mode. Inputs: the key, its
+/// modifier bits and whether the pane asked for application cursor keys. Output: bytes.
+pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
+    assert!(mods <= SHIFT | ALT | CONTROL);
+    let m = mods + 1;
+    let letter = |c: char| match (mods, app_cursor) {
+        (0, true) => format!("\x1bO{c}"),
+        (0, false) => format!("\x1b[{c}"),
+        _ => format!("\x1b[1;{m}{c}"),
+    };
+    let tilde = |n: u8, with: bool| match with {
+        true => format!("\x1b[{n};{m}~"),
+        false => format!("\x1b[{n}~"),
+    };
+    let text = match key {
+        Named::Up => letter('A'),
+        Named::Down => letter('B'),
+        Named::Right => letter('C'),
+        Named::Left => letter('D'),
+        Named::Home => letter('H'),
+        Named::End => letter('F'),
+        Named::PageUp => tilde(5, mods & CONTROL != 0),
+        Named::PageDown => tilde(6, mods & CONTROL != 0),
+        Named::Insert => tilde(2, false),
+        Named::Delete => tilde(3, mods != 0),
+        Named::BackTab => "\x1b[Z".to_owned(),
+        Named::F(n @ 1..=4) => {
+            let c = char::from(b'P' + n - 1);
+            if mods == 0 {
+                format!("\x1bO{c}")
+            } else {
+                format!("\x1b[1;{m}{c}")
+            }
         }
+        Named::F(n @ 5..=12) => tilde(
+            [15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)],
+            mods != 0,
+        ),
+        Named::F(n) => unreachable!("function key F{n} out of 1 to 12"),
     };
-    let bytes = match key {
-        Named::Up => arrow(b'A'),
-        Named::Down => arrow(b'B'),
-        Named::Right => arrow(b'C'),
-        Named::Left => arrow(b'D'),
-        Named::Home => b"\x1b[H".to_vec(),
-        Named::End => b"\x1b[F".to_vec(),
-        Named::PageUp => b"\x1b[5~".to_vec(),
-        Named::PageDown => b"\x1b[6~".to_vec(),
-        Named::Delete => b"\x1b[3~".to_vec(),
-        Named::BackTab => b"\x1b[Z".to_vec(),
-    };
-    assert!(bytes.len() >= 3);
-    assert_eq!(bytes[0], 0x1b);
-    bytes
+    assert!(text.len() >= 3);
+    assert!(text.starts_with('\x1b'));
+    text.into_bytes()
 }
 
 /// One input to a native view from its host. Cells are column and line on the visible
 /// screen; `option` is the Option key, which forces a local selection while the pane reads
-/// the mouse. Text is at most `INPUT_BYTES_MAX` bytes (the host splits longer typing).
+/// the mouse; `clicks` is the click count, which selects a word on 2 and a line on 3. Text
+/// is at most `INPUT_BYTES_MAX` bytes (the host splits longer typing).
 #[derive(Debug, PartialEq)]
 pub enum Input {
     Text(Vec<u8>),
-    Key(Named),
-    Wheel { lines: i32, cell: (usize, usize) },
-    Press { cell: (usize, usize), option: bool },
-    Drag { cell: (usize, usize), option: bool },
-    Release { cell: (usize, usize), option: bool },
-    Paste { text: String },
+    Key {
+        key: Named,
+        mods: u8,
+    },
+    Wheel {
+        lines: i32,
+        cell: (usize, usize),
+    },
+    Press {
+        cell: (usize, usize),
+        option: bool,
+        clicks: u8,
+    },
+    Drag {
+        cell: (usize, usize),
+        option: bool,
+    },
+    Release {
+        cell: (usize, usize),
+        option: bool,
+    },
+    Paste {
+        text: String,
+    },
 }
 
 /// What one input asks of the host: bytes for the agent (`wheel` when only the wheel made
@@ -183,6 +228,25 @@ impl Pane {
             .is_some_and(|t| t.grid().display_offset() > 0)
     }
 
+    /// Selects the whole output the view holds, as Cmd-A does. Output: whether there was a
+    /// terminal to select in.
+    pub fn select_all(&mut self) -> bool {
+        let Some(term) = self.term.as_mut() else {
+            return false;
+        };
+        let top = Point::new(Line(-(term.grid().history_size() as i32)), Column(0));
+        let bottom = Point::new(
+            Line(term.screen_lines() as i32 - 1),
+            Column(term.columns() - 1),
+        );
+        let mut all = Selection::new(SelectionType::Lines, top, Side::Left);
+        all.update(bottom, Side::Right);
+        term.selection = Some(all);
+        self.dirty = true;
+        assert!(term.selection.is_some());
+        true
+    }
+
     /// Scrolls back to the bottom of the output. Output: whether it moved.
     pub fn jump(&mut self) -> bool {
         let Some(term) = self.term.as_mut() else {
@@ -218,10 +282,14 @@ impl Pane {
         }
         let action = match input {
             Input::Text(bytes) => self.typed(bytes),
-            Input::Key(key) => self.typed(named_bytes(key, self.app_cursor())),
+            Input::Key { key, mods } => self.key(key, mods),
             Input::Wheel { lines, cell } => self.wheel(lines, cell),
-            Input::Press { cell, option } => self.button(true, cell, option),
-            Input::Release { cell, option } => self.button(false, cell, option),
+            Input::Press {
+                cell,
+                option,
+                clicks,
+            } => self.button(true, cell, option, clicks),
+            Input::Release { cell, option } => self.button(false, cell, option, 1),
             Input::Drag { cell, option } => self.drag(cell, option),
             Input::Paste { text } => self.paste(text),
         };
@@ -250,6 +318,24 @@ impl Pane {
             bytes,
             wheel: false,
         }
+    }
+
+    fn key(&mut self, key: Named, mods: u8) -> Action {
+        let page = matches!(key, Named::PageUp | Named::PageDown) && mods & SHIFT != 0;
+        if !page {
+            return self.typed(named_bytes(key, mods, self.app_cursor()));
+        }
+        let Some(term) = self.term.as_mut() else {
+            return Action::Nothing;
+        };
+        let rows = i32::try_from(term.screen_lines() - 1).unwrap_or(1).max(1);
+        let lines = if key == Named::PageUp { rows } else { -rows };
+        let before = term.grid().display_offset();
+        let after = codec::scroll_clamp(before, lines, term.grid().history_size());
+        term.scroll_display(Scroll::Delta(after as i32 - before as i32));
+        self.dirty = true;
+        assert_eq!(term.grid().display_offset(), after);
+        Action::Local
     }
 
     fn paste(&mut self, text: String) -> Action {
@@ -287,7 +373,8 @@ impl Pane {
             && mode.contains(TermMode::ALT_SCREEN)
             && mode.contains(TermMode::ALTERNATE_SCROLL)
         {
-            let arrow: &[u8] = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
+            let key = if lines > 0 { Named::Up } else { Named::Down };
+            let arrow = named_bytes(key, 0, mode.contains(TermMode::APP_CURSOR));
             let bytes: Vec<u8> = (0..count).flat_map(|_| arrow.iter().copied()).collect();
             return Action::Input { bytes, wheel: true };
         }
@@ -311,7 +398,7 @@ impl Pane {
         Some(Point::new(Line(line as i32 - offset), Column(column)))
     }
 
-    fn button(&mut self, press: bool, cell: (usize, usize), option: bool) -> Action {
+    fn button(&mut self, press: bool, cell: (usize, usize), option: bool, clicks: u8) -> Action {
         let Some(cell) = self.clamp(cell) else {
             return Action::Nothing;
         };
@@ -326,7 +413,12 @@ impl Pane {
         if press {
             let point = self.grid_point(cell);
             if let (Some(point), Some(term)) = (point, self.term.as_mut()) {
-                term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+                let kind = match clicks {
+                    0 | 1 => SelectionType::Simple,
+                    2 => SelectionType::Semantic,
+                    _ => SelectionType::Lines,
+                };
+                term.selection = Some(Selection::new(kind, point, Side::Left));
             }
             self.dirty = true;
         }
