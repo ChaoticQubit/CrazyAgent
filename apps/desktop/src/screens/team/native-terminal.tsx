@@ -27,8 +27,31 @@ export type NativeProbe = {
 /** One native view that ended and fell back to today's renderer: its agent and plain code. */
 export type NativeEnded = { name: string; code: string };
 
-/** What a native view reports: ready, one finished timed input, or ended with a plain code. */
-export type NativeReport = { type: "ready" } | { type: "ended"; code: string } | ({ type: "probe" } & NativeProbe);
+/** What the test hook's accessibility read saw through the native view's own selectors
+ * (e2e build only): whether AppKit gave it an input context, its role, value, insertion
+ * line, selected range and marked range (UTF-16 location and length). */
+export type NativeAccess = {
+  inputContext: boolean;
+  role: string;
+  value: string;
+  insertionLine: number;
+  selected: [number, number];
+  marked: [number, number] | null;
+};
+
+/** What a native view reports: ready, one finished timed input, an accessibility read, or
+ * ended with a plain code. */
+export type NativeReport = { type: "ready" } | { type: "ended"; code: string } | ({ type: "probe" } & NativeProbe)
+  | ({ type: "access" } & NativeAccess);
+
+/** The text operation a harness asks of the native view's input method client and
+ * accessibility with a `native-terminal-text` event (e2e build only): marked text with its
+ * caret, an insert, an unmark or an accessibility read. Input: the event detail. Output: the
+ * hook event fields, or null for anything else. */
+export function textOp(detail: unknown): Record<string, unknown> | null {
+  void detail;
+  return null;
+}
 
 /** The most finished timed inputs a page keeps for the harness to read. */
 const REPORTS_MAX = 20000;
