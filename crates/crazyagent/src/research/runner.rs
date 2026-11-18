@@ -4668,6 +4668,25 @@ mod tests {
             .unwrap();
     }
 
+    /// V243-FIRMLINK-STATE (#448 r2 LOW): a research state named through
+    /// /System/Volumes/Data is refused, since the folder gates compare it with one-spelled
+    /// roots and its sandbox rules would never match, so a folder inside it would see other
+    /// agents' homes and tmp. The short name of the same folder opens.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_state_named_through_the_data_volume_is_refused() {
+        let root = engine_root();
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", root.state.display()));
+        assert!(matches!(
+            ResearchRunner::without_codex(&root.database, &long, ResearchLimits::default()),
+            Err(RunError::Invalid(reason)) if reason == "state directory must be canonical"
+        ));
+        assert!(
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .is_ok()
+        );
+    }
+
     /// A run that waits for its repository's setup lock longer than the stale limit keeps
     /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
     /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).

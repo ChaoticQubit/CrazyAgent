@@ -1813,6 +1813,45 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
     }
 }
 
+/// V243-FIRMLINK-STATE (#448 r2 LOW): a team state named through /System/Volumes/Data is
+/// refused, since the launch gates compare it with one-spelled roots and its sandbox rules
+/// would never match, so a project inside it would see other agents' homes and tmp. The
+/// short name of the same folder opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_state_named_through_the_data_volume_is_refused() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-state-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let owner = connection.unchecked_transaction().unwrap();
+    crate::conversation::initialize(&owner).unwrap();
+    owner.commit().unwrap();
+    drop(connection);
+    let state = base.join("team");
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", state.display()));
+    let open = |state: &Path| {
+        TeamRuntime::open(
+            &database,
+            state,
+            BTreeMap::new(),
+            Box::new(|| None),
+            TeamLimits::default(),
+        )
+        .map(drop)
+    };
+    assert_eq!(
+        open(&long),
+        Err(EngineError("team_state_not_canonical".into()))
+    );
+    assert_eq!(open(&state), Ok(()));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
