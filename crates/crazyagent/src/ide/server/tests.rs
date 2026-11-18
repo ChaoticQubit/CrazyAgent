@@ -3259,9 +3259,9 @@ async fn a_full_access_stop_names_a_process_that_left_its_group() {
 }
 
 /// RV-DS241-189: removing a recorded temp folder only moves it aside, one rename however
-/// much it holds, so no stop, shutdown or next start waits on what a session left there;
-/// the folder is removed on a thread of its own, and one no remove can finish no longer
-/// stays at its path.
+/// much it holds or however it is shut, so no stop, shutdown or next start waits on what a
+/// session left there; the folder is removed on a thread of its own, so a moved folder is one
+/// the start sweep removes or already gone (#571 code F1).
 #[test]
 fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path() {
     let (data, keys) = (scratch(), scratch());
@@ -3286,7 +3286,9 @@ fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path()
                 .is_some_and(|name| name.starts_with(&prefix))
         })
         .collect();
-    let named = aside.iter().all(|path| retired(path));
+    let named = aside
+        .iter()
+        .all(|path| retired(path) || fs::symlink_metadata(path).is_err());
     for path in aside.iter().chain(stayed.then_some(&left)) {
         let _ = fs::set_permissions(path.join(&shut), fs::Permissions::from_mode(0o700));
         let _ = fs::remove_dir_all(path);
