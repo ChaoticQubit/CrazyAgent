@@ -1234,10 +1234,10 @@ mod windows_tests {
     }
 
     /// V243-WIN-MCP-NPX and #341: npm's `npx.cmd`, found by its layout, runs as the `node.exe`
-    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling, and
-    /// one the resolver refuses is not found; any other `.cmd` or `.bat`, and a name with no
-    /// extension or a dotted one with a `.cmd` beside it, there or not, is left out; a `.exe`
-    /// spec is unchanged.
+    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling; one
+    /// the resolver refuses, and a `.cmd` that is not there, npx.cmd included, is not found; any
+    /// other `.cmd` or `.bat`, and a name with no extension or a dotted one with a `.cmd` beside
+    /// it, there or not, is a batch file; a `.exe` spec is unchanged.
     #[test]
     fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
         let folder = tempfile::tempdir().unwrap();
@@ -1296,6 +1296,15 @@ mod windows_tests {
         std::fs::remove_file(real.join("node.exe")).unwrap();
         let lone = npx_spec(&real.join("npx.cmd"), &args, &places);
         assert_eq!(lone, Err("server_batch_file"));
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.cmd")),
+            Err("server_command_not_found")
+        );
+        std::fs::remove_file(real.join("npx.cmd")).unwrap();
+        assert_eq!(
+            without_cmd_exe(&real, spec("npx.cmd")),
+            Err("server_command_not_found")
+        );
         let program = ServerSpec::Stdio {
             command: text(shipped),
             args: args.clone(),

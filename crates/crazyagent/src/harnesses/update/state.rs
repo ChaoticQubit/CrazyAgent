@@ -1118,6 +1118,7 @@ mod windows_tests {
             )
             .unwrap();
             assert!(granted.status.success(), "{granted:?}");
+            assert!(!granted.stdout.is_empty(), "{granted:?}");
         });
         BETWEEN_VETTED_AND_RUN
             .lock()

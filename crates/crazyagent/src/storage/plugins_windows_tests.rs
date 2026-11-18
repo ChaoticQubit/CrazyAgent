@@ -1,7 +1,8 @@
 /// V243-WIN-MCP-NPX and #341 sec F1: an approved server whose command is a Windows batch file
 /// other than npm's npx.cmd, or a name with no extension or a dotted one with a `.cmd` beside
 /// it, is left out of a launch, by name in `batch_files` and `left_out`, while a server whose
-/// command is a program runs as approved.
+/// command is a program runs as approved. One whose npx.cmd is missing is left out by name in
+/// `commands_not_found`, never as a batch file (V243-MCP-NPX-LAUNCH-LINE).
 #[test]
 fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     use super::{Command, ResultValue, execute};
@@ -35,6 +36,7 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
         ("bare", root.join("tool")),
         ("dotted", root.join("tool.v2")),
         ("lookup", program),
+        ("npx", root.join("npx.cmd")),
     ];
     for (name, command) in servers {
         let spec = ServerSpec::Stdio {
@@ -77,7 +79,8 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
         names
     };
     assert_eq!(sorted(&launch.batch_files), ["bare", "dotted", "notes"]);
-    assert_eq!(sorted(&launch.left_out), ["bare", "dotted", "notes"]);
+    assert_eq!(launch.commands_not_found, ["npx"]);
+    assert_eq!(sorted(&launch.left_out), ["bare", "dotted", "notes", "npx"]);
     assert_eq!(launch.context_mode_off, None);
     let names: Vec<&str> = launch.servers.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["lookup"]);
