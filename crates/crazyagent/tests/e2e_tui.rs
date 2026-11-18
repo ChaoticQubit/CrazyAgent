@@ -2713,13 +2713,9 @@ fn start_sign_in(engine: &Engine, home: &Path, tile: &str, method: &str) -> Scri
     pty
 }
 
-/// DEC-166: whether the screen shows a sign-in that ran this harness's stand-in: no too-old
-/// line, and the line the engine gives only once the started stand-in ended without signing
-/// in, with its key line. Claude Code's is `native_auth_claude_native_exit` and "Press n to try
-/// again."; Codex's device code sign-in gives `native_auth_codex_exited_before_observation`, or
-/// `native_auth_codex_io_failed` when Codex ended before the engine's first request reached it,
-/// and "Press n for a new code." A harness not found never matches.
-/// Inputs: the harness name and the screen. Output: the answer.
+/// DEC-166: whether the screen shows a sign-in that ran this harness's stand-in: the line the
+/// engine gives only once the started stand-in ended, its key line and no too-old line, so a
+/// harness not found never matches. Inputs: the harness name and the screen. Output: the answer.
 fn ran_the_harness(name: &str, screen: &str) -> bool {
     let (ended, key) = match name {
         "Codex" => (
