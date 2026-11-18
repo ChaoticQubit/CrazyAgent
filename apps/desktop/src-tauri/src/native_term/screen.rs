@@ -26,9 +26,13 @@ impl Dimensions for GridSize {
     }
 }
 
-/// A run of cells in one row that share colour and style.
+/// A run of cells in one row that share colour and style: `cells` cells from `column` on,
+/// one character per cell, or a single wide character over two cells.
 pub struct Span {
     pub text: String,
+    pub column: usize,
+    pub cells: usize,
+    pub wide: bool,
     pub fg: Rgb,
     pub bold: bool,
     pub italic: bool,
@@ -180,10 +184,10 @@ fn cursor_at(content: &RenderableContent<'_>, lines: usize, shown: bool) -> Opti
 }
 
 /// Where marked text goes: the terminal cursor cell (followed even while the cursor is
-/// hidden, as input methods expect), clipped to the cells left in the row. Inputs: the
-/// marked text, the cursor point, the display offset and the screen size. Output: the
-/// marked cells and the text that fits, or none when nothing is marked or the cursor is off
-/// the screen.
+/// hidden, as input methods expect), clipped to the cells left in the row; zero-width
+/// characters are not drawn, since a span cell holds one character. Inputs: the marked
+/// text, the cursor point, the display offset and the screen size. Output: the marked cells
+/// and the text that fits, or none when nothing is marked or the cursor is off the screen.
 fn place_marked(
     marked: Option<&str>,
     point: Point,
@@ -202,6 +206,10 @@ fn place_marked(
     let mut cells = 0usize;
     for c in marked.chars() {
         let width = c.width().unwrap_or(0);
+        assert!(width <= 2);
+        if width == 0 {
+            continue;
+        }
         if cells + width > room {
             break;
         }
@@ -231,25 +239,50 @@ fn push_fill(fills: &mut Vec<Fill>, row: usize, column: usize, color: Rgb) {
     assert!(fills.len() == count || fills.len() == count + 1);
 }
 
-/// Appends one character to a row's spans and folds it into the row's key. Inputs: the
-/// row's spans and key, the character, its colour, and whether it is bold, italic and
-/// marked text.
-fn push_char(spans: &mut Vec<Span>, key: &mut u64, c: char, fg: Rgb, style: (bool, bool, bool)) {
+/// Appends one character to a row's spans and folds it into the row's key: a narrow
+/// character joins the span it continues, a wide one is its own two-cell span. Inputs: the
+/// row's spans and key, the character, its colour, whether it is bold, italic and marked
+/// text, and its column and whether it is wide.
+fn push_char(
+    spans: &mut Vec<Span>,
+    key: &mut u64,
+    c: char,
+    fg: Rgb,
+    style: (bool, bool, bool),
+    at: (usize, bool),
+) {
     let (bold, italic, marked) = style;
+    let (column, wide) = at;
     let count = spans.len();
     let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
     let flags = (u64::from(bold) << 24) | (u64::from(italic) << 25) | (u64::from(marked) << 26);
     *key = mix(mix(*key, c as u64), packed | flags);
     match spans.last_mut() {
-        Some(s) if s.fg == fg && s.bold == bold && s.italic == italic => s.text.push(c),
+        Some(s)
+            if !wide
+                && !s.wide
+                && s.column + s.cells == column
+                && (s.fg, s.bold, s.italic) == (fg, bold, italic) =>
+        {
+            s.text.push(c);
+            s.cells += 1;
+        }
         _ => spans.push(Span {
             text: c.to_string(),
+            column,
+            cells: if wide { 2 } else { 1 },
+            wide,
             fg,
             bold,
             italic,
         }),
     }
     assert!(spans.len() == count || spans.len() == count + 1);
+    assert!(
+        spans
+            .last()
+            .is_some_and(|s| s.column + s.cells == column + 1 + usize::from(wide))
+    );
 }
 
 /// Builds the frame for the visible screen. Inputs: the terminal, the theme, whether the
@@ -283,10 +316,15 @@ pub fn frame(
             && (cells.column..cells.column + cells.cells).contains(&column)
         {
             if column == cells.column {
+                let mut at = cells.column;
                 for c in text.chars() {
+                    let wide = c.width() == Some(2);
                     let style = (false, false, true);
-                    push_char(&mut rows[row], &mut keys[row], c, theme.foreground, style);
+                    let fg = theme.foreground;
+                    push_char(&mut rows[row], &mut keys[row], c, fg, style, (at, wide));
+                    at += 1 + usize::from(wide);
                 }
+                assert_eq!(at, cells.column + cells.cells);
             }
             continue;
         }
@@ -306,12 +344,14 @@ pub fn frame(
             cell.flags.contains(Flags::ITALIC),
             false,
         );
-        push_char(&mut rows[row], &mut keys[row], cell.c, fg, style);
+        let at = (column, cell.flags.contains(Flags::WIDE_CHAR));
+        push_char(&mut rows[row], &mut keys[row], cell.c, fg, style, at);
     }
     let preedit = overlay.map(|(cells, _)| cells);
     assert_eq!(rows.len(), lines);
     assert!(cursor.is_none_or(|c| c.row < lines));
     assert!(preedit.is_none() || cursor.is_none());
+    assert!(rows.iter().flatten().all(|s| !s.wide || s.cells == 2));
     Frame {
         rows,
         keys,
@@ -393,6 +433,9 @@ mod tests {
             fg,
             vec![theme.ansi[9], theme.ansi[1], back, fore, back, fore]
         );
+        let cells: Vec<(usize, usize)> =
+            frame.rows[0].iter().map(|s| (s.column, s.cells)).collect();
+        assert_eq!(cells, vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 5)]);
         assert_eq!(
             frame.rows[0]
                 .iter()
@@ -412,6 +455,22 @@ mod tests {
             shape: CursorShape::Block,
         };
         assert_eq!(frame.cursor, Some(cursor));
+    }
+
+    #[test]
+    fn a_wide_character_is_its_own_two_cell_span() {
+        let theme = Theme::default();
+        let term = screen("a\u{4e2d}b".as_bytes());
+        let frame = frame(&term, &theme, false, None);
+        let spans: Vec<(&str, usize, usize, bool)> = frame.rows[0]
+            .iter()
+            .map(|s| (s.text.as_str(), s.column, s.cells, s.wide))
+            .collect();
+        let wide = ("\u{4e2d}", 1, 2, true);
+        assert_eq!(
+            spans,
+            vec![("a", 0, 1, false), wide, ("b      ", 3, 7, false)]
+        );
     }
 
     #[test]

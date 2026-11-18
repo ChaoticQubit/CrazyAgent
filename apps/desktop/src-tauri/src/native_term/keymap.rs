@@ -14,9 +14,9 @@ pub struct Press<'a> {
 
 impl Press<'_> {
     fn mods(&self) -> u8 {
-        let mods = u8::from(self.shift) * SHIFT
-            | u8::from(self.option) * ALT
-            | u8::from(self.control) * CONTROL;
+        let mods = (u8::from(self.shift) * SHIFT)
+            | (u8::from(self.option) * ALT)
+            | (u8::from(self.control) * CONTROL);
         assert!(mods <= SHIFT | ALT | CONTROL);
         mods
     }
