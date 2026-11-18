@@ -8,9 +8,9 @@ const PIPES_FILE: &str = "pipes";
 
 /// Publishes a new start of the endpoint `purpose` in its protected root (DESIGN-0256 D7,
 /// leader 07:46): a fresh random part and this engine's pin, staged in a file created private
-/// before its first byte, renamed over `pipes` inside the held root, then read back through
-/// the private judge. A `pipes` file the judge refuses is left as it is. Inputs: the root and
-/// the purpose. Output: what was published, or the error.
+/// and labelled no-read-up before its first byte (#555 N1), renamed over `pipes` inside the
+/// held root, then read back through the private judge. A `pipes` file the judge refuses is
+/// left as it is. Inputs: the root and the purpose. Output: what was published, or the error.
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "the D8 Windows listener is its first caller")
@@ -35,7 +35,7 @@ pub(super) fn publish(root: &Path, purpose: &str) -> io::Result<Published> {
     };
     let stage: String = stage.iter().map(|byte| format!("{byte:02x}")).collect();
     let staged = root.join(format!("{PIPES_FILE}.{stage}.new"));
-    let mut file = private::file(&staged, true)?;
+    let mut file = private::secret_file(&staged)?;
     let written = file
         .write_all(encode_pipes(purpose, &published).as_bytes())
         .and_then(|()| file.sync_all());
