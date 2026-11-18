@@ -501,13 +501,14 @@ impl Shared {
             raw_display_handle: display,
             raw_window_handle: window,
         };
-        self.surface_on(target, width, height)
+        unsafe { self.surface_on(target, width, height) }
     }
 
-    /// Makes one view's surface on a surface target that outlives it: the device on the
-    /// first, then the configure and the view's drawing state. Inputs: the target, width
-    /// and height in physical pixels. Output: the surface, or the setup error.
-    fn surface_on(
+    /// Makes one view's surface on a surface target: the device on the first, then the
+    /// configure and the view's drawing state. Safety: the target must name a live layer or
+    /// window that outlives the returned surface. Inputs: the target, width and height in
+    /// physical pixels. Output: the surface, or the setup error.
+    unsafe fn surface_on(
         &mut self,
         target: wgpu::SurfaceTargetUnsafe,
         width: u32,
@@ -1107,9 +1108,8 @@ mod tests {
     fn a_frame_on_a_lost_device_reports_the_gpu_code_before_glyphon_maps_a_buffer() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 4096, 128)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 4096, 128) }.expect("a surface");
         shared
             .draw(&mut surface, &frame_of("before"))
             .expect("drawn before the loss");
@@ -1135,9 +1135,7 @@ mod tests {
     fn a_frame_acquired_before_a_loss_is_not_presented() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let surface = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let output = surface.surface.get_current_texture().expect("a frame");
         lose(&shared);
         let set = shared.device.as_ref().expect("a device");
@@ -1154,9 +1152,7 @@ mod tests {
     fn a_frame_whose_encode_failed_on_a_lost_device_is_not_discarded() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let surface = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let output = surface.surface.get_current_texture().expect("a frame");
         lose(&shared);
         let set = shared.device.as_ref().expect("a device");
@@ -1175,9 +1171,8 @@ mod tests {
     fn a_surface_past_the_default_texture_limit_configures_at_full_width_and_draws() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let default_max = wgpu::Limits::default().max_texture_dimension_2d;
         assert_eq!(default_max, 8192, "wgpu's default largest texture side");
         let set = shared.device.as_ref().expect("a device");
@@ -1207,9 +1202,8 @@ mod tests {
     fn a_surface_past_the_device_texture_limit_is_held_to_it_and_still_draws() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let side_max = shared
             .device
             .as_ref()
@@ -1228,8 +1222,7 @@ mod tests {
             .draw(&mut surface, &frame_of("held"))
             .expect("drawn at the held size, no fault");
         let tall = metal_layer();
-        let made = shared
-            .surface_on(on_layer(&tall), 64, side_max * 2)
+        let made = unsafe { shared.surface_on(on_layer(&tall), 64, side_max * 2) }
             .expect("a surface made past the limit");
         assert_eq!((made.config.width, made.config.height), (64, side_max));
         drop((surface, made));
@@ -1244,9 +1237,8 @@ mod tests {
     fn a_gpu_validation_error_is_reported_as_the_gpu_code_not_a_panic() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let set = shared.device.as_ref().expect("a device");
         let side = set.device.limits().max_texture_dimension_2d + 1;
         let _texture = set.device.create_texture(&wgpu::TextureDescriptor {
