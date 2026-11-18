@@ -11,16 +11,15 @@ const SHAPES: [&str; 5] = [
 ];
 
 /// Runs the runner's git as a test owner would, with no system or global config, and
-/// returns what it printed. Inputs: the folder and the arguments. Output: its standard
-/// output.
+/// returns what it printed, its output collected ([`crate::spawn_gate::collected`]).
+/// Inputs: the folder and the arguments. Output: its standard output.
 fn owner_git(folder: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = crate::spawn_gate::collected(
         Command::new(git().unwrap())
             .args(args)
             .current_dir(folder)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
-            .stdin(Stdio::null()),
+            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
     )
     .unwrap();
     assert!(
@@ -70,9 +69,14 @@ impl Project {
     }
 
     fn head(&self) -> String {
-        owner_git(&self.path(), &["rev-parse", "HEAD"])
+        let head = owner_git(&self.path(), &["rev-parse", "HEAD"])
             .trim()
-            .to_owned()
+            .to_owned();
+        assert!(
+            matches!(head.len(), 40 | 64) && head.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "head {head:?}"
+        );
+        head
     }
 
     /// Plants one shape that points owner git at another place, toward a share where
@@ -119,18 +123,29 @@ impl Project {
     }
 }
 
-/// Asserts `answer` is the refusal `code`, whatever the step returns on success.
-/// Inputs: the answer, the code and what was tried, which names the failure.
-/// Output: none; a mismatch fails the test.
+/// Tells how `answer` differs from the refusal `code`, whatever the step returns on success.
+/// Inputs: the answer, the code and what was tried, which names the difference. Output:
+/// none for the refusal, else what was tried and what came back.
+fn mismatch<T: std::fmt::Debug>(
+    answer: Result<T, EngineError>,
+    code: &str,
+    tried: &str,
+) -> Option<String> {
+    (!matches!(&answer, Err(EngineError(got)) if got == code))
+        .then(|| format!("{tried}: {answer:?}"))
+}
+
+/// Asserts `answer` is the refusal `code` ([`mismatch`]). Inputs: the answer, the code and
+/// what was tried, which names the failure. Output: none; a mismatch fails the test.
 fn refused<T: std::fmt::Debug>(answer: Result<T, EngineError>, code: &str, tried: &str) {
-    assert!(
-        matches!(&answer, Err(EngineError(got)) if got == code),
-        "{tried}: {answer:?}"
-    );
+    if let Some(wrong) = mismatch(answer, code, tried) {
+        panic!("{wrong}");
+    }
 }
 
 #[test]
 fn every_windows_publish_step_refuses_a_git_folder_that_points_elsewhere() {
+    let mut wrong = Vec::new();
     for shape in SHAPES {
         let made = project();
         let (git, home, folder) = (git().unwrap(), made.home.path(), made.path());
@@ -139,30 +154,30 @@ fn every_windows_publish_step_refuses_a_git_folder_that_points_elsewhere() {
         assert!(configured_author(&git, made.owner_home.path(), &folder).is_some());
         made.plant(shape);
         let refusal = "github_publish_not_plain_repo";
-        refused(
+        wrong.extend(mismatch(
             inspect(&git, home, &folder, HOST),
             refusal,
             &format!("{shape} inspect"),
-        );
+        ));
         let choices = GitHubPrepare {
             private: true,
             docs: false,
             approved: Vec::new(),
             rules: GitHubRule::defaults(),
         };
-        refused(
+        wrong.extend(mismatch(
             prepare(&git, home, &folder, &local, &choices),
             refusal,
             &format!("{shape} prepare"),
-        );
+        ));
         for history in [GitHubHistory::Empty, GitHubHistory::Owner] {
-            refused(
+            wrong.extend(mismatch(
                 secret_findings(&git, home, &folder, history),
                 refusal,
                 &format!("{shape} secrets {history:?}"),
-            );
+            ));
         }
-        refused(
+        wrong.extend(mismatch(
             commit(
                 &git,
                 home,
@@ -175,17 +190,17 @@ fn every_windows_publish_step_refuses_a_git_folder_that_points_elsewhere() {
             ),
             refusal,
             &format!("{shape} commit"),
-        );
-        refused(
+        ));
+        wrong.extend(mismatch(
             has_workflows(&git, home, &folder, &head),
             refusal,
             &format!("{shape} workflows"),
-        );
-        assert!(
-            configured_author(&git, made.owner_home.path(), &folder).is_none(),
-            "{shape} author"
-        );
+        ));
+        if configured_author(&git, made.owner_home.path(), &folder).is_some() {
+            wrong.push(format!("{shape} author: still read"));
+        }
     }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
 
 #[test]
