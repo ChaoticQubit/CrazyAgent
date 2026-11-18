@@ -549,9 +549,11 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
     owner.stop().await;
 }
 
-/// A folder add whose plan storage cannot take before the exchange deadline is refused
-/// storage_busy_not_submitted by the projects home route itself, rather than cut and heard as
-/// an unknown outcome, and moves nothing (V243-STORAGE-BUSY-ROWS).
+/// A folder add whose replay check storage takes 1.3 s late, and whose plan then waits behind
+/// a second hold, is refused storage_busy_not_submitted by the projects home route before the
+/// exchange deadline cuts it: the late take puts the plan's storage bound past that cut, so
+/// the owner hears the refusal rather than an unknown outcome, and nothing moves
+/// (V243-STORAGE-BUSY-ROWS).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves_nothing() {
     let owner = Usage::start().await;
@@ -593,11 +595,27 @@ async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves
         )
         .unwrap();
 
-    let release = hold_storage(&owner);
-    let answered = tokio::time::timeout(Duration::from_secs(20), controller.send_pending())
-        .await
-        .unwrap();
-    drop(release);
+    let first = hold_storage(&owner);
+    let mut answered = Box::pin(tokio::time::timeout(
+        Duration::from_secs(20),
+        controller.send_pending(),
+    ));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut answered)
+            .await
+            .is_err(),
+        "the replay check waits behind the first hold"
+    );
+    let second = hold_storage(&owner);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut answered)
+            .await
+            .is_err(),
+        "the replay check still waits, so the plan is submitted late"
+    );
+    drop(first);
+    let answered = answered.await.unwrap();
+    drop(second);
     assert!(
         matches!(
             &answered,
