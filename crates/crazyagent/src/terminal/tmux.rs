@@ -677,19 +677,8 @@ impl Tmux {
             control.stop();
             return Err(refused);
         }
-        for option in [
-            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
-            "set-option -gw allow-rename off".into(),
-            "set-option -gw automatic-rename off".into(),
-            "set-option -gw remain-on-exit off".into(),
-            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
-        ]
-        .into_iter()
-        .chain(
-            self.confined
-                .is_some()
-                .then(|| format!("set-option -g default-shell {LEAD_SHELL}")),
-        ) {
+        let paste_buffer = crate::hop_trace::toggled(crate::hop_trace::T7_PASTE_BUFFER_ENV);
+        for option in server_options(self.confined.is_some(), paste_buffer) {
             control
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
@@ -2612,6 +2601,32 @@ fn input_route(bytes: &[u8], interleave: bool, paste_buffer: bool) -> Route {
     };
     assert!(route == Route::OneByOne || bytes.len() > SEND_KEYS_BYTES_MAX);
     route
+}
+
+/// The `set-option` commands the engine runs on each server it controls, in order: the
+/// terminal type, window names and exits, scrollback, the lead shell on a confined host, and
+/// with DEC-202 T7 on, `set-clipboard external` and `get-clipboard off`, so no pane's OSC 52
+/// query reads a tmux buffer. Takes whether the host is confined and whether T7 is on.
+/// Returns the commands.
+fn server_options(confined: bool, paste_buffer: bool) -> Vec<String> {
+    let mut options = vec![
+        format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+        "set-option -gw allow-rename off".into(),
+        "set-option -gw automatic-rename off".into(),
+        "set-option -gw remain-on-exit off".into(),
+        format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+    ];
+    if confined {
+        options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+    }
+    let _ = paste_buffer;
+    assert!(options.len() >= 5);
+    assert!(
+        options
+            .iter()
+            .all(|option| option.starts_with("set-option -"))
+    );
+    options
 }
 
 /// The most commands one `Control::send_all` writes: the runs of the longest input.

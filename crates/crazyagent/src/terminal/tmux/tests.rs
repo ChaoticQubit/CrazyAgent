@@ -458,6 +458,96 @@ fn t7_a_pending_named_paste_buffer_is_not_read_by_a_panes_osc_52_query() {
     }
 }
 
+/// DEC-202 T7 (h4 MUX-RESULTS): with its toggle on, the engine pins `set-clipboard external`
+/// and `get-clipboard off` after today's server options, which stay the same and in the same
+/// order with the toggle off, on the engine's server and on a confined lead's.
+#[test]
+fn t7_pins_the_clipboard_options_after_todays_only_with_its_toggle_on() {
+    for confined in [false, true] {
+        let mut today = vec![
+            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+            "set-option -gw allow-rename off".to_owned(),
+            "set-option -gw automatic-rename off".to_owned(),
+            "set-option -gw remain-on-exit off".to_owned(),
+            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+        ];
+        if confined {
+            today.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+        }
+        let off = server_options(confined, false);
+        assert_eq!(off, today);
+        let on = server_options(confined, true);
+        assert_eq!(on[..off.len()], off[..]);
+        assert_eq!(
+            on[off.len()..],
+            [
+                "set-option -sq set-clipboard external",
+                "set-option -sq get-clipboard off"
+            ]
+        );
+    }
+}
+
+/// DEC-202 T7 (h4 MUX-RESULTS): a pane's OSC 52 query reads an unnamed buffer with
+/// `set-clipboard on`, but no longer once T7's clipboard pins are applied, nor when
+/// `set-clipboard on` comes back after them, since `get-clipboard off` still refuses it.
+#[cfg(target_os = "macos")]
+#[test]
+fn t7_clipboard_pins_stop_a_panes_osc_52_query_reading_an_unnamed_buffer() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, _agent, received) = raw_cat_pane(home.path(), true);
+    let control = host.live_control().unwrap();
+    let replies = || {
+        let bytes = std::fs::read(&received).unwrap_or_default();
+        bytes
+            .windows(5)
+            .filter(|window| *window == b"\x1b]52;")
+            .count()
+    };
+    control.run("set-option -s set-clipboard on").unwrap();
+    control.run("set-buffer -- \"control\"").unwrap();
+    osc52_query(home.path());
+    assert_eq!(
+        replies(),
+        1,
+        "the unnamed buffer never came back before the pins"
+    );
+    let today = server_options(false, false);
+    let pins: Vec<String> = server_options(false, true)
+        .into_iter()
+        .filter(|option| !today.contains(option))
+        .collect();
+    for pin in &pins {
+        control.run(pin).unwrap();
+    }
+    osc52_query(home.path());
+    assert_eq!(replies(), 1, "a query read the buffer through the pins");
+    control.run("set-option -s set-clipboard on").unwrap();
+    osc52_query(home.path());
+    assert_eq!(
+        replies(),
+        1,
+        "get-clipboard off let a query read the buffer"
+    );
+    assert_eq!(pins.len(), 2);
+}
+
+/// Makes the pane of `raw_cat_pane` with OSC 52 queries print one query: writes the `go` file,
+/// waits until the pane took it, then 800 ms for any reply to reach the pane's file. Takes the
+/// test's home folder.
+#[cfg(target_os = "macos")]
+fn osc52_query(home: &Path) {
+    let go = home.join("go");
+    assert!(!go.exists());
+    std::fs::write(&go, b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while go.exists() {
+        assert!(Instant::now() < deadline, "the pane never sent its query");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(800));
+}
+
 /// A real tmux server whose one agent pane runs `cat` on a raw terminal, writing what it
 /// receives to a file. With `osc52_queries`, the pane also prints an OSC 52 clipboard query
 /// each time a `go` file appears in the home folder and removes it, for at most 20 s and
