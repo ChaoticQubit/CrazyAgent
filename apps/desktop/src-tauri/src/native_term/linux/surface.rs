@@ -69,12 +69,28 @@ impl Rect {
         (self.x * scale, self.y * scale, width, height)
     }
 
-    /// The part of the rectangle a child may show inside the webview's area. Not clipped
-    /// yet: the whole rectangle. Input: the webview's area in the toplevel's logical
-    /// pixels. Output: the part.
+    /// The part of the rectangle inside another, such as the webview's area: a Wayland
+    /// subsurface is not clipped to its toplevel, so a child shows only this part. Input:
+    /// the other rectangle, in the same pixels. Output: the part, or none when no pixel of
+    /// the rectangle is inside.
     pub fn visible(self, bounds: Rect) -> Option<Rect> {
-        let _ = bounds;
-        Some(self)
+        let end = |start: i32, size: i32| i64::from(start) + i64::from(size);
+        let x = self.x.max(bounds.x);
+        let y = self.y.max(bounds.y);
+        let right = end(self.x, self.w).min(end(bounds.x, bounds.w));
+        let bottom = end(self.y, self.h).min(end(bounds.y, bounds.h));
+        if right <= i64::from(x) || bottom <= i64::from(y) {
+            return None;
+        }
+        let part = Rect {
+            x,
+            y,
+            w: i32::try_from(right - i64::from(x)).expect("no wider than the rectangle"),
+            h: i32::try_from(bottom - i64::from(y)).expect("no taller than the rectangle"),
+        };
+        assert!(part.x >= self.x && part.y >= self.y && part.w <= self.w && part.h <= self.h);
+        assert!(part.w >= 1 && part.h >= 1);
+        Some(part)
     }
 }
 
