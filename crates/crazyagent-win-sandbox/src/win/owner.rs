@@ -189,9 +189,7 @@ fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
     Ok((owner, list))
 }
 
-/// The engine's own user SID, read from its process token. Relies on the token handle
-/// staying open for both calls, and on the buffer, aligned for `TOKEN_USER` and as long as
-/// Windows asked for, outliving the read of the SID it holds. Output: the SID bytes, or the
+/// The engine's own user SID, read from its process token. Output: the SID bytes, or the
 /// Windows error.
 pub(super) fn user_sid() -> Result<Vec<u8>, u32> {
     let mut token: HANDLE = std::ptr::null_mut();
@@ -199,6 +197,13 @@ pub(super) fn user_sid() -> Result<Vec<u8>, u32> {
         return Err(last_error());
     }
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    token_user(&token)
+}
+
+/// The user SID a token names. Relies on the buffer, aligned for `TOKEN_USER` and as long
+/// as Windows asked for, outliving the read of the SID it holds. Input: a token opened with
+/// `TOKEN_QUERY`. Output: the SID bytes, or the Windows error.
+pub(super) fn token_user(token: &OwnedHandle) -> Result<Vec<u8>, u32> {
     let mut needed = 0_u32;
     unsafe {
         GetTokenInformation(

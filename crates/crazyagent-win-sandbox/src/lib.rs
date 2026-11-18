@@ -3,10 +3,7 @@
 
 pub mod dacl;
 pub mod grants;
-#[cfg(windows)]
-pub mod pipe {
-    pub use crate::win::pipe::{INSTANCES_MAX, create};
-}
+pub mod pipe;
 pub mod plan;
 pub mod private;
 pub mod profile;
