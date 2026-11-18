@@ -317,6 +317,32 @@ fn principals() -> Vec<(&'static str, OwnedHandle)> {
     ]
 }
 
+/// rv-code #551 F2: `create` refuses a name that is not one plain part under `\\.\pipe\`,
+/// and an instance cap outside 1-254, with `InvalidInput` and makes no pipe, so the good
+/// name is still free for a first instance afterwards.
+#[test]
+fn a_bad_pipe_name_or_instance_cap_is_refused_before_any_pipe_is_made() {
+    let name = unique("engine");
+    let bad_names = [
+        String::new(),
+        r"\\.\pipe\".to_owned(),
+        "crazyagent-p2-engine".to_owned(),
+        format!(r"{name}\inner"),
+        format!("{name}/inner"),
+        format!("{name}\0inner"),
+        format!(r"\\.\pipe\{}", "a".repeat(250)),
+    ];
+    for bad in &bad_names {
+        let refused = pipe::create(bad, true, 1).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+    }
+    for instances in [0, pipe::INSTANCES_MAX + 1] {
+        let refused = pipe::create(&name, true, instances).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput, "{instances}");
+    }
+    drop(pipe::create(&name, true, 1).unwrap());
+}
+
 /// W2 D8 (P2 row 3): the first instance claims a pipe name, and a second create that asks
 /// to be the first instance is refused with access denied, the code the engine reports as
 /// `engine_pipe_taken`.
