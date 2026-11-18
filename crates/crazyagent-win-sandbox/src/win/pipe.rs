@@ -1,29 +1,35 @@
+use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, token_user};
 use super::private::user_sid;
 use super::{Words, last_error};
-use crate::dacl::{SYSTEM, allowing};
-use crate::pipe::Peer;
+use crate::dacl::{SYSTEM, allowing, label};
+use crate::pipe::{Peer, Pin, Served};
 use std::io;
-use std::os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use windows_sys::Win32::Foundation::{
-    ERROR_NO_TOKEN, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_NO_TOKEN, ERROR_SUCCESS, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
 use windows_sys::Win32::Security::{
-    GetTokenInformation, InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, RevertToSelf,
-    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel, TokenIsAppContainer,
-    TokenRestrictedSids,
+    ACL, GetTokenInformation, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, RevertToSelf, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
+    SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    TokenIntegrityLevel, TokenIsAppContainer, TokenRestrictedSids,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
-    CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-    PIPE_TYPE_BYTE, PIPE_WAIT,
+    CreateNamedPipeW, GetNamedPipeServerProcessId, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
-use windows_sys::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentThread, GetProcessId, GetProcessTimes, OpenProcess, OpenProcessToken,
+    OpenThreadToken, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 /// The local pipe namespace every engine pipe name starts with.
 const PREFIX: &str = r"\\.\pipe\";
@@ -139,6 +145,88 @@ fn thread_token_gone() -> bool {
         return false;
     }
     last_error() == ERROR_NO_TOKEN
+}
+
+/// Reads who serves a connected engine pipe, before the client writes a byte (DESIGN-0256
+/// D10): the server's process ID off the pipe, that process opened for limited queries and
+/// pinned by its creation time, its token, and the pipe's integrity label. Input: the client
+/// end. Output: what [`crate::pipe::judge_server`] judges, or the Windows error.
+pub fn server(pipe: BorrowedHandle<'_>) -> io::Result<Served> {
+    let mut pid = 0_u32;
+    if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    let pin = pin_of(process.as_handle())?;
+    assert_eq!(pin.pid, pid, "the opened process is the one the pipe named");
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(process.as_raw_handle(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    Ok(Served {
+        pin,
+        peer: peer_of(&token)?,
+        label: label_of(pipe)?,
+    })
+}
+
+/// Pins a process by its ID and creation time (DESIGN-0256 D10 step 1), the engine its own
+/// child or itself. Input: a process handle with at least limited query access. Output: the
+/// pin, or the Windows error.
+pub fn pin_of(process: BorrowedHandle<'_>) -> io::Result<Pin> {
+    let pid = unsafe { GetProcessId(process.as_raw_handle()) };
+    if pid == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut times = [FILETIME::default(); 4];
+    let [created, exited, kernel, user] = &mut times;
+    if unsafe { GetProcessTimes(process.as_raw_handle(), created, exited, kernel, user) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let created = (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime);
+    assert_ne!(created, 0, "a running process has a creation time");
+    Ok(Pin { pid, created })
+}
+
+/// The integrity level of a pipe's mandatory label (DESIGN-0256 D10 step 3). Input: a
+/// handle to the pipe with read-control access. Output: the level, None when the pipe
+/// carries no label, or why the label could not be read.
+fn label_of(pipe: BorrowedHandle<'_>) -> io::Result<Option<u32>> {
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            pipe.as_raw_handle(),
+            SE_KERNEL_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut sacl,
+            &mut descriptor,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let descriptor = Local(descriptor);
+    let level = if sacl.is_null() {
+        None
+    } else {
+        let size = usize::from(unsafe { (*sacl).AclSize });
+        assert!((8..=ACL_BYTES_MAX).contains(&size));
+        let list = unsafe { std::slice::from_raw_parts(sacl.cast::<u8>(), size) };
+        label(list)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))?
+            .map(|(level, _)| level)
+    };
+    drop(descriptor);
+    Ok(level)
 }
 
 /// What a token says about its holder for D9 and D10: its user SID, whether it is an

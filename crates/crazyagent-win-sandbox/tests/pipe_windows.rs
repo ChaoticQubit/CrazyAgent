@@ -1,13 +1,14 @@
 #![cfg(windows)]
 
-use crazyagent_win_sandbox::pipe::{self, Peer};
+use crazyagent_win_sandbox::pipe::{self, Peer, Served};
 use crazyagent_win_sandbox::private::user_sid;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_IO_PENDING, ERROR_NO_TOKEN, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
     HANDLE, LocalFree,
@@ -26,7 +27,7 @@ use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{
     CreateProcessAsUserW, GetCurrentProcess, GetCurrentThread, GetExitCodeProcess,
     OpenProcessToken, OpenThreadToken, PROCESS_INFORMATION, STARTUPINFOW, SetThreadToken,
-    WaitForSingleObject,
+    TerminateProcess, WaitForSingleObject,
 };
 
 /// The low mandatory level, the level of a sandboxed browser tab or a lowered helper.
@@ -410,17 +411,12 @@ fn lower_principals_creating_a_fresh_name_are_logged() {
     }
 }
 
-/// W2 P2 (probe for row 2): a child process starts from a copy of this process's token
-/// lowered to low integrity through CreateProcessAsUserW without any extra privilege, which
-/// the rogue-server rows rely on, and runs to its exit code.
-#[test]
-fn a_low_integrity_child_starts_from_a_lowered_primary_token() {
+/// Starts `command` as a child from a copy of this process's token lowered to low
+/// integrity, through CreateProcessAsUserW. Input: the command line. Output: the child's
+/// process handle and ID, or the Windows error.
+fn start_low(command: &str) -> io::Result<(OwnedHandle, u32)> {
     let token = low_token(TokenPrimary);
-    let root = std::env::var("SystemRoot").unwrap();
-    let mut command: Vec<u16> = format!(r"{root}\System32\cmd.exe /c exit 7")
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let mut command: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
     let startup = STARTUPINFOW {
         cb: size_of::<STARTUPINFOW>() as u32,
         ..Default::default()
@@ -441,18 +437,29 @@ fn a_low_integrity_child_starts_from_a_lowered_primary_token() {
             &mut started,
         )
     };
-    let failure = io::Error::last_os_error();
+    if made == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(unsafe { OwnedHandle::from_raw_handle(started.hThread) });
+    let process = unsafe { OwnedHandle::from_raw_handle(started.hProcess) };
+    Ok((process, started.dwProcessId))
+}
+
+/// W2 P2 (probe for row 2): a child process starts from a copy of this process's token
+/// lowered to low integrity through CreateProcessAsUserW without any extra privilege, which
+/// the rogue-server rows rely on, and runs to its exit code.
+#[test]
+fn a_low_integrity_child_starts_from_a_lowered_primary_token() {
+    let root = std::env::var("SystemRoot").unwrap();
+    let child = start_low(&format!(r"{root}\System32\cmd.exe /c exit 7"));
     println!(
         "P2 low-il child through CreateProcessAsUserW: {}",
-        if made != 0 {
-            "started".to_string()
-        } else {
-            format!("refused {:?} {failure}", failure.raw_os_error())
+        match &child {
+            Ok(_) => "started".to_string(),
+            Err(failure) => format!("refused {:?} {failure}", failure.raw_os_error()),
         }
     );
-    assert_ne!(made, 0);
-    let process = unsafe { OwnedHandle::from_raw_handle(started.hProcess) };
-    drop(unsafe { OwnedHandle::from_raw_handle(started.hThread) });
+    let (process, _) = child.unwrap();
     assert_eq!(
         unsafe { WaitForSingleObject(process.as_raw_handle(), 30_000) },
         0
@@ -548,4 +555,124 @@ fn clients_the_pipe_list_refuses_never_reach_the_peer_check() {
     );
     assert!(client.is_ok());
     drop(server);
+}
+
+/// The name a rogue server child squats, made from its own process ID. Input: the child's
+/// process ID. Output: the full pipe name.
+fn rogue_name(pid: u32) -> String {
+    format!(r"\\.\pipe\crazyagent-p2-rogue-{pid}")
+}
+
+/// This process, borrowed through its pseudo handle. Output: the handle.
+fn this_process() -> BorrowedHandle<'static> {
+    unsafe { BorrowedHandle::borrow_raw(GetCurrentProcess()) }
+}
+
+/// What a client read off its pipe, or the Win32 code. Input: the reading. Output: the text
+/// the row logs.
+fn read_off(result: &io::Result<Served>) -> String {
+    match result {
+        Ok(served) => format!(
+            "pid {}, created {}, label {:?}, {}",
+            served.pin.pid,
+            served.pin.created,
+            served.label.map(|level| format!("{level:#x}")),
+            described(&Ok(served.peer.clone()))
+        ),
+        Err(error) => format!("refused {:?} {error}", error.raw_os_error()),
+    }
+}
+
+/// Opens the client end of `name` as the engine's clients do, retrying while the name does
+/// not exist yet, for 30 seconds at most. Input: the pipe name. Output: the client end.
+fn open_when_made(name: &str) -> File {
+    for _ in 0..300 {
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(name);
+        match opened {
+            Ok(file) => return file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            Err(error) => panic!("{name}: {error}"),
+        }
+    }
+    panic!("{name} was not made within 30 seconds");
+}
+
+/// W2 D10 (DESIGN-0256 steps 1-3, NOTE-0145 A4 pass): before writing a byte, a client reads
+/// off its connected pipe the process that serves it, here this engine: the pin matches the
+/// engine's own ID and creation time, its token passes, and the pipe's label, if any, is not
+/// below medium.
+#[test]
+fn the_client_pins_the_engine_that_serves_its_pipe() {
+    let user = user_sid().unwrap();
+    let engine = pipe::pin_of(this_process()).unwrap();
+    assert_eq!(engine.pid, std::process::id());
+    assert_ne!(engine.created, 0);
+    let (server, client) = connected(None);
+    let client = client.unwrap();
+    let served = pipe::server(client.as_handle());
+    println!(
+        "D10 client reads the engine's own pipe: {}",
+        read_off(&served)
+    );
+    let served = served.unwrap();
+    assert_eq!(served.pin, engine);
+    assert_eq!(pipe::judge_server(&served, engine, &user), Ok(()));
+    drop((client, server));
+}
+
+/// Not a row on its own: the rogue server that
+/// `a_client_refuses_a_pipe_a_low_integrity_child_serves` starts as a low integrity child.
+/// It squats the name made from its own process ID and holds it for 30 seconds at most;
+/// the parent ends it sooner.
+#[test]
+#[ignore = "the low integrity child of a D10 row"]
+fn rogue_server_child() {
+    let server = pipe::create(&rogue_name(std::process::id()), true, 1).unwrap();
+    std::thread::sleep(Duration::from_secs(30));
+    drop(server);
+}
+
+/// W2 D10 (DESIGN-0256 probe row 2): a low integrity child of the user squats a fresh name,
+/// as P2 showed it can, and serves it. The client that opens it reads the child as the
+/// server, so the pin to the engine refuses it before a byte is written; the child's token
+/// is below medium as well. The child's pipe label is logged.
+#[test]
+fn a_client_refuses_a_pipe_a_low_integrity_child_serves() {
+    let user = user_sid().unwrap();
+    let engine = pipe::pin_of(this_process()).unwrap();
+    let test = std::env::current_exe().unwrap();
+    let (child, pid) = start_low(&format!(
+        "\"{}\" rogue_server_child --exact --ignored --test-threads 1",
+        test.display()
+    ))
+    .unwrap();
+    let client = open_when_made(&rogue_name(pid));
+    let served = pipe::server(client.as_handle());
+    println!(
+        "D10 client reads a pipe a low-il child serves: {}",
+        read_off(&served)
+    );
+    let served = served.unwrap();
+    assert_eq!(served.pin.pid, pid);
+    assert_eq!(served.pin, pipe::pin_of(child.as_handle()).unwrap());
+    assert_eq!(
+        pipe::judge_server(&served, engine, &user),
+        Err("another process serves the pipe")
+    );
+    assert_eq!(
+        pipe::judge_peer(&served.peer, &user),
+        Err("a lower integrity process is at the other end of the pipe")
+    );
+    drop(client);
+    unsafe { TerminateProcess(child.as_raw_handle(), 1) };
+    assert_eq!(
+        unsafe { WaitForSingleObject(child.as_raw_handle(), 30_000) },
+        0
+    );
 }
