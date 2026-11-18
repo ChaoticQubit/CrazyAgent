@@ -208,8 +208,8 @@ export class NativeView implements Held {
   }
 
   /** Gives the shown live view the keyboard, as the web panel focuses its terminal: at once
-   * when uncovered, else once a page overlay stops covering it; a hidden view gets nothing.
-   * Output: none. */
+   * when uncovered, else once a page overlay stops covering it if the view is still live; a
+   * hidden view gets nothing. Output: none. */
   focus(): void {
     const id = this.open?.id ?? null;
     if (!this.shown || id === null || this.state.view.kind !== "live") return;
@@ -450,7 +450,7 @@ export class NativeView implements Held {
     }
     if (!covered && this.wantsFocus) {
       this.wantsFocus = false;
-      void focusNativeTerminal(id);
+      if (this.state.view.kind === "live") void focusNativeTerminal(id);
     }
   }
 }
