@@ -159,9 +159,10 @@ impl Deliveries {
 }
 
 /// Puts back the messages delivered or typed to agents of a project whose session has
-/// stopped or failed, however it ended, so their next session gets them, at most
-/// `RECIPIENTS_PER_TICK_MAX` such messages a tick. Takes the database, the project and
-/// the time in ms. Returns any failure.
+/// stopped or failed, however it ended, so their next session gets them: every such
+/// message of the agents named by the first `RECIPIENTS_PER_TICK_MAX` found; those leave
+/// the read, so the next tick reaches the agents after them. Takes the database, the
+/// project and the time in ms. Returns any failure.
 fn requeue_stopped(db: &Connection, project: &ProjectId, now: i64) -> Result<(), EngineError> {
     let stopped: BTreeSet<AgentId> = {
         let mut statement = db.prepare(REQUEUE_SQL).map_err(state)?;
