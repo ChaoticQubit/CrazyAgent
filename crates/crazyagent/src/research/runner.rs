@@ -43,11 +43,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
-/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
-/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
-/// program the repository names (RV-DS241-39), and no signature check on a log or show at
-/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
-/// what the engine reads (RV-DS241-39 r2 F2).
+/// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
+/// (RV-DS241-39 r2 F2), and no signature program the repository names (RV-DS241-39). On
+/// Unix each program is `/dev/null`, which git cannot start and goes on without; a started
+/// `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with SIGPIPE
+/// (V243-WORKTREES-GIT-FLAKE). Windows keeps `/usr/bin/false` (V244-WIN-GIT-SAFE-PROGRAM-PATH).
 pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "core.hooksPath=/dev/null",
@@ -60,11 +60,23 @@ pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "protocol.allow=never",
     "-c",
-    "gpg.program=/usr/bin/false",
+    if cfg!(unix) {
+        "gpg.program=/dev/null"
+    } else {
+        "gpg.program=/usr/bin/false"
+    },
     "-c",
-    "gpg.x509.program=/usr/bin/false",
+    if cfg!(unix) {
+        "gpg.x509.program=/dev/null"
+    } else {
+        "gpg.x509.program=/usr/bin/false"
+    },
     "-c",
-    "gpg.ssh.program=/usr/bin/false",
+    if cfg!(unix) {
+        "gpg.ssh.program=/dev/null"
+    } else {
+        "gpg.ssh.program=/usr/bin/false"
+    },
     "-c",
     "log.showSignature=false",
 ];

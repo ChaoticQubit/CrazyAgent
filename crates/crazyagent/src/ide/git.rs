@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(all(test, unix))]
 mod tests;
 
-const KEYS: usize = 16;
+const KEYS: usize = 17;
 
 /// The git configuration every git the IDE server starts runs with, as `GIT_CONFIG_COUNT`
 /// and numbered `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` variables, which outrank every
@@ -22,10 +22,12 @@ const KEYS: usize = 16;
 /// each agent's `HEAD` in its admin folder, which the IDE cannot write
 /// (IDE-SANDBOX-AGENT-FOLDERS); git skips the reflog step only when both expiry keys are
 /// `never`. Every signing switch is off, so a project that signs every commit or tag still
-/// commits and tags from the IDE, unsigned (INT1-3). The server's environment adds them
-/// after its allowlist.
+/// commits and tags from the IDE, unsigned (INT1-3), and no log checks a signature. The ssh
+/// command and the signature programs are [`NO_PROGRAM`], never a `false` a path lookup
+/// finds on Unix (V243-WORKTREES-GIT-FLAKE). The server's environment adds them after its
+/// allowlist.
 pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
-    ("GIT_CONFIG_COUNT", "16"),
+    ("GIT_CONFIG_COUNT", "17"),
     ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
     ("GIT_CONFIG_VALUE_0", "all"),
     ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
@@ -33,17 +35,17 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
     ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
     ("GIT_CONFIG_VALUE_2", "false"),
     ("GIT_CONFIG_KEY_3", "core.sshCommand"),
-    ("GIT_CONFIG_VALUE_3", "false"),
+    ("GIT_CONFIG_VALUE_3", NO_PROGRAM),
     ("GIT_CONFIG_KEY_4", "core.pager"),
     ("GIT_CONFIG_VALUE_4", "cat"),
     ("GIT_CONFIG_KEY_5", "credential.helper"),
     ("GIT_CONFIG_VALUE_5", ""),
     ("GIT_CONFIG_KEY_6", "gpg.program"),
-    ("GIT_CONFIG_VALUE_6", "false"),
+    ("GIT_CONFIG_VALUE_6", NO_PROGRAM),
     ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
-    ("GIT_CONFIG_VALUE_7", "false"),
+    ("GIT_CONFIG_VALUE_7", NO_PROGRAM),
     ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
-    ("GIT_CONFIG_VALUE_8", "false"),
+    ("GIT_CONFIG_VALUE_8", NO_PROGRAM),
     ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
     ("GIT_CONFIG_VALUE_9", "never"),
     ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
@@ -56,13 +58,21 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
     ("GIT_CONFIG_VALUE_13", "never"),
     ("GIT_CONFIG_KEY_14", "gc.reflogExpireUnreachable"),
     ("GIT_CONFIG_VALUE_14", "never"),
-    ("GIT_CONFIG_KEY_15", "core.hooksPath"),
-    ("GIT_CONFIG_VALUE_15", "/dev/null"),
+    ("GIT_CONFIG_KEY_15", "log.showSignature"),
+    ("GIT_CONFIG_VALUE_15", "false"),
+    ("GIT_CONFIG_KEY_16", "core.hooksPath"),
+    ("GIT_CONFIG_VALUE_16", "/dev/null"),
 ];
+
+/// The ssh command and every signature program under [`CONFIG_ENV`]: on Unix `/dev/null`,
+/// an absolute path git cannot start, so the transport or check fails and nothing runs;
+/// elsewhere the bare `false` for now, which a path lookup resolves
+/// (V244-WIN-GIT-SAFE-PROGRAM-PATH).
+const NO_PROGRAM: &str = if cfg!(unix) { "/dev/null" } else { "false" };
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
 /// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
-const PROJECT_HOOKS_COUNT: &str = "15";
+const PROJECT_HOOKS_COUNT: &str = "16";
 
 /// The variable that ends git's search for a repository at the project's agents root
 /// (INT1-1): git in an agent folder, whose `.git` the IDE sandbox cannot read, then finds no
@@ -351,7 +361,7 @@ pub fn shim_text(
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
         CONFIG_ENV[2 * KEYS - 1],
-        ("GIT_CONFIG_KEY_15", "core.hooksPath")
+        ("GIT_CONFIG_KEY_16", "core.hooksPath")
     );
     assert!(
         git.is_absolute(),
