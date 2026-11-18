@@ -44,7 +44,7 @@ fn system_shell() -> std::path::PathBuf {
 #[test]
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
 fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
-    let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
+    let _ = guarded(|| spawn(&mut succeeding()));
 }
 
 /// V243 P6: a kept start asked for while this thread holds the gate panics before its keeper
