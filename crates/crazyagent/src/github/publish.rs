@@ -25,10 +25,11 @@ const OUTPUT_BYTES_MAX: u64 = 1 << 20;
 const GITIGNORE_BYTES_MAX: u64 = 1 << 20;
 const FINDINGS_MAX: usize = 1000;
 const TREE_ENTRIES_MAX: usize = 2_000_000;
-/// The repository config keys that name a file outside the tree, each turned off on every
-/// publish git in the project, so a `.git/config` an agent wrote never has git open a share or
-/// another outside file as the owner: the excludes and attributes files and the mailmap
-/// (rv-sec3 #620 F1). The in-tree `.gitignore` and `.gitattributes` still apply.
+/// The repository config keys that name a file outside the tree, turned off on every publish
+/// git that reads the tree ([`project_git`]), so a `.git/config` an agent wrote never has git
+/// open a share or another outside file as the owner: the excludes and attributes files and the
+/// mailmap. On Unix too, so an owner's own repository `core.excludesFile` no longer hides files
+/// from the publish scan or commit; `.gitignore`, `.git/info/exclude` and `.gitattributes` apply.
 const OUTSIDE_FILES_OFF: [&str; 8] = [
     "-c",
     "core.excludesFile=/dev/null",
@@ -261,12 +262,11 @@ pub(super) fn git() -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("github_git_missing"))
 }
 
-/// Starts a git command in the project's own repository with the engine's safe options and
-/// the empty home, so no hook folder, pager, fsmonitor, owner configuration outside the
-/// repository or outside file its config names ([`OUTSIDE_FILES_OFF`]) runs or is read, and git
-/// never looks for a repository above the project. A config hook these options do not stop is
-/// refused by [`refuse_hooks`] first. Inputs: git, its empty home and the project. Output: the
-/// command, without arguments.
+/// Starts a git command in the project's own repository with the engine's safe options and the
+/// empty home, so no hook folder, pager, fsmonitor, owner config outside the repository or
+/// outside file its config names ([`OUTSIDE_FILES_OFF`]) runs or is read, and git never looks
+/// above the project. [`refuse_hooks`] first refuses a config hook these options do not stop.
+/// Inputs: git, its empty home and the project. Output: the command, without arguments.
 fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
     let mut command = clone::git_command(git, home);
     command

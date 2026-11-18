@@ -12,6 +12,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The owner's own git for one project inside an AppContainer of its own, with no capability,
+/// so a `.git` that points git elsewhere reaches nothing (V244-WIN-GIT-UNC-SIBLINGS).
+pub mod owner_git;
+
 /// The boundary helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-win-boundary.exe";
 
