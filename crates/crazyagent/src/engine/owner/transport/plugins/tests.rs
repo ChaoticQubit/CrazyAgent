@@ -517,6 +517,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     assert!(live.is_dir());
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::storage::plugins::initialize(&connection).unwrap();
+    crate::storage::trash::initialize(&connection).unwrap();
     connection
         .execute(
             "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
@@ -569,6 +570,7 @@ fn a_check_profile_that_cannot_be_released_stays_for_the_next_start() {
     std::fs::write(&other, "kept").unwrap();
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::storage::plugins::initialize(&connection).unwrap();
+    crate::storage::trash::initialize(&connection).unwrap();
     connection
         .execute(
             "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES (?1,'server','global','live','{}')",
