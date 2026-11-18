@@ -85,6 +85,22 @@ pub fn rect(
     Ok(placed)
 }
 
+/// A view's IME spot in client device pixels: the cursor cell's top left, where the
+/// composition window goes, and the cell itself, which the candidate list keeps clear of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spot {
+    pub point: (i32, i32),
+    pub cell: (i32, i32, i32, i32),
+}
+
+/// Where the IME's windows sit for a cursor cell. Inputs: the cursor's row and column, the
+/// cell size in points and the scale key. Output: the spot, or none for a cell that is not
+/// finite and positive or a spot past `RECT_MAX`.
+pub fn ime_spot(cursor: (usize, usize), cell_points: (f64, f64), key: u32) -> Option<Spot> {
+    let _ = (cursor, cell_points, key);
+    unimplemented!("H2 red")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +209,30 @@ mod tests {
     #[should_panic(expected = "a scale key")]
     fn a_scale_key_out_of_range_is_a_bug() {
         let _ = rect((0.0, 0.0, 10.0, 10.0), 99, (0, 0));
+    }
+
+    #[test]
+    fn the_ime_spot_is_the_cursor_cell_in_device_pixels() {
+        let plain = ime_spot((2, 3), (7.0, 17.0), 100);
+        assert_eq!(
+            plain,
+            Some(Spot {
+                point: (21, 34),
+                cell: (21, 34, 28, 51)
+            })
+        );
+        let scaled = ime_spot((2, 3), (7.0, 17.0), 150);
+        assert_eq!(
+            scaled,
+            Some(Spot {
+                point: (32, 51),
+                cell: (32, 51, 42, 77)
+            })
+        );
+        let origin = ime_spot((0, 0), (7.0, 17.0), 100).map(|spot| spot.point);
+        assert_eq!(origin, Some((0, 0)));
+        assert_eq!(ime_spot((2, 3), (0.0, 17.0), 100), None);
+        assert_eq!(ime_spot((2, 3), (f64::NAN, 17.0), 100), None);
+        assert_eq!(ime_spot((0, 10_000), (7.0, 17.0), 400), None);
     }
 }

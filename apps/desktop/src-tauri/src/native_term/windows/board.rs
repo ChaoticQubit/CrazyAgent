@@ -61,6 +61,7 @@ struct Slot<T> {
     shown: bool,
     changed: bool,
     misses: u8,
+    cell: Option<(f64, f64)>,
     fresh: bool,
     removing: bool,
 }
@@ -114,6 +115,7 @@ impl<T> Board<T> {
             shown: false,
             changed: false,
             misses: 0,
+            cell: None,
             fresh: true,
             removing: false,
         });
@@ -226,6 +228,21 @@ impl<T> Board<T> {
         assert!(!slot.fresh, "geometry is taken only after the hand-over");
         let owed = std::mem::take(&mut slot.geometry_owed);
         owed.then_some(slot.geometry)
+    }
+
+    /// The render thread's word of a view's cell size in points, which the view's thread
+    /// reads to place the IME. Inputs: the view id and the size. Output: whether the view
+    /// is on the board.
+    pub fn post_cell(&self, id: u64, cell: (f64, f64)) -> bool {
+        let _ = (id, cell);
+        unimplemented!("H2 red")
+    }
+
+    /// A view's cell size in points as the render thread last posted it. Input: the view
+    /// id. Output: the size, or none before the view's first surface.
+    pub fn cell(&self, id: u64) -> Option<(f64, f64)> {
+        let _ = id;
+        unimplemented!("H2 red")
     }
 
     /// The render thread's word that a ready view's swap-chain wait failed: the change stays
@@ -521,5 +538,16 @@ mod tests {
         let board: Board<&str> = Board::new();
         board.add(1, 1, ONE).expect("a view");
         let _ = board.add(1, 2, ONE);
+    }
+
+    #[test]
+    fn the_render_side_posts_each_views_cell_for_the_ime() {
+        let board: Board<&str> = Board::new();
+        board.add(1, 1, ONE).expect("a view");
+        assert_eq!(board.cell(1), None);
+        assert!(board.post_cell(1, (7.0, 17.0)));
+        assert_eq!(board.cell(1), Some((7.0, 17.0)));
+        assert!(!board.post_cell(2, (7.0, 17.0)));
+        assert_eq!(board.cell(2), None);
     }
 }
