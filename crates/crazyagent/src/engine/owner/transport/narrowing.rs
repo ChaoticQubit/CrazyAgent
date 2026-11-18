@@ -314,6 +314,16 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Whether the drainer has nothing left to land and no task running, for a row that
+    /// waits for a drained change before it reads storage. Output: the verdict.
+    #[cfg(all(test, unix))]
+    pub(super) fn narrowing_drain_idle(&self) -> bool {
+        self.authority
+            .drain
+            .lock()
+            .is_ok_and(|drain| drain.pending.is_empty() && !drain.running)
+    }
+
     /// Stops the drainer without waiting, when the engine is dropped without a shutdown.
     /// Output: none.
     pub(in crate::engine) fn abort_narrowing_drain(&self) {

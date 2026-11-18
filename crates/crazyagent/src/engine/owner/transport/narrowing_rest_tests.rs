@@ -1,10 +1,15 @@
-use super::barrier_tests::{database, worker_died};
+use super::barrier_tests::{database, revoke_settled, worker_died};
+use super::narrowing::hold_drain;
 use super::secret_storage_wait_tests::{holders, none_hold};
 use super::usage_tests::{IN_FLIGHT, Usage};
 use super::*;
 use crate::accounts::{AccountDraft, Provider, SignInMethod};
-use crate::engine::owner::AccountSecret;
+use crate::engine::owner::{
+    AccountSecret, ModelAccessCollection, OwnerData, OwnerMutation, OwnerOperation, OwnerRead,
+    OwnerRequest, OwnerResponse, OwnerResult,
+};
 use crate::plugins::{Scope, ServerSpec};
+use crate::storage::narrowing::{Change, IntentId, Intents};
 
 const LAPSE_WAIT_MS: u64 = 250;
 const PATIENT_WAIT_MS: u64 = 30_000;
@@ -290,4 +295,500 @@ async fn a_secret_detach_pending_when_the_engine_dies_lands_at_the_next_open() {
         "the detach outlasts the owner wait and is pending"
     );
     restarted.stop().await;
+}
+
+/// Adds an account to the model-access catalog through an owner apply, so agents may use it
+/// and storage counts it as held. Inputs: the engine and the account id. Output: none; the
+/// settings file names the account afterwards.
+async fn into_catalog(owner: &Usage, id: &CredentialRef) {
+    let applied = catalog_apply(owner, id).await;
+    let OwnerResponse::Applied { operation } = applied else {
+        panic!("the catalog apply commits: {applied:?}");
+    };
+    assert_eq!(operation.result, OwnerResult::Applied);
+    assert!(in_settings(owner.root.path(), id));
+}
+
+/// Asks the engine, as the owner, to add an account to the model-access catalog.
+/// Inputs: the engine and the account id. Output: the engine's answer.
+async fn catalog_apply(owner: &Usage, id: &CredentialRef) -> OwnerResponse {
+    let read = owner
+        .client
+        .request(OwnerRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            request_id: RequestId::new("rest-catalog-read").unwrap(),
+            expected_revision: crate::protocol::Cursor::new(0),
+            operation: OwnerOperation::Read {
+                query: OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 16,
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let OwnerResponse::Read { state } = read.response else {
+        panic!("the model-access page reads");
+    };
+    let OwnerData::ModelAccessPage { source_hash, .. } = state.data else {
+        panic!("the model-access page names its source hash");
+    };
+    let applied = owner
+        .client
+        .request(OwnerRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            request_id: RequestId::new(format!("rest-hold-{}", id.as_str())).unwrap(),
+            expected_revision: state.revision,
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ModelAccess {
+                    expected_config_id: state.config_id,
+                    expected_source_hash: source_hash,
+                    edit: crate::config::ModelAccessEdit::AddAccount {
+                        account_ref: id.clone(),
+                    },
+                },
+            },
+        })
+        .await
+        .unwrap();
+    applied.response
+}
+
+/// Whether the global settings file names an account, which it does while the account is in
+/// the model-access catalog. Inputs: the test root and the account id. Output: the verdict.
+fn in_settings(root: &Path, id: &CredentialRef) -> bool {
+    std::fs::read_to_string(root.join("global.toml"))
+        .unwrap()
+        .contains(id.as_str())
+}
+
+/// The owner admission of the TUI client, as the transport builds it from its packet.
+/// Input: the engine. Output: the admission.
+fn tui_admission(owner: &Usage) -> crate::engine::owner::Admission {
+    owner
+        .runtime()
+        .authority
+        .authenticate(&owner.packet())
+        .unwrap()
+}
+
+/// The key reference of an account that uses a key, read through storage the way a key
+/// replace reads it first. Inputs: the engine and the account id. Output: the reference.
+async fn key_reference(owner: &Usage, id: &CredentialRef) -> CredentialRef {
+    let admission = tui_admission(owner);
+    let Ok(crate::storage::accounts::ResultValue::Account(listed)) = owner
+        .runtime()
+        .engine
+        .native_auth_job(|reply| {
+            crate::storage::Job::Accounts(
+                admission,
+                crate::storage::accounts::Command::Get(id.clone()),
+                reply,
+            )
+        })
+        .await
+    else {
+        panic!("storage lists the added account");
+    };
+    let crate::config::ModelAuthentication::ApiKey { credential_ref } = listed.connection.auth
+    else {
+        panic!("the added account keeps an API key");
+    };
+    credential_ref
+}
+
+/// Lands a key replace's storage job in an engine that dies at that job's claim, so storage
+/// never hears of the new key. Inputs: the engine, the account and its key reference.
+/// Output: none once the worker stopped.
+async fn key_replaced_lost(owner: &Usage, id: &CredentialRef, credential: &CredentialRef) {
+    let path = database(owner);
+    crate::storage::die_at_claim(&path);
+    let lost = super::accounts::key_replaced(
+        &owner.runtime().engine,
+        &tui_admission(owner),
+        id.clone(),
+        credential.clone(),
+    )
+    .await;
+    assert!(lost.is_err(), "a job the dying worker never ran is not committed");
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at its claim"
+    );
+}
+
+/// Names the intents kept on disk for an engine folder. Input: the folder.
+/// Output: the intent names, in the order they were written.
+fn kept(root: &Path) -> Vec<IntentId> {
+    Intents::open(&engine_root(root))
+        .unwrap()
+        .expect("unix keeps an intent store")
+        .list()
+        .unwrap()
+        .intents
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Waits until the drainer of an engine landed or answered every queued change.
+/// Input: the engine. Output: whether it did within `LANDED_WAIT`.
+async fn drained(owner: &Usage) -> bool {
+    landed(|| owner.runtime().narrowing_drain_idle()).await
+}
+
+/// Counts the settings publications storage journaled and has not finished.
+/// Input: the database path. Output: 0 or 1.
+fn journaled(path: &Path) -> i64 {
+    stored(path)
+        .query_row("SELECT COUNT(*) FROM settings_publication", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// Makes every settings publication stop after its journal commits and before its file is
+/// renamed, the persisted state of an engine that dies there, by failing the journal update
+/// the rename step writes first. Input: the database path. Output: none.
+fn stop_publications(path: &Path) {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER rest_publication_stop BEFORE UPDATE ON settings_publication \
+             BEGIN SELECT RAISE(ABORT, 'rest-publication-stop'); END;",
+        )
+        .unwrap();
+}
+
+/// Rewrites a pending owner journal as one the open's replay writes: origin narrowing_replay
+/// and the replay's owner id, every other field as the owner's request left it, so only the
+/// recover check for a replay's edit stands between it and the settings file.
+/// Input: the database path. Output: none.
+fn disguise_as_replay(path: &Path) {
+    let db = rusqlite::Connection::open(path).unwrap();
+    let body: Vec<u8> = db
+        .query_row("SELECT body FROM settings_publication", [], |row| row.get(0))
+        .unwrap();
+    let mut journal: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    journal["origin"] = serde_json::json!("narrowing_replay");
+    journal["admission"]["owner_id"] = serde_json::json!("narrowing_replay");
+    db.execute(
+        "UPDATE settings_publication SET body=?1",
+        [serde_json::to_vec(&journal).unwrap()],
+    )
+    .unwrap();
+}
+
+/// Lets settings publications finish again. Input: the database path. Output: none.
+fn resume_publications(path: &Path) {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute_batch("DROP TRIGGER rest_publication_stop")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_removal_drained_with_a_stale_admission_keeps_its_intent_for_the_next_open() {
+    let owner = Usage::start_settings(&format!(
+        "timeout_ms = {LAPSE_WAIT_MS}\nqueue_capacity = 1\n"
+    ))
+    .await;
+    let (id, key, _listener) = key_account(&owner, "remove-stale").await;
+    let path = database(&owner);
+    let drain = hold_drain(&owner.runtime().authority.root.path);
+    let hold = crate::storage::hold_claims(&path);
+    let filler = fill_queue(&owner);
+    tokio::time::sleep(IN_FLIGHT).await;
+    let answer = owner.client.remove_account(id.clone()).await;
+    drop(hold);
+    filler.await.unwrap().unwrap();
+    revoke_settled(&owner, "rest-revoke-before-drain").await;
+    drop(drain);
+    assert!(drained(&owner).await, "the drainer answers the removal");
+    assert_eq!(
+        account_rows(&path, &id),
+        1,
+        "storage refuses a drained removal whose admission went stale: {answer:?}"
+    );
+    let restarted = owner.restarted().await;
+    let root = engine_root(restarted.root.path());
+    assert_eq!(
+        account_rows(&path, &id),
+        0,
+        "the next open applies the removal the drained refusal kept"
+    );
+    assert!(
+        none_hold(&root, key.as_bytes()).await,
+        "the removed account's key leaves the disk"
+    );
+    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_replaced_after_its_account_was_removed_and_lost_with_the_engine_leaves_no_key() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let (id, first, _listener) = key_account(&owner, "key-race").await;
+    let credential = key_reference(&owner, &id).await;
+    owner.client.remove_account(id.clone()).await.unwrap();
+    let root = engine_root(owner.root.path());
+    assert!(none_hold(&root, first.as_bytes()).await);
+    let intent = owner
+        .runtime()
+        .keep_narrowing(Change::KeyReplaced {
+            id: id.clone(),
+            credential: credential.clone(),
+        })
+        .await;
+    assert!(intent.is_some(), "the key replace keeps its intent first");
+    let second = format!("sk-after-race-{}", std::process::id());
+    super::accounts::replace_key(
+        &owner.runtime().authority.root,
+        &credential,
+        AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        holders(&root, second.as_bytes()),
+        1,
+        "a replace that read the account before the Remove recreates its key file"
+    );
+    key_replaced_lost(&owner, &id, &credential).await;
+    let restarted = owner.restarted().await;
+    assert!(
+        none_hold(&root, second.as_bytes()).await,
+        "the next open deletes the key a lost key replace left for a removed account"
+    );
+    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_key_replace_lost_after_its_key_rename_leaves_no_orphan_key() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let (id, first, _listener) = key_account(&owner, "key-rename").await;
+    let credential = key_reference(&owner, &id).await;
+    let second = format!("sk-renamed-{}", std::process::id());
+    super::accounts::replace_key(
+        &owner.runtime().authority.root,
+        &credential,
+        AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+    )
+    .unwrap();
+    key_replaced_lost(&owner, &id, &credential).await;
+    let path = database(&owner);
+    let restarted = owner.restarted().await;
+    let root = engine_root(restarted.root.path());
+    assert_eq!(account_rows(&path, &id), 1, "the account stays");
+    assert!(
+        none_hold(&root, first.as_bytes()).await,
+        "the rename replaced the old key in place, so no old key is left"
+    );
+    assert_eq!(holders(&root, second.as_bytes()), 1, "the new key stays once");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_kept_removal_of_an_account_already_gone_ends_its_intent_at_the_next_open() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let intent = owner
+        .runtime()
+        .keep_narrowing(Change::RemoveAccount {
+            id: CredentialRef::new("rest-gone-account").unwrap(),
+        })
+        .await
+        .expect("the removal keeps its intent");
+    assert_eq!(kept(owner.root.path()), [intent]);
+    let restarted = owner.restarted().await;
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "a removal that no longer applies ends its intent"
+    );
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attach_after_a_refused_detach_keeps_the_new_secret_through_the_drain_and_a_reopen() {
+    let owner = Usage::start_settings(&format!(
+        "timeout_ms = {LAPSE_WAIT_MS}\nqueue_capacity = 1\n"
+    ))
+    .await;
+    let (id, _first) = secret_server(&owner, "attach-after").await;
+    let path = database(&owner);
+    let root = engine_root(owner.root.path());
+    let drain = hold_drain(&owner.runtime().authority.root.path);
+    let hold = crate::storage::hold_claims(&path);
+    let filler = fill_queue(&owner);
+    tokio::time::sleep(IN_FLIGHT).await;
+    let answer = owner
+        .client
+        .remove_mcp_secret(id.clone(), SECRET_NAME.into())
+        .await
+        .map(|_| ());
+    drop(hold);
+    filler.await.unwrap().unwrap();
+    let second = format!("secret-attached-after-{}", std::process::id());
+    owner
+        .client
+        .set_mcp_secret(
+            id.clone(),
+            SECRET_NAME.into(),
+            AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+        )
+        .await
+        .unwrap();
+    drop(drain);
+    assert!(drained(&owner).await, "the drainer answers the detach");
+    assert_eq!(
+        stored_secret_names(&path, &id),
+        [SECRET_NAME],
+        "the drained detach leaves the secret attached after it: {answer:?}"
+    );
+    assert_eq!(holders(&root, second.as_bytes()), 1);
+    let restarted = owner.restarted().await;
+    assert_eq!(
+        stored_secret_names(&path, &id),
+        [SECRET_NAME],
+        "the next open leaves the secret attached after the detach"
+    );
+    assert_eq!(holders(&root, second.as_bytes()), 1);
+    assert!(kept(restarted.root.path()).is_empty(), "the superseded intent ends");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_death_between_an_attach_commit_and_its_intent_unlink_keeps_the_new_secret() {
+    let owner = Usage::start_settings(&format!(
+        "timeout_ms = {LAPSE_WAIT_MS}\nqueue_capacity = 1\n"
+    ))
+    .await;
+    let (id, _first) = secret_server(&owner, "attach-death").await;
+    let path = database(&owner);
+    let drain = hold_drain(&owner.runtime().authority.root.path);
+    let hold = crate::storage::hold_claims(&path);
+    let filler = fill_queue(&owner);
+    tokio::time::sleep(IN_FLIGHT).await;
+    let answer = owner
+        .client
+        .remove_mcp_secret(id.clone(), SECRET_NAME.into())
+        .await
+        .map(|_| ());
+    drop(hold);
+    filler.await.unwrap().unwrap();
+    crate::storage::die_at(&path, crate::storage::Death::AttachCommitted);
+    let second = format!("secret-attached-at-death-{}", std::process::id());
+    let attached = owner
+        .client
+        .set_mcp_secret(
+            id.clone(),
+            SECRET_NAME.into(),
+            AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+        )
+        .await;
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies right after the attach commits: {attached:?}"
+    );
+    drop(drain);
+    let restarted = owner.restarted().await;
+    let root = engine_root(restarted.root.path());
+    assert_eq!(
+        stored_secret_names(&path, &id),
+        [SECRET_NAME],
+        "the next open leaves the secret the attach committed: {answer:?}"
+    );
+    assert_eq!(holders(&root, second.as_bytes()), 1);
+    assert!(kept(restarted.root.path()).is_empty(), "the superseded intent ends");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_account_removal_pending_when_the_engine_dies_leaves_the_catalog_at_the_next_open() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let (id, key, _listener) = key_account(&owner, "held-die").await;
+    into_catalog(&owner, &id).await;
+    let path = database(&owner);
+    let hold = crate::storage::hold_claims(&path);
+    let answer = owner.client.remove_account(id.clone()).await;
+    crate::storage::die_at_claim(&path);
+    drop(hold);
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at its claim"
+    );
+    let restarted = owner.restarted().await;
+    let root = engine_root(restarted.root.path());
+    assert!(
+        !in_settings(restarted.root.path(), &id),
+        "the next open takes the held account out of the catalog: {answer:?}"
+    );
+    assert_eq!(account_rows(&path, &id), 0);
+    assert!(
+        none_hold(&root, key.as_bytes()).await,
+        "the removed account's key leaves the disk"
+    );
+    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replayed_removal_stopped_after_its_settings_journal_finishes_at_the_next_open() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let (id, key, _listener) = key_account(&owner, "held-journal").await;
+    into_catalog(&owner, &id).await;
+    let path = database(&owner);
+    let hold = crate::storage::hold_claims(&path);
+    let answer = owner.client.remove_account(id.clone()).await;
+    crate::storage::die_at_claim(&path);
+    drop(hold);
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at its claim"
+    );
+    stop_publications(&path);
+    let stopped = owner.restarted().await;
+    assert_eq!(
+        journaled(&path),
+        1,
+        "the replay journals its catalog removal before the rename stops: {answer:?}"
+    );
+    assert!(
+        in_settings(stopped.root.path(), &id),
+        "the stopped publication left the settings file as it was"
+    );
+    resume_publications(&path);
+    let restarted = stopped.restarted().await;
+    let root = engine_root(restarted.root.path());
+    assert_eq!(journaled(&path), 0, "the next open finishes the journal");
+    assert!(!in_settings(restarted.root.path(), &id));
+    assert_eq!(account_rows(&path, &id), 0);
+    assert!(
+        none_hold(&root, key.as_bytes()).await,
+        "the removed account's key leaves the disk"
+    );
+    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_narrowing_replay_journal_with_any_other_edit_is_refused_at_recover() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let (id, _key, _listener) = key_account(&owner, "replay-widen").await;
+    let path = database(&owner);
+    stop_publications(&path);
+    let stopped = catalog_apply(&owner, &id).await;
+    assert_eq!(
+        journaled(&path),
+        1,
+        "the owner apply stops after its journal: {stopped:?}"
+    );
+    resume_publications(&path);
+    disguise_as_replay(&path);
+    let (refusal, root) = owner.refused_restart().await;
+    assert_eq!(refusal.0, "settings_journal_invalid");
+    assert!(
+        !in_settings(root.path(), &id),
+        "a refused journal widens nothing"
+    );
 }

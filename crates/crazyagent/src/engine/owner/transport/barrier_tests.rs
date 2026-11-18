@@ -246,7 +246,7 @@ fn fresh_client(owner: &Usage) -> OwnerClient {
 /// Revokes the TUI client and returns what storage committed, reconciling the same control
 /// when the answer outlasts a short owner wait. Inputs: the engine and the operation name.
 /// Output: the committed reply.
-async fn revoke_settled(owner: &Usage, name: &str) -> OwnerControlReply {
+pub(super) async fn revoke_settled(owner: &Usage, name: &str) -> OwnerControlReply {
     let runtime = owner.runtime();
     let control = revocation(runtime, OwnerClientKind::Tui, name);
     match runtime.control(control.clone()).await {

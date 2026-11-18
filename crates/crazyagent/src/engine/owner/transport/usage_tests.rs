@@ -100,6 +100,44 @@ impl Usage {
     /// Output: the engine started again, with no owner client, since a revoked one may
     /// not attach.
     pub(super) async fn restarted(self) -> Restarted {
+        let (root, stop) = self.stopped().await;
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stop.subscribe(),
+        )
+        .await
+        .unwrap();
+        Restarted {
+            root,
+            service,
+            _stop: stop,
+        }
+    }
+
+    /// Stops the engine without asking for a clean close and starts one again on the same
+    /// folder and settings, for a row whose next start must refuse to open.
+    /// Input: the engine. Output: the start's refusal and the folder.
+    pub(super) async fn refused_restart(self) -> (EngineError, tempfile::TempDir) {
+        let (root, stop) = self.stopped().await;
+        let refused = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stop.subscribe(),
+        )
+        .await
+        .err()
+        .expect("the start refuses to open");
+        (refused, root)
+    }
+
+    /// Stops the engine without asking for a clean close. Input: the engine.
+    /// Output: its folder and stop signal, for the next start on the same folder.
+    async fn stopped(self) -> (tempfile::TempDir, tokio::sync::watch::Sender<bool>) {
         let Usage {
             root,
             mut service,
@@ -108,6 +146,31 @@ impl Usage {
             ..
         } = self;
         drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap();
+        drop(service);
+        (root, stop)
+    }
+}
+
+/// An engine started again on a folder an earlier engine used, for rows that read what its
+/// start applied.
+pub(super) struct Restarted {
+    pub(super) root: tempfile::TempDir,
+    service: EngineService,
+    _stop: tokio::sync::watch::Sender<bool>,
+}
+
+impl Restarted {
+    /// Stops this engine and starts one again on the same folder and settings, for rows that
+    /// change the disk between two starts. Input: the engine. Output: the engine started again.
+    pub(super) async fn restarted(self) -> Restarted {
+        let Restarted {
+            root,
+            mut service,
+            _stop: stop,
+        } = self;
         let _ = tokio::time::timeout(Duration::from_secs(10), service.shutdown())
             .await
             .unwrap();
@@ -127,17 +190,7 @@ impl Usage {
             _stop: stop,
         }
     }
-}
 
-/// An engine started again on a folder an earlier engine used, for rows that read what its
-/// start applied.
-pub(super) struct Restarted {
-    pub(super) root: tempfile::TempDir,
-    service: EngineService,
-    _stop: tokio::sync::watch::Sender<bool>,
-}
-
-impl Restarted {
     pub(super) fn runtime(&self) -> &OwnerRuntimeHandle {
         self.service.owner_runtime().unwrap()
     }
