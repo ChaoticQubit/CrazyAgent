@@ -94,13 +94,14 @@ fn marker(scratch: &Path) -> PathBuf {
     )
     .unwrap();
     let program = scratch.join("marker.exe");
-    let built = Command::new("rustc")
-        .arg("-O")
-        .arg(source)
-        .arg("-o")
-        .arg(&program)
-        .status()
-        .unwrap();
+    let built = crate::spawn_gate::status(
+        Command::new("rustc")
+            .arg("-O")
+            .arg(source)
+            .arg("-o")
+            .arg(&program),
+    )
+    .unwrap();
     assert!(built.success(), "rustc built no marker");
     program
 }
@@ -108,7 +109,7 @@ fn marker(scratch: &Path) -> PathBuf {
 /// Runs a setup git and returns what it printed, trimmed, failing the row when it fails.
 /// Input: the command. Output: the standard output.
 fn setup(command: &mut Command) -> String {
-    let output = command.stdin(Stdio::null()).output().unwrap();
+    let output = crate::spawn_gate::collected(command).unwrap();
     assert!(
         output.status.success(),
         "{command:?}: {}",
@@ -279,99 +280,95 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         let first = &commits[0].1;
         check(
             format!("{at} publish update-ref"),
-            project_git(&git, home, project)
-                .args([
-                    "update-ref",
-                    "-m",
-                    "row",
-                    "refs/heads/published",
-                    first.as_str(),
-                ])
-                .output()
-                .unwrap(),
+            crate::spawn_gate::collected(project_git(&git, home, project).args([
+                "update-ref",
+                "-m",
+                "row",
+                "refs/heads/published",
+                first.as_str(),
+            ]))
+            .unwrap(),
             true,
             None,
         );
         check(
             format!("{at} stage init"),
-            clone::git_command(&git, home)
-                .args(git_safe())
-                .args(["init", "--bare", "-q", "--template=", "--"])
-                .arg(home.join("stage"))
-                .stdin(Stdio::null())
-                .output()
-                .unwrap(),
+            crate::spawn_gate::collected(
+                clone::git_command(&git, home)
+                    .args(git_safe())
+                    .args(["init", "--bare", "-q", "--template=", "--"])
+                    .arg(home.join("stage")),
+            )
+            .unwrap(),
             true,
             None,
         );
         check(
             format!("{at} commit"),
-            project_git(&git, home, project)
-                .args([
-                    "-c",
-                    "user.name=Owner",
-                    "-c",
-                    "user.email=owner@example.invalid",
-                ])
-                .args(["commit", "-q", "--allow-empty", "-m", "row"])
-                .output()
-                .unwrap(),
+            crate::spawn_gate::collected(
+                project_git(&git, home, project)
+                    .args([
+                        "-c",
+                        "user.name=Owner",
+                        "-c",
+                        "user.email=owner@example.invalid",
+                    ])
+                    .args(["commit", "-q", "--allow-empty", "-m", "row"]),
+            )
+            .unwrap(),
             true,
             None,
         );
         for (armor, commit) in commits {
             check(
                 format!("{at} {armor} signature check"),
-                project_git(&git, home, project)
-                    .args([
-                        "log",
-                        "--show-signature",
-                        "-1",
-                        "--format=%s",
-                        commit.as_str(),
-                    ])
-                    .output()
-                    .unwrap(),
+                crate::spawn_gate::collected(project_git(&git, home, project).args([
+                    "log",
+                    "--show-signature",
+                    "-1",
+                    "--format=%s",
+                    commit.as_str(),
+                ]))
+                .unwrap(),
                 true,
                 Some(subject.as_str()),
             );
             check(
                 format!("{at} {armor} IDE signature check"),
-                ide_git(&git, project, home, &path)
-                    .args([
-                        "log",
-                        "--show-signature",
-                        "-1",
-                        "--format=%s",
-                        commit.as_str(),
-                    ])
-                    .output()
-                    .unwrap(),
+                crate::spawn_gate::collected(ide_git(&git, project, home, &path).args([
+                    "log",
+                    "--show-signature",
+                    "-1",
+                    "--format=%s",
+                    commit.as_str(),
+                ]))
+                .unwrap(),
                 true,
                 Some(subject.as_str()),
             );
         }
         check(
             format!("{at} IDE ssh"),
-            ide_git(&git, project, home, &path)
-                .args(["ls-remote", "ssh://example.invalid/x"])
-                .output()
-                .unwrap(),
+            crate::spawn_gate::collected(
+                ide_git(&git, project, home, &path).args(["ls-remote", "ssh://example.invalid/x"]),
+            )
+            .unwrap(),
             false,
             None,
         );
         check(
             format!("{at} IDE commit"),
-            ide_git(&git, project, home, &path)
-                .args([
-                    "-c",
-                    "user.name=Owner",
-                    "-c",
-                    "user.email=owner@example.invalid",
-                ])
-                .args(["commit", "-q", "--allow-empty", "-m", "ide"])
-                .output()
-                .unwrap(),
+            crate::spawn_gate::collected(
+                ide_git(&git, project, home, &path)
+                    .args([
+                        "-c",
+                        "user.name=Owner",
+                        "-c",
+                        "user.email=owner@example.invalid",
+                    ])
+                    .args(["commit", "-q", "--allow-empty", "-m", "ide"]),
+            )
+            .unwrap(),
             true,
             None,
         );
