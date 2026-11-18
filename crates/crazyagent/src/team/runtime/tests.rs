@@ -2464,11 +2464,16 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     };
     let mut wrong = Vec::new();
 
-    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    const NOTE_BYTES_MAX: usize = 128;
+    let normal = "# Panes\n\nPlan the page.\n";
+    std::fs::write(&brief, normal).unwrap();
     let framed = frame();
+    let around_bytes = framed
+        .as_deref()
+        .map_or(0, |text| text.len().saturating_sub(normal.len()));
     if !framed
         .as_deref()
-        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+        .is_some_and(|text| text.contains(&format!("Project brief:\n{normal}")))
     {
         wrong.push(("normal", framed));
     }
@@ -2511,7 +2516,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     if !framed.as_deref().is_some_and(|text| {
         text.contains("Project brief:\n# Panes\n\naaaa")
             && text.contains(&format!("The brief is {huge} bytes"))
-            && text.len() < BRIEF_BYTES_MAX + 2048
+            && text.len() <= around_bytes + BRIEF_BYTES_MAX + NOTE_BYTES_MAX
     }) {
         wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
     }
@@ -28356,14 +28361,16 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
 /// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
 /// unknown agent leaves its row to a later tick, so its end thread does not wake the team
 /// loop; a wake there would run the loop back to back for as long as the error lasts. The
-/// host here has no tmux, so every end the owner's stop pass starts fails the same way.
+/// host here has no tmux and is set as the terminal as is, since attaching one asks it for
+/// its panes first, so every end the owner's stop pass starts fails the same way.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     const PASSES: u64 = 40;
     let fixture = Fixture::new(1);
     let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
-    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let mut team = fixture.runtime();
+    team.terminal = Some(host);
     let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
     let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
     fixture

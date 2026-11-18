@@ -2557,30 +2557,22 @@ fn version_arm(line: Option<String>) -> String {
 }
 
 /// DEC-166: a private test HOME for harness stand-ins where the engine takes a harness: this
-/// user's cache folder (`getconf` on macOS, `~/.cache` elsewhere), never a temp folder, whose
-/// harness files the engine's search passes over, as agents or other users can change them.
-/// Input: a name prefix. Output: the folder, removed when dropped.
+/// user's cache folder (`~/Library/Caches` on macOS, `~/.cache` elsewhere), outside every
+/// temp folder, since the engine reads no version from a harness folder in one (`getconf`'s
+/// macOS cache folder is one). Input: a name prefix. Output: the folder, removed when dropped.
 fn harness_home(prefix: &str) -> tempfile::TempDir {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let base = if cfg!(target_os = "macos") {
-        let cache = crazyagent::spawn_gate::output(
-            Command::new("/usr/bin/getconf")
-                .arg("DARWIN_USER_CACHE_DIR")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
-        )
-        .unwrap();
-        PathBuf::from(String::from_utf8(cache.stdout).unwrap().trim())
+    let cache = if cfg!(target_os = "macos") {
+        "Library/Caches"
     } else {
-        let cache = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache");
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&cache)
-            .unwrap();
-        cache
+        ".cache"
     };
+    let base = PathBuf::from(std::env::var_os("HOME").unwrap()).join(cache);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&base)
+        .unwrap();
     let home = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(std::fs::canonicalize(base).unwrap())
