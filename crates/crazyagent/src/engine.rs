@@ -850,21 +850,103 @@ mod tests {
     }
 
     /// Opens an engine whose storage queue holds one job, in a private folder.
-    /// Input: the folder. Output: the engine and its database path.
-    async fn one_slot_engine(root: &std::path::Path) -> (Engine, std::path::PathBuf) {
+    /// Inputs: the folder and any further settings lines. Output: the engine and its
+    /// database path.
+    async fn one_slot_engine(
+        root: &std::path::Path,
+        settings: &str,
+    ) -> (Engine, std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.join("g");
-        std::fs::write(&global, "queue_capacity = 1").unwrap();
+        std::fs::write(&global, format!("queue_capacity = 1\n{settings}")).unwrap();
         let cfg = crate::config::resolve_config(&global, &root.join("p")).unwrap();
         let path = root.join("db");
         (Engine::open(&path, cfg).await.unwrap(), path)
     }
 
+    /// Reads how many changes the closed engine's database holds.
+    /// Input: the database path. Output: the stored revision.
+    fn stored_revision(path: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Sends one create while the worker is held at its claim, lifts the hold `release`
+    /// after the send, and waits for the engine to close. Inputs: the folder, the settings
+    /// lines and the release delay. Output: the apply's revision or error code, and the
+    /// stored revision after close.
+    async fn apply_across_a_held_claim(
+        root: &std::path::Path,
+        settings: &str,
+        release: Duration,
+    ) -> (Result<crate::protocol::Cursor, String>, i64) {
+        let path = root.join("db");
+        let hold = crate::storage::hold_claims(&path);
+        let (engine, opened) = one_slot_engine(root, settings).await;
+        assert_eq!(opened, path);
+        let engine = std::sync::Arc::new(engine);
+        let raced = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.apply(create_request("raced")).await }
+        });
+        tokio::time::sleep(release).await;
+        drop(hold);
+        let outcome = raced
+            .await
+            .unwrap()
+            .map(|reply| reply.revision)
+            .map_err(|error| error.0);
+        engine.close().await.unwrap();
+        (outcome, stored_revision(&path))
+    }
+
+    #[tokio::test]
+    async fn a_job_whose_bound_runs_out_at_the_claim_is_withdrawn_and_the_worker_skips_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (outcome, stored) =
+            apply_across_a_held_claim(root.path(), "", Duration::from_millis(1500)).await;
+        assert_eq!(outcome, Err("storage_busy_not_submitted".to_owned()));
+        assert_eq!(
+            stored, 0,
+            "the worker lost the claim and never ran the withdrawn job"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_claim_race_at_the_bound_has_one_outcome_and_applies_at_most_once() {
+        for round in 0..3 {
+            for offset in [-20i64, -10, -5, -2, 0, 2, 5, 10, 20] {
+                let root = tempfile::tempdir().unwrap();
+                let release = Duration::from_millis(u64::try_from(100 + offset).unwrap());
+                let (outcome, stored) =
+                    apply_across_a_held_claim(root.path(), "timeout_ms = 100", release).await;
+                let seen = format!("round {round} offset {offset}: {outcome:?}, stored {stored}");
+                match outcome.as_ref() {
+                    Err(code) if code == "storage_busy_not_submitted" => {
+                        assert_eq!(stored, 0, "{seen}")
+                    }
+                    Ok(revision) => {
+                        assert_eq!(*revision, crate::protocol::Cursor::new(1), "{seen}");
+                        assert_eq!(stored, 1, "{seen}");
+                    }
+                    Err(code) if code == "outcome_unknown_retry_same_identity" => {
+                        assert_eq!(stored, 1, "{seen}")
+                    }
+                    Err(_) => panic!("an outcome outside the claim's three: {seen}"),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn an_apply_the_busy_worker_does_not_take_in_time_is_withdrawn_and_never_lands() {
         let root = tempfile::tempdir().unwrap();
-        let (engine, _) = one_slot_engine(root.path()).await;
+        let (engine, _) = one_slot_engine(root.path(), "").await;
         let engine = std::sync::Arc::new(engine);
         let (release, held) = oneshot::channel();
         engine.storage.sender.try_send(Job::Hold(held)).unwrap();
@@ -894,7 +976,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("db");
         let hold = crate::storage::hold_start(&path);
-        let (engine, opened) = one_slot_engine(root.path()).await;
+        let (engine, opened) = one_slot_engine(root.path(), "").await;
         assert_eq!(opened, path);
         let engine = std::sync::Arc::new(engine);
         let first = tokio::spawn({
