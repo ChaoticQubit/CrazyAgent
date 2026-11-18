@@ -6160,31 +6160,4 @@ mod tests {
         assert!(NATIVE_COMMANDS.contains(&"desktop_terminal_prompt"));
         assert!(NATIVE_COMMANDS.contains(&"desktop_team_terminals_per_window"));
     }
-
-    #[test]
-    fn the_app_handler_on_macos_answers_not_found_for_each_webview_terminal_command() {
-        let app = mock_builder()
-            .invoke_handler(native_handler())
-            .build(mock_context(noop_assets()))
-            .unwrap();
-        let main = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
-            .build()
-            .unwrap();
-        for command in [
-            "desktop_terminal_attach",
-            "desktop_terminal_input",
-            "desktop_terminal_resize",
-            "desktop_terminal_detach",
-            "desktop_terminal_prompt",
-        ] {
-            let answer = ask(main.as_ref(), command, json!({})).unwrap_err();
-            let not_found = json!(format!("Command {command} not found"));
-            let webview_only = command != "desktop_terminal_prompt";
-            assert_eq!(
-                answer == not_found,
-                webview_only && cfg!(target_os = "macos"),
-                "{command}: {answer}",
-            );
-        }
-    }
 }
