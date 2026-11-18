@@ -1,5 +1,7 @@
+mod a11y;
 mod codec;
 mod control;
+mod ime;
 mod keymap;
 mod pane;
 mod render;
