@@ -14,10 +14,10 @@ mod tree;
 pub use file_id::file_id;
 pub use listeners::listener_beside;
 pub use name::final_name;
-pub use owner::{changeable_part, owner_only};
+pub use owner::{changeable_part, owner_only, unreadable_read_root, unreadable_root};
 pub use tree::ProcessTree;
 
-use crate::plan::plan;
+use crate::plan::{nested_read_roots, plan};
 use crate::profile::{BoundaryProfile, ProfileError};
 use crate::request::Request;
 use std::fmt;
@@ -25,12 +25,23 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::GetLastError;
 
 /// Why the boundary did not start the agent: a refused profile, a refused launch with a plain
-/// reason, or a Windows call that failed at a named step with its error code.
+/// reason, a Windows call that failed at a named step with its error code, an access list
+/// that could not be read or changed, with the path it belongs to (V244-WIN-NPM), or a read
+/// root the grant around it does not reach, with its path (V244-WIN-NESTED-READ-ROOT).
 #[derive(Debug)]
 pub enum BoundaryError {
     Profile(ProfileError),
     Refused(&'static str),
-    Windows { step: &'static str, code: u32 },
+    Windows {
+        step: &'static str,
+        code: u32,
+    },
+    AccessList {
+        step: &'static str,
+        path: String,
+        code: u32,
+    },
+    Unreached(String),
 }
 
 impl fmt::Display for BoundaryError {
@@ -44,6 +55,16 @@ impl fmt::Display for BoundaryError {
                     "agent not started: could not {step} (Windows error {code})"
                 )
             }
+            Self::AccessList { step, path, code } => {
+                write!(
+                    f,
+                    "agent not started: could not {step} of {path} (Windows error {code})"
+                )
+            }
+            Self::Unreached(path) => write!(
+                f,
+                "agent not started: app containers cannot read the read root {path}, and the grant on the folder around it does not reach it"
+            ),
         }
     }
 }
@@ -54,21 +75,41 @@ fn windows(step: &'static str) -> impl FnOnce(u32) -> BoundaryError {
     move |code| BoundaryError::Windows { step, code }
 }
 
-/// Starts one agent inside its boundary and waits for it: reads the profile, opens the agent's
-/// AppContainer, takes back the access entries an earlier profile of that container granted
-/// and this one does not, puts the planned entries on its roots and protected paths, starts
-/// the program suspended in that container with the profile's capabilities, places it in a
-/// job that kills every process left when the helper exits, then resumes it. Nothing starts
-/// when any step fails. Input: the request. Output: the agent's exit code, or why it did not
-/// start.
+/// The failure of an access-list step on one path, so the refusal names the folder an owner
+/// would look at. Inputs: the step and the path. Output: the mapping from the Windows error.
+fn access_list(step: &'static str, path: &str) -> impl FnOnce(u32) -> BoundaryError {
+    let path = path.to_owned();
+    move |code| BoundaryError::AccessList { step, path, code }
+}
+
+/// Starts one agent inside its boundary and waits for it: takes back what an earlier profile of
+/// its AppContainer granted and this one does not, puts the planned entries in place, refuses a
+/// read root the grant around it does not reach ([`reach`]), then starts the program suspended
+/// in that container, in a job that kills what is left when the helper exits, and resumes it.
+/// Input: the request. Output: the agent's exit code, or why nothing started.
 pub fn run(request: &Request) -> Result<u32, BoundaryError> {
     let profile = BoundaryProfile::load(&request.profile).map_err(BoundaryError::Profile)?;
     let aces = plan(&profile, acl::present).map_err(BoundaryError::Refused)?;
     let container = container::open(&profile.container)?;
     record::Record::open(&profile.grants, &profile.container)?.reconcile(&container, &aces)?;
+    reach(&profile, &container)?;
     let capabilities = container::capabilities(&profile.capabilities)?;
     let job = job::Job::new(profile.active_processes)?;
     launch::start(request, &container, &capabilities, &job)
+}
+
+/// Refuses, by name, the first read root the helper does not grant itself
+/// ([`nested_read_roots`]) whose list lets neither every app container nor this one read it
+/// once the grant is written. A missing one, a link or a junction is skipped, as the plan skips
+/// such a guarded path (V244-WIN-NESTED-READ-ROOT). Inputs: the profile and the container SID.
+/// Output: Ok, or the refusal or the failed read.
+fn reach(profile: &BoundaryProfile, container: &Words) -> Result<(), BoundaryError> {
+    for root in nested_read_roots(profile) {
+        if acl::present(root) && !acl::reached(container, root)? {
+            return Err(BoundaryError::Unreached(root.to_owned()));
+        }
+    }
+    Ok(())
 }
 
 /// Takes back every access entry the boundary recorded for the profile's container, removes

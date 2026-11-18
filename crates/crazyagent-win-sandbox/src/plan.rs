@@ -124,7 +124,7 @@ pub fn plan(
 ) -> Result<Vec<Ace>, &'static str> {
     refuse(profile)?;
     let writes = outermost(profile.write_roots.iter().map(String::as_str), &[]);
-    let reads = outermost(profile.read_roots.iter().map(String::as_str), &writes);
+    let reads = granted_read_roots(profile);
     let mut guards = guards(profile, &writes, &reads);
     guards.sort_by_key(|ace| std::cmp::Reverse(depth(&ace.path)));
     let mut anchors = anchors(profile, &writes, &guards, present);
@@ -279,6 +279,36 @@ fn anchors(
     anchors
 }
 
+/// The read roots the helper grants: each outermost one outside every writable root, as
+/// [`plan`] keeps them (DEC-193 D1). A root inside a granted one is reached only through that
+/// grant, so the helper checks it once the grant is written ([`nested_read_roots`]).
+/// Input: the profile. Output: those roots.
+pub fn granted_read_roots(profile: &BoundaryProfile) -> Vec<&str> {
+    let writes = outermost(profile.write_roots.iter().map(String::as_str), &[]);
+    outermost(profile.read_roots.iter().map(String::as_str), &writes)
+}
+
+/// The read roots the helper does not grant themselves: each inside a granted read root or a
+/// writable root, reached only when that root's grant reaches it (V244-WIN-NESTED-READ-ROOT).
+/// Input: the profile. Output: those roots, in profile order.
+pub fn nested_read_roots(profile: &BoundaryProfile) -> Vec<&str> {
+    let writes = outermost(profile.write_roots.iter().map(String::as_str), &[]);
+    let granted = granted_read_roots(profile);
+    let nested: Vec<&str> = profile
+        .read_roots
+        .iter()
+        .map(String::as_str)
+        .filter(|root| !granted.iter().any(|kept| same(kept, root)))
+        .collect();
+    assert!(nested.iter().all(|root| {
+        writes
+            .iter()
+            .chain(&granted)
+            .any(|outer| within(root, outer))
+    }));
+    nested
+}
+
 fn outermost<'a>(roots: impl Iterator<Item = &'a str>, covered: &[&'a str]) -> Vec<&'a str> {
     let mut kept: Vec<&'a str> = Vec::new();
     for root in roots {
@@ -340,6 +370,22 @@ mod tests {
             .filter(|item| item.access == access)
             .map(|item| item.path.as_str())
             .collect()
+    }
+
+    /// V244-WIN-NPM r2 F1: the helper grants only the outermost read roots outside every
+    /// writable root, so a read root inside a writable root or inside another read root is
+    /// not granted for itself; it is listed for the check after the grant.
+    #[test]
+    fn a_read_root_inside_a_granted_root_is_not_granted_for_itself() {
+        let vendor = format!(r"{PROJECT}\vendor");
+        let tools = r"C:\Tools\node";
+        let lib = r"C:\Tools\node\lib";
+        let shared = r"C:\Data\shared";
+        let nested = profile(&[&vendor, lib, tools, shared], &[PROJECT], &[]);
+        assert_eq!(granted_read_roots(&nested), vec![tools, shared]);
+        assert_eq!(nested_read_roots(&nested), vec![vendor.as_str(), lib]);
+        let granted = plan(&nested).unwrap();
+        assert_eq!(roles(&granted, Access::ReadExecute), vec![tools, shared]);
     }
 
     #[test]

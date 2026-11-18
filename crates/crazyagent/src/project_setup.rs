@@ -2748,8 +2748,8 @@ fn set_agent_policy(
     if let Err(code) = policy.validate() {
         return Ok(rejected(code));
     }
-    if policy.access.unavailable().is_some() {
-        return Ok(rejected("agent_access_unavailable"));
+    if let Some((_, code)) = policy.access.refusal() {
+        return Ok(rejected(code));
     }
     let before = crate::sandbox::policy::load(tx, project_id.as_str())
         .map(|saved| saved.grants)

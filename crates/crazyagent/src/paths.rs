@@ -160,7 +160,13 @@ impl Layout {
     /// default `global.toml` and `project.toml` (0600) when they are missing; existing
     /// files are kept. Output: an error naming the path for an unsafe or unusable entry.
     pub fn prepare(&self) -> Result<(), PathsError> {
+        #[cfg(unix)]
         private_folder(&self.root)?;
+        #[cfg(windows)]
+        private_folder_as(
+            &self.root,
+            Some(crazyagent_win_sandbox::private::Store::Database),
+        )?;
         private_folder(&self.logs())?;
         private_settings(&self.global_settings(), GLOBAL_DEFAULTS)?;
         private_settings(&self.project_settings(), PROJECT_DEFAULTS)?;
@@ -193,13 +199,28 @@ pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
 /// path and why it is not private.
 #[cfg(windows)]
 pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
+    private_folder_as(path, None)
+}
+
+/// [`private_folder`] for a store folder too: a new one is made with the store's no-read-up
+/// label (#524 r3), as the data root is for the database. Inputs: the folder and the store,
+/// if any. Output: Ok, or an error naming the path and why it is not private.
+#[cfg(windows)]
+fn private_folder_as(
+    path: &Path,
+    store: Option<crazyagent_win_sandbox::private::Store>,
+) -> Result<(), PathsError> {
+    use crazyagent_win_sandbox::private;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| problem(path, format!("could not create the folder ({error})")))?;
     }
-    crazyagent_win_sandbox::private::dir(path)
-        .map(drop)
-        .map_err(|error| refused(path, &error))
+    match store {
+        Some(store) => private::store_dir(path, store),
+        None => private::dir(path),
+    }
+    .map(drop)
+    .map_err(|error| refused(path, &error))
 }
 
 /// Says why W1's private check refused an entry, or that it could not be opened. Inputs: the

@@ -2,6 +2,7 @@
 
 use crazyagent_win_sandbox::dacl::{self, ADMINISTRATORS, SYSTEM};
 use crazyagent_win_sandbox::private;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -291,24 +292,22 @@ fn a_private_file_with_a_low_label_is_refused() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// W1c D5 (F36): an existing folder of this user that other users may change is made
-/// private again by repair, keeping what it holds, and a junction in place of such a folder
-/// is refused and its target left as it was.
+/// W1c D5 (F36): an existing empty folder of this user that other users may change is made
+/// private again by repair, and a junction in place of such a folder is refused and its
+/// target left as it was.
 #[test]
 fn repair_makes_an_open_folder_of_this_user_private_and_refuses_a_junction() {
     let folder = scratch("repair");
     std::fs::create_dir(&folder).unwrap();
-    std::fs::write(folder.join("kept"), "x").unwrap();
     grant(&folder, "S-1-5-11", "M");
     assert!(private::dir(&folder).is_err());
     let user = private::user_sid().unwrap();
     let held = private::repair(&folder).unwrap();
     let facts = private::facts(&held).unwrap();
     only_trusted(facts.list.as_deref().unwrap(), &user);
-    assert_eq!(private::judge(&facts, &user), Ok(()));
+    assert_eq!(private::judge_folder(&facts, &user), Ok(()));
     drop(held);
     drop(private::dir(&folder).unwrap());
-    assert_eq!(std::fs::read_to_string(folder.join("kept")).unwrap(), "x");
     let target = scratch("repair-target");
     std::fs::create_dir(&target).unwrap();
     grant(&target, "S-1-5-11", "M");
@@ -328,4 +327,140 @@ fn repair_makes_an_open_folder_of_this_user_private_and_refuses_a_junction() {
     std::fs::remove_dir(&junction).unwrap();
     std::fs::remove_dir_all(&target).unwrap();
     std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// #512 r2 (rv-sec2 F1, rv-code4 F2): a private folder whose inherit-only entry hands
+/// authenticated users read on what is made in it is refused by `dir`, so SQLite's side
+/// files never start open to them.
+#[test]
+fn a_folder_handing_other_users_access_to_what_is_made_in_it_is_refused() {
+    let folder = scratch("handed");
+    drop(private::dir(&folder).unwrap());
+    let entry = "*S-1-5-11:(OI)(IO)(R)";
+    run("icacls", &[folder.to_str().unwrap(), "/grant", entry]);
+    assert!(private::dir(&folder).is_err());
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// #512 r2: repair refuses a folder that already holds a file, which keeps its own explicit
+/// entries whatever the folder's new list says, and changes nothing, so `dir` still refuses
+/// the folder and a second repair refuses it again.
+#[test]
+fn repair_refuses_a_folder_that_already_holds_a_file_and_changes_nothing() {
+    let folder = scratch("repair-held");
+    std::fs::create_dir(&folder).unwrap();
+    grant(&folder, "S-1-5-11", "M");
+    let kept = folder.join("kept");
+    std::fs::write(&kept, "x").unwrap();
+    run(
+        "icacls",
+        &[kept.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"],
+    );
+    assert!(private::repair(&folder).is_err());
+    assert!(private::dir(&folder).is_err());
+    assert!(private::repair(&folder).is_err());
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "x");
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// The medium label with no-write-up and no-read-up the secret stores carry (#524 r3).
+const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+
+/// The mandatory label that applies to an open folder or file itself. Input: the object.
+/// Output: the level and policy, None when it has none.
+fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
+    let facts = private::facts(object).unwrap();
+    facts.label.and_then(|sacl| dacl::label(&sacl).unwrap())
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): the database folder, the data root, hands the medium
+/// no-read-up label to the files made directly in it, engine.db and SQLite's side files. It
+/// carries none itself and hands none to a folder made in it, which may be a root granted to
+/// an AppContainer, nor to what is made there.
+#[test]
+fn the_database_folder_labels_only_the_files_made_directly_in_it() {
+    let root = scratch("database-label");
+    let held = private::store_dir(&root, private::Store::Database).unwrap();
+    assert_eq!(own_label(&held), None);
+    drop(private::file(&root.join("engine.db"), true).unwrap());
+    std::fs::write(root.join("engine.db-wal"), "x").unwrap();
+    for name in ["engine.db", "engine.db-wal"] {
+        let file = std::fs::File::open(root.join(name)).unwrap();
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+    }
+    let made = root.join("setup");
+    let plain = root.join("check");
+    std::fs::create_dir(&plain).unwrap();
+    for folder in [private::dir(&made).unwrap(), private::dir(&plain).unwrap()] {
+        assert_eq!(own_label(&folder), None);
+    }
+    std::fs::write(made.join("inside.txt"), "x").unwrap();
+    let inside = std::fs::File::open(made.join("inside.txt")).unwrap();
+    assert_eq!(own_label(&inside), None);
+    drop((held, inside));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): a secret store folder (account keys, MCP secrets)
+/// carries the medium no-read-up label itself and hands it to every file and folder made in
+/// it.
+#[test]
+fn a_secret_folder_labels_itself_and_all_made_in_it() {
+    let root = scratch("secret-label");
+    let held = private::store_dir(&root, private::Store::Secret).unwrap();
+    assert_eq!(own_label(&held), MEDIUM_NO_UP);
+    let file = private::file(&root.join("secret-1"), true).unwrap();
+    assert_eq!(own_label(&file), MEDIUM_NO_UP);
+    let below = private::dir(&root.join("below")).unwrap();
+    assert_eq!(own_label(&below), MEDIUM_NO_UP);
+    drop((held, file, below));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45): a private folder or file outside the secret stores
+/// carries no label of its own, as before #512 r2's N1.
+#[test]
+fn a_private_folder_and_file_carry_no_label_of_their_own() {
+    let root = scratch("no-label");
+    let held = private::dir(&root).unwrap();
+    assert_eq!(own_label(&held), None);
+    let file = private::file(&root.join("plain"), true).unwrap();
+    assert_eq!(own_label(&file), None);
+    drop((held, file));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW): a plain private folder
+/// already there takes its store's label once it is judged private, so a store folder gets
+/// its label whatever made it first; a folder another account owns is refused as before and
+/// keeps no label.
+#[test]
+fn an_existing_plain_folder_takes_its_store_label_only_once_judged_private() {
+    let root = scratch("relabel");
+    drop(private::dir(&root).unwrap());
+    let inside = root.join("made-before");
+    drop(private::file(&inside, true).unwrap());
+    let held = private::store_dir(&root, private::Store::Secret).unwrap();
+    assert_eq!(own_label(&held), MEDIUM_NO_UP);
+    println!(
+        "relabel probe: a file made before the label carries {:?} after it",
+        own_label(&private::file(&inside, false).unwrap())
+    );
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
+    let foreign = scratch("relabel-foreign");
+    drop(private::dir(&foreign).unwrap());
+    run(
+        "icacls",
+        &[foreign.to_str().unwrap(), "/setowner", "*S-1-5-32-545"],
+    );
+    assert!(private::store_dir(&foreign, private::Store::Secret).is_err());
+    let seen = std::fs::OpenOptions::new()
+        .access_mode(windows_sys::Win32::Storage::FileSystem::READ_CONTROL)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(&foreign)
+        .unwrap();
+    assert_eq!(own_label(&seen), None);
+    drop(seen);
+    std::fs::remove_dir_all(&foreign).unwrap();
 }

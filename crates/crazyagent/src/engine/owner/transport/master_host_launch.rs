@@ -985,8 +985,8 @@ fn turn_sandbox(
     policy: &AgentPolicy,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
-    if policy.access.unavailable().is_some() {
-        return Err(failure("agent_access_unavailable"));
+    if let Some((_, code)) = policy.access.refusal() {
+        return Err(failure(code));
     }
     crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
@@ -1077,6 +1077,8 @@ fn turn_sandbox(
         InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(|error| {
             if crate::sandbox::linux_not_full(&error) {
                 failure(crate::sandbox::LINUX_NOT_FULL)
+            } else if crate::sandbox::model_loopback_windows(&error) {
+                failure(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
             } else {
                 refused(error)
             }

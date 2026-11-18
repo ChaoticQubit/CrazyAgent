@@ -794,10 +794,7 @@ pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
 
 #[cfg(not(unix))]
 pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
-    if !std::fs::symlink_metadata(path).ok()?.is_file() {
-        return None;
-    }
-    let file = File::open(path).ok()?;
+    let file = crate::platform::open_plain(path).ok()?;
     let metadata = file.metadata().ok()?;
     let identity = crazyagent_win_sandbox::file_id(&file).ok()?;
     metadata
@@ -1980,3 +1977,19 @@ mod migration_tests;
 
 #[cfg(test)]
 mod counting_tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_usage_record_that_is_a_link_is_not_opened() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("session.jsonl");
+        std::fs::write(&target, "{}\n").unwrap();
+        let link = folder.path().join("linked.jsonl");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(open_record(&target).is_some());
+        assert!(open_record(&link).is_none());
+    }
+}

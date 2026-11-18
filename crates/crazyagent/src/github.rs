@@ -28,6 +28,9 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
+pub(crate) use clone::NULL_DEVICE;
+#[cfg(not(unix))]
+pub(crate) use clone::git_program;
 pub use job::{
     GitHubDraft, GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
     GitHubPublishStep,
