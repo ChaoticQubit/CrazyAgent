@@ -35,12 +35,11 @@ export type NativeTheme = {
  * 256 bytes), the size in CSS pixels (6 to 72), whether the cursor blinks, and the colours. */
 export type NativeStyle = { fontFamily: string; fontSize: number; cursorBlink: boolean; theme: NativeTheme };
 
-/** What a native view tells its panel, in order: `ready` once with its grid; then at any time
- * `menu` (a right click, at CSS pixels in the webview), `mouse` (the pane turned mouse
- * reporting on or off), `behind` (the view scrolled off or back to the bottom); and last, at
- * most once, `ended` with a plain code. `final` is false when the agent ended or restarted and
- * a reopen may find it again, true when reopening cannot help (grant revoked, attach
- * rejected, a refused request). After `ended` the view is gone. */
+/** What a native view tells its panel: `ready` once with its grid; at any time `menu` (a right
+ * click, in CSS pixels), `mouse` (mouse reporting on or off), `behind` (scrolled off or back
+ * to the bottom); last, at most once, `ended` with a plain code, after which the view is gone.
+ * `final` is false when a reopen may find the agent again, true when it cannot help (grant
+ * revoked, attach rejected, a refused request). */
 export type NativeEvent =
   | { type: "ready"; cols: number; rows: number }
   | { type: "menu"; x: number; y: number }
