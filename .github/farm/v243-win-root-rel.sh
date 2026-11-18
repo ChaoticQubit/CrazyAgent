@@ -34,8 +34,8 @@ row() {
   cargo test -p crazyagent --locked --lib -- --exact "$name" > "$RUNNER_TEMP/row.txt" 2>&1
   cat "$RUNNER_TEMP/row.txt"
   local got=missing
-  grep -qE "^test $name \.\.\. ok$" "$RUNNER_TEMP/row.txt" && got=ok
-  grep -qE "^test $name \.\.\. FAILED$" "$RUNNER_TEMP/row.txt" && got=FAILED
+  grep -qE "^test $name( - should panic)? \.\.\. ok$" "$RUNNER_TEMP/row.txt" && got=ok
+  grep -qE "^test $name( - should panic)? \.\.\. FAILED$" "$RUNNER_TEMP/row.txt" && got=FAILED
   if [ "$got" = "$want" ]; then
     note "| ${name##*::} at $at | $want | $got |"
   else
