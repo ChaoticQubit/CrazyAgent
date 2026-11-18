@@ -361,7 +361,9 @@ impl Drop for View {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_term::event::MouseKind;
     use crate::native_term::linux::rows::{checkpoint, pump_for, pump_until, row_dir};
+    use crate::native_term::linux::surface::{self, Rect};
     use crate::native_term::pane::Named;
     use serde_json::json;
     use std::cell::RefCell;
@@ -489,6 +491,229 @@ mod tests {
         assert_eq!(commit_event(focus, "a"), None);
     }
 
+    const DOUBLE: DoubleClick = DoubleClick {
+        time_ms: 400,
+        distance: 5.0,
+    };
+
+    const RECT: Rect = Rect {
+        x: 100,
+        y: 120,
+        w: 400,
+        h: 240,
+    };
+
+    fn placed() -> Pointer {
+        let mut pointer = Pointer::new();
+        pointer.place(Some(RECT));
+        pointer
+    }
+
+    fn mouse(kind: MouseKind, point: (f64, f64), clicks: u8) -> Option<ViewEvent> {
+        Some(ViewEvent::Mouse {
+            kind,
+            point,
+            option: false,
+            clicks,
+        })
+    }
+
+    fn view(focus: bool, event: Option<ViewEvent>) -> Route {
+        Route::View { focus, event }
+    }
+
+    fn left(pointer: &mut Pointer, at: (f64, f64), time: u32) -> Route {
+        let route = pointer.press(1, at, time, false, false, DOUBLE);
+        assert!(matches!(pointer.release(1, at, false), Route::View { .. }));
+        route
+    }
+
+    #[test]
+    fn a_press_inside_the_uncovered_rect_takes_focus_and_counts_clicks() {
+        let mut pointer = placed();
+        assert_eq!(
+            pointer.press(1, (110.0, 130.0), 1_000, false, false, DOUBLE),
+            view(true, mouse(MouseKind::Press, (10.0, 10.0), 1))
+        );
+        assert_eq!(
+            pointer.release(1, (110.0, 130.0), false),
+            view(false, mouse(MouseKind::Release, (10.0, 10.0), 1))
+        );
+        assert_eq!(
+            left(&mut pointer, (112.0, 131.0), 1_200),
+            view(true, mouse(MouseKind::Press, (12.0, 11.0), 2))
+        );
+        assert_eq!(
+            left(&mut pointer, (112.0, 131.0), 1_300),
+            view(true, mouse(MouseKind::Press, (12.0, 11.0), 3))
+        );
+        assert_eq!(
+            left(&mut pointer, (112.0, 131.0), 1_400),
+            view(true, mouse(MouseKind::Press, (12.0, 11.0), 3))
+        );
+        assert_eq!(
+            pointer.press(1, (499.0, 359.0), 9_000, true, false, DOUBLE),
+            view(
+                true,
+                Some(ViewEvent::Mouse {
+                    kind: MouseKind::Press,
+                    point: (399.0, 239.0),
+                    option: true,
+                    clicks: 1,
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn a_press_outside_the_rect_on_a_covered_view_or_before_placing_goes_to_the_page() {
+        let mut unplaced = Pointer::new();
+        assert_eq!(
+            unplaced.press(1, (110.0, 130.0), 0, false, false, DOUBLE),
+            Route::Page
+        );
+        assert_eq!(
+            unplaced.scroll((110.0, 130.0), 1.0, false, false),
+            Route::Page
+        );
+        let mut pointer = placed();
+        for outside in [
+            (99.0, 130.0),
+            (500.0, 130.0),
+            (110.0, 119.0),
+            (110.0, 360.0),
+        ] {
+            assert_eq!(
+                pointer.press(1, outside, 0, false, false, DOUBLE),
+                Route::Page
+            );
+            assert_eq!(pointer.release(1, outside, false), Route::Page);
+            assert_eq!(pointer.scroll(outside, 1.0, false, false), Route::Page);
+        }
+        assert_eq!(pointer.motion((110.0, 130.0), false), Route::Page);
+        for button in [1, 2, 3] {
+            assert_eq!(
+                pointer.press(button, (110.0, 130.0), 0, false, true, DOUBLE),
+                Route::Page
+            );
+        }
+        assert_eq!(
+            pointer.scroll((110.0, 130.0), 1.0, false, true),
+            Route::Page
+        );
+        pointer.place(None);
+        assert_eq!(
+            pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE),
+            Route::Page
+        );
+    }
+
+    #[test]
+    fn a_left_drag_follows_the_pointer_outside_the_rect_until_release() {
+        let mut pointer = placed();
+        pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE);
+        assert_eq!(
+            pointer.motion((50.0, 400.0), false),
+            view(false, mouse(MouseKind::Drag, (-50.0, 280.0), 1))
+        );
+        assert_eq!(
+            pointer.release(1, (50.0, 400.0), false),
+            view(false, mouse(MouseKind::Release, (-50.0, 280.0), 1))
+        );
+        assert_eq!(pointer.motion((110.0, 130.0), false), Route::Page);
+    }
+
+    #[test]
+    fn the_right_button_opens_the_menu_and_other_buttons_are_held_without_events() {
+        let mut pointer = placed();
+        assert_eq!(
+            pointer.press(3, (110.0, 130.0), 0, false, false, DOUBLE),
+            view(
+                false,
+                Some(ViewEvent::Menu {
+                    point: (10.0, 10.0)
+                })
+            )
+        );
+        assert_eq!(pointer.motion((120.0, 140.0), false), view(false, None));
+        assert_eq!(
+            pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE),
+            view(false, None)
+        );
+        assert_eq!(pointer.release(1, (110.0, 130.0), false), view(false, None));
+        assert_eq!(pointer.release(3, (110.0, 130.0), false), view(false, None));
+        assert_eq!(pointer.motion((110.0, 130.0), false), Route::Page);
+        assert_eq!(
+            pointer.press(2, (110.0, 130.0), 0, false, false, DOUBLE),
+            view(false, None)
+        );
+        assert_eq!(pointer.release(2, (110.0, 130.0), false), view(false, None));
+    }
+
+    #[test]
+    fn a_cover_during_a_press_leaves_the_rest_of_it_to_the_page() {
+        let mut pointer = placed();
+        pointer.press(1, (110.0, 130.0), 0, false, false, DOUBLE);
+        pointer.cover();
+        assert_eq!(pointer.motion((120.0, 140.0), false), Route::Page);
+        assert_eq!(pointer.release(1, (120.0, 140.0), false), Route::Page);
+    }
+
+    #[test]
+    fn a_wheel_inside_is_lines_for_a_mouse_and_points_for_a_touchpad() {
+        let pointer = placed();
+        let wheel = |delta, precise| {
+            view(
+                false,
+                Some(ViewEvent::Wheel {
+                    point: (10.0, 10.0),
+                    delta,
+                    precise,
+                }),
+            )
+        };
+        assert_eq!(
+            pointer.scroll((110.0, 130.0), 1.0, false, false),
+            wheel(-1.0, false)
+        );
+        assert_eq!(
+            pointer.scroll((110.0, 130.0), -2.0, false, false),
+            wheel(2.0, false)
+        );
+        assert_eq!(
+            pointer.scroll((110.0, 130.0), 0.25, true, false),
+            wheel(-0.25 * TOUCHPAD_POINTS_PER_UNIT, true)
+        );
+        assert_eq!(
+            pointer.scroll((110.0, 130.0), f64::NAN, false, false),
+            view(false, None)
+        );
+    }
+
+    #[test]
+    fn clicks_reset_after_the_double_click_time_or_distance() {
+        let mut pointer = placed();
+        let clicks = |route: Route| match route {
+            Route::View {
+                event: Some(ViewEvent::Mouse { clicks, .. }),
+                ..
+            } => clicks,
+            other => panic!("a press expected, got {other:?}"),
+        };
+        assert_eq!(clicks(left(&mut pointer, (110.0, 130.0), 1_000)), 1);
+        assert_eq!(clicks(left(&mut pointer, (110.0, 130.0), 1_401)), 1);
+        assert_eq!(clicks(left(&mut pointer, (116.0, 130.0), 1_500)), 1);
+        assert_eq!(clicks(left(&mut pointer, (116.0, 134.0), 1_600)), 2);
+        assert_eq!(
+            clicks(left(&mut pointer, (116.0, 134.0), u32::MAX - 100)),
+            1
+        );
+        assert_eq!(clicks(left(&mut pointer, (116.0, 134.0), 50)), 2);
+        pointer.press(3, (116.0, 134.0), 100, false, false, DOUBLE);
+        pointer.release(3, (116.0, 134.0), false);
+        assert_eq!(clicks(left(&mut pointer, (116.0, 134.0), 150)), 1);
+    }
+
     fn page_text(page: &webkit2gtk::WebView) -> String {
         page.title()
             .map(|title| title.to_string())
@@ -611,5 +836,129 @@ mod tests {
         step("closed");
         pump_until("typing after close", || page_text(&page) == "v:xyézy");
         assert_eq!(take_seen(), Vec::new());
+    }
+
+    /// A page with an overlay over the host rectangle; the title counts presses on the
+    /// overlay, presses elsewhere on the page and wheel events anywhere on the page.
+    const POINTER_PAGE: &str = "<!doctype html><title>o:0 p:0 w:0</title><style>html,body{margin:0;height:200%}#o{position:absolute;left:100px;top:120px;width:400px;height:240px;background:#fff}</style><div id=\"o\"></div><script>let o=0,p=0,w=0;const s=()=>{document.title=`o:${o} p:${p} w:${w}`};document.getElementById('o').addEventListener('mousedown',e=>{o++;e.stopPropagation();s()});document.addEventListener('mousedown',()=>{p++;s()});document.addEventListener('wheel',()=>{w++;s()},{passive:true});</script>";
+
+    fn counts(page: &webkit2gtk::WebView) -> [u32; 3] {
+        let title = page_text(page);
+        let mut out = [u32::MAX; 3];
+        for (slot, part) in out.iter_mut().zip(title.split(' ')) {
+            *slot = part
+                .split_once(':')
+                .and_then(|(_, n)| n.parse().ok())
+                .unwrap_or(u32::MAX);
+        }
+        out
+    }
+
+    fn near(point: (f64, f64), want: (f64, f64)) -> bool {
+        (point.0 - want.0).abs() <= 1.0 && (point.1 - want.1).abs() <= 1.0
+    }
+
+    fn pointer_step(name: &str, window: &gtk::Window, rect: Rect) {
+        let gdk = window.window().expect("a realized toplevel");
+        let (_, wx, wy) = gdk.origin();
+        let click = [wx + rect.x + rect.w / 2, wy + rect.y + rect.h / 2];
+        let outside = [wx + rect.x - 50, wy + rect.y + rect.h / 2];
+        checkpoint(
+            name,
+            &json!({ "step": name, "click": click, "outside": outside }),
+        );
+    }
+
+    /// A page overlay drawn over the host rectangle while the view is covered keeps its
+    /// click and the wheel, and the view gets nothing; uncovered, a click and a wheel in
+    /// the rectangle are the view's and the page gets neither; a click on the page
+    /// outside the rectangle is the page's and releases native focus.
+    #[test]
+    #[ignore = "needs a display and the farm's pointer: the farm runs it under Xvfb and sway"]
+    fn a_covered_view_leaves_clicks_and_wheel_to_the_page_overlay() {
+        assert!(
+            row_dir().is_some(),
+            "NATIVE_ROW_DIR: the farm moves the pointer"
+        );
+        gtk::init().expect("a display");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("native-row");
+        window.set_decorated(false);
+        window.set_default_size(640, 480);
+        let page = webkit2gtk::WebView::new();
+        window.add(&page);
+        window.show_all();
+        page.load_html(POINTER_PAGE, None);
+        pump_until("page load", || {
+            !page.is_loading() && counts(&page) == [0, 0, 0]
+        });
+        page.grab_focus();
+        pump_for(Duration::from_millis(300));
+        let offset = page
+            .translate_coordinates(&window, 0, 0)
+            .expect("the page inside the toplevel");
+        let rect = surface::rect((100.0, 120.0, 400.0, 240.0), offset).expect("a host rect");
+        let view = View::new(&window, ID, seen).expect("a view");
+        view.place(Some(rect));
+        view.cover(true);
+        assert_eq!(take_seen(), Vec::new());
+
+        pointer_step("covered", &window, rect);
+        pump_until("overlay click and wheel", || {
+            let [o, _, w] = counts(&page);
+            o == 1 && w >= 1 && w != u32::MAX
+        });
+        pump_for(Duration::from_millis(300));
+        assert_eq!(
+            take_seen(),
+            Vec::new(),
+            "a covered view takes no pointer event"
+        );
+        let [o, p, w] = counts(&page);
+        assert_eq!((o, p), (1, 0));
+
+        view.cover(false);
+        assert_eq!(take_seen(), Vec::new());
+        pump_until("toplevel focus", || window.has_toplevel_focus());
+        pointer_step("uncovered", &window, rect);
+        pump_until("view click and wheel", || {
+            SEEN.with(|seen| {
+                seen.borrow()
+                    .iter()
+                    .any(|(_, event)| matches!(event, ViewEvent::Wheel { .. }))
+            })
+        });
+        pump_for(Duration::from_millis(300));
+        let got = take_seen();
+        let center = (200.0, 120.0);
+        assert!(got.len() >= 4, "{got:?}");
+        assert_eq!(got[0], ViewEvent::Focus(true), "{got:?}");
+        assert!(
+            matches!(got[1], ViewEvent::Mouse { kind: MouseKind::Press, point, option: false, clicks: 1 } if near(point, center)),
+            "{got:?}"
+        );
+        assert!(
+            matches!(got[2], ViewEvent::Mouse { kind: MouseKind::Release, point, option: false, clicks: 1 } if near(point, center)),
+            "{got:?}"
+        );
+        assert!(
+            got[3..].iter().all(|event| matches!(event, ViewEvent::Wheel { point, delta, precise: false } if near(*point, center) && *delta < 0.0)),
+            "{got:?}"
+        );
+        assert_eq!(
+            counts(&page),
+            [o, p, w],
+            "the page gets nothing the view took"
+        );
+
+        pointer_step("outside", &window, rect);
+        pump_until("page click", || counts(&page)[1] == p + 1);
+        pump_for(Duration::from_millis(300));
+        assert_eq!(
+            take_seen(),
+            vec![ViewEvent::Focus(false)],
+            "a page click releases native focus"
+        );
+        drop(view);
     }
 }
