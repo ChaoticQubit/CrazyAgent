@@ -755,16 +755,38 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
         group != 0 && group != 80,
         "the scratch folder has the user's group"
     );
-    assert_eq!(
-        resolve("node", &home_only(&home)).unwrap_err().reason,
-        Reason::Refused
-    );
     #[cfg(target_os = "macos")]
-    if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
-        assert!(
-            resolve("node", &home_only(&home)).is_ok(),
-            "admin's group is trusted"
+    {
+        assert_eq!(
+            resolve("node", &home_only(&home)).unwrap_err().reason,
+            Reason::Refused
         );
+        if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
+            assert!(
+                resolve("node", &home_only(&home)).is_ok(),
+                "admin's group is trusted"
+            );
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        assert_eq!(
+            resolve("node", &home_only(&home)).is_ok(),
+            crate::service::own_group_private(),
+            "only this user's private group is trusted"
+        );
+        let shared = nix::unistd::getgroups()
+            .unwrap()
+            .into_iter()
+            .map(|gid| gid.as_raw())
+            .find(|gid| *gid != 0 && *gid != group);
+        if let Some(shared) = shared {
+            std::os::unix::fs::chown(&bin, None, Some(shared)).unwrap();
+            assert_eq!(
+                resolve("node", &home_only(&home)).unwrap_err().reason,
+                Reason::Refused
+            );
+        }
     }
 }
 
