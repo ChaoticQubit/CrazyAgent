@@ -34,7 +34,11 @@ const COMMANDS: [&str; 6] = [
 fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     let build = include_str!("../build.rs");
     let bindings = include_str!("../src/lib.rs");
-    let capability = include_str!("../capabilities/main-window.json");
+    let capability = [
+        include_str!("../capabilities/main-window.json"),
+        include_str!("../capabilities/webview-terminal.json"),
+    ]
+    .concat();
     let client = include_str!("../../src/api.ts");
     for command in COMMANDS {
         assert_eq!(
@@ -128,10 +132,16 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     assert_eq!(wall["windows"], json!(["terminals-*"]));
     assert_eq!(wall["webviews"], json!(["terminals-*"]));
     assert_eq!(wall["local"], json!(true));
+    let webview = read(include_str!("../capabilities/webview-terminal.json"));
+    assert!(webview.get("windows").is_none());
+    assert_eq!(webview["webviews"], json!(["main", "terminals-*"]));
+    assert_eq!(webview["platforms"], json!(["linux", "windows"]));
+    assert_eq!(webview["local"], json!(true));
     let granted: BTreeSet<String> = wall["permissions"]
         .as_array()
         .unwrap()
         .iter()
+        .chain(webview["permissions"].as_array().unwrap())
         .map(|permission| permission.as_str().unwrap().to_owned())
         .collect();
     let allowed: BTreeSet<String> = WALL_COMMANDS
@@ -148,7 +158,7 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     let conf = read(include_str!("../tauri.conf.json"));
     assert_eq!(
         conf["app"]["security"]["capabilities"],
-        json!(["main-window", "terminal-wall"])
+        json!(["main-window", "terminal-wall", "webview-terminal"])
     );
     let commands = command_bodies();
     assert!(commands.len() > 100, "{}", commands.len());

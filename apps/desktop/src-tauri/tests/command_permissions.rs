@@ -75,7 +75,10 @@ fn the_webview_terminal_commands_are_built_and_granted_only_off_macos() {
         include_str!("../capabilities/terminal-wall.json"),
     ] {
         for permission in &granted {
-            assert!(!every_os.contains(&format!("\"{permission}\"")), "{permission}");
+            assert!(
+                !every_os.contains(&format!("\"{permission}\"")),
+                "{permission}"
+            );
         }
     }
     let build = include_str!("../build.rs");
@@ -85,7 +88,11 @@ fn the_webview_terminal_commands_are_built_and_granted_only_off_macos() {
         .and_then(|rest| rest.split("];").next())
         .expect("build.rs names the webview terminal commands in one list");
     for command in WEBVIEW_TERMINAL {
-        assert_eq!(build.matches(&format!("\"{command}\"")).count(), 1, "{command}");
+        assert_eq!(
+            build.matches(&format!("\"{command}\"")).count(),
+            1,
+            "{command}"
+        );
         assert!(gated.contains(&format!("\"{command}\"")), "{command}");
     }
     assert!(build.contains("if os != \"macos\""));
@@ -109,6 +116,10 @@ fn every_bound_command_is_built_and_granted_to_the_window_that_calls_it() {
         "allow-desktop-",
     )
     .into_iter()
+    .chain(quoted(
+        include_str!("../capabilities/webview-terminal.json"),
+        "allow-desktop-",
+    ))
     .map(|permission| permission["allow-".len()..].replace('-', "_"))
     .collect();
     let missing = |from: &BTreeSet<String>, to: &BTreeSet<String>| -> Vec<String> {

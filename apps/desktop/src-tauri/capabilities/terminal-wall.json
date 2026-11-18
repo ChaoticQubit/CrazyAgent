@@ -5,11 +5,7 @@
   "windows": ["terminals-*"],
   "webviews": ["terminals-*"],
   "permissions": [
-    "allow-desktop-terminal-attach",
-    "allow-desktop-terminal-input",
     "allow-desktop-terminal-prompt",
-    "allow-desktop-terminal-resize",
-    "allow-desktop-terminal-detach",
     "allow-desktop-team-graph",
     "allow-desktop-team-stop-agent",
     "allow-desktop-team-stop-teammate",
