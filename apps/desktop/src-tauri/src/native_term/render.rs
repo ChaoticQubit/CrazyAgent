@@ -774,12 +774,27 @@ impl Shared {
             }
         };
         let clear = linear_rgba(self.theme.background, 1.0);
-        encode(set, surface, &output, rects.len() / 8, clear)?;
-        output.present();
+        let encoded = encode(set, surface, &output, rects.len() / 8, clear);
+        hand_back(set, output, encoded)?;
         surface.atlas.trim();
         assert_eq!(surface.generation, self.generation);
         Ok(())
     }
+}
+
+/// Hands an acquired frame back to wgpu: presents it once encoded, or lets it drop, which
+/// discards it, when encoding failed. Inputs: the device, the frame and the encode result.
+/// Output: ok, or the encode error.
+fn hand_back(
+    set: &Device,
+    output: wgpu::SurfaceTexture,
+    encoded: Result<(), String>,
+) -> Result<(), String> {
+    assert!(output.texture.width() <= set.side_max);
+    assert!(output.texture.height() <= set.side_max);
+    encoded?;
+    output.present();
+    Ok(())
 }
 
 fn encode(
@@ -976,6 +991,82 @@ mod tests {
             cursor: None,
             preedit: None,
         }
+    }
+
+    /// Loses a shared renderer's device as a GPU reset would: destroys it, then polls so
+    /// wgpu runs its device-lost callback (wgpu-core resource.rs:561-575). Input: the
+    /// renderer, with a device.
+    fn lose(shared: &Shared) {
+        let set = shared.device.as_ref().expect("a device");
+        set.device.destroy();
+        set.device
+            .poll(wgpu::PollType::Wait)
+            .expect("a poll after the destroy");
+    }
+
+    /// A frame drawn after the device is lost reports `native_terminal_gpu` before any GPU
+    /// work. Its 200 glyphs overflow glyphon's first 4096-byte vertex buffer, so without the
+    /// guard glyphon maps a new buffer on the lost device, which wgpu 25 panics on
+    /// (V243-NATIVE-PRESENT-FATAL).
+    #[test]
+    fn a_frame_on_a_lost_device_reports_the_gpu_code_before_glyphon_maps_a_buffer() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut surface = shared
+            .surface_on(on_layer(&layer), 4096, 128)
+            .expect("a surface");
+        shared
+            .draw(&mut surface, &frame_of("before"))
+            .expect("drawn before the loss");
+        lose(&shared);
+        let wide = "x".repeat(200);
+        let grown = Frame {
+            rows: vec![vec![span(&wide, 0, false)]],
+            keys: vec![2],
+            fills: Vec::new(),
+            cursor: None,
+            preedit: None,
+        };
+        assert_eq!(shared.draw(&mut surface, &grown), Err(GPU_FAULT.to_owned()));
+        drop(surface);
+        drop(layer);
+    }
+
+    /// A frame acquired before the device is lost is never presented, since present on a
+    /// lost device panics in wgpu 25: the call reports `native_terminal_gpu`. Synthetic: no
+    /// Metal call loses a device between acquire and present.
+    #[test]
+    fn a_frame_acquired_before_a_loss_is_not_presented() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let surface = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        let output = surface.surface.get_current_texture().expect("a frame");
+        lose(&shared);
+        let set = shared.device.as_ref().expect("a device");
+        assert_eq!(hand_back(set, output, Ok(())), Err(GPU_FAULT.to_owned()));
+        drop(surface);
+        drop(layer);
+    }
+
+    /// A frame whose encode failed after the device was lost is never dropped as is, since
+    /// the drop discards it and that panics on a lost device in wgpu 25: the call reports
+    /// `native_terminal_gpu`. Synthetic, as above.
+    #[test]
+    fn a_frame_whose_encode_failed_on_a_lost_device_is_not_discarded() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let surface = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        let output = surface.surface.get_current_texture().expect("a frame");
+        lose(&shared);
+        let set = shared.device.as_ref().expect("a device");
+        let refused = Err("encode refused".to_owned());
+        assert_eq!(hand_back(set, output, refused), Err(GPU_FAULT.to_owned()));
+        drop(surface);
+        drop(layer);
     }
 
     /// A view as wide as the adapter's own largest texture side, past wgpu's default 8192
