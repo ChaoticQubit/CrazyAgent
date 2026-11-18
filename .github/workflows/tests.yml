@@ -24,7 +24,7 @@ defaults:
 
 jobs:
   v243-win-root-rel:
-    name: Windows root-relative program ${{ matrix.mode }} (fix 3876a4e6f, red 684ccb4a9)
+    name: Windows root-relative program ${{ matrix.mode }} (fix 72da0514a, red 684ccb4a9)
     runs-on: windows-2022
     timeout-minutes: ${{ matrix.minutes }}
     strategy:

@@ -2,7 +2,7 @@
 set -uo pipefail
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 red=684ccb4a9388da1a715bb960d71f2c2c808f9e3b
-fix=3876a4e6f66f2deb48681eab61a9a8e016ce01e5
+fix=72da0514aefbbf20448b1a7d86e3e163a59b05db
 code=spawn_relative_program_refused
 red_rows=(
   spawn_gate::tests::a_root_relative_program_is_refused_where_another_user_could_plant_it_and_its_full_path_runs
@@ -13,6 +13,7 @@ fix_rows=(
   "${red_rows[@]}"
   tools::windows_tests::a_program_is_fixed_only_when_absolute_or_a_bare_file_name
   coord::lane::windows_tests::the_windows_lane_still_runs_a_program_named_relative_to_its_folder
+  spawn_gate::tests::entering_the_gate_inside_the_gate_panics_instead_of_deadlocking
 )
 failed=0
 note() { printf '%s\n' "$1" >> "$summary"; echo "$1"; }
@@ -74,6 +75,11 @@ case "${1:-}" in
     if [ "$rc" -ne 0 ]; then note "| engine binaries at fix | build | FAILED, exit $rc |"; echo "FARM failed=1"; exit 1; fi
     mkdir -p target/debug/deps
     cp target/debug/crazyagent-landlock.exe target/debug/deps/crazyagent-landlock.exe
+    cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked > "$RUNNER_TEMP/boundary.txt" 2>&1
+    rc=$?
+    tail -n 5 "$RUNNER_TEMP/boundary.txt"
+    if [ "$rc" -ne 0 ]; then note "| crazyagent-win-boundary at fix | build | FAILED, exit $rc |"; echo "FARM failed=1"; exit 1; fi
+    cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
     build_lib fix || { echo "FARM failed=1"; exit 1; }
     cargo test -p crazyagent --locked --lib > "$RUNNER_TEMP/suite.txt" 2>&1
     rc=$?
@@ -85,6 +91,7 @@ case "${1:-}" in
     count=$(grep -cE '^test .* \.\.\. FAILED$' "$RUNNER_TEMP/suite.txt")
     named=$(grep -cF "$code" "$RUNNER_TEMP/suite.txt")
     note "| full --lib at fix | exit | $rc, $count failed rows, $named lines naming $code |"
+    [ "$rc" -eq 0 ] || failed=1
     echo "=== failures section"
     sed -n '/^failures:$/,$p' "$RUNNER_TEMP/suite.txt" | head -n 400
     ;;
