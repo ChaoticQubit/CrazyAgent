@@ -2819,6 +2819,48 @@ fn first_run_leaves_only_after_its_own_fix_ends_when_the_run_ends_first() {
     assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
+/// V243-SETUP-TUI-HELD-OUTCOME (#412 rv-code4 F1): on first run, a run that ended while this
+/// screen's own fix ran is held; when the fix then ends with its tool Missing or Failed, the
+/// fix's outcome stays the lead, never replaced by the earlier run's end, and Setup stays.
+#[test]
+fn first_run_keeps_its_own_fix_outcome_when_the_held_run_ends_with_a_problem() {
+    for ended in [
+        DependencyState::Missing {
+            line: String::new(),
+        },
+        DependencyState::Failed {
+            reason: "no network".into(),
+        },
+    ] {
+        let mut shell = first_run(120, 36);
+        shell.arrive(event(AppSetupEvent::Status(Ok(refused_status(
+            crate::setup::RefusedTool::FixButton,
+        )))));
+        shell.key(Key::Enter);
+        jobs(&mut shell);
+        shell.arrive(event(AppSetupEvent::Ran(Ok(()))));
+        jobs(&mut shell);
+        shell.key(Key::Char('p'));
+        shell.key(Key::Char('y'));
+        fix_sent(&mut shell);
+        shell.arrive(event(AppSetupEvent::FixSet(Ok(()))));
+        jobs(&mut shell);
+        let mut fixing = refused_status(crate::setup::RefusedTool::FixButton);
+        fixing.dependencies[2].busy = true;
+        shell.arrive(event(AppSetupEvent::Status(Ok(fixing))));
+        assert_eq!(shell.place(), Some(Place::Setup { first_run: true }));
+        let mut done = installed_status();
+        done.dependencies[2].state = ended.clone();
+        shell.arrive(event(AppSetupEvent::Status(Ok(done))));
+        assert_eq!(
+            lead(&shell),
+            "Permissions changed, but Graphify command is still not used.",
+            "{ended:?}"
+        );
+        assert_eq!(shell.place(), Some(Place::Setup { first_run: true }));
+    }
+}
+
 /// V243-SETUP-TUI-FIX-PENDING (#381 F3 r2): in Settings a run that ends while this screen's
 /// own permission fix runs says so at once, and the fix's outcome, said when it ends, is the
 /// last word, never overwritten by the run's end.
