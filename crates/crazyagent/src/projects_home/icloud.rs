@@ -35,8 +35,8 @@ const NOT_DOWNLOADED: &str = "home_icloud_not_downloaded";
 const _: () = assert!(BATCH_PATHS_MAX * 4096 < 1024 * 1024);
 const _: () = assert!(JOB_OPEN_FILES_MAX >= BATCH_PATHS_MAX);
 const _: () = assert!(JOB_OPEN_FILES_MAX <= OPEN_FILES_MAX);
-const _: () = assert!(JOB_OPEN_FILES_MAX % BATCH_PATHS_MAX == 0);
-const _: () = assert!(OPEN_FILES_MAX % BATCH_PATHS_MAX == 0);
+const _: () = assert!(JOB_OPEN_FILES_MAX.is_multiple_of(BATCH_PATHS_MAX));
+const _: () = assert!(OPEN_FILES_MAX.is_multiple_of(BATCH_PATHS_MAX));
 const _: () = assert!(STALL_MAX.as_secs() < DOWNLOAD_TIME_MAX.as_secs());
 const _: () = assert!(LANDING_LOG_EVERY.as_secs() < STALL_MAX.as_secs());
 const _: () = assert!(CANCEL_EVERY.as_millis() < POLL_EVERY.as_millis());
@@ -330,7 +330,7 @@ impl Lanes {
             self.lanes
                 .iter()
                 .enumerate()
-                .filter(|(_, lane)| wanted(*lane))
+                .filter(|(_, lane)| wanted(lane))
                 .min_by_key(|(_, lane)| (lane.served, lane.id))
                 .map(|(at, _)| at)
         };

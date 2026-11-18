@@ -6,6 +6,7 @@ fn seconds(count: u64) -> Duration {
 }
 
 /// What a download of `root` would ask for now, by real flags or this thread's fake ones.
+#[cfg(unix)]
 fn wanted(root: &Path) -> Vec<PathBuf> {
     let look = |path: &Path| fs::symlink_metadata(path);
     let listing = survey(root, root, 0, COPY_BOUNDS, &look).unwrap();
