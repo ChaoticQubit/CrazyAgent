@@ -2,11 +2,20 @@ use super::{PIPES_BYTES_MAX, Published, encode_pipes, parse_pipes};
 use crazyagent_win_sandbox::{pipe, private};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::time::Duration;
 
 /// The D7 pipes file's name in its protected root.
 const PIPES_FILE: &str = "pipes";
 /// The most entries one sweep of a protected root reads; a root holds a handful.
 const ROOT_ENTRIES_MAX: usize = 1024;
+/// How many times publish tries the rename over `pipes` while a client holds it open.
+const RENAME_TRIES: u32 = 50;
+/// The pause between two of those tries; all of them together wait about one second.
+const RENAME_PAUSE: Duration = Duration::from_millis(20);
+/// Windows' ERROR_ACCESS_DENIED.
+const ACCESS_DENIED: i32 = 5;
+/// Windows' ERROR_SHARING_VIOLATION: another handle's share mode refuses the access.
+const SHARING_VIOLATION: i32 = 32;
 
 /// Removes the staged pipes files earlier starts left in a held root, each judged private
 /// before it goes, and leaves every other entry (rv-code2 #554 N4). Input: the root. Output:
@@ -22,6 +31,33 @@ fn sweep(root: &Path) -> io::Result<()> {
         std::fs::remove_file(&leftover)?;
     }
     Ok(())
+}
+
+/// Renames the staged pipes file over `pipes` (rv-code2 #554 N3). A client reading `pipes`
+/// holds it without delete sharing for the moment its read takes, so a rename refused for
+/// that is tried again, at most [`RENAME_TRIES`] times. Inputs: the staged file and the
+/// target. Output: Ok, or the last rename error.
+fn replace(staged: &Path, target: &Path) -> io::Result<()> {
+    let mut tries = 1;
+    loop {
+        match std::fs::rename(staged, target) {
+            Err(error) if held_open(&error) && tries < RENAME_TRIES => {
+                tries += 1;
+                std::thread::sleep(RENAME_PAUSE);
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Whether a rename failed because another handle holds the target open: Windows' sharing
+/// violation, or access denied, which a rename over a file open without delete sharing may
+/// return. Input: the error. Output: whether to try again.
+fn held_open(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(SHARING_VIOLATION | ACCESS_DENIED)
+    )
 }
 
 /// Whether a root entry is a staged pipes file: `pipes.`, 16 lowercase hex, `.new`. Input:
@@ -73,7 +109,7 @@ pub(super) fn publish(root: &Path, purpose: &str) -> io::Result<Published> {
         .write_all(encode_pipes(purpose, &published).as_bytes())
         .and_then(|()| file.sync_all());
     drop(file);
-    if let Err(error) = written.and_then(|()| std::fs::rename(&staged, &target)) {
+    if let Err(error) = written.and_then(|()| replace(&staged, &target)) {
         let _ = std::fs::remove_file(&staged);
         return Err(error);
     }
