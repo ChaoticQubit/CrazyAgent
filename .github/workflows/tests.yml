@@ -25,6 +25,9 @@ env:
   MODULES: "team::cleanup::tests:: sandbox::toolchains::tests:: agent_home::tests:: team::runtime::tests::a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead team::caller::tests::a_hook_asking_while_the_socket_is_bound_again_never_reads_alone"
   LINUX_MODULES: "team::cleanup::tests:: sandbox::toolchains::tests:: agent_home::tests::"
   KEPT_ROWS: "team::runtime::tests::a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead team::caller::tests::a_hook_asking_while_the_socket_is_bound_again_never_reads_alone neither_a_native_lead_nor_its_teammates_touch_the_caller_socket_s_binding_name"
+  OLD_SWAP_TESTS: f463fce5371903efd3504a937b7197b0adbc1b05
+  SWAP_RUNS: "20"
+  SWAP_ROWS: "team::cleanup::tests::removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_to team::cleanup::tests::an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to"
   NEW_ROWS: "team::cleanup::tests::opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable sandbox::toolchains::tests::removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned sandbox::toolchains::tests::removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned"
 
 defaults:
@@ -33,13 +36,13 @@ defaults:
 
 jobs:
   macos:
-    name: macOS cleanup, toolchains and agent home rows, ${{ matrix.side }}
+    name: macOS cleanup, toolchains, agent home and swap rows, ${{ matrix.side }}
     runs-on: macos-15
     timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
-        side: [base, tip]
+        side: [base, tip, mutant, mutant-old]
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
