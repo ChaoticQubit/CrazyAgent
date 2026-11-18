@@ -8,7 +8,7 @@ use super::owner::{
     OwnerResponse,
 };
 #[cfg(unix)]
-use super::verify_peer;
+use super::verify_server;
 use super::{Engine, EngineError, io_error};
 use crate::config::EffectiveConfig;
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId, SessionId};
@@ -953,12 +953,12 @@ impl EngineService {
         )?;
         let stream = tokio::time::timeout(
             self.timeout,
-            crate::spawn_gate::connect_unix(self.anchor.path.join(ordinary)),
+            crate::ipc::owner_connect(self.anchor.path.join(ordinary)),
         )
         .await
         .map_err(|_| fail("ordinary_readiness_timeout"))?
         .map_err(io_error)?;
-        verify_peer(&stream)?;
+        verify_server(&stream)?;
         check_socket(
             &self.anchor,
             &self.anchor.path.join(ordinary),

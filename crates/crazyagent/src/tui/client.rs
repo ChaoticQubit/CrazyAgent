@@ -2733,11 +2733,7 @@ mod creation_recovery_tests {
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
         for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
-            silent.push(
-                crate::spawn_gate::connect_unix(&owner_socket)
-                    .await
-                    .unwrap(),
-            );
+            silent.push(crate::ipc::owner_connect(&owner_socket).await.unwrap());
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let busy = h
@@ -2799,11 +2795,7 @@ mod creation_recovery_tests {
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
         for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
-            silent.push(
-                crate::spawn_gate::connect_unix(&owner_socket)
-                    .await
-                    .unwrap(),
-            );
+            silent.push(crate::ipc::owner_connect(&owner_socket).await.unwrap());
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let result = h

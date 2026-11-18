@@ -17,10 +17,12 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::{Engine, io_error, owner_trace as trace, read_frame, verify_peer};
+use crate::engine::{
+    Engine, io_error, owner_trace as trace, read_frame, verify_client, verify_server,
+};
+use crate::ipc::{Listener, Stream};
 use crate::model_gateway::{ConnectionState, Observation};
 use crate::platform::FileExt;
-use crate::platform::unix_socket::{UnixListener, UnixStream};
 use crate::storage::Job;
 use crate::storage::worker_dispatch::{
     DispatchJob, DispatchRecord, DispatchResult, DispatchSnapshot,
@@ -1260,7 +1262,7 @@ impl OwnerRuntimeHandle {
 }
 
 pub struct OwnerServer {
-    listener: UnixListener,
+    listener: Listener,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     timeout: Duration,
@@ -1328,8 +1330,7 @@ impl OwnerServer {
                 });
             }
             root.verify()?;
-            let listener =
-                crate::spawn_gate::bind_unix(root.path.join(SOCKET)).map_err(io_error)?;
+            let listener = crate::ipc::owner_listener(root.path.join(SOCKET)).map_err(io_error)?;
             let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
             created_socket = Some(Identity::of(&created));
             if !created.file_type().is_socket()
@@ -1451,7 +1452,7 @@ impl OwnerServer {
 
     fn accept_owner_handshake(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         auth: [u8; 37],
         deadline: Instant,
         tasks: &mut Tasks,
@@ -1529,7 +1530,7 @@ impl OwnerServer {
     /// deadline when already read, and the refusal tasks. Output: none.
     fn refuse_busy(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         handshake: Option<([u8; 37], Instant)>,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
@@ -1566,7 +1567,7 @@ impl OwnerServer {
     /// deadline, and the refusal tasks. Output: none.
     fn refuse_terminal(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         auth: [u8; 37],
         deadline: Instant,
         refusals: &mut tokio::task::JoinSet<()>,
@@ -1654,8 +1655,8 @@ impl OwnerServer {
                         None => {}
                     }
                 }
-                accepted=crate::spawn_gate::accept_unix(&self.listener) => {
-                    let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
+                accepted=crate::ipc::owner_accept(&self.listener) => {
+                    let stream=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
                     if handshakes.len()>=HANDSHAKES_MAX {self.refuse_busy(stream, None, &mut tasks.refusals);continue;}
                     let timeout=self.timeout;
                     handshakes.spawn(read_owner_handshake(stream,timeout));
@@ -2129,12 +2130,12 @@ impl Engine {
 }
 
 async fn read_owner_handshake(
-    mut stream: UnixStream,
+    mut stream: Stream,
     timeout: Duration,
-) -> Option<(UnixStream, [u8; 37], Instant)> {
+) -> Option<(Stream, [u8; 37], Instant)> {
     let deadline = Instant::now() + timeout;
     let exchange = async {
-        verify_peer(&stream)?;
+        verify_client(&stream)?;
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
@@ -2147,7 +2148,7 @@ async fn read_owner_handshake(
 
 #[cfg(all(test, target_os = "macos"))]
 async fn serve_owner(
-    stream: UnixStream,
+    stream: Stream,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     timeout: Duration,
@@ -2164,7 +2165,7 @@ async fn serve_owner(
 /// handshake packet, engine, authority and deadline. Output: none; the reply is written to
 /// the stream and the stream is closed.
 async fn serve_authenticated_owner(
-    mut stream: UnixStream,
+    mut stream: Stream,
     auth: [u8; 37],
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -2221,11 +2222,11 @@ fn log_panic<T>(result: &Result<T, tokio::task::JoinError>, code: &str) {
 /// Inputs: the stream, the handshake packet and the authority. Output: the owner
 /// admission (none for a runner) and the whole frame, or the error that ends it.
 async fn admit(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     authority: &Authority,
 ) -> Result<(Option<Admission>, Vec<u8>), EngineError> {
-    verify_peer(stream)?;
+    verify_client(stream)?;
     let admission = if &auth[..4] == b"CAR1" {
         authority.authenticate_runner(auth)?;
         None
@@ -2303,7 +2304,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
 }
 
 async fn serve_admitted(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -2673,7 +2674,7 @@ enum Deferred {
 /// Inputs: the stream, the handshake packet, the whole request frame and the code.
 /// Output: Ok once written; Ok without a reply for the Claude code input, which has none.
 async fn refuse(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     frame: &[u8],
     code: &str,
@@ -2726,7 +2727,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
 }
 
 async fn write_owner_reply(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     result: Result<OwnerReply, EngineError>,
     id: RequestId,
     mutation: bool,
@@ -2742,7 +2743,7 @@ const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
 /// `REPLY_WRITE_TIME` so a client that stops reading never holds the barrier for others;
 /// the connection is then dropped. Inputs: the connection and the frame.
 /// Output: done once written, or `owner_reply_stalled` and the write error.
-async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), EngineError> {
+async fn write_reply(stream: &mut Stream, frame: &[u8]) -> Result<(), EngineError> {
     tokio::time::timeout(REPLY_WRITE_TIME, stream.write_all(frame))
         .await
         .map_err(|_| failure("owner_reply_stalled"))?
@@ -2861,10 +2862,10 @@ async fn runner_control(
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
-        let mut stream = crate::spawn_gate::connect_unix(root.path.join("control.sock"))
+        let mut stream = crate::ipc::owner_connect(root.path.join("control.sock"))
             .await
             .map_err(io_error)?;
-        verify_peer(&stream)?;
+        verify_server(&stream)?;
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
@@ -3277,10 +3278,10 @@ impl RunnerClient {
             let mut token = [0; 32];
             file.read_exact_at(&mut token, 0).map_err(io_error)?;
             let socket = generation.socket_identity()?;
-            let mut stream = crate::spawn_gate::connect_unix(generation.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(generation.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if generation.socket_identity()? != socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -3524,10 +3525,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -4132,12 +4133,10 @@ fallback_allowed = false
         let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
             .await
             .unwrap();
-        let mut client = crate::spawn_gate::connect_unix(root.path().join(SOCKET))
+        let mut client = crate::ipc::owner_connect(root.path().join(SOCKET))
             .await
             .unwrap();
-        let (stream, _) = crate::spawn_gate::accept_unix(&server.listener)
-            .await
-            .unwrap();
+        let stream = crate::ipc::owner_accept(&server.listener).await.unwrap();
         nix::sys::socket::setsockopt(&stream, nix::sys::socket::sockopt::SndBuf, &1024usize)
             .unwrap();
         nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize)

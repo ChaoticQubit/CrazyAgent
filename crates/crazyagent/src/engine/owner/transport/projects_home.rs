@@ -110,7 +110,7 @@ pub(super) async fn still_running(
 /// Where a served change's reply goes: the client that asked, or the intake job that runs
 /// the add, which keeps the reply and lends its tally to the copy.
 pub(super) enum Sink<'a> {
-    Client(&'a mut UnixStream),
+    Client(&'a mut Stream),
     Job(Arc<Tally>, &'a mut Option<Result<OwnerReply, EngineError>>),
 }
 
