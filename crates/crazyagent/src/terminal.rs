@@ -46,6 +46,10 @@ pub const INPUT_BYTES_MAX: usize = 4096;
 /// no split of them cuts it (RV-DS241-69).
 pub(crate) const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub const PROMPT_BYTES_MAX: usize = 4096;
+/// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
+/// most a native view copies.
+pub const PASTE_BYTES_MAX: usize = 1 << 20;
+const _: () = assert!(PASTE_BYTES_MAX % INPUT_BYTES_MAX == 0);
 pub const CHUNK_BYTES_MAX: usize = 8192;
 pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
@@ -539,6 +543,20 @@ pub trait Host: Send + Sync {
         Err(failure("terminal_unavailable"))
     }
 
+    /// Pastes the owner's keys into the agent's own pane as one paste, bracketed only when
+    /// its app turned bracketed paste on. Takes the name and keys from `paste_keys`, 1 to
+    /// `PASTE_BYTES_MAX` bytes. Returns once the host took them all, or
+    /// `terminal_paste_unsupported` from a host that cannot paste.
+    fn paste(&self, _agent: &AgentId, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
+    }
+
+    /// Pastes the owner's keys into one pane as `paste` does into the agent's own pane.
+    /// Takes the name, the pane id and the keys. Returns as `paste`.
+    fn paste_pane(&self, _agent: &AgentId, _pane: &str, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
+    }
+
     /// Gives a native teammate's pane its own name (DEC-104 K5a), so later calls by that
     /// name, `kill` included, reach that one pane of its lead's own server. Calling it again
     /// for the same pane changes nothing, so discovery may repeat it each pass and an engine
@@ -746,6 +764,14 @@ impl Host for OwnServer {
         self.0.input_live_pane(agent, pane)
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.0.paste(agent, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.0.paste_pane(agent, pane, keys)
+    }
+
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
         self.0.adopt_pane(agent, lead, pane)
     }
@@ -818,6 +844,10 @@ impl Host for PaneView {
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.host.input_live_pane(agent, &self.pane)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.host.paste_pane(agent, &self.pane, keys)
     }
 
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
@@ -1329,6 +1359,9 @@ pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
 /// full-screen app reads in place of a scroll; they are typed as `Input` is but never count
 /// as the owner typing, which holds engine input to a live master back. A `Scroll` holding
 /// anything but up and down arrow keys and mouse or focus reports counts as `Input` does.
+/// `AttachInput` opens a sized view that sends no output, for a viewer drawing the pane from
+/// elsewhere; `Paste` chunks of at most `INPUT_BYTES_MAX` bytes, the last one marked, carry
+/// one owner paste of at most `PASTE_BYTES_MAX` that the engine filters and pastes once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalRequest {
@@ -1345,8 +1378,18 @@ pub enum TerminalRequest {
         cols: u16,
         rows: u16,
     },
+    AttachInput {
+        agent_id: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
     Input {
         bytes: Vec<u8>,
+    },
+    Paste {
+        bytes: Vec<u8>,
+        last: bool,
     },
     Scroll {
         bytes: Vec<u8>,
@@ -1393,6 +1436,22 @@ pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
     };
     assert!(!keys.contains('\n'));
     Some(keys.into_bytes())
+}
+
+/// The keys one owner paste types, filtered here at the trust boundary as the desktop's
+/// `pasteText` filters it: every control character (C0, DEL and C1) is dropped except tab,
+/// line feed and carriage return, then CR LF and LF become CR, as a terminal sends Enter, so
+/// a paste can never press Escape, end a bracketed paste or send a Ctrl key. Takes the
+/// pasted text. Returns the keys, empty when nothing is left.
+pub fn paste_keys(text: &str) -> Vec<u8> {
+    let kept: String = text
+        .chars()
+        .filter(|character| matches!(character, '\t' | '\n' | '\r') || !character.is_control())
+        .collect();
+    let keys = kept.replace("\r\n", "\r").replace('\n', "\r");
+    assert!(!keys.contains('\x1b') && !keys.contains('\n') && !keys.contains('\0'));
+    assert!(keys.len() <= text.len());
+    keys.into_bytes()
 }
 
 /// Types one prompt into an agent's app as one submission: a paste when the app turned

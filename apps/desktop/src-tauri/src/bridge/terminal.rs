@@ -295,13 +295,15 @@ pub fn input_request(bytes: Vec<u8>, wheel: bool) -> TerminalRequest {
     }
 }
 
-/// Checks one input, prompt or resize request from the window before it reaches the engine.
-/// Takes the request; attach and detach never come through this path.
+/// Checks one input, paste chunk, prompt or resize request from the window before it reaches
+/// the engine. Takes the request; attach and detach never come through this path.
 /// Returns whether the bytes, the prompt or the size are inside the engine's limits.
 pub fn request_valid(request: &TerminalRequest) -> bool {
     let size = SIZE_MIN..=SIZE_MAX;
     match request {
-        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+        TerminalRequest::Input { bytes }
+        | TerminalRequest::Scroll { bytes }
+        | TerminalRequest::Paste { bytes, .. } => {
             !bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX
         }
         TerminalRequest::Prompt { text } => {
@@ -311,6 +313,7 @@ pub fn request_valid(request: &TerminalRequest) -> bool {
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
         | TerminalRequest::AttachSized { .. }
+        | TerminalRequest::AttachInput { .. }
         | TerminalRequest::Detach => false,
     }
 }
@@ -657,9 +660,11 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
             TerminalRequest::Scroll { bytes } => control.scroll(bytes).await,
             TerminalRequest::Prompt { text } => control.prompt(text).await,
             TerminalRequest::Resize { cols, rows } => control.resize(cols, rows).await,
+            TerminalRequest::Paste { bytes, last } => control.paste(bytes, last).await,
             TerminalRequest::Attach { .. }
             | TerminalRequest::AttachPane { .. }
             | TerminalRequest::AttachSized { .. }
+            | TerminalRequest::AttachInput { .. }
             | TerminalRequest::Detach => continue,
         };
         if sent.is_err() {

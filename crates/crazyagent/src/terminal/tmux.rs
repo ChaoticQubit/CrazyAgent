@@ -1,9 +1,9 @@
 use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt,
-    PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED,
-    TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX,
+    PASTE_BYTES_MAX, PaneAt, PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
+    TEAMMATES_SERVER_REPLACED, TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::Ending;
@@ -856,6 +856,28 @@ impl Tmux {
         let lines = paste_buffer_lines(target, &buffer, bytes);
         assert_eq!(lines.len(), COMMANDS_SENT_MAX);
         let pasted = control.run_all(&lines);
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
+    }
+
+    /// Pastes one owner paste into one tmux target (T7): `set-buffer` pieces of at most
+    /// `INPUT_BYTES_MAX` bytes into a buffer no other paste uses, each piece after the first
+    /// appended, then `paste-buffer -d -p -r -S`, which brackets the whole only when the
+    /// pane's app turned bracketed paste on and deletes the buffer; on a failure a
+    /// best-effort `delete-buffer` follows. Takes the control client, the target and keys
+    /// from `paste_keys`. Returns once tmux took them all, or `terminal_paste_bounds`.
+    fn send_paste(control: &Control, target: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0) {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let buffer = paste_buffer_name();
+        let lines = owner_paste_lines(target, &buffer, keys);
+        assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+        let pasted = lines
+            .iter()
+            .try_for_each(|line| control.run(line).map(|_| ()));
         if pasted.is_err() {
             let _ = control.run(&format!("delete-buffer -b {buffer}"));
         }
@@ -2365,6 +2387,23 @@ impl Host for Tmux {
         Self::paste_on(&*self.live_control()?, &pane)
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        Self::send_paste(&control, &target, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let pane = self.member_pane(agent, pane)?;
+        Self::send_paste(&*self.live_control()?, &pane, keys)
+    }
+
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
         if self.confined.is_none() {
             return Err(failure(OWN_SERVER_UNAVAILABLE));
@@ -2563,8 +2602,23 @@ const COMMANDS_SENT_MAX: usize = 2;
 fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
     assert!(!bytes.contains(&0));
     assert!(bytes.len() <= INPUT_BYTES_MAX);
-    let mut set = String::with_capacity(24 + buffer.len() + bytes.len() * 4);
-    let _ = write!(set, "set-buffer -b {buffer} -- \"");
+    vec![
+        set_buffer_line(buffer, bytes, false),
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// One `set-buffer` command that writes bytes into a named buffer, appended with `append`,
+/// every byte other than an ASCII letter or digit written as a `\ooo` octal escape inside
+/// double quotes, so tmux's parser decodes each exactly and expands nothing. Takes the
+/// buffer name, at most `INPUT_BYTES_MAX` bytes without a NUL and whether to append.
+/// Returns the command.
+fn set_buffer_line(buffer: &str, bytes: &[u8], append: bool) -> String {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let flag = if append { "-a " } else { "" };
+    let mut set = String::with_capacity(28 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer {flag}-b {buffer} -- \"");
     for &byte in bytes {
         if byte.is_ascii_alphanumeric() {
             set.push(char::from(byte));
@@ -2573,11 +2627,25 @@ fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
         }
     }
     set.push('"');
-    assert!(set.len() <= "set-buffer -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
-    vec![
-        set,
-        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
-    ]
+    assert!(set.len() <= "set-buffer -a -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    set
+}
+
+/// The commands that paste one owner paste into one target through a named buffer (T7):
+/// one `set-buffer` per piece of at most `INPUT_BYTES_MAX` bytes, each piece after the first
+/// appended, then `paste-buffer -d -p -r -S`, which brackets the whole only when the pane's
+/// app asked, writes the bytes unchanged otherwise and deletes the buffer. Takes the target,
+/// the buffer name and 1 to `PASTE_BYTES_MAX` keys without a NUL. Returns the commands.
+fn owner_paste_lines(target: &str, buffer: &str, keys: &[u8]) -> Vec<String> {
+    assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
+    let mut lines: Vec<String> = keys
+        .chunks(INPUT_BYTES_MAX)
+        .enumerate()
+        .map(|(at, piece)| set_buffer_line(buffer, piece, at > 0))
+        .collect();
+    lines.push(format!("paste-buffer -d -p -r -S -b {buffer} -t {target}"));
+    assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+    lines
 }
 
 /// A tmux buffer name no other paste of this engine uses, `crazyagent-paste-<pid>-<n>`,

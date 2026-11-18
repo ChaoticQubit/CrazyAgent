@@ -265,6 +265,14 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_live_pane(agent, pane)
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.inner.paste(agent, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.inner.paste_pane(agent, pane, keys)
+    }
+
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
         self.inner.adopt_pane(agent, lead, pane)
     }
