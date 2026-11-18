@@ -431,130 +431,153 @@ fn windows_path_command_keeps_the_user_path_kind_and_its_unexpanded_text() {
     );
 }
 
-/// Serializes the tests that change the user's stored PATH, so one never restores over
-/// another's change.
+/// Builds one PowerShell command for a script and its environment, with no input and both
+/// outputs collected. Inputs: the script and the variables. Output: the command.
 #[cfg(windows)]
-static USER_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn powershell_command(script: &str, env: &[(&str, &str)]) -> std::process::Command {
+    assert!(!script.is_empty());
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (name, value) in env {
+        assert!(!name.is_empty());
+        command.env(name, value);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
+}
 
 /// Runs one PowerShell script with the given environment. Takes the script and the
 /// variables. Returns its standard output; panics when PowerShell fails.
 #[cfg(windows)]
 fn powershell(script: &str, env: &[(&str, &str)]) -> String {
-    let mut command = std::process::Command::new("powershell.exe");
-    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    let output = crate::spawn_gate::output(
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
+    let output = crate::spawn_gate::output(&mut powershell_command(script, env)).unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry
-/// kind. Takes nothing. Returns the kind name and the value, both empty when it is unset.
+/// A registry key of one row's own that stands in for the user's environment key, so no row
+/// writes the PATH of the machine running it or reads another row's (V244-WIN-LINK-CLI-NEXTEST):
+/// `HKCU:\Software\CrazyAgent-test-<tag>-<pid>`, removed with its values when dropped.
 #[cfg(windows)]
-fn raw_user_path() -> (String, String) {
-    let shown = powershell(
-        "$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
-if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write($k.GetValueKind('Path').ToString() + \"`n\" + \
+struct ScratchKey {
+    name: String,
+}
+
+#[cfg(windows)]
+impl ScratchKey {
+    /// Creates the key, holding a Path value of the given registry kind and text when one is
+    /// given. Inputs: the row's tag, lowercase letters, and the value, none for no Path.
+    /// Output: the key.
+    fn new(tag: &str, path: Option<(&str, &str)>) -> Self {
+        assert!(!tag.is_empty(), "a row names its key");
+        assert!(tag.bytes().all(|byte| byte.is_ascii_lowercase()), "{tag}");
+        let name = format!(
+            r"HKCU:\Software\CrazyAgent-test-{tag}-{}",
+            std::process::id()
+        );
+        powershell(
+            "$ErrorActionPreference='Stop'; \
+New-Item -Path $env:CRAZYAGENT_TEST_KEY -Force | Out-Null",
+            &[("CRAZYAGENT_TEST_KEY", &name)],
+        );
+        let key = Self { name };
+        if let Some((kind, value)) = path {
+            powershell(
+                "$ErrorActionPreference='Stop'; \
+Set-ItemProperty -LiteralPath $env:CRAZYAGENT_TEST_KEY -Name 'Path' \
+-Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND",
+                &[
+                    ("CRAZYAGENT_TEST_KEY", &key.name),
+                    ("CRAZYAGENT_TEST_PATH", value),
+                    ("CRAZYAGENT_TEST_KIND", kind),
+                ],
+            );
+        }
+        let (kind, value) = path.unwrap_or_default();
+        assert_eq!(key.path(), (kind.to_owned(), value.to_owned()));
+        key
+    }
+
+    /// Reads the key's Path value as written, %VAR% references unexpanded, with its registry
+    /// kind. Output: the kind name and the value, both empty when there is no Path value.
+    fn path(&self) -> (String, String) {
+        let shown = powershell(
+            "$ErrorActionPreference='Stop'; $k=Get-Item -LiteralPath $env:CRAZYAGENT_TEST_KEY; \
+if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write( \
+$k.GetValueKind('Path').ToString() + \"`n\" + \
 $k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) }",
-        &[],
-    );
-    match shown.split_once('\n') {
-        Some((kind, value)) => (kind.to_owned(), value.to_owned()),
-        None => (String::new(), String::new()),
+            &[("CRAZYAGENT_TEST_KEY", &self.name)],
+        );
+        let (kind, value) = shown.split_once('\n').unwrap_or_default();
+        assert!(["", "String", "ExpandString"].contains(&kind), "{shown}");
+        (kind.to_owned(), value.to_owned())
     }
 }
 
-/// Stores the user's PATH back as it was: the same text with the same registry kind, or no
-/// value when the kind is empty. Takes the kind name and the value. Returns nothing.
 #[cfg(windows)]
-fn restore_raw_user_path(kind: &str, value: &str) {
-    powershell(
-        "if ([string]::IsNullOrEmpty($env:CRAZYAGENT_TEST_KIND)) { \
-Remove-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -ErrorAction SilentlyContinue } else { \
-Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND }",
-        &[
-            ("CRAZYAGENT_TEST_KIND", kind),
-            ("CRAZYAGENT_TEST_PATH", value),
-        ],
-    );
+impl Drop for ScratchKey {
+    /// Removes the key and its values. A removal that fails fails the row, unless the row is
+    /// already failing, where a second panic would abort the whole run.
+    fn drop(&mut self) {
+        let removed = crate::spawn_gate::output(&mut powershell_command(
+            "$ErrorActionPreference='Stop'; \
+Remove-Item -LiteralPath $env:CRAZYAGENT_TEST_KEY -Recurse",
+            &[("CRAZYAGENT_TEST_KEY", &self.name)],
+        ));
+        let done = removed.is_ok_and(|output| output.status.success());
+        assert!(done || std::thread::panicking(), "{} is left", self.name);
+    }
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
+    let key = ScratchKey::new("once", None);
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("cra'zy$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
-    let first = link_cli(&executable, root.path());
-    let second = link_cli(&executable, root.path());
-    let (_, after) = raw_user_path();
-    restore_raw_user_path(&kind, &before);
-    assert_eq!(first.unwrap(), folder);
-    assert_eq!(second.unwrap(), folder);
+    assert_eq!(link_cli_under(&executable, &key.name).unwrap(), folder);
+    assert_eq!(link_cli_under(&executable, &key.name).unwrap(), folder);
     let shown = folder.to_str().unwrap();
-    assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
-    assert_eq!(raw_user_path(), (kind, before));
+    assert_eq!(key.path(), ("ExpandString".to_owned(), shown.to_owned()));
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
+    let before = ("String", r"C:\Windows");
+    let key = ScratchKey::new("semicolon", Some(before));
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("cra;zy");
     std::fs::create_dir(&folder).unwrap();
-    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
-    let after = raw_user_path();
-    restore_raw_user_path(&kind, &before);
+    let linked = link_cli_under(&folder.join("crazyagent.exe"), &key.name);
     let refusal = linked.unwrap_err().to_string();
     assert!(
         refusal.contains("cra;zy") && refusal.contains("PATH is unchanged"),
         "{refusal}"
     );
-    assert_eq!(after, (kind, before));
+    assert_eq!(key.path(), (before.0.to_owned(), before.1.to_owned()));
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
-    let reference = r"%USERPROFILE%\crazyagent-kind-check";
-    restore_raw_user_path("ExpandString", &format!("{reference};{before}"));
+    let before = r"%USERPROFILE%\crazyagent-kind-check;C:\Windows";
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("bin");
     std::fs::create_dir(&folder).unwrap();
-    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
-    let after = raw_user_path();
-    restore_raw_user_path(&kind, &before);
-    assert_eq!(linked.unwrap(), folder);
-    assert_eq!(after.0, "ExpandString", "{after:?}");
-    assert!(after.1.starts_with(&format!("{reference};")), "{after:?}");
     let shown = folder.to_str().unwrap();
-    assert_eq!(
-        after.1.split(';').filter(|entry| *entry == shown).count(),
-        1,
-        "{after:?}"
-    );
-    assert_eq!(raw_user_path(), (kind, before));
+    for kind in ["ExpandString", "String"] {
+        let key = ScratchKey::new(&kind.to_ascii_lowercase(), Some((kind, before)));
+        let linked = link_cli_under(&folder.join("crazyagent.exe"), &key.name);
+        assert_eq!(linked.unwrap(), folder, "{kind}");
+        let after = (kind.to_owned(), format!("{before};{shown}"));
+        assert_eq!(key.path(), after, "{kind}");
+    }
 }
 
 #[cfg(unix)]
