@@ -1143,8 +1143,8 @@ fn prepare_mates_home(
 impl TeamRuntime {
     /// Opens the team runtime over the engine database, with the usage tables its turn ends
     /// write; usage tables that cannot be made are logged by code and leave usage uncounted.
-    /// Takes the database, an engine-owned state directory outside every project, the
-    /// launch executables by harness, a source of live model access and the limits.
+    /// Takes the database, an engine-owned state directory outside every project in its
+    /// one spelling, the launch executables by harness, a source of live access and the limits.
     /// Returns the runtime after returning work interrupted by an earlier engine to the queue.
     pub fn open(
         database: &Path,
@@ -1158,7 +1158,7 @@ impl TeamRuntime {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         private_directory(state)?;
-        if state.canonicalize().map_err(error)? != state {
+        if crate::projects_home::one_spelling(state.canonicalize().map_err(error)?) != state {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         for directory in ["agents", "profiles"] {
@@ -14637,6 +14637,7 @@ pub fn start_for_engine(
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;

@@ -477,8 +477,8 @@ fn requeued_reason(cause: Narrowing) -> &'static str {
 
 impl ResearchRunner {
     /// `database` is the job store, `state` an engine-owned directory outside
-    /// every project for sandbox profiles and agent homes, `codex` the
-    /// absolute Codex executable.
+    /// every project, in its one spelling, for sandbox profiles and agent homes,
+    /// `codex` the absolute Codex executable.
     pub fn new(
         database: &Path,
         state: &Path,
@@ -511,7 +511,10 @@ impl ResearchRunner {
         codex: Option<&Path>,
         limits: ResearchLimits,
     ) -> Result<Self, RunError> {
-        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
+        if !state.is_absolute()
+            || !state.is_dir()
+            || crate::projects_home::one_spelling(state.canonicalize()?) != state
+        {
             return Err(RunError::Invalid(
                 "state directory must be canonical".into(),
             ));
