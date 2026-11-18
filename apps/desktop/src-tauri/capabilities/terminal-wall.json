@@ -5,6 +5,12 @@
   "windows": ["terminals-*"],
   "webviews": ["terminals-*"],
   "permissions": [
+    "allow-desktop-native-terminal-enabled",
+    "allow-desktop-native-terminal-open",
+    "allow-desktop-native-terminal-place",
+    "allow-desktop-native-terminal-cover",
+    "allow-desktop-native-terminal-input",
+    "allow-desktop-native-terminal-close",
     "allow-desktop-terminal-attach",
     "allow-desktop-terminal-input",
     "allow-desktop-terminal-prompt",

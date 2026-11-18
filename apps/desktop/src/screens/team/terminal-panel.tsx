@@ -11,6 +11,7 @@ import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../
 import { displayText } from "../conversation";
 import type { Seed } from "../project/console-model";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
+import { NativeScreen, nativeTerminalOn } from "./native-terminal";
 import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
 import { autoStartFailed, gpuStartFailed, gpuWanted, probeGpu, rendererChosen } from "./terminal-renderer";
 import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, readableScreen, seedText, selectNote, settleAfterWrites, terminalEvent, terminalSize, type GpuDrawing } from "./terminal-io";
@@ -923,7 +924,7 @@ const idle = () => IDLE;
  * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
  * types (the terminal, the message box under it, or both) is the one Terminal input in
  * Settings, for every agent on every screen. Output: the panel. */
-export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: {
+function WebTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
@@ -1038,5 +1039,40 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
       <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(terminal ? terminalOutput(terminal) : "", "Copied the output.")}>Copy output</Button>
     </div>}
     {boxed && <Composer node={node} live={view.kind === "live"} onSend={(text) => entry?.prompt?.(text) ?? false} compact={!embedded} box={box} />}
+  </section>;
+}
+
+type PanelProps = Parameters<typeof WebTerminalPanel>[0];
+
+/** One agent terminal: drawn by a native view when the DEC-203 research switch is on and the
+ * agent runs in its own window on the engine's server, else by today's renderer. A teammate
+ * known only by its pane in its lead's terminal, or a native view that ended, falls back to
+ * today's renderer. Input: the panel's props. Output: the panel. */
+export function TerminalPanel(props: PanelProps) {
+  const [ended, setEnded] = useState<{ name: string; code: string } | null>(null);
+  const name = props.node.terminal;
+  const native = nativeTerminalOn() && Boolean(name) && teammatePane(props.node) === null && ended?.name !== name;
+  if (!native || !name) return <WebTerminalPanel {...props} />;
+  return <NativeTerminalPanel {...props} name={name} onEnded={(code) => setEnded({ name, code })} />;
+}
+
+/** The panel around a native view: the same head as today's panel, an opening line until the
+ * view shows its first screen, and the host element the view is drawn over. Inputs: the
+ * panel's props, the agent's window name and what hears the view end. Output: the panel. */
+function NativeTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, reported, onOpened, name, onEnded }: PanelProps & {
+  name: string;
+  onEnded: (code: string) => void;
+}) {
+  if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
+  const [ready, setReady] = useState(false);
+  const opened = useRef(onOpened);
+  opened.current = onOpened;
+  useEffect(() => { opened.current?.(ready); }, [ready]);
+  useEffect(() => () => opened.current?.(false), []);
+  return <section className={embedded ? "tg-terminal embedded" : tile ? "tg-terminal wall-tile" : "tg-terminal"} aria-label={`${node.label} terminal`}>
+    {!embedded && <TerminalHead node={node} harness={harness} tile={tile} message={false} boxed={false} onMessage={() => undefined}
+      onStop={onStop} onClose={onClose} reported={reported} swaps={swaps} />}
+    {!ready && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Opening the terminal.</p>}
+    <NativeScreen name={name} onReady={() => setReady(true)} onEnded={onEnded} />
   </section>;
 }

@@ -1,5 +1,8 @@
 pub mod bridge;
 pub mod ide;
+/// DEC-203 research: engine-server agent terminals drawn by a native view behind the
+/// `CRAZYAGENT_NATIVE_TERMINAL` switch; off, today's renderer runs unchanged.
+pub mod native_term;
 pub mod theme;
 mod updates;
 
@@ -2293,6 +2296,7 @@ fn build_wall(
                     .state::<TerminalState>()
                     .0
                     .page_started(window.label());
+                native_term::window_gone(window.app_handle(), window.label());
             }
         })
         .build()
@@ -2300,9 +2304,11 @@ fn build_wall(
     theme::dress(&wall);
     let terminals = Arc::clone(&app.state::<TerminalState>().0);
     let closed = label.to_owned();
+    let native_app = app.clone();
     wall.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             terminals.window_closed(&closed);
+            native_term::window_gone(&native_app, &closed);
         }
     });
     Ok(())
@@ -5348,12 +5354,15 @@ fn admit_pages<R: Runtime>(
 /// handler behind the page check. Input: the command functions. Output: `NATIVE_COMMANDS`
 /// and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+) => {
+    ($($command:ident,)+ ; $($module:ident :: $inner:ident,)*) => {
         #[cfg(test)]
-        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($inner),)*];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
-            admit_pages::<tauri::Wry>(tauri::generate_handler![$($command,)+])
+            admit_pages::<tauri::Wry>(tauri::generate_handler![
+                $($command,)+
+                $($module::$inner,)*
+            ])
         }
     };
 }
@@ -5718,6 +5727,13 @@ native_commands! {
     desktop_install_update,
     desktop_restart_app,
     desktop_link_cli,
+    ;
+    native_term::desktop_native_terminal_enabled,
+    native_term::desktop_native_terminal_open,
+    native_term::desktop_native_terminal_place,
+    native_term::desktop_native_terminal_cover,
+    native_term::desktop_native_terminal_input,
+    native_term::desktop_native_terminal_close,
 }
 
 pub fn run() {
@@ -5747,6 +5763,7 @@ pub fn run() {
                             .state::<TerminalState>()
                             .0
                             .page_started(window.label());
+                        native_term::window_gone(window.app_handle(), window.label());
                     }
                 })
                 .build()?;
