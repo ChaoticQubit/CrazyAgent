@@ -352,6 +352,18 @@ export function pasteText(text: string): string {
   return kept;
 }
 
+/** The text a drafted message types into an agent's terminal: as a clipboard paste, with each
+ * run of line breaks made one space while the app has not turned on bracketed paste, as a bare
+ * line break there presses Enter and would send the draft unasked. Inputs: the draft and
+ * whether the app reads pastes bracketed. Output: the text to paste. */
+export function seedText(text: string, bracketed: boolean): string {
+  const kept = pasteText(text);
+  if (bracketed) return kept;
+  const flat = kept.replace(/[\r\n]+/g, " ");
+  assert(!/[\r\n]/.test(flat), "an unbracketed seed keeps no line break");
+  return flat;
+}
+
 /** The key that makes a drag select text while the app in a terminal reads the mouse: xterm
  * then sends a plain drag to the app, and only a drag with this key held selects. Input:
  * whether this is a Mac. Output: Option on a Mac, Shift elsewhere. */

@@ -1816,7 +1816,9 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         Vec::new()
     };
     let prompt_extra = if typed { prompt.len() - 1 } else { 0 };
-    let available = room.saturating_sub(4 + prompt_extra + below.len());
+    let free = room.saturating_sub(4 + prompt_extra + below.len());
+    let notice = reinstall_rows(screen, content, free / 2, look);
+    let available = free - notice.len();
     let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if !screen.pool_ready {
         (
             vec![Row::of(
@@ -1953,10 +1955,97 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         lines.extend(std::iter::repeat_n(Row::default(), gap));
     }
     lines.extend(below);
+    lines.extend(notice);
     lines.push(Row::of(look.glyph("\u{2500}").repeat(content), look.muted));
     let cursor = typed.then(|| (at.1, lines.len() + at.0));
     lines.extend(input);
     (lines, cursor, help)
+}
+
+/// The most cells one folder name takes in the reinstall notice; a longer one shows its tail.
+const NOTICE_NAME_CELLS: usize = 40;
+
+/// What the reinstall offer adds while the master's accounts aren't signed in, as the desktop.
+pub(in crate::tui) const REINSTALL_SIGN_IN: &str =
+    "Add an account first; the master can reinstall them once one is signed in.";
+
+/// What the reinstall offer says, as the desktop: the folders a job left in iCloud, the first
+/// three named and the rest counted, and why. Takes the offer. Returns the sentence.
+pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Offer) -> String {
+    let names = &offer.folders;
+    let count = names.len() as u64 + offer.more;
+    let listed = match (names.as_slice(), offer.more) {
+        (_, more) if more > 0 => format!("{} and {more} more", names.join(", ")),
+        ([one], _) => one.clone(),
+        ([head @ .., last], _) => format!("{} and {last}", head.join(", ")),
+        ([], _) => String::new(),
+    };
+    let (verb, pronoun) = match count {
+        1 => ("was", "it"),
+        _ => ("were", "they"),
+    };
+    format!(
+        "{listed} {verb} left out when this project came into your projects folder, as \
+         {pronoun} can be rebuilt."
+    )
+}
+
+/// The reinstall offer's rows above the input: its sentence, the sign-in sentence while the
+/// master's accounts aren't signed in, then the keys that act on it on rows of their own, `a`
+/// only while the master can take a message; while typing they come after Tab. Each folder
+/// name shows its last `NOTICE_NAME_CELLS` cells. At most
+/// `rows_max` rows: the sentence is cut short to fit, and with no room for one row of it
+/// beside the keys nothing is drawn. Takes the screen, the width, the row bound and the
+/// look. Returns the rows, none without an offer.
+fn reinstall_rows(
+    screen: &ProjectScreen,
+    content: usize,
+    rows_max: usize,
+    look: &Look,
+) -> Vec<Row> {
+    let Some(offer) = screen.reinstall.as_ref() else {
+        return Vec::new();
+    };
+    let named = crate::projects_home::reinstall::Offer {
+        folders: offer
+            .folders
+            .iter()
+            .map(|name| shown_tail(name, NOTICE_NAME_CELLS))
+            .collect(),
+        more: offer.more,
+        draft: String::new(),
+    };
+    let mut text = reinstall_line(&named);
+    if screen.reinstall_signed_out() {
+        text.push(' ');
+        text.push_str(REINSTALL_SIGN_IN);
+    }
+    let keys = match screen.reinstall_ask() {
+        true => "a to put the drafted message in your input, d to dismiss this.",
+        false => "d to dismiss this.",
+    };
+    let lead = match screen.typing {
+        true => "Press Tab, then",
+        false => "Press",
+    };
+    let keys = wrap_words(&format!("{lead} {keys}"), content);
+    if keys.len() >= rows_max {
+        return Vec::new();
+    }
+    let room = rows_max - keys.len();
+    let mut said = wrap_words(&text, content);
+    if said.len() > room {
+        let joined = format!("{} {}", said[room - 1], said[room]);
+        said.truncate(room);
+        said[room - 1] = crate::tui::text::cut(&joined, content, look.glyph("\u{2026}"));
+    }
+    let rows: Vec<Row> = said
+        .into_iter()
+        .chain(keys)
+        .map(|line| Row::of(line, look.fg))
+        .collect();
+    assert!(rows.len() <= rows_max);
+    rows
 }
 
 fn input_row(screen: &ProjectScreen, look: &Look) -> Row {

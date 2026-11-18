@@ -48,9 +48,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -154,6 +154,10 @@ enum AtQuit {
 const FROZEN_NOTE: &str = "Frozen while CrazyAgent was closed; it continues when CrazyAgent opens";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
+/// What every master does before it hands out work: diagnose itself, plan, then give each
+/// sub-agent its part with an acceptance check (V243-MASTER-ANALYZE-FIRST). Without it the
+/// master read "sub-agents do the hands-on work" as handing down the debugging too.
+const MASTER_FIRST_RULES: &str = "\n## Your own task first\n\nBefore you hand out work, find out yourself what is wrong or what is asked: read every error in the owner's message and the code and logs it points to, and reproduce the failure or probe it when that is cheap and safe. That diagnosis is your work, never a sub-agent's. Then plan: the cause or the design, the parts, which agent takes each, and how each is checked. Tell the owner what you found, its evidence and the plan. Give each sub-agent its part: the confirmed cause, or the open question it must settle and how; the files; and the acceptance check. Name a cause you could not confirm as unconfirmed. Sub-agents make the edits, each in its own git worktree of the project folder.\n";
 /// How streams, leads and their branches work, given to every master (N3).
 const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works in its own git worktree and branch. The sub-agent you start for a stream of work leads it and may start workers of its own, up to the owner's Sub-agent depth setting. Workers' work lands on their lead's branch; the owner accepts a lead's work onto any branch. One harness per stream means one lead agent per stream, on the harness and model the owner chose or the settings default. Never ask the owner how streams share a branch.\n";
 /// What a sub-agent that may lead its own workers is told with each task (N3).
@@ -912,6 +916,7 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     restarts: BTreeMap<i64, (ProjectId, Restart)>,
     hidden_next: BTreeMap<ProjectId, Instant>,
+    followed: Option<(i64, u64)>,
     access_restarts: BTreeMap<i64, ProjectId>,
     access_widened: BTreeSet<ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
@@ -1266,6 +1271,7 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             restarts: BTreeMap::new(),
             hidden_next: BTreeMap::new(),
+            followed: None,
             access_restarts: BTreeMap::new(),
             access_widened: BTreeSet::new(),
             master_restarts: BTreeSet::new(),
@@ -1872,11 +1878,44 @@ impl TeamRuntime {
         self.watch_questions()?;
         self.watch_teammates()?;
         self.sweep()?;
-        crate::ide::workspace::follow(&self.connection, &self.root)?;
+        self.follow_workspaces(crate::ide::workspace::follow)?;
         self.watch_master_questions()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
         let lanes = self.lanes();
         questions.and(lanes)
+    }
+
+    /// Runs `follow` over the IDE workspaces when [`TeamRuntime::follow_due`] says the
+    /// database moved, then stores the mark it compares; the tick passes
+    /// `crate::ide::workspace::follow`. Takes the runtime and the follow step. Returns the
+    /// first failure; a failed follow keeps the old mark, so the next tick tries again.
+    fn follow_workspaces(
+        &mut self,
+        follow: impl FnOnce(&Connection, &Path) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        if self.follow_due()? {
+            let version = self.data_version()?;
+            follow(&self.connection, self.root.as_path())?;
+            self.followed = Some((version, self.connection.total_changes()));
+        }
+        Ok(())
+    }
+
+    /// Tells whether the IDE workspaces may need a rewrite: on the first tick and whenever
+    /// the database changed since they were last followed, by another connection
+    /// (`PRAGMA data_version`, read before that follow so a commit during it stays due) or
+    /// by this one (`total_changes`, read after it, so its own writes do not). Takes the
+    /// runtime. Returns the answer, or a failed read.
+    fn follow_due(&self) -> Result<bool, EngineError> {
+        Ok(self.followed != Some((self.data_version()?, self.connection.total_changes())))
+    }
+
+    /// Reads how many commits other connections made, as `PRAGMA data_version` counts
+    /// them for this connection. Takes the runtime. Returns the count, or a failed read.
+    fn data_version(&self) -> Result<i64, EngineError> {
+        self.connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(error)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's
@@ -2556,9 +2595,12 @@ impl TeamRuntime {
         let spawned = std::thread::Builder::new()
             .name(format!("team-end-{id}"))
             .spawn(move || {
-                end_reported(id, sender, || {
+                let settled = end_reported(id, sender, || {
                     end_teammate(host.as_ref(), &name, mates.as_deref())
                 });
+                if settled {
+                    wake_loops();
+                }
             });
         if spawned.is_err() {
             return Ok(UnmanagedEnd::Untouched);
@@ -2611,10 +2653,8 @@ impl TeamRuntime {
                 .unmanaged_ending
                 .remove(&id)
                 .expect("an end finished only after it was handed over");
-            let confirmed = match outcome {
-                Ok(confirmed) => confirmed,
-                Err(problem) if problem.0 == "terminal_agent_unknown" => true,
-                Err(_) => continue,
+            let Some(confirmed) = end_settled(&outcome) else {
+                continue;
             };
             if !self.mark_unmanaged(id, pending.reason, confirmed)? {
                 continue;
@@ -3382,14 +3422,7 @@ impl TeamRuntime {
     fn active_projects(&self) -> Result<Vec<ProjectId>, EngineError> {
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
-                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
-                 UNION SELECT project FROM team_settings WHERE keep_warm=1
-                 UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
-                 UNION SELECT project FROM team_live_masters WHERE live=1",
-            )
+            .prepare(ACTIVE_PROJECTS_SQL)
             .map_err(error)?;
         let mut projects: BTreeSet<ProjectId> = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -6812,6 +6845,9 @@ impl TeamRuntime {
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
+        if queued.is_empty() {
+            return self.wait_beyond_dispatch(project, &queued);
+        }
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         let reserved: BTreeSet<i64> = crate::recovery::open_runs(&self.connection, project)?
@@ -8124,7 +8160,10 @@ impl TeamRuntime {
         let keyed = launch.relay().is_some();
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
-            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap, by))
+            .spawn(move || {
+                work(launch, inbox, outbox, flag, interrupt, kept, wrap, by);
+                wake_loops();
+            })
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
@@ -11344,7 +11383,7 @@ fn framing(
         block_text()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}{MASTER_NESTING_RULES}\nProject brief:\n{}\n\n",
+        "You are the master agent of the project \"{}\".\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{MASTER_FIRST_RULES}{}{MASTER_NESTING_RULES}\nProject brief:\n{}\n\n",
         stored.name,
         team,
         crate::launch_context::MASTER_LANDING_RULES,
@@ -11353,9 +11392,10 @@ fn framing(
 }
 
 /// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool
-/// or, without team tools, a `crazyagent-task` block naming it (L6), and which ones it can
-/// wake (WK-R5). Input: the finished sub-agents' lines, newest first, and whether it has
-/// the team tools. Output: the text, or nothing when no sub-agent finished.
+/// or, without team tools, a `crazyagent-task` block naming it (L6) with what its task
+/// holds (V243-MASTER-WAKE-TEXT-HANDOFF), and which ones it can wake (WK-R5). Input: the
+/// finished sub-agents' lines, newest first, and whether it has the team tools. Output:
+/// the text, or nothing when no sub-agent finished.
 fn wake_text(finished: &[String], team_tool: bool) -> String {
     if finished.is_empty() {
         return String::new();
@@ -11367,8 +11407,9 @@ fn wake_text(finished: &[String], team_tool: bool) -> String {
         )
     } else {
         format!(
-            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```",
-            tool::BLOCK_FENCE
+            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```\nEach task: {}",
+            tool::BLOCK_FENCE,
+            tool::HAND_OFF_TASK
         )
     };
     format!(
@@ -11399,11 +11440,13 @@ fn turn_proposals(
 
 /// Tells a master without team tools how to hand a task to a sub-agent: one
 /// `crazyagent-task` block per task, a JSON object the engine reads through the same
-/// schema as the `delegate` tool (L6). Output: the text, ending in a line break.
+/// schema as the `delegate` tool (L6), and what each task holds, as in the team tools'
+/// task fields (#388 F1). Output: the text, ending in a line break.
 fn block_text() -> String {
     format!(
-        "To hand a task to a sub-agent, put a block like this on lines of its own in your reply, one task per block, with harness and role only if you choose them:\n{}\n{{\"task\": \"<the task>\", \"harness\": \"<harness>\", \"role\": \"<short-role>\"}}\n```\nThe engine reads only these blocks, never other text of your reply.\n",
-        tool::BLOCK_FENCE
+        "To hand a task to a sub-agent, put a block like this on lines of its own in your reply, one task per block, with harness and role only if you choose them:\n{}\n{{\"task\": \"<the task>\", \"harness\": \"<harness>\", \"role\": \"<short-role>\"}}\n```\nEach task: {}\nThe engine reads only these blocks, never other text of your reply.\n",
+        tool::BLOCK_FENCE,
+        tool::HAND_OFF_TASK
     )
 }
 
@@ -11454,7 +11497,7 @@ fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
         block_text()
     };
     let text = format!(
-        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}{MASTER_NESTING_RULES}",
+        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{MASTER_FIRST_RULES}{}{MASTER_NESTING_RULES}",
         bound_text(&stored.name, crate::launch_context::NAME_BYTES_MAX),
         crate::launch_context::MASTER_LANDING_RULES
     );
@@ -12404,23 +12447,20 @@ fn next_lead_turn(
                 Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
                 Err(RecvTimeoutError::Timeout) => {}
             }
-        } else {
-            if own.held.is_none() {
-                match orders.try_recv() {
-                    Ok(Order::Start(instructions, grant)) => {
-                        own.held = Some(Next::Start(instructions, grant));
-                    }
-                    Ok(Order::Turn(prompt, grant, typed)) => {
-                        *rules = typed;
-                        own.held = Some(Next::Turn(prompt, grant, typed));
-                    }
-                    Ok(Order::Rules(next)) => *rules = next,
-                    Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        return Next::Stop;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        } else if own.held.is_none() {
+            match orders.recv_timeout(ORDER_WAIT) {
+                Ok(Order::Start(instructions, grant)) => {
+                    own.held = Some(Next::Start(instructions, grant));
                 }
+                Ok(Order::Turn(prompt, grant, typed)) => {
+                    *rules = typed;
+                    own.held = Some(Next::Turn(prompt, grant, typed));
+                }
+                Ok(Order::Rules(next)) => *rules = next,
+                Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
+                Err(RecvTimeoutError::Timeout) => {}
             }
+        } else {
             std::thread::sleep(ORDER_WAIT);
         }
         match session.next_event(IDLE_EVENT_WAIT) {
@@ -12860,19 +12900,33 @@ fn socket_refuses(_: &Path) -> bool {
 /// Runs one native teammate's end on its thread and sends what it found, also when the end
 /// panics: a guard then sends it as not proven, so its row is still marked, with the
 /// uncertain cleanup code, and no agent stays handed over (S4B-B1-L1 r1). Takes the agent,
-/// the channel and the end. Returns nothing.
+/// the channel and the end. Returns whether the end settled (see [`end_settled`]), so only
+/// a settled end wakes the team loop (#393 F1).
 fn end_reported(
     id: i64,
     sender: Sender<PaneEnd>,
     end: impl FnOnce() -> Result<bool, crate::terminal::HostError>,
-) {
+) -> bool {
     let mut guard = EndGuard {
         id,
         sender: Some(sender),
     };
     let outcome = end();
+    let settled = end_settled(&outcome).is_some();
     if let Some(sender) = guard.sender.take() {
         let _ = sender.send((id, outcome));
+    }
+    settled
+}
+
+/// Whether a native teammate's end settled its row: it ran, or the host no longer knows the
+/// agent. Takes the end's outcome. Returns whether the cleanup was confirmed when it
+/// settled, or None when another host failure leaves the row to a later tick.
+fn end_settled(outcome: &Result<bool, crate::terminal::HostError>) -> Option<bool> {
+    match outcome {
+        Ok(confirmed) => Some(*confirmed),
+        Err(problem) if problem.0 == "terminal_agent_unknown" => Some(true),
+        Err(_) => None,
     }
 }
 
@@ -13036,6 +13090,18 @@ const NOTE_RESULT_BYTES_MAX: usize = 300;
 const NOTE_PROBLEM_BYTES_MAX: usize = 200;
 const NOTE_PLACE_BYTES_MAX: usize = 120;
 const NOTES_PER_TICK_MAX: i64 = 16;
+/// The read behind `active_projects`: every project with pending owner messages, live or
+/// undelivered master tasks, Keep warm, live agents or a live master switched on. Each arm
+/// seeks an index led by the column it filters (`team_messages_state`, `team_tasks_status`,
+/// `team_tasks_undelivered`, `team_agents_status`), so no arm walks ended history, and
+/// UNION ALL builds no temp tree: the caller collects the rows into a set.
+const ACTIVE_PROJECTS_SQL: &str = "SELECT project FROM team_messages WHERE state='pending'
+ UNION ALL SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running')
+ UNION ALL SELECT project FROM team_tasks WHERE delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured'))
+ UNION ALL SELECT project FROM team_settings WHERE keep_warm=1
+ UNION ALL SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
+ UNION ALL SELECT project FROM team_live_masters WHERE live=1";
 
 /// One task a conversation master handed off that has ended, as the note sweep reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14008,6 +14074,35 @@ fn turn(
     (text, end, cause)
 }
 
+static WAKES: Mutex<u64> = Mutex::new(0);
+static WOKEN: Condvar = Condvar::new();
+
+/// Wakes every team loop in this engine at once, as an owner request that has landed
+/// does (DEC-200), so the loop acts on it without waiting out its tick. A wake that lands
+/// while a loop ticks ends that loop's next wait at once. Output: none.
+pub(crate) fn wake_loops() {
+    let mut wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    *wakes = wakes.wrapping_add(1);
+    WOKEN.notify_all();
+}
+
+/// The count of team loop wakes so far, read before a tick so a wake during it is not
+/// missed. Output: the count.
+fn wakes_seen() -> u64 {
+    *WAKES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Waits until a wake newer than `seen` or `tick` has passed. Inputs: the count read before
+/// the tick and the tick. Output: the count now.
+fn wait_for_wake(seen: u64, tick: Duration) -> u64 {
+    let wakes = WAKES.lock().unwrap_or_else(PoisonError::into_inner);
+    let (wakes, waited) = WOKEN
+        .wait_timeout_while(wakes, tick, |wakes| *wakes == seen)
+        .unwrap_or_else(PoisonError::into_inner);
+    assert!(waited.timed_out() || *wakes != seen);
+    *wakes
+}
+
 /// Background loop that keeps every project's team moving.
 pub struct TeamService {
     stop: Arc<AtomicBool>,
@@ -14015,8 +14110,8 @@ pub struct TeamService {
 }
 
 impl TeamService {
-    /// Starts the loop on its own thread, ticking at `tick`.
-    /// Takes an opened runtime.
+    /// Starts the loop on its own thread, ticking at `tick` and at once on each wake
+    /// ([`wake_loops`]) that lands while it waits or ticks. Takes an opened runtime.
     /// Returns the running service; stopping it stops every agent process group.
     pub fn start(mut runtime: TeamRuntime, tick: Duration) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
@@ -14025,6 +14120,7 @@ impl TeamService {
             .name("team-runtime".into())
             .spawn(move || {
                 let mut last = None;
+                let mut seen = wakes_seen();
                 while !flag.load(Ordering::SeqCst) {
                     let problem = runtime.tick().err().map(|e| e.0);
                     if problem.is_some() && problem != last {
@@ -14034,7 +14130,7 @@ impl TeamService {
                         );
                     }
                     last = problem;
-                    std::thread::sleep(tick);
+                    seen = wait_for_wake(seen, tick);
                 }
                 if let Err(problem) = runtime.shutdown() {
                     eprintln!("team runtime shutdown: {}", bound_text(&problem.0, 300));
@@ -14052,6 +14148,7 @@ impl TeamService {
 
     fn halt(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        wake_loops();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
-import { dismissIntake, intakeCopy, loadFolderSize, loadFoundProjects, loadProjectsHome, startIntake, startOnboarding, stopIntake } from "../../api-intake";
+import { dismissIntake, intakeCopy, loadFolderSize, loadFoundProjects, loadProjectsHome, loadReinstallOffer, startIntake, startOnboarding, stopIntake } from "../../api-intake";
 import { loadPools, moveProjectHome, receiptState, removeProject, type PoolChoice } from "../../api-projects";
-import type { AddOverride, FolderSize, FoundProject, IntakeJob, IntakeJobState, ProjectsHome } from "../../engine-client";
+import type { AddOverride, FolderSize, FoundProject, IntakeJob, IntakeJobState, ProjectsHome, ReinstallOffer } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, RadioCard, StatusBadge, formatRoute, navigate, type IconName, type Tone } from "../../ui";
 import { displayText } from "../conversation";
@@ -12,7 +12,7 @@ import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
+import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, reinstallProject, reinstallRoute, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -37,7 +37,7 @@ const KIND_BADGES: Record<IntakeJob["kind"], Partial<Record<IntakeJobState["stat
   add: {}, move_project: { copying: "Moving", done: "Moved" }, delete: { copying: "Deleting", done: "Deleted" }, setup: { done: "Set up" },
 };
 
-const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
+const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", reinstall: "Reinstall in the project", dismiss: "Dismiss" };
 
 /** The button words a delete cut short shows in place of Try again and Dismiss (DEC-177 add.1). */
 const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], string>> = { retry: "Finish delete", dismiss: "Keep the project" };
@@ -45,19 +45,22 @@ const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], st
 /** Home's row for the engine's intake job: the folder, or a delete's project name whole, a badge
  * for its state, its line with the counts as files land, and only the actions its state allows,
  * with Can't stop now, disabled, while a delete moves folders to the Trash. Inputs: the job, a
- * busy flag and the four action handlers. Output: the row. */
-export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss }: {
+ * busy flag, whether the engine keeps a reinstall offer for its project, and the action
+ * handlers. Output: the row. */
+export function IntakeJobView({ job, busy, offered = false, onStop, onRetry, onAnswer, onDismiss, onReinstall = () => go(reinstallRoute(job)) }: {
   job: IntakeJob;
   busy: boolean;
+  offered?: boolean;
   onStop: () => void;
   onRetry: () => void;
   onAnswer: () => void;
   onDismiss: () => void;
+  onReinstall?: () => void;
 }) {
   const shown = JOB_BADGES[job.state.state];
   const word = KIND_BADGES[job.kind][job.state.state];
   const badge = word === undefined ? shown : { word, tone: shown.tone };
-  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
+  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, reinstall: onReinstall, dismiss: onDismiss };
   const labels = job.state.state === "cut_short" ? { ...JOB_LABELS, ...CUT_SHORT_LABELS } : JOB_LABELS;
   return <div className="in-row">
     <span className="in-row-main">
@@ -65,7 +68,7 @@ export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss 
       <span className="pj-small pj-secondary" role="status">{displayText(jobLine(job))}</span>
     </span>
     <span className="pj-row">{job.state.state === "trashing" && <Button size="small" variant="secondary" disabled>{"Can't stop now"}</Button>}
-      {jobActions(job).map((action) => <Button key={action} size="small" variant={action === "answer" ? "primary" : "secondary"}
+      {jobActions(job, offered).map((action) => <Button key={action} size="small" variant={action === "answer" ? "primary" : "secondary"}
         disabled={busy} onClick={handlers[action]}>{labels[action]}</Button>)}</span>
   </div>;
 }
@@ -236,11 +239,15 @@ function IntakeJobItem({ job, onSetUp }: { job: IntakeJob; onSetUp: (folder: Set
     setBusy(false);
     setAnswering({ id: job.id, size });
   };
+  const project = reinstallProject(job);
+  const [offer] = useLoad<ReinstallOffer | null>(
+    () => (project === null ? Promise.resolve<Result<ReinstallOffer | null>>({ kind: "ok", value: null }) : loadReinstallOffer(project)), [project]);
+  const offered = offer.kind === "ok" && offer.value !== null;
   const read = answering !== null && answering.id === job.id ? answering.size : null;
   const question = job.state.state === "needs_answer" && read !== null ? jobQuestion(job, read) : null;
   const name = jobName(job);
   return <>
-    <IntakeJobView job={job} busy={busy} onStop={() => void run(() => stopIntake(job.id))} onRetry={() => restart(job.overrides)}
+    <IntakeJobView job={job} busy={busy} offered={offered} onStop={() => void run(() => stopIntake(job.id))} onRetry={() => restart(job.overrides)}
       onAnswer={() => void answer()} onDismiss={() => void run(() => dismissIntake(job.id))} />
     {question && <AnywayDialog open way={job.mode} name={name} size={read} refused={null} issues={question.issues} busy={busy}
       keepLabel={job.kind === "move_project" ? "Keep it here" : undefined}

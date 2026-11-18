@@ -156,8 +156,8 @@ fn landed(progress: &Progress) -> String {
 
 /// What a done add says about the rebuildable folders it left in iCloud: where they stayed
 /// after a Move, that a Copy left them out, and to reinstall them; the ones the engine only
-/// counted join the "more". Takes the job. Returns the sentence with a leading space, empty
-/// when it left none.
+/// counted join the "more", or make the count when it named none. Takes the job. Returns the
+/// sentence with a leading space, empty when it left none.
 fn left_line(job: &JobView) -> String {
     let unnamed = job.left_more.map_or(0, |more| more.folders);
     let count = (job.left.len() as u64).saturating_add(unnamed);
@@ -171,12 +171,14 @@ fn left_line(job: &JobView) -> String {
         .map(|folder| folder.path.as_str())
         .collect();
     let shown = paths.len() as u64;
+    let one = count == 1;
     let names = match paths.split_last() {
+        None if one => "1 rebuildable folder".to_owned(),
+        None => format!("{count} rebuildable folders"),
         _ if count > shown => format!("{} and {} more", paths.join(", "), count - shown),
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => paths.concat(),
     };
-    let one = count == 1;
     let place = match job.mode {
         AddMode::Move => format!("stayed in {}", job.source),
         AddMode::Copy if one => "was not copied".to_owned(),

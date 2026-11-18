@@ -91,9 +91,33 @@ pub struct Tally {
     documents_done: AtomicU64,
     recording: AtomicBool,
     gate: std::sync::Mutex<()>,
+    landed: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl Tally {
+    /// Records the folder an add or a project move lands in, once its work is planned, so
+    /// the job can keep a reinstall offer there after its record deleted the add row.
+    /// Input: the folder, absolute.
+    pub fn land_at(&self, folder: &Path) {
+        assert!(folder.is_absolute());
+        *self
+            .landed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(folder.to_path_buf());
+    }
+
+    /// The folder the job's work last planned to land in. Output: the folder, or None for
+    /// work that lands nowhere or was never planned.
+    pub fn landed_at(&self) -> Option<PathBuf> {
+        let landed = self
+            .landed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(landed.as_deref().is_none_or(Path::is_absolute));
+        landed
+    }
+
     /// How many of the project's agents a project move waits for before anything moves,
     /// or None when it does not wait. The count is stored before the wait is marked and
     /// never goes back to 0, so a read during a change never sees a wait for none.

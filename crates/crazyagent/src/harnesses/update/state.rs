@@ -230,10 +230,34 @@ fn version_command(executable: &Path) -> Option<Fixed> {
     })
 }
 
-/// Runs a version command, bounded like every other run. Inputs: the command and the home
-/// folder. Output: the version it printed, or none.
-fn version_ran(fixed: &Fixed, home: &Path) -> Option<String> {
+/// Runs a version command, bounded like every other run. Inputs: the command, the home
+/// folder and the resolver's places, unused here. Output: the version it printed, or none.
+#[cfg(unix)]
+fn version_ran(fixed: &Fixed, home: &Path, _places: &crate::tools::Places) -> Option<String> {
     let raw = version_raw(fixed, home, VERSION_TIME).ok()?;
+    installed_version(&String::from_utf8_lossy(&raw.stdout))
+        .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
+}
+
+/// Runs a version command on Windows, which runs no script by its first line: the checked
+/// real file is resolved once more ([`crate::tools::resolve_entry`]), refused unless that
+/// gives the same file and every file it runs passes [`owner_only`] (the script and each
+/// interpreter, [`crate::tools::Resolved::grants`]), and that same value's words start with
+/// the version arguments, bounded like every other run. Inputs: the command, the home
+/// folder and the resolver's places. Output: the version it printed, or none.
+#[cfg(windows)]
+fn version_ran(fixed: &Fixed, home: &Path, places: &crate::tools::Places) -> Option<String> {
+    assert!(fixed.prefix.is_none());
+    let tool = crate::tools::resolve_entry(&fixed.program, places).ok()?;
+    if tool.program != fixed.program {
+        return None;
+    }
+    for file in tool.grants() {
+        owner_only(&file)?;
+    }
+    let mut words = tool.argv();
+    words.extend(fixed.args.iter().map(std::ffi::OsString::from));
+    let raw = version_raw(&words, &fixed.search, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))
         .or_else(|| installed_version(&String::from_utf8_lossy(&raw.stderr)))
 }
@@ -408,8 +432,8 @@ fn owner_only(program: &Path) -> Option<()> {
 /// missing, is never started for a version. It runs the real file the resolver checked,
 /// once that file passes again by its own path, with the entry's folder kept as the search
 /// an interpreter asked for by name is found in, so no link of the entry's chain is
-/// followed after the check. On Windows that real file must also pass [`owner_only`],
-/// since no link on its way is read.
+/// followed after the check. On Windows the run resolves that real file once more and
+/// checks every file it runs with [`owner_only`], since no link on its way is read.
 /// Inputs: the harness executable, the home folder and the resolver's places. Output: the
 /// version, or none.
 pub(super) fn version_if_runs(
@@ -427,14 +451,12 @@ pub(super) fn version_if_runs(
     if super::vetted(&fixed, places).ok()? != fixed.program {
         return None;
     }
-    #[cfg(windows)]
-    owner_only(&fixed.program)?;
     assert!(fixed.program.is_absolute());
     #[cfg(test)]
     if let Some(step) = between_vetted_and_run(executable) {
         step();
     }
-    version_ran(&fixed, home)
+    version_ran(&fixed, home, places)
 }
 
 /// A step a row runs once between the check of a version command and its run.
@@ -1055,7 +1077,7 @@ mod windows_tests {
         std::fs::copy(&shipped, &curl).unwrap();
         assert!(version_if_runs(&curl, &home, &places).is_some());
 
-        let granted = crate::spawn_gate::output(
+        let granted = crate::spawn_gate::collected(
             std::process::Command::new("icacls")
                 .arg(&kept)
                 .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
@@ -1064,5 +1086,49 @@ mod windows_tests {
         assert!(granted.status.success(), "{granted:?}");
         assert_eq!(version_if_runs(&curl, &home, &places), None);
         assert_eq!(super::super::version_under_home(&curl), None);
+    }
+
+    /// V243-WIN-HARNESS-SEARCH: a script's version is read through the `node.exe` the places
+    /// hold only while no other account can change it. A curl copy standing in as node.exe
+    /// tells the version of a script whose first line asks for node; once the node folder
+    /// grants Users Modify after the read's check and before its run, the read asks nothing.
+    #[test]
+    fn a_script_s_node_another_account_can_change_tells_no_version() {
+        let home = home_folder().unwrap();
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("curl.exe");
+        let folder = tempfile::tempdir_in(&home).unwrap();
+        let kept = crate::sandbox::canonical(folder.path()).unwrap();
+        let node = kept.join("node");
+        let package = kept.join("package").join("bin");
+        std::fs::create_dir_all(&node).unwrap();
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::copy(&shipped, node.join("node.exe")).unwrap();
+        let script = package.join("codex.js");
+        std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
+        let places = crate::tools::Places::new(vec![node.clone()], None);
+        assert!(version_if_runs(&script, &home, &places).is_some());
+
+        let step: Step = Box::new(move || {
+            let granted = crate::spawn_gate::collected(
+                std::process::Command::new("icacls")
+                    .arg(&node)
+                    .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]),
+            )
+            .unwrap();
+            assert!(granted.status.success(), "{granted:?}");
+            assert!(!granted.stdout.is_empty(), "{granted:?}");
+        });
+        BETWEEN_VETTED_AND_RUN
+            .lock()
+            .unwrap()
+            .push((script.clone(), step));
+        assert_eq!(version_if_runs(&script, &home, &places), None);
+        let steps = BETWEEN_VETTED_AND_RUN.lock().unwrap();
+        assert!(
+            steps.iter().all(|(entry, _)| *entry != script),
+            "the read passed its check before the grant"
+        );
     }
 }

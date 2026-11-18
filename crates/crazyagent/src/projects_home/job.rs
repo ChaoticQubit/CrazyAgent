@@ -1,4 +1,7 @@
-use super::icloud::{Download, JOB_SKIPPED_LISTED_MAX, Progress, Skipped, SkippedMore};
+use super::icloud::{
+    Download, JOB_SKIPPED_LISTED_MAX, Progress, SKIPPED_ENTRY_BYTES_MAX, Skipped, SkippedFolders,
+    SkippedMore,
+};
 use super::{ADD_OVERRIDES_MAX, AddMode, AddOverride, PATH_BYTES_MAX, Tally};
 use crate::engine::EngineError;
 use crate::project_setup::ProjectSetup;
@@ -22,11 +25,20 @@ pub const JOB_TEXT_BYTES_MAX: usize = 128;
 /// The most bytes a protocol identity holds, safe ASCII that JSON writes as it is.
 const ID_BYTES_MAX: usize = 128;
 
-/// The most bytes of JSON one job view takes: its id and project id, its source and its one
-/// state text, the last two written at worst as twice their bytes, and the names, kinds,
-/// overrides and numbers around them.
+/// The most bytes of JSON a view's count of the left folders it does not name takes, with its
+/// field name: two numbers of at most twenty digits and the names around them.
+const LEFT_MORE_BYTES_MAX: usize = 96;
+
+/// The most bytes of JSON one job view naming no left folder takes: its id and project id,
+/// its source and its one state text, the last two written at worst as twice their bytes, the
+/// names, kinds, overrides and numbers around them, and its count of left folders.
+pub const JOB_VIEW_NAMELESS_BYTES_MAX: usize =
+    2 * ID_BYTES_MAX + 2 * PATH_BYTES_MAX + 2 * JOB_TEXT_BYTES_MAX + 256 + LEFT_MORE_BYTES_MAX;
+
+/// The most bytes of JSON one job view takes: the view naming no left folder, and the left
+/// folders it names with the list around them (V243-JOBLIST-FRAME-BOUND).
 pub const JOB_VIEW_BYTES_MAX: usize =
-    2 * ID_BYTES_MAX + 2 * PATH_BYTES_MAX + 2 * JOB_TEXT_BYTES_MAX + 256;
+    JOB_VIEW_NAMELESS_BYTES_MAX + JOB_SKIPPED_LISTED_MAX * SKIPPED_ENTRY_BYTES_MAX + 16;
 
 const _: () = {
     let mut at = 0;
@@ -126,8 +138,8 @@ pub enum JobState {
 /// the project's name, which labels its end line), the mode (a delete reads Move, unused), the soft
 /// refusals it goes past, whether a stop was asked, its state, and the rebuildable folders its
 /// download left in iCloud, which an add leaves out: the first `JOB_SKIPPED_LISTED_MAX` named,
-/// the rest counted. A client answering a soft refusal starts again with these overrides and
-/// the new one.
+/// the rest counted, all counted in a status list past its room (`fit_left`). A client
+/// answering a soft refusal starts again with these overrides and the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
@@ -175,6 +187,50 @@ impl JobView {
             }),
             _ => None,
         }
+    }
+}
+
+/// Keeps a list of job views within `bytes` of JSON, so a status reply of every held job fits
+/// one frame (V243-JOBLIST-FRAME-BOUND): the newest jobs keep their left folders named first,
+/// and a view past the room counts them instead. Inputs: the views in start order and the
+/// most bytes the list may take, at least every view naming none. Output: none.
+pub fn fit_left(views: &mut [JobView], bytes: usize) {
+    let size = |view: &JobView| {
+        serde_json::to_vec(view)
+            .expect("a job view is plain data")
+            .len()
+    };
+    let bare_views: Vec<JobView> = views.iter().map(nameless).collect();
+    let mut taken = views.len() + 2 + bare_views.iter().map(size).sum::<usize>();
+    assert!(taken <= bytes, "every job view fits naming no left folder");
+    for (view, bare) in views.iter_mut().zip(bare_views).rev() {
+        let with_names = taken - size(&bare) + size(view);
+        if with_names <= bytes {
+            taken = with_names;
+        } else {
+            *view = bare;
+        }
+    }
+    assert_eq!(
+        views.len() + 2 + views.iter().map(size).sum::<usize>(),
+        taken
+    );
+    assert!(taken <= bytes);
+}
+
+/// The view with every left folder counted and none named. Input: the view. Output: the
+/// same view with its named folders folded into its count.
+fn nameless(view: &JobView) -> JobView {
+    let left = SkippedFolders {
+        listed: view.left.clone(),
+        more: view.left_more,
+    };
+    let (named, left_more) = left.cut(0);
+    assert!(named.is_empty());
+    JobView {
+        left: named,
+        left_more,
+        ..view.clone()
     }
 }
 

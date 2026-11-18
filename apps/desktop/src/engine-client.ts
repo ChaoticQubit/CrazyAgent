@@ -307,6 +307,7 @@ export function errorMessage(error: unknown): string {
     server_command_not_found: "Can't start: command not found.",
     server_command_not_runnable: "Can't start: this file can't be run.",
     server_cant_start: "The server can't start.",
+    server_batch_file: "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
     server_exited: "The server stopped before answering.",
     server_check_timeout: "The server did not answer within 10 seconds.",
     server_setting_up: "context-mode is still being set up. Check again in a minute.",
@@ -1920,6 +1921,25 @@ export function intakeStop(id: string): Promise<boolean> {
 /** Forgets an ended intake job. Input: its id. Output: whether it was forgotten. */
 export function intakeDismiss(id: string): Promise<boolean> {
   return invoke<boolean>("desktop_intake_dismiss", { id });
+}
+
+/** A project's reinstall offer: up to three folders a job left in iCloud as rebuildable, shown
+ * plain, how many more there are, and the message the master gets on Ask. */
+export interface ReinstallOffer {
+  folders: string[];
+  more: number;
+  draft: string;
+}
+
+/** Reads the reinstall offer the engine keeps for a project's folder. Input: the project id.
+ * Output: the offer, or null when there is none. */
+export function reinstallOffer(projectId: string): Promise<ReinstallOffer | null> {
+  return invoke<ReinstallOffer | null>("desktop_reinstall_offer", { projectId });
+}
+
+/** Dismisses a project's reinstall offer. Input: the project id. Output: whether one was. */
+export function reinstallDismiss(projectId: string): Promise<boolean> {
+  return invoke<boolean>("desktop_reinstall_dismiss", { projectId });
 }
 
 /** Measures a folder before Copy and names its GitHub repository, if any.

@@ -2,8 +2,10 @@ use super::projects_home::{Running, Sink, UNKNOWN};
 use super::*;
 use crate::projects_home::icloud;
 use crate::projects_home::job::{
-    IntakeJob, JOB_VIEW_BYTES_MAX, JobKind, JobState, JobSubject, JobView,
+    IntakeJob, JOB_VIEW_BYTES_MAX, JOB_VIEW_NAMELESS_BYTES_MAX, JobKind, JobState, JobSubject,
+    JobView, fit_left,
 };
+use crate::projects_home::reinstall;
 use crate::projects_home::{AddMode, AddOverride, HomeAction};
 
 /// How many times a job reads the current revision and plans its change again when another
@@ -26,15 +28,19 @@ pub(super) const JOBS_ENDED_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX;
 /// The most jobs held at once: the live ones and the ended ones kept.
 const JOBS_HELD_MAX: usize = JOBS_RUNNING_MAX + JOBS_WAITING_MAX + JOBS_ENDED_MAX;
 
-/// How often an add waiting for the download slot looks for a stop (#380 F4).
-const TURN_STOP_EVERY: Duration = Duration::from_millis(20);
+/// The most bytes of JSON the list of a status reply takes: a frame less the reply's kind
+/// and names around the list.
+const JOBS_LIST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 64;
 
-/// The most bytes of JSON a status reply takes: every job held at its largest view, the
-/// commas between them and the reply's kind around the list, within one frame (#380 N3).
-const JOBS_REPLY_BYTES_MAX: usize = JOBS_HELD_MAX * JOB_VIEW_BYTES_MAX + JOBS_HELD_MAX + 64;
+/// The most bytes of JSON a status reply's list takes with no job naming a left folder: every
+/// job held at its largest such view, the commas between them and the brackets (#380 N3). The
+/// list fits its room this way, so `fit_left` always ends within it (V243-JOBLIST-FRAME-BOUND).
+const JOBS_NAMELESS_LIST_BYTES_MAX: usize =
+    JOBS_HELD_MAX * JOB_VIEW_NAMELESS_BYTES_MAX + JOBS_HELD_MAX + 2;
 
 const _: () = assert!(JOBS_RUNNING_MAX <= REVISION_TRIES);
-const _: () = assert!(JOBS_REPLY_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
+const _: () = assert!(JOBS_NAMELESS_LIST_BYTES_MAX <= JOBS_LIST_BYTES_MAX);
+const _: () = assert!(JOB_VIEW_BYTES_MAX + 64 <= crate::protocol::FRAME_BYTES_MAX);
 
 /// What a client asks a job to do: the change's request id, which names the job, the subject,
 /// the mode and the overrides.
@@ -56,7 +62,6 @@ pub(super) struct Intake {
     held: Mutex<Vec<Held>>,
     direct: std::sync::atomic::AtomicUsize,
     claims: std::sync::atomic::AtomicUsize,
-    pub(super) downloads: tokio::sync::Mutex<()>,
 }
 
 /// A job's claim on its request id, counted among the intake's claims until it is dropped,
@@ -260,9 +265,11 @@ impl Intake {
     /// inside or around it; `job_busy` while a direct client add or project move runs, the id
     /// runs as a client change, the waiting list is full, or `JOBS_ENDED_MAX` kept ends wait
     /// for a client; `home_add_in_progress` for a move while an add that is no job of this
-    /// engine holds the home (a move behind add jobs waits its turn); `job_request_invalid`
-    /// for an add's or a move's folder past the bound a view counts on; or the folder,
-    /// override or move check's code.
+    /// engine holds the home (a move behind add jobs waits its turn);
+    /// `move_project_in_progress` for a move while a project move that is no running job of
+    /// this engine is pending (a move behind its own move job waits its turn);
+    /// `job_request_invalid` for an add's or a move's folder past the bound a view counts
+    /// on; or the folder, override or move check's code.
     pub(super) async fn start(
         engine: &Arc<Engine>,
         authority: &Arc<Authority>,
@@ -271,6 +278,7 @@ impl Intake {
         asked: Asked,
     ) -> Result<JobView, EngineError> {
         let mut add_running = false;
+        let mut move_pending = false;
         let (project, source, real) = match &asked.subject {
             JobSubject::Add { path } => {
                 HomeAction::Added {
@@ -295,8 +303,10 @@ impl Intake {
                 if let Some(answer) = early {
                     return answer;
                 }
-                let (source, adding) = check_move(engine, a, project_id, asked.mode).await?;
-                add_running = adding;
+                let checked = check_move(engine, a, project_id, asked.mode).await?;
+                add_running = checked.adding;
+                move_pending = checked.moving;
+                let source = checked.source;
                 let real = PathBuf::from(&source);
                 (Some(project_id.clone()), source, real)
             }
@@ -359,6 +369,12 @@ impl Intake {
             .any(|current| current.live() && current.job.kind() == JobKind::Add);
         if add_running && !jobs_adding {
             return Err(failure("home_add_in_progress"));
+        }
+        let jobs_moving = held
+            .iter()
+            .any(|current| current.running() && current.job.kind() == JobKind::MoveProject);
+        if move_pending && !jobs_moving {
+            return Err(failure("move_project_in_progress"));
         }
         if authority.intake.directs() > 0 {
             return Err(failure("job_busy"));
@@ -456,7 +472,8 @@ impl Intake {
     pub(super) fn status(&self) -> Vec<JobView> {
         let mut held = self.lock();
         assert!(held.len() <= JOBS_HELD_MAX);
-        let views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        let mut views: Vec<JobView> = held.iter().map(|current| current.job.view()).collect();
+        fit_left(&mut views, JOBS_LIST_BYTES_MAX);
         for (current, view) in held.iter_mut().zip(&views) {
             if view.state.over() {
                 current.seen = true;
@@ -806,7 +823,40 @@ async fn worked(
     }
     fetch(authority, job).await?;
     job.copying();
-    served(engine, authority, packet, a, job, subject).await
+    let result = served(engine, authority, packet, a, job, subject).await;
+    if result.is_ok() {
+        keep_offer(engine, job).await;
+    }
+    result
+}
+
+/// Keeps the reinstall offer of an add or a project move that ended done (DEC-198 slice 3):
+/// the folders its download left out, each with the command the files beside it name, at
+/// the folder it landed in, and drops the offer at a moved project's old folder. A failure
+/// is logged and never fails the job. Inputs: the engine and the job. Output: none.
+async fn keep_offer(engine: &Arc<Engine>, job: &Arc<IntakeJob>) {
+    let Some(landed) = job.tally().landed_at() else {
+        eprintln!("reinstall_offer_not_kept cause=no_landing");
+        return;
+    };
+    let old = (job.kind() == JobKind::MoveProject).then(|| PathBuf::from(job.source()));
+    let (download, folder) = (job.download(), landed.clone());
+    let look = tokio::task::spawn_blocking(move || {
+        let skipped = download.skipped();
+        reinstall::kept(&folder, &skipped, &|path: &Path| {
+            std::fs::symlink_metadata(path)
+        })
+    });
+    let Ok(kept) = look.await else {
+        eprintln!("reinstall_offer_not_kept cause=look_failed");
+        return;
+    };
+    let keep = engine.owner_job(|reply| Job::HomeReinstallKeep(landed, old, kept, reply));
+    match tokio::time::timeout(engine.timeout, keep).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("reinstall_offer_not_kept cause={}", e.0),
+        Err(_) => eprintln!("reinstall_offer_not_kept cause=timeout"),
+    }
 }
 
 /// Checks the job's add before its download, so a folder the add refuses is not downloaded
@@ -867,22 +917,22 @@ async fn check_setup(
 }
 
 /// Checks a project move before its job starts, writing nothing. Inputs: the engine, the
-/// client's admission, the project and the mode. Output: the project's real folder and
-/// whether an add runs, the refusal code, or the unknown-outcome code when storage does not
-/// answer in time.
+/// client's admission, the project and the mode. Output: the project's real folder, whether
+/// an add runs and whether another project move is pending; the refusal code; or the
+/// unknown-outcome code when storage does not answer in time.
 async fn check_move(
     engine: &Engine,
     a: &Admission,
     project: &ProjectId,
     mode: AddMode,
-) -> Result<(String, bool), EngineError> {
+) -> Result<crate::projects_home::MoveCheck, EngineError> {
     let ask = engine
         .owner_job(|reply| Job::HomeProjectMoveCheck(a.clone(), project.clone(), mode, reply));
     let checked = tokio::time::timeout(engine.timeout, ask)
         .await
         .map_err(|_| failure(UNKNOWN))?;
     assert!(!matches!(&checked, Err(e) if e.0.is_empty()));
-    assert!(!matches!(&checked, Ok((source, _)) if source.is_empty()));
+    assert!(!matches!(&checked, Ok(found) if found.source.is_empty()));
     checked
 }
 
@@ -907,29 +957,28 @@ impl Drop for Ending {
     }
 }
 
-/// Downloads what of the job's folder is only in iCloud, holding the engine's download slot
-/// once the downloads of the jobs before it ended, so jobs take turns instead of refusing
-/// each other; a stop asked while the job waits for the slot ends the wait at once (#380 F4).
-/// Input: the authority and the job. Output: Ok once every file is on this Mac, else the
-/// download's code, `icloud_download_busy` while a client's own download runs.
+/// Downloads what of the job's folder is only in iCloud, side by side with the other running
+/// jobs' downloads through the engine's shared paced downloads (DEC-197); a stop cancels the
+/// job's download, which ends at its next check (#380 F4). Input: the authority and the job.
+/// Output: Ok once every file is on this Mac, else the download's code,
+/// `icloud_download_busy` while the engine holds its most downloads.
 async fn fetch(authority: &Arc<Authority>, job: &Arc<IntakeJob>) -> Result<(), EngineError> {
-    let turn = authority.intake.downloads.lock();
-    tokio::pin!(turn);
-    let _turn = loop {
-        tokio::select! {
-            taken = &mut turn => break taken,
-            () = tokio::time::sleep(TURN_STOP_EVERY) => {
-                if job.download().cancelled() {
-                    return Err(failure("home_icloud_not_downloaded"));
-                }
-            }
-        }
-    };
+    fetch_with(authority, job, icloud::download).await
+}
+
+/// Runs the job's download as `fetch` does, with `pull` in place of the iCloud download, so a
+/// test can watch when downloads run. Inputs: the authority, the job and the download to run.
+/// Output: Ok once `pull` brought every file within the job's bounds, else its code.
+pub(super) async fn fetch_with(
+    authority: &Arc<Authority>,
+    job: &Arc<IntakeJob>,
+    pull: fn(&str, &icloud::Download, crate::projects_home::CopyBounds) -> Result<u64, EngineError>,
+) -> Result<(), EngineError> {
     let claim = authority.icloud.claim_for(job.download())?;
     let download = claim.download();
     let path = job.source().to_owned();
     let bounds = crate::projects_home::add_bounds(job.overrides());
-    let fetched = tokio::task::spawn_blocking(move || icloud::download(&path, &download, bounds))
+    let fetched = tokio::task::spawn_blocking(move || pull(&path, &download, bounds))
         .await
         .map_err(|_| failure("home_icloud_not_downloaded"));
     drop(claim);

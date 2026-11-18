@@ -235,3 +235,23 @@ fn a_stream_accepted_from_a_non_blocking_listener_waits_out_its_read_timeout() {
         "the read failed after {waited:?}, not after its timeout"
     );
 }
+
+/// A blocking accept whose client comes 200 ms late waits for it in a few waits, not in a
+/// retry loop that wakes every few milliseconds (V243-POLL-WAITS).
+#[cfg(unix)]
+#[test]
+fn a_blocking_accept_waits_for_a_late_client_in_a_few_waits() {
+    use std::time::Duration;
+    let listener = super::bind_tcp_std("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        super::connect_tcp_std(address).unwrap()
+    });
+    let before = super::accept_waits();
+    let accepted = super::accept_tcp_std(&listener);
+    let waits = super::accept_waits() - before;
+    let _client = client.join().unwrap();
+    assert!(accepted.is_ok(), "{accepted:?}");
+    assert!(waits <= 3, "{waits} waits for a client 200 ms late");
+}

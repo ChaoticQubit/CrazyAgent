@@ -1,3 +1,7 @@
+#[cfg(any(windows, test))]
+mod batch;
+#[cfg(windows)]
+pub(crate) use batch::{batch_file, cmd_shim_real, npx_real, program_file};
 pub mod permission_fix;
 pub mod probe;
 #[cfg(all(test, unix))]
@@ -676,7 +680,8 @@ impl Resolved {
     /// runs itself for a program or a script whose first line names a program by path;
     /// otherwise the interpreter's own words, the first line's arguments, then the script's
     /// real file, for a script that asks `env` by name, names a shim, or names an interpreter
-    /// that is itself a script, which macOS does not run. Output: the absolute words.
+    /// that is itself a script, which macOS does not run, and every script on Windows, which
+    /// runs no first line. Output: the absolute words.
     pub fn argv(&self) -> Vec<OsString> {
         let words: Vec<OsString> = match &self.kind {
             Kind::Native => vec![self.program.clone().into_os_string()],
@@ -684,7 +689,7 @@ impl Resolved {
                 interpreter,
                 by_name: false,
                 ..
-            } if interpreter.kind == Kind::Native => {
+            } if cfg!(unix) && interpreter.kind == Kind::Native => {
                 vec![self.program.clone().into_os_string()]
             }
             Kind::Script {
@@ -748,8 +753,9 @@ impl Reason {
 /// named so the owner knows what to fix, a file agents can write, a version-manager shim
 /// with no real install found behind it, or a file in a temp folder the engine's places
 /// refuse or reached through a link into one, which agents with the owner's temp folder
-/// grant or other users write, or a script whose first line the resolver cannot read the
-/// way the system and `/usr/bin/env` run it.
+/// grant or other users write, a script whose first line the resolver cannot read the
+/// way the system and `/usr/bin/env` run it, or a Windows batch file that is neither an npm
+/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
@@ -757,6 +763,7 @@ pub enum Refusal {
     Shim,
     InTemp,
     FirstLine,
+    Batch,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -1003,6 +1010,10 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         return Err(refused(program.as_path(), Refusal::InTemp));
     }
     assert!(program.is_absolute());
+    #[cfg(windows)]
+    if let Some(mapped) = batch::entry(entry, &program, places, depth, refused) {
+        return mapped;
+    }
     let shebang = match shebang(&program) {
         Ok(Some(shebang)) => shebang,
         Ok(None) => {
@@ -1096,8 +1107,9 @@ fn between_program_and_check(entry: &Path) -> Option<Step> {
 
 /// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the
 /// one in the script's own npm prefix ([`crate::harnesses::node_prefix`]), so a harness
-/// installed under one Node starts under that Node, then the places in order. Inputs: the
-/// name, the script's real file, the places and the depth. Output: the interpreter, or why.
+/// installed under one Node starts under that Node, then the places in order, as
+/// `<name>.exe` on Windows, the only file it starts by itself. Inputs: the name, the script's
+/// real file, the places and the depth. Output: the interpreter, or why.
 fn named_interpreter(
     name: &str,
     script: &Path,
@@ -1109,6 +1121,8 @@ fn named_interpreter(
         .then(|| crate::harnesses::node_prefix(script))
         .flatten()
         .and_then(|prefix| entry_at(&prefix.join("bin").join(name), places, depth).ok());
+    #[cfg(windows)]
+    let name = &format!("{name}.exe");
     match own {
         Some(node) => Ok(node),
         None => resolve_at(name, places, depth),
@@ -1120,8 +1134,14 @@ fn named_interpreter(
 /// starts a copy the resolver never judged (rv-sec2 B11 r2 F2). [`entry_at`] asks it of the
 /// interpreter's real file name and of the name the line runs it as, its program word for
 /// `env` or the file name as written, since a multi-call binary such as coreutils or busybox
-/// picks its tool by that name (rv-code4 B18 F1). Input: the name. Output: the answer.
+/// picks its tool by that name (rv-code4 B18 F1). On Windows the name is read as Windows
+/// finds a program, ASCII case ignored and a trailing `.exe` dropped (#333 r1 sec F1).
+/// Input: the name. Output: the answer.
 fn launches_by_name(name: &str) -> bool {
+    #[cfg(windows)]
+    let lower = name.to_ascii_lowercase();
+    #[cfg(windows)]
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
     NAME_LAUNCHERS.contains(&name)
 }
 
@@ -1194,18 +1214,15 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     }
     let (first, rest) = words.split_first().ok_or(Unreadable)?;
     let interpreter = PathBuf::from(first);
-    if !usable(&interpreter) {
-        return Err(Unreadable);
-    }
-    if interpreter.file_name() != Some(OsStr::new("env")) {
+    if interpreter != Path::new(ENV) {
+        if !usable(&interpreter) || interpreter.file_name() == Some(OsStr::new("env")) {
+            return Err(Unreadable);
+        }
         return Ok(Some(Shebang {
             interpreter,
             by_name: None,
             arguments: rest.iter().map(|word| (*word).to_owned()).collect(),
         }));
-    }
-    if interpreter != Path::new(ENV) {
-        return Err(Unreadable);
     }
     let split = rest.first() == Some(&"-S");
     let rest = if split { &rest[1..] } else { rest };
@@ -1357,6 +1374,9 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
         ),
         Refusal::FirstLine => format!(
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
+        ),
+        Refusal::Batch => format!(
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
         ),
     }
 }

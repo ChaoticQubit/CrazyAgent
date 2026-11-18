@@ -12,6 +12,7 @@ use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::project_setup::ProjectSetup;
 use crazyagent::projects_home::job::{JobKind, JobState, JobSubject, JobView};
+use crazyagent::projects_home::reinstall::Offer;
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
@@ -358,6 +359,12 @@ pub fn shown(mut view: JobView) -> JobView {
 
 fn intake_id(id: &str) -> Result<RequestId, BridgeError> {
     RequestId::new(id).map_err(|_| failure("intake_failed"))
+}
+
+/// Reads a project id the window sent for a reinstall offer. Input: the text. Output: the
+/// id, else `invalid_project`.
+fn reinstall_project(id: &str) -> Result<ProjectId, BridgeError> {
+    ProjectId::new(id).map_err(|_| failure("invalid_project"))
 }
 
 /// Names a GitHub failure from its allowlist only, never with the engine code behind it:
@@ -782,6 +789,40 @@ impl NativeBridge {
             bounded(
                 client
                     .job_dismiss(request_id)
+                    .await
+                    .map_err(intake_failure)?,
+            )
+        }))
+    }
+
+    /// Reads the reinstall offer the engine keeps for a project's folder: the folders a job
+    /// left in iCloud as rebuildable and the message the master gets on Ask. Input: the
+    /// project id. Output: the offer, or None when there is none.
+    pub fn reinstall_offer(
+        &mut self,
+        project_id: String,
+    ) -> Result<Unlocked<Option<Offer>>, BridgeError> {
+        let project = reinstall_project(&project_id)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .reinstall_offer(project)
+                    .await
+                    .map_err(intake_failure)?,
+            )
+        }))
+    }
+
+    /// Dismisses a project's reinstall offer, so neither client shows it again. Input: the
+    /// project id. Output: whether an offer was dismissed.
+    pub fn reinstall_dismiss(&mut self, project_id: String) -> Result<Unlocked<bool>, BridgeError> {
+        let project = reinstall_project(&project_id)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .reinstall_dismiss(project)
                     .await
                     .map_err(intake_failure)?,
             )

@@ -514,32 +514,46 @@ fn linked_agent_copies(tx: &Transaction<'_>, origin: &Path) -> Result<bool, Engi
 }
 
 /// What the checks of a project move that read nothing inside its folder found: the projects
-/// home, the project's real folder and every other registered project.
+/// home and the project's real folder, both in their stored spelling, which the records of
+/// the move and of the project's work compare as text, and every other registered project.
 struct Checked {
     home: PathBuf,
     real: PathBuf,
     others: Vec<Registered>,
 }
 
+/// What a project move job's start check found, writing nothing: the project's real folder
+/// as text, whether an add runs and whether another project move is pending. The engine lets
+/// the move wait its turn behind its own add and move jobs and refuses it for any other
+/// (DEC-197).
+#[derive(Debug)]
+pub(crate) struct MoveCheck {
+    pub(crate) source: String,
+    pub(crate) adding: bool,
+    pub(crate) moving: bool,
+}
+
 /// Checks a project move as far as it can without reading inside the folder, so a job that
-/// would be refused is refused before it starts: another project move pending
-/// (`move_project_in_progress`), no projects home, an unknown project, a project without
-/// setup, a folder gone (`home_source_missing`), already in the home
+/// would be refused is refused before it starts: no projects home, an unknown project, a
+/// project without setup, a folder gone (`home_source_missing`), already in the home
 /// (`move_project_already_home`) or reached through a link (`move_project_folder_link`),
 /// another project using the folder (`home_move_project`), what [`busy`] names, and a Copy
-/// while an agent works in a linked worktree (`move_project_copy_worktrees`). Nothing is
-/// written. Inputs: the transaction, the guarded projects, the project and the mode.
-/// Output: the project's real folder, or the refusal code.
+/// while an agent works in a linked worktree (`move_project_copy_worktrees`). Another
+/// project move pending is reported, not refused, so the engine lets the move wait behind
+/// its own move job (DEC-197); [`plan`] still refuses it. Nothing is written. Inputs: the
+/// transaction, the guarded projects, the project and the mode. Output: the project's real
+/// folder and whether another project move is pending, or the refusal code.
 pub(crate) fn check(
     tx: &Transaction<'_>,
     registered: &[Registered],
     project: &ProjectId,
     mode: AddMode,
-) -> Result<PathBuf, EngineError> {
+) -> Result<(PathBuf, bool), EngineError> {
+    let moving = pending(tx)?.is_some();
     let found = checked(tx, registered, project, mode)?;
     assert!(found.real.is_absolute());
     assert!(!found.real.starts_with(&found.home));
-    Ok(found.real)
+    Ok((found.real, moving))
 }
 
 /// The checks [`check`] names, keeping what they found for [`plan`]. Inputs: as
@@ -550,9 +564,6 @@ fn checked(
     project: &ProjectId,
     mode: AddMode,
 ) -> Result<Checked, EngineError> {
-    if pending(tx)?.is_some() {
-        return Err(refused("move_project_in_progress"));
-    }
     let home = super::load(tx)?.ok_or_else(|| refused("projects_home_unset"))?;
     let found = registered
         .iter()
@@ -567,10 +578,8 @@ fn checked(
     if set_up == 0 {
         return Err(refused("project_setup_missing"));
     }
-    let real = one_spelling(
-        std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?,
-    );
-    if real.starts_with(one_spelling(home.clone())) {
+    let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
+    if one_spelling(real.clone()).starts_with(one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
     if real != found.folder {
@@ -616,6 +625,9 @@ pub(crate) fn plan(
     asked: &Asked<'_>,
 ) -> Result<ProjectMove, EngineError> {
     assert!(asked.exchange > 0);
+    if pending(tx)?.is_some() {
+        return Err(refused("move_project_in_progress"));
+    }
     let Checked { home, real, others } = checked(tx, registered, asked.project, asked.mode)?;
     let source = text(&real)?;
     let mut overrides = asked.overrides.to_vec();
@@ -635,7 +647,7 @@ pub(crate) fn plan(
         overrides.push(AddOverride::Worktrees);
     }
     let add = plan_add(&home, engine_root, source, asked.mode, &overrides, &others)?;
-    assert_eq!(add.source(), real);
+    assert_eq!(add.source(), one_spelling(real.clone()));
     assert!(add.destination().starts_with(&home));
     if others
         .iter()

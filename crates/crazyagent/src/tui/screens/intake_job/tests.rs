@@ -157,7 +157,13 @@ fn each_jobs_end_is_said_once_while_the_jobs_beside_it_still_run() {
             .collect::<Vec<_>>()
     };
     let shop_done = "shop is in your projects folder. Set it up from Home.";
-    assert_eq!(said(&[running_job.clone()], &[done.clone()]), [shop_done]);
+    assert_eq!(
+        said(
+            std::slice::from_ref(&running_job),
+            std::slice::from_ref(&done)
+        ),
+        [shop_done]
+    );
     assert_eq!(
         said(
             &[running_job.clone(), garden.clone()],
@@ -165,20 +171,26 @@ fn each_jobs_end_is_said_once_while_the_jobs_beside_it_still_run() {
         ),
         [shop_done]
     );
-    assert!(said(&[done.clone()], &[done.clone()]).is_empty());
-    assert!(said(&[], &[done.clone()]).is_empty());
-    assert!(said(&[running_job.clone()], &[running_job.clone()]).is_empty());
-    assert!(said(&[running_job.clone()], &[]).is_empty());
+    assert!(said(std::slice::from_ref(&done), std::slice::from_ref(&done)).is_empty());
+    assert!(said(&[], std::slice::from_ref(&done)).is_empty());
+    assert!(
+        said(
+            std::slice::from_ref(&running_job),
+            std::slice::from_ref(&running_job)
+        )
+        .is_empty()
+    );
+    assert!(said(std::slice::from_ref(&running_job), &[]).is_empty());
     let other = JobView {
         id: RequestId::new("add-9").unwrap(),
         ..done
     };
-    assert!(said(&[running_job.clone()], &[other]).is_empty());
+    assert!(said(std::slice::from_ref(&running_job), &[other]).is_empty());
     let waiting = job(JobState::Waiting {
         behind: "garden".into(),
     });
     assert!(
-        said(&[waiting.clone()], &[running_job]).is_empty(),
+        said(std::slice::from_ref(&waiting), &[running_job]).is_empty(),
         "a waiting job let go is still at work"
     );
     let cancelled = job(JobState::Cancelled {
@@ -679,6 +691,30 @@ fn a_done_add_counts_the_left_folders_it_does_not_name() {
         ),
         "{}",
         line(&capped)
+    );
+}
+
+#[test]
+fn a_done_add_whose_left_folders_are_only_counted_says_how_many() {
+    let counted = |folders: u64, mode: AddMode| JobView {
+        left_more: Some(crate::projects_home::icloud::SkippedMore {
+            folders,
+            files: None,
+        }),
+        mode,
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&counted(3, AddMode::Move)),
+        "shop is in your projects folder. Set it up from Home. 3 rebuildable folders stayed in \
+         /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; reinstall them in the \
+         project."
+    );
+    assert!(
+        line(&counted(1, AddMode::Copy))
+            .ends_with(" 1 rebuildable folder was not copied; reinstall it in the project."),
+        "{}",
+        line(&counted(1, AddMode::Copy))
     );
 }
 

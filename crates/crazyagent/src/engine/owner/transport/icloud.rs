@@ -1,7 +1,8 @@
 use super::*;
 use crate::projects_home::job::{JobKind, JobSubject, JobView};
+use crate::projects_home::reinstall::Offer;
 use crate::projects_home::{AddMode, AddOverride};
-use crate::protocol::encode_frame;
+use crate::protocol::{ProjectId, encode_frame};
 use serde::{Deserialize, Serialize};
 
 /// The most bytes one iCloud or job request may hold: one owner frame, as for any owner
@@ -27,6 +28,12 @@ enum Action {
     Dismiss {
         request_id: RequestId,
     },
+    ReinstallOffer {
+        project_id: ProjectId,
+    },
+    ReinstallDismiss {
+        project_id: ProjectId,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -42,6 +49,8 @@ enum Reply {
     Jobs { jobs: Vec<JobView> },
     Stopped { running: bool },
     Dismissed { forgotten: bool },
+    Reinstall { offer: Option<Offer> },
+    ReinstallDismissed { forgotten: bool },
     Rejected { code: String },
 }
 
@@ -98,6 +107,34 @@ impl OwnerClient {
     pub async fn job_dismiss(&self, request_id: RequestId) -> Result<bool, EngineError> {
         match self.icloud_exchange(Action::Dismiss { request_id }).await? {
             Reply::Dismissed { forgotten } => Ok(forgotten),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the reinstall offer kept for a project's folder: the folders a job left in
+    /// iCloud, rebuildable, and the message the master gets when the owner says yes.
+    /// Input: the project. Output: the offer, or None when there is none.
+    pub async fn reinstall_offer(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Option<Offer>, EngineError> {
+        match self
+            .icloud_exchange(Action::ReinstallOffer { project_id })
+            .await?
+        {
+            Reply::Reinstall { offer } => Ok(offer),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Dismisses a project's reinstall offer, so neither client shows it again. Input: the
+    /// project. Output: whether an offer was dismissed.
+    pub async fn reinstall_dismiss(&self, project_id: ProjectId) -> Result<bool, EngineError> {
+        match self
+            .icloud_exchange(Action::ReinstallDismiss { project_id })
+            .await?
+        {
+            Reply::ReinstallDismissed { forgotten } => Ok(forgotten),
             _ => Err(unknown()),
         }
     }
@@ -239,5 +276,13 @@ async fn handle(
                 forgotten: forgotten.is_some(),
             })
         }
+        Action::ReinstallOffer { project_id } => engine
+            .owner_job(|reply| Job::HomeReinstallRead(project_id, reply))
+            .await
+            .map(|offer| Reply::Reinstall { offer }),
+        Action::ReinstallDismiss { project_id } => engine
+            .owner_job(|reply| Job::HomeReinstallDismiss(project_id, reply))
+            .await
+            .map(|forgotten| Reply::ReinstallDismissed { forgotten }),
     }
 }

@@ -55,6 +55,8 @@ use ratatui::text::Line;
 use std::path::{Path, PathBuf};
 
 const SENT_MAX: usize = 8;
+/// What the project says when the engine did not dismiss its reinstall offer.
+const REINSTALL_NOT_DISMISSED: &str = "The reinstall offer was not dismissed. Try again.";
 const MASTER_SENT_MAX: usize = 4;
 const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
@@ -262,6 +264,7 @@ pub(in crate::tui) struct ProjectPage {
     uncommitted_asked: bool,
     job_sent: Option<IntakeQuery>,
     move_read_sent: Option<IntakeQuery>,
+    reinstall_sent: Option<IntakeQuery>,
     publish_sent: Option<IntakeQuery>,
     publish_pane: Option<PublishPane>,
     publish_asked: Option<IntakeQuery>,
@@ -373,6 +376,7 @@ impl ProjectPage {
             uncommitted_asked: false,
             job_sent: None,
             move_read_sent: None,
+            reinstall_sent: None,
             publish_sent: None,
             publish_pane: None,
             publish_asked: None,
@@ -1429,6 +1433,19 @@ impl ProjectPage {
         assert!(self.job_sent.is_some());
     }
 
+    /// Reads the reinstall offer the engine keeps for this project's folder, unless a read or
+    /// a dismiss of it is already on its way. Takes the context. Returns nothing.
+    fn read_reinstall(&mut self, ctx: &mut Ctx) {
+        if self.reinstall_sent.is_some() {
+            return;
+        }
+        let query = IntakeQuery::ReinstallOffer {
+            project: self.screen.project.clone(),
+        };
+        self.reinstall_sent = Some(query.clone());
+        super::intake::ask(ctx, query);
+    }
+
     /// Takes the reply to this page's move or delete start, then follows the started move in
     /// the job the shell keeps until it ends or is gone, when the project's setup is read again
     /// for its new folder; a started delete is followed on Home, where the page goes. Takes the
@@ -1460,6 +1477,18 @@ impl ProjectPage {
             }
             if !started {
                 self.ask_publish(ctx);
+            }
+            return true;
+        }
+        if self.reinstall_sent.as_ref() == Some(&event.query) {
+            self.reinstall_sent = None;
+            match (&event.query, &event.result) {
+                (_, Ok(IntakeView::Reinstall(offer))) => self.screen.reinstall = offer.clone(),
+                (_, Ok(IntakeView::ReinstallDismissed(_))) => self.screen.reinstall = None,
+                (IntakeQuery::ReinstallDismiss { .. }, _) => {
+                    self.screen.problem = Some(REINSTALL_NOT_DISMISSED.into());
+                }
+                _ => {}
             }
             return true;
         }
@@ -1974,6 +2003,14 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::ReinstallDismiss => {
+                let query = IntakeQuery::ReinstallDismiss {
+                    project: self.screen.project.clone(),
+                };
+                self.reinstall_sent = Some(query.clone());
+                super::intake::ask(ctx, query);
+                Flow::Handled
+            }
             ProjectReply::GitHubRules => Flow::Open(Place::ProjectGitHub {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
@@ -2424,6 +2461,7 @@ impl Screen for ProjectPage {
         self.ask_team(ctx);
         self.ask_import(ctx);
         self.ask_uncommitted(ctx);
+        self.read_reinstall(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);

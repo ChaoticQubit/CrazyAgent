@@ -35,8 +35,8 @@ const NOT_DOWNLOADED: &str = "home_icloud_not_downloaded";
 const _: () = assert!(BATCH_PATHS_MAX * 4096 < 1024 * 1024);
 const _: () = assert!(JOB_OPEN_FILES_MAX >= BATCH_PATHS_MAX);
 const _: () = assert!(JOB_OPEN_FILES_MAX <= OPEN_FILES_MAX);
-const _: () = assert!(JOB_OPEN_FILES_MAX % BATCH_PATHS_MAX == 0);
-const _: () = assert!(OPEN_FILES_MAX % BATCH_PATHS_MAX == 0);
+const _: () = assert!(JOB_OPEN_FILES_MAX.is_multiple_of(BATCH_PATHS_MAX));
+const _: () = assert!(OPEN_FILES_MAX.is_multiple_of(BATCH_PATHS_MAX));
 const _: () = assert!(STALL_MAX.as_secs() < DOWNLOAD_TIME_MAX.as_secs());
 const _: () = assert!(LANDING_LOG_EVERY.as_secs() < STALL_MAX.as_secs());
 const _: () = assert!(CANCEL_EVERY.as_millis() < POLL_EVERY.as_millis());
@@ -330,7 +330,7 @@ impl Lanes {
             self.lanes
                 .iter()
                 .enumerate()
-                .filter(|(_, lane)| wanted(*lane))
+                .filter(|(_, lane)| wanted(lane))
                 .min_by_key(|(_, lane)| (lane.served, lane.id))
                 .map(|(at, _)| at)
         };
@@ -485,7 +485,7 @@ pub const SKIPPED_PATH_MAX: usize = 256;
 
 /// The most bytes one named folder takes in a reply: its path with every byte escaped as JSON
 /// escapes a control character, six bytes each, and the field names and file count around it.
-const SKIPPED_ENTRY_BYTES_MAX: usize = 6 * SKIPPED_PATH_MAX + 64;
+pub const SKIPPED_ENTRY_BYTES_MAX: usize = 6 * SKIPPED_PATH_MAX + 64;
 const _: () = assert!(
     SKIPPED_LISTED_MAX * SKIPPED_ENTRY_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX
 );
@@ -502,7 +502,8 @@ pub struct SkippedMore {
     pub files: Option<u64>,
 }
 
-/// Rebuildable folders as a listing gathers them: the first `SKIPPED_LISTED_MAX` named, the
+/// Rebuildable folders as a listing gathers them: `SKIPPED_LISTED_MAX` named, the first found,
+/// except that a folder needing a reinstall takes the place of one that rebuilds itself; the
 /// rest only counted, so the list stays bounded whatever the tree holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkippedFolders {
@@ -510,12 +511,32 @@ pub struct SkippedFolders {
     pub more: Option<SkippedMore>,
 }
 
+/// Whether a rebuildable folder rebuilds itself the next time its program runs, so it needs
+/// no reinstall: a `__pycache__`. Input: the folder's path. Output: the answer.
+pub fn rebuilds_itself(path: &str) -> bool {
+    Path::new(path).file_name() == Some(std::ffi::OsStr::new("__pycache__"))
+}
+
 impl SkippedFolders {
-    /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted.
-    /// Input: the folder. Output: none.
+    /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted. Once the
+    /// names are full, a folder that needs a reinstall takes the slot of the first named one
+    /// that rebuilds itself, which is counted instead, so a reinstall offer sees every folder
+    /// it needs and a job's line, which names the first few, names it before those. Input: the
+    /// folder. Output: none.
     pub fn push(&mut self, folder: Skipped) {
         if self.listed.len() < SKIPPED_LISTED_MAX {
             self.listed.push(folder);
+        } else if !rebuilds_itself(&folder.path)
+            && let Some(at) = self
+                .listed
+                .iter()
+                .position(|named| rebuilds_itself(&named.path))
+        {
+            let freed = std::mem::replace(&mut self.listed[at], folder);
+            self.count(SkippedMore {
+                folders: 1,
+                files: freed.files,
+            });
         } else {
             self.count(SkippedMore {
                 folders: 1,

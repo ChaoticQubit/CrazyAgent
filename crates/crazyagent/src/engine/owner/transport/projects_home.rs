@@ -161,6 +161,15 @@ enum Work {
 }
 
 impl Work {
+    /// The folder an add or a project move lands in; None for other work.
+    fn landing(&self) -> Option<&Path> {
+        match self {
+            Self::Add(plan) => Some(plan.destination()),
+            Self::MoveProject(plan) => Some(plan.destination()),
+            Self::Move(_) | Self::New(_) | Self::Demo(_) | Self::Delete(..) => None,
+        }
+    }
+
     fn interrupted(&self) -> &'static str {
         match self {
             Self::Add(_) => "home_add_interrupted",
@@ -469,6 +478,9 @@ pub(super) async fn serve(
                     if let Work::MoveProject(plan) = &work {
                         _moved_ide =
                             Some(authority.ide_servers.hold_for_delete(plan.project()).await);
+                    }
+                    if let Some(landing) = work.landing() {
+                        tally.land_at(landing);
                     }
                     let interrupted = work.interrupted();
                     let tallied = Arc::clone(&tally);

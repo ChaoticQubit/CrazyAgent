@@ -13,9 +13,10 @@ const POLL: Duration = Duration::from_millis(2);
 /// the first with `merge-tree --merge-base` and `check-attr --source`, which a squash merge
 /// and the attribute checks around it run (W-GIT-FLOOR).
 const VERSION_MIN: (u32, u32) = (2, 40);
-/// The oldest git that opening a repository and every engine git call outside those two
-/// run on: 2.39, the Apple Git-154 of Xcode 16 and its Command Line Tools (W-GIT-FLOOR).
-const OPEN_VERSION_MIN: (u32, u32) = (2, 39);
+/// The oldest git that opening a repository, an agent worktree and every engine git call
+/// outside those two run on: 2.39, the Apple Git-154 of Xcode 16 and its Command Line Tools
+/// (W-GIT-FLOOR, V243-WORKTREE-GIT-FLOOR).
+pub(crate) const OPEN_VERSION_MIN: (u32, u32) = (2, 39);
 
 #[cfg(test)]
 thread_local! {
@@ -31,9 +32,13 @@ const CHECK_LINE_BYTES_MAX: usize = 80;
 
 /// Refuses a git version older than `needed`, logging the version found and the one needed
 /// once per process for each pair (W-GIT-FLOOR). Inputs: the numbers of the version, major
-/// first, and the oldest major and minor. Output: Ok, else `changes_git_old`, or
-/// `changes_git_unsupported` for fewer than two numbers.
-fn refuse_older(found: &[u32], needed: (u32, u32)) -> Result<(), EngineError> {
+/// first, the oldest major and minor, and the code an older git is refused with. Output:
+/// Ok, else `old`, or `changes_git_unsupported` for fewer than two numbers.
+pub(crate) fn refuse_older(
+    found: &[u32],
+    needed: (u32, u32),
+    old: &str,
+) -> Result<(), EngineError> {
     let (Some(&major), Some(&minor)) = (found.first(), found.get(1)) else {
         return Err(failure("changes_git_unsupported"));
     };
@@ -42,12 +47,30 @@ fn refuse_older(found: &[u32], needed: (u32, u32)) -> Result<(), EngineError> {
     }
     let shown: Vec<String> = found.iter().map(u32::to_string).collect();
     super::log_once(&format!(
-        "changes_git_old found={} needed={}.{}",
+        "{old} found={} needed={}.{}",
         shown.join("."),
         needed.0,
         needed.1
     ));
-    Err(failure("changes_git_old"))
+    Err(failure(old))
+}
+
+/// The numbers a `git version` line names, or a row's shaped line on this thread
+/// (W-GIT-FLOOR). Input: what `git version` printed. Output: its first numbers, at most
+/// three, which [`refuse_older`] judges.
+pub(crate) fn version_numbers(printed: Vec<u8>) -> Vec<u32> {
+    #[cfg(test)]
+    let printed = VERSION_PRINTED
+        .with_borrow(Clone::clone)
+        .map_or(printed, String::into_bytes);
+    let text = String::from_utf8_lossy(&printed);
+    text.trim()
+        .strip_prefix("git version ")
+        .unwrap_or_default()
+        .split(|c: char| !c.is_ascii_digit())
+        .map_while(|part| part.parse::<u32>().ok())
+        .take(3)
+        .collect()
 }
 
 /// Whether git arguments use an option new in git 2.40.0, `merge-tree --merge-base` or
@@ -493,7 +516,7 @@ impl Repo {
             version: None,
         };
         let found = repo.found_version()?;
-        refuse_older(&found, OPEN_VERSION_MIN)?;
+        refuse_older(&found, OPEN_VERSION_MIN, "changes_git_old")?;
         repo.version = found.first().copied().zip(found.get(1).copied());
         let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
         let keys = crate::research::runner::listed_filter_keys(&listing)
@@ -689,7 +712,7 @@ impl Repo {
             ..self.clone()
         };
         let found = step.found_version()?;
-        refuse_older(&found, OPEN_VERSION_MIN)?;
+        refuse_older(&found, OPEN_VERSION_MIN, "changes_git_old")?;
         Ok(Self {
             version: found.first().copied().zip(found.get(1).copied()),
             ..step
@@ -843,7 +866,7 @@ impl Repo {
             Some((major, minor)) => vec![major, minor],
             None => self.found_version()?,
         };
-        refuse_older(&found, VERSION_MIN)
+        refuse_older(&found, VERSION_MIN, "changes_git_old")
     }
 
     /// Whether the version kept at open is known to be older than 2.40, so that a squash
@@ -856,20 +879,7 @@ impl Repo {
     /// The numbers `git version` prints for this repository's git, or a row's shaped line.
     /// Output: its first numbers, at most three, which [`refuse_older`] judges.
     fn found_version(&self) -> Result<Vec<u32>, EngineError> {
-        let printed = self.capture(&["version"], 256)?;
-        #[cfg(test)]
-        let printed = VERSION_PRINTED
-            .with_borrow(Clone::clone)
-            .map_or(printed, String::into_bytes);
-        let text = String::from_utf8_lossy(&printed);
-        Ok(text
-            .trim()
-            .strip_prefix("git version ")
-            .unwrap_or_default()
-            .split(|c: char| !c.is_ascii_digit())
-            .map_while(|part| part.parse::<u32>().ok())
-            .take(3)
-            .collect())
+        self.capture(&["version"], 256).map(version_numbers)
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {

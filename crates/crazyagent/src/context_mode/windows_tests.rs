@@ -13,7 +13,8 @@ struct Case {
 
 /// Makes an engine root with its `setup\npm` folder and its own `setup\bin`, a folder the
 /// engine's tool resolver looks in, holding the Windows Node layout: `npx.cmd`, `node.exe`
-/// and npm's own `node_modules\npm\bin\npm-cli.js`. Output: the case, removed when dropped.
+/// and npm's own `node_modules\npm\bin\npm-cli.js` and `npx-cli.js`. Output: the case,
+/// removed when dropped.
 fn case() -> Case {
     let directory = tempfile::tempdir().unwrap();
     let base = crate::sandbox::canonical(directory.path()).unwrap();
@@ -21,7 +22,13 @@ fn case() -> Case {
     let bin = root.join("setup").join("bin");
     fs::create_dir_all(root.join("setup").join("npm")).unwrap();
     fs::create_dir_all(npm_cli(&bin).parent().unwrap()).unwrap();
-    for file in [bin.join("npx.cmd"), bin.join("node.exe"), npm_cli(&bin)] {
+    let npx_cli = npm_cli(&bin).with_file_name("npx-cli.js");
+    for file in [
+        bin.join("npx.cmd"),
+        bin.join("node.exe"),
+        npm_cli(&bin),
+        npx_cli,
+    ] {
         fs::write(file, "").unwrap();
     }
     Case {
@@ -448,4 +455,289 @@ fn npm_installs_into_a_fresh_staging_folder() {
         "npm installs; only the pin refuses the tarball"
     );
     assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
+}
+
+/// The access list of a folder a job read or wrote, as `icacls` prints it, without the
+/// inherited mark a rewritten list may change. Only lists this case owns are compared, since
+/// other rows' containers come and go in the machine-wide Packages and grants folders while
+/// the farm runs rows side by side. Input: the folder. Output: the list.
+fn entries(folder: &Path) -> String {
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let listed = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe")).arg(folder),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "{}", shown(&listed));
+    let list = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
+    assert!(list.contains("(OI)(CI)"), "{list}");
+    list
+}
+
+/// The grants record and the AppContainer folder Windows keeps for one container, by its
+/// name, so a row checks only its own container. Input: the name. Output: both paths.
+fn container_files(name: &str) -> (PathBuf, PathBuf) {
+    let grants = crate::paths::Layout::current()
+        .unwrap()
+        .root()
+        .join(crate::sandbox::windows::GRANTS_FOLDER);
+    let packages = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap()).join("Packages");
+    assert!(name.starts_with("crazyagent."));
+    (
+        grants.join(format!("container-{name}.grants")),
+        packages.join(name),
+    )
+}
+
+/// V243-WIN-CONTAINER-RELEASE: the node probe releases the container it ran `node.exe` in once
+/// the probe ends, so npx's folder keeps no entry for it and no scratch folder is left; here
+/// `node.exe` is empty, so the probe names no version.
+#[test]
+fn the_node_probe_leaves_no_container_behind() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let before = entries(&case.bin);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(entries(&case.bin), before);
+    let left: Vec<_> = fs::read_dir(&npm)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != NODE_CHECK_LOCK)
+        .collect();
+    assert!(left.is_empty(), "no scratch folder is left: {left:?}");
+}
+
+/// V243-WIN-CONTAINER-RELEASE: an npm install releases its container before its staging
+/// folder is published or removed, so a failed install, here with an empty `node.exe`, leaves
+/// no entry on npx's folder, no boundary profile and no install folder.
+#[test]
+fn a_failed_npm_install_leaves_no_container_behind() {
+    let case = case();
+    let folder = install_folder(&case.root, VERSION);
+    let before = entries(&case.bin);
+    assert_eq!(
+        replace(&case.root, &folder, &case.bin, VERSION),
+        Err(InstallError("context_mode_install_failed"))
+    );
+    assert_eq!(entries(&case.bin), before);
+    let parent = folder.parent().unwrap();
+    assert!(!npm_profile(parent, VERSION).exists());
+    assert!(!folder.exists());
+}
+
+/// V243-WIN-CONTAINER-RELEASE: npm's job gives its container an entry on the staging folder,
+/// a grants record and an AppContainer folder even when `node.exe` cannot start, and the
+/// release takes all three back with the profile, so a staging folder renamed into place
+/// carries no grant.
+#[test]
+fn the_release_takes_back_what_the_npm_job_was_granted() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let before = entries(&staged);
+    let job = crate::sandbox::canonical(&staged).unwrap();
+    let home = crate::sandbox::canonical(&work).unwrap().join("home");
+    let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
+    let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
+    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    assert!(!ran.status.success(), "{}", shown(&ran));
+    assert_ne!(entries(&staged), before, "{}", shown(&ran));
+    assert!(record.is_file(), "{}", shown(&ran));
+    assert!(package.is_dir(), "{}", shown(&ran));
+    assert!(os::release(&npm_profile(&npm, VERSION), &job, &home));
+    assert_eq!(entries(&staged), before);
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!npm_profile(&npm, VERSION).exists());
+}
+
+/// V243-WIN-CONTAINER-RELEASE: a release that cannot go ahead logs and reports false without
+/// stopping the engine: a profile path Windows cannot read, and a profile naming another
+/// container than the job's folders give, which is kept with nothing of it released.
+#[test]
+fn a_refused_release_reports_false_and_keeps_the_profile() {
+    let case = case();
+    let base = crate::sandbox::canonical(&case.root).unwrap();
+    let folders = ["project", "home", "tmp"].map(|name| base.join("job").join(name));
+    for folder in &folders {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let grants = base.join("grants");
+    fs::create_dir_all(&grants).unwrap();
+    assert!(!os::release(
+        Path::new("C:\\no\0such.sb"),
+        &folders[0],
+        &folders[1]
+    ));
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &folders[0],
+        &folders[1],
+        &folders[2],
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+    let derived = crate::sandbox::windows::container_for(&folders[0], &folders[1]);
+    assert_eq!(forged.container, derived);
+    forged.container = format!("crazyagent.{}", "0".repeat(32));
+    let profile = base.join("forged.sb");
+    fs::write(&profile, forged.encode().unwrap()).unwrap();
+    assert!(!os::release(&profile, &folders[0], &folders[1]));
+    assert!(profile.is_file());
+    assert!(!grants.join(format!("container-{derived}.lock")).exists());
+}
+
+/// Runs a node probe's job in a fresh scratch folder and stops before its release, as a probe
+/// that crashed there would. Input: the case. Output: the scratch folder, the grants record
+/// and the AppContainer folder its job left.
+fn crashed_probe(case: &Case) -> (PathBuf, PathBuf, PathBuf) {
+    let npm = case.root.join("setup").join("npm");
+    let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
+    let base = crate::sandbox::canonical(&scratch).unwrap();
+    let name = crate::sandbox::windows::container_for(&base.join("project"), &base.join("home"));
+    let (record, package) = container_files(&name);
+    let mut command = node_command(&case.root, &scratch, &case.bin).unwrap();
+    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    assert!(record.is_file(), "{}", shown(&ran));
+    assert!(package.is_dir(), "{}", shown(&ran));
+    (scratch, record, package)
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a node probe that crashed before its release left its
+/// container; the next probe, with no other probe running, releases it, so npx's folder keeps
+/// no entry for it and its record, AppContainer folder and scratch folder are gone.
+#[test]
+fn a_node_probe_releases_the_container_a_crashed_probe_left() {
+    let case = case();
+    let before = entries(&case.bin);
+    let (scratch, record, package) = crashed_probe(&case);
+    assert_ne!(entries(&case.bin), before);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(entries(&case.bin), before);
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!scratch.exists());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: while another probe holds the check lock, a probe
+/// releases no container of a scratch folder it finds, since it may be that probe's live one;
+/// once the lock is free the next probe releases it.
+#[test]
+fn a_node_probe_leaves_a_live_probe_container_alone() {
+    let case = case();
+    let (scratch, record, package) = crashed_probe(&case);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(case.root.join("setup").join("npm").join("node-check.lock"))
+        .unwrap();
+    held.lock_shared().unwrap();
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert!(record.is_file());
+    assert!(package.is_dir());
+    assert!(scratch.is_dir());
+    held.unlock().unwrap();
+    drop(held);
+    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!scratch.exists());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an npm install that crashed before its release left its
+/// staging and work folders, paired by one random suffix, and its container; the next install
+/// of that version, under the version's lock, releases that container before it removes the
+/// folders, so npx's folder keeps no entry for it.
+#[test]
+fn an_npm_install_releases_the_container_a_crashed_install_left() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let before = entries(&case.bin);
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    let work = npm.join(format!(".{prefix}-work-{random}"));
+    fs::create_dir(&work).unwrap();
+    let job = crate::sandbox::canonical(&staged).unwrap();
+    let home = crate::sandbox::canonical(&work).unwrap().join("home");
+    let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
+    let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
+    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    assert!(record.is_file(), "{}", shown(&ran));
+    assert!(package.is_dir(), "{}", shown(&ran));
+    assert_ne!(entries(&case.bin), before);
+    let folder = install_folder(&case.root, VERSION);
+    assert_eq!(
+        replace(&case.root, &folder, &case.bin, VERSION),
+        Err(InstallError("context_mode_install_failed"))
+    );
+    assert_eq!(entries(&case.bin), before);
+    assert!(!record.exists());
+    assert!(!package.exists());
+    assert!(!staged.exists());
+    assert!(!work.exists());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an install's work folder carries its staging folder's
+/// random suffix, so a later install can pair the two, and is never one that exists.
+#[test]
+fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    let work = work_folder(&staged, &prefix).unwrap();
+    assert_eq!(work, npm.join(format!(".{prefix}-work-{random}")));
+    assert!(work.is_dir());
+    assert_eq!(
+        work_folder(&staged, &prefix),
+        Err(InstallError("setup_store_unavailable"))
+    );
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a left pair whose version profile names another
+/// container is not released by the profile's word: the release refuses and keeps the
+/// profile, nothing of that container is touched, and both folders are still removed.
+#[test]
+fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
+    let case = case();
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let work = work_folder(&staged, &prefix).unwrap();
+    let (job, home) = npm_job(&staged, &work).unwrap();
+    let tmp = crate::sandbox::canonical(&work).unwrap().join("tmp");
+    for folder in [&home, &tmp] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let grants = case.root.join("grants");
+    fs::create_dir_all(&grants).unwrap();
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &job,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
+    assert_eq!(
+        forged.container,
+        crate::sandbox::windows::container_for(&job, &home)
+    );
+    forged.container = format!("crazyagent.{}", "0".repeat(32));
+    let profile = npm_profile(&npm, VERSION);
+    fs::write(&profile, forged.encode().unwrap()).unwrap();
+    remove_staged(&npm, &prefix, VERSION);
+    assert!(profile.is_file(), "a refused release keeps the profile");
+    assert!(
+        !grants
+            .join(format!("container-{}.lock", forged.container))
+            .exists()
+    );
+    assert!(!staged.exists());
+    assert!(!work.exists());
 }

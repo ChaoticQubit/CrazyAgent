@@ -546,6 +546,7 @@ fn master_wire_types_are_closed_snake_case_without_producer_actions() {
         "protocol_fault",
         "frame_limit",
         "worktree_uncertain",
+        "git_too_old",
         "sandbox_stopped",
         "cancelled",
         "unknown",

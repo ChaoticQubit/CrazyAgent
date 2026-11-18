@@ -992,13 +992,6 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     case.close().await;
 }
 
-/// Has the owner replace the native pool with one serving the given projects, its
-/// members, roles, fallback and quota policy as in CONFIG. Inputs: the case, the edit id
-/// and the projects. Output: the owner's result.
-async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerResult {
-    replace_native_pool_members(case, id, projects, &["native-connection"]).await
-}
-
 /// Has the owner replace the native pool with one serving the given projects through the
 /// given members, its roles, fallback and quota policy as in CONFIG. Inputs: the case,
 /// the edit id, the projects and the member connection ids. Output: the owner's result.

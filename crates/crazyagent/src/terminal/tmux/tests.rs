@@ -129,16 +129,23 @@ fn a_send_keys_run_never_cuts_a_paste_end_marker_inside_the_input() {
 
 /// #359 r2, rv-code2 r2 F1: the desktop joins whole events into one input, and no
 /// `send-keys` run ends inside one of them, so an app never reads half an escape sequence
-/// and takes its lone ESC for the Escape key.
+/// and takes its lone ESC for the Escape key. V243-PASTE-SS3-X10-UTF8: that holds for an SS3
+/// key whose final is a UTF-8 character, and for an X10 report past column or row 95, whose
+/// three bytes xterm.js sends raw, one byte per value up to 0xFF and never as UTF-8 (#398
+/// r1 F1), after any count of typed bytes.
 #[test]
 fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
     let text = |times: usize| vec![&b"x"[..]; times];
-    let cases: Vec<(&str, Vec<&[u8]>)> = vec![
+    let mut cases: Vec<(&str, Vec<&[u8]>)> = vec![
         ("wheel reports", vec![&b"\x1b[<65;40;12M"[..]; 341]),
         ("held arrow keys", vec![&b"\x1b[A"[..]; 300]),
         ("held application arrow keys", vec![&b"\x1bOA"[..]; 300]),
         ("alt keys", [text(1), vec![&b"\x1bx"[..]; 300]].concat()),
         ("x10 mouse reports", vec![&b"\x1b[M`!!"[..]; 100]),
+        (
+            "ss3 keys with a utf-8 final",
+            [text(1), vec![&b"\x1bO\xc3\xa9"[..]; 100]].concat(),
+        ),
         (
             "osc replies",
             vec![&b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07"[..]; 20],
@@ -154,6 +161,18 @@ fn a_send_keys_run_never_cuts_an_escape_sequence_of_a_batched_input() {
             .concat(),
         ),
     ];
+    for (case, report) in [
+        ("raw x10 wheel past column 95", &b"\x1b[M`\x84\x34"[..]),
+        (
+            "raw x10 click past column and row 95",
+            &b"\x1b[M \x84\x98"[..],
+        ),
+        ("raw x10 release past column 95", &b"\x1b[M#\xa2\x48"[..]),
+    ] {
+        for typed in 0..12 {
+            cases.push((case, [text(typed), vec![report; 200]].concat()));
+        }
+    }
     for (case, events) in cases {
         let bytes = events.concat();
         let bounds: Vec<usize> = events
@@ -2163,13 +2182,15 @@ fn probing_a_live_server_out_of_descriptors() {
     std::fs::write(home.join("answer"), format!("{answer:?}")).unwrap();
 }
 
-/// A tmux program answering as the stand-in server a lead swapped in for its own would: its
-/// session lists `agent` and every pane it reports has `pid` as its first process. Takes the
-/// folder it goes in, the agent and the pid. Returns the program.
+/// A tmux program answering as the stand-in server a lead swapped in for its own would: it
+/// reports the lowest version the host takes ([`VERSION_MIN`]), its session lists `agent` and
+/// every pane it reports has `pid` as its first process. Takes the folder it goes in, the
+/// agent and the pid. Returns the program.
 #[cfg(target_os = "macos")]
 fn forging_tmux(folder: &Path, agent: &AgentId, pid: impl std::fmt::Display) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let program = folder.join("forging-tmux");
+    let (major, minor) = VERSION_MIN;
     let script = format!(
         r#"#!/bin/sh
 printf '%%begin 1 0 1\n%%end 1 0 1\n'
@@ -2177,7 +2198,7 @@ number=1
 while IFS= read -r line; do
   printf '%%begin 1 %s 1\n' "$number"
   case "$line" in
-    *'#{{version}}'*) printf '3.5 end\n' ;;
+    *'#{{version}}'*) printf '{major}.{minor} end\n' ;;
     *list-windows*) printf '{agent} end\n' ;;
     *list-panes*) printf '%%1 {pid} 0 end\n' ;;
     *new-window*) printf '%%2 {pid} end\n' ;;

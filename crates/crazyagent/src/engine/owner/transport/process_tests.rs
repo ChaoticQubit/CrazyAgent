@@ -2376,7 +2376,7 @@ fn process_import_never_labels_the_project_text() {
             "carried",
         ][..],
     ] {
-        let done = crate::spawn_gate::output(
+        let done = crate::spawn_gate::collected(
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&folder)

@@ -303,6 +303,21 @@ impl OwnerController {
         self.owner_client()?.job_dismiss(id).await
     }
 
+    /// Reads the reinstall offer kept for a project's folder. Takes the project. Returns the
+    /// offer, or None when there is none.
+    pub async fn reinstall_offer(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Option<crate::projects_home::reinstall::Offer>, EngineError> {
+        self.owner_client()?.reinstall_offer(project_id).await
+    }
+
+    /// Dismisses a project's reinstall offer. Takes the project. Returns whether one was
+    /// dismissed.
+    pub async fn reinstall_dismiss(&mut self, project_id: ProjectId) -> Result<bool, EngineError> {
+        self.owner_client()?.reinstall_dismiss(project_id).await
+    }
+
     /// Reads the rules a new GitHub repository starts with. Takes nothing.
     /// Returns the rules on, DEC-182's standard setup while the owner saved none.
     pub async fn github_rule_defaults(&mut self) -> Result<BTreeSet<GitHubRule>, EngineError> {

@@ -253,16 +253,30 @@ fn private(
     Ok(())
 }
 
-fn executable_names(name: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![format!("{name}.exe"), name.to_owned()]
-    } else {
+/// The file names a search tries for a program name in each folder, in order: the name
+/// alone off Windows; on Windows `<name>.exe`, then `<name>.cmd` (an npm cmd-shim the
+/// resolver maps to its script, never run through cmd.exe), and a name that already has an
+/// extension alone. The extensionless file npm writes beside its shims is an sh script
+/// Windows cannot start, so it is never tried. Input: the name. Output: the names.
+pub(crate) fn executable_names(name: &str) -> Vec<String> {
+    if !cfg!(windows) || Path::new(name).extension().is_some() {
         vec![name.to_owned()]
+    } else {
+        vec![format!("{name}.exe"), format!("{name}.cmd")]
     }
 }
 
-fn executable_file(path: &Path) -> Option<PathBuf> {
+/// The real file a launch of an entry runs, while it is a runnable file: on Windows an npm
+/// cmd-shim gives the script it names ([`crate::tools::cmd_shim_real`]), the pin, and any
+/// other batch file gives none. Input: the entry. Output: the real file, or none.
+pub(crate) fn executable_file(path: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(path).ok()?;
+    #[cfg(windows)]
+    let real = if crate::tools::batch_file(&real) {
+        crate::tools::cmd_shim_real(&real)?
+    } else {
+        real
+    };
     let metadata = std::fs::metadata(&real).ok()?;
     #[cfg(unix)]
     let runnable = std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0;

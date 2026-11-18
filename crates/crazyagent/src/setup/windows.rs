@@ -594,6 +594,10 @@ mod tests {
             bin.join("npx.cmd"),
             bin.join("npx.exe"),
             bin.join("node.exe"),
+            bin.join("node_modules")
+                .join("npm")
+                .join("bin")
+                .join("npx-cli.js"),
             bin.join("tool"),
             links.join("uv.exe"),
             elsewhere.join("other.cmd"),

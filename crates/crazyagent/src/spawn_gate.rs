@@ -14,6 +14,18 @@ thread_local! {
     static SPAWNED: Cell<usize> = const { Cell::new(0) };
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    static ACCEPT_WAITS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Test helper: how many times this thread's blocking accepts have waited for a client, so a
+/// row can bound the wakeups one accept takes. Output: the count.
+#[cfg(all(test, unix))]
+pub(crate) fn accept_waits() -> usize {
+    ACCEPT_WAITS.get()
+}
+
 /// Test helper: how many children this thread has started through the gate, so a row can
 /// bound the processes one call starts. Output: the count.
 #[cfg(all(test, target_os = "macos"))]
@@ -73,12 +85,19 @@ pub fn guarded<T>(create: impl FnOnce() -> T) -> T {
     create()
 }
 
-/// Starts a child process while no other thread of this process starts one or
-/// creates a socket, so the child inherits only its own pipes.
-/// Input: the configured command. Output: the child, or the error that kept it
-/// from starting.
+/// Starts a child process while no other thread of this process starts one or creates a
+/// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program is
+/// refused, since Windows would run it through cmd.exe ([`crate::tools::batch_file`]).
+/// Input: the configured command. Output: the child, or the error that kept it from starting.
 #[allow(clippy::disallowed_methods)]
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    #[cfg(windows)]
+    if crate::tools::batch_file(std::path::Path::new(command.get_program())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "spawn_batch_file_refused",
+        ));
+    }
     #[cfg(test)]
     SPAWNED.set(SPAWNED.get() + 1);
     guarded(|| command.spawn())
@@ -464,8 +483,8 @@ pub fn connect_tcp_std_timeout(
     guarded(|| std::net::TcpStream::connect_timeout(address, timeout))
 }
 
-/// Accepts one connection on a blocking or non-blocking TCP listener. A blocking
-/// listener is polled without the gate every few milliseconds and keeps its mode;
+/// Accepts one connection on a blocking or non-blocking TCP listener. A blocking listener
+/// waits for a client in poll(2) without the gate, then accepts under it, and keeps its mode;
 /// the accepted stream is blocking. Input: the listener. Output: the stream and peer.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
@@ -479,7 +498,15 @@ pub fn accept_tcp_std(
     let accepted = loop {
         match guarded(|| listener.accept()) {
             Err(error) if waits && error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(ACCEPT_POLL);
+                #[cfg(test)]
+                ACCEPT_WAITS.set(ACCEPT_WAITS.get() + 1);
+                let mut fds = [rustix::event::PollFd::new(
+                    listener,
+                    rustix::event::PollFlags::IN,
+                )];
+                if crate::platform::fd_wait::ready(&mut fds, None).is_err() {
+                    std::thread::sleep(ACCEPT_POLL);
+                }
             }
             other => break other,
         }
