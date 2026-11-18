@@ -676,9 +676,10 @@ impl Shared {
         self.submit(surface, output, &rects)
     }
 
-    /// Waits for a surface's next texture before the frame is built, so output that arrives
-    /// during the wait is drawn in it; a failed wait reconfigures the surface. Input: the
-    /// surface. Output: the texture for `draw_acquired`, or why there is none.
+    /// Waits for a surface's next texture; a failed wait reconfigures the surface. `draw`
+    /// calls it after building the frame; a caller that wants output arriving during the
+    /// wait drawn in that frame calls it first and builds with `draw_acquired`. Input: the
+    /// surface. Output: the texture, or why there is none.
     pub fn acquire(&self, surface: &mut Surface) -> Result<wgpu::SurfaceTexture, String> {
         let set = self.device.as_ref().ok_or("no device")?;
         surface.surface.get_current_texture().map_err(|e| {

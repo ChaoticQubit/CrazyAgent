@@ -60,6 +60,7 @@ struct Slot<T> {
     geometry_owed: bool,
     shown: bool,
     changed: bool,
+    misses: u8,
     fresh: bool,
     removing: bool,
 }
@@ -112,6 +113,7 @@ impl<T> Board<T> {
             geometry_owed: false,
             shown: false,
             changed: false,
+            misses: 0,
             fresh: true,
             removing: false,
         });
@@ -231,18 +233,30 @@ impl<T> Board<T> {
     /// next post, so a surface lost for good cannot spin the thread. Input: the view id.
     /// Output: whether the change is still owed.
     pub fn missed(&self, id: u64) -> bool {
-        let _ = id;
-        unimplemented!("H1 r2 red")
+        let mut slots = self.lock();
+        let Some(slot) = slots.iter_mut().find(|slot| slot.id == id) else {
+            return false;
+        };
+        assert!(!slot.fresh, "a wait is missed only after the hand-over");
+        slot.misses += 1;
+        assert!(slot.misses <= MISSES_MAX);
+        let owed = slot.misses < MISSES_MAX;
+        if !owed {
+            slot.changed = false;
+            slot.misses = 0;
+        }
+        owed
     }
 
     /// A view's newest frame, taken after the swap-chain wait, so a frame posted during
-    /// the wait is drawn in it; clears the view's change. Input: the view id. Output: the
-    /// frame posted since the last take, or none.
+    /// the wait is drawn in it; clears the view's change unless a geometry came in during
+    /// the wait. Input: the view id. Output: the frame posted since the last take, or none.
     pub fn take(&self, id: u64) -> Option<T> {
         let mut slots = self.lock();
         let slot = slots.iter_mut().find(|slot| slot.id == id)?;
         assert!(!slot.fresh, "a frame is taken only after the hand-over");
-        slot.changed = false;
+        slot.changed = slot.geometry_owed;
+        slot.misses = 0;
         slot.frame.take()
     }
 }
