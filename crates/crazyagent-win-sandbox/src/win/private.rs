@@ -18,9 +18,8 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SE_DACL_PROTECTED, SE_SACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
-    SetSecurityDescriptorSacl,
+    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, SetSecurityDescriptorSacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
@@ -474,9 +473,9 @@ fn open(
 }
 
 /// The security descriptor a private folder or file is created with: the user as owner, the
-/// protected list of [`list`] and the protected label of [`label_list`]. The owner, list and
-/// label live in their own buffers, which do not move when this value does, so the
-/// descriptor's pointers stay valid.
+/// protected list of [`list`] and the label of [`label_list`], its system list unprotected as
+/// a protected one needs SeSecurityPrivilege (error 1314). The buffers do not move when this
+/// value does, so the descriptor's pointers stay valid.
 struct Planned {
     owner: Words,
     list: Words,
@@ -498,7 +497,7 @@ impl Planned {
         let owner: PSID = planned.owner.words.as_mut_ptr().cast();
         let dacl: *const ACL = planned.list.words.as_ptr().cast();
         let sacl: *const ACL = planned.label.words.as_ptr().cast();
-        let protected = SE_DACL_PROTECTED | SE_SACL_PROTECTED;
+        let protected = SE_DACL_PROTECTED;
         let built = unsafe {
             InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) != 0
                 && SetSecurityDescriptorOwner(descriptor, owner, 0) != 0
