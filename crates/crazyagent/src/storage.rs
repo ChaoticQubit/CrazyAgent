@@ -482,6 +482,22 @@ impl Claim {
     }
 }
 
+/// Withdraws a timed job's claim that is still queued when its submitter stops waiting
+/// before deciding it, as when the transport cuts an owner request at its deadline, so the
+/// worker skips the job and it never lands. It holds no claim for an access-narrowing job,
+/// which always lands.
+struct WithdrawnOnDrop(Option<Arc<Claim>>);
+
+impl Drop for WithdrawnOnDrop {
+    fn drop(&mut self) {
+        if let Some(claim) = self.0.take() {
+            claim.decide(WITHDRAWN);
+            let state = claim.state.load(std::sync::atomic::Ordering::Acquire);
+            assert!(state == TAKEN || state == WITHDRAWN);
+        }
+    }
+}
+
 /// The answer for an access-narrowing job whose bound ran out: it stays queued or running
 /// and takes effect when storage gets to it, unless the engine stops first.
 pub(crate) const ACCESS_CHANGE_PENDING: &str = "access_change_pending";
@@ -603,9 +619,11 @@ impl Storage {
         self.sender
             .try_send(Job::Claimed(Box::new(job), claim.clone()))
             .map_err(|_| error(full))?;
+        let mut dropped = WithdrawnOnDrop((!narrowing).then(|| claim.clone()));
         let late = tokio::time::timeout_at(deadline, claim.taken.notified())
             .await
             .is_err();
+        dropped.0 = None;
         if late && narrowing {
             return Err(error(ACCESS_CHANGE_PENDING));
         }
