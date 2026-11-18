@@ -398,6 +398,10 @@ const END_COPY: Record<string, string> = {
   terminal_attach_timeout: "The engine took too long to open this terminal.",
   terminal_not_answering: "The terminal server didn't answer in time.",
   terminal_attach_failed: "The engine couldn't open this terminal.",
+  terminal_closed: "The connection to this terminal closed. Open it again to reconnect.",
+  owner_grant_stale_or_revoked: "This app's access to the engine changed, so the view closed. Reconnect, then open it again.",
+  native_terminal_input_overflow: "More typing was waiting than this terminal could take, so the view closed. Open it again to keep typing.",
+  native_terminal_gpu: "This Mac couldn't draw the terminal, so the view closed. Open it again to try once more.",
   exited: "The agent's app exited.",
 };
 
