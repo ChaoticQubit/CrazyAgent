@@ -40,25 +40,35 @@ fn a_home_move_rechecks_agent_work_under_its_hold_before_the_first_write() {
     );
 }
 
-/// V243-FIRMLINK-HELD-INSIDE (sweep #1): agent work recorded under the other name of the
-/// home holds a home move: a worktree recorded through /System/Volumes/Data under a home
-/// saved short, and a short worktree under a home saved long before the data-volume fix.
+/// V243-FIRMLINK-HELD-INSIDE (sweep #1, rv-code4 F1): agent work recorded under either name
+/// of the home holds a home move, whichever name the home was saved under and whether the
+/// recorded worktree exists on disk or is gone or not made yet.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_home_move_sees_agent_work_recorded_under_either_name_of_the_home() {
     let long =
         |path: &Path| std::path::PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
-    for long_home in [false, true] {
+    let cases = [false, true]
+        .into_iter()
+        .flat_map(|long_home| [false, true].map(|long_record| (long_home, long_record)))
+        .flat_map(|(long_home, long_record)| {
+            [false, true].map(|made| (long_home, long_record, made))
+        });
+    for (long_home, long_record, made) in cases {
         let root = tempfile::tempdir().unwrap();
         let base = root.path().canonicalize().unwrap();
         let home = base.join("home");
         let worktree = home.join("demo").join("agent-3");
-        std::fs::create_dir_all(&worktree).unwrap();
-        assert!(long(&worktree).is_dir(), "{}", long(&worktree).display());
-        let (saved, recorded) = if long_home {
-            (long(&home), worktree.clone())
+        std::fs::create_dir_all(&home).unwrap();
+        if made {
+            std::fs::create_dir_all(&worktree).unwrap();
+        }
+        assert!(long(&home).is_dir(), "{}", long(&home).display());
+        let saved = if long_home { long(&home) } else { home.clone() };
+        let recorded = if long_record {
+            long(&worktree)
         } else {
-            (home.clone(), long(&worktree))
+            worktree.clone()
         };
         let mut connection = Connection::open(base.join("engine.db")).unwrap();
         initialize_authority_schemas(&connection).unwrap();
@@ -83,7 +93,7 @@ fn a_home_move_sees_agent_work_recorded_under_either_name_of_the_home() {
         assert_eq!(
             projects_home::recheck(&mut connection, 7).unwrap(),
             Err("home_move_agent_work".to_owned()),
-            "home saved long: {long_home}"
+            "home saved long: {long_home}, record long: {long_record}, record made: {made}"
         );
     }
 }
