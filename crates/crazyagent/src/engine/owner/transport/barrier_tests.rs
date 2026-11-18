@@ -610,6 +610,10 @@ async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves
         .unwrap();
 
     let first = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the first hold"
+    );
     let mut answered = Box::pin(tokio::time::timeout(
         Duration::from_secs(20),
         controller.send_pending(),
@@ -620,7 +624,15 @@ async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves
             .is_err(),
         "the replay check waits behind the first hold"
     );
+    assert!(
+        storage_queue_reaches(&owner, 1).await,
+        "the replay check is queued behind the first hold"
+    );
     let second = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 2).await,
+        "the second hold is queued behind the replay check"
+    );
     assert!(
         tokio::time::timeout(Duration::from_secs(1), &mut answered)
             .await
