@@ -453,4 +453,83 @@ mod windows_tests {
             "project_files_no_repository"
         );
     }
+
+    /// Makes an empty repository with its own home beside it. Input: the temp folder.
+    /// Output: the repository folder and the home.
+    fn repository(place: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let (repo, home) = (place.join("repo"), place.join("home"));
+        for folder in [&repo, &home] {
+            fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template="]);
+        (repo, home)
+    }
+
+    #[test]
+    fn a_windows_repository_whose_git_folder_points_elsewhere_is_not_listed() {
+        let place = tempfile::tempdir().unwrap();
+        let (repo, _home) = repository(place.path());
+        fs::write(repo.join("README.md"), "readme").unwrap();
+        let (git_dir, stop) = (repo.join(".git"), Instant::now() + LISTING_TIME);
+        fs::write(git_dir.join("commondir"), r"\\127.0.0.1\x").unwrap();
+        assert_eq!(
+            list(&repo, "", FILES_MAX, stop).unwrap_err().0,
+            "project_files_no_repository",
+            "a commondir file is refused before git runs"
+        );
+        fs::remove_file(git_dir.join("commondir")).unwrap();
+        let config = git_dir.join("config");
+        let kept = fs::read_to_string(&config).unwrap();
+        for section in [
+            "[include]\n\tpath = //127.0.0.1/x\n",
+            "[IncludeIf \"gitdir:C:/\"]\n\tpath = //127.0.0.1/x\n",
+        ] {
+            fs::write(&config, format!("{kept}{section}")).unwrap();
+            assert_eq!(
+                list(&repo, "", FILES_MAX, stop).unwrap_err().0,
+                "project_files_no_repository",
+                "{section}"
+            );
+        }
+        fs::write(&config, &kept).unwrap();
+        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["README.md"]);
+    }
+
+    #[test]
+    fn a_windows_repository_own_excludes_file_is_not_read() {
+        let place = tempfile::tempdir().unwrap();
+        let (repo, home) = repository(place.path());
+        let excludes = place.path().join("excludes");
+        fs::write(&excludes, "notes.txt\n").unwrap();
+        let excludes = excludes.to_string_lossy().into_owned();
+        git(&home, &repo, &["config", "core.excludesFile", &excludes]);
+        fs::write(repo.join("notes.txt"), "untracked").unwrap();
+        let stop = Instant::now() + LISTING_TIME;
+        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["notes.txt"]);
+    }
+
+    #[test]
+    fn a_windows_index_entry_that_ntfs_opens_as_git_is_not_listed() {
+        let place = tempfile::tempdir().unwrap();
+        let (repo, home) = repository(place.path());
+        fs::write(repo.join("empty.txt"), "").unwrap();
+        git(&home, &repo, &["add", "empty.txt"]);
+        for name in [".git./config", ".git /config", "git~1/config"] {
+            let entry = format!("100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,{name}");
+            git(
+                &home,
+                &repo,
+                &[
+                    "-c",
+                    "core.protectNTFS=false",
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &entry,
+                ],
+            );
+        }
+        let stop = Instant::now() + LISTING_TIME;
+        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["empty.txt"]);
+    }
 }
