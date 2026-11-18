@@ -1538,6 +1538,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
         }
+        "move_project_two_spellings" => {
+            "Some of this project's saved records name its folder in two ways, and a move would overwrite one with the other. Nothing was moved."
+        }
         "home_add_in_progress" => {
             "A folder is being added to your projects folder. Try again when it finishes."
         }
