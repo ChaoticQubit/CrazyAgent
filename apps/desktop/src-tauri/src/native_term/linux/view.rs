@@ -559,8 +559,8 @@ impl Inner {
         Propagation::Stop
     }
 
-    /// Routes one pointer event in GTK's capture phase, ahead of the webview. A press
-    /// the page gets releases native focus; a middle press reads PRIMARY, whose text
+    /// Routes one pointer event the page widget got, ahead of the page's own handlers. A
+    /// press the page gets releases native focus; a middle press reads PRIMARY, whose text
     /// lands only if the view is still alive, placed and uncovered when it comes back.
     /// Input: the event. Output: whether it goes on to the page.
     fn pointer_event(self: &Rc<Self>, event: &gdk::Event) -> Propagation {
@@ -643,23 +643,27 @@ impl Inner {
 
 /// The Linux side of one native terminal view's input. It takes the toplevel's keys
 /// ahead of the webview while active, through its own input method context, and the
-/// pointer events of its rectangle in GTK's capture phase, and hands each key, commit,
-/// pointer event and focus change to the host's sink with the view's id. Native focus
-/// takes GTK focus off the page, as the macOS view takes first responder, and gives it
-/// back on release; the page taking GTK focus releases native focus.
+/// pointer events of its rectangle from the page widget's `event` signal, which GTK 3
+/// emits before the page's own button, motion and scroll handlers. It hands each key,
+/// commit, pointer event and focus change to the host's sink with the view's id. Native
+/// focus takes GTK focus off the page, as the macOS view takes first responder, and gives
+/// it back on release; the page taking GTK focus releases native focus.
 pub struct View {
     inner: Rc<Inner>,
     handlers: Handlers,
+    page_handlers: Handlers,
     commit: Option<SignalHandlerId>,
 }
 
 impl View {
-    /// Wires a view to a realized toplevel, unplaced and without native focus. Inputs: the
-    /// toplevel, the view id, the sink and the host's boards for the middle-click paste.
-    /// Output: the view, or `native_terminal_surface_unavailable` when the toplevel has no
-    /// GDK window.
+    /// Wires a view to a realized toplevel and the page widget under its rectangle,
+    /// unplaced and without native focus. Inputs: the toplevel, the page widget, the view
+    /// id, the sink and the host's boards for the middle-click paste. Output: the view, or
+    /// `native_terminal_surface_unavailable` when the toplevel has no GDK window or the
+    /// page is not inside it.
     pub fn new(
         toplevel: &gtk::Window,
+        page: &gtk::Widget,
         id: u64,
         sink: Sink,
         clip: Rc<Clip>,
@@ -668,6 +672,9 @@ impl View {
         let gdk = toplevel
             .window()
             .ok_or("native_terminal_surface_unavailable")?;
+        if page.toplevel().as_ref() != Some(toplevel.upcast_ref::<gtk::Widget>()) {
+            return Err("native_terminal_surface_unavailable");
+        }
         let im = gtk::IMMulticontext::new();
         im.set_client_window(Some(&gdk));
         let inner = Rc::new(Inner {
@@ -722,22 +729,18 @@ impl View {
                     }
                 })
             },
-            {
-                let me = me();
-                toplevel.connect_local("captured-event", false, move |values| {
-                    let stop = values
-                        .get(1)
-                        .and_then(|value| value.get::<gdk::Event>().ok())
-                        .is_some_and(|event| matches!(me.pointer_event(&event), Propagation::Stop));
-                    Some(stop.to_value())
-                })
-            },
         ] {
             handlers.push(id);
         }
+        let mut page_handlers = Handlers::new(page);
+        page_handlers.push({
+            let me = me();
+            page.connect_event(move |_, event| me.pointer_event(event))
+        });
         Ok(View {
             inner,
             handlers,
+            page_handlers,
             commit: Some(commit),
         })
     }
@@ -763,13 +766,14 @@ impl View {
 }
 
 impl Drop for View {
-    /// Disconnects the toplevel and input method handlers, cancels any open preedit,
+    /// Disconnects the toplevel, page and input method handlers, cancels any open preedit,
     /// releases the context and gives GTK focus back to the page if the view held native
     /// focus. Output: none.
     fn drop(&mut self) {
         let inner = &self.inner;
         let native = inner.focus.get().is_native();
         self.handlers.disconnect();
+        self.page_handlers.disconnect();
         if let Some(commit) = self.commit.take() {
             inner.im.disconnect(commit);
         }
@@ -1224,7 +1228,14 @@ mod tests {
         });
         page.grab_focus();
         pump_for(Duration::from_millis(300));
-        let view = View::new(&window, ID, seen, Rc::new(Clip::desktop())).expect("a view");
+        let view = View::new(
+            &window,
+            page.upcast_ref(),
+            ID,
+            seen,
+            Rc::new(Clip::desktop()),
+        )
+        .expect("a view");
 
         step("page");
         pump_until("page typing", || page_text(&page) == "v:xy");
@@ -1373,7 +1384,14 @@ mod tests {
             .translate_coordinates(&window, 0, 0)
             .expect("the page inside the toplevel");
         let rect = surface::rect((100.0, 120.0, 400.0, 240.0), offset).expect("a host rect");
-        let view = View::new(&window, ID, seen, Rc::new(Clip::desktop())).expect("a view");
+        let view = View::new(
+            &window,
+            page.upcast_ref(),
+            ID,
+            seen,
+            Rc::new(Clip::desktop()),
+        )
+        .expect("a view");
         view.place(Some(rect));
         view.cover(true);
         assert_eq!(take_seen(), Vec::new());
@@ -1466,7 +1484,14 @@ mod tests {
             .translate_coordinates(&window, 0, 0)
             .expect("the page inside the toplevel");
         let rect = surface::rect((100.0, 120.0, 400.0, 240.0), offset).expect("a host rect");
-        let view = View::new(&window, ID, seen, Rc::new(Clip::desktop())).expect("a view");
+        let view = View::new(
+            &window,
+            page.upcast_ref(),
+            ID,
+            seen,
+            Rc::new(Clip::desktop()),
+        )
+        .expect("a view");
         view.place(Some(rect));
 
         pointer_step("primary", &window, rect);
