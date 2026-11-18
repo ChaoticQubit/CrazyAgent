@@ -1772,6 +1772,7 @@ pub(crate) const SIGN_OUT_NOT_RUN: &str = "native_auth_sign_out_not_run";
 /// owner sign-in. Inputs: the database, the intent's database id and the sign-out. Output:
 /// the outcome, not applicable once recorded, for another database or a profile that never
 /// signed in; or the storage error, which keeps the intent.
+#[cfg(unix)]
 pub(crate) fn replay_logout(
     db: &mut Connection,
     db_instance: &str,
@@ -1851,6 +1852,7 @@ pub(crate) fn replay_logout(
 /// Finds the newest operation of a connection, whatever its settings say now, by the
 /// connection its fact is bound to. Inputs: the transaction and the connection id. Output:
 /// the fact with the highest generation, or none when it never had one.
+#[cfg(unix)]
 fn newest_of(
     tx: &Transaction<'_>,
     connection: &CredentialRef,

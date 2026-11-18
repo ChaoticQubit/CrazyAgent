@@ -742,6 +742,7 @@ impl Storage {
                         return;
                     }
                 };
+                #[cfg(unix)]
                 if let Some(intents) = &intents {
                     replay_intents(&mut connection, intents);
                 }
@@ -3354,6 +3355,7 @@ fn owner_control_in(
 /// What applying a kept narrowing change at open found: it committed now, or it no longer
 /// applies (already applied, past its epoch, or for another database), each of which ends
 /// the intent; the cause is logged.
+#[cfg(unix)]
 pub(crate) enum Replayed {
     Committed,
     NotApplicable(&'static str),
@@ -3364,6 +3366,7 @@ pub(crate) enum Replayed {
 /// first. An intent ends once committed or no longer applicable; one storage could not apply
 /// stays for the next open. Inputs: the database and the store. Output: none; every outcome
 /// is logged.
+#[cfg(unix)]
 fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
     let listing = match intents.list() {
         Ok(listing) => listing,
@@ -3414,6 +3417,7 @@ fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
 /// database, a database with no owner tables, or a client already past its epoch it does
 /// nothing. Inputs: the database, the intent's database id and the revocation. Output: the
 /// outcome, or the storage error, which keeps the intent.
+#[cfg(unix)]
 fn replay_revoke(
     db: &mut Connection,
     db_instance: &str,
