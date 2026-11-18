@@ -135,9 +135,11 @@ fn linear_rgba(color: Rgb, alpha: f32) -> [f32; 4] {
     ]
 }
 
-fn load_fallbacks() -> FontSystem {
+/// Loads the fallback font files that are present into a new font system. Input: the
+/// files. Output: the font system.
+fn load_fallbacks(files: &[FontSource]) -> FontSystem {
     let mut db = fontdb::Database::new();
-    for path in FALLBACKS.iter().filter_map(FontSource::file) {
+    for path in files.iter().filter_map(FontSource::file) {
         if path.is_file() && db.load_font_file(&path).is_err() {
             continue;
         }
@@ -335,7 +337,7 @@ impl Shared {
         let mut shared = Shared {
             instance,
             device: None,
-            fonts: load_fallbacks(),
+            fonts: load_fallbacks(&FALLBACKS),
             swash: SwashCache::new(),
             scale,
             family: String::new(),
@@ -1035,9 +1037,45 @@ mod tests {
         assert_eq!(BACKENDS, wgpu::Backends::DX12);
     }
 
+    /// With no system font at all, an upright, bold, italic and bold italic span each find a
+    /// face of their own style and weight; with none, cosmic-text panics "no default font
+    /// found" while shaping, as an italic span did on DejaVu Sans Mono with no emoji font.
+    #[test]
+    fn every_style_finds_its_own_face_with_no_system_font() {
+        let mut fonts = load_fallbacks(&[]);
+        let styles = [FontStyle::Normal, FontStyle::Italic];
+        let weights = [Weight::NORMAL, Weight::BOLD];
+        let attrs = |style, weight| {
+            Attrs::new()
+                .family(Family::Name("DejaVu Sans Mono"))
+                .style(style)
+                .weight(weight)
+        };
+        for (style, weight) in styles.into_iter().flat_map(|s| weights.map(|w| (s, w))) {
+            assert!(
+                !fonts.get_font_matches(&attrs(style, weight)).is_empty(),
+                "a {style:?} {weight:?} span has a face"
+            );
+        }
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(13.0, 17.0));
+        for (style, weight) in styles.into_iter().flat_map(|s| weights.map(|w| (s, w))) {
+            buffer.set_text(&mut fonts, "ab", &attrs(style, weight), Shaping::Advanced);
+            buffer.shape_until_scroll(&mut fonts, false);
+            let ids: Vec<fontdb::ID> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id))
+                .collect();
+            assert_eq!(ids.len(), 2, "{style:?} {weight:?}");
+            for id in ids {
+                let face = fonts.db().face(id).expect("a loaded face");
+                assert_eq!((face.style, face.weight), (style, weight));
+            }
+        }
+    }
+
     #[test]
     fn every_present_fallback_file_loads_its_faces() {
-        let fonts = load_fallbacks();
+        let fonts = load_fallbacks(&FALLBACKS);
         let present: Vec<std::path::PathBuf> = FALLBACKS
             .iter()
             .filter_map(FontSource::file)
