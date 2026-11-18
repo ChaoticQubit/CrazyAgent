@@ -1417,9 +1417,13 @@ fn cut_projects(mut items: Vec<ProjectRow>, more: bool) -> Result<ProjectList, B
 mod tests {
     use super::*;
 
+    /// One bridge route as the storage-answer row checks it: the route's name and the function
+    /// that turns its engine error into the bridge failure the desktop shows.
+    type RouteRow = (&'static str, fn(EngineError) -> BridgeError);
+
     #[test]
     fn every_route_names_each_storage_answer_instead_of_its_unknown_outcome() {
-        let routes: [(&str, fn(EngineError) -> BridgeError); 17] = [
+        let routes: [RouteRow; 17] = [
             ("accounts", accounts::account_error),
             ("account_profile", account_profile::profile_error),
             ("native_auth", native_auth::auth_error),

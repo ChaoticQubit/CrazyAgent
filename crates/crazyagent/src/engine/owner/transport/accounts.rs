@@ -854,9 +854,7 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
 fn sign_out_reason(code: &str) -> &'static str {
     match code {
         crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
-        "native_auth_host_unavailable" | "native_auth_host_unregistered" => {
-            "the sign-in helper could not run the harness"
-        }
+        "native_auth_host_unavailable" => "the sign-in helper could not run the harness",
         _ => "the harness sign-out failed",
     }
 }
