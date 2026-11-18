@@ -4401,7 +4401,7 @@ fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_fold
     let checkouts = checkouts();
     let folder = checkouts.project.join("private");
     fs::create_dir(&folder).unwrap();
-    let profiles = checkouts.tmp.join("profiles");
+    let profiles = checkouts.project.parent().unwrap().join("profiles");
     fs::create_dir_all(&profiles).unwrap();
     let refused = InstalledSandbox::install(
         confined(&checkouts).hide(&folder).unwrap(),

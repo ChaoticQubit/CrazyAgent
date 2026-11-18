@@ -2683,12 +2683,25 @@ mod tests {
             let mut child = sandbox.wrap(&harness).unwrap();
             child
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
         };
-        assert!(read(&repository.join("open.txt")));
-        assert!(!read(&hidden.join("key.txt")));
+        let open = read(&repository.join("open.txt"));
+        assert!(
+            open.status.success() && open.stdout == b"open\n",
+            "{:?} {} {}",
+            open.status,
+            String::from_utf8_lossy(&open.stdout),
+            String::from_utf8_lossy(&open.stderr)
+        );
+        let key = read(&hidden.join("key.txt"));
+        assert!(
+            !key.status.success() && !String::from_utf8_lossy(&key.stdout).contains("secret"),
+            "{:?} {}",
+            key.status,
+            String::from_utf8_lossy(&key.stderr)
+        );
         assert_eq!(
             std::fs::read_to_string(hidden.join("key.txt")).unwrap(),
             "owner secret\n"
