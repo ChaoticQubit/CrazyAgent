@@ -182,6 +182,15 @@ fn drive_root(path: &Path) -> PathBuf {
     }
 }
 
+/// Gives a git the temp folder an owner's git has, `TEMP` and `TMP`, which the engine's
+/// cleared environment lacks: without one a signature check cannot write the signature
+/// file and starts no program (probe 44347783949). Input: the command. Output: the same
+/// command.
+fn with_temp(command: &mut Command) -> &mut Command {
+    let temp = std::env::temp_dir();
+    command.env("TEMP", &temp).env("TMP", temp)
+}
+
 /// A git as the IDE server would start it, under [`crate::ide::git::config_env`], with
 /// `path` as its search path. Inputs: git, the project, its home and the search path.
 /// Output: the command, without arguments.
@@ -202,11 +211,11 @@ fn ide_git(git: &Path, project: &Path, home: &Path, path: &str) -> Command {
     command
 }
 
-/// V244-WIN-GIT-SAFE-PROGRAM-PATH: with a marker program planted where a drive-relative
-/// path, a path lookup or a hook folder could reach (each drive's `usr\bin\false`,
-/// `dev\null.exe` and `dev\null\<hook>.exe`, the project and a folder first on the path),
-/// publish's git, a stage init, a commit, a signature check in every armor and the IDE's
-/// git run none of them, for a project on each drive, and every git ends as it should.
+/// V244-WIN-GIT-SAFE-PROGRAM-PATH: with a marker planted where a drive-relative path, a
+/// path lookup or a hook folder could reach (each drive's `usr\bin\false`, `dev\null.exe`
+/// and `dev\null\<hook>.exe`, the project, a folder first on the path), publish's git, a
+/// stage init, a commit, a signature check per armor (also with the owner's temp folder,
+/// which it needs to start a program) and the IDE's git run none, and every git ends well.
 #[test]
 #[ignore = "plants programs under the drive roots: the farm runs it by name (V244-WIN-GIT-SAFE-PROGRAM-PATH)"]
 fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
@@ -329,6 +338,36 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
                     "--format=%s",
                     commit.as_str(),
                 ]))
+                .unwrap(),
+                true,
+                Some(subject.as_str()),
+            );
+            check(
+                format!("{at} {armor} signature check with TEMP"),
+                crate::spawn_gate::collected(
+                    with_temp(&mut project_git(&git, home, project)).args([
+                        "log",
+                        "--show-signature",
+                        "-1",
+                        "--format=%s",
+                        commit.as_str(),
+                    ]),
+                )
+                .unwrap(),
+                true,
+                Some(subject.as_str()),
+            );
+            check(
+                format!("{at} {armor} IDE signature check with TEMP"),
+                crate::spawn_gate::collected(
+                    with_temp(&mut ide_git(&git, project, home, &path)).args([
+                        "log",
+                        "--show-signature",
+                        "-1",
+                        "--format=%s",
+                        commit.as_str(),
+                    ]),
+                )
                 .unwrap(),
                 true,
                 Some(subject.as_str()),
