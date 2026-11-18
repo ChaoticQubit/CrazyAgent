@@ -8,6 +8,12 @@ rows="engine::codex_host::process_tests::a_codex_host_whose_harness_it_can_never
 cpus=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 bad=0
 build() {
+  if [ "${RUNNER_OS:-}" = Linux ]; then
+    cargo build -p crazyagent --bin crazyagent-landlock --locked > "$out/helper-$1.txt" 2>&1 || { echo "::error::landlock helper build failed at $1"; tail -20 "$out/helper-$1.txt"; exit 1; }
+    mkdir -p target/debug/deps
+    cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
+    ls -l target/debug/deps/crazyagent-landlock
+  fi
   cargo test -p crazyagent --lib --locked --no-run > "$out/build-$1.txt" 2>&1
   local code=$?
   tail -2 "$out/build-$1.txt"
@@ -24,6 +30,7 @@ runs() {
         grep -hE 'panicked at|reaped its harness first|lease was never released' -A1 "$out/$label-$short-$i.txt" | head -3
       fi
       grep -qE '^test .* ok$' "$out/$label-$short-$i.txt" || grep -qE 'FAILED' "$out/$label-$short-$i.txt" || { echo "::error::$short did not run at $label"; bad=1; }
+      if grep -qE 'master_host_fixture.rs:2[0-9][0-9]:[0-9]+:$' "$out/$label-$short-$i.txt" && grep -qE 'Unavailable\(' "$out/$label-$short-$i.txt"; then echo "::error::$short at $label failed in fixture setup (sandbox unavailable), not the race"; bad=1; fi
     done
     echo "ROWS $label $short: $fails of $n failed"
     echo "$label $short $fails" >> "$out/counts"
