@@ -834,7 +834,7 @@ pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineErr
 }
 
 /// The first snapshot run of the three tables, for the schema step that puts sessions on
-/// the log (step 15): rows written before the log reach replay through it, through the
+/// the log (step 16): rows written before the log reach replay through it, through the
 /// open's proof. A store without the `state` table, or with no row in any of the tables
 /// that exist, gets no run and moves no revision. Inputs: the step's transaction and the
 /// open's proof. Output: whether a run was appended, or the first refusal.
