@@ -587,24 +587,95 @@ fn a_read_root_only_an_administrator_can_open_to_containers_is_refused_by_name()
     assert!(!marker.exists());
 }
 
-/// V244-WIN-NPM r2 F1: the read root of the row above, inside a folder every app container
-/// reads, is not refused when that folder is a read root too, since the helper grants only the
-/// outer one; on its own it is refused. The farm makes its parent readable to every package.
+/// V244-WIN-NPM r2 F1 and V244-WIN-NESTED-READ-ROOT: the read root of the row above, inside a
+/// folder every app container reads through an entry for that folder only, passes the check
+/// before the helper when the folder is a read root too, and the helper, which leaves that
+/// folder alone, names it once its grant is written; on its own it is refused before. The farm
+/// makes its parent readable to every package.
 #[test]
 #[ignore = "needs an administrator-made folder and a standard user (test farm)"]
-fn a_read_root_inside_a_granted_one_is_not_refused_for_itself() {
+fn a_read_root_inside_one_every_package_reads_is_named_by_the_helper_not_the_check_before() {
     let fixture = PathBuf::from(std::env::var("CRAZYAGENT_TEST_UNCHANGEABLE_ROOT").unwrap());
     let outer = fixture.parent().unwrap().to_path_buf();
     let case = case("crazyagent.test.nested");
     let mut profile = case.base.clone();
     profile.read_roots = vec![plain(&outer), plain(&fixture)];
     assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
+    refuses_unreached(&case, &profile, &fixture);
     profile.read_roots = vec![plain(&fixture)];
     let alone = plain(&fixture);
     assert_eq!(
         crazyagent_win_sandbox::unreadable_read_root(&profile),
         Some(alone.as_str())
     );
+}
+
+/// Runs the helper on `profile` and asserts it started nothing and named `root` as a read root
+/// app containers cannot read once its grant is written (V244-WIN-NESTED-READ-ROOT).
+/// Inputs: the case, the profile and the root.
+fn refuses_unreached(case: &Case, profile: &BoundaryProfile, root: &Path) {
+    install(case, profile);
+    let marker = case.project.join("started.txt");
+    let output = run(case, &["/C", "echo", "started>", &plain(&marker)]);
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(REFUSED_EXIT)),
+        "{}",
+        ran(&output)
+    );
+    let named = format!("app containers cannot read the read root {}", plain(root));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&named),
+        "{}",
+        ran(&output)
+    );
+    assert!(!marker.exists());
+}
+
+/// Runs `icacls` on `path` with `args` and asserts it succeeded. Inputs: the path and the
+/// arguments after it.
+fn icacls(path: &Path, args: &[&str]) {
+    let done = Command::new(system("icacls.exe"))
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(done.status.success(), "{}", ran(&done));
+}
+
+/// V244-WIN-NESTED-READ-ROOT (rv-code2 #529 r2 F1): a read root inside a granted one is checked
+/// once the grant is written. One that inherits the grant runs. One under a root every package
+/// reads through an entry for that folder only, which the helper leaves alone, and one whose
+/// own inheritance is cut under a root the helper grants, are named and nothing starts, though
+/// the check before the helper passes both, since this user could open them.
+#[test]
+fn a_read_root_the_grant_around_it_does_not_reach_is_refused_by_name() {
+    let case = case("crazyagent.test.reach");
+    let reached = case.outside.join("reached");
+    let cut = case.outside.join("cut");
+    let shelf = case.project.parent().unwrap().join("shelf");
+    let inner = shelf.join("inner");
+    for folder in [&reached, &cut, &inner] {
+        fs::create_dir_all(folder).unwrap();
+        fs::write(folder.join("note.txt"), "nested note\r\n").unwrap();
+    }
+    icacls(&cut, &["/inheritance:d"]);
+    icacls(&shelf, &["/grant", "*S-1-15-2-1:(RX)"]);
+
+    let mut profile = case.base.clone();
+    profile.read_roots = vec![plain(&case.outside), plain(&reached)];
+    install(&case, &profile);
+    let read = run(&case, &["/C", "type", &plain(&reached.join("note.txt"))]);
+    assert!(read.status.success(), "{}", ran(&read));
+    assert!(String::from_utf8_lossy(&read.stdout).contains("nested note"));
+
+    profile.read_roots = vec![plain(&case.outside), plain(&cut)];
+    assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
+    refuses_unreached(&case, &profile, &cut);
+
+    profile.read_roots = vec![plain(&shelf), plain(&inner)];
+    assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
+    refuses_unreached(&case, &profile, &inner);
 }
 
 #[test]
