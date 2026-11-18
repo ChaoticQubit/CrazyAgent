@@ -139,7 +139,8 @@ impl Painter {
 
     /// Gives a view its new geometry before the swap-chain wait: a resize on the same
     /// scale, or a new surface on the new scale's shared state, the old one dropped first
-    /// since a window has one swap chain.
+    /// since a window has one swap chain. A resize wgpu refused counts a failure and makes
+    /// the surface again at the new geometry, within the board's bounded retry.
     fn refit(&mut self, index: usize, geometry: Geometry) {
         assert!(
             geometry.size.0 >= 1 && geometry.size.1 >= 1,
@@ -154,8 +155,13 @@ impl Painter {
             .iter()
             .find(|(shared_key, _)| *shared_key == key);
         if let (true, Some(surface), Some((_, shared))) = (same, view.surface.as_mut(), held) {
-            shared.resize(surface, geometry.size.0, geometry.size.1);
-            return;
+            if shared
+                .resize(surface, geometry.size.0, geometry.size.1)
+                .is_ok()
+            {
+                return;
+            }
+            failed();
         }
         view.surface = None;
         let handle = view.handle;

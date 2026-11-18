@@ -96,8 +96,9 @@ struct Device {
 
 impl Device {
     /// Whether wgpu reported this device lost. wgpu runs the lost callback inside the call
-    /// that lost the device, and every wgpu call here runs on the main thread, so a loss is
-    /// seen by the next check on that thread. Output: the answer; it never clears.
+    /// that lost the device, and every wgpu call here runs on one thread (the main thread on
+    /// macOS, the render thread on Windows), so a loss is seen by the next check on that
+    /// thread. Output: the answer; it never clears.
     fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
     }
