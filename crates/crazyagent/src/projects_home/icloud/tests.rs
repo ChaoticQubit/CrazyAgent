@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::projects_home::COPY_BOUNDS;
 
 fn seconds(count: u64) -> Duration {
