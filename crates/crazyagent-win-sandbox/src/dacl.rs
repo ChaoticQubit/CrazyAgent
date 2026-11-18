@@ -160,8 +160,7 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
 /// `changeable` is asked only for such a root. Inputs: the path's list and the change probe.
 /// Output: true to refuse.
 pub fn read_root_refused(acl: &[u8], changeable: impl FnOnce() -> bool) -> bool {
-    let _ = acl;
-    !changeable()
+    !reads(acl, &ALL_APPLICATION_PACKAGES) && !changeable()
 }
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
