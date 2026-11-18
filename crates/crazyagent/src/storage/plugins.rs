@@ -1688,6 +1688,7 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
     let mut servers = Vec::with_capacity(plugins.servers.len());
     let mut context_mode_off = None;
     let mut batch_files = Vec::new();
+    let mut commands_not_found = Vec::new();
     let mut left_out = Vec::new();
     for server in plugins.servers {
         let spec = match crate::context_mode::for_launch(root, server.spec) {
@@ -1701,11 +1702,15 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
         let spec = match crate::plugins::without_cmd_exe(root, spec) {
             Ok(spec) => spec,
             Err(code) => {
-                eprintln!(
-                    "plugin_server_batch_left_out name={} code={code}",
-                    server.name
+                eprintln!("plugin_server_left_out name={} code={code}", server.name);
+                assert!(
+                    matches!(code, "server_batch_file" | "server_command_not_found"),
+                    "{code}"
                 );
-                batch_files.push(server.name.clone());
+                match code {
+                    "server_command_not_found" => commands_not_found.push(server.name.clone()),
+                    _ => batch_files.push(server.name.clone()),
+                }
                 left_out.push(server.name);
                 continue;
             }
@@ -1725,15 +1730,22 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
     }
     assert!(servers.len() + left_out.len() <= 2 * SERVERS_PER_SCOPE_MAX);
     assert_eq!(
-        context_mode_off.is_some() || !batch_files.is_empty(),
+        context_mode_off.is_some() || !batch_files.is_empty() || !commands_not_found.is_empty(),
         !left_out.is_empty()
     );
     assert!(batch_files.iter().all(|name| left_out.contains(name)));
+    assert!(
+        commands_not_found
+            .iter()
+            .all(|name| left_out.contains(name))
+    );
+    assert!(batch_files.len() + commands_not_found.len() <= left_out.len());
     Ok(LaunchPlugins {
         skills: plugins.skills,
         servers,
         context_mode_off,
         batch_files,
+        commands_not_found,
         left_out,
     })
 }
