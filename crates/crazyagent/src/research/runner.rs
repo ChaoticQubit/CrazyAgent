@@ -2057,33 +2057,14 @@ fn job_kept_ports(
     }
 }
 
-/// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
-/// host, and a tools-on job follows the project's network choice with the model still
-/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
-/// endpoint. Output: the sandbox network.
-pub(crate) fn job_network(
-    policy: &crate::sandbox::policy::AgentPolicy,
-    tools: bool,
-    model: SandboxRemote,
-) -> SandboxNetwork {
-    if tools {
-        policy.network.sandbox(Some(model))
-    } else {
-        SandboxNetwork::Only(vec![model])
-    }
-}
-
 /// The sandbox network a research job runs under and the model proxy it reaches its model
-/// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
-/// for its account's hosts and reaches only the proxy's port; any other job gets
-/// [`job_network`]. Inputs: the OS it runs on, the project's agent policy, whether the job
-/// has tools, its account, its id, which the proxy's refusal lines name, and the owner's
-/// model ports the proxy leaves alone. Output: the network and the proxy, which must live
-/// as long as the job runs, or the refusal of an endpoint no proxy can reach by name or a
-/// proxy that could not start.
+/// through, decided as for a team agent by `AgentNetwork::proxied` and `reach` (S4B-M1, O2a).
+/// Inputs: the OS, the project's agent policy, whether the job has tools, its account, its id
+/// for the proxy's refusal lines, and the owner's model ports the proxy leaves alone. Output:
+/// the network and the proxy, which must outlive the job, or the refusal of a model this OS
+/// cannot reach, of an endpoint no proxy can name, or of a proxy that could not start.
 pub(crate) fn job_reach(
-    _os: &str,
+    os: &str,
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
@@ -2091,11 +2072,8 @@ pub(crate) fn job_reach(
     kept: &[u16],
 ) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
     let model = model_remote(account)?;
-    let proxied = tools
-        && policy.network == crate::sandbox::policy::AgentNetwork::None
-        && matches!(model, SandboxRemote::AnyHost(_));
-    if !proxied {
-        return Ok((job_network(policy, tools, model), None));
+    if !policy.network.proxied(os, tools, model) {
+        return Ok((policy.network.reach(os, tools, model, None)?, None));
     }
     let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
         hosts
@@ -2117,15 +2095,14 @@ pub(crate) fn job_reach(
         ));
     }
     let proxy = ModelProxy::bind(job, hosts, None, kept)?;
-    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
+    let network = policy.network.reach(os, tools, model, Some(proxy.port()))?;
     Ok((network, Some(proxy)))
 }
 
-/// The line a research job fails with when its launch errs, and how many attempts that
-/// failure may use: a context problem names a secret in the command text when it found one,
-/// a warden that did not confirm the sandbox empty fails at once, and any other error is a
-/// sandbox that could not be prepared. Inputs: the launch error and the runner's attempt
-/// limit. Output: the line and the attempts.
+/// The line a research job fails with when its launch errs, and its attempt count: a context
+/// problem names any secret found in the command text, an unconfirmed warden or a model on
+/// this computer that a Windows agent cannot reach fails at once, and anything else is a
+/// sandbox that could not be prepared. Inputs: the error and the attempt limit. Output: both.
 fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
     match error {
         RunError::Context(problem) => (
@@ -2134,6 +2111,12 @@ fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
             attempts_max,
         ),
         RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        RunError::Sandbox(refusal) if crate::sandbox::model_loopback_windows(refusal) => (
+            crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap_or(crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE)
+                .to_owned(),
+            1,
+        ),
         _ => (
             "Could not prepare the research sandbox".to_owned(),
             attempts_max,
@@ -4427,11 +4410,12 @@ mod tests {
                 std::fs::create_dir(&folder).unwrap();
                 folder
             };
+            let proxy = choice.proxied("macos", tools, model).then_some(41_300);
             ProjectSandbox::new(
                 &make("project"),
                 &make("home"),
                 &make("tmp"),
-                job_network(&policy, tools, model),
+                choice.reach("macos", tools, model, proxy).unwrap(),
             )
             .unwrap()
             .profile()
@@ -4446,6 +4430,7 @@ mod tests {
         assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
         let none = profile(AgentNetwork::None, true);
         assert!(!none.contains("(remote ip \"*:"), "{none}");
+        assert!(none.contains("(remote ip \"localhost:41300\")"), "{none}");
         assert!(!none.contains("mDNSResponder"), "{none}");
     }
 
