@@ -379,9 +379,9 @@ fn staged_name(name: &str) -> bool {
 
 /// Publishes a start of the endpoint `purpose` in its protected root (DESIGN-0256 D7, leader
 /// 07:46): the caller's random part and this engine's pin, staged in a file created private
-/// and labelled no-read-up before its first byte (#555 N1), renamed over `pipes` in the held
-/// root, then read back through the private judge; a `pipes` file it refuses stays as it is.
-/// Inputs: the root, the purpose and the random part. Output: what was published.
+/// and closed to lower integrity opens before its first byte (#555 N1, #562 F1), renamed over
+/// `pipes` in the held root, then read back through the private judge; a `pipes` file it
+/// refuses stays. Inputs: the root, the purpose and the random part. Output: what was published.
 pub(super) fn publish(root: &Path, purpose: &str, random: [u8; 16]) -> io::Result<Published> {
     let held = private::dir(root)?;
     let target = root.join(PIPES_FILE);

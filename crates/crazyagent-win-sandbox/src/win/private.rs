@@ -248,9 +248,9 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
 }
 
 /// Creates the private file at `path` as [`file`] does with `create`, carrying from creation
-/// the medium no-write-up no-read-up label of [`secret_file_label`] on the file itself, so
-/// in any folder no lower integrity process reads or holds it (rv-sec3 #555 N1). Input: the
-/// absolute path, which must not exist. Output: the open file, or why it is not private.
+/// the medium no-write-up, no-read-up and no-execute-up label of [`secret_file_label`] on the
+/// file itself, so in any folder no lower integrity process opens or holds it (#555 N1, #562
+/// F1). Input: the absolute path, which must not exist. Output: the open file, or the error.
 pub fn secret_file(path: &Path) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
