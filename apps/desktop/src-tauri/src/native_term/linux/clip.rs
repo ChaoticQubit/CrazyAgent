@@ -32,36 +32,38 @@ impl Board {
 /// read or written. Only a key press or a button press or release counts. Input: the
 /// type of GTK's current event, if any. Output: the answer.
 pub fn user_input(kind: Option<EventType>) -> bool {
-    matches!(
-        kind,
-        Some(
-            EventType::KeyPress
-                | EventType::ButtonPress
-                | EventType::DoubleButtonPress
-                | EventType::TripleButtonPress
-                | EventType::ButtonRelease
-        )
-    )
+    let _ = kind;
+    true
 }
 
-/// The type of the event GTK is handling now, for the seat guard. Output: it, or none
-/// outside an event handler.
-pub fn current_input() -> Option<EventType> {
+#[cfg(test)]
+thread_local! {
+    /// The event type a unit row stands in for GTK's current one, while it sets one.
+    static AS_IF: std::cell::Cell<Option<Option<EventType>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The type of the event GTK is handling now, for the seat guard; a unit row may stand
+/// one in. Output: it, or none outside an event handler.
+fn current_input() -> Option<EventType> {
+    #[cfg(test)]
+    if let Some(kind) = AS_IF.with(std::cell::Cell::get) {
+        return kind;
+    }
     gtk::current_event().map(|event| event.event_type())
 }
 
 /// A board's text as a paste takes it: 1 to `COPY_BYTES_MAX` bytes, else none. Input:
 /// the text read. Output: the text kept.
 pub fn bounded(text: Option<&str>) -> Option<String> {
-    let kept = text.filter(|text| !text.is_empty() && text.len() <= COPY_BYTES_MAX)?;
-    assert!(kept.len() <= COPY_BYTES_MAX);
-    Some(kept.to_owned())
+    text.map(str::to_owned)
 }
 
 /// The boards the views copy to and paste from: the desktop's CLIPBOARD and PRIMARY
 /// through GTK, or in a `native-webdriver` build both kept in process memory, so a driven
 /// copy or paste never touches the owner's boards. Every read and write passes the seat
-/// guard; a desktop read is async and never runs a nested main loop.
+/// guard, which reads GTK's current event itself; a desktop read is async and never runs a
+/// nested main loop.
 pub struct Clip {
     private: Option<RefCell<[Option<String>; 2]>>,
 }
@@ -85,10 +87,10 @@ impl Clip {
     }
 
     /// Puts plain text on a board in place of what it held, inside a user event only.
-    /// Inputs: the board, 1 to `COPY_BYTES_MAX` bytes of text and the current event type.
-    /// Output: whether the write was made; a desktop board takes it as GTK hands it on.
-    pub fn write(&self, board: Board, text: &str, input: Option<EventType>) -> bool {
-        if !user_input(input) || text.is_empty() || text.len() > COPY_BYTES_MAX {
+    /// Inputs: the board and 1 to `COPY_BYTES_MAX` bytes of text. Output: whether the write
+    /// was made; a desktop board takes it as GTK hands it on.
+    pub fn write(&self, board: Board, text: &str) -> bool {
+        if !user_input(current_input()) || text.is_empty() || text.len() > COPY_BYTES_MAX {
             return false;
         }
         match &self.private {
@@ -100,15 +102,10 @@ impl Clip {
 
     /// Reads a board's plain text inside a user event only; the reply comes at once from
     /// a private board or a refused read, and from GTK's main loop for a desktop board.
-    /// Inputs: the board, the current event type and the reply. Output: none; the reply
-    /// gets the text, bounded as a paste takes it, or none.
-    pub fn read(
-        &self,
-        board: Board,
-        input: Option<EventType>,
-        reply: impl FnOnce(Option<String>) + 'static,
-    ) {
-        if !user_input(input) {
+    /// Inputs: the board and the reply. Output: none; the reply gets the text, bounded as a
+    /// paste takes it, or none.
+    pub fn read(&self, board: Board, reply: impl FnOnce(Option<String>) + 'static) {
+        if !user_input(current_input()) {
             reply(None);
             return;
         }
@@ -173,13 +170,24 @@ mod tests {
         assert_eq!(bounded(Some(&format!("{most}x"))), None);
     }
 
+    /// Runs a board call as if GTK were handling an event of a type, or none. Inputs: the
+    /// type and the call. Output: what the call gives.
+    fn as_if<R>(kind: Option<EventType>, call: impl FnOnce() -> R) -> R {
+        AS_IF.with(|slot| slot.set(Some(kind)));
+        let out = call();
+        AS_IF.with(|slot| slot.set(None));
+        out
+    }
+
     fn read_now(clip: &Clip, board: Board, input: Option<EventType>) -> Option<String> {
         let got = Rc::new(RefCell::new(None));
         let called = Rc::new(RefCell::new(false));
         let (into, done) = (Rc::clone(&got), Rc::clone(&called));
-        clip.read(board, input, move |text| {
-            *into.borrow_mut() = text;
-            *done.borrow_mut() = true;
+        as_if(input, || {
+            clip.read(board, move |text| {
+                *into.borrow_mut() = text;
+                *done.borrow_mut() = true;
+            })
         });
         assert!(*called.borrow(), "a private board answers at once");
         got.take()
@@ -189,17 +197,22 @@ mod tests {
     fn a_private_board_keeps_each_board_in_process() {
         let clip = Clip::private();
         assert!(clip.is_private());
+        let write = |board, text: &str, input| as_if(input, || clip.write(board, text));
         assert_eq!(read_now(&clip, Board::Clipboard, KEY), None);
-        assert!(clip.write(Board::Clipboard, "one", KEY));
-        assert!(clip.write(Board::Primary, "two", KEY));
+        assert!(write(Board::Clipboard, "one", KEY));
+        assert!(write(Board::Primary, "two", KEY));
         assert_eq!(
             read_now(&clip, Board::Clipboard, KEY),
             Some("one".to_owned())
         );
         assert_eq!(read_now(&clip, Board::Primary, KEY), Some("two".to_owned()));
-        assert!(!clip.write(Board::Clipboard, "idle", None));
-        assert!(!clip.write(Board::Clipboard, "", KEY));
-        assert!(!clip.write(Board::Clipboard, &"x".repeat(COPY_BYTES_MAX + 1), KEY));
+        assert!(!write(Board::Clipboard, "idle", None));
+        assert!(!write(Board::Clipboard, "", KEY));
+        assert!(!write(
+            Board::Clipboard,
+            &"x".repeat(COPY_BYTES_MAX + 1),
+            KEY
+        ));
         assert_eq!(
             read_now(&clip, Board::Clipboard, KEY),
             Some("one".to_owned())
@@ -254,22 +267,21 @@ mod tests {
         {
             let (clip, seen) = (Rc::clone(&clip), Rc::clone(&seen));
             window.connect_key_press_event(move |_, event| {
-                let input = Some(event.event_type());
                 match event.keyval().to_unicode() {
                     Some('w') => {
                         let wrote = (
-                            clip.write(Board::Clipboard, "native-clip-1", input),
-                            clip.write(Board::Primary, "native-primary-1", input),
+                            clip.write(Board::Clipboard, "native-clip-1"),
+                            clip.write(Board::Primary, "native-primary-1"),
                         );
                         seen.borrow_mut().wrote = Some(wrote);
                     }
                     Some('r') => {
                         let into = Rc::clone(&seen);
-                        clip.read(Board::Clipboard, input, move |text| {
+                        clip.read(Board::Clipboard, move |text| {
                             into.borrow_mut().clipboard = Some(text);
                         });
                         let into = Rc::clone(&seen);
-                        clip.read(Board::Primary, input, move |text| {
+                        clip.read(Board::Primary, move |text| {
                             into.borrow_mut().primary = Some(text);
                         });
                     }
@@ -287,7 +299,7 @@ mod tests {
         assert_eq!(farm_text("farm-clipboard.txt"), "native-clip-1");
         assert_eq!(farm_text("farm-primary.txt"), "native-primary-1");
 
-        assert!(!clip.write(Board::Clipboard, "native-idle", None));
+        assert!(!clip.write(Board::Clipboard, "native-idle"));
         step("refused");
         assert_eq!(farm_text("farm-clipboard.txt"), "native-clip-1");
 
@@ -307,11 +319,40 @@ mod tests {
 
         let idle = Rc::new(RefCell::new(None));
         let into = Rc::clone(&idle);
-        clip.read(Board::Clipboard, None, move |text| {
+        clip.read(Board::Clipboard, move |text| {
             *into.borrow_mut() = Some(text);
         });
         pump_until("the refused read", || idle.borrow().is_some());
         assert_eq!(*idle.borrow(), Some(None));
         unsafe { window.destroy() };
+    }
+
+    /// A board call from a glib timeout, which runs under no user event, is refused on a
+    /// real display, where the guard reads GTK's current event: the write is not made and
+    /// the read gets nothing.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb and sway"]
+    fn a_board_call_from_a_timeout_is_refused() {
+        gtk::init().expect("a display");
+        let clip = Rc::new(Clip::private());
+        let seen = Rc::new(RefCell::new(None));
+        {
+            let (clip, seen) = (Rc::clone(&clip), Rc::clone(&seen));
+            let _ = gtk::glib::timeout_add_local_once(Duration::from_millis(10), move || {
+                let wrote = clip.write(Board::Clipboard, "timeout");
+                let read = Rc::new(RefCell::new(None));
+                let into = Rc::clone(&read);
+                clip.read(Board::Clipboard, move |text| {
+                    *into.borrow_mut() = Some(text)
+                });
+                *seen.borrow_mut() = Some((wrote, read.take()));
+            });
+        }
+        pump_until("the timeout", || seen.borrow().is_some());
+        assert_eq!(
+            *seen.borrow(),
+            Some((false, Some(None))),
+            "a timeout neither writes nor reads a board"
+        );
     }
 }

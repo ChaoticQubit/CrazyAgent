@@ -75,7 +75,10 @@ fn keys_off_types_and_pastes_nothing_but_still_scrolls() {
     pane.set_keys(false);
     assert_eq!(pane.apply(Input::Text(b"a".to_vec())), Action::Nothing);
     assert_eq!(
-        pane.apply(Input::Paste { text: "a".into() }),
+        pane.apply(Input::Paste {
+            text: "a".into(),
+            primary: false
+        }),
         Action::Nothing
     );
     assert_eq!(
@@ -197,14 +200,46 @@ fn a_paste_passes_the_owner_text_unchanged_for_the_engine_to_clean() {
     let mut pane = attached(b"");
     let text = "a\x1b[201~b\r\nc".to_owned();
     assert_eq!(
-        pane.apply(Input::Paste { text: text.clone() }),
+        pane.apply(Input::Paste {
+            text: text.clone(),
+            primary: false
+        }),
         Action::Paste { text }
     );
     assert_eq!(
         pane.apply(Input::Paste {
-            text: String::new()
+            text: String::new(),
+            primary: false
         }),
         Action::Nothing
+    );
+}
+
+#[test]
+fn a_primary_paste_flattens_its_line_breaks_unless_the_app_brackets() {
+    let mut pane = attached(b"");
+    let primary = |text: &str| Input::Paste {
+        text: text.to_owned(),
+        primary: true,
+    };
+    let pasted = |text: &str| Action::Paste {
+        text: text.to_owned(),
+    };
+    assert_eq!(pane.apply(primary("a\nb")), pasted("a b"));
+    assert_eq!(pane.apply(primary("a\r\n\r\nb\n")), pasted("a b "));
+    assert_eq!(
+        pane.apply(Input::Paste {
+            text: "a\nb".to_owned(),
+            primary: false
+        }),
+        pasted("a\nb"),
+        "an owner paste keeps its lines"
+    );
+    let mut bracketing = attached(b"\x1b[?2004h");
+    assert_eq!(
+        bracketing.apply(primary("a\nb")),
+        pasted("a\nb"),
+        "a bracketing app gets the lines in one bracketed paste"
     );
 }
 

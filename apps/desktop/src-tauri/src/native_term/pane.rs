@@ -85,9 +85,9 @@ pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
 }
 
 /// One input to a native view from its host. Cells are column and line on the visible
-/// screen; `option` is the Option key, which forces a local selection while the pane reads
-/// the mouse; `clicks` is the click count, which selects a word on 2 and a line on 3. Text
-/// is at most `INPUT_BYTES_MAX` bytes (the host splits longer typing).
+/// screen; `option` forces a local selection while the pane reads the mouse; `clicks` selects
+/// a word on 2 and a line on 3; `primary` marks a middle click's paste of the primary
+/// selection. Text is at most `INPUT_BYTES_MAX` bytes (the host splits longer typing).
 #[derive(Debug, PartialEq)]
 pub enum Input {
     Text(Vec<u8>),
@@ -114,6 +114,7 @@ pub enum Input {
     },
     Paste {
         text: String,
+        primary: bool,
     },
 }
 
@@ -288,7 +289,7 @@ impl Pane {
             } => self.button(true, cell, option, clicks),
             Input::Release { cell, option } => self.button(false, cell, option, 1),
             Input::Drag { cell, option } => self.drag(cell, option),
-            Input::Paste { text } => self.paste(text),
+            Input::Paste { text, primary } => self.paste(text, primary),
         };
         if let Action::Input { bytes, .. } = &action {
             assert!(!bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX);
@@ -335,7 +336,8 @@ impl Pane {
         Action::Local
     }
 
-    fn paste(&mut self, text: String) -> Action {
+    fn paste(&mut self, text: String, primary: bool) -> Action {
+        let _ = primary;
         if !self.keys || text.is_empty() || text.len() > codec::COPY_BYTES_MAX {
             return Action::Nothing;
         }

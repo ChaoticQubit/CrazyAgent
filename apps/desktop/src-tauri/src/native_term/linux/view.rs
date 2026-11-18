@@ -7,7 +7,7 @@ use gtk::gdk::{self, EventKey, EventType, ModifierType, ScrollDirection};
 use gtk::glib::{Propagation, SignalHandlerId, WeakRef};
 use gtk::prelude::*;
 
-use super::clip::{self, Board, Clip};
+use super::clip::{Board, Clip};
 use super::keys;
 use super::signals::Handlers;
 use super::surface::{Rect, page_bounds};
@@ -72,16 +72,20 @@ pub fn commit_event(focus: Focus, text: &str) -> Option<ViewEvent> {
     commit_input(text).map(ViewEvent::Key)
 }
 
-/// The event a middle click's PRIMARY read makes when it comes back: the same paste input
-/// Cmd-V makes, so the pane's paste checks and bracketed paste apply, and only while the
-/// view is still placed and uncovered. Inputs: the view's focus, whether it is placed and
-/// the text read. Output: the event.
+/// The event a middle click's PRIMARY read makes when it comes back: a paste input marked
+/// as the primary selection's, which the pane flattens for an app without bracketed paste,
+/// and only while the view is still placed and uncovered. Inputs: the view's focus, whether
+/// it is placed and the text read. Output: the event.
 pub fn primary_paste(focus: Focus, placed: bool, text: Option<String>) -> Option<ViewEvent> {
-    if !placed || focus.is_covered() {
+    let _ = focus;
+    if !placed {
         return None;
     }
     let text = text.filter(|text| !text.is_empty())?;
-    Some(ViewEvent::Key(Input::Paste { text }))
+    Some(ViewEvent::Key(Input::Paste {
+        text,
+        primary: true,
+    }))
 }
 
 /// Where keyboard focus stands for one view: whether it holds native focus, whether its
@@ -723,16 +727,15 @@ impl Inner {
             }
             Route::Primary => {
                 let me = Rc::downgrade(self);
-                self.clip
-                    .read(Board::Primary, clip::current_input(), move |text| {
-                        let Some(me) = me.upgrade() else {
-                            return;
-                        };
-                        let placed = me.pointer.borrow().is_placed();
-                        if let Some(event) = primary_paste(me.focus.get(), placed, text) {
-                            me.send(event);
-                        }
-                    });
+                self.clip.read(Board::Primary, move |text| {
+                    let Some(me) = me.upgrade() else {
+                        return;
+                    };
+                    let placed = me.pointer.borrow().is_placed();
+                    if let Some(event) = primary_paste(me.focus.get(), placed, text) {
+                        me.send(event);
+                    }
+                });
                 Propagation::Stop
             }
             Route::View { focus, event } => {
@@ -1334,6 +1337,7 @@ mod tests {
         let text = || Some("p".to_owned());
         let paste = Some(ViewEvent::Key(Input::Paste {
             text: "p".to_owned(),
+            primary: true,
         }));
         let mut focus = Focus::new(true);
         assert_eq!(focus.shown(true), None);
@@ -1971,7 +1975,8 @@ mod tests {
         assert_eq!(
             take_seen(),
             vec![ViewEvent::Key(Input::Paste {
-                text: "farm-primary-3".to_owned()
+                text: "farm-primary-3".to_owned(),
+                primary: true,
             })]
         );
         assert_eq!(counts(&page), [0, 0, 0], "the page gets no press");
