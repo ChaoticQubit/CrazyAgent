@@ -25,7 +25,6 @@ fn named(keyval: Key) -> Option<Named> {
         key::Page_Down | key::KP_Page_Down => Named::PageDown,
         key::Insert | key::KP_Insert => Named::Insert,
         key::Delete | key::KP_Delete => Named::Delete,
-        key::ISO_Left_Tab => Named::BackTab,
         other if (*key::F1..=*key::F12).contains(&*other) => {
             Named::F(u8::try_from(*other - *key::F1 + 1).ok()?)
         }
@@ -198,8 +197,8 @@ mod tests {
         assert_eq!(text(k::Tab, M::empty()).as_deref(), Some(&b"\t"[..]));
         assert_eq!(text(k::Escape, M::empty()).as_deref(), Some(&b"\x1b"[..]));
         assert_eq!(
-            named(k::ISO_Left_Tab, M::SHIFT_MASK),
-            Some((Named::BackTab, SHIFT))
+            text(k::ISO_Left_Tab, M::SHIFT_MASK).as_deref(),
+            Some(&b"\x1b[Z"[..])
         );
     }
 
