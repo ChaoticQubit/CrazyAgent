@@ -2000,7 +2000,7 @@ fn a_home_saved_through_the_data_volume_keeps_its_refusals() {
     assert_eq!(plan_trash(&saved, text(&inner), &[]).unwrap(), inner);
     assert_eq!(
         plan_delete(&saved, &[saved.join("inner")]).unwrap(),
-        [inner.clone()]
+        std::slice::from_ref(&inner)
     );
     assert_eq!(
         plan_move(&saved, &inner, &case.engine).unwrap_err().0,
