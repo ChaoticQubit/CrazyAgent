@@ -1,0 +1,13 @@
+diff --git a/crates/crazyagent/src/sandbox/linux.rs b/crates/crazyagent/src/sandbox/linux.rs
+index 685467741..9ec56cb77 100644
+--- a/crates/crazyagent/src/sandbox/linux.rs
++++ b/crates/crazyagent/src/sandbox/linux.rs
+@@ -1899,7 +1899,7 @@ fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> b
+ fn probe_failure(probe: &mut Command, log: &mut impl Write) -> Option<String> {
+     let (said, ended) = probe_said(probe)?;
+     let flags: Vec<&OsStr> = probe.get_args().collect();
+-    let _ = writeln!(log, "{}", probe_log(&flags, &ended, &said));
++    let _ = writeln!(log, "linux_probe_failed: {flags:?} {ended}: {said}");
+     Some(probe_reason(&said, &ended))
+ }
+ 
