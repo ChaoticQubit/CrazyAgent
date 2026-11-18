@@ -1,4 +1,4 @@
-use super::{BoundaryError, Words, last_error, wide, windows};
+use super::{BoundaryError, Words, access_list, last_error, wide};
 use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads, without};
 use crate::plan::{ANCHOR, Access, Ace, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use crate::snapshot::{self, Snapshot};
@@ -172,9 +172,10 @@ pub(super) fn withdrawal(
 
 /// Writes one change. Input: the change. Output: Ok, or the failed step.
 pub(super) fn write(change: &Change) -> Result<(), BoundaryError> {
-    let path = wide(&change.path);
+    let wide_path = wide(&change.path);
     let list = Words::from_bytes(&change.list);
-    write_dacl(&path, &list, change.info).map_err(windows("change an access list"))
+    write_dacl(&wide_path, &list, change.info)
+        .map_err(access_list("change an access list", &change.path))
 }
 
 /// Whether a path is present as the boundary counts it for a plan: a real file or folder, not
@@ -240,8 +241,9 @@ impl Drop for Local {
 /// list, which grants everyone everything, is refused. Input: a plain drive path. Output:
 /// the list, or the refusal or failed step.
 fn read(path: &str) -> Result<Dacl, BoundaryError> {
-    let path = wide(path);
-    let (list, control) = read_dacl(&path).map_err(windows("read an access list"))?;
+    let wide_path = wide(path);
+    let (list, control) =
+        read_dacl(&wide_path).map_err(access_list("read an access list", path))?;
     let list = list.ok_or(BoundaryError::Refused("a granted path has no access list"))?;
     let list = list.bytes();
     assert!(list.len() >= 8);

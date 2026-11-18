@@ -153,6 +153,15 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
         })
     })
 }
+
+/// Whether the boundary refuses a read root before its helper runs: no allow entry of ALL
+/// APPLICATION PACKAGES reads the path itself ([`reads`]), so the helper would add the
+/// container's own entry, and this user cannot change the path's list, so that write fails.
+/// `changeable` is asked only for such a root. Inputs: the path's list and the change probe.
+/// Output: true to refuse.
+pub fn read_root_refused(acl: &[u8], changeable: impl FnOnce() -> bool) -> bool {
+    !reads(acl, &ALL_APPLICATION_PACKAGES) && !changeable()
+}
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 /// The SID `S-1-5-32-544` (the Administrators group) as bytes.
@@ -780,6 +789,36 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(!reads(&denied, &ALL_APPLICATION_PACKAGES));
+    }
+
+    /// A read root is refused before the helper runs only when no app container may read it
+    /// and this user cannot change its list, and the change probe runs only for such a root.
+    #[test]
+    fn a_read_root_is_refused_only_when_no_package_reads_it_and_this_user_cannot_change_it() {
+        let packages = acl(&[ace(
+            ACCESS_ALLOWED,
+            0x10,
+            READ_EXECUTE,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        let unprobed = || -> bool { panic!("a root every package reads was probed") };
+        assert!(!read_root_refused(&packages, unprobed));
+        let admins_only = acl(&[
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &SYSTEM),
+        ]);
+        let inherit_only = acl(&[ace(
+            ACCESS_ALLOWED,
+            0x0b,
+            READ_EXECUTE,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        let mut malformed = packages.clone();
+        malformed[16] = 2;
+        for list in [&admins_only, &inherit_only, &malformed] {
+            assert!(read_root_refused(list, || false));
+            assert!(!read_root_refused(list, || true));
+        }
     }
 
     const TEAMMATE: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];

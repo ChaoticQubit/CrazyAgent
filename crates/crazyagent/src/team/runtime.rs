@@ -13875,7 +13875,7 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
 fn sandbox_code(error: &SandboxError) -> &'static str {
     match error {
         SandboxError::Invalid(_) => "sandbox_refused",
-        SandboxError::Unavailable(_) => "sandbox_unavailable",
+        SandboxError::Unavailable(_) | SandboxError::Unreadable(_) => "sandbox_unavailable",
         SandboxError::Io(error) => io_code(error),
     }
 }

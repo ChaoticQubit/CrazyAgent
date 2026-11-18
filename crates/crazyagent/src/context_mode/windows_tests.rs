@@ -457,6 +457,33 @@ fn npm_installs_into_a_fresh_staging_folder() {
     assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
 }
 
+/// V244-WIN-NPM: where Node.js's folder is one no app container reads and this standard user
+/// cannot change, as on the test farm's runners, the node probe and the npm install both
+/// refuse with Node.js's own code before the helper runs, never as a Node.js too old.
+#[test]
+#[ignore = "needs the farm runner's Node.js folder and a standard user (test farm)"]
+fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_own_code() {
+    let bin = system_bin();
+    assert!(
+        crazyagent_win_sandbox::unreadable_root(&bin),
+        "{}",
+        bin.display()
+    );
+    let case = case();
+    let unreadable = InstallError("context_mode_node_folder_unreadable");
+    assert_eq!(node_supported(&case.root, &bin), Err(unreadable));
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let source = OsStr::new("context-mode.tgz");
+    assert_eq!(
+        fill(&case.root, &staged, &work, &bin, VERSION, source),
+        Err(unreadable)
+    );
+    assert!(!staged.join(MODULES).exists());
+}
+
 /// The access list of a folder a job read or wrote, as `icacls` prints it, without the
 /// inherited mark a rewritten list may change. Only lists this case owns are compared, since
 /// other rows' containers come and go in the machine-wide Packages and grants folders while

@@ -76,8 +76,10 @@ impl WindowsSandbox {
     /// profile its next launch uses; the existing `grants` folder, where the helper records
     /// what it grants each container, must lie outside them too. Inputs: the policy, the
     /// helper, the profile path and the grants folder. Output: the sandbox, `Unavailable` for
-    /// a missing helper or an endpoint limit, or `Invalid` for an unsafe path or policy.
-    /// Before the profile, it makes each missing guarded folder (see
+    /// a missing helper or an endpoint limit, `Unreadable` for a read root no app container
+    /// may read and this user cannot change ([`crazyagent_win_sandbox::unreadable_root`]),
+    /// which the helper could not open to the agent, or `Invalid` for an unsafe path or
+    /// policy. Before the profile, it makes each missing guarded folder (see
     /// [`make_guarded_folders`]).
     pub fn install(
         sandbox: ProjectSandbox,
@@ -90,6 +92,14 @@ impl WindowsSandbox {
             .ok_or_else(|| invalid("grants folder must exist"))?;
         make_guarded_folders(&sandbox)?;
         let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
+        if let Some(root) = boundary
+            .read_roots
+            .iter()
+            .find(|root| crazyagent_win_sandbox::unreadable_root(Path::new(root)))
+        {
+            eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
+            return Err(SandboxError::Unreadable(PathBuf::from(root)));
+        }
         let helper = existing_helper(helper)?;
         let parent = profile
             .parent()
@@ -626,6 +636,35 @@ mod tests {
             Err(SandboxError::Unavailable(reason)) => assert_eq!(reason, FIREWALL_RULE_MISSING),
             other => panic!("expected the firewall refusal, got {other:?}"),
         }
+    }
+
+    /// V244-WIN-NPM: install refuses a read root no app container reads and this standard
+    /// user cannot change, made by an administrator and named in
+    /// `CRAZYAGENT_TEST_UNCHANGEABLE_ROOT`, by that folder and before any profile is written,
+    /// and installs the same policy reading a folder this user owns.
+    #[test]
+    #[ignore = "needs an administrator-made folder and a standard user (test farm)"]
+    fn install_refuses_a_read_root_only_an_administrator_can_open_to_containers() {
+        let folders = folders();
+        let fixture = std::env::var_os("CRAZYAGENT_TEST_UNCHANGEABLE_ROOT").unwrap();
+        let fixture = canonical(Path::new(&fixture)).unwrap();
+        let helper = std::env::current_exe().unwrap();
+        let path = folders.profiles.join("agent.sb");
+        let refused = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .allow_read(&fixture)
+            .unwrap();
+        match WindowsSandbox::install(refused, &helper, &path, &folders.grants) {
+            Err(SandboxError::Unreadable(folder)) => assert_eq!(folder, fixture),
+            other => panic!("expected the unreadable root refusal, got {other:?}"),
+        }
+        assert!(!path.exists());
+        let own = folders.profiles.join("own");
+        fs::create_dir_all(&own).unwrap();
+        let allowed = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .allow_read(&own)
+            .unwrap();
+        WindowsSandbox::install(allowed, &helper, &path, &folders.grants).unwrap();
+        assert!(path.is_file());
     }
 
     #[test]
