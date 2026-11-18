@@ -2,6 +2,7 @@
 
 use crazyagent_win_sandbox::dacl::{self, ADMINISTRATORS, SYSTEM};
 use crazyagent_win_sandbox::private;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -427,4 +428,39 @@ fn a_private_folder_and_file_carry_no_label_of_their_own() {
     assert_eq!(own_label(&file), None);
     drop((held, file));
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW): a plain private folder
+/// already there takes its store's label once it is judged private, so a store folder gets
+/// its label whatever made it first; a folder another account owns is refused as before and
+/// keeps no label.
+#[test]
+fn an_existing_plain_folder_takes_its_store_label_only_once_judged_private() {
+    let root = scratch("relabel");
+    drop(private::dir(&root).unwrap());
+    let inside = root.join("made-before");
+    drop(private::file(&inside, true).unwrap());
+    let held = private::store_dir(&root, private::Store::Secret).unwrap();
+    assert_eq!(own_label(&held), MEDIUM_NO_UP);
+    println!(
+        "relabel probe: a file made before the label carries {:?} after it",
+        own_label(&private::file(&inside, false).unwrap())
+    );
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
+    let foreign = scratch("relabel-foreign");
+    drop(private::dir(&foreign).unwrap());
+    run(
+        "icacls",
+        &[foreign.to_str().unwrap(), "/setowner", "*S-1-5-32-545"],
+    );
+    assert!(private::store_dir(&foreign, private::Store::Secret).is_err());
+    let seen = std::fs::OpenOptions::new()
+        .access_mode(windows_sys::Win32::Storage::FileSystem::READ_CONTROL)
+        .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS)
+        .open(&foreign)
+        .unwrap();
+    assert_eq!(own_label(&seen), None);
+    drop(seen);
+    std::fs::remove_dir_all(&foreign).unwrap();
 }

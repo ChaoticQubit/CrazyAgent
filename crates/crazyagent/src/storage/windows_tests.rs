@@ -190,6 +190,29 @@ async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_labe
     drop(storage);
 }
 
+/// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW): a data root the update
+/// channel save made before the first `Layout::prepare` still hands the medium no-read-up
+/// label to engine.db and its side files, as `prepare` labels the root whatever made it.
+#[tokio::test]
+async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
+    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    crate::update::save_channel(&data, crate::update::Channel::Dev).unwrap();
+    let layout = crate::paths::Layout::new(data.clone()).unwrap();
+    layout.prepare().unwrap();
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let storage = Storage::open(&data.join("engine.db"), config, false)
+        .await
+        .unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let file = private::file(&data.join(name), false).unwrap();
+        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+    }
+    drop(storage);
+}
+
 /// W1c D5: an MCP server secret round-trips through the Windows plugin key store as a W1
 /// private file, a secret file other users may read is refused as unsafe, and a removed
 /// secret is gone.
