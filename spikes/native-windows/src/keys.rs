@@ -1,10 +1,13 @@
-use crate::probe::{child, click_term, log, on_main, take_notes, wide};
+use crate::probe::{
+    child, click_screen, click_term, log, on_main, on_main_within, take_notes, wide,
+};
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{HWND, LPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::UI::Input::Ime::{
-    IME_CMODE_FULLSHAPE, IME_CMODE_HANGUL, IME_CMODE_NATIVE, IME_CONVERSION_MODE, ImmGetContext,
-    ImmGetConversionStatus, ImmGetOpenStatus, ImmReleaseContext, ImmSetConversionStatus,
-    ImmSetOpenStatus,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, IME_CMODE_FULLSHAPE, IME_CMODE_HANGUL, IME_CMODE_NATIVE,
+    IME_CONVERSION_MODE, ImmGetContext, ImmGetConversionStatus, ImmGetOpenStatus,
+    ImmReleaseContext, ImmSetCandidateWindow, ImmSetConversionStatus, ImmSetOpenStatus,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyboardLayout, GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL,
@@ -14,8 +17,14 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_Q, VK_R, VK_RETURN, VK_RMENU, VK_S, VK_SPACE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowTextW, IsWindowVisible,
+    EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, IsWindowVisible,
 };
+
+/// How long a row waits for a hung window thread to answer again before going on.
+const RECOVER_WAIT: Duration = Duration::from_secs(200);
+
+/// Where the IME rows ask the candidate list to open, in the view's client pixels.
+const CANDIDATE_AT: POINT = POINT { x: 8, y: 400 };
 
 /// Keyboard layouts the layout rows load: US-International for dead keys, German for AltGr.
 const US_INTERNATIONAL: &str = "00020409";
@@ -176,35 +185,71 @@ fn layouts() -> Vec<isize> {
         .collect()
 }
 
-/// Activates an IME layout on the window's thread, opens it and sets its conversion mode,
-/// so letters compose instead of arriving as Latin. Inputs: the layout and the mode.
-/// Output: the layout before and the line, or None on a timeout.
+/// Asks the IME to open its candidate list at `CANDIDATE_AT`. Input: the view's context.
+/// Output: whether it took the place and that place on the screen.
+fn place_candidates(context: windows_sys::Win32::UI::Input::Ime::HIMC) -> String {
+    let form = CANDIDATEFORM {
+        dwIndex: 0,
+        dwStyle: CFS_CANDIDATEPOS,
+        ptCurrentPos: CANDIDATE_AT,
+        rcArea: RECT::default(),
+    };
+    let placed = unsafe { ImmSetCandidateWindow(context, &form) };
+    let mut screen = CANDIDATE_AT;
+    unsafe { ClientToScreen(child(), &mut screen) };
+    format!(
+        "candidate_set={placed} candidate_at={},{}",
+        screen.x, screen.y
+    )
+}
+
+/// Activates an IME layout on the window's thread, opens it, sets its conversion mode and
+/// keeps its sentence mode (zero would commit every kana unconverted), and places its
+/// candidate list. Inputs: the layout and the mode. Output: the layout before and the
+/// line, or None on a timeout.
 fn open_ime(layout: isize, mode: IME_CONVERSION_MODE) -> Option<(isize, String)> {
     on_main(move || {
         let before = unsafe { GetKeyboardLayout(0) } as isize;
+        log("ime_open_step", "activate");
         unsafe { ActivateKeyboardLayout(layout as HKL, 0) };
+        log("ime_open_step", "focus");
         unsafe { SetFocus(child()) };
         let context = unsafe { ImmGetContext(child()) };
         if context.is_null() {
             return (before, "context_null".into());
         }
+        log("ime_open_step", "open");
         let opened = unsafe { ImmSetOpenStatus(context, 1) };
-        let moded = unsafe { ImmSetConversionStatus(context, mode, 0) };
         let (mut conversion, mut sentence) = (0u32, 0u32);
         unsafe { ImmGetConversionStatus(context, &mut conversion, &mut sentence) };
+        log("ime_open_step", "mode");
+        let moded = unsafe { ImmSetConversionStatus(context, mode, sentence) };
+        log("ime_open_step", "done");
+        unsafe { ImmGetConversionStatus(context, &mut conversion, &mut sentence) };
         let open = unsafe { ImmGetOpenStatus(context) };
+        let candidates = place_candidates(context);
         unsafe { ImmReleaseContext(child(), context) };
         let now = unsafe { GetKeyboardLayout(0) } as isize;
         let line = format!(
-            "now={now:X} open_set={opened} open={open} mode_set={moded} mode={conversion:X}"
+            "now={now:X} open_set={opened} open={open} mode_set={moded} mode={conversion:X} \
+             sentence={sentence:X} {candidates}"
         );
         (before, line)
     })
 }
 
+/// Types keys one by one, 250 ms apart, in a layout. Inputs: the keys and the layout.
+fn type_keys(keys: &[u16], layout: isize) {
+    for &key in keys {
+        send_keys(&taps(&[key]), layout);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// The real IME rows, run after the language step installs ja-JP and ko-KR: MS-IME types
-/// "ka", converts and commits; the Korean IME types "gksrmf" (한글) and a space. Each
-/// logs what reached the view, or INCONCLUSIVE when the layout is missing.
+/// "ka" and converts twice (the second opens the candidate list, whose window and place
+/// are logged) and Enter commits; the Korean IME types "gksrmf" (한글) and a space
+/// commits. Each logs what reached the view, or INCONCLUSIVE when the layout is missing.
 pub fn real_ime_rows() {
     let installed = layouts();
     let names: Vec<String> = installed
@@ -216,15 +261,17 @@ pub fn real_ime_rows() {
         0x0411,
         "ja",
         IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE,
-        vec![VK_K, VK_A, VK_SPACE, VK_RETURN],
+        vec![VK_K, VK_A, VK_SPACE, VK_SPACE],
+        VK_RETURN,
     );
     let korean = (
         0x0412,
         "ko",
         IME_CMODE_HANGUL,
-        vec![VK_G, VK_K, VK_S, VK_R, VK_M, VK_F, VK_SPACE],
+        vec![VK_G, VK_K, VK_S, VK_R, VK_M, VK_F],
+        VK_SPACE,
     );
-    for (language, label, mode, keys) in [japanese, korean] {
+    for (language, label, mode, compose, commit) in [japanese, korean] {
         let row = format!("ime_real_{label}");
         let Some(&layout) = installed
             .iter()
@@ -236,46 +283,86 @@ pub fn real_ime_rows() {
         click_term();
         let Some((before, line)) = open_ime(layout, mode) else {
             log(&row, "INCONCLUSIVE timeout opening the IME");
+            let waited = std::time::Instant::now();
+            let back = on_main_within(RECOVER_WAIT, || ()).is_some();
+            let took = waited.elapsed().as_secs_f64();
+            log(
+                &format!("{row}_recovered"),
+                &format!("{back} after={took:.1}s"),
+            );
             continue;
         };
         log(&format!("{row}_open"), &line);
         take_notes();
-        for key in keys {
-            send_keys(&taps(&[key]), layout);
-            std::thread::sleep(Duration::from_millis(250));
-        }
+        let windows = top_windows();
+        type_keys(&compose, layout);
         std::thread::sleep(SETTLE);
-        log(&row, &take_notes().join(" "));
+        let appeared = new_windows(&windows);
+        log(&format!("{row}_composed"), &take_notes().join(" "));
+        log(&format!("{row}_windows"), &appeared.join(" ; "));
+        type_keys(&[commit], layout);
+        std::thread::sleep(SETTLE);
+        log(&format!("{row}_committed"), &take_notes().join(" "));
         restore_layout(before);
     }
 }
 
-/// Visible top-level windows as "class|title". Output: up to `WINDOWS_MAX` of them.
-fn top_windows() -> Vec<String> {
+/// A visible top-level window: its handle, "class|title" and its screen rectangle.
+struct Top {
+    hwnd: isize,
+    name: String,
+    rect: RECT,
+}
+
+/// Visible top-level windows. Output: up to `WINDOWS_MAX` of them.
+fn top_windows() -> Vec<Top> {
     unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> windows_sys::core::BOOL {
-        let found = unsafe { &mut *(found as *mut Vec<String>) };
+        let found = unsafe { &mut *(found as *mut Vec<Top>) };
         if unsafe { IsWindowVisible(hwnd) } != 0 {
             let (mut class, mut title) = ([0u16; 128], [0u16; 128]);
             let class_len = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), 128) }.max(0) as usize;
             let title_len =
                 unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), 128) }.max(0) as usize;
-            found.push(format!(
+            let mut rect = RECT::default();
+            unsafe { GetWindowRect(hwnd, &mut rect) };
+            let name = format!(
                 "{}|{}",
                 String::from_utf16_lossy(&class[..class_len.min(128)]),
                 String::from_utf16_lossy(&title[..title_len.min(128)])
-            ));
+            );
+            found.push(Top {
+                hwnd: hwnd as isize,
+                name,
+                rect,
+            });
         }
         i32::from(found.len() < WINDOWS_MAX)
     }
-    let mut found: Vec<String> = Vec::new();
-    unsafe { EnumWindows(Some(each), &mut found as *mut Vec<String> as LPARAM) };
+    let mut found: Vec<Top> = Vec::new();
+    unsafe { EnumWindows(Some(each), &mut found as *mut Vec<Top> as LPARAM) };
     assert!(found.len() <= WINDOWS_MAX);
     found
 }
 
-/// The emoji panel row: Win+. on the focused view, the windows that appear, then Enter to
-/// pick the first emoji and the UTF-16 units that reach the view; INCONCLUSIVE when no
-/// window appears. Escape closes the panel after.
+/// The visible top-level windows that were not there before, with their rectangles.
+/// Input: the windows before. Output: one "class|title [l,t r,b]" per new window.
+fn new_windows(before: &[Top]) -> Vec<String> {
+    top_windows()
+        .into_iter()
+        .filter(|window| before.iter().all(|old| old.hwnd != window.hwnd))
+        .map(|window| {
+            let r = window.rect;
+            format!(
+                "{} [{},{} {},{}]",
+                window.name, r.left, r.top, r.right, r.bottom
+            )
+        })
+        .collect()
+}
+
+/// The emoji panel row: Win+. on the focused view and the windows that appear, then Enter
+/// and then a click at the panel's centre, each with the UTF-16 units that reach the
+/// view; INCONCLUSIVE when no window appears. Escape closes the panel after.
 pub fn emoji_rows() {
     click_term();
     take_notes();
@@ -288,22 +375,37 @@ pub fn emoji_rows() {
     ];
     let taken = send_keys(&chord, 0);
     std::thread::sleep(Duration::from_millis(2000));
-    let appeared: Vec<String> = top_windows()
+    let panel: Vec<Top> = top_windows()
         .into_iter()
-        .filter(|window| !before.contains(window))
+        .filter(|window| before.iter().all(|old| old.hwnd != window.hwnd))
         .collect();
-    let verdict = if appeared.is_empty() {
+    let named: Vec<String> = panel.iter().map(|window| window.name.clone()).collect();
+    let verdict = if panel.is_empty() {
         "INCONCLUSIVE no panel window"
     } else {
         "panel"
     };
     log(
         "emoji_panel",
-        &format!("{verdict} events={taken} new={}", appeared.join(" ; ")),
+        &format!("{verdict} events={taken} new={}", named.join(" ; ")),
     );
     send_keys(&taps(&[VK_RETURN]), 0);
     std::thread::sleep(Duration::from_millis(1000));
-    log("emoji_picked", &take_notes().join(" "));
+    log("emoji_picked_enter", &take_notes().join(" "));
+    if let Some(window) = panel.first() {
+        let r = window.rect;
+        let centre = POINT {
+            x: (r.left + r.right) / 2,
+            y: (r.top + r.bottom) / 2,
+        };
+        let clicked = click_screen(centre);
+        std::thread::sleep(Duration::from_millis(1000));
+        let got = take_notes().join(" ");
+        log(
+            "emoji_picked_click",
+            &format!("at={},{} events={clicked} got={got}", centre.x, centre.y),
+        );
+    }
     send_keys(&taps(&[VK_ESCAPE]), 0);
     std::thread::sleep(Duration::from_millis(300));
 }

@@ -19,7 +19,7 @@ $has = $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pa
 if ($has) {
     $text = $pattern.DocumentRange.GetText(-1)
     "reader_text_chars=" + $text.Length
-    "reader_text_tail=" + $text.Substring([Math]::Max(0, $text.Length - 24))
+    "reader_text_tail=" + $text.Substring([Math]::Max(0, $text.Length - 24)).Replace("`n", "|")
     try {
         $pattern.DocumentRange.Select()
         "reader_select=accepted"

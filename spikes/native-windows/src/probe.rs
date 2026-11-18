@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicIsize, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use tauri::Manager;
-use windows_sys::Win32::Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    FILETIME, GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows_sys::Win32::Graphics::Gdi::{
     ClientToScreen, EnumDisplayMonitors, GetDC, GetPixel, HDC, HMONITOR, ReleaseDC, ValidateRect,
 };
@@ -20,7 +22,7 @@ use windows_sys::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
 };
 use windows_sys::Win32::System::Threading::{
-    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, GetSystemTimes,
 };
 use windows_sys::Win32::UI::HiDpi::{
     GetAwarenessFromDpiAwarenessContext, GetDpiForMonitor, GetDpiForWindow,
@@ -72,7 +74,7 @@ const KEY_WAIT: Duration = Duration::from_secs(1);
 
 /// How long the whole run may take before the watchdog ends it, so a stuck runner still
 /// prints its log.
-const WATCHDOG: Duration = Duration::from_secs(300);
+const WATCHDOG: Duration = Duration::from_secs(420);
 
 /// The most key, character and IME messages kept between two reads by a row.
 const NOTES_MAX: usize = 512;
@@ -199,6 +201,7 @@ pub(crate) fn child() -> HWND {
 }
 
 /// The id of the window's thread, zero before the view exists.
+#[cfg(feature = "uia")]
 pub(crate) fn ui_thread() -> u32 {
     UI_THREAD.load(Ordering::SeqCst)
 }
@@ -236,7 +239,7 @@ pub(crate) fn click_term() {
 /// Runs a closure on the window's thread and waits for its result up to `wait`.
 /// Inputs: the wait and the closure. Output: its result, or None when the app is gone or
 /// it timed out.
-fn on_main_within<T: Send + 'static>(
+pub(crate) fn on_main_within<T: Send + 'static>(
     wait: Duration,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {
@@ -667,11 +670,16 @@ fn centres() -> ((f64, f64), (f64, f64)) {
     )
 }
 
-/// Clicks the left button at a page point through `SendInput`, in virtual-desktop
-/// coordinates. Input: the page point. Output: how many events Windows took.
+/// Clicks the left button at a page point. Input: the page point.
+/// Output: how many events Windows took.
 fn click(css: (f64, f64)) -> u32 {
     let scale = LAYOUT.lock().map(|layout| layout.2).unwrap_or(1.0);
-    let point = screen_point(css, scale);
+    click_screen(screen_point(css, scale))
+}
+
+/// Clicks the left button at a screen point through `SendInput`, in virtual-desktop
+/// coordinates. Input: the screen point. Output: how many events Windows took.
+pub(crate) fn click_screen(point: POINT) -> u32 {
     let (vx, vy, vw, vh) = unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -1260,7 +1268,8 @@ fn uia_rows() {
         let _ = draw();
     });
     let expected: Vec<u16> = crate::gpu::screen_text(&typed()).encode_utf16().collect();
-    let tail = String::from_utf16_lossy(&expected[expected.len().saturating_sub(24)..]);
+    let tail =
+        String::from_utf16_lossy(&expected[expected.len().saturating_sub(24)..]).replace('\n', "|");
     log(
         "uia_expected",
         &format!("chars={} tail={tail}", expected.len()),
@@ -1334,6 +1343,37 @@ fn clipboard() -> String {
     format!(
         "placed={placed} equal={equal} chars={CLIP_CHARS} write_ms={written:.2} read_ms={:.2}",
         start.elapsed().as_secs_f64() * 1000.0
+    )
+}
+
+/// The machine's idle and total CPU time so far, in 100 ns units, summed over cores.
+/// Output: (idle, total), or zeros when Windows refuses.
+fn cpu_times() -> (u64, u64) {
+    let (mut idle, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return (0, 0);
+    }
+    let value =
+        |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    let total = value(kernel) + value(user);
+    (value(idle), total)
+}
+
+/// The share of CPU time busy between two samples, so a loaded cell shows its load.
+/// Inputs: the samples. Output: the percentage line.
+fn busy_pct(before: (u64, u64), after: (u64, u64)) -> String {
+    let idle = after.0.saturating_sub(before.0);
+    let total = after.1.saturating_sub(before.1);
+    if total == 0 {
+        return "unknown".into();
+    }
+    format!(
+        "{:.1}",
+        100.0 * total.saturating_sub(idle) as f64 / total as f64
     )
 }
 
@@ -1424,8 +1464,10 @@ fn drive() {
         Rows::Perf => {
             log("foreground", &foreground().to_string());
             click_term();
+            let before = cpu_times();
             key_rows();
             frame_rows();
+            log("env_cpu_busy_pct", &busy_pct(before, cpu_times()));
         }
         Rows::Uia => uia_rows(),
         Rows::Lang => {
