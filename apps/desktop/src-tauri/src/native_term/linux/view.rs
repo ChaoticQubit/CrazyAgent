@@ -427,7 +427,8 @@ impl Pointer {
 }
 
 /// The vertical scroll of a GDK scroll event in GDK's units, down positive, and whether a
-/// touchpad made it; a horizontal scroll is zero. Input: the event. Output: them.
+/// touchpad made it; a horizontal scroll is zero. GDK gives a smooth scroll no direction,
+/// only deltas, so no direction means read the deltas. Input: the event. Output: them.
 fn scroll_dy(event: &gdk::Event) -> (f64, bool) {
     let touchpad = event
         .source_device()
@@ -435,8 +436,8 @@ fn scroll_dy(event: &gdk::Event) -> (f64, bool) {
     let dy = match event.scroll_direction() {
         Some(ScrollDirection::Up) => -1.0,
         Some(ScrollDirection::Down) => 1.0,
-        Some(ScrollDirection::Smooth) => event.scroll_deltas().map_or(0.0, |(_, dy)| dy),
-        _ => 0.0,
+        Some(_) => 0.0,
+        None => event.scroll_deltas().map_or(0.0, |(_, dy)| dy),
     };
     (dy, touchpad)
 }
