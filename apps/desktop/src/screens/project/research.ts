@@ -6,6 +6,7 @@ import { accountLabels, namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterActivityLine, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
+import { isMac } from "../../ui/keys";
 
 
 /** Formats a duration the way the design writes elapsed time.
@@ -635,9 +636,16 @@ export function minutesOfCause(cause: string | null | undefined): number | null 
   return found ? Number(found[1]) : null;
 }
 
+/** Why a master on a Git older than the 2.39 floor couldn't start (V243-WORKTREE-GIT-FLOOR). */
+const GIT_TOO_OLD = "agents need Git 2.39 or newer, and the Git on this computer is older. Update Git, then send again.";
+
+/** The same on a Mac, where the engine runs the Git of Xcode or its Command Line Tools,
+ * never Homebrew's, so only updating those helps. */
+const GIT_TOO_OLD_MAC = "agents need Git 2.39 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then send again.";
+
 /** One plain line for a master turn that has no reply yet or ended without one; a stopped
- * turn ends with its code. Input: the turn. Output: the line. */
-export function turnLine(turn: MasterTurn): string {
+ * turn ends with its code. Input: the turn, and whether this is a Mac. Output: the line. */
+export function turnLine(turn: MasterTurn, mac: boolean = isMac()): string {
   const code = ` (${stopCode(turn)})`;
   if (turn.cause === "rcli_master_key_setup_required" && turn.detail) return `${turn.detail}${code}`;
   const configChanged = turn.cause === "rcli_profile_changed_in_conversation" ? failureSentence(turn.cause) : undefined;
@@ -651,6 +659,7 @@ export function turnLine(turn: MasterTurn): string {
   if (turn.phase === "blocked" && turn.reason === "readiness_stale") return `Sign-in is out of date. Sign in again in Settings, Accounts, then send again.${code}`;
   if (turn.phase === "blocked" && turn.reason === "connection_changed") return `Settings changed since the master started. End the conversation, then send again.${code}`;
   if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_missing") return `The master couldn't start: this project has no repository yet.${code}`;
+  if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "git_too_old") return `The master couldn't start: ${mac ? GIT_TOO_OLD_MAC : GIT_TOO_OLD}${code}`;
   if ((turn.phase === "blocked" || turn.phase === "failed") && turn.reason === "repository_config_refused") return `The master couldn't start: ${turn.detail ?? "a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again."}${code}`;
   switch (turn.phase) {
     case "queued": case "prepared": case "delivering": return "Waiting to start";
