@@ -389,9 +389,11 @@ test("off a Mac, a Shift drag on the normal screen selects the dragged text with
     await mouse(send, spot(200, 1).x, spot(200, 1).y, "left");
     await drag(send, spot(2, 0), spot(140, 0), 8);
     const afterClick = await copied();
-    const shiftClick = async (at) => {
+    const shiftClick = async (at, jitter = 0) => {
+      const end = { x: at.x, y: at.y + jitter };
       await send("Input.dispatchMouseEvent", { type: "mousePressed", ...at, button: "left", buttons: 1, clickCount: 1, modifiers: 8 });
-      await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", buttons: 0, clickCount: 1, modifiers: 8 });
+      if (jitter > 0) await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1, modifiers: 8 });
+      await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...end, button: "left", buttons: 0, clickCount: 1, modifiers: 8 });
       await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...spot(300, 1) });
     };
     await drag(send, spot(2, 0), spot(60, 0));
@@ -400,7 +402,10 @@ test("off a Mac, a Shift drag on the normal screen selects the dragged text with
     await mouse(send, spot(2, 0).x, spot(2, 0).y, "left");
     await shiftClick(spot(140, 0));
     const fromClick = await copied();
-    return { platform, fresh, afterClick, extended, fromClick };
+    await mouse(send, spot(2, 0).x, spot(2, 0).y, "left");
+    await shiftClick(spot(140, 0), 1);
+    const jittered = await copied();
+    return { platform, fresh, afterClick, extended, fromClick, jittered };
   }).finally(() => server?.close());
   assert.equal(seen.platform, "Linux x86_64", "the page took the Linux platform");
   const dragged = (text) => text.trimEnd().length >= 5 && "first line of output".startsWith(text.trimEnd());
@@ -408,4 +413,5 @@ test("off a Mac, a Shift drag on the normal screen selects the dragged text with
   assert.equal(seen.afterClick, seen.fresh, "after a click elsewhere, the Shift drag selected the dragged text, not from the click");
   assert.equal(seen.extended, seen.fresh, "a Shift click extended the selection that showed to the click");
   assert.equal(seen.fromClick, seen.fresh, "with nothing showing, a Shift click without a drag still selected from the last click to it, as xterm does");
+  assert.equal(seen.jittered, seen.fresh, "a Shift click whose pointer moved 1 px while pressed is still a click, so it selected from the last click (#490 F1)");
 });
