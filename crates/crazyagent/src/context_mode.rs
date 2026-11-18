@@ -696,17 +696,14 @@ fn refused<E>(_: E) -> InstallError {
 }
 
 /// The install code for a boundary that did not install: a read root no app container may
-/// read and this user cannot change is [`NODE_FOLDER_UNREADABLE`] when it is npx's folder,
-/// logged with the folder; every other refusal is `context_mode_sandbox_unavailable`.
-/// Inputs: npx's canonical folder and the refusal. Output: the code.
+/// read and this user cannot change, which the boundary logs by folder, is
+/// [`NODE_FOLDER_UNREADABLE`] when it is npx's folder; every other refusal is
+/// `context_mode_sandbox_unavailable`. Inputs: npx's canonical folder and the refusal.
+/// Output: the code.
 fn boundary_refused(bin: &Path, error: SandboxError) -> InstallError {
     let SandboxError::Unreadable(folder) = error else {
         return refused(error);
     };
-    eprintln!(
-        "context_mode_boundary_refused cause=unreadable folder={}",
-        folder.display()
-    );
     if folder == bin {
         InstallError(NODE_FOLDER_UNREADABLE)
     } else {

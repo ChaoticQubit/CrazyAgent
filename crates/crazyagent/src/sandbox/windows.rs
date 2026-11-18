@@ -97,6 +97,7 @@ impl WindowsSandbox {
             .iter()
             .find(|root| crazyagent_win_sandbox::unreadable_root(Path::new(root)))
         {
+            eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
             return Err(SandboxError::Unreadable(PathBuf::from(root)));
         }
         let helper = existing_helper(helper)?;
