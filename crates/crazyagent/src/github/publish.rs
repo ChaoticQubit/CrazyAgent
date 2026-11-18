@@ -403,12 +403,13 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Starts `command` and its watcher with its output piped, and its input piped when it takes
-/// input. Every publish git starts here. Inputs: owner git's container for a project command,
-/// none for any other, the command, whether it takes input and the limit. Output: as
-/// [`Watched::start`].
+/// Starts `command` and its watcher, output piped and input piped when it takes input. Every
+/// publish git starts here, a project command inside owner git's container when there is one;
+/// the wrapped command keeps no stdio, so it is set again, with no error output. Inputs: the
+/// container for a project command, else none, the command, whether it takes input and the
+/// limit. Output: as [`Watched::start`], or the boundary's refusal as `github_publish_failed`.
 fn started(
-    _contained: Option<&OwnerGit>,
+    contained: Option<&OwnerGit>,
     command: &mut Command,
     input: bool,
     limit: Duration,
@@ -417,6 +418,16 @@ fn started(
     if let Some(step) = BEFORE_SPAWN.with(|next| next.borrow_mut().take()) {
         step();
     }
+    let mut wrapped;
+    let command = match contained {
+        None => command,
+        Some(owner) => {
+            wrapped = owner
+                .wrap(command)
+                .map_err(|_| failure("github_publish_failed"))?;
+            wrapped.stdin(Stdio::null()).stderr(Stdio::null())
+        }
+    };
     if input {
         command.stdin(Stdio::piped());
     }
@@ -1565,30 +1576,55 @@ pub(super) struct Author {
     pub(super) email: String,
 }
 
-/// The identity the owner's own git commits with in the project: git reads the project's
-/// settings and the owner's own, from the owner's home, as a commit there would. A name
-/// or email git would refuse or mangle counts as none. Inputs: git, the owner's home
-/// folder and the project. Output: the author, or None, also for a `.git` that is not plain.
+/// The identity the owner's own git commits with in the project: the project's settings, then
+/// the owner's own from the owner's home, as a commit there would; with owner git's container,
+/// the project is read in it and then the owner's global files and their includes, from git's
+/// empty home. A name or email git would refuse or mangle counts as none. Inputs: git, the
+/// owner's home, git's empty home, the project. Output: the author, or None, as for no plain `.git`.
 pub(super) fn configured_author(
     git: &PublishGit,
     owner_home: &Path,
-    _home: &Path,
+    home: &Path,
     project: &Path,
 ) -> Option<Author> {
     if plain_repository(project).is_err() {
         return None;
     }
-    let value = |key: &str| {
+    let owner_config = |key: &str| {
         let mut command = clone::git_command(git.program(), owner_home);
         command
             .env_remove("GIT_CONFIG_GLOBAL")
-            .current_dir(project)
-            .env("GIT_DIR", project.join(".git"))
             .args(git_safe())
-            .args(["config", "--get", key])
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        let output = run(None, &mut command).ok()?;
+        match git.container() {
+            None => command
+                .current_dir(project)
+                .env("GIT_DIR", project.join(".git"))
+                .args(["config", "--get", key]),
+            Some(_) => command
+                .current_dir(home)
+                .env("GIT_CEILING_DIRECTORIES", home)
+                .args(["config", "--global", "--includes", "--get", key]),
+        };
+        run(None, &mut command).ok()
+    };
+    let value = |key: &str| {
+        let output = match git.container() {
+            None => owner_config(key)?,
+            Some(owner) => {
+                let read = run(
+                    Some(owner),
+                    project_git(git, home, project).args(["config", "--get", key]),
+                )
+                .ok()?;
+                if read.status.code() == Some(1) {
+                    owner_config(key)?
+                } else {
+                    read
+                }
+            }
+        };
         let text = String::from_utf8(output.stdout)
             .ok()
             .filter(|_| output.status.success())?;

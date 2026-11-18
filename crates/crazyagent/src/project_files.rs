@@ -87,8 +87,11 @@ pub(crate) fn list(
     #[cfg(unix)]
     let git = crate::research::runner::setup_git().to_path_buf();
     #[cfg(not(unix))]
-    let git = crate::github::git_program(std::env::var_os("PATH").as_deref())
-        .ok_or_else(|| failure("project_files_git_failed"))?;
+    let git = match contained {
+        Some(owner) => owner.git().to_path_buf(),
+        None => crate::github::git_program(std::env::var_os("PATH").as_deref())
+            .ok_or_else(|| failure("project_files_git_failed"))?,
+    };
     let mut command = Command::new(git);
     command
         .env_clear()
@@ -109,10 +112,7 @@ pub(crate) fn list(
             LISTED_ALL
         } else {
             LISTED
-        })
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        });
     #[cfg(unix)]
     command.env("PATH", "/usr/bin:/bin");
     #[cfg(not(unix))]
@@ -121,7 +121,21 @@ pub(crate) fn list(
             command.env(name, value);
         }
     }
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(git_failed)?;
+    let mut wrapped;
+    let command = match contained {
+        None => &mut command,
+        Some(owner) => {
+            wrapped = owner
+                .wrap(&command)
+                .map_err(|_| failure("project_files_git_failed"))?;
+            &mut wrapped
+        }
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(command).map_err(git_failed)?;
     let output = child
         .stdout
         .take()
