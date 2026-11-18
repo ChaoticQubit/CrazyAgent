@@ -866,16 +866,18 @@ impl AppSetup {
         }
         self.finished_with_problems = true;
         let items = if problems == 1 { "item" } else { "items" };
-        let ended = format!("Setup finished, but {problems} {items} did not install.");
         ctx.say(match said {
             Some(fix) => {
-                let rest = format!("{ended} See the reasons below.");
+                let rest = format!("{problems} {items} failed.");
                 match fix.tone {
                     Tone::Error => Message::error(&fix.lead, &rest),
                     Tone::Success | Tone::Warning => Message::warning(&fix.lead, &rest),
                 }
             }
-            None => Message::warning(&ended, "See the reasons below."),
+            None => Message::warning(
+                &format!("Setup finished, but {problems} {items} did not install."),
+                "See the reasons below.",
+            ),
         });
         Flow::Handled
     }
