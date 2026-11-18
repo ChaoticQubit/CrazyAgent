@@ -481,7 +481,7 @@ impl Claim {
 }
 
 /// The answer for an access-narrowing job whose bound ran out: it stays queued or running
-/// and takes effect when storage gets to it, so the owner need not send it again.
+/// and takes effect when storage gets to it, unless the engine stops first.
 pub(crate) const ACCESS_CHANGE_PENDING: &str = "access_change_pending";
 
 /// What `Storage::submit` hands back once the worker took the job: whether the job narrows

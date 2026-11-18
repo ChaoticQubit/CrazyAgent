@@ -333,7 +333,7 @@ export function nativeAuthError(code: string): string {
     case "storage_starting_not_submitted":
       return "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.";
     case "access_change_pending":
-      return "CrazyAgent's database is busy, so this change is waiting its turn. It takes effect when the database gets to it; you don't need to do it again.";
+      return "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.";
     case "storage_busy_not_submitted":
       return "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.";
     default:

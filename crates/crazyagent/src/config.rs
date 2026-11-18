@@ -785,8 +785,9 @@ pub const STORAGE_STARTING_LINE: &str =
 pub const STORAGE_BUSY_LINE: &str = "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.";
 
 /// The sentence for `access_change_pending`: a change that narrows access waited past its
-/// bound and stays queued or running, so it still takes effect and need not be sent again.
-pub const ACCESS_CHANGE_PENDING_LINE: &str = "CrazyAgent's database is busy, so this change is waiting its turn. It takes effect when the database gets to it; you don't need to do it again.";
+/// bound and stays queued or running. It takes effect unless the engine stops before
+/// storage reaches it, since the queue does not outlive the engine.
+pub const ACCESS_CHANGE_PENDING_LINE: &str = "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.";
 
 /// The sentence for `engine_version_mismatch`: the running engine and this app speak
 /// different versions, read from a version check or from a reply the app could not read.
