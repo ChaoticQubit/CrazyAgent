@@ -49,6 +49,27 @@ pub fn route(mods: Mods, composing: bool) -> Route {
     route
 }
 
+/// What the input method did with one interpreted key: whether it inserted or marked text,
+/// whether it passed a command back (Return, Tab, Backspace, Escape, arrows arrive so), and
+/// whether marked text was shown before and after the key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Took {
+    pub handled: bool,
+    pub command: bool,
+    pub before: bool,
+    pub after: bool,
+}
+
+/// Whether an interpreted key still sends its own bytes once the input method returned:
+/// never while marked text stays shown; after a composition only when the input method
+/// passed a command back (Korean commits the syllable, then Return or an arrow goes on);
+/// otherwise when it passed a command or took nothing. Input: what it did. Output: true to
+/// send the key's own bytes after any committed text.
+pub fn own_bytes(took: Took) -> bool {
+    let _ = took;
+    false
+}
+
 /// The Meta input of an Option key: Escape before its text, or its named key unchanged.
 /// Input: the characters ignoring modifiers (Shift still applied). Output: the input, or
 /// none for keys that send nothing.
@@ -271,6 +292,53 @@ mod tests {
         assert_eq!(route(mods(false, true, false), true), Route::Interpret);
         assert_eq!(route(mods(false, false, true), true), Route::Interpret);
         assert_eq!(route(mods(true, false, false), true), Route::Ignore);
+    }
+
+    #[test]
+    fn a_key_sends_its_own_bytes_once_unless_the_input_method_kept_it() {
+        let took = |handled, command, before, after| Took {
+            handled,
+            command,
+            before,
+            after,
+        };
+        assert!(
+            own_bytes(took(false, true, false, false)),
+            "Return, no composition"
+        );
+        assert!(
+            own_bytes(took(false, false, false, false)),
+            "a key nobody took"
+        );
+        assert!(
+            !own_bytes(took(true, false, false, false)),
+            "a typed letter"
+        );
+        assert!(
+            !own_bytes(took(true, false, false, true)),
+            "a dead key starts marking"
+        );
+        assert!(
+            own_bytes(took(true, true, true, false)),
+            "Korean: syllable, then Return"
+        );
+        assert!(
+            !own_bytes(took(true, false, true, false)),
+            "Japanese Return commits only"
+        );
+        assert!(
+            !own_bytes(took(true, false, true, true)),
+            "a conversion step"
+        );
+        assert!(
+            !own_bytes(took(false, false, true, true)),
+            "a candidate arrow"
+        );
+        assert!(
+            !own_bytes(took(false, true, true, true)),
+            "a command while still marked"
+        );
+        assert!(!own_bytes(took(true, false, true, false)), "Escape cancels");
     }
 
     #[test]
