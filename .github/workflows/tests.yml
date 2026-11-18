@@ -19,7 +19,7 @@ env:
   TMUX_VERSION: "3.8"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  TIP: 3d6d377ba02ce5d7f2fb9dfdba934d8434cb552e
+  TIP: 9cbe10c75cd59fa70e8247a4055913fda2eacc7f
   RED: a8f768b6c238a0b8e222059617a3d30bba1cd99c
 
 defaults:
@@ -28,7 +28,7 @@ defaults:
 
 jobs:
   flake-linux-tip:
-    name: Git flake Linux at the tip, clippy lib then tests, rows, the load row five times
+    name: Git flake Linux at the tip, clippy lib then tests, rows, the load row alone six times
     runs-on: ubuntu-22.04
     timeout-minutes: 200
     steps:
@@ -95,26 +95,28 @@ jobs:
           grep -E "^test .* \.\.\. (ok|ignored)" "$RUNNER_TEMP/tip.txt" | sed 's/^test //' | sort > "$RUNNER_TEMP/tip-rows.txt"
           wc -l < "$RUNNER_TEMP/tip-rows.txt"
           grep -E "landing::tests::|ignored" "$RUNNER_TEMP/tip-rows.txt"
-          for row in worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time worktrees::tests::engine_worktree_git_runs_no_repository_signature_program_in_any_armor landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor ide::git::tests::the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds ide::git::tests::the_ide_git_ssh_transport_runs_no_false_the_path_finds; do
+          grep -q "^test worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time \.\.\. ignored" "$RUNNER_TEMP/tip.txt" || { echo "LOAD ROW NOT IGNORED IN THE SHARED RUN"; rc=1; }
+          for row in worktrees::tests::engine_worktree_git_runs_no_repository_signature_program_in_any_armor landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor ide::git::tests::the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds ide::git::tests::the_ide_git_ssh_transport_runs_no_false_the_path_finds; do
             grep -q "^test $row \.\.\. ok" "$RUNNER_TEMP/tip.txt" || { echo "ROW NOT OK: $row"; rc=1; }
           done
           exit "$rc"
-      - name: The load row five more times at the tip
+      - name: The load row alone six times at the tip
         if: ${{ !cancelled() && steps.lib.outcome == 'success' }}
         timeout-minutes: 20
         run: |
           set +e -uo pipefail
           rc=0
-          for run in 1 2 3 4 5; do
-            cargo test -p crazyagent --lib --locked -- --exact worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time > "$RUNNER_TEMP/load-$run.txt" 2>&1
+          for run in 1 2 3 4 5 6; do
+            cargo test -p crazyagent --lib --locked -- --ignored --exact worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time > "$RUNNER_TEMP/load-$run.txt" 2>&1
             code=$?
             grep -E "^test |^test result|panicked|runs failed" "$RUNNER_TEMP/load-$run.txt"
             grep -q "^test worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time \.\.\. ok" "$RUNNER_TEMP/load-$run.txt" || { echo "LOAD RUN $run NOT OK (exit $code)"; rc=1; }
+            grep -q "^test result: ok\. 1 passed" "$RUNNER_TEMP/load-$run.txt" || { echo "LOAD RUN $run DID NOT RUN THE ROW ALONE"; rc=1; }
           done
           exit "$rc"
 
   flake-linux-red:
-    name: Git flake Linux at the red commit, the new rows fail
+    name: Git flake Linux, the tip's rows over the red commit's code fail for their named reasons
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -131,14 +133,16 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Make the tree the red commit
+      - name: Make the tree the tip's rows over the red commit's code
         run: |
           set -euo pipefail
           git merge-base --is-ancestor "$TIP" HEAD
           git merge-base --is-ancestor "$RED" "$TIP"
           test "$(git diff --name-only "$TIP" HEAD)" = .github/workflows/tests.yml
-          git checkout "$RED" -- .github/workflows/tests.yml crates/crazyagent/src/research/runner.rs crates/crazyagent/src/ide/git.rs
-          git diff --quiet "$RED" || { echo "TREE IS NOT THE RED COMMIT"; git diff --stat "$RED"; exit 1; }
+          git checkout "$TIP" -- .github/workflows/tests.yml
+          git checkout "$RED" -- crates/crazyagent/src/research/runner.rs crates/crazyagent/src/ide/git.rs
+          test "$(git diff --name-only "$TIP" | sort | tr '\n' ' ')" = "crates/crazyagent/src/ide/git.rs crates/crazyagent/src/research/runner.rs " || { echo "TREE IS NOT THE TIP WITH THE RED CODE"; git diff --stat "$TIP"; exit 1; }
+          test "$(git diff --name-only "$RED" | sort | tr '\n' ' ')" = "crates/crazyagent/src/ide/git/tests.rs crates/crazyagent/src/worktrees.rs " || { echo "TREE DIFFERS FROM THE RED COMMIT BEYOND THE R2 ROWS"; git diff --stat "$RED"; exit 1; }
       - name: Install Linux build packages
         timeout-minutes: 10
         run: bash scripts/ci/linux-packages.sh
@@ -157,18 +161,25 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p crazyagent --lib --locked --no-run
-      - name: The new rows fail at the red commit
+      - name: The new rows fail at the red commit's code for their named reasons
         timeout-minutes: 20
         run: |
           set +e -uo pipefail
-          cargo test -p crazyagent --lib --locked -- --exact worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time ide::git::tests::the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds ide::git::tests::the_ide_git_ssh_transport_runs_no_false_the_path_finds landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor > "$RUNNER_TEMP/red.txt" 2>&1
+          cargo test -p crazyagent --lib --locked -- --exact ide::git::tests::the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds ide::git::tests::the_ide_git_ssh_transport_runs_no_false_the_path_finds landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor > "$RUNNER_TEMP/red.txt" 2>&1
           rc=$?
-          grep -E "^test |^test result|panicked|runs failed|ran the path" "$RUNNER_TEMP/red.txt" | head -40
+          cargo test -p crazyagent --lib --locked -- --ignored --exact worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time > "$RUNNER_TEMP/red-load.txt" 2>&1
+          rc_load=$?
+          grep -E "^test |^test result|panicked|runs failed|ran the path|setup git failed" "$RUNNER_TEMP/red.txt" "$RUNNER_TEMP/red-load.txt" | cut -c1-400 | head -40
           [ "$rc" -ne 0 ] || { echo "RED RUN PASSED, expected failures"; exit 1; }
-          for row in worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time ide::git::tests::the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds ide::git::tests::the_ide_git_ssh_transport_runs_no_false_the_path_finds; do
-            grep -q "^test $row \.\.\. FAILED" "$RUNNER_TEMP/red.txt" || { echo "RED: $row did not fail"; exit 1; }
-          done
-          echo "red ok: 3 rows failed at $RED"
+          [ "$rc_load" -ne 0 ] || { echo "RED LOAD RUN PASSED, expected a failure"; exit 1; }
+          reason() {
+            awk -v t="thread '$2' " -v want="$3" 'index($0, t) == 1 && /panicked at/ {getline line; if (index(line, want)) found=1} END {exit !found}' "$1" || { echo "RED: $2 did not fail for: $3"; exit 1; }
+          }
+          reason "$RUNNER_TEMP/red.txt" ide::git::tests::the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds "the IDE's git ran the path's false"
+          reason "$RUNNER_TEMP/red.txt" ide::git::tests::the_ide_git_ssh_transport_runs_no_false_the_path_finds "the IDE's git ran the path's false as its ssh command"
+          reason "$RUNNER_TEMP/red-load.txt" worktrees::tests::engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time "runs failed under"
+          grep -q "^test landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor \.\.\. FAILED" "$RUNNER_TEMP/red.txt" && echo "signature row also failed at the red code" || echo "signature row passed at the red code (its red is the race, not required)"
+          echo "red ok: 3 rows failed for their named reasons at $RED's code"
 
   flake-macos-tip:
     name: Git flake macOS at the tip, rows
