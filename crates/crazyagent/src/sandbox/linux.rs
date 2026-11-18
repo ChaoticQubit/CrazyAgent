@@ -127,6 +127,8 @@ const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
 const PROBE_FAILED: &str = "the sandbox check failed";
 /// The most bytes of the probe's own reason a refusal carries.
 const PROBE_REASON_MAX: usize = 200;
+/// The most bytes of a failed probe's stderr that are read and logged ([`probe_said`]).
+const PROBE_SAID_MAX: usize = 4096;
 /// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's
 /// own nest probe failed (rv-sa241 SBX-2-R2 LOW-1), so no agent runs on the shared network
 /// with Landlock rules alone while the Agent access page says it is nested.
@@ -1890,10 +1892,19 @@ fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> b
     held
 }
 
-/// Runs a probe with no environment and no input, keeping what it says on stderr, which goes
-/// to the log whole. Input: the probe command. Output: none when it ran and exited 0, else
-/// its reason ([`probe_reason`]).
+/// Runs a probe ([`probe_said`]) and, when it failed, logs what it said ([`probe_log`]).
+/// Input: the probe command. Output: none when it ran and exited 0, else its reason
+/// ([`probe_reason`]).
 fn probe_failure(probe: &mut Command) -> Option<String> {
+    let (said, ended) = probe_said(probe)?;
+    let flags: Vec<&OsStr> = probe.get_args().collect();
+    eprintln!("{}", probe_log(&flags, &ended, &said));
+    Some(probe_reason(&said, &ended))
+}
+
+/// Runs a probe with no environment and no input, keeping what it says on stderr. Input: the
+/// probe command. Output: none when it ran and exited 0, else its stderr and how it ended.
+fn probe_said(probe: &mut Command) -> Option<(String, String)> {
     let ran = crate::spawn_gate::output(
         probe
             .env_clear()
@@ -1901,17 +1912,21 @@ fn probe_failure(probe: &mut Command) -> Option<String> {
             .stdout(Stdio::null())
             .stderr(Stdio::piped()),
     );
-    let (said, ended) = match ran {
-        Ok(output) if output.status.success() => return None,
-        Ok(output) => (
+    match ran {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some((
             String::from_utf8_lossy(&output.stderr).into_owned(),
             output.status.to_string(),
-        ),
-        Err(error) => (String::new(), error.to_string()),
-    };
-    let flags: Vec<&OsStr> = probe.get_args().collect();
-    eprintln!("linux_probe_failed: {flags:?} {ended}: {said}");
-    Some(probe_reason(&said, &ended))
+        )),
+        Err(error) => Some((String::new(), error.to_string())),
+    }
+}
+
+/// The log line for a failed probe, naming its flags, how it ended and what it said on
+/// stderr. Inputs: the flags, how it ended and what it said. Output: the line, without its
+/// newline.
+fn probe_log(flags: &[&OsStr], ended: &str, said: &str) -> String {
+    format!("linux_probe_failed: {flags:?} {ended}: {said}")
 }
 
 /// The reason a refusal carries for a failed probe: the first line it said, or how it ended
@@ -3635,6 +3650,59 @@ mod tests {
             reason.len()
         );
         assert!(reason.chars().all(|letter| letter == 'é'));
+    }
+
+    /// V243-LINUX-PROBE-STDERR-CAP: a failed probe that says far more than it should is read
+    /// only to [`PROBE_SAID_MAX`] bytes and still ends with its own status; bytes that are not
+    /// UTF-8 stay within the cap once replaced.
+    #[test]
+    fn a_failed_probe_is_read_only_to_its_cap_and_still_ends() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let fake = |name: &str, says: &str| {
+            let path = temp.path().join(name);
+            fs::write(&path, format!("#!/bin/sh\n{says} >&2\nexit 3\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let ascii = fake("ascii", "yes x | head -c 1048576");
+        let (said, ended) = probe_said(&mut Command::new(&ascii)).unwrap();
+        assert_eq!(said.len(), PROBE_SAID_MAX);
+        assert!(said.starts_with("x\nx\n"));
+        assert_eq!(ended, "exit status: 3");
+        let raw = fake("raw", "head -c 1048576 /dev/zero | tr '\\000' '\\377'");
+        let (said, ended) = probe_said(&mut Command::new(&raw)).unwrap();
+        assert!(
+            said.len() <= PROBE_SAID_MAX && said.len() > PROBE_SAID_MAX - 4,
+            "{}",
+            said.len()
+        );
+        assert!(
+            said.chars()
+                .all(|letter| letter == char::REPLACEMENT_CHARACTER)
+        );
+        assert_eq!(ended, "exit status: 3");
+    }
+
+    /// V243-LINUX-PROBE-STDERR-CAP: what a failed probe said goes to the log as one line, with
+    /// its newlines and other control characters escaped, so a probe cannot write log lines
+    /// of its own or terminal escapes.
+    #[test]
+    fn a_failed_probe_is_logged_on_one_line_with_its_control_characters_escaped() {
+        let line = probe_log(
+            &[OsStr::new("--probe")],
+            "exit status: 3",
+            "first\nsecond\u{7}\u{1b}[31m red\r",
+        );
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(
+            line.starts_with(r#"linux_probe_failed: ["--probe"] exit status: 3: "#),
+            "{line:?}"
+        );
+        assert!(
+            line.contains(r"first\nsecond\u{7}\u{1b}[31m red\r"),
+            "{line:?}"
+        );
     }
 
     #[test]
