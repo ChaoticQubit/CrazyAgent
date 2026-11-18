@@ -2,7 +2,10 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, user_sid as token_user};
 use super::{Words, final_name, last_error};
 use crate::dacl::{inherited_label, label, trusted_owner};
-use crate::private::{Facts, Store, judge, judge_folder, label_list, list, secret_file_label};
+use crate::private::{
+    Facts, Store, judge, judge_folder, judge_store_before_label, label_list, list,
+    secret_file_label,
+};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -52,16 +55,17 @@ pub fn dir(path: &Path) -> io::Result<File> {
 
 /// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
 /// store's label of [`label_list`]: a new folder is made with it, and one already there
-/// takes it once judged private, whatever made it first (#524 r3, leader 06:32). Inputs: the
-/// absolute path and the store. Output: the held folder, or why it is not private.
+/// takes it once judged private, whatever made it first (#524 r3, leader 06:32), an earlier
+/// build's weaker label included, and so do the files in it (V244-WIN-STORE-LABEL-NX).
+/// Inputs: the absolute path and the store. Output: the held folder, or why it is not private.
 pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
     made_dir(path, Some(store))
 }
 
 /// The work of [`dir`] and [`store_dir`]: creates the folder when missing, with the store's
-/// label when one is named, then opens and judges it, and gives a judged store folder its
-/// label. Inputs: the absolute path and the store, if any. Output: the held folder, or why
-/// it is not private.
+/// label when one is named, then opens it. A store folder is judged by
+/// [`judge_store_before_label`] and given its label before the full judge. Inputs: the
+/// absolute path and the store, if any. Output: the held folder, or why it is not private.
 fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
@@ -81,18 +85,20 @@ fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
     )?;
-    private_as(&folder, &user, true)?;
     if let Some(store) = store {
+        judge_store_before_label(&shaped(&folder, true)?, &user).map_err(refused)?;
         store_labelled(&folder, store)?;
     }
+    private_as(&folder, &user, true)?;
     Ok(folder)
 }
 
 /// Gives a store folder its store's label when the one it carries reads otherwise, as on a
-/// folder made before the store was labelled. Called only on a folder already judged private;
-/// medium is the engine's own level, so no privilege is needed, and only the label part of
-/// the system list changes. Inputs: the held folder, opened with WRITE_OWNER, and the store.
-/// Output: Ok, or the Windows error.
+/// folder made before the store was labelled or by an earlier build; Windows passes the
+/// change to what the folder holds. Called only on a folder [`judge_store_before_label`]
+/// passed; medium is the engine's own level, so no privilege is needed, and only the label
+/// part of the system list changes. Inputs: the held folder, opened with WRITE_OWNER, and the
+/// store. Output: Ok, or the Windows error.
 fn store_labelled(folder: &File, store: Store) -> io::Result<()> {
     let wanted = label_list(store);
     let readings = |sacl: &[u8]| (label(sacl), inherited_label(sacl));
@@ -408,6 +414,13 @@ fn take(file: &File, flags: u32) -> io::Result<()> {
 /// [`judged`] does not find private. Inputs: the handle, the user's SID and whether a folder
 /// is wanted. Output: Ok, or a `PermissionDenied` error with the reason.
 fn private_as(object: &File, user: &[u8], folder: bool) -> io::Result<()> {
+    judged(&shaped(object, folder)?, user, folder)
+}
+
+/// Reads an opened object's facts, refusing a folder where a file is wanted or the reverse.
+/// Inputs: the handle and whether a folder is wanted. Output: the facts, or a
+/// `PermissionDenied` error with the reason.
+fn shaped(object: &File, folder: bool) -> io::Result<Facts> {
     let (facts, attributes) = read(object)?;
     if (attributes & FILE_ATTRIBUTE_DIRECTORY != 0) != folder {
         return Err(refused(if folder {
@@ -416,7 +429,7 @@ fn private_as(object: &File, user: &[u8], folder: bool) -> io::Result<()> {
             "a private file is a folder"
         }));
     }
-    judged(&facts, user, folder)
+    Ok(facts)
 }
 
 /// Judges an object's facts as a folder ([`judge_folder`]) or a file ([`judge`]).

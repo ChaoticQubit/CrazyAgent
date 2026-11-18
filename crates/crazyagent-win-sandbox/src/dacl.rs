@@ -767,7 +767,7 @@ pub fn labelled(level: u32, policy: u32, flags: u8) -> Vec<u8> {
 /// Input: the list bytes Windows copied out with the label asked for. Output: the level and
 /// policy, None when no label applies, or the reason the list or a label is malformed.
 pub fn label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
-    first_label(sacl, |flags| flags & INHERIT_ONLY == 0)
+    only_label(sacl, |flags| flags & INHERIT_ONLY == 0)
 }
 
 /// The mandatory label a folder's system access list hands what is made in it, an entry with
@@ -775,31 +775,37 @@ pub fn label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
 /// Input: the list bytes. Output: the level and policy, None when no label is handed down,
 /// or the reason the list or a label is malformed.
 pub fn inherited_label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
-    first_label(sacl, |flags| {
+    only_label(sacl, |flags| {
         flags & (OBJECT_INHERIT | CONTAINER_INHERIT) != 0
     })
 }
 
-/// The first mandatory label entry whose flags `wanted` accepts, as its level and policy.
-/// Inputs: the system list bytes and the flag test. Output: the level and policy, None when
-/// no such label exists, or the reason the list or the label is malformed.
-fn first_label(sacl: &[u8], wanted: fn(u8) -> bool) -> Result<Option<(u32, u32)>, &'static str> {
+/// The one mandatory label entry whose flags `wanted` accepts, as its level and policy. A
+/// second such entry is refused, not skipped, since the reader cannot tell which of the two
+/// Windows enforces (#568 rv-code F1). Inputs: the system list bytes and the flag test.
+/// Output: the level and policy, None when no such label exists, or the reason the list or a
+/// label is malformed or a second one is there.
+fn only_label(sacl: &[u8], wanted: fn(u8) -> bool) -> Result<Option<(u32, u32)>, &'static str> {
+    let mut found = None;
     for span in spans(sacl)? {
         let at = span.range.start;
         if sacl[at] != MANDATORY_LABEL || !wanted(sacl[at + 1]) {
             continue;
+        }
+        if found.is_some() {
+            return Err("a system list holds a second mandatory label for the same objects");
         }
         let policy = u32::from_le_bytes([sacl[at + 4], sacl[at + 5], sacl[at + 6], sacl[at + 7]]);
         let sid = sid_at(&sacl[at + ACE_HEADER_BYTES..span.range.end])?;
         if sid.len() != 12 || sid[2..8] != LABEL_AUTHORITY {
             return Err("a mandatory label holds a SID that is not an integrity level");
         }
-        return Ok(Some((
+        found = Some((
             u32::from_le_bytes([sid[8], sid[9], sid[10], sid[11]]),
             policy,
-        )));
+        ));
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Whether only the trusted accounts may change an object: one of them owns it

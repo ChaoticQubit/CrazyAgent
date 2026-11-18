@@ -202,7 +202,7 @@ pub(crate) fn private_folder(path: &Path) -> Result<(), PathsError> {
     private_folder_as(path, None)
 }
 
-/// [`private_folder`] for a store folder too: a new one is made with the store's no-read-up
+/// [`private_folder`] for a store folder too: a new one is made with the store's full
 /// label (#524 r3), as the data root is for the database. Inputs: the folder and the store,
 /// if any. Output: Ok, or an error naming the path and why it is not private.
 #[cfg(windows)]

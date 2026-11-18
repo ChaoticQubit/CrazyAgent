@@ -2,9 +2,24 @@
 
 use crazyagent_win_sandbox::dacl::{self, ADMINISTRATORS, SYSTEM};
 use crazyagent_win_sandbox::private;
+use std::io;
 use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::ptr::{null, null_mut};
+use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+use windows_sys::Win32::Security::{
+    DuplicateTokenEx, LABEL_SECURITY_INFORMATION, RevertToSelf, SID_AND_ATTRIBUTES,
+    SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_WRITE_DATA,
+    READ_CONTROL, WRITE_OWNER,
+};
+use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
 
 /// A fresh scratch path in the temp folder, unique to this test and run, with nothing at
 /// it. Input: the test's name. Output: the path.
@@ -363,8 +378,12 @@ fn repair_refuses_a_folder_that_already_holds_a_file_and_changes_nothing() {
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
-/// The medium label with no-write-up and no-read-up the secret stores carry (#524 r3).
-const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+/// The medium label with no-write-up, no-read-up and no-execute-up every store carries
+/// (V244-WIN-STORE-LABEL-NX).
+const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
+/// The medium label with no-write-up and no-read-up alone that an earlier build gave the
+/// stores (#524 r3).
+const EARLIER: Option<(u32, u32)> = Some((0x2000, 0x3));
 
 /// The mandatory label that applies to an open folder or file itself. Input: the object.
 /// Output: the level and policy, None when it has none.
@@ -373,10 +392,33 @@ fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
     facts.label.and_then(|sacl| dacl::label(&sacl).unwrap())
 }
 
-/// #524 r3 (rv-code4 F2, leader 05:45): the database folder, the data root, hands the medium
-/// no-read-up label to the files made directly in it, engine.db and SQLite's side files. It
-/// carries none itself and hands none to a folder made in it, which may be a root granted to
-/// an AppContainer, nor to what is made there.
+/// Every mandatory label entry an object's system list holds, as its flags, level and
+/// policy, read without the reader's checks, so a row sees a second entry beside the first
+/// (#568 rv-code F1). Input: the object. Output: the entries in list order.
+fn label_entries(object: &std::fs::File) -> Vec<(u8, u32, u32)> {
+    let Some(sacl) = private::facts(object).unwrap().label else {
+        return Vec::new();
+    };
+    let count = usize::from(u16::from_le_bytes([sacl[4], sacl[5]]));
+    let mut at = 8;
+    let mut found = Vec::new();
+    for _ in 0..count {
+        let size = usize::from(u16::from_le_bytes([sacl[at + 2], sacl[at + 3]]));
+        assert!(size >= 8 && at + size <= sacl.len(), "{sacl:?}");
+        if sacl[at] == 0x11 {
+            assert_eq!(size, 20, "{sacl:?}");
+            let word = |from: usize| u32::from_le_bytes(sacl[from..from + 4].try_into().unwrap());
+            found.push((sacl[at + 1], word(at + size - 4), word(at + 4)));
+        }
+        at += size;
+    }
+    found
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45), V244-WIN-STORE-LABEL-NX: the database folder, the
+/// data root, hands the full medium label to the files made directly in it, engine.db and
+/// SQLite's side files. It carries none itself and hands none to a folder made in it, which
+/// may be a root granted to an AppContainer, nor to what is made there.
 #[test]
 fn the_database_folder_labels_only_the_files_made_directly_in_it() {
     let root = scratch("database-label");
@@ -386,7 +428,7 @@ fn the_database_folder_labels_only_the_files_made_directly_in_it() {
     std::fs::write(root.join("engine.db-wal"), "x").unwrap();
     for name in ["engine.db", "engine.db-wal"] {
         let file = std::fs::File::open(root.join(name)).unwrap();
-        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+        assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
     }
     let made = root.join("setup");
     let plain = root.join("check");
@@ -401,18 +443,18 @@ fn the_database_folder_labels_only_the_files_made_directly_in_it() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// #524 r3 (rv-code4 F2, leader 05:45): a secret store folder (account keys, MCP secrets)
-/// carries the medium no-read-up label itself and hands it to every file and folder made in
-/// it.
+/// #524 r3 (rv-code4 F2, leader 05:45), V244-WIN-STORE-LABEL-NX: a secret store folder
+/// (account keys, MCP secrets) carries the full medium label itself and hands it to every
+/// file and folder made in it.
 #[test]
 fn a_secret_folder_labels_itself_and_all_made_in_it() {
     let root = scratch("secret-label");
     let held = private::store_dir(&root, private::Store::Secret).unwrap();
-    assert_eq!(own_label(&held), MEDIUM_NO_UP);
+    assert_eq!(own_label(&held), MEDIUM_FULL);
     let file = private::file(&root.join("secret-1"), true).unwrap();
-    assert_eq!(own_label(&file), MEDIUM_NO_UP);
+    assert_eq!(own_label(&file), MEDIUM_FULL);
     let below = private::dir(&root.join("below")).unwrap();
-    assert_eq!(own_label(&below), MEDIUM_NO_UP);
+    assert_eq!(own_label(&below), MEDIUM_FULL);
     drop((held, file, below));
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -431,9 +473,9 @@ fn a_private_folder_and_file_carry_no_label_of_their_own() {
 }
 
 /// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW): a plain private folder
-/// already there takes its store's label once it is judged private, so a store folder gets
-/// its label whatever made it first; a folder another account owns is refused as before and
-/// keeps no label.
+/// already there takes its store's label once it is judged private, and so does a file
+/// already in it, so a store gets its label whatever made it first; a folder another account
+/// owns is refused as before and keeps no label.
 #[test]
 fn an_existing_plain_folder_takes_its_store_label_only_once_judged_private() {
     let root = scratch("relabel");
@@ -441,10 +483,10 @@ fn an_existing_plain_folder_takes_its_store_label_only_once_judged_private() {
     let inside = root.join("made-before");
     drop(private::file(&inside, true).unwrap());
     let held = private::store_dir(&root, private::Store::Secret).unwrap();
-    assert_eq!(own_label(&held), MEDIUM_NO_UP);
-    println!(
-        "relabel probe: a file made before the label carries {:?} after it",
-        own_label(&private::file(&inside, false).unwrap())
+    assert_eq!(own_label(&held), MEDIUM_FULL);
+    assert_eq!(
+        own_label(&private::file(&inside, false).unwrap()),
+        MEDIUM_FULL
     );
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
@@ -463,4 +505,235 @@ fn an_existing_plain_folder_takes_its_store_label_only_once_judged_private() {
     assert_eq!(own_label(&seen), None);
     drop(seen);
     std::fs::remove_dir_all(&foreign).unwrap();
+}
+
+/// The low mandatory level SID, S-1-16-4096, in words so Windows reads it aligned.
+const LOW_LEVEL: [u32; 3] = [0x0000_0101, 0x1000_0000, 0x0000_1000];
+
+/// A copy of this process's token at impersonation level lowered to the low mandatory level,
+/// the level a confined agent runs at. Output: the token.
+fn low_token() -> OwnedHandle {
+    let mut process = null_mut();
+    let opened = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_DUPLICATE | TOKEN_QUERY,
+            &mut process,
+        )
+    };
+    assert_ne!(opened, 0, "{}", io::Error::last_os_error());
+    let process = unsafe { OwnedHandle::from_raw_handle(process) };
+    let mut copy = null_mut();
+    let made = unsafe {
+        DuplicateTokenEx(
+            process.as_raw_handle(),
+            TOKEN_ALL_ACCESS,
+            null(),
+            SecurityImpersonation,
+            TokenImpersonation,
+            &mut copy,
+        )
+    };
+    assert_ne!(made, 0, "{}", io::Error::last_os_error());
+    let token = unsafe { OwnedHandle::from_raw_handle(copy) };
+    let mut level = LOW_LEVEL;
+    let label = TOKEN_MANDATORY_LABEL {
+        Label: SID_AND_ATTRIBUTES {
+            Sid: level.as_mut_ptr().cast(),
+            Attributes: SE_GROUP_INTEGRITY as u32,
+        },
+    };
+    let size = size_of::<TOKEN_MANDATORY_LABEL>() + size_of_val(&level);
+    let set = unsafe {
+        SetTokenInformation(
+            token.as_raw_handle(),
+            TokenIntegrityLevel,
+            (&raw const label).cast(),
+            size as u32,
+        )
+    };
+    assert_ne!(set, 0, "{}", io::Error::last_os_error());
+    token
+}
+
+/// Runs `work` on this thread while it impersonates `token`, then reverts; a failed revert
+/// aborts the process, so no later code runs lowered. Inputs: the impersonation token and
+/// the work. Output: what the work returned.
+fn as_principal<T>(token: &OwnedHandle, work: impl FnOnce() -> T) -> T {
+    let set = unsafe { SetThreadToken(null(), token.as_raw_handle()) };
+    assert_ne!(set, 0, "{}", io::Error::last_os_error());
+    let result = work();
+    if unsafe { RevertToSelf() } == 0 {
+        std::process::abort();
+    }
+    result
+}
+
+/// Gives an object a medium label with `policy` and inheritance `flags`, as an earlier
+/// version or another tool may have left it. Inputs: the path, whether it is a folder, the
+/// policy and the flags.
+fn set_label(path: &Path, folder: bool, policy: u32, flags: u8) {
+    let held = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | WRITE_OWNER)
+        .custom_flags(if folder {
+            FILE_FLAG_BACKUP_SEMANTICS
+        } else {
+            0
+        })
+        .open(path)
+        .unwrap();
+    let bytes = dacl::labelled(0x2000, policy, flags);
+    let mut words = vec![0_u32; bytes.len().div_ceil(4)];
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr().cast(), bytes.len())
+    };
+    let status = unsafe {
+        SetSecurityInfo(
+            held.as_raw_handle(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            null_mut(),
+            null_mut(),
+            null(),
+            words.as_ptr().cast(),
+        )
+    };
+    assert_eq!(status, 0, "{}", io::Error::from_raw_os_error(status as i32));
+}
+
+/// Asserts a lower integrity process of the user can open `path` with no sharing neither to
+/// read, for execute only, for delete only nor to write, any of which would block the
+/// engine's later opens and renames, while the engine opens it each way (#562 F1, #568 N1).
+/// Input: the file.
+fn closed_to_low_holders(path: &Path) {
+    let open = |access: u32| {
+        std::fs::OpenOptions::new()
+            .access_mode(access)
+            .share_mode(0)
+            .open(path)
+    };
+    let low = low_token();
+    let mut held = Vec::new();
+    for (hold, access) in [
+        ("read", FILE_GENERIC_READ),
+        ("execute only", FILE_EXECUTE),
+        ("delete only", DELETE),
+        ("write only", FILE_WRITE_DATA),
+    ] {
+        drop(open(access).unwrap_or_else(|error| panic!("the engine's {hold} open: {error}")));
+        let lowered = as_principal(&low, || open(access));
+        println!(
+            "a low-il {hold} open of {}: {:?}",
+            path.display(),
+            lowered
+                .as_ref()
+                .map(|_| ())
+                .map_err(io::Error::raw_os_error)
+        );
+        if lowered.is_ok() {
+            held.push(hold);
+        }
+    }
+    assert!(
+        held.is_empty(),
+        "a low-il process holds {path:?} for {held:?}"
+    );
+}
+
+/// V244-WIN-STORE-LABEL-NX (leader 09:13): engine.db in the database folder and a file in a
+/// secret store are closed to a lower integrity process of the user with no sharing, to read,
+/// for execute only, for delete only or to write, so a confined agent cannot hold either and
+/// block the engine; the label is read only after the effect is shown.
+#[test]
+fn a_low_integrity_holder_cannot_open_engine_db_or_a_secret_store_file() {
+    let database = scratch("nx-database");
+    let held = private::store_dir(&database, private::Store::Database).unwrap();
+    let engine_db = database.join("engine.db");
+    drop(private::file(&engine_db, true).unwrap());
+    closed_to_low_holders(&engine_db);
+    let opened = private::file(&engine_db, false).unwrap();
+    println!("engine.db label entries: {:?}", label_entries(&opened));
+    assert_eq!(own_label(&opened), MEDIUM_FULL);
+    drop((opened, held));
+    let secret = scratch("nx-secret");
+    let held_secret = private::store_dir(&secret, private::Store::Secret).unwrap();
+    let key = secret.join("secret-1");
+    drop(private::file(&key, true).unwrap());
+    closed_to_low_holders(&key);
+    assert_eq!(own_label(&private::file(&key, false).unwrap()), MEDIUM_FULL);
+    drop(held_secret);
+    std::fs::remove_dir_all(&database).unwrap();
+    std::fs::remove_dir_all(&secret).unwrap();
+}
+
+/// V244-WIN-STORE-LABEL-NX (leader 09:13, earlier installs): a store folder an earlier
+/// version labelled 0x3, holding engine.db or a key made under that label, takes the full
+/// label when it is next opened, and so do the files already in it.
+#[test]
+fn an_earlier_store_label_is_raised_at_open_with_the_files_it_holds() {
+    for (store, flags, name) in [
+        (private::Store::Database, 0x0D, "engine.db"),
+        (private::Store::Secret, 0x03, "secret-1"),
+    ] {
+        let root = scratch(&format!("nx-earlier-{name}"));
+        drop(private::store_dir(&root, store).unwrap());
+        set_label(&root, true, 0x3, flags);
+        let inside = root.join(name);
+        std::fs::write(&inside, "x").unwrap();
+        let before = std::fs::File::open(&inside).unwrap();
+        assert_eq!(own_label(&before), EARLIER, "{name} before");
+        drop(before);
+        let held = private::store_dir(&root, store).unwrap();
+        closed_to_low_holders(&inside);
+        let after = private::file(&inside, false).unwrap();
+        println!("{name} label entries after: {:?}", label_entries(&after));
+        assert_eq!(own_label(&after), MEDIUM_FULL, "{name} after");
+        drop((after, held));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// V244-WIN-STORE-LABEL-NX (leader 09:14): a private file carrying a medium label weaker
+/// than the full policy, no-write-up alone or with no-read-up, is refused on open, since a
+/// lower integrity process may read it or hold it; with the full policy it opens.
+#[test]
+fn a_private_file_with_a_weaker_label_is_refused() {
+    let root = scratch("weaker-label");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("plain");
+    drop(private::file(&path, true).unwrap());
+    for policy in [0x1, 0x3] {
+        set_label(&path, false, policy, 0);
+        assert!(private::file(&path, false).is_err(), "{policy}");
+        assert!(private::read_only(&path).is_err(), "{policy}");
+    }
+    set_label(&path, false, 0x7, 0);
+    drop(private::file(&path, false).expect("the full label opens"));
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #568 rv-code F1 (leader 09:19): a secret file made in the database folder, as the engine
+/// publishes its `pipes` file in the data root, holds one label entry, its own full label,
+/// with none the folder hands down beside it, and is closed to a lower integrity holder.
+#[test]
+fn a_secret_file_in_the_database_folder_holds_one_full_label() {
+    let root = scratch("nx-pipes-root");
+    let held = private::store_dir(&root, private::Store::Database).unwrap();
+    let pipes = root.join("pipes");
+    let made = private::secret_file(&pipes);
+    let seen = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .open(&pipes)
+        .unwrap();
+    let entries = label_entries(&seen);
+    println!(
+        "pipes in the database root: made {:?}, label entries {entries:?}",
+        made.as_ref().map(|_| ()).map_err(io::Error::to_string)
+    );
+    drop((made.unwrap(), seen));
+    closed_to_low_holders(&pipes);
+    assert_eq!(entries, [(0, 0x2000, 0x7)]);
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
 }
