@@ -1,3 +1,273 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gtk::gdk::keys::Key;
+use gtk::gdk::keys::constants as key;
+use gtk::gdk::{EventKey, ModifierType};
+use gtk::glib::{Propagation, SignalHandlerId};
+use gtk::prelude::*;
+
+use super::keys;
+use crate::native_term::event::{Sink, ViewEvent};
+use crate::native_term::pane::Input;
+
+/// The modifiers a chord is read against; Lock, Num Lock, the pointer buttons and the
+/// input method's forward bit never change a chord.
+const CHORD_MODIFIERS: ModifierType = ModifierType::SHIFT_MASK
+    .union(ModifierType::CONTROL_MASK)
+    .union(ModifierType::MOD1_MASK)
+    .union(ModifierType::MOD4_MASK)
+    .union(ModifierType::MOD5_MASK)
+    .union(ModifierType::SUPER_MASK)
+    .union(ModifierType::HYPER_MASK)
+    .union(ModifierType::META_MASK);
+
+/// The largest input method commit a view passes on, in bytes; a larger one is dropped.
+pub const COMMIT_BYTES_MAX: usize = 1 << 20;
+
+/// The view command a key chord makes, by the Linux terminal convention: Ctrl+Shift+C
+/// copies, Ctrl+Shift+V pastes, Ctrl+Shift+A selects all and Shift+Insert pastes. Inputs:
+/// the key and the modifier state. Output: the command, or none for any other key.
+pub fn chord(keyval: Key, state: ModifierType) -> Option<ViewEvent> {
+    let held = state & CHORD_MODIFIERS;
+    let command = if held == ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK {
+        match keyval.to_lower() {
+            key::c => ViewEvent::Copy,
+            key::v => ViewEvent::Paste,
+            key::a => ViewEvent::SelectAll,
+            _ => return None,
+        }
+    } else if held == ModifierType::SHIFT_MASK && matches!(keyval, key::Insert | key::KP_Insert) {
+        ViewEvent::Paste
+    } else {
+        return None;
+    };
+    assert!(matches!(
+        command,
+        ViewEvent::Copy | ViewEvent::Paste | ViewEvent::SelectAll
+    ));
+    Some(command)
+}
+
+/// The input one input method commit makes: its UTF-8 bytes as one text input, the one
+/// path text takes (spike run 3: IBus commits every plain letter). Input: the committed
+/// text. Output: the input, or none for empty text or text over `COMMIT_BYTES_MAX` bytes.
+pub fn commit_input(text: &str) -> Option<Input> {
+    if text.is_empty() || text.len() > COMMIT_BYTES_MAX {
+        return None;
+    }
+    Some(Input::Text(text.as_bytes().to_vec()))
+}
+
+/// Where keyboard focus stands for one view: whether it holds native focus, whether its
+/// toplevel has keyboard focus and whether a page element covers it. Keys go to the view
+/// only while it is active: native, in a focused toplevel and uncovered. A cover drops
+/// native focus, which only the page gives back, as on macOS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Focus {
+    native: bool,
+    toplevel: bool,
+    covered: bool,
+}
+
+impl Focus {
+    /// A new view's focus: not native and uncovered. Input: whether the toplevel has
+    /// keyboard focus. Output: the focus.
+    pub const fn new(toplevel: bool) -> Focus {
+        Focus {
+            native: false,
+            toplevel,
+            covered: false,
+        }
+    }
+
+    /// Whether keys go to the view. Output: the answer.
+    pub fn active(self) -> bool {
+        self.native && self.toplevel && !self.covered
+    }
+
+    /// Gives or takes native focus; a covered view refuses it. Input: on or off. Output:
+    /// the new activity when it changed.
+    pub fn native(&mut self, on: bool) -> Option<bool> {
+        self.change(|focus| focus.native = on && !focus.covered)
+    }
+
+    /// Notes the toplevel gaining or losing keyboard focus. Input: on or off. Output: the
+    /// new activity when it changed.
+    pub fn toplevel(&mut self, on: bool) -> Option<bool> {
+        self.change(|focus| focus.toplevel = on)
+    }
+
+    /// Covers or uncovers the view; covering drops native focus. Input: covered or not.
+    /// Output: the new activity when it changed.
+    pub fn cover(&mut self, covered: bool) -> Option<bool> {
+        self.change(|focus| {
+            focus.covered = covered;
+            focus.native &= !covered;
+        })
+    }
+
+    fn change(&mut self, edit: impl FnOnce(&mut Focus)) -> Option<bool> {
+        let before = self.active();
+        edit(self);
+        assert!(!(self.covered && self.native));
+        let after = self.active();
+        (before != after).then_some(after)
+    }
+}
+
+/// Edits a view's shared focus. Inputs: the focus and the edit. Output: the new activity
+/// when it changed.
+fn edit(focus: &Cell<Focus>, change: impl FnOnce(&mut Focus) -> Option<bool>) -> Option<bool> {
+    let mut next = focus.get();
+    let changed = change(&mut next);
+    focus.set(next);
+    changed
+}
+
+/// Moves the input method's focus with the view's and tells the host. Inputs: the change,
+/// the context, the view id and the sink. Output: none.
+fn apply(change: Option<bool>, im: &gtk::IMMulticontext, id: u64, sink: Sink) {
+    let Some(active) = change else {
+        return;
+    };
+    if active {
+        im.focus_in();
+    } else {
+        im.focus_out();
+    }
+    sink(id, ViewEvent::Focus(active));
+}
+
+/// Takes one key press while the view is active, ahead of the webview: a chord becomes
+/// its command, the input method gets the key next, and a key it does not take goes to
+/// the key map. Inputs: the context, the focus, the view id, the sink and the event.
+/// Output: whether the key goes on to the page, which it does only while inactive.
+fn press(
+    im: &gtk::IMMulticontext,
+    focus: &Cell<Focus>,
+    id: u64,
+    sink: Sink,
+    event: &EventKey,
+) -> Propagation {
+    if !focus.get().active() {
+        return Propagation::Proceed;
+    }
+    let (keyval, state) = (event.keyval(), event.state());
+    if let Some(command) = chord(keyval, state) {
+        sink(id, command);
+        return Propagation::Stop;
+    }
+    if im.filter_keypress(event) {
+        return Propagation::Stop;
+    }
+    if let Some(input) = keys::key_input(keyval, state) {
+        sink(id, ViewEvent::Key(input));
+    }
+    Propagation::Stop
+}
+
+/// The Linux side of one native terminal view's input: it takes the toplevel's keys
+/// ahead of the webview while active, through its own input method context, and hands
+/// each key, commit and focus change to the host's sink with the view's id.
+pub struct View {
+    id: u64,
+    sink: Sink,
+    im: gtk::IMMulticontext,
+    focus: Rc<Cell<Focus>>,
+    toplevel: gtk::Window,
+    handlers: Vec<SignalHandlerId>,
+    commit: Option<SignalHandlerId>,
+}
+
+impl View {
+    /// Wires a view to a realized toplevel, without native focus. Inputs: the toplevel,
+    /// the view id and the sink. Output: the view, or
+    /// `native_terminal_surface_unavailable` when the toplevel has no GDK window.
+    pub fn new(toplevel: &gtk::Window, id: u64, sink: Sink) -> Result<View, &'static str> {
+        assert!(id > 0);
+        let gdk = toplevel
+            .window()
+            .ok_or("native_terminal_surface_unavailable")?;
+        let im = gtk::IMMulticontext::new();
+        im.set_client_window(Some(&gdk));
+        let commit = im.connect_commit(move |_, text| {
+            if let Some(input) = commit_input(text) {
+                sink(id, ViewEvent::Key(input));
+            }
+        });
+        let focus = Rc::new(Cell::new(Focus::new(toplevel.has_toplevel_focus())));
+        let on_press = {
+            let (im, focus) = (im.clone(), Rc::clone(&focus));
+            toplevel.connect_key_press_event(move |_, event| press(&im, &focus, id, sink, event))
+        };
+        let on_release = {
+            let (im, focus) = (im.clone(), Rc::clone(&focus));
+            toplevel.connect_key_release_event(move |_, event| {
+                if !focus.get().active() {
+                    return Propagation::Proceed;
+                }
+                im.filter_keypress(event);
+                Propagation::Stop
+            })
+        };
+        let on_focus_in = {
+            let (im, focus) = (im.clone(), Rc::clone(&focus));
+            toplevel.connect_focus_in_event(move |_, _| {
+                apply(edit(&focus, |f| f.toplevel(true)), &im, id, sink);
+                Propagation::Proceed
+            })
+        };
+        let on_focus_out = {
+            let (im, focus) = (im.clone(), Rc::clone(&focus));
+            toplevel.connect_focus_out_event(move |_, _| {
+                apply(edit(&focus, |f| f.toplevel(false)), &im, id, sink);
+                Propagation::Proceed
+            })
+        };
+        Ok(View {
+            id,
+            sink,
+            im,
+            focus,
+            toplevel: toplevel.clone(),
+            handlers: vec![on_press, on_release, on_focus_in, on_focus_out],
+            commit: Some(commit),
+        })
+    }
+
+    /// Gives or takes native focus, as a click in the host rectangle or the page asks;
+    /// refused while covered. Input: on or off. Output: none.
+    pub fn focus(&self, on: bool) {
+        let change = edit(&self.focus, |f| f.native(on));
+        apply(change, &self.im, self.id, self.sink);
+    }
+
+    /// Covers or uncovers the view as the page reports an element over it; covering
+    /// sends keys back to the page. Input: covered or not. Output: none.
+    pub fn cover(&self, covered: bool) {
+        let change = edit(&self.focus, |f| f.cover(covered));
+        apply(change, &self.im, self.id, self.sink);
+    }
+}
+
+impl Drop for View {
+    /// Disconnects the toplevel and input method handlers and releases the context.
+    /// Output: none.
+    fn drop(&mut self) {
+        for handler in self.handlers.drain(..) {
+            self.toplevel.disconnect(handler);
+        }
+        if let Some(commit) = self.commit.take() {
+            self.im.disconnect(commit);
+        }
+        if self.focus.get().active() {
+            self.im.focus_out();
+        }
+        self.im.set_client_window(None::<&gtk::gdk::Window>);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
