@@ -4410,12 +4410,15 @@ mod tests {
                 std::fs::create_dir(&folder).unwrap();
                 folder
             };
-            let proxy = choice.proxied("macos", tools, model).then_some(41_300);
+            let proxy = policy
+                .network
+                .proxied("macos", tools, model)
+                .then_some(41_300);
             ProjectSandbox::new(
                 &make("project"),
                 &make("home"),
                 &make("tmp"),
-                choice.reach("macos", tools, model, proxy).unwrap(),
+                policy.network.reach("macos", tools, model, proxy).unwrap(),
             )
             .unwrap()
             .profile()
