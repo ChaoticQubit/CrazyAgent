@@ -120,6 +120,25 @@ pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io:
     })
 }
 
+/// The custody of a child started by [`kept`]: the thread that forked it waits until this
+/// drops. Linux sends a child's parent-death signal, which bubblewrap's `--die-with-parent`
+/// sets, when the thread that forked it exits, so the child ends with this keeper or with
+/// the process, never with the thread that asked for it.
+#[must_use = "dropping the keeper ends the thread that forked the child"]
+pub struct Keeper {
+    _release: std::sync::mpsc::SyncSender<()>,
+}
+
+/// Runs `start`, which forks a child, so the child outlives the calling thread and still
+/// ends with the engine (V243 P6). Input: the start. Output: what the start returned and
+/// its keeper, or the error that kept it from starting.
+pub fn kept<T: Send + 'static>(
+    start: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<(T, Keeper)> {
+    let (release, _released) = std::sync::mpsc::sync_channel(0);
+    Ok((start()?, Keeper { _release: release }))
+}
+
 /// Starts a child through the gate and waits for it outside the gate.
 /// Input: the configured command; its stdio is inherited unless set, as with
 /// `Command::status`. Output: the exit status.

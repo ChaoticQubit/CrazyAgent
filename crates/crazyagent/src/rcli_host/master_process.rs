@@ -700,4 +700,56 @@ read -r _
             process.cleanup().unwrap();
         }
     }
+
+    /// V243 P6 (rv-code #501 F1): the engine's runtime has two workers, and a task that hands
+    /// its worker's core off for blocking work, as `off_worker` does, leaves that thread to
+    /// exit once idle. A host started on it whose first process is bubblewrap with
+    /// `--die-with-parent`, as the closed backend's is, dies with the thread that forked it,
+    /// so the custody forks it and the host outlives the worker.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_host_outlives_a_runtime_worker_that_handed_its_core_off() {
+        let bwrap = crate::sandbox::linux::BWRAP_PATHS
+            .iter()
+            .map(std::path::Path::new)
+            .find(|path| path.is_file())
+            .expect("Linux test machines need bubblewrap installed");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_keep_alive(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let mut command = Command::new(bwrap);
+        command
+            .args(["--die-with-parent", "--unshare-pid", "--dev-bind", "/", "/"])
+            .args(["--", "/bin/sh", "-c", "read -r line"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let task = runtime.spawn(async move {
+            let process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
+            let worker = std::fs::read_link("/proc/thread-self").unwrap();
+            tokio::task::block_in_place(|| thread::sleep(Duration::from_millis(100)));
+            (process, worker)
+        });
+        let (mut process, worker) = runtime.block_on(task).unwrap();
+        let worker = std::path::Path::new("/proc").join(worker);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while worker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the worker that started the host never exited"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(500));
+        process.reap().unwrap();
+        assert_eq!(
+            process.status, None,
+            "the host ended with the runtime worker that started it"
+        );
+        process.cleanup().unwrap();
+        drop(runtime);
+    }
 }

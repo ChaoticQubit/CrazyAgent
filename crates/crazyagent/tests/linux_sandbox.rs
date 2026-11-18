@@ -9,6 +9,8 @@ use crazyagent::sandbox::{
     SandboxError, SandboxNetwork, SandboxRemote,
 };
 
+use crazyagent::spawn_gate::Keeper;
+
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
 
 use std::ffi::{OsStr, OsString};
@@ -3137,20 +3139,47 @@ fn bubblewrap_starts_for_a_nested_agent_with_no_new_privileges() {
     assert_eq!(held, Some("1"), "{status}");
 }
 
-/// A gate row for a bubblewrap fact taken from memory: `--die-with-parent` must tie the
-/// namespace to bubblewrap's outer process only. Were that outer process tied to the thread
-/// that started it, an agent would end when an engine thread does.
+/// Starts a wrapped `/bin/sh -c script` as [`started`] does, from a thread kept until the
+/// returned keeper drops, as the rcli master host starts its agent. Inputs: the sandbox,
+/// the case and the script, which prints `ready` first. Output: the running first process,
+/// the reader of the rest of its output and its keeper.
+fn kept_started(
+    sandbox: &dyn Sandbox,
+    case: &Case,
+    script: &str,
+) -> (Child, BufReader<ChildStdout>, Keeper) {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", script])
+        .current_dir(case.project.join("worktrees"));
+    let mut command = sandbox.wrap(&harness).unwrap();
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let (mut child, keeper) =
+        crazyagent::spawn_gate::kept(move || crazyagent::spawn_gate::spawn(&mut command)).unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    (child, output, keeper)
+}
+
+/// V243 P6: bubblewrap's outer process, the first process of a nested agent, dies with the
+/// thread that forked it (`--die-with-parent`), so an agent started on an engine thread that
+/// then ends, as a tokio worker does, would end with it. Started through the custody, as the
+/// rcli master host starts its agent, it outlives the thread that asked for it.
 #[test]
-#[ignore = "V244-NEST-THREAD: bubblewrap's outer process dies with the engine thread that started it; no Linux caller today starts an agent from a thread that ends before it"]
 fn a_nested_agent_outlives_the_thread_that_started_it() {
     let case = case();
     let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
         return;
     };
     let script = "echo ready; read -r line; echo \"got $line\"";
-    let (mut child, mut output) = std::thread::scope(|scope| {
+    let (mut child, mut output, _keeper) = std::thread::scope(|scope| {
         scope
-            .spawn(|| started(&sandbox, &case, script))
+            .spawn(|| kept_started(&sandbox, &case, script))
             .join()
             .unwrap()
     });
@@ -3164,6 +3193,54 @@ fn a_nested_agent_outlives_the_thread_that_started_it() {
     assert_eq!(line, "got on\n");
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+/// The token a stand-in engine run of [`a_kept_nested_agent_ends_with_the_engine`] finds in
+/// its environment: its agent sleeps for it, so the row finds that agent by command line.
+const KEPT_ENGINE: &str = "CRAZYAGENT_TEST_KEPT_ENGINE";
+
+/// rv-sec3 N1, a guard for the custody: a nested agent started through it still ends with the
+/// engine. The row runs itself again as a stand-in engine that starts the agent so and waits;
+/// once the stand-in is killed, nothing the agent runs is left. It holds with the agent
+/// forked on the calling thread too, and must keep holding with the custody.
+#[test]
+fn a_kept_nested_agent_ends_with_the_engine() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    if let Ok(token) = std::env::var(KEPT_ENGINE) {
+        let script = format!("echo ready; exec sleep {token}");
+        let _kept = kept_started(&sandbox, &case, &script);
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
+    let token = format!("604.{}", std::process::id());
+    let mut engine = crazyagent::spawn_gate::spawn(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "a_kept_nested_agent_ends_with_the_engine",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(KEPT_ENGINE, &token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !running(&token) {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in engine never started its agent"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(engine.try_wait().unwrap(), None);
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+    assert!(ended(&token), "the agent outlived the engine that kept it");
 }
 
 /// A gate row for a bubblewrap fact taken from memory: its outer process exits with the
