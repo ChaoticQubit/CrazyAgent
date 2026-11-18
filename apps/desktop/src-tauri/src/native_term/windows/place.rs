@@ -10,6 +10,9 @@ pub const RECT_INVALID: &str = "native_terminal_rect_invalid";
 /// 4x bounds.
 pub const SCALE_KEYS: RangeInclusive<u32> = 100..=400;
 
+/// The DPI Windows calls 100 percent.
+const DPI_BASE: u32 = 96;
+
 /// A native view's rectangle in its parent window's client area, in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
@@ -23,8 +26,24 @@ pub struct Rect {
 /// GetDpiForWindow's answer. Output: the key, or none for 0, which GetDpiForWindow returns
 /// for a window it cannot read.
 pub fn scale_key(dpi: u32) -> Option<u32> {
-    let _ = dpi;
-    unimplemented!("H1 red")
+    if dpi == 0 {
+        return None;
+    }
+    let base = u64::from(DPI_BASE);
+    let percent = (u64::from(dpi) * 100 + base / 2) / base;
+    let held = percent.clamp(u64::from(*SCALE_KEYS.start()), u64::from(*SCALE_KEYS.end()));
+    let key = u32::try_from(held).expect("a held key fits");
+    assert!(SCALE_KEYS.contains(&key));
+    Some(key)
+}
+
+/// One page coordinate in device pixels: scaled, rounded, then moved by the offset. The
+/// inputs are bounded by `rect`, so the result stays well inside i32.
+fn edge(css: f64, scale: f64, offset: i32) -> f64 {
+    let device = (css * scale).round() + f64::from(offset);
+    assert!(device.is_finite());
+    assert!(device.abs() <= f64::from(RECT_MAX) * 10.0);
+    device
 }
 
 /// The device rectangle for the page's terminal box. Inputs: x, y, width and height in CSS
@@ -36,8 +55,34 @@ pub fn rect(
     key: u32,
     offset: (i32, i32),
 ) -> Result<Rect, &'static str> {
-    let _ = (page, key, offset);
-    unimplemented!("H1 red")
+    assert!(
+        SCALE_KEYS.contains(&key),
+        "a scale key of 100 to 400, got {key}"
+    );
+    let (x, y, w, h) = page;
+    let max = f64::from(RECT_MAX);
+    let page_ok = [x, y, w, h].iter().all(|v| v.is_finite() && v.abs() <= max);
+    let bound = RECT_MAX.unsigned_abs();
+    let offset_ok = offset.0.unsigned_abs() <= bound && offset.1.unsigned_abs() <= bound;
+    if !page_ok || !offset_ok {
+        return Err(RECT_INVALID);
+    }
+    let scale = f64::from(key) / 100.0;
+    let (left, top) = (edge(x, scale, offset.0), edge(y, scale, offset.1));
+    let (right, bottom) = (edge(x + w, scale, offset.0), edge(y + h, scale, offset.1));
+    let (width, height) = (right - left, bottom - top);
+    let sized = (1.0..=max).contains(&width) && (1.0..=max).contains(&height);
+    if !sized || left.abs() > max || top.abs() > max {
+        return Err(RECT_INVALID);
+    }
+    let placed = Rect {
+        x: left as i32,
+        y: top as i32,
+        w: width as u32,
+        h: height as u32,
+    };
+    assert!(placed.w >= 1 && placed.h >= 1);
+    Ok(placed)
 }
 
 #[cfg(test)]
