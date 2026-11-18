@@ -22,3 +22,24 @@ fn only_a_native_webdriver_build_carries_the_trial_pick_seam() {
         "{APP} carries {variable}: {carried}; a default build must not hold the trial pick seam"
     );
 }
+
+/// The code only the native terminal trial probe answers with, spelled backwards like the
+/// variable above.
+#[cfg(target_os = "macos")]
+const PROBE_CODE_REVERSED: &str = "deliaf_eborp_lanimret_evitan";
+
+#[cfg(target_os = "macos")]
+#[test]
+fn only_a_native_webdriver_build_carries_the_native_terminal_probe() {
+    let code: String = PROBE_CODE_REVERSED.chars().rev().collect();
+    let app = std::fs::read(APP).unwrap();
+    assert!(app.len() > 1024 * 1024, "{APP} is not the app binary");
+    let carried = app
+        .windows(code.len())
+        .any(|window| window == code.as_bytes());
+    assert_eq!(
+        carried,
+        cfg!(feature = "native-webdriver"),
+        "{APP} carries {code}: {carried}; a default build must not hold the native probe"
+    );
+}

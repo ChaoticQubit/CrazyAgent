@@ -72,7 +72,7 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 23] = [
+const WALL_COMMANDS: [&str; 24] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
@@ -87,6 +87,7 @@ const WALL_COMMANDS: [&str; 23] = [
     "desktop_native_terminal_jump",
     "desktop_native_terminal_keys",
     "desktop_native_terminal_close",
+    "desktop_native_terminal_probe",
     "desktop_terminal_resize",
     "desktop_terminal_detach",
     "desktop_team_graph",

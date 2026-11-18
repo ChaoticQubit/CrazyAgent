@@ -108,6 +108,7 @@
     "allow-desktop-native-terminal-jump",
     "allow-desktop-native-terminal-keys",
     "allow-desktop-native-terminal-close",
+    "allow-desktop-native-terminal-probe",
     "allow-desktop-team-terminals-per-window",
     "allow-desktop-open-terminal-windows",
     "allow-desktop-close-project-walls",

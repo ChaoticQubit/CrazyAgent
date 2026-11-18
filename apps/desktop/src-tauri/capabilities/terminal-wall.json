@@ -17,6 +17,7 @@
     "allow-desktop-native-terminal-jump",
     "allow-desktop-native-terminal-keys",
     "allow-desktop-native-terminal-close",
+    "allow-desktop-native-terminal-probe",
     "allow-desktop-team-graph",
     "allow-desktop-team-stop-agent",
     "allow-desktop-team-stop-teammate",

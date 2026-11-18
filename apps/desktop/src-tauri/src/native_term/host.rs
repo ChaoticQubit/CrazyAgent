@@ -358,6 +358,47 @@ pub fn style(style: Style) -> Result<(), &'static str> {
     }
 }
 
+/// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
+/// the direct path draws it and the private pasteboard's text.
+#[cfg(feature = "native-webdriver")]
+pub struct Look {
+    pub view: Retained<TermView>,
+    pub rows: Vec<String>,
+    pub direct: bool,
+    pub pasteboard: Option<String>,
+}
+
+/// Reads one view a window opened for a native-webdriver trial; on the main thread. Inputs:
+/// the window label and the view id. Output: the look, or a plain code.
+#[cfg(feature = "native-webdriver")]
+pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
+    let looked = with_native(|native| {
+        let Native { table, clip, .. } = native;
+        let entry = table.owned(window, page)?;
+        let rows = entry.pane.term().map_or_else(Vec::new, |term| {
+            let grid = a11y::visible(term);
+            let text = |row: &Vec<a11y::Glyph>| -> String {
+                let cells = row.iter().filter(|glyph| !glyph.spacer);
+                let line: String = cells.map(|glyph| glyph.text.as_str()).collect();
+                line.trim_end().to_owned()
+            };
+            grid.rows.iter().map(text).collect()
+        });
+        assert!(rows.len() <= GRID_MAX);
+        Ok(Look {
+            view: entry.platform.ns.clone(),
+            rows,
+            direct: entry.direct,
+            pasteboard: clip.read(),
+        })
+    });
+    match looked {
+        Ok(look) => look,
+        Err((Held::Missing, _)) => Err("native_terminal_view_unknown"),
+        Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
+    }
+}
+
 fn blink() {
     let more = with_native(|native| {
         native.shown = !native.shown;

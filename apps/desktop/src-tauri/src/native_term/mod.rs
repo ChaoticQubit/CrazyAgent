@@ -7,6 +7,8 @@ pub(crate) mod host;
 mod ime;
 mod keymap;
 mod pane;
+#[cfg(feature = "native-webdriver")]
+pub(crate) mod probe;
 mod render;
 mod screen;
 pub(crate) mod style;

@@ -2066,6 +2066,27 @@ async fn native_call(
     .map_err(engine_failure)
 }
 
+/// Test builds only: takes one native-webdriver trial step on a native view the calling page
+/// opened, through the view's own AppKit selectors, and reads what the view and its window
+/// show. Inputs: the calling page, the view id and the step. Output: what it reads.
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+#[tauri::command]
+async fn desktop_native_terminal_probe(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    step: native_term::probe::Step,
+) -> Result<native_term::probe::Seen, BridgeError> {
+    terminal_window(&webview)?;
+    let window = webview.label().to_owned();
+    native_term::host::on_main(&app, move |mtm| {
+        native_term::probe::take(mtm, &window, view, step)
+    })
+    .await
+    .map_err(engine_failure)?
+    .map_err(engine_failure)
+}
+
 /// Whether this desktop draws terminals natively: true only in a macOS build. Input: the
 /// calling page. Output: the answer.
 #[tauri::command]
@@ -5807,20 +5828,24 @@ fn admit_pages<R: Runtime>(
 }
 
 /// Declares the native commands once: their names for whoever must walk them and their
-/// handler behind the page check. The commands after the `;` serve only the webview
-/// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only.
+/// handler behind the page check. The commands after the first `;` serve only the webview
+/// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only; the
+/// ones after the second exist only in a macOS native-webdriver build, for its trials.
 /// Input: the command functions. Output: `NATIVE_COMMANDS` and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+ ; $($webview:ident,)+) => {
+    ($($command:ident,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
         #[cfg(all(test, not(target_os = "macos")))]
         const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($webview),)+];
-        #[cfg(all(test, target_os = "macos"))]
+        #[cfg(all(test, target_os = "macos", not(feature = "native-webdriver")))]
         const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+        #[cfg(all(test, target_os = "macos", feature = "native-webdriver"))]
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($trial),)+];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
             admit_pages::<tauri::Wry>(tauri::generate_handler![
                 $($command,)+
                 $(#[cfg(not(target_os = "macos"))] $webview,)+
+                $(#[cfg(all(target_os = "macos", feature = "native-webdriver"))] $trial,)+
             ])
         }
     };
@@ -6198,6 +6223,8 @@ native_commands! {
     desktop_terminal_input,
     desktop_terminal_resize,
     desktop_terminal_detach,
+    ;
+    desktop_native_terminal_probe,
 }
 
 pub fn run() {
