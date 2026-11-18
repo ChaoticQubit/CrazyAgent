@@ -20,6 +20,7 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   TMUX_VERSION: "3.8"
+  NODE_VERSION: "26.12.1"
   BASE_SHA: cdf02af79b53347eb64d7d2b0d9d42391d6f71aa
   TIP_SHA: a7fbf7b9519e8bbb272b27ff6b1c350e8f4a8c49
   BOOT_ROWS: cli_output_failure_cleans_runtime_before_unlock cli_preserves_unrecorded_socket cli_shutdown_preserves_observed_replacements
@@ -37,7 +38,7 @@ jobs:
   macos:
     name: macOS owner_bootstrap rows around the IDE server rows, ${{ matrix.side }}
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -72,6 +73,42 @@ jobs:
           echo "engine git $git: $version"
           IFS=. read -r major minor _ <<< "${version#git version }"
           (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Read the pinned IDE build
+        id: ide
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { appendFileSync, readFileSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
+            const { version } = manifest;
+            const build = manifest.builds["aarch64-apple-darwin"];
+            const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
+            const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
+              && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
+            if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
+            appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
+          '
+      - name: Provision the pinned IDE build
+        env:
+          IDE_VERSION: ${{ steps.ide.outputs.version }}
+          IDE_URL: ${{ steps.ide.outputs.url }}
+          IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
+          IDE_BYTES: ${{ steps.ide.outputs.bytes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/vscodium-reh-web"
+          build=".local-state/ide-cache/vscodium-$IDE_VERSION"
+          mkdir -p "$work" "$build"
+          curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
+          test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
+          echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
+          tar -xzf "$work/vscodium.tgz" -C "$build"
+          test -f "$build/out/server-main.js"
       - name: Install the Rust toolchain
         run: |
           set -euo pipefail
