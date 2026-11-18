@@ -386,3 +386,7 @@ impl Intents {
 #[cfg(all(test, unix))]
 #[path = "narrowing_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "narrowing_windows_tests.rs"]
+mod windows_tests;
