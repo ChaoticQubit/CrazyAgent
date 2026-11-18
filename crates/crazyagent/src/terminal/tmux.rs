@@ -1,9 +1,9 @@
 use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt,
-    PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED,
-    TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX,
+    PASTE_BYTES_MAX, PaneAt, PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
+    TEAMMATES_SERVER_REPLACED, TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::Ending;
@@ -862,13 +862,54 @@ impl Tmux {
         pasted
     }
 
+    /// Pastes one owner paste into one tmux target through `owner_paste_lines` (T7), which
+    /// brackets it only when the pane asked, with a best-effort `delete-buffer` on a failure.
+    /// Takes the control client, the target and 1 to `PASTE_BYTES_MAX` keys from
+    /// `paste_keys`, without a NUL. Returns once tmux took them all, `terminal_paste_bounds`,
+    /// or tmux's refusal.
+    fn send_paste(control: &Control, target: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0) {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let buffer = paste_buffer_name();
+        let lines = owner_paste_lines(target, &buffer, keys);
+        assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+        let pasted = lines
+            .iter()
+            .try_for_each(|line| control.run(line).map(|_| ()));
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
+    }
+
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
-    /// the target. Returns the answer.
+    /// the target. Returns the answer, or `terminal_agent_unknown` once the target is gone.
     fn paste_on(control: &Control, target: &str) -> Result<bool, HostError> {
+        Ok(Self::displayed(control, target, "#{bracket_paste_flag}")? == "1")
+    }
+
+    /// Reads one format of one tmux target. `display-message` answers for the current pane,
+    /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
+    /// and window, and one of them must be the target. Takes the control client, a `%N` pane
+    /// or `session:=window` target, whose names hold no space, and the format. Returns the
+    /// format's text, or `terminal_agent_unknown` once the target is gone.
+    fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
+        let named = "#{pane_id} #{session_name}:=#{window_name}";
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{bracket_paste_flag}}{FORMAT_END}'"
+            "display-message -p -t {target} '{named} {format}{FORMAT_END}'"
         ))?;
-        Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
+        let unread = || failure("terminal_command_failed");
+        let line = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .ok_or_else(unread)?;
+        let (pane, rest) = line.split_once(' ').ok_or_else(unread)?;
+        let (window, text) = rest.split_once(' ').ok_or_else(unread)?;
+        if pane != target && window != target {
+            return Err(failure("terminal_agent_unknown"));
+        }
+        Ok(text.to_owned())
     }
 }
 
@@ -2365,6 +2406,23 @@ impl Host for Tmux {
         Self::paste_on(&*self.live_control()?, &pane)
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        Self::send_paste(&control, &target, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let pane = self.member_pane(agent, pane)?;
+        Self::send_paste(&*self.live_control()?, &pane, keys)
+    }
+
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
         if self.confined.is_none() {
             return Err(failure(OWN_SERVER_UNAVAILABLE));
@@ -2385,14 +2443,10 @@ impl Host for Tmux {
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;
-        let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{window_activity}}{FORMAT_END}'"
-        ))?;
-        let activity = lines
-            .first()
-            .and_then(|line| std::str::from_utf8(line).ok())
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .ok_or_else(|| failure("terminal_command_failed"))?;
+        let activity = Self::displayed(&control, &target, "#{window_activity}")?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| failure("terminal_command_failed"))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| failure("terminal_command_failed"))?
@@ -2563,8 +2617,23 @@ const COMMANDS_SENT_MAX: usize = 2;
 fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
     assert!(!bytes.contains(&0));
     assert!(bytes.len() <= INPUT_BYTES_MAX);
-    let mut set = String::with_capacity(24 + buffer.len() + bytes.len() * 4);
-    let _ = write!(set, "set-buffer -b {buffer} -- \"");
+    vec![
+        set_buffer_line(buffer, bytes, false),
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// One `set-buffer` command that writes bytes into a named buffer, appended with `append`,
+/// every byte other than an ASCII letter or digit written as a `\ooo` octal escape inside
+/// double quotes, so tmux's parser decodes each exactly and expands nothing. Takes the
+/// buffer name, at most `INPUT_BYTES_MAX` bytes without a NUL and whether to append.
+/// Returns the command.
+fn set_buffer_line(buffer: &str, bytes: &[u8], append: bool) -> String {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let flag = if append { "-a " } else { "" };
+    let mut set = String::with_capacity(28 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer {flag}-b {buffer} -- \"");
     for &byte in bytes {
         if byte.is_ascii_alphanumeric() {
             set.push(char::from(byte));
@@ -2573,11 +2642,25 @@ fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
         }
     }
     set.push('"');
-    assert!(set.len() <= "set-buffer -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
-    vec![
-        set,
-        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
-    ]
+    assert!(set.len() <= "set-buffer -a -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    set
+}
+
+/// The commands that paste one owner paste into one target through a named buffer (T7):
+/// one `set-buffer` per piece of at most `INPUT_BYTES_MAX` bytes, each piece after the first
+/// appended, then `paste-buffer -d -p -r -S`, which brackets the whole only when the pane's
+/// app asked, writes the bytes unchanged otherwise and deletes the buffer. Takes the target,
+/// the buffer name and 1 to `PASTE_BYTES_MAX` keys without a NUL. Returns the commands.
+fn owner_paste_lines(target: &str, buffer: &str, keys: &[u8]) -> Vec<String> {
+    assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
+    let mut lines: Vec<String> = keys
+        .chunks(INPUT_BYTES_MAX)
+        .enumerate()
+        .map(|(at, piece)| set_buffer_line(buffer, piece, at > 0))
+        .collect();
+    lines.push(format!("paste-buffer -d -p -r -S -b {buffer} -t {target}"));
+    assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+    lines
 }
 
 /// A tmux buffer name no other paste of this engine uses, `crazyagent-paste-<pid>-<n>`,

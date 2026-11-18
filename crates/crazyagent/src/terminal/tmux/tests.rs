@@ -476,6 +476,18 @@ fn the_clipboard_pins_stop_a_panes_osc_52_query_reading_an_unnamed_buffer() {
 /// the guard that stops the server, the agent and the file.
 #[cfg(target_os = "macos")]
 fn raw_cat_pane(home: &Path, osc52_queries: bool) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
+    cat_pane(home, osc52_queries, false)
+}
+
+/// The pane of `raw_cat_pane`, which with `bracketed` first turns bracketed paste on, as an
+/// agent app that reads pastes does. Takes the home folder, the OSC 52 choice and that one.
+/// Returns as `raw_cat_pane`.
+#[cfg(target_os = "macos")]
+fn cat_pane(
+    home: &Path,
+    osc52_queries: bool,
+    bracketed: bool,
+) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let folder = home.join("terminal");
     std::fs::create_dir(&folder).unwrap();
@@ -498,8 +510,13 @@ fn raw_cat_pane(home: &Path, osc52_queries: bool) -> (Arc<Tmux>, Server, AgentId
     } else {
         String::new()
     };
+    let bracket = if bracketed {
+        "printf '\\033[?2004h'; "
+    } else {
+        ""
+    };
     let script = format!(
-        "stty raw -echo; : > '{}'; {queries}exec /bin/cat > '{}'",
+        "stty raw -echo; {bracket}: > '{}'; {queries}exec /bin/cat > '{}'",
         ready.display(),
         received.display()
     );
@@ -3439,5 +3456,129 @@ fn a_pane_command_with_the_keeper_lifeline_variable_is_refused() {
     assert_eq!(
         spawn_line(&agent, &command).map_err(|error| error.0),
         Err("terminal_command_invalid".to_owned())
+    );
+}
+
+/// Decodes the one double-quoted argument of a `set-buffer` command back to its bytes: ASCII
+/// letters and digits as they are, every other byte from its `\ooo` escape. Takes the
+/// command. Returns the bytes.
+fn set_buffer_bytes(line: &str) -> Vec<u8> {
+    let quoted = line
+        .split_once(" -- \"")
+        .and_then(|(_, rest)| rest.strip_suffix('"'))
+        .expect("set-buffer with one double-quoted argument");
+    let mut decoded = Vec::new();
+    let mut bytes = quoted.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte.is_ascii_alphanumeric() {
+            decoded.push(byte);
+            continue;
+        }
+        assert_eq!(byte, b'\\', "a raw {byte:#04x} inside the quotes");
+        let digits: Vec<u8> = bytes.by_ref().take(3).collect();
+        assert_eq!(digits.len(), 3);
+        decoded.push(u8::from_str_radix(std::str::from_utf8(&digits).unwrap(), 8).unwrap());
+    }
+    decoded
+}
+
+/// Slice C (DEC-203 T7): an owner paste goes to tmux as one `set-buffer` per piece of at most
+/// `INPUT_BYTES_MAX` bytes, each piece after the first appended, then one `paste-buffer -d
+/// -p -r -S`, which brackets the whole only when the pane asked; the pieces decode back to
+/// the keys in order.
+#[test]
+fn an_owner_paste_is_set_in_appended_pieces_then_pasted_once_with_p() {
+    let keys: Vec<u8> = (0..2 * INPUT_BYTES_MAX + 1)
+        .map(|at| b' ' + (at % 95) as u8)
+        .collect();
+    let lines = owner_paste_lines("%7", "crazyagent-paste-1-3", &keys);
+    assert_eq!(lines.len(), 4);
+    assert!(lines[0].starts_with("set-buffer -b crazyagent-paste-1-3 -- \""));
+    assert!(lines[1].starts_with("set-buffer -a -b crazyagent-paste-1-3 -- \""));
+    assert!(lines[2].starts_with("set-buffer -a -b crazyagent-paste-1-3 -- \""));
+    assert_eq!(
+        lines[3],
+        "paste-buffer -d -p -r -S -b crazyagent-paste-1-3 -t %7"
+    );
+    let decoded: Vec<u8> = lines[..3]
+        .iter()
+        .flat_map(|line| set_buffer_bytes(line))
+        .collect();
+    assert_eq!(decoded, keys);
+}
+
+/// Slice C (DEC-203 T7): a 200 KB owner paste into a pane whose app turned bracketed paste
+/// on arrives once inside one bracket pair, byte-exact; into a pane that did not, it arrives
+/// unwrapped; no buffer is left behind either way.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_paste_is_bracketed_once_only_when_the_pane_asked() {
+    for bracketed in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let (host, _server, agent, received) = cat_pane(home.path(), false, bracketed);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.input_live(&agent).unwrap() != bracketed {
+            assert!(
+                Instant::now() < deadline,
+                "the pane never set its paste mode"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let keys: Vec<u8> = (0..50 * INPUT_BYTES_MAX + 7)
+            .map(|at| b' ' + (at * 7 % 95) as u8)
+            .collect();
+        host.paste(&agent, &keys).unwrap();
+        let mut expected = Vec::new();
+        if bracketed {
+            expected.extend_from_slice(b"\x1b[200~");
+        }
+        expected.extend_from_slice(&keys);
+        if bracketed {
+            expected.extend_from_slice(PASTE_CLOSE);
+        }
+        assert_eq!(
+            received_bytes(&received, expected.len()),
+            expected,
+            "bracketed paste {bracketed}"
+        );
+        assert_eq!(buffers_left(&host), 0);
+    }
+}
+
+/// #477 r2 / #483: tmux 3.8 answers `display-message -t` for a gone window with success and
+/// the current pane's values, so a terminal whose window is gone, on the engine's own server
+/// where no lookup runs first, must read as `terminal_agent_unknown`, never as that other
+/// pane's paste mode or activity; a live terminal still reads its own.
+#[test]
+fn a_gone_window_reads_as_unknown_not_as_the_current_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    assert_eq!(host.input_live(&agent).map_err(|error| error.0), Ok(false));
+    assert!(host.quiet(&agent).unwrap().is_some());
+    let gone = AgentId::team(9).unwrap();
+    assert_eq!(
+        host.input_live(&gone).map_err(|error| error.0),
+        Err("terminal_agent_unknown".to_owned())
+    );
+    assert_eq!(
+        host.quiet(&gone).map_err(|error| error.0),
+        Err("terminal_agent_unknown".to_owned())
     );
 }

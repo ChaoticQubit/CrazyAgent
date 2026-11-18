@@ -271,3 +271,21 @@ fn a_teammates_server_pid_record_is_read_for_its_own_socket_and_refused_once_dam
         Err(failure(OWN_SERVER_UNAVAILABLE))
     );
 }
+
+/// Slice C (DEC-203, fix5 parity): the engine filters an owner paste as the desktop's
+/// `pasteText` does: every C0 control, DEL and C1 control is dropped except tab, line feed
+/// and carriage return, then CR LF and LF become CR, so a paste cannot press Escape, end a
+/// bracketed paste or send a Ctrl key; other text passes unchanged.
+#[test]
+fn an_owner_paste_keeps_only_tab_and_enter_of_the_control_characters() {
+    let every: String = (0u32..=0x9f).filter_map(char::from_u32).collect();
+    let expected: Vec<u8> = b"\t\r\r".iter().copied().chain(0x20u8..0x7f).collect();
+    assert_eq!(paste_keys(&every), expected);
+    assert_eq!(paste_keys("a\r\nb\nc\rd"), b"a\rb\rc\rd");
+    assert_eq!(paste_keys("x\x1b[201~y\x03z"), b"x[201~yz");
+    assert_eq!(
+        paste_keys("\u{e9}\u{6f22}\u{1f642}"),
+        "\u{e9}\u{6f22}\u{1f642}".as_bytes()
+    );
+    assert!(paste_keys("\x00\x1b\u{9b}\x7f").is_empty());
+}
