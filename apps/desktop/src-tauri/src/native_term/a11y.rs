@@ -388,6 +388,16 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_ending_on_a_wide_characters_left_cell_keeps_it() {
+        let mut wide = term(10, 2, "a界😀e".as_bytes());
+        select(&mut wide, (0, 1), (0, 3));
+        assert_eq!(visible(&wide).selection, Some(((0, 1), (0, 3))));
+        assert_eq!(build(&visible(&wide)).selection, Some((1, 3)));
+        select(&mut wide, (0, 0), (0, 1));
+        assert_eq!(build(&visible(&wide)).selection, Some((0, 2)));
+    }
+
+    #[test]
     fn a_range_covers_cells_on_its_first_line() {
         let text = build(&visible(&term(10, 2, "a界😀e\r\nxy".as_bytes())));
         assert_eq!(text.cells_for_range((1, 3)), Some((0, 1, 5)));
