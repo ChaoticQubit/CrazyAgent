@@ -212,6 +212,27 @@ impl Fixture {
         }
     }
 
+    /// Starts a pane whose process ignores terminate and waits until its shell has set that
+    /// trap, so a terminate sent at once cannot end it before the trap holds (S4B-B1 rows).
+    /// Inputs: the host and the agent. Output: the pane's record.
+    #[cfg(target_os = "macos")]
+    fn pane_ignoring_terminate(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        let ready = self.base.join(format!("terminate-ignored-{id}"));
+        let shown = ready.display().to_string();
+        assert!(!shown.contains('\''), "{shown}");
+        let script = format!("trap '' TERM; : > '{shown}'; exec cat");
+        let record = self.pane_running(host, id, &["/bin/sh", "-c", &script]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pane never set its trap: {shown}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        record
+    }
+
     fn keep(&self, id: i64, record: &PaneRecord) {
         self.connection
             .execute(
@@ -24881,7 +24902,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
         ),
     ] {
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let record = fixture.pane_ignoring_terminate(&host, id);
         let agent = AgentId::team(id).unwrap();
         let adoption = Adoption {
             host: host.clone(),
@@ -28549,7 +28570,7 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
             params![mate, lead],
         )
         .unwrap();
-    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let _record = fixture.pane_ignoring_terminate(&host, mate);
     fixture
         .connection
         .execute(
