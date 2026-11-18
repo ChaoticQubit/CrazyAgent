@@ -231,8 +231,8 @@ public static class NulAccess {
     const uint ReadControl = 0x20000;
     const uint WriteDac = 0x40000;
     const uint Dacl = 4;
-    static SafeFileHandle Open() {
-        SafeFileHandle handle = CreateFileW(@"\\.\NUL", ReadControl | WriteDac, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+    static SafeFileHandle Open(string path, bool folder) {
+        SafeFileHandle handle = CreateFileW(path, ReadControl | WriteDac, 7, IntPtr.Zero, 3, folder ? 0x02000000u : 0u, IntPtr.Zero);
         if (handle.IsInvalid) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
         return handle;
     }
@@ -243,11 +243,11 @@ public static class NulAccess {
         if (!GetKernelObjectSecurity(handle, Dacl, bytes, needed, out needed)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
         return new RawSecurityDescriptor(bytes, 0);
     }
-    public static string Sddl() {
-        using (SafeFileHandle handle = Open()) { return Read(handle).GetSddlForm(AccessControlSections.Access); }
+    public static string Sddl(string path, bool folder) {
+        using (SafeFileHandle handle = Open(path, folder)) { return Read(handle).GetSddlForm(AccessControlSections.Access); }
     }
-    public static string Grant(int mask) {
-        using (SafeFileHandle handle = Open()) {
+    public static string Grant(string path, bool folder, int mask) {
+        using (SafeFileHandle handle = Open(path, folder)) {
             RawSecurityDescriptor descriptor = Read(handle);
             SecurityIdentifier packages = new SecurityIdentifier("S-1-15-2-1");
             RawAcl list = descriptor.DiscretionaryAcl;
@@ -274,13 +274,37 @@ function Test-Nul([string]$stage, [string]$boundary) {
 }
 
 $netProfile = Write-Profile 'p2-net' 'crazyagent.probe-git-net' @('internetClient') @("$base\p1w")
-Write-Host "NUL dacl-before $([NulAccess]::Sddl())"
+Write-Host "NUL dacl-before $([NulAccess]::Sddl('\\.\NUL', $false))"
 Test-Nul 'before nocap' $gitProfile
-Write-Host "NUL dacl-read $([NulAccess]::Grant(0x120089))"
+Write-Host "NUL dacl-read $([NulAccess]::Grant('\\.\NUL', $false, 0x120089))"
 Test-Nul 'read-only nocap' $gitProfile
-Write-Host "NUL dacl-readwrite $([NulAccess]::Grant(0x12019F))"
+Write-Host "NUL dacl-readwrite $([NulAccess]::Grant('\\.\NUL', $false, 0x12019F))"
 Test-Nul 'read-write nocap' $gitProfile
 Test-Nul 'read-write internetClient' $netProfile
+
+$userWork = Join-Path $env:USERPROFILE 'probe-work'
+$userClean = "$userWork\r-clean"
+New-Item -ItemType Directory -Force -Path $userWork | Out-Null
+& $git init -q $userClean
+Set-Content -Path "$userClean\a.txt" -Value 'a'
+& $git -C $userClean add a.txt
+& $git -C $userClean -c user.name=probe -c user.email=probe@example.invalid commit -q -m init
+Set-Content -Path "$userClean\b.txt" -Value 'b'
+$userProfile = Write-Profile 'p2-user' 'crazyagent.probe-git-user' @() @($userWork)
+Set-Variant $emptyConfig
+
+function Test-Cwd([string]$stage) {
+    foreach ($place in @(@($gitProfile, $clean, 'probe-root'), @($userProfile, $userClean, 'user-profile'))) {
+        $listed = Invoke-ContainedGit $place[0] (Get-GitArgs $place[1] (Get-StepArgs 'ls-files' ''))
+        Write-Host "CWD $stage $($place[2]) [$($place[1])] ls-files-exit=$($listed.Exit) out=[$((($listed.Output -replace '\s+', ' ').Trim()))]"
+    }
+}
+
+Write-Host "CWD parents $((icacls $env:USERPROFILE | Out-String) -replace '\s+', ' ') | $((icacls (Split-Path $env:USERPROFILE) | Out-String) -replace '\s+', ' ')"
+Write-Host "ROOT dacl-before $([NulAccess]::Sddl('C:\', $true))"
+Test-Cwd 'before-root-entry'
+Write-Host "ROOT dacl-after $([NulAccess]::Grant('C:\', $true, 0x00100080))"
+Test-Cwd 'after-root-entry'
 
 $chosen = $null
 foreach ($variant in @($emptyConfig, 'NUL')) {
