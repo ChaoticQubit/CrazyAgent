@@ -668,9 +668,39 @@ impl Shared {
     }
 
     /// Draws one frame on a surface: reshapes changed rows, uploads rectangles and glyphs,
-    /// renders and presents. Inputs: the surface and the frame. Output: ok, or why it was
-    /// skipped.
+    /// waits for the surface's next texture, renders and presents. Inputs: the surface and
+    /// the frame. Output: ok, or why it was skipped.
     pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
+        let rects = self.prepare(surface, frame)?;
+        let output = self.acquire(surface)?;
+        self.submit(surface, output, &rects)
+    }
+
+    /// Waits for a surface's next texture before the frame is built, so output that arrives
+    /// during the wait is drawn in it; a failed wait reconfigures the surface. Input: the
+    /// surface. Output: the texture for `draw_acquired`, or why there is none.
+    pub fn acquire(&self, surface: &mut Surface) -> Result<wgpu::SurfaceTexture, String> {
+        let set = self.device.as_ref().ok_or("no device")?;
+        surface.surface.get_current_texture().map_err(|e| {
+            surface.surface.configure(&set.device, &surface.config);
+            e.to_string()
+        })
+    }
+
+    /// Draws one frame into a texture `acquire` gave: reshapes changed rows, uploads
+    /// rectangles and glyphs, renders and presents. Inputs: the surface, the frame and the
+    /// texture. Output: ok, or why it was skipped.
+    pub fn draw_acquired(
+        &mut self,
+        surface: &mut Surface,
+        frame: &Frame,
+        output: wgpu::SurfaceTexture,
+    ) -> Result<(), String> {
+        let rects = self.prepare(surface, frame)?;
+        self.submit(surface, output, &rects)
+    }
+
+    fn prepare(&mut self, surface: &mut Surface, frame: &Frame) -> Result<Vec<f32>, String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
         let set = self.device.as_ref().ok_or("no device")?;
@@ -714,10 +744,17 @@ impl Shared {
                 &mut self.swash,
             )
             .map_err(|e| e.to_string())?;
-        let output = surface.surface.get_current_texture().map_err(|e| {
-            surface.surface.configure(&set.device, &surface.config);
-            e.to_string()
-        })?;
+        assert_eq!(rects.len() % 8, 0);
+        Ok(rects)
+    }
+
+    fn submit(
+        &self,
+        surface: &mut Surface,
+        output: wgpu::SurfaceTexture,
+        rects: &[f32],
+    ) -> Result<(), String> {
+        let set = self.device.as_ref().ok_or("no device")?;
         let clear = linear_rgba(self.theme.background, 1.0);
         encode(set, surface, &output, rects.len() / 8, clear)?;
         output.present();
