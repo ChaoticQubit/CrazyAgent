@@ -246,16 +246,29 @@ public static class NulAccess {
     public static string Sddl(string path, bool folder) {
         using (SafeFileHandle handle = Open(path, folder)) { return Read(handle).GetSddlForm(AccessControlSections.Access); }
     }
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+    static extern int DeriveAppContainerSidFromAppContainerName(string name, out IntPtr sid);
+    [DllImport("advapi32.dll")]
+    static extern IntPtr FreeSid(IntPtr sid);
+    public static string ContainerSid(string name) {
+        IntPtr sid;
+        int result = DeriveAppContainerSidFromAppContainerName(name, out sid);
+        if (result != 0) { throw new Win32Exception(result); }
+        try { return new SecurityIdentifier(sid).Value; } finally { FreeSid(sid); }
+    }
     public static string Grant(string path, bool folder, int mask) {
+        return Set(path, folder, "S-1-15-2-1", mask);
+    }
+    public static string Set(string path, bool folder, string sid, int mask) {
         using (SafeFileHandle handle = Open(path, folder)) {
             RawSecurityDescriptor descriptor = Read(handle);
-            SecurityIdentifier packages = new SecurityIdentifier("S-1-15-2-1");
+            SecurityIdentifier who = new SecurityIdentifier(sid);
             RawAcl list = descriptor.DiscretionaryAcl;
             for (int at = list.Count - 1; at >= 0; at--) {
                 CommonAce entry = list[at] as CommonAce;
-                if (entry != null && entry.SecurityIdentifier == packages) { list.RemoveAce(at); }
+                if (entry != null && entry.SecurityIdentifier == who) { list.RemoveAce(at); }
             }
-            list.InsertAce(list.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, mask, packages, false, null));
+            if (mask != 0) { list.InsertAce(list.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, mask, who, false, null)); }
             descriptor.DiscretionaryAcl = list;
             byte[] bytes = new byte[descriptor.BinaryLength];
             descriptor.GetBinaryForm(bytes, 0);
@@ -290,21 +303,106 @@ Set-Content -Path "$userClean\a.txt" -Value 'a'
 & $git -C $userClean add a.txt
 & $git -C $userClean -c user.name=probe -c user.email=probe@example.invalid commit -q -m init
 Set-Content -Path "$userClean\b.txt" -Value 'b'
-$userProfile = Write-Profile 'p2-user' 'crazyagent.probe-git-user' @() @($userWork)
+$userProfile = Write-Profile 'p2-user' 'crazyagent.probe-git-user' @() @($userWork, "$base\work\home")
+$latProfile = Write-Profile 'p3-lat' 'crazyagent.probe-lat' @() @("$base\lat")
 Set-Variant $emptyConfig
 
-function Test-Cwd([string]$stage) {
-    foreach ($place in @(@($gitProfile, $clean, 'probe-root'), @($userProfile, $userClean, 'user-profile'))) {
-        $listed = Invoke-ContainedGit $place[0] (Get-GitArgs $place[1] (Get-StepArgs 'ls-files' ''))
-        Write-Host "CWD $stage $($place[2]) [$($place[1])] ls-files-exit=$($listed.Exit) out=[$((($listed.Output -replace '\s+', ' ').Trim()))]"
-    }
+$replay = "$base\io\cwdprobe.exe"
+$built = ((& rustc --edition 2021 -O -o $replay "$ws\.github\farm\cwdprobe.rs" 2>&1 | Out-String) -replace '\s+', ' ').Trim()
+foreach ($folder in @("$base\work\bin", "$userWork\bin")) {
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    Copy-Item -LiteralPath $replay -Destination $folder -Force -ErrorAction SilentlyContinue
+}
+Write-Host "E replay built=$(Test-Path $replay) [$built]"
+
+$root = 'C:\'
+$packages = 'S-1-15-2-1'
+$mount = '\\.\MountPointManager'
+$rootEntry = 0x00100080
+$listMask = 0x001000A1
+$places = @(
+    [pscustomobject]@{ Name = 'probe-root'; Profile = $gitProfile; Container = 'crazyagent.probe-git'; Repo = $clean; Replay = "$base\work\bin\cwdprobe.exe"; Middles = @($base) },
+    [pscustomobject]@{ Name = 'user-profile'; Profile = $userProfile; Container = 'crazyagent.probe-git-user'; Repo = $userClean; Replay = "$userWork\bin\cwdprobe.exe"; Middles = @((Split-Path $env:USERPROFILE), $env:USERPROFILE) },
+    [pscustomobject]@{ Name = 'lat'; Profile = $latProfile; Container = 'crazyagent.probe-lat'; Repo = ''; Replay = ''; Middles = @($base) }
+)
+foreach ($place in $places) { $place | Add-Member -NotePropertyName Sid -NotePropertyValue ([NulAccess]::ContainerSid($place.Container)) }
+$middles = @($places | ForEach-Object { $_.Middles } | Sort-Object -Unique)
+Write-Host "E sids $(($places | ForEach-Object { "$($_.Container)=$($_.Sid)" }) -join ' ')"
+Write-Host "E mount-manager dacl-before $(try { [NulAccess]::Sddl($mount, $false) } catch { "unread: $($_.Exception.Message)" })"
+foreach ($path in @($root) + $middles) { Write-Host "E dacl-before $path $([NulAccess]::Sddl($path, $true))" }
+
+function Set-Access([string]$path, [bool]$folder, [string]$sid, [int]$mask) {
+    try { [NulAccess]::Set($path, $folder, $sid, $mask) } catch { "set failed: $($_.Exception.Message)" }
 }
 
-Write-Host "CWD parents $((icacls $env:USERPROFILE | Out-String) -replace '\s+', ' ') | $((icacls (Split-Path $env:USERPROFILE) | Out-String) -replace '\s+', ' ')"
-Write-Host "ROOT dacl-before $([NulAccess]::Sddl('C:\', $true))"
-Test-Cwd 'before-root-entry'
-Write-Host "ROOT dacl-after $([NulAccess]::Grant('C:\', $true, 0x00100080))"
-Test-Cwd 'after-root-entry'
+function Set-State($state) {
+    $null = Set-Access $root $true $packages $state.Root
+    foreach ($middle in $middles) { $null = Set-Access $middle $true $packages $state.Middle }
+    $mountLine = Set-Access $mount $false $packages $state.Mount
+    $own = if ($state.Own) { $listMask } else { 0 }
+    foreach ($place in $places) {
+        $null = Set-Access $root $true $place.Sid $own
+        foreach ($middle in $place.Middles) { $null = Set-Access $middle $true $place.Sid $own }
+    }
+    foreach ($path in @($root) + $middles) { Write-Host "E $($state.Name) acl $path $([NulAccess]::Sddl($path, $true))" }
+    Write-Host "E $($state.Name) acl mount-manager $mountLine"
+}
+
+function Test-State($state) {
+    foreach ($place in @($places | Where-Object { $_.Replay -ne '' })) {
+        Push-Location -LiteralPath $place.Repo
+        $calls = Invoke-Contained $place.Profile $place.Replay @()
+        Pop-Location
+        Write-Host "E $($state.Name) $($place.Name) replay exit=$($calls.Exit) [$((@(($calls.Output -split "`r?`n") | Where-Object { $_.Trim() -ne '' })) -join ' | ')]"
+    }
+    $exits = @()
+    $failed = 0
+    $first = ''
+    $listed = $false
+    foreach ($step in $steps) {
+        $result = Invoke-ContainedGit $gitProfile (Get-GitArgs $clean (Get-StepArgs $step "$base\work\b-$($state.Name).bundle"))
+        $exits += "$step=$($result.Exit)"
+        if ($step -eq 'ls-files') { $listed = $result.Exit -eq 0 -and $result.Output -match 'b\.txt' }
+        if ($result.Exit -ne 0) {
+            $failed++
+            if ($first -eq '') { $first = (($result.Output -replace '\s+', ' ').Trim()) }
+        }
+    }
+    $user = Invoke-ContainedGit $userProfile (Get-GitArgs $userClean (Get-StepArgs 'ls-files' ''))
+    $userListed = $user.Exit -eq 0 -and $user.Output -match 'b\.txt'
+    Write-Host "E $($state.Name) probe-root $($exits -join ' ') lists-b=$listed first-failure=[$first]"
+    Write-Host "E $($state.Name) user-profile ls-files=$($user.Exit) lists-b=$userListed out=[$((($user.Output -replace '\s+', ' ').Trim()))]"
+    $listed -and $failed -eq 0 -and $userListed
+}
+
+Push-Location -LiteralPath $clean
+$ownerCalls = Invoke-Owner $replay @()
+Pop-Location
+Write-Host "E owner probe-root replay exit=$($ownerCalls.Exit) [$((@(($ownerCalls.Output -split "`r?`n") | Where-Object { $_.Trim() -ne '' })) -join ' | ')]"
+
+$states = @(
+    [pscustomobject]@{ Name = 'S0-admin-step-root'; Root = $rootEntry; Middle = 0; Mount = 0; Own = $false },
+    [pscustomobject]@{ Name = 'S1-mount-manager'; Root = $rootEntry; Middle = 0; Mount = 0x00120089; Own = $false },
+    [pscustomobject]@{ Name = 'S2-list-every-ancestor'; Root = $listMask; Middle = $listMask; Mount = 0; Own = $false },
+    [pscustomobject]@{ Name = 'S3-root-entry-middle-list'; Root = $rootEntry; Middle = $listMask; Mount = 0; Own = $false },
+    [pscustomobject]@{ Name = 'S4-root-list-no-middle'; Root = $listMask; Middle = 0; Mount = 0; Own = $false },
+    [pscustomobject]@{ Name = 'S5-own-container-list'; Root = $rootEntry; Middle = 0; Mount = 0; Own = $true }
+)
+$working = @()
+foreach ($state in $states) {
+    Set-State $state
+    if (Test-State $state) { $working += $state.Name }
+}
+Write-Host "E WORKING [$($working -join ',')]"
+$preference = @('S0-admin-step-root', 'S1-mount-manager', 'S3-root-entry-middle-list', 'S4-root-list-no-middle', 'S5-own-container-list', 'S2-list-every-ancestor')
+$keep = @($preference | Where-Object { $working -contains $_ } | ForEach-Object { $name = $_; $states | Where-Object { $_.Name -eq $name } } | Select-Object -First 1)
+if ($keep.Count -eq 1) {
+    Set-State $keep[0]
+    Write-Host "E KEPT $($keep[0].Name) for P2 and P3"
+} else {
+    Set-State $states[0]
+    Write-Host 'E KEPT none, S0 restored for P2 and P3'
+}
 
 $chosen = $null
 foreach ($variant in @($emptyConfig, 'NUL')) {
@@ -347,7 +445,6 @@ if ($gitWorks) {
 & $git clone -q $ws "$base\lat\repo"
 $latRepo = "$base\lat\repo"
 $latFiles = @(& $git -C $latRepo ls-files).Count
-$latProfile = Write-Profile 'p3-lat' 'crazyagent.probe-lat' @() @("$base\lat")
 $latArgs = Get-GitArgs $latRepo (Get-StepArgs 'ls-files' '')
 $probe = Invoke-ContainedGit $latProfile $latArgs
 $probeLines = @(($probe.Output -split "`n") | Where-Object { $_.Trim() -ne '' }).Count
