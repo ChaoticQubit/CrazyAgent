@@ -8,6 +8,7 @@ mod render;
 mod screen;
 mod style;
 mod view;
+mod view_text;
 
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};
 use std::ffi::OsStr;
