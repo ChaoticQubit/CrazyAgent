@@ -572,3 +572,15 @@ test("V243-NATIVE-INPUT r2 (#509 F2): while a following view connects again afte
   assert.equal(seen.line, "Connecting to the terminal again, try 1 of 30. Last try: " + seen.ended);
   assert.ok(!/open it again/i.test(seen.line), seen.line);
 });
+
+test("V243-NATIVE-INPUT r2 (rv-sec2 #509 N1): with Message box only saved, the app-start preload opens the remembered terminal with keys off, before any panel shows it", async () => {
+  const seen = await page(`
+    await F.stage({ nodes: [${MASTER}] });
+    F.input("box");
+    F.preload([{ key: { project: "p1", terminal: "team-1", pane: null }, size: { width: 640, height: 380 } }], ["p1"]);
+    if (!(await F.until(() => F.calls("desktop_native_terminal_open").length === 1))) return { loaded: false };
+    await pause(200);
+    return { loaded: true, keys: F.calls("desktop_native_terminal_open")[0].args.keys, calls: F.calls("desktop_native_terminal_keys").length };
+  `);
+  assert.deepEqual(seen, { loaded: true, keys: false, calls: 0 });
+});
