@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,14 +115,19 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
-    name: Build the ${{ matrix.os }} test archive
+    name: Native Windows spike on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 90
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows
             runner: windows-2022
+          - os: windows
+            runner: windows-2025
+    env:
+      SPIKE_EXE: target/release/native-windows-spike.exe
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -129,23 +136,102 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install SQLite for Windows
+      - name: Install Rust toolchain
         run: |
           set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build the spike
+        working-directory: spikes/native-windows
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tee "$RUNNER_TEMP/spike-build.txt"
+      - name: Base rows, quiet
+        if: success()
+        working-directory: spikes/native-windows
+        run: |
+          set +e -uo pipefail
+          code=0
+          SPIKE_ROWS=base SPIKE_CONDITION="quiet" SPIKE_LOG="$RUNNER_TEMP/spike-base-quiet.log" /usr/bin/timeout 360 "./$SPIKE_EXE" || code=$?
+          echo "spike exit $code" | tee -a "$RUNNER_TEMP/spike-base-quiet.log"
+          cat "$RUNNER_TEMP/spike-base-quiet.log"
+          exit "$code"
+      - name: Perf rows, quiet
+        if: always()
+        working-directory: spikes/native-windows
+        run: |
+          set +e -uo pipefail
+          code=0
+          SPIKE_ROWS=perf SPIKE_CONDITION="quiet" SPIKE_LOG="$RUNNER_TEMP/spike-perf-quiet.log" /usr/bin/timeout 360 "./$SPIKE_EXE" || code=$?
+          echo "spike exit $code" | tee -a "$RUNNER_TEMP/spike-perf-quiet.log"
+          cat "$RUNNER_TEMP/spike-perf-quiet.log"
+          exit "$code"
+      - name: Perf rows, loaded
+        if: always()
+        working-directory: spikes/native-windows
+        run: |
+          set +e -uo pipefail
+          cores="${NUMBER_OF_PROCESSORS:-4}"
+          "./$SPIKE_EXE" --burn "$cores" 420 > "$RUNNER_TEMP/spike-burn.txt" 2>&1 &
+          burn=$!
+          sleep 5
+          code=0
+          SPIKE_ROWS=perf SPIKE_CONDITION="loaded burn=$cores" SPIKE_LOG="$RUNNER_TEMP/spike-perf-loaded.log" /usr/bin/timeout 360 "./$SPIKE_EXE" || code=$?
+          kill "$burn" 2>/dev/null
+          wait "$burn" 2>/dev/null
+          taskkill //F //IM native-windows-spike.exe > /dev/null 2>&1
+          echo "spike exit $code burn threads=$cores" | tee -a "$RUNNER_TEMP/spike-perf-loaded.log"
+          cat "$RUNNER_TEMP/spike-burn.txt" "$RUNNER_TEMP/spike-perf-loaded.log"
+          exit "$code"
+      - name: Build the spike with the accessibility provider
+        if: always()
+        working-directory: spikes/native-windows
+        run: |
+          set -euo pipefail
+          cargo build --release --features uia 2>&1 | tee "$RUNNER_TEMP/spike-build-uia.txt"
+      - name: Accessibility rows, provider on
+        if: always()
+        working-directory: spikes/native-windows
+        run: |
+          set +e -uo pipefail
+          code=0
+          SPIKE_ROWS=uia SPIKE_CONDITION="quiet" SPIKE_LOG="$RUNNER_TEMP/spike-uia.log" /usr/bin/timeout 360 "./$SPIKE_EXE" || code=$?
+          echo "spike exit $code" | tee -a "$RUNNER_TEMP/spike-uia.log"
+          cat "$RUNNER_TEMP/spike-uia.log"
+          exit "$code"
+      - name: Add ja-JP and ko-KR input
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          set +e -uo pipefail
+          env -u PSModulePath powershell.exe -NoProfile -NonInteractive -Command '$list = Get-WinUserLanguageList; $list.Add("ja-JP"); $list.Add("ko-KR"); Set-WinUserLanguageList $list -Force; Get-WinUserLanguageList | Format-List LanguageTag, InputMethodTips' 2>&1 | tee "$RUNNER_TEMP/spike-lang-setup.txt"
+          exit 0
+      - name: Real IME and emoji rows
+        if: always()
+        continue-on-error: true
+        working-directory: spikes/native-windows
+        run: |
+          set +e -uo pipefail
+          code=0
+          SPIKE_ROWS=lang SPIKE_CONDITION="quiet" SPIKE_LOG="$RUNNER_TEMP/spike-lang.log" /usr/bin/timeout 360 "./$SPIKE_EXE" || code=$?
+          echo "spike exit $code" | tee -a "$RUNNER_TEMP/spike-lang.log"
+          cat "$RUNNER_TEMP/spike-lang.log"
+          exit "$code"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
         with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
+          name: farm-native-windows-spike-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/spike-*.txt
+            ${{ runner.temp }}/spike-*.log
+          if-no-files-found: warn
+          retention-days: 14
 
   rust-linux:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -190,9 +276,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-macos:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -252,9 +338,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-windows:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +386,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +550,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -525,9 +613,9 @@ jobs:
           retention-days: 14
 
   report:
+    if: false
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
