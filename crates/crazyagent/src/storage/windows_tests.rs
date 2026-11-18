@@ -53,6 +53,43 @@ async fn a_second_engine_on_the_same_folder_is_refused() {
     drop(first);
 }
 
+/// Closes engine storage through its own close job, which releases the engine lock before it
+/// answers. Input: the storage. Output: none; a failed close fails the test.
+async fn close(storage: Storage) {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    storage
+        .sender
+        .try_send(super::Job::Close(send))
+        .unwrap_or_else(|_| panic!("the close job was not queued"));
+    receive.await.unwrap().unwrap();
+}
+
+/// W1 D3 (F2): while the engine runs, neither its database nor its data folder can be
+/// renamed away, so the path checked before SQLite opened it keeps naming the same file.
+#[tokio::test]
+async fn the_database_and_its_folder_cannot_be_renamed_while_the_engine_runs() {
+    let (root, path, config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    let storage = Storage::open(&path, config, false).await.unwrap();
+    assert!(std::fs::rename(&path, data.join("moved.db")).is_err());
+    assert!(std::fs::rename(&data, root.path().join("moved")).is_err());
+    assert!(path.is_file() && !data.join("moved.db").exists());
+    close(storage).await;
+}
+
+/// W1 D4 (rv-code4 F2): the lock probe says free before an engine opens the folder, held
+/// while one runs, and free again once that engine has closed.
+#[tokio::test]
+async fn the_lock_probe_sees_a_running_engine_and_its_close() {
+    let (_root, path, config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    assert!(super::engine_lock_released(&data));
+    let storage = Storage::open(&path, config, false).await.unwrap();
+    assert!(!super::engine_lock_released(&data));
+    close(storage).await;
+    assert!(super::engine_lock_released(&data));
+}
+
 /// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
 /// the blanket `storage_unavailable` refusal the port replaces.
 #[tokio::test]
