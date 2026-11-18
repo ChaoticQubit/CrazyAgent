@@ -1911,6 +1911,38 @@ async fn desktop_team_graph(
     read(&state).await?.team_graph(&id).await
 }
 
+/// The one gate every terminal view passes, page or native: the main window or a wall window
+/// of the project it names, whose team graph shows the agent, and a free place among the
+/// window's views, taken in the same step. Takes the calling page, the bridge, the terminals,
+/// the terminal name, the pane and the wall window's project id. Returns the view's key and
+/// its held place, or the refusal.
+async fn attach_place(
+    webview: &Webview,
+    state: &NativeState,
+    terminals: &TerminalState,
+    agent: &str,
+    pane: Option<&str>,
+    id: Option<&str>,
+) -> Result<(bridge::terminal::ViewKey, bridge::terminal::Reservation), BridgeError> {
+    terminal_window(webview)?;
+    let key = bridge::terminal::view_key(agent, pane)?;
+    let project = bridge::terminal::place_project(webview.label(), id)?;
+    let shows = async {
+        if let Some(id) = project {
+            let graph = read(state).await?.team_graph(&id).await?;
+            if !bridge::terminal::graph_shows(&graph, &key.agent) {
+                return Err(engine_failure("window_denied"));
+            }
+        }
+        Ok::<(), BridgeError>(())
+    };
+    let place = terminals
+        .0
+        .checked_room(webview.label(), &key, shows)
+        .await?;
+    Ok((key, place))
+}
+
 #[tauri::command]
 async fn desktop_terminal_attach(
     webview: Webview,
@@ -1921,34 +1953,20 @@ async fn desktop_terminal_attach(
     id: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
-    terminal_window(&webview)?;
-    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
-    let id = match webview.label() {
-        "main" => None,
-        _ => {
-            let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-            terminal_window_for(&webview, &id)?;
-            Some(id)
-        }
-    };
-    let shows = async {
-        if let Some(id) = id {
-            let graph = read(&state).await?.team_graph(&id).await?;
-            if !bridge::terminal::graph_shows(&graph, &key.agent) {
-                return Err(engine_failure("window_denied"));
-            }
-        }
-        Ok::<(), BridgeError>(())
-    };
-    let room = terminals
-        .0
-        .checked_room(webview.label(), &key, shows)
-        .await?;
+    let (key, place) = attach_place(
+        &webview,
+        &state,
+        &terminals,
+        &agent,
+        pane.as_deref(),
+        id.as_deref(),
+    )
+    .await?;
     let session = lock(&state)
         .await?
-        .open_terminal(key.agent, key.pane)
+        .open_terminal(key.agent, key.pane, None, false)
         .await?;
-    room.attach(session, output)
+    place.attach(session, bridge::terminal::Sink::Page(output))
 }
 
 /// Types a view's keys into an attached agent terminal, the view of exactly that pane when

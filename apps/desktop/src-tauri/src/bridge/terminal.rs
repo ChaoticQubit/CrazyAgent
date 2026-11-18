@@ -1,15 +1,18 @@
+use super::feed::{FeedEvent, Wake, feed_event};
 use super::team::read_failure;
 use super::{BridgeError, NativeBridge, bounded, failure};
 use crazyagent::engine::owner::{TerminalControl, TerminalOutput, TerminalSession};
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::TeamGraph;
 use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
+    AgentId, INPUT_BYTES_MAX, PASTE_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame,
+    TerminalRequest,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 pub const VIEWERS_MAX: usize = 9;
 pub const VIEWS_MAX: usize = crazyagent::terminal::DESKTOP_VIEWS_MAX;
@@ -20,6 +23,9 @@ const WALL_DIGEST_DIGITS: usize = 16;
 const _: () = assert!(WINDOWS_MAX < 10);
 const _: () = assert!(VIEWERS_MAX <= VIEWS_MAX);
 const REQUESTS_MAX: usize = 64;
+const NATIVE_REQUESTS_MAX: usize = PASTE_BYTES_MAX / INPUT_BYTES_MAX + REQUESTS_MAX;
+const _: () = assert!(NATIVE_REQUESTS_MAX > REQUESTS_MAX);
+pub const NATIVE_OVERFLOW: &str = "native_terminal_input_overflow";
 const CODE_BYTES_MAX: usize = 64;
 
 /// Checks a terminal name the window sent. Takes the text.
@@ -183,6 +189,26 @@ pub fn graph_shows(graph: &TeamGraph, agent: &AgentId) -> bool {
         .any(|node| node.terminal.as_ref() == Some(agent))
 }
 
+/// The project whose team graph must show an agent before a window may view its terminal:
+/// none for the main window, which views every project, and for a terminal wall window the
+/// project its label was made for, which it must name. Takes the window label and the project
+/// id the window sent, if any. Returns that project id, none, or `window_denied`.
+pub fn place_project(label: &str, id: Option<&str>) -> Result<Option<String>, BridgeError> {
+    let denied = || failure("window_denied");
+    if !window_label_valid(label) {
+        return Err(denied());
+    }
+    if label == "main" {
+        return Ok(None);
+    }
+    let id = id.ok_or_else(denied)?;
+    let project = ProjectId::new(id).map_err(|_| denied())?;
+    if !window_admits(label, &project) {
+        return Err(denied());
+    }
+    Ok(Some(id.to_owned()))
+}
+
 /// Checks a pane id the window sent for a native teammate's view, such as `%12`. Takes the
 /// text. Returns the pane id, or `terminal_pane_invalid`.
 pub fn pane(text: &str) -> Result<String, BridgeError> {
@@ -221,6 +247,7 @@ fn attach_failure(code: &str) -> BridgeError {
         "terminal_attach_timeout" => "terminal_attach_timeout",
         "terminal_outcome_unknown" => "terminal_outcome_unknown",
         "terminal_not_answering" => "terminal_not_answering",
+        "terminal_size_bounds" => "terminal_size_bounds",
         "controller_disconnected" => "not_connected",
         "terminal_owner_unavailable" | "owner_socket_replaced" => "owner_unavailable",
         _ => "terminal_attach_failed",
@@ -336,17 +363,33 @@ impl NativeBridge {
     }
 
     /// Opens one owner terminal session attached to an agent's terminal, or to one pane of
-    /// its window, such as a native teammate's. Takes the terminal name and the checked pane.
+    /// its window, such as a native teammate's. With a size the engine first sizes the window
+    /// to the viewer; an input-only session, which needs a size, sends no output, for a native
+    /// view that draws the pane from the engine's tmux server directly. Takes the terminal
+    /// name, the checked pane, the size if any and whether the session is input-only.
     /// Returns the session with the terminal size, its output and its controls.
     pub async fn open_terminal(
         &mut self,
         agent: AgentId,
         pane: Option<String>,
+        size: Option<(u16, u16)>,
+        input_only: bool,
     ) -> Result<TerminalSession, BridgeError> {
         let controller = self.controller()?;
-        let session = match pane {
-            Some(pane) => controller.terminal_attach_pane(agent.clone(), pane).await,
-            None => controller.terminal_attach(agent.clone()).await,
+        let session = match (size, input_only, pane) {
+            (Some((cols, rows)), true, pane) => {
+                controller
+                    .terminal_attach_input(agent.clone(), pane, cols, rows)
+                    .await
+            }
+            (None, true, _) => return Err(failure("terminal_size_bounds")),
+            (Some((cols, rows)), false, pane) => {
+                controller
+                    .terminal_attach_sized(agent.clone(), pane, cols, rows)
+                    .await
+            }
+            (None, false, Some(pane)) => controller.terminal_attach_pane(agent.clone(), pane).await,
+            (None, false, None) => controller.terminal_attach(agent.clone()).await,
         }
         .map_err(|e| attach_failure(&e.0))?;
         if session.agent != agent {
@@ -457,6 +500,39 @@ impl Views {
     }
 }
 
+/// Where one view's frames go: the page's channel, or the inbox of a native view, which
+/// `wake` tells its host about after each event.
+pub enum Sink {
+    Page(Channel<InvokeResponseBody>),
+    Native {
+        view: u64,
+        inbox: mpsc::Sender<FeedEvent>,
+        wake: Wake,
+    },
+}
+
+impl Sink {
+    /// Hands one engine frame to the view in its form: the channel message, or the feed
+    /// event awaited into the bounded inbox, so a slow host holds the engine back. Takes the
+    /// view's agent and the frame. Returns whether it was the view's last, or an error once
+    /// the page or the host is gone.
+    async fn deliver(&self, agent: &AgentId, frame: TerminalFrame) -> Result<bool, ()> {
+        match self {
+            Sink::Page(output) => {
+                let (message, last) = channel_message(agent, frame);
+                output.send(message).map_err(|_| ())?;
+                Ok(last)
+            }
+            Sink::Native { view, inbox, wake } => {
+                let (event, last) = feed_event(*view, agent, frame);
+                inbox.send(event).await.map_err(|_| ())?;
+                wake();
+                Ok(last)
+            }
+        }
+    }
+}
+
 /// One view's place among its window's views, taken before its engine connection opens
 /// so views still opening count toward `VIEWERS_MAX` and `VIEWS_MAX`. Attaching turns it
 /// into the view; dropping it first gives the place back.
@@ -479,20 +555,27 @@ impl Drop for Reservation {
 }
 
 impl Reservation {
-    /// Streams one opened terminal session to the window's channel in order: the attach
-    /// frame with the size first, then the screen and live output.
-    /// Takes the session of this place's agent and the channel.
+    /// The window and the key this place was taken for. Takes the place. Returns both.
+    pub fn place(&self) -> (&str, &ViewKey) {
+        (&self.window, &self.key)
+    }
+
+    /// Streams one opened terminal session to its view in order: the attach frame with the
+    /// size first, then the screen and live output. A page view's channel takes the attach
+    /// frame here; a native view's inbox gets it first from the reader, and its request queue
+    /// holds a whole paste beside `REQUESTS_MAX` other requests.
+    /// Takes the session of this place's agent and where its frames go.
     /// Returns the view's serial once the reader and writer run, which its detach names; a
     /// place lost to a full set of views or to a newer view of the key is refused.
-    pub fn attach(
-        self,
-        session: TerminalSession,
-        output: Channel<InvokeResponseBody>,
-    ) -> Result<u64, BridgeError> {
+    pub fn attach(self, session: TerminalSession, sink: Sink) -> Result<u64, BridgeError> {
         let terminals = Arc::clone(&self.terminals);
         let (key, serial) = (self.key.clone(), self.serial);
         assert_eq!(session.agent, key.agent);
-        let (requests, queue) = mpsc::channel(REQUESTS_MAX);
+        let capacity = match sink {
+            Sink::Page(_) => REQUESTS_MAX,
+            Sink::Native { .. } => NATIVE_REQUESTS_MAX,
+        };
+        let (requests, queue) = mpsc::channel(capacity);
         terminals
             .views()?
             .install(&self.window, &key, serial, requests)?;
@@ -501,12 +584,18 @@ impl Reservation {
             cols: session.cols,
             rows: session.rows,
         };
-        let (message, last) = channel_message(&key.agent, attached);
-        assert!(!last);
-        if output.send(message).is_err() {
-            terminals.forget(&self.window, &key, serial);
-            return Err(failure("terminal_window_closed"));
-        }
+        let first = match &sink {
+            Sink::Page(output) => {
+                let (message, last) = channel_message(&key.agent, attached);
+                assert!(!last);
+                if output.send(message).is_err() {
+                    terminals.forget(&self.window, &key, serial);
+                    return Err(failure("terminal_window_closed"));
+                }
+                None
+            }
+            Sink::Native { .. } => Some(attached),
+        };
         tauri::async_runtime::spawn(write(session.control, queue));
         tauri::async_runtime::spawn(read(
             terminals,
@@ -514,7 +603,8 @@ impl Reservation {
             key,
             serial,
             session.output,
-            output,
+            sink,
+            first,
         ));
         Ok(serial)
     }
@@ -599,6 +689,46 @@ impl Terminals {
             .map_err(|_| failure("terminal_not_attached"))
     }
 
+    /// Queues requests for one view, named by its serial, whole or not at all and without
+    /// waiting: a native view's typed keys, wheel keys, resizes and the chunks of one paste.
+    /// A newer view of the key, a page load or a closed window leaves the serial without a
+    /// view. Takes the window label, the key, the serial and 1 or more valid requests.
+    /// Returns unit, `terminal_request_invalid`, `terminal_not_attached`, or `NATIVE_OVERFLOW`
+    /// when the queue lacks room for all of them, in which case none was queued.
+    pub fn try_send_view(
+        &self,
+        window: &str,
+        key: &ViewKey,
+        serial: u64,
+        requests: Vec<TerminalRequest>,
+    ) -> Result<(), BridgeError> {
+        if requests.is_empty() || !requests.iter().all(request_valid) {
+            return Err(failure("terminal_request_invalid"));
+        }
+        let views = self.views()?;
+        let viewer = views
+            .windows
+            .get(window)
+            .and_then(|shown| shown.viewers.get(key))
+            .filter(|viewer| viewer.serial == serial)
+            .ok_or_else(|| failure("terminal_not_attached"))?;
+        let permits =
+            viewer
+                .requests
+                .try_reserve_many(requests.len())
+                .map_err(|error| match error {
+                    TrySendError::Full(()) => failure(NATIVE_OVERFLOW),
+                    TrySendError::Closed(()) => failure("terminal_not_attached"),
+                })?;
+        let mut sent = 0;
+        for (permit, request) in permits.zip(requests) {
+            permit.send(request);
+            sent += 1;
+        }
+        assert!(sent > 0);
+        Ok(())
+    }
+
     /// Closes a window's view of one agent terminal, whichever pane it shows; the agent keeps
     /// running. Takes the window label, the terminal name and the serial its attach returned,
     /// which names one view: a view with another serial, a newer one or the same agent's
@@ -643,6 +773,20 @@ impl Terminals {
         }
     }
 
+    /// Makes a place's view a window's view with the given request queue, as an attach does
+    /// once its session opened, for rows that hold no engine session. Takes the window label,
+    /// the key, the place's serial and the queue's sender. Returns as `Views::install`.
+    #[cfg(test)]
+    pub(crate) fn install_viewer(
+        &self,
+        window: &str,
+        key: &ViewKey,
+        serial: u64,
+        requests: mpsc::Sender<TerminalRequest>,
+    ) -> Result<(), BridgeError> {
+        self.views()?.install(window, key, serial, requests)
+    }
+
     fn forget(&self, window: &str, key: &ViewKey, serial: u64) {
         if let Ok(mut views) = self.0.lock()
             && let Some(shown) = views.windows.get_mut(window)
@@ -680,21 +824,23 @@ async fn read(
     key: ViewKey,
     serial: u64,
     mut stream: TerminalOutput,
-    output: Channel<InvokeResponseBody>,
+    sink: Sink,
+    first: Option<TerminalFrame>,
 ) {
-    loop {
-        let (message, last) = match stream.next().await {
-            Ok(frame) => channel_message(&key.agent, frame),
-            Err(error) if error.0 == "terminal_closed" => {
-                (json(&closed("terminal_connection_closed")), true)
+    let delivered = match first {
+        Some(frame) => sink.deliver(&key.agent, frame).await,
+        None => Ok(false),
+    };
+    if delivered == Ok(false) {
+        loop {
+            let frame = match stream.next().await {
+                Ok(frame) => frame,
+                Err(error) if error.0 == "terminal_closed" => closed("terminal_connection_closed"),
+                Err(error) => closed(&plain_code(&error.0, "terminal_connection_lost")),
+            };
+            if sink.deliver(&key.agent, frame).await != Ok(false) {
+                break;
             }
-            Err(error) => (
-                json(&closed(&plain_code(&error.0, "terminal_connection_lost"))),
-                true,
-            ),
-        };
-        if output.send(message).is_err() || last {
-            break;
         }
     }
     terminals.forget(&window, &key, serial);
@@ -1436,5 +1582,149 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// Slice C row 12 (DEC-203): the gate every view passes, page or native, lets the main
+    /// window view any project and a wall window only the project its label was made for,
+    /// which it must name; any other window is refused.
+    #[test]
+    fn the_shared_gate_refuses_a_wall_window_another_projects_agent() {
+        let larkspur = ProjectId::new("larkspur").unwrap();
+        let wall = wall_label(&larkspur, 1);
+        assert_eq!(place_project("main", None).unwrap(), None);
+        assert_eq!(place_project("main", Some("other")).unwrap(), None);
+        assert_eq!(
+            place_project(&wall, Some("larkspur")).unwrap(),
+            Some("larkspur".to_owned())
+        );
+        for (label, id) in [
+            (wall.as_str(), Some("other.project:2")),
+            (wall.as_str(), None),
+            (wall.as_str(), Some("")),
+            ("settings", Some("larkspur")),
+            ("", None),
+        ] {
+            assert_eq!(
+                code(place_project(label, id)),
+                Some("window_denied"),
+                "{label:?} {id:?}"
+            );
+        }
+    }
+
+    /// Slice C row 10: a native view takes a place among the window's views like a page
+    /// view, so nine views of either kind fill a window, and a page load ends the native
+    /// view too: its serial names no view any more and its request queue closes, which
+    /// detaches its engine session.
+    #[test]
+    fn a_native_view_counts_with_page_views_and_a_page_load_ends_it() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let mut queues = Vec::new();
+        let mut native = None;
+        for index in 1..=VIEWERS_MAX {
+            let key = team(index);
+            let place = terminals.room("main", &key).unwrap();
+            let capacity = if index % 2 == 0 {
+                NATIVE_REQUESTS_MAX
+            } else {
+                REQUESTS_MAX
+            };
+            let (requests, queue) = mpsc::channel(capacity);
+            terminals
+                .install_viewer("main", &key, place.serial, requests)
+                .unwrap();
+            if index == 2 {
+                native = Some((key.clone(), place.serial));
+            }
+            queues.push(queue);
+        }
+        assert_eq!(
+            code(terminals.room("main", &team(VIEWERS_MAX + 1))),
+            Some("terminal_viewers_full")
+        );
+        let (key, serial) = native.unwrap();
+        let typed = || {
+            terminals.try_send_view(
+                "main",
+                &key,
+                serial,
+                vec![input_request(b"x".to_vec(), false)],
+            )
+        };
+        assert_eq!(code(typed()), None);
+        terminals.page_started("main");
+        assert_eq!(code(typed()), Some("terminal_not_attached"));
+        let queue = &mut queues[1];
+        assert_eq!(
+            queue.try_recv().unwrap(),
+            TerminalRequest::Input {
+                bytes: b"x".to_vec()
+            }
+        );
+        assert!(queue.try_recv().is_err());
+        assert!(
+            queue.is_closed(),
+            "the page load dropped the native view's queue"
+        );
+    }
+
+    /// Slice C row 11: a view's requests are queued whole or not at all: a set larger than
+    /// the room left is refused with `native_terminal_input_overflow` and none of it is
+    /// queued; a serial that names no view, or an invalid request, is refused first.
+    #[test]
+    fn requests_for_a_view_are_queued_whole_or_not_at_all() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let key = team(1);
+        let place = terminals.room("main", &key).unwrap();
+        let serial = place.serial;
+        let (requests, mut queue) = mpsc::channel(3);
+        terminals
+            .install_viewer("main", &key, serial, requests)
+            .unwrap();
+        let paste = |count: usize| -> Vec<TerminalRequest> {
+            (0..count)
+                .map(|at| TerminalRequest::Paste {
+                    bytes: vec![b'a'; INPUT_BYTES_MAX],
+                    last: at + 1 == count,
+                })
+                .collect()
+        };
+        assert_eq!(
+            code(terminals.try_send_view("main", &key, serial, paste(2))),
+            None
+        );
+        assert_eq!(
+            code(terminals.try_send_view("main", &key, serial, paste(2))),
+            Some(NATIVE_OVERFLOW)
+        );
+        assert_eq!(
+            code(terminals.try_send_view("main", &key, serial, paste(4))),
+            Some(NATIVE_OVERFLOW),
+            "more than the queue ever holds"
+        );
+        assert_eq!(
+            std::iter::from_fn(|| queue.try_recv().ok()).count(),
+            2,
+            "only the set that fitted was queued"
+        );
+        assert_eq!(
+            code(terminals.try_send_view("main", &key, serial + 1, paste(1))),
+            Some("terminal_not_attached")
+        );
+        assert_eq!(
+            code(terminals.try_send_view(
+                "main",
+                &key,
+                serial,
+                vec![TerminalRequest::Input { bytes: Vec::new() }]
+            )),
+            Some("terminal_request_invalid")
+        );
+        assert_eq!(
+            code(terminals.try_send_view("main", &key, serial, Vec::new())),
+            Some("terminal_request_invalid")
+        );
     }
 }
