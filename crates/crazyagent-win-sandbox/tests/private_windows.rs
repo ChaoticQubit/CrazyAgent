@@ -68,6 +68,20 @@ fn a_new_private_folder_and_file_list_only_the_user_system_and_administrators() 
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// W1 D3 (A6 P4): a held private folder cannot be renamed away, so a path checked through
+/// it keeps naming the same folder; once the hold ends the rename works.
+#[test]
+fn a_held_private_folder_cannot_be_renamed() {
+    let root = scratch("held");
+    let moved = scratch("held-moved");
+    let held = private::dir(&root).unwrap();
+    assert!(std::fs::rename(&root, &moved).is_err());
+    assert!(root.is_dir() && !moved.exists());
+    drop(held);
+    std::fs::rename(&root, &moved).unwrap();
+    std::fs::remove_dir_all(&moved).unwrap();
+}
+
 /// W1 D1: a private file that gained a second hard link is refused on open.
 #[test]
 fn a_private_file_with_a_second_hard_link_is_refused() {
