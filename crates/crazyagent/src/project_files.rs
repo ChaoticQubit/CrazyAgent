@@ -15,6 +15,19 @@ const POLL: Duration = Duration::from_millis(2);
 const CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 /// The most entries [`redirected`] looks through in one `.git` folder before it refuses it.
 const GIT_ENTRIES_MAX: usize = 100_000;
+/// What [`list`] asks git for: tracked and unignored untracked files on Unix, tracked files
+/// only on Windows (the declined path), so owner git walks no folder an agent made there.
+const LISTED: &[&str] = if cfg!(windows) {
+    &["ls-files", "-z", "--cached"]
+} else {
+    &[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]
+};
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.into())
@@ -33,11 +46,11 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Lists, for `@` tags, tracked and untracked files git does not ignore whose path holds the
-/// query in any case, never `.git`, a link or a file reached through a link out of the folder,
-/// via setup's git (Unix) or Git for Windows, with no outside config, excludes file, hooks or
-/// fsmonitor and `.git` as its common folder, so a planted `commondir` redirects nothing. Inputs:
-/// folder, query, limit, stop time. Output: paths by the limit, 48 KiB or `stop`, or an error.
+/// Lists, for `@` tags, files whose path holds the query in any case: tracked and unignored
+/// untracked ones on Unix, tracked only on Windows (the declined path); never `.git`, a link or a
+/// file through a link out of the folder, with no outside config, excludes, hooks or fsmonitor
+/// and `.git` as its common folder. Inputs: folder, query, limit, stop. Output: paths by the
+/// limit, 48 KiB or `stop` (the `.git` walk first is bounded by entries, not time), or an error.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
@@ -88,13 +101,7 @@ pub(crate) fn list(
         .arg("--work-tree")
         .arg(&git_root)
         .current_dir(&git_root)
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
+        .args(LISTED)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -221,12 +228,15 @@ fn git_path(folder: &Path) -> std::path::PathBuf {
 }
 
 /// True when a `.git` folder points git at another place, which Git for Windows would open as
-/// the owner, a share among them: a `commondir` or `objects\info` alternates entry of any kind,
-/// a link at any depth or more than [`GIT_ENTRIES_MAX`] entries ([`linked_within`]), or an
-/// include in its config or worktree config, or either file over 1 MiB or unreadable (rv-sec2
-/// #492 F1). Input: the `.git` folder. Output: the answer.
+/// the owner, a share among them: first a link at any depth or more than [`GIT_ENTRIES_MAX`]
+/// entries ([`linked_within`]), so no later check reads through a link, then a `commondir` or
+/// `objects\info` alternates entry of any kind, or an include in its config or worktree config,
+/// or either file over 1 MiB or unreadable. Input: the `.git` folder. Output: the answer.
 pub(crate) fn redirected(git_dir: &Path) -> bool {
     use std::io::Read;
+    if linked_within(git_dir, GIT_ENTRIES_MAX) {
+        return true;
+    }
     #[cfg(test)]
     BEFORE_POINTERS.with(|step| {
         if let Some(step) = step.borrow().as_ref() {
@@ -241,7 +251,6 @@ pub(crate) fn redirected(git_dir: &Path) -> bool {
         || ["alternates", "http-alternates"]
             .iter()
             .any(|name| !absent(std::fs::symlink_metadata(info.join(name))))
-        || linked_within(git_dir, GIT_ENTRIES_MAX)
         || ["config", "config.worktree"].iter().any(|name| {
             let file = match crate::platform::open_plain(&git_dir.join(name)) {
                 Ok(file) => file,
@@ -285,7 +294,6 @@ fn linked_within(folder: &Path, entries_max: usize) -> bool {
             }
         }
     }
-    assert!(seen <= entries_max);
     false
 }
 

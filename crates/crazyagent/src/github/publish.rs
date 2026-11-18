@@ -25,6 +25,20 @@ const OUTPUT_BYTES_MAX: u64 = 1 << 20;
 const GITIGNORE_BYTES_MAX: u64 = 1 << 20;
 const FINDINGS_MAX: usize = 1000;
 const TREE_ENTRIES_MAX: usize = 2_000_000;
+/// The repository config keys that name a file outside the tree, each turned off on every
+/// publish git in the project, so a `.git/config` an agent wrote never has git open a share or
+/// another outside file as the owner: the excludes and attributes files and the mailmap
+/// (rv-sec3 #620 F1). The in-tree `.gitignore` and `.gitattributes` still apply.
+const OUTSIDE_FILES_OFF: [&str; 8] = [
+    "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "log.mailmap=false",
+    "-c",
+    "mailmap.file=/dev/null",
+];
 const FILE_FINDINGS_MAX: usize = 20;
 const LOOKUP_TIME: Duration = Duration::from_secs(20);
 /// The longest a publish Start's own git can run: [`inspect`] reads the remotes once and
@@ -248,14 +262,16 @@ pub(super) fn git() -> Result<PathBuf, EngineError> {
 }
 
 /// Starts a git command in the project's own repository with the engine's safe options and
-/// the empty home, so no hook folder, pager, fsmonitor or owner configuration outside the
-/// repository runs, and git never looks for a repository above the project. A config hook
-/// these options do not stop is refused by [`refuse_hooks`] first. Inputs: git, its empty
-/// home and the project. Output: the command, without arguments.
+/// the empty home, so no hook folder, pager, fsmonitor, owner configuration outside the
+/// repository or outside file its config names ([`OUTSIDE_FILES_OFF`]) runs or is read, and git
+/// never looks for a repository above the project. A config hook these options do not stop is
+/// refused by [`refuse_hooks`] first. Inputs: git, its empty home and the project. Output: the
+/// command, without arguments.
 fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
     let mut command = clone::git_command(git, home);
     command
         .current_dir(project)
+        .args(OUTSIDE_FILES_OFF)
         .env("GIT_DIR", project.join(".git"))
         .env("GIT_WORK_TREE", project)
         .args(GIT_SAFE)
@@ -554,7 +570,6 @@ fn nested_repository(project: &Path) -> Result<(), EngineError> {
             }
         }
     }
-    assert!(seen <= TREE_ENTRIES_MAX);
     Ok(())
 }
 
@@ -948,8 +963,8 @@ fn write_new(project: &Path, path: &str, text: &str) -> Result<(), EngineError> 
 /// Finds the lines that would push a secret: with no owner history, the files the first
 /// commit would take, from the working tree; with owner history, the files of HEAD's
 /// tree, from git, since that is what is pushed. Older commits are not read. Inputs: git,
-/// its empty home, the project folder and its history. Output: the findings by file and
-/// line, `github_publish_too_large` past 20,000 files or 200 MiB, or a nested repository.
+/// its empty home, the project folder and its history. Output: the findings by file and line,
+/// or a refusal [`findings_within`] names, `github_publish_too_large` past 20,000 files or 200 MiB.
 pub(super) fn secret_findings(
     git: &Path,
     home: &Path,
@@ -1039,7 +1054,9 @@ pub(super) fn written_findings(
 
 /// Finds the secret lines as [`secret_findings`] does, within the given bounds.
 /// Inputs: git, its empty home, the project, its history, the most files and the most
-/// bytes read. Output: the findings, or `github_publish_too_large`, `github_publish_failed`.
+/// bytes read. Output: the findings, or `github_publish_not_plain_repo`,
+/// `github_publish_too_large`, `github_publish_failed`, or on Windows
+/// `github_publish_nested_repository` or `github_publish_tree_too_large` ([`nested_repository`]).
 fn findings_within(
     git: &Path,
     home: &Path,
