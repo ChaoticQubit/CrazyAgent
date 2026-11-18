@@ -1299,6 +1299,27 @@ mod tests {
             .collect()
     }
 
+    /// V243-REFUSALS-PREFIX: a code that only starts like a listed one is read whole, so it
+    /// fails the coverage row instead of passing as the listed code, and a log line still
+    /// reads as the code it names.
+    #[test]
+    fn refusals_read_a_longer_code_whole_and_a_log_line_as_its_code() {
+        let read = refusals(
+            r#"failure("changes_stale2"); failure("changes_Stale"); log("changes_git_old found={}");"#,
+        );
+        assert_eq!(
+            read,
+            std::collections::BTreeSet::from([
+                "changes_Stale",
+                "changes_git_old",
+                "changes_stale2"
+            ])
+        );
+        assert!(
+            !CHANGES_CODES.contains(&"changes_stale2") && CHANGES_CODES.contains(&"changes_stale")
+        );
+    }
+
     /// The listed codes cover every refusal the landing engine and this protocol make,
     /// so a client that passes listed codes through never hides a real one.
     #[test]
