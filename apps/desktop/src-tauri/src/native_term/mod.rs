@@ -131,6 +131,26 @@ mod tests {
             .find(|needle| text.contains(needle.as_str()))
     }
 
+    fn raise_call(text: &str) -> Option<String> {
+        focus_call(text)
+    }
+
+    fn scan(folder: &str, call: fn(&str) -> Option<String>) -> usize {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(folder);
+        let mut read = 0;
+        for entry in std::fs::read_dir(&folder).expect("native folder") {
+            let path = entry.expect("folder entry").path();
+            if path.extension() != Some(std::ffi::OsStr::new("rs")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source file");
+            let shown = path.display();
+            assert_eq!(call(&text), None, "{shown}");
+            read += 1;
+        }
+        read
+    }
+
     #[test]
     fn the_focus_scan_finds_a_planted_call() {
         let planted = format!("window.{}{}();", "makeKey", "Window");
@@ -141,23 +161,28 @@ mod tests {
         let app = format!("app.{}IgnoringOtherApps(true);", ["acti", "vate"].concat());
         assert!(focus_call(&app).is_some());
         assert_eq!(focus_call("window.setFrame(rect);"), None);
+        assert!(raise_call("toplevel.present();").is_some());
+        assert!(raise_call("toplevel.present_with_time(0);").is_some());
+        assert!(raise_call("toplevel.deiconify();").is_some());
+        assert!(raise_call("toplevel.set_keep_above(true);").is_some());
+        assert!(raise_call("gdk.raise();").is_some());
+        assert!(raise_call("(xlib.XRaiseWindow)(display, window);").is_some());
+        assert!(raise_call("(xlib.XSetInputFocus)(display, window, 1, 0);").is_some());
+        assert!(raise_call(&app).is_some());
+        assert_eq!(raise_call("child.presented();"), None);
+        assert_eq!(raise_call("(xlib.XMapRaised)(display, window);"), None);
     }
 
     #[test]
     fn no_native_file_brings_the_app_forward_or_makes_a_window_key() {
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
-        let mut read = 0;
-        for entry in std::fs::read_dir(&folder).expect("native_term folder") {
-            let path = entry.expect("folder entry").path();
-            if path.extension() != Some(std::ffi::OsStr::new("rs")) {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("source file");
-            let shown = path.display();
-            assert_eq!(focus_call(&text), None, "{shown}");
-            read += 1;
-        }
+        let read = scan("src/native_term", focus_call);
         assert!(read >= 14, "read {read} files");
+    }
+
+    #[test]
+    fn no_linux_native_file_raises_or_focuses_a_window() {
+        let read = scan("src/native_term/linux", raise_call);
+        assert!(read >= 7, "read {read} files");
     }
 
     #[cfg(unix)]
