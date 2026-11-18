@@ -5,6 +5,7 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { plainError } from "../../src/api.ts";
+import { KEPT_STORE_KEY, savedText, savedViews } from "../../src/screens/team/kept-terminals.ts";
 import { nativeTerminalEnabled } from "../../src/screens/team/native-terminal.ts";
 import { loadTerminalKind } from "../../src/screens/team/terminal-kind.ts";
 import { endCopy, selectNote } from "../../src/screens/team/terminal-io.ts";
@@ -106,6 +107,14 @@ export function mount(slot, node, props = {}) {
   flushSync(() => root.render(createElement(TerminalPanel, { node, projectId: "p1", ...props })));
 }
 
+/** Renders a slot's mounted panel again with new props, as a parent's render does. Inputs:
+ * the slot, the node and the panel's other props. Output: none. */
+export function rerender(slot, node, props = {}) {
+  const root = roots.get(slot);
+  if (!root) throw new Error(`no panel in ${slot}`);
+  flushSync(() => root.render(createElement(TerminalPanel, { node, projectId: "p1", ...props })));
+}
+
 /** Unmounts a slot's panel, as closing it or a graph click to another agent does. Input: the
  * slot. Output: none. */
 export function unmount(slot) {
@@ -119,13 +128,19 @@ function Probe({ projects }) {
   return null;
 }
 
-/** Starts the app's kept-terminal hook with terminals remembered from the last run, as app
- * start does, with no panel. Inputs: the stored terminals and the listed project ids.
- * Output: none. */
+/** Starts the app's kept-terminal hook with terminals remembered from the last run, stored as
+ * the app stores them, as app start does, with no panel. Inputs: the remembered terminals
+ * (`{ key, size }`) and the listed project ids. Output: none. */
 export function preload(saved, projects) {
-  window.localStorage.setItem("crazyagent.kept-terminals", JSON.stringify(saved));
+  window.localStorage.setItem(KEPT_STORE_KEY, savedText(saved));
   probe = createRoot(document.getElementById("probe"));
   flushSync(() => probe.render(createElement(Probe, { projects })));
+}
+
+/** The remembered terminals as the next app start reads them from the store. Output:
+ * `[{ key, size }]`, most recently used first. */
+export function saved() {
+  return savedViews(window.localStorage.getItem(KEPT_STORE_KEY));
 }
 
 /** Lets go of every kept view, as a sign-out does. Output: none. */

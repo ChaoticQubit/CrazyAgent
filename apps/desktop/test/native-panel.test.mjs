@@ -50,13 +50,14 @@ test("V243-NATIVE-ONLY: with the native kind the app-start preload opens the rem
   const seen = await page(`
     await F.stage({ nodes: [${MASTER}] });
     F.preload([{ key: { project: "p1", terminal: "team-1", pane: null }, size: { width: 640, height: 380 } }], ["p1"]);
-    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    if (!(await F.until(() => F.calls("desktop_native_terminal_open").length === 1))) return { loaded: false, saved: F.saved() };
     const open = F.calls("desktop_native_terminal_open")[0].args;
     F.mount("a", ${MASTER});
     const uncovered = await F.until(() => F.calls("desktop_native_terminal_cover").some((entry) => entry.args.view === 1 && entry.args.covered === false));
     await pause(300);
-    return { open, uncovered, opens: F.calls("desktop_native_terminal_open").length, placed: F.calls("desktop_native_terminal_place").some((entry) => entry.args.view === 1), shown: F.shown("a") };
+    return { loaded: true, open, uncovered, opens: F.calls("desktop_native_terminal_open").length, placed: F.calls("desktop_native_terminal_place").some((entry) => entry.args.view === 1), shown: F.shown("a") };
   `);
+  assert.equal(seen.loaded, true, JSON.stringify(seen));
   assert.equal(seen.open.covered, true, "a preloaded view draws nothing until a panel shows it");
   assert.equal(seen.uncovered, true);
   assert.equal(seen.placed, true);
