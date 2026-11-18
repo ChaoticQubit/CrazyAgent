@@ -215,8 +215,10 @@ fn read_sddl(path: &Path) -> String {
     let bytes = fs::read(&file).unwrap();
     let text = if bytes.starts_with(&[0xFF, 0xFE]) || bytes.get(1) == Some(&0) {
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         String::from_utf16_lossy(&units)
     } else {

@@ -22,7 +22,7 @@ pub use layout::{
 pub(crate) use move_project::holds as project_move_holds;
 pub(crate) use move_project::lands as project_move_lands;
 pub(crate) use move_project::{
-    Asked, Finished, Pending, check as project_move_check, finish, forget, pending, plan,
+    Asked, Finished, MoveCheck, Pending, check as project_move_check, finish, forget, pending, plan,
 };
 pub use move_project::{MOVE_STOP_WAIT, Moved, ProjectMove};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};

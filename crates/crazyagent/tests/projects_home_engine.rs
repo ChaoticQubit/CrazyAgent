@@ -2780,6 +2780,48 @@ async fn a_resent_direct_add_that_applied_answers_its_record_while_a_job_runs() 
     engine.stop().await;
 }
 
+/// DEC-197: a project move job waits its turn only behind a move job of this engine. While a
+/// project move no job holds is pending, a move job's start is refused
+/// `move_project_in_progress` and holds nothing; once that move is gone, the start runs and
+/// lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_job_is_refused_while_a_project_move_no_job_holds_is_pending() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let engine = Engine::start().await;
+    let (owner, reading, origin, target) = kept_outside(&engine, &place).await;
+    let database = engine.root.path().join("engine.db");
+    sql(
+        &database,
+        &format!(
+            "INSERT INTO projects_home_project_move VALUES (1, 'move-held', 7, 'reading', '{}', '{}', 'move');",
+            text(&origin),
+            text(&target)
+        ),
+    );
+    let client = owner.controller.owner_client().unwrap();
+    let refused = client
+        .job_start(id("move-late"), moving(&reading), AddMode::Move, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "move_project_in_progress");
+    assert!(
+        client.job_status().await.unwrap().is_empty(),
+        "a refused start holds no job"
+    );
+    sql(&database, "DELETE FROM projects_home_project_move;");
+    client
+        .job_start(id("move-now"), moving(&reading), AddMode::Move, Vec::new())
+        .await
+        .unwrap();
+    job_named(&owner.controller, "move-now", |job| {
+        job.state == JobState::Done
+    })
+    .await;
+    assert!(target.is_dir() && !origin.exists());
+    engine.stop().await;
+}
+
 /// rv-sec2 F1 (DEC-177 step 1b): an add plans nothing while a project move is pending, so the
 /// two never plan the same name in the home whatever the client; once the move is gone, the
 /// add goes.

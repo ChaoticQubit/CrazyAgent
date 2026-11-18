@@ -51,16 +51,21 @@ test("slice 3: Ask puts the draft alone in an empty input and after the owner's 
   assert.equal(seededText("Hello", "Reinstall."), "Hello\n\nReinstall.");
 });
 
-test("slice 3: Home offers Reinstall in the project only for a done project move that left folders", () => {
+test("slice 3 #419 F2: Home offers Reinstall in the project only for a done project move whose offer the engine keeps", () => {
   const job = (extra) => ({
     id: "move-1", kind: "move_project", project_id: "p-1", source: "/Users/o/Library/Mobile Documents/p", mode: "move", overrides: [],
     stopping: false, state: { state: "done" }, left: [{ path: "node_modules", files: 3 }], ...extra,
   });
-  assert.deepEqual(intake.jobActions(job({})), ["reinstall", "dismiss"]);
+  assert.deepEqual(intake.jobActions(job({}), true), ["reinstall", "dismiss"]);
   assert.equal(intake.reinstallRoute(job({})), "/projects/p-1/conversation");
-  assert.deepEqual(intake.jobActions(job({ left: [], left_more: { folders: 2, files: null } })), ["reinstall", "dismiss"]);
-  assert.deepEqual(intake.jobActions(job({ left: [] })), ["dismiss"]);
-  assert.deepEqual(intake.jobActions(job({ kind: "add", project_id: null })), ["dismiss"]);
+  assert.deepEqual(intake.jobActions(job({}), false), ["dismiss"], "a dismissed offer takes Home's action with it");
+  assert.deepEqual(intake.jobActions(job({ left: [{ path: "__pycache__", files: 2 }] }), false), ["dismiss"],
+    "a move that left only __pycache__ keeps no offer");
+  assert.deepEqual(intake.jobActions(job({ kind: "add", project_id: null }), true), ["dismiss"]);
+  assert.deepEqual(intake.jobActions(job({ state: { state: "failed", phase: "copying" } }), true), ["retry", "dismiss"]);
+  const found = readFileSync(new URL("../src/screens/intake/found.tsx", import.meta.url), "utf8");
+  assert.match(found, /loadReinstallOffer\(/);
+  assert.match(found, /jobActions\(job, offered\)/);
 });
 
 test("slice 3 F1: an Ask's seed is taken once: used clears it, unless a newer Ask replaced it", () => {

@@ -198,6 +198,7 @@ pub enum MasterReason {
     UnsupportedCapability,
     RepositoryMissing,
     RepositoryConfigRefused,
+    GitTooOld,
     InstructionsTooLarge,
     ProtocolFault,
     FrameLimit,

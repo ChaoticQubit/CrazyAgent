@@ -815,19 +815,7 @@ async fn a_done_add_that_left_nothing_clears_the_offer_kept_at_its_landed_folder
 async fn a_projects_offer_reads_by_its_id_until_dismissed_and_goes_with_the_project() {
     let mut jobs = Jobs::start().await;
     let project = ProjectId::new("reading").unwrap();
-    let setup = ProjectSetup {
-        about: "Tracks reading lists.".into(),
-        tech_stack: vec!["rust".into()],
-        platforms: vec![Platform::Website],
-        research: vec![ResearchKind::MarketResearch],
-        pool: None,
-        team: None,
-        documents: vec![],
-    };
-    let spec = ProjectSpec {
-        name: "Reading list".into(),
-        repositories: vec![],
-    };
+    let (spec, setup) = reading_list();
     let set = jobs
         .owner
         .setup_project(project.clone(), spec, setup, 2)
@@ -864,5 +852,58 @@ async fn a_projects_offer_reads_by_its_id_until_dismissed_and_goes_with_the_proj
         "{removed:?}"
     );
     assert_eq!(jobs.offer_at(&folder), None);
+    jobs.stop().await;
+}
+
+/// The Reading list project's name and setup, a website with market research and no pool.
+/// Output: the spec and the setup.
+fn reading_list() -> (ProjectSpec, ProjectSetup) {
+    let setup = ProjectSetup {
+        about: "Tracks reading lists.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: "Reading list".into(),
+        repositories: vec![],
+    };
+    (spec, setup)
+}
+
+/// #419 sec F2: an offer left at a path whose folder is gone, as one kept for an add whose
+/// folder was deleted outside CrazyAgent before it was set up, is forgotten when a New Project
+/// lands at that path, so the new project offers no reinstall of the old folder's folders.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_project_landing_where_a_stale_offer_is_kept_forgets_it() {
+    let mut jobs = Jobs::start().await;
+    let folder = jobs.home().join("reading-list");
+    let kept = Kept {
+        left: vec![Left {
+            path: "node_modules".into(),
+            hint: None,
+        }],
+        more: 0,
+    };
+    jobs.keep_offer(folder.clone(), kept.clone()).await;
+    assert_eq!(jobs.offer_at(&folder), Some(kept));
+    assert!(!folder.exists());
+    let project = ProjectId::new("reading").unwrap();
+    let (spec, setup) = reading_list();
+    let set = jobs
+        .owner
+        .setup_project(project.clone(), spec, setup, 2)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&set, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{set:?}"
+    );
+    assert!(folder.is_dir());
+    assert_eq!(jobs.offer_at(&folder), None);
+    assert_eq!(jobs.owner.reinstall_offer(project).await.unwrap(), None);
     jobs.stop().await;
 }

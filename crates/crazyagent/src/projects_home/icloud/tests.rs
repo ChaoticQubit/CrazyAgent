@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::projects_home::COPY_BOUNDS;
 
 fn seconds(count: u64) -> Duration {
@@ -6,6 +7,7 @@ fn seconds(count: u64) -> Duration {
 }
 
 /// What a download of `root` would ask for now, by real flags or this thread's fake ones.
+#[cfg(unix)]
 fn wanted(root: &Path) -> Vec<PathBuf> {
     let look = |path: &Path| fs::symlink_metadata(path);
     let listing = survey(root, root, 0, COPY_BOUNDS, &look).unwrap();
@@ -903,7 +905,7 @@ fn download_everything_lists_the_rebuildable_folders_too() {
     fake::placeholders();
     let folder = project();
     let root = folder.path();
-    assert!(!COPY_BOUNDS.skip_rebuildable);
+    const { assert!(!COPY_BOUNDS.skip_rebuildable) }
     let (wanted, skipped) = listed(root, COPY_BOUNDS);
     assert_eq!(
         wanted,
@@ -1273,4 +1275,41 @@ fn progress_follows_files_landing_from_icloud_within_two_polls() {
     assert_eq!(outcome.unwrap(), total);
     assert!(moved_early, "progress moved only at the end");
     assert!(wanted(&root).is_empty());
+}
+
+/// #419 F3: once the names are full, a folder that needs a reinstall takes the place of the
+/// first named `__pycache__`, which is counted with its files instead; a `__pycache__` past
+/// the names is only counted.
+#[test]
+fn past_the_names_a_folder_to_reinstall_takes_the_place_of_a_pycache() {
+    let mut gathered = SkippedFolders::default();
+    for at in 0..SKIPPED_LISTED_MAX {
+        gathered.push(Skipped {
+            path: format!("p{at}/__pycache__"),
+            files: Some(2),
+        });
+    }
+    gathered.push(Skipped {
+        path: "web/node_modules".into(),
+        files: Some(7),
+    });
+    gathered.push(Skipped {
+        path: "p99/__pycache__".into(),
+        files: Some(1),
+    });
+    assert_eq!(gathered.listed.len(), SKIPPED_LISTED_MAX);
+    let named = |path: &str| gathered.listed.iter().any(|folder| folder.path == path);
+    assert!(named("web/node_modules"));
+    assert!(!named("p0/__pycache__") && named("p1/__pycache__") && !named("p99/__pycache__"));
+    let counted = SkippedMore {
+        folders: 2,
+        files: Some(3),
+    };
+    assert_eq!(gathered.more, Some(counted));
+    assert_eq!(gathered.len(), SKIPPED_LISTED_MAX as u64 + 2);
+    let (shown, _) = gathered.cut(JOB_SKIPPED_LISTED_MAX);
+    assert_eq!(
+        shown[0].path, "web/node_modules",
+        "Home's job line names the folder to reinstall first"
+    );
 }

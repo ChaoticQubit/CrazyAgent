@@ -2710,12 +2710,15 @@ fn signed_in_setup_opens_the_github_rules_for_new_repositories_with_g_upper() {
 fn a_tool_row_waiting_behind_another_job_says_whom_it_waits_for() {
     let mut shell = settings(120, 60);
     let mut status = installed_status();
-    assert_eq!(status.dependencies[3].name, Dependency::Node);
-    status.dependencies[3].state = DependencyState::Missing {
-        line: String::new(),
-    };
-    status.dependencies[3].busy = true;
-    status.dependencies[3].waiting = Some("setup".into());
+    let mut node = tool(
+        Dependency::Node,
+        DependencyState::Missing {
+            line: String::new(),
+        },
+    );
+    node.busy = true;
+    node.waiting = Some("setup".into());
+    status.dependencies.push(node);
     shell.arrive(event(AppSetupEvent::Status(Ok(status))));
     let rows = render(&mut shell, 120, 60);
     assert!(find(&rows, "Node.js").contains("Waiting"), "{rows:#?}");

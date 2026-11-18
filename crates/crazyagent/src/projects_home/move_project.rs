@@ -639,26 +639,39 @@ struct Checked {
     others: Vec<Registered>,
 }
 
+/// What a project move job's start check found, writing nothing: the project's real folder
+/// as text, whether an add runs and whether another project move is pending. The engine lets
+/// the move wait its turn behind its own add and move jobs and refuses it for any other
+/// (DEC-197).
+#[derive(Debug)]
+pub(crate) struct MoveCheck {
+    pub(crate) source: String,
+    pub(crate) adding: bool,
+    pub(crate) moving: bool,
+}
+
 /// Checks a project move as far as it can without reading inside the folder, so a job that
-/// would be refused is refused before it starts: another project move pending
-/// (`move_project_in_progress`), no projects home, an unknown project, a project without
-/// setup, a folder gone (`home_source_missing`), already in the home
+/// would be refused is refused before it starts: no projects home, an unknown project, a
+/// project without setup, a folder gone (`home_source_missing`), already in the home
 /// (`move_project_already_home`) or reached through a link (`move_project_folder_link`),
 /// another project using the folder (`home_move_project`), what [`busy`] names, a key the
 /// folder's two names both hold (`move_project_two_spellings`), and a Copy while an agent
-/// works in a linked worktree (`move_project_copy_worktrees`). Nothing is written. Inputs:
-/// the transaction, the guarded projects, the project and the mode. Output: the project's
-/// real folder, or the refusal code.
+/// works in a linked worktree (`move_project_copy_worktrees`). Another project move pending
+/// is reported, not refused, so the engine lets the move wait behind its own move job
+/// (DEC-197); [`plan`] still refuses it. Nothing is written. Inputs: the transaction, the
+/// guarded projects, the project and the mode. Output: the project's real folder and whether
+/// another project move is pending, or the refusal code.
 pub(crate) fn check(
     tx: &Transaction<'_>,
     registered: &[Registered],
     project: &ProjectId,
     mode: AddMode,
-) -> Result<PathBuf, EngineError> {
+) -> Result<(PathBuf, bool), EngineError> {
+    let moving = pending(tx)?.is_some();
     let found = checked(tx, registered, project, mode)?;
     assert!(found.real.is_absolute());
     assert!(!found.real.starts_with(&found.home));
-    Ok(found.real)
+    Ok((found.real, moving))
 }
 
 /// The checks [`check`] names, keeping what they found for [`plan`]. Inputs: as
@@ -669,9 +682,6 @@ fn checked(
     project: &ProjectId,
     mode: AddMode,
 ) -> Result<Checked, EngineError> {
-    if pending(tx)?.is_some() {
-        return Err(refused("move_project_in_progress"));
-    }
     let home = super::load(tx)?.ok_or_else(|| refused("projects_home_unset"))?;
     let found = registered
         .iter()
@@ -739,6 +749,9 @@ pub(crate) fn plan(
     asked: &Asked<'_>,
 ) -> Result<ProjectMove, EngineError> {
     assert!(asked.exchange > 0);
+    if pending(tx)?.is_some() {
+        return Err(refused("move_project_in_progress"));
+    }
     let Checked { home, real, others } = checked(tx, registered, asked.project, asked.mode)?;
     let source = text(&real)?;
     let mut overrides = asked.overrides.to_vec();

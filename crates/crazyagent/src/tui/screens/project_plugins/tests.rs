@@ -1164,6 +1164,20 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
     assert!(find(&frame(&view, 80, 24), "release-notes").contains("Off here"));
 }
 
+/// Whether an intake query is one of the project page's own reads: the Overview's GitHub
+/// publish read and its offer question (DEC-182) and the folder's kept reinstall offer, read
+/// each time the page shows. Any other intake query from these pages is a fault.
+/// Input: the query. Output: the answer.
+fn project_page_read(query: &crate::tui::client::intake::IntakeQuery) -> bool {
+    use crate::tui::client::intake::IntakeQuery;
+    matches!(
+        query,
+        IntakeQuery::GitHubPublishStatus { .. }
+            | IntakeQuery::GitHubPublishPrompt { .. }
+            | IntakeQuery::ReinstallOffer { .. }
+    )
+}
+
 async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(8);
@@ -1204,6 +1218,9 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                     connection.questions(*query).unwrap();
                 }
                 Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
+                Request::Intake(job) if project_page_read(&job.query()) => {
+                    connection.intake(*job).unwrap();
+                }
                 other => panic!("the project page never sends {other:?}"),
             }
         }
@@ -1897,6 +1914,9 @@ async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&
                     ) =>
                 {
                     connection.roadmap(*query).unwrap();
+                }
+                Request::Intake(job) if project_page_read(&job.query()) => {
+                    connection.intake(*job).unwrap();
                 }
                 other => panic!("the plugins pages never send {other:?}"),
             }

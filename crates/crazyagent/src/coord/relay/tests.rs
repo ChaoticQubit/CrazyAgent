@@ -869,3 +869,47 @@ fn a_codex_mailbox_answers_overlap_questions_and_takes_no_letters() {
     }
     assert_eq!(CODEX_EDIT_MATCHER, "apply_patch|Bash");
 }
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): serving an unchanged team leaves `relay.json` as it
+/// is instead of replacing it on every tick, while a roster an agent rewrote, swapped for
+/// a link to the same bytes or removed is written again on the next serve.
+#[test]
+fn an_unchanged_roster_is_not_written_again_and_a_tampered_one_is_restored() {
+    use std::os::unix::fs::MetadataExt;
+    let team = Team::new();
+    let lead = team.agent("sub", None, None);
+    team.serve(lead, false);
+    let roster = team.entry(ROSTER_FILE);
+    let first = std::fs::symlink_metadata(&roster).unwrap().ino();
+    let written = std::fs::read(&roster).unwrap();
+    team.serve(lead, false);
+    assert_eq!(
+        std::fs::symlink_metadata(&roster).unwrap().ino(),
+        first,
+        "an unchanged roster is not written again"
+    );
+    std::fs::write(&roster, b"{}").unwrap();
+    team.serve(lead, false);
+    assert_eq!(
+        std::fs::read(&roster).unwrap(),
+        written,
+        "a rewrite is undone"
+    );
+    let elsewhere = team.entry("elsewhere.json");
+    std::fs::write(&elsewhere, &written).unwrap();
+    std::fs::remove_file(&roster).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &roster).unwrap();
+    team.serve(lead, false);
+    assert!(
+        std::fs::symlink_metadata(&roster).unwrap().is_file(),
+        "a link is replaced by a plain roster"
+    );
+    assert_eq!(std::fs::read(&roster).unwrap(), written);
+    std::fs::remove_file(&roster).unwrap();
+    team.serve(lead, false);
+    assert_eq!(
+        std::fs::read(&roster).unwrap(),
+        written,
+        "a removal is undone"
+    );
+}

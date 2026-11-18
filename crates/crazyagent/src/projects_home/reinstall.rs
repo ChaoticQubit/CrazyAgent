@@ -1,5 +1,6 @@
 use super::icloud::{
     JOB_SKIPPED_LISTED_MAX, SKIPPED_LISTED_MAX, SKIPPED_PATH_MAX, SkippedFolders, dataless,
+    rebuilds_itself,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -11,10 +12,22 @@ mod tests;
 /// The most reinstall offers the engine keeps; past it the oldest goes first.
 pub const OFFERS_MAX: usize = 64;
 
-/// The most bytes one drafted message takes: a fixed head and tail, and per named folder its
-/// path, the folder to run its command in, the command and the file that chose it.
-pub const DRAFT_BYTES_MAX: usize = 1024 + SKIPPED_LISTED_MAX * (2 * SKIPPED_PATH_MAX + 200);
+/// The most bytes one drafted message takes: half the master's message bound, so the owner's
+/// own text keeps the other half of the input it is put in. Folders past it are counted.
+pub const DRAFT_BYTES_MAX: usize = crate::team::MESSAGE_BYTES_MAX / 2;
 const _: () = assert!(DRAFT_BYTES_MAX <= crate::agents::PROMPT_BYTES_MAX);
+
+/// The first line of every draft.
+const DRAFT_HEAD: &str = "Some folders of this project were left out when it came into the \
+                          projects folder, as they can be rebuilt. Please reinstall them in the \
+                          agent sandbox:";
+
+/// The most bytes one folder's line takes: its path twice, the command and the file.
+const LINE_BYTES_MAX: usize = 2 * SKIPPED_PATH_MAX + 200;
+
+/// The most bytes the counted rest's line takes, its count at the widest a u64 prints.
+const REST_BYTES_MAX: usize = 160;
+const _: () = assert!(DRAFT_HEAD.len() + 1 + LINE_BYTES_MAX + REST_BYTES_MAX <= DRAFT_BYTES_MAX);
 
 /// The most named folders an offer's reply carries, as a job's line names three.
 pub const OFFER_FOLDERS_MAX: usize = JOB_SKIPPED_LISTED_MAX;
@@ -134,9 +147,7 @@ pub fn kept(
     let left: Vec<Left> = skipped
         .listed
         .iter()
-        .filter(|folder| {
-            Path::new(&folder.path).file_name() != Some(std::ffi::OsStr::new("__pycache__"))
-        })
+        .filter(|folder| !rebuilds_itself(&folder.path))
         .map(|folder| Left {
             path: folder.path.clone(),
             hint: hint(landed, &folder.path, look),
@@ -227,24 +238,32 @@ fn line(left: &Left) -> String {
 }
 
 /// The message the master gets when the owner says yes: each named folder with where and how
-/// to rebuild it, then the counted rest. Input: the record. Output: the text, within
-/// `DRAFT_BYTES_MAX`.
+/// to rebuild it while its line fits, then the rest counted, the record's own count included.
+/// Input: the record. Output: the text, within `DRAFT_BYTES_MAX`, naming at least one folder
+/// when the record names any.
 pub fn draft(kept: &Kept) -> String {
     assert!(bounded(kept));
-    let mut text = String::from(
-        "Some folders of this project were left out when it came into the projects folder, as \
-         they can be rebuilt. Please reinstall them in the agent sandbox:",
-    );
+    let mut text = String::from(DRAFT_HEAD);
+    let mut named = 0;
     for left in &kept.left {
+        let line = line(left);
+        assert!(line.len() <= LINE_BYTES_MAX);
+        if text.len() + 1 + line.len() + REST_BYTES_MAX > DRAFT_BYTES_MAX {
+            break;
+        }
         text.push('\n');
-        text.push_str(&line(left));
+        text.push_str(&line);
+        named += 1;
     }
-    if kept.more > 0 {
-        text.push_str(&format!(
-            "\nCrazyAgent also counted {} more rebuildable folders it did not name; check the \
-             project for those too.",
-            kept.more
-        ));
+    assert!(named > 0 || kept.left.is_empty());
+    let more = kept.more.saturating_add((kept.left.len() - named) as u64);
+    if more > 0 {
+        let rest = format!(
+            "\nCrazyAgent also counted {more} more rebuildable folders it did not name; check the \
+             project for those too."
+        );
+        assert!(rest.len() <= REST_BYTES_MAX);
+        text.push_str(&rest);
     }
     assert!(text.len() <= DRAFT_BYTES_MAX);
     text
