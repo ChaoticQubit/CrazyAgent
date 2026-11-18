@@ -763,6 +763,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_exited", "The server stopped before answering."),
     (
+        "server_check_timeout_powershell",
+        "The server did not answer within 10 seconds. It runs on PowerShell, so the likely cause is PowerShell reading every module installed on this computer before its first command, which takes longer when many modules are installed.",
+    ),
+    (
         "server_check_timeout",
         "The server did not answer within 10 seconds.",
     ),
@@ -957,7 +961,22 @@ pub fn known_code(code: &str) -> Option<&'static str> {
 pub fn timed_out_problem(code: &'static str, program: &Path) -> &'static str {
     assert!(!code.is_empty());
     assert!(!program.as_os_str().is_empty());
-    code
+    let text = program.to_string_lossy();
+    let name = text
+        .rsplit(|unit| unit == '/' || unit == '\\')
+        .next()
+        .unwrap_or_default();
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    let powershell = ["powershell", "pwsh"]
+        .iter()
+        .any(|known| stem.eq_ignore_ascii_case(known));
+    let named = "server_check_timeout_powershell";
+    if code == "server_check_timeout" && powershell {
+        assert!(known_code(named).is_some());
+        named
+    } else {
+        code
+    }
 }
 
 #[cfg(test)]
