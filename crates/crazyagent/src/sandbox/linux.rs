@@ -1040,10 +1040,11 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
 /// Route and bridge flags may lead a nest, and bridge flags the run or probe inside it
 /// ([`read_request`]). No mode runs while the environment holds a variable that loads code
-/// ([`LOADER_REFUSED`]).
+/// ([`LOADER_REFUSED`]), or before it closed the descriptors it inherited unnamed
+/// ([`close_inherited`]).
 /// Output: the exit code, 2 for refused arguments or such a variable, 3 when the kernel
-/// cannot hold the policy, the session or the signal mask, or the process it dies with is
-/// gone, 126 when the harness or bubblewrap cannot start.
+/// cannot hold the policy, the session or the signal mask, the process it dies with is gone
+/// or an inherited descriptor stays open, 126 when the harness or bubblewrap cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let loader = std::env::vars_os()
         .map(|(name, _)| name)
@@ -1062,6 +1063,18 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let named: Vec<RawFd> = [
+        bridge.as_ref().and_then(|bridge| bridge.fd),
+        started,
+        named_descriptor(&request),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Err(reason) = close_inherited(&named) {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Nest { bwrap, args } => {
@@ -1118,6 +1131,51 @@ fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
 /// What [`read_request`] reads: the route ports, the bridge, the go descriptor and the
 /// request.
 type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
+
+/// The descriptor a request names in its own arguments, which [`close_inherited`] must leave
+/// open for it. Every request is listed, so a mode that takes a descriptor answers here.
+/// Input: the request. Output: the descriptor, or none.
+fn named_descriptor(request: &HelperRequest) -> Option<RawFd> {
+    match request {
+        HelperRequest::Probe { .. }
+        | HelperRequest::Run { .. }
+        | HelperRequest::Filter { .. }
+        | HelperRequest::Nest { .. }
+        | HelperRequest::Scoped
+        | HelperRequest::Broker { .. }
+        | HelperRequest::Egress { .. }
+        | HelperRequest::Supervisor { .. }
+        | HelperRequest::Supervised { .. } => None,
+    }
+}
+
+/// Closes every descriptor above the standard three that this process holds and `named`
+/// leaves out, before any mode runs. One the engine's own parent left open, not closed on
+/// exec, would otherwise reach bubblewrap, slirp4netns and the harness, or stay readable
+/// through `/proc` in a helper that stays a parent (V243-LINUX-HARNESS-FD-LEAK). Input: the
+/// named descriptors. Output: Ok, or the reason one cannot be listed or closed.
+fn close_inherited(named: &[RawFd]) -> Result<(), String> {
+    assert!(named.iter().all(|fd| *fd > 2));
+    let failed = |error: std::io::Error| format!("inherited descriptors: {error}");
+    let mut open = Vec::new();
+    for entry in fs::read_dir("/proc/self/fd").map_err(failed)? {
+        let name = entry.map_err(failed)?.file_name();
+        let fd = name
+            .to_str()
+            .and_then(|text| text.parse::<RawFd>().ok())
+            .ok_or("inherited descriptors: /proc/self/fd lists a name that is not a number")?;
+        if fd > 2 && !named.contains(&fd) {
+            open.push(fd);
+        }
+    }
+    for fd in open {
+        match nix::unistd::close(fd) {
+            Ok(()) | Err(nix::errno::Errno::EBADF | nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(format!("inherited descriptor {fd}: {error}")),
+        }
+    }
+    Ok(())
+}
 
 /// Holds a policy on this process, then becomes the harness, or with a guard stays as its
 /// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
