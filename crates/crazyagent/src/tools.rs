@@ -473,14 +473,19 @@ impl Places {
         (self.temp_refused && hops.iter().any(leads)).then_some(Refusal::InTemp)
     }
 
-    /// Whether agents can write a folder or file, read as written and with its links
-    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside a
-    /// folder the engine names for agents ([`Places::in_set_up_project`]), inside the engine's
-    /// data folder outside its `setup` folder, or inside an agent's short temp folder
+    /// Whether agents can write a folder or file, read as written, with its links resolved
+    /// and in its one spelling ([`crate::sandbox::canonical`]): inside a `.crazyagent` folder,
+    /// inside a project ([`in_project`]), inside a folder the engine names for agents
+    /// ([`Places::in_set_up_project`]), inside the engine's data folder outside its `setup`
+    /// folder, or inside an agent's short temp folder
     /// ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
-        std::iter::once(path).chain(real.as_deref()).any(|path| {
+        let plain = crate::sandbox::canonical(path).ok();
+        let mut forms = std::iter::once(path)
+            .chain(real.as_deref())
+            .chain(plain.as_deref());
+        forms.any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
                 || in_project(self.home(), path)
                 || self.in_set_up_project(path)
@@ -497,10 +502,8 @@ impl Places {
         match &self.projects {
             Some(roots) => roots.iter().any(|root| path.starts_with(root)),
             None => {
-                let home = self.home.as_deref();
-                let real_home = home.and_then(|home| home.canonicalize().ok());
-                home.into_iter()
-                    .chain(real_home.as_deref())
+                home_names(self.home.as_deref())
+                    .iter()
                     .any(|home| path.starts_with(home))
                     && !self.engine_roots.iter().any(|root| path.starts_with(root))
             }
@@ -508,7 +511,30 @@ impl Places {
     }
 }
 
-/// Every folder agents can write whole that `engine.db` names, as recorded and real: set-up
+/// HOME's names: as given, with its links resolved, in its one spelling and, on macOS, that
+/// spelling's data volume name, so a path in either spelling meets HOME in its own. Input:
+/// HOME, or none. Output: the names, each once.
+fn home_names(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let plain = crate::sandbox::canonical(home).ok();
+    let twin = plain.as_deref().and_then(crate::projects_home::data_twin);
+    let mut names = vec![home.to_path_buf()];
+    for name in [home.canonicalize().ok(), plain, twin]
+        .into_iter()
+        .flatten()
+    {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    assert!(names.len() <= 4);
+    names
+}
+
+/// Every folder agents can write whole that `engine.db` names, as recorded, real and in one
+/// spelling ([`crate::sandbox::canonical`]): set-up
 /// project folders, declared repositories, team and leased worktrees with their repositories,
 /// read read-only through engine start's own reader
 /// ([`crate::harnesses::finding::named_folders`]). No database or table names none; a failed
@@ -537,7 +563,8 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     let mut seen = std::collections::HashSet::new();
     for folder in named.into_iter().filter(|folder| folder.is_absolute()) {
         let real = folder.canonicalize().ok();
-        for root in std::iter::once(folder).chain(real) {
+        let plain = crate::sandbox::canonical(&folder).ok();
+        for root in std::iter::once(folder).chain(real).chain(plain) {
             if seen.insert(root.clone()) {
                 roots.push(root);
             }
@@ -546,7 +573,7 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     if skipped > 0 {
         eprintln!("engine_places_setup_rows_skipped count={skipped}");
     }
-    assert!(roots.len() <= 2 * NAMED_FOLDERS_MAX);
+    assert!(roots.len() <= 3 * NAMED_FOLDERS_MAX);
     assert!(roots.iter().all(|root| root.is_absolute()));
     Some(roots)
 }
@@ -571,33 +598,38 @@ fn engine_folders(root: &Path) -> [PathBuf; 2] {
     ]
 }
 
-/// The engine data folder as given and with its links resolved. Input: the folder, or
-/// none. Output: the folders.
+/// The engine data folder as given, with its links resolved and in its one spelling
+/// ([`crate::sandbox::canonical`]), so a path in the short spelling meets a data folder given
+/// through the data volume. Input: the folder, or none. Output: the folders, each once.
 pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = root.map(Path::to_path_buf).into_iter().collect();
-    if let Some(real) = root.and_then(|root| root.canonicalize().ok())
-        && !roots.contains(&real)
-    {
-        roots.push(real);
+    let resolved = root.into_iter().flat_map(|root| {
+        [
+            root.canonicalize().ok(),
+            crate::sandbox::canonical(root).ok(),
+        ]
+    });
+    for real in resolved.flatten() {
+        if !roots.contains(&real) {
+            roots.push(real);
+        }
     }
-    assert!(roots.len() <= 2);
+    assert!(roots.len() <= 3);
     roots
 }
 
 /// Whether a path is inside a CrazyAgent project: it or a folder above it, other than HOME
-/// and `/`, holds a `.crazyagent` entry, which the sandbox never lets an agent remove. A
-/// path deeper than [`ANCESTORS_MAX`] counts as inside. Inputs: HOME and the path.
-/// Output: the answer.
+/// under any of its names ([`home_names`]) and `/`, holds a `.crazyagent` entry, which the
+/// sandbox never lets an agent remove. A path deeper than [`ANCESTORS_MAX`] counts as
+/// inside. Inputs: HOME and the path. Output: the answer.
 fn in_project(home: Option<&Path>, path: &Path) -> bool {
     if path.components().count() > ANCESTORS_MAX {
         return true;
     }
-    let real_home = home.and_then(|home| home.canonicalize().ok());
+    let homes = home_names(home);
     path.ancestors()
         .filter(|folder| {
-            folder.parent().is_some()
-                && Some(*folder) != home
-                && Some(*folder) != real_home.as_deref()
+            folder.parent().is_some() && !homes.iter().any(|home| home.as_path() == *folder)
         })
         .any(|folder| {
             std::fs::symlink_metadata(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY))
