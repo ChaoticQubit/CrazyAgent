@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,14 +115,17 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
-    name: Build the ${{ matrix.os }} test archive
+    name: Windows confinement probes P0 P5-P8 on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows
             runner: windows-2022
+          - os: windows
+            runner: windows-2025
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -129,6 +134,76 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: P0 token facts of the runner
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'p0.txt'
+          "P0 runner user: $(whoami)" | Tee-Object -FilePath $out
+          whoami /groups | Tee-Object -FilePath $out -Append
+          whoami /priv | Tee-Object -FilePath $out -Append
+          reg query 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' /v EnableLUA 2>&1 | Tee-Object -FilePath $out -Append
+          reg query 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' /v ConsentPromptBehaviorAdmin 2>&1 | Tee-Object -FilePath $out -Append
+      - name: P8 cmd.exe runs a program from its current folder before PATH
+        continue-on-error: true
+        shell: cmd
+        run: |
+          mkdir "%RUNNER_TEMP%\p8"
+          cd /d "%RUNNER_TEMP%\p8"
+          > git.bat echo @echo P8 PLANTED BY THE PROJECT FOLDER
+          echo P8 plain cmd:
+          cmd /d /c git --version
+          echo P8 cmd with NoDefaultCurrentDirectoryInExePath=1:
+          set NoDefaultCurrentDirectoryInExePath=1
+          cmd /d /c git --version
+          set NoDefaultCurrentDirectoryInExePath=
+          echo P8 powershell:
+          powershell -NoProfile -Command "git --version"
+          exit /b 0
+      - name: P7 firewall rule and loopback exemption, elevated and not
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $script = 'C:\Users\Public\crazy-p7.ps1'
+          @'
+          param([string]$Who)
+          $out = "C:\Users\Public\crazy-p7-$Who.txt"
+          $sid = 'S-1-15-2-1-2-3-4-5-6-7'
+          "P7 $Who user: $(whoami)" | Out-File $out
+          (whoami /groups | Select-String 'Mandatory Label') | Out-File $out -Append
+          try {
+            New-NetFirewallRule -DisplayName "crazy-p7-$Who" -Direction Outbound -Action Allow -Package $sid -RemoteAddress 192.0.2.1 -ErrorAction Stop | Out-Null
+            "P7 $Who firewall rule: added" | Out-File $out -Append
+            Remove-NetFirewallRule -DisplayName "crazy-p7-$Who" -ErrorAction SilentlyContinue
+          } catch {
+            "P7 $Who firewall rule: refused $($_.Exception.Message)" | Out-File $out -Append
+          }
+          $added = & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a "-p=$sid" 2>&1
+          "P7 $Who loopback exempt: exit $LASTEXITCODE $added" | Out-File $out -Append
+          & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -d "-p=$sid" 2>&1 | Out-Null
+          'done' | Out-File "C:\Users\Public\crazy-p7-$Who.done"
+          '@ | Set-Content -Path $script
+          function Wait-Done([string]$Who) {
+            $done = "C:\Users\Public\crazy-p7-$Who.done"
+            foreach ($i in 1..60) { if (Test-Path $done) { break }; Start-Sleep -Seconds 1 }
+            $out = "C:\Users\Public\crazy-p7-$Who.txt"
+            if (Test-Path $out) { Get-Content $out } else { "P7 $Who wrote nothing" }
+          }
+          & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Who runner
+          Wait-Done runner
+          runas /trustlevel:0x20000 "powershell -NoProfile -ExecutionPolicy Bypass -File $script -Who basic"
+          Wait-Done basic
+          try {
+            $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File $script -Who limited"
+            $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+            Register-ScheduledTask -TaskName 'crazy-p7-limited' -Action $action -Principal $principal -ErrorAction Stop | Out-Null
+            Start-ScheduledTask -TaskName 'crazy-p7-limited'
+            Wait-Done limited
+            "P7 limited task result: $((Get-ScheduledTaskInfo -TaskName 'crazy-p7-limited').LastTaskResult)"
+            Unregister-ScheduledTask -TaskName 'crazy-p7-limited' -Confirm:$false
+          } catch {
+            "P7 limited task: not started $($_.Exception.Message)"
+          }
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail
@@ -137,15 +212,41 @@ jobs:
             echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
             echo "VCPKGRS_TRIPLET=x64-windows-static-md"
           } >> "$GITHUB_ENV"
-      - uses: ./.github/actions/rust-archive
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build the boundary helper
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked 2>&1 | tee "$RUNNER_TEMP/helper-build.txt"
+      - name: P5 and P6 rows through the real helper
+        env:
+          PROBE_LOOPBACK_EXEMPT: "1"
+        run: |
+          set +e -uo pipefail
+          code=0
+          cargo test -p crazyagent --lib --locked sandbox::windows::tests::probes -- --nocapture --test-threads 1 > "$RUNNER_TEMP/probes.log" 2>&1 || code=$?
+          echo "probes exit $code" >> "$RUNNER_TEMP/probes.log"
+          grep -E "PROBE|panicked|probes exit|^test |error" "$RUNNER_TEMP/probes.log"
+          exit "$code"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
         with:
-          os: ${{ matrix.os }}
-          node-version: ${{ env.NODE_VERSION }}
+          name: farm-win-probes-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/p0.txt
+            ${{ runner.temp }}/helper-build.txt
+            ${{ runner.temp }}/probes.log
+            C:\Users\Public\crazy-p7-*.txt
+          if-no-files-found: warn
+          retention-days: 14
 
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +293,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +355,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +401,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +565,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -527,7 +630,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:

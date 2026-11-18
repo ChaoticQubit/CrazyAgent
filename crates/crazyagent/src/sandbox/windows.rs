@@ -457,6 +457,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    mod probes;
+
     struct Folders {
         _temp: tempfile::TempDir,
         project: PathBuf,
