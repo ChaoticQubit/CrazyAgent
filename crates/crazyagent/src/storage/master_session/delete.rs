@@ -55,15 +55,11 @@ pub(super) fn delete_session(
     Ok(Outcome::Applied)
 }
 
-/// Logs an applied owner Delete of a master session at the request's revision: one
-/// [`SESSION_DELETED`] event holding only the two ids, which the team projection applies in
-/// the same transaction, then every earlier Sessions and Team event naming the session is
-/// redacted (L1-N1), then the request's sessions marks close (v2.5 L13), the closed row, its
-/// waiting Resolve and its profile receipts marked first (L13c), so their final saves are
-/// the events naming the session and replay keeps those rows. Any refusal rolls the whole
-/// request back, the redactions with it. Inputs: the request's transaction, its revision,
-/// the owner's admission, the project and the session. Output: how many earlier events were
-/// redacted, or the first refusal.
+/// Logs an applied owner Delete at the request's revision: one [`SESSION_DELETED`] of the two
+/// ids, applied by the team projection; the redaction of every earlier Sessions and Team
+/// event naming the session (L1-N1); a close of the closed row, its Resolve and receipts, so
+/// their final saves name it. Inputs: the transaction, revision, admission, project and
+/// session. Output: how many events were redacted, or the refusal, which rolls all back.
 pub(super) fn log_deleted(
     tx: &Transaction<'_>,
     revision: u64,

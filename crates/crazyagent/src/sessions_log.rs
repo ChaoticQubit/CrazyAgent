@@ -977,11 +977,10 @@ fn valid(event: &Event) -> bool {
 }
 
 /// Rebuilds the seven tables from the log: clears them, then replays every sessions event in
-/// order; L12's delete, which the team projection also reads, deletes the session's turns
-/// and preparations as the live Delete does. A snapshot run holds every row of all seven,
-/// so its first chunk clears them again; a chunk opens a run unless it follows another
-/// chunk at the previous `seq`. Input: the transaction, on a store whose open made the
-/// tables. Output: the last `seq` read.
+/// order, L12's delete removing the session's turns and preparations as the live Delete does.
+/// A chunk opens a snapshot run, which clears the tables again, unless it follows a chunk at
+/// the previous `seq`. Input: the transaction, on a store whose open made the tables. Output:
+/// the last `seq` read.
 pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     crate::storage::agent_text::ensure(tx)?;
     clear(tx)?;

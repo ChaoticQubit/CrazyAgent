@@ -18,10 +18,10 @@ pub(super) fn settings_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineErro
 }
 
 /// Step 16 (v2.5 L13): master sessions, conversation entries and agent texts go on the state
-/// log. Their rows written before the log reach replay through one snapshot run of the three
-/// tables, appended through the open's proof, their texts kept as digests; a store with no
-/// row in them gets no run. Input: the open upgrade transaction. Output: Ok or the log's
-/// refusal.
+/// log. Rows written before the log reach replay through one snapshot run of all seven
+/// sessions tables (L13c's four too), appended through the open's proof, texts and bodies
+/// kept as digests; a store with no row in them gets no run. Input: the open upgrade
+/// transaction. Output: Ok or the log's refusal.
 pub(super) fn sessions_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
     let at_ms = crate::state_log::replay::Clock::System.now_ms();
     let opening = crate::storage::opening::Opening::new(at_ms);
