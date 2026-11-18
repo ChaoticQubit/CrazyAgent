@@ -981,6 +981,10 @@ pub fn linux_holds_fully(
 /// where bubblewrap cannot start agents in namespaces of their own.
 pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
 
+/// The engine refusal code of a Linux launch whose project hides a folder that this
+/// computer mounts a second time where it shows that folder.
+pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
+
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
 /// setting's ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the code, or none for a
 /// refusal with no code of its own.
@@ -5633,22 +5637,32 @@ mod linux_sockets_tests {
         }
     }
 
-    /// rv-code4 F2 (#622): the Linux refusal of hidden folders where bubblewrap cannot
-    /// start agents in namespaces of their own has its own code, so the owner reads what
-    /// makes hidden folders work there instead of the generic sandbox line.
+    /// rv-code4 F2 (#622): each Linux refusal of hidden folders, where bubblewrap cannot
+    /// start agents in namespaces of their own and where a second mount shows the folder,
+    /// has its own code, so the owner reads what to change instead of the generic line.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_hidden_folder_refusal_has_its_own_code_and_reads_plainly() {
-        let refused = SandboxError::Unavailable(linux::HIDDEN_NEEDS_NAMESPACES.into());
-        assert_eq!(refusal_code(&refused), Some(LINUX_HIDDEN_NEEDS_NAMESPACES));
-        let line = crate::config::plain_problem(LINUX_HIDDEN_NEEDS_NAMESPACES);
-        assert!(
-            line.is_some(),
-            "the hidden folder refusal has a plain sentence"
-        );
-        let line = line.unwrap();
-        for part in ["bubblewrap", "namespaces", "Hidden folders"] {
-            assert!(line.contains(part), "{line}");
+    fn the_hidden_folder_refusals_have_their_own_codes_and_read_plainly() {
+        for (reason, code, parts) in [
+            (
+                linux::HIDDEN_NEEDS_NAMESPACES,
+                LINUX_HIDDEN_NEEDS_NAMESPACES,
+                ["bubblewrap", "namespaces", "Hidden folders"],
+            ),
+            (
+                linux::HIDDEN_MOUNTED_AGAIN,
+                LINUX_HIDDEN_MOUNTED_AGAIN,
+                ["mounted a second time", "remove that mount", "Hidden folders"],
+            ),
+        ] {
+            let refused = SandboxError::Unavailable(reason.into());
+            assert_eq!(refusal_code(&refused), Some(code));
+            let line = crate::config::plain_problem(code);
+            assert!(line.is_some(), "{code} has a plain sentence");
+            let line = line.unwrap();
+            for part in parts {
+                assert!(line.contains(part), "{line}");
+            }
         }
     }
 
