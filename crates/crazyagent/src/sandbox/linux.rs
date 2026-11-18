@@ -3500,8 +3500,8 @@ mod tests {
 
     /// V243-LINUX-KEEP-FREE-REFUSAL-NAME: a probe that says the kernel cannot hold the
     /// boundary keeps the kernel refusals; any other failure is named, its first line cut to
-    /// 200 bytes with no control characters. A network with ports never widens to open, and
-    /// a closed network keeps its bubblewrap fallback either way.
+    /// 200 bytes with no control characters. A network with ports never widens to open; a
+    /// closed network keeps its bubblewrap fallback, and without bubblewrap names the reason.
     #[test]
     fn a_failed_probe_names_its_own_reason_and_only_an_enforcement_answer_names_the_kernel() {
         use std::os::unix::fs::PermissionsExt;
@@ -3526,6 +3526,10 @@ mod tests {
                 Ok(LinuxBackend::Bubblewrap { .. })
             )
         };
+        let no_bubblewrap = |helper: &Path| {
+            let (_folders, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+            refusal(LinuxSandbox::detect_among(sandbox, helper, &[]))
+        };
         for status in ["PartiallyEnforced", "NotEnforced"] {
             let said =
                 format!("crazyagent-landlock: this kernel cannot hold the boundary ({status})\\n");
@@ -3540,6 +3544,11 @@ mod tests {
                 "{limited}"
             );
             assert!(falls_back(&helper), "{status}");
+            let pinned = no_bubblewrap(&helper);
+            assert!(
+                pinned.starts_with("this Linux cannot fully enforce Landlock file rules"),
+                "{pinned}"
+            );
         }
         let other = fake(
             "other",
@@ -3549,6 +3558,7 @@ mod tests {
         assert_eq!(refusal(detected(&other, SandboxNetwork::Open)), named);
         assert_eq!(refusal(detected(&other, ports())), named);
         assert!(falls_back(&other));
+        assert_eq!(no_bubblewrap(&other), named);
         let silent = fake("silent", "");
         assert_eq!(
             refusal(detected(&silent, SandboxNetwork::Open)),
