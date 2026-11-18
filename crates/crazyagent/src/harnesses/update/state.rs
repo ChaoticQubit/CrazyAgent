@@ -418,7 +418,8 @@ fn owner_only(program: &Path) -> Option<()> {
             BoundaryError::Refused(reason) => {
                 eprintln!("harness_version_owner_refused cause={reason}");
             }
-            BoundaryError::Windows { step, code } => {
+            BoundaryError::Windows { step, code }
+            | BoundaryError::AccessList { step, code, .. } => {
                 eprintln!("harness_version_owner_refused cause={step} code={code}");
             }
             BoundaryError::Profile(_) => eprintln!("harness_version_owner_refused cause=profile"),

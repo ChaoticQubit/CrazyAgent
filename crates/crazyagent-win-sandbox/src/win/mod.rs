@@ -23,12 +23,21 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::GetLastError;
 
 /// Why the boundary did not start the agent: a refused profile, a refused launch with a plain
-/// reason, or a Windows call that failed at a named step with its error code.
+/// reason, a Windows call that failed at a named step with its error code, or an access list
+/// that could not be read or changed, with the path it belongs to (V244-WIN-NPM).
 #[derive(Debug)]
 pub enum BoundaryError {
     Profile(ProfileError),
     Refused(&'static str),
-    Windows { step: &'static str, code: u32 },
+    Windows {
+        step: &'static str,
+        code: u32,
+    },
+    AccessList {
+        step: &'static str,
+        path: String,
+        code: u32,
+    },
 }
 
 impl fmt::Display for BoundaryError {
@@ -42,6 +51,12 @@ impl fmt::Display for BoundaryError {
                     "agent not started: could not {step} (Windows error {code})"
                 )
             }
+            Self::AccessList { step, path, code } => {
+                write!(
+                    f,
+                    "agent not started: could not {step} of {path} (Windows error {code})"
+                )
+            }
         }
     }
 }
@@ -50,6 +65,13 @@ impl std::error::Error for BoundaryError {}
 
 fn windows(step: &'static str) -> impl FnOnce(u32) -> BoundaryError {
     move |code| BoundaryError::Windows { step, code }
+}
+
+/// The failure of an access-list step on one path, so the refusal names the folder an owner
+/// would look at. Inputs: the step and the path. Output: the mapping from the Windows error.
+fn access_list(step: &'static str, path: &str) -> impl FnOnce(u32) -> BoundaryError {
+    let path = path.to_owned();
+    move |code| BoundaryError::AccessList { step, path, code }
 }
 
 /// Starts one agent inside its boundary and waits for it: reads the profile, opens the agent's
