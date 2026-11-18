@@ -3686,6 +3686,67 @@ async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_fir
     engine.stop().await;
 }
 
+/// #590 (leader 10:37): where the boundary cannot hold a hidden folder, Linux here, the read
+/// says so, a save that hides any folder is refused in plain words and changes nothing, and
+/// an empty save still lands, so a list saved before this can be cleared.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn hidden_folders_are_refused_where_the_boundary_cannot_hold_them_and_a_list_still_clears() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("hidden-unheld").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(created), OwnerResult::Applied);
+    let stored = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    let secret = stored.project_folder().join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    let secret = std::fs::canonicalize(&secret).unwrap();
+    let unheld = |paths: Vec<String>, version: u64| HiddenPaths {
+        paths,
+        version,
+        runs: Vec::new(),
+        unavailable: true,
+    };
+    let opened = owner.project_hidden_paths(project.clone()).await.unwrap();
+    assert_eq!(
+        opened,
+        unheld(vec![], 0),
+        "the read says this system holds none"
+    );
+    let refused = owner
+        .set_project_hidden_paths(
+            project.clone(),
+            0,
+            vec![secret.to_str().unwrap().to_owned()],
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(refused), rejected("hidden_paths_need_macos"));
+    let cleared = owner
+        .set_project_hidden_paths(project.clone(), 0, vec![], 3)
+        .await
+        .unwrap();
+    assert_eq!(result(cleared), OwnerResult::Applied);
+    assert_eq!(
+        owner.project_hidden_paths(project.clone()).await.unwrap(),
+        unheld(vec![], 1),
+        "the refused save changed nothing and the empty one landed"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// Where hidden folders are held (macOS), a save from a stale read never un-hides a folder.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_folder() {
     let engine = Engine::start().await;
@@ -3748,6 +3809,7 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
             paths: vec![text(&secret)],
             version: 1,
             runs: Vec::new(),
+            unavailable: false,
         },
         "the stale window changed nothing"
     );
@@ -3770,6 +3832,7 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
             paths: vec![text(&secret), text(&vendor)],
             version: 2,
             runs: Vec::new(),
+            unavailable: false,
         },
         "after a re-read the redo lands"
     );
@@ -3794,6 +3857,7 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
             paths: vec![],
             version: 3,
             runs: Vec::new(),
+            unavailable: false,
         },
         "the project added again under the same id starts with no hidden folders"
     );
@@ -3813,7 +3877,9 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
 }
 
 /// SA-VID14-R2-N2: the hidden folders read names the kind of an engine run that started
-/// before a folder was hidden while it runs, and nothing once it ends.
+/// before a folder was hidden while it runs, and nothing once it ends, where hidden folders are
+/// held (macOS).
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn hidden_paths_read_names_engine_runs_that_started_before_a_folder_was_hidden() {
     use crate::sandbox::hidden_paths::RunKind;

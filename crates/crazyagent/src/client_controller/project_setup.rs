@@ -135,11 +135,13 @@ impl OwnerController {
                 paths,
                 version,
                 runs,
+                unavailable,
                 ..
             } => Ok(crate::project_setup::HiddenPaths {
                 paths,
                 version,
                 runs,
+                unavailable,
             }),
             _ => Err(EngineError("controller_read_response".into())),
         }

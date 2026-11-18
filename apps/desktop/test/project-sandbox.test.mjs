@@ -61,14 +61,23 @@ test("a hidden folders save sends the version it read, and a stale one reads the
   assert.match(api, /call<IntentReceipt>\("desktop_set_project_hidden_paths", \{ id, version, paths, generation \}\)/);
 });
 
-test("the hidden folders section is offered on every system, since the engine's git check answers everywhere (V243-WIN-HIDDEN-GIT)", () => {
-  assert.equal(settings.hiddenOffered, undefined, "no gate on the engine read");
+test("the hidden folders section is offered only where the engine says the boundary holds them, and a list saved before stays removable (#590)", () => {
+  assert.equal(settings.hiddenOffered(null), true, "loading still shows the section");
+  assert.equal(settings.hiddenOffered({ paths: [], version: 0 }), true, "an engine without the flag offers it");
+  assert.equal(settings.hiddenOffered({ paths: [], version: 0, unavailable: true }), false, "nothing saved: one plain line");
+  assert.equal(settings.hiddenOffered({ paths: ["C:\\p\\secret"], version: 3, unavailable: true }), true, "a list saved before stays removable");
+  assert.equal(settings.HIDDEN_MACOS_ONLY, "Hidden folders work only on macOS for now.");
+  assert.equal(settings.HIDDEN_MACOS_CLEAR, "Hidden folders work only on macOS for now, so agents here don't start while this list holds a folder. Remove them and save.");
   const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   const start = source.indexOf("function HiddenSection(");
   const hidden = source.slice(start, source.indexOf("\n}\n", start));
-  assert.ok(start > 0 && !hidden.includes("return null;"), "the section always draws");
+  const gate = hidden.indexOf(`if (!hiddenOffered(latest)) return <div className="pj-stack"><h2>Folders agents can't open</h2><p className="pj-secondary">{HIDDEN_MACOS_ONLY}</p></div>;`);
+  assert.ok(gate > 0, "one plain line where nothing can be hidden");
+  assert.ok(gate > hidden.lastIndexOf("useEffect("), "after every hook");
+  assert.match(hidden, /\{latest\?\.unavailable && <p className="pj-note warn" role="status">\{HIDDEN_MACOS_CLEAR\}<\/p>\}/);
+  assert.match(hidden, /\{saved !== null && !latest\?\.unavailable && <form /, "no folder is added there");
   const api = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
-  assert.match(api, /export type HiddenPaths = \{ paths: string\[\]; version: number; runs\?: HiddenRunKind\[\] \};/);
+  assert.match(api, /export type HiddenPaths = \{ paths: string\[\]; version: number; runs\?: HiddenRunKind\[\]; unavailable\?: boolean \};/);
 });
 
 test("the hidden folders section names the running agents that can still open a hidden folder and Restart them restarts them", () => {

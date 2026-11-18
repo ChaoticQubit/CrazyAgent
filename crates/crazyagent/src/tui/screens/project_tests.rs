@@ -2940,6 +2940,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
             paths: vec!["/Users/owner/project/secret".into()],
             version: 3,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
@@ -2985,6 +2986,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
             ],
             version: 4,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     let hidden = screen.hidden.as_ref().unwrap();
@@ -3016,6 +3018,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
             paths: vec!["/Users/owner/project/secret".into()],
             version: 5,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     assert!(screen.hidden.is_none(), "Esc keeps the saved one");
@@ -3047,6 +3050,7 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
         runs: Vec::new(),
+        unavailable: false,
     });
     screen.context = Some(crate::project_setup::ProjectContext {
         project_id: project.clone(),
@@ -3106,6 +3110,46 @@ fn a_hidden_folder_refused_for_its_non_english_name_is_told_why() {
     );
 }
 
+/// #590 (leader 10:37): where the engine says this system's boundary cannot hold hidden
+/// folders, the Settings tab says so in one plain line and `k` opens no box; a list saved
+/// before still shows with how to clear it and `k` opens the box, and the save's refusal
+/// names the cause.
+#[test]
+fn settings_offer_hidden_folders_only_where_the_boundary_holds_them_and_a_saved_list_clears() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let unheld = |paths: Vec<String>| crate::project_setup::HiddenPaths {
+        paths,
+        version: 0,
+        runs: Vec::new(),
+        unavailable: true,
+    };
+    screen.hidden_paths = Some(unheld(Vec::new()));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Hidden    Works only on macOS for now"),
+        "{shown}"
+    );
+    assert!(!shown.contains("k Edit hidden folders"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Ignored);
+    assert!(screen.hidden.is_none());
+    screen.hidden_paths = Some(unheld(vec!["/p/secret".into()]));
+    let shown = text(&project_screen(&mut screen, 120, 24, &look).rows);
+    assert!(
+        shown.contains("/p/secret  ! Only on macOS; remove them so agents start"),
+        "{shown}"
+    );
+    assert!(shown.contains("k Edit hidden folders"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    assert!(screen.hidden.is_some());
+    assert_eq!(
+        plain_problem("hidden_paths_need_macos"),
+        "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
+    );
+}
+
 #[test]
 fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let look = Look::plain();
@@ -3150,6 +3194,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
             paths: vec!["/Users/owner/secret".into()],
             version: 1,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
@@ -3232,6 +3277,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         paths: vec![],
         version: 2,
         runs: Vec::new(),
+        unavailable: false,
     });
     screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
@@ -5252,6 +5298,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them(
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
         runs: Vec::new(),
+        unavailable: false,
     });
     let node = |id: &str, kind, label: &str, sees_hidden: bool| GraphNode {
         id: id.into(),
@@ -5350,6 +5397,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
         runs,
+        unavailable: false,
     };
     screen.hidden_paths = Some(saved(vec![
         RunKind::Master,
@@ -5399,6 +5447,7 @@ fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
             paths: vec!["/Users/owner/secret".into()],
             version: 1,
             runs,
+            unavailable: false,
         }))
     };
     let first = next_hidden_read(&mut screen, 20);
