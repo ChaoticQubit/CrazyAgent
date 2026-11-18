@@ -7,33 +7,45 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 use tauri::Manager;
 use windows_sys::Win32::Foundation::{GlobalFree, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, EnumDisplayMonitors, GetDC, GetPixel, HDC, HMONITOR, ReleaseDC, ValidateRect};
-use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
+use windows_sys::Win32::Graphics::Gdi::{
+    ClientToScreen, EnumDisplayMonitors, GetDC, GetPixel, HDC, HMONITOR, ReleaseDC, ValidateRect,
+};
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-use windows_sys::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
-use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
+use windows_sys::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTSGetActiveConsoleSessionId,
+};
+use windows_sys::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId,
+};
 use windows_sys::Win32::UI::HiDpi::{
-    GetAwarenessFromDpiAwarenessContext, GetDpiForMonitor, GetDpiForWindow, GetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
+    GetAwarenessFromDpiAwarenessContext, GetDpiForMonitor, GetDpiForWindow,
+    GetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
 };
 use windows_sys::Win32::UI::Input::Ime::{
-    CFS_POINT, COMPOSITIONFORM, CPS_COMPLETE, GCS_RESULTSTR, ImmGetCompositionStringW, ImmGetCompositionWindow, ImmGetContext,
-    ImmIsIME, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionStringW, ImmSetCompositionWindow, NI_COMPOSITIONSTR, SCS_SETSTR,
+    CFS_POINT, COMPOSITIONFORM, CPS_COMPLETE, GCS_RESULTSTR, ImmGetCompositionStringW,
+    ImmGetCompositionWindow, ImmGetContext, ImmIsIME, ImmNotifyIME, ImmReleaseContext,
+    ImmSetCompositionStringW, ImmSetCompositionWindow, NI_COMPOSITIONSTR, SCS_SETSTR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetFocus, GetKeyboardLayoutList, HKL, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, KLF_ACTIVATE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput, SetFocus,
+    ActivateKeyboardLayout, GetFocus, GetKeyboardLayoutList, HKL, INPUT, INPUT_0, INPUT_KEYBOARD,
+    INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, KLF_ACTIVATE,
+    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput, SetFocus,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, EnumChildWindows, GUITHREADINFO, GW_CHILD, GW_HWNDNEXT,
-    GetClassNameW, GetClientRect, GetForegroundWindow, GetGUIThreadInfo, GetSystemMetrics, GetWindow, GetWindowRect,
-    GetWindowThreadProcessId, HWND_TOP, IDC_ARROW, LoadCursorW, MA_ACTIVATE, RegisterClassW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, ShowWindow, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_IME_CHAR,
-    WM_IME_COMPOSITION, WM_IME_STARTCOMPOSITION, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_SETFOCUS,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, EnumChildWindows, GUITHREADINFO,
+    GW_CHILD, GW_HWNDNEXT, GetClassNameW, GetClientRect, GetForegroundWindow, GetGUIThreadInfo,
+    GetSystemMetrics, GetWindow, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IDC_ARROW,
+    LoadCursorW, MA_ACTIVATE, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CHAR,
+    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_SETFOCUS,
     WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE, WindowFromPoint,
 };
 
@@ -87,7 +99,21 @@ static START: OnceLock<Instant> = OnceLock::new();
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static DRIVE: OnceLock<()> = OnceLock::new();
 static SENT: Mutex<Option<Instant>> = Mutex::new(None);
-static LAYOUT: Mutex<(Rect, Rect, f64)> = Mutex::new((Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, 1.0));
+static LAYOUT: Mutex<(Rect, Rect, f64)> = Mutex::new((
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 0.0,
+        h: 0.0,
+    },
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 0.0,
+        h: 0.0,
+    },
+    1.0,
+));
 static PARENT: AtomicIsize = AtomicIsize::new(0);
 static CHILD: AtomicIsize = AtomicIsize::new(0);
 static UI_THREAD: AtomicU32 = AtomicU32::new(0);
@@ -144,8 +170,12 @@ fn on_main<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Opti
 /// state. Output: the frame's timing, or why none was drawn.
 fn draw() -> Result<crate::gpu::Timing, String> {
     STATE.with(|state| {
-        let mut state = state.try_borrow_mut().map_err(|_| "state busy".to_string())?;
-        let State { gpu, typed, text, .. } = &mut *state;
+        let mut state = state
+            .try_borrow_mut()
+            .map_err(|_| "state busy".to_string())?;
+        let State {
+            gpu, typed, text, ..
+        } = &mut *state;
         let gpu = gpu.as_mut().ok_or("no gpu")?;
         gpu.draw(*text, typed)
     })
@@ -164,7 +194,9 @@ fn on_char(unit: u32) {
         if let Some(letter) = char::from_u32(unit) {
             state.typed.push(letter);
         }
-        let State { gpu, typed, text, .. } = &mut *state;
+        let State {
+            gpu, typed, text, ..
+        } = &mut *state;
         let gpu = gpu.as_mut().ok_or("no gpu")?;
         gpu.draw(*text, typed)
     });
@@ -187,16 +219,27 @@ fn on_char(unit: u32) {
 /// The native view's window procedure: a click focuses it, characters and IME messages are
 /// counted, paint draws a frame and every other message goes to the default procedure.
 /// Inputs: the Win32 message. Output: its result.
-unsafe extern "system" fn view_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn view_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     match message {
         WM_MOUSEACTIVATE => return MA_ACTIVATE as LRESULT,
         WM_LBUTTONDOWN => {
             let before = unsafe { SetFocus(hwnd) };
-            log("native_mouse_down", &format!("focus_was={}", class_of(before)));
+            log(
+                "native_mouse_down",
+                &format!("focus_was={}", class_of(before)),
+            );
             return 0;
         }
         WM_SETFOCUS => log("native_focus", "set"),
-        WM_KILLFOCUS => log("native_focus", &format!("kill to={}", class_of(wparam as HWND))),
+        WM_KILLFOCUS => log(
+            "native_focus",
+            &format!("kill to={}", class_of(wparam as HWND)),
+        ),
         WM_CHAR => {
             on_char(wparam as u32);
             return 0;
@@ -210,13 +253,19 @@ unsafe extern "system" fn view_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 let context = unsafe { ImmGetContext(hwnd) };
                 let mut units = [0u16; 64];
                 let bytes = unsafe {
-                    ImmGetCompositionStringW(context, GCS_RESULTSTR, units.as_mut_ptr().cast(), (units.len() * 2) as u32)
+                    ImmGetCompositionStringW(
+                        context,
+                        GCS_RESULTSTR,
+                        units.as_mut_ptr().cast(),
+                        (units.len() * 2) as u32,
+                    )
                 };
                 unsafe { ImmReleaseContext(hwnd, context) };
                 if bytes > 0
                     && let Ok(mut result) = IME_RESULT.lock()
                 {
-                    *result = String::from_utf16_lossy(&units[..(bytes as usize / 2).min(units.len())]);
+                    *result =
+                        String::from_utf16_lossy(&units[..(bytes as usize / 2).min(units.len())]);
                 }
             }
         }
@@ -232,7 +281,10 @@ unsafe extern "system" fn view_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
             return 0;
         }
         WM_ERASEBKGND => return 1,
-        WM_DPICHANGED_AFTERPARENT => log("native_dpi_changed", &unsafe { GetDpiForWindow(hwnd) }.to_string()),
+        WM_DPICHANGED_AFTERPARENT => log(
+            "native_dpi_changed",
+            &unsafe { GetDpiForWindow(hwnd) }.to_string(),
+        ),
         _ => {}
     }
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -251,7 +303,10 @@ fn client_rect(rect: Rect, scale: f64) -> (i32, i32, i32, i32) {
 /// A page point on the screen, through the parent's client origin. Inputs: the page point
 /// and the scale. Output: the screen point.
 fn screen_point(css: (f64, f64), scale: f64) -> POINT {
-    let mut point = POINT { x: (css.0 * scale).round() as i32, y: (css.1 * scale).round() as i32 };
+    let mut point = POINT {
+        x: (css.0 * scale).round() as i32,
+        y: (css.1 * scale).round() as i32,
+    };
     unsafe { ClientToScreen(PARENT.load(Ordering::SeqCst) as HWND, &mut point) };
     point
 }
@@ -263,7 +318,17 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
     let (x, y, w, h) = client_rect(term, scale);
     let child = CHILD.load(Ordering::SeqCst) as HWND;
     if !child.is_null() {
-        unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER) };
+        unsafe {
+            SetWindowPos(
+                child,
+                std::ptr::null_mut(),
+                x,
+                y,
+                w,
+                h,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+        };
         STATE.with(|state| {
             if let Ok(mut state) = state.try_borrow_mut()
                 && let Some(gpu) = state.gpu.as_mut()
@@ -308,8 +373,20 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
     };
     log("class_registered", &registered.to_string());
     let child = unsafe {
-        CreateWindowExW(0, class.as_ptr(), std::ptr::null(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, x, y, w, h, parent,
-            std::ptr::null_mut(), module, std::ptr::null())
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            std::ptr::null(),
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            x,
+            y,
+            w,
+            h,
+            parent,
+            std::ptr::null_mut(),
+            module,
+            std::ptr::null(),
+        )
     };
     if child.is_null() {
         log("error", "CreateWindowExW returned null");
@@ -317,8 +394,17 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
     }
     CHILD.store(child as isize, Ordering::SeqCst);
     unsafe { SetWindowPos(child, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) };
-    log("child_created", &format!("{x},{y} {w}x{h} parent={}", class_of(parent)));
-    match Gpu::new(child as isize, module as isize, w as u32, h as u32, scale as f32) {
+    log(
+        "child_created",
+        &format!("{x},{y} {w}x{h} parent={}", class_of(parent)),
+    );
+    match Gpu::new(
+        child as isize,
+        module as isize,
+        w as u32,
+        h as u32,
+        scale as f32,
+    ) {
         Ok(gpu) => {
             log("env_adapter_used", &gpu.adapter);
             for (index, adapter) in gpu.adapters.iter().enumerate() {
@@ -349,7 +435,10 @@ fn place(app: tauri::AppHandle, term: Rect, field: Rect, dpr: f64) {
     if let Ok(mut layout) = LAYOUT.lock() {
         *layout = (term, field, dpr);
     }
-    log("page_layout", &format!("term={term:?} field={field:?} dpr={dpr}"));
+    log(
+        "page_layout",
+        &format!("term={term:?} field={field:?} dpr={dpr}"),
+    );
     let handle = app.clone();
     if let Err(error) = app.run_on_main_thread(move || place_view(&handle, term, dpr)) {
         log("error", &format!("run_on_main_thread: {error}"));
@@ -381,13 +470,22 @@ fn look(css: (f64, f64)) -> String {
     unsafe { ReleaseDC(std::ptr::null_mut(), screen) };
     let hit = unsafe { WindowFromPoint(point) };
     let rgb = ((pixel & 0xFF) << 16) | (pixel & 0xFF00) | ((pixel >> 16) & 0xFF);
-    format!("rgb={rgb:06X} raw={pixel:08X} green={} hit={} at={},{}", pixel == GREEN, class_of(hit), point.x, point.y)
+    format!(
+        "rgb={rgb:06X} raw={pixel:08X} green={} hit={} at={},{}",
+        pixel == GREEN,
+        class_of(hit),
+        point.x,
+        point.y
+    )
 }
 
 /// The centre of the terminal box and of the field, in page pixels.
 fn centres() -> ((f64, f64), (f64, f64)) {
     let (term, field, _) = LAYOUT.lock().map(|layout| *layout).unwrap_or_default();
-    ((term.x + term.w / 2.0, term.y + term.h / 2.0), (field.x + field.w / 2.0, field.y + field.h / 2.0))
+    (
+        (term.x + term.w / 2.0, term.y + term.h / 2.0),
+        (field.x + field.w / 2.0, field.y + field.h / 2.0),
+    )
 }
 
 /// Clicks the left button at a page point through `SendInput`, in virtual-desktop
@@ -408,11 +506,28 @@ fn click(css: (f64, f64)) -> u32 {
     let mouse = |flags| INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
-            mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, time: 0, dwExtraInfo: 0 },
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: 0,
+                dwFlags: flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                time: 0,
+                dwExtraInfo: 0,
+            },
         },
     };
-    let inputs = [mouse(MOUSEEVENTF_MOVE), mouse(MOUSEEVENTF_LEFTDOWN), mouse(MOUSEEVENTF_LEFTUP)];
-    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) }
+    let inputs = [
+        mouse(MOUSEEVENTF_MOVE),
+        mouse(MOUSEEVENTF_LEFTDOWN),
+        mouse(MOUSEEVENTF_LEFTUP),
+    ];
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    }
 }
 
 /// Types text through `SendInput` as Unicode key events, which reach the focused window as
@@ -420,23 +535,49 @@ fn click(css: (f64, f64)) -> u32 {
 fn type_text(text: &str) -> u32 {
     let key = |unit: u16, flags| INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: 0, wScan: unit, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0,
+                wScan: unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     };
     let inputs: Vec<INPUT> = text
         .encode_utf16()
-        .flat_map(|unit| [key(unit, KEYEVENTF_UNICODE), key(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)])
+        .flat_map(|unit| {
+            [
+                key(unit, KEYEVENTF_UNICODE),
+                key(unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+            ]
+        })
         .collect();
-    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) }
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    }
 }
 
 /// The window that has the keyboard focus on the window's thread, by class.
 fn focus_class() -> String {
-    let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+    let mut info = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
     let thread = UI_THREAD.load(Ordering::SeqCst);
     if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
         return "unknown".into();
     }
-    format!("{} active={}", class_of(info.hwndFocus), class_of(info.hwndActive))
+    format!(
+        "{} active={}",
+        class_of(info.hwndFocus),
+        class_of(info.hwndActive)
+    )
 }
 
 /// p50, p95 and max of a set of milliseconds, with the count. Input: the values.
@@ -447,7 +588,13 @@ fn percentiles(values: &mut [f64]) -> String {
     }
     values.sort_by(|a, b| a.total_cmp(b));
     let at = |p: f64| values[((values.len() - 1) as f64 * p).round() as usize];
-    format!("n={} p50={:.2} p95={:.2} max={:.2}", values.len(), at(0.5), at(0.95), values[values.len() - 1])
+    format!(
+        "n={} p50={:.2} p95={:.2} max={:.2}",
+        values.len(),
+        at(0.5),
+        at(0.95),
+        values[values.len() - 1]
+    )
 }
 
 /// Runs a script in the page. Input: the script.
@@ -466,7 +613,14 @@ fn tree() -> String {
     while !child.is_null() && order.len() < 32 {
         let mut rect = RECT::default();
         unsafe { GetWindowRect(child, &mut rect) };
-        order.push(format!("{}[{},{} {}x{}]", class_of(child), rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top));
+        order.push(format!(
+            "{}[{},{} {}x{}]",
+            class_of(child),
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top
+        ));
         child = unsafe { GetWindow(child, GW_HWNDNEXT) };
     }
     unsafe extern "system" fn each(hwnd: HWND, found: LPARAM) -> windows_sys::core::BOOL {
@@ -484,22 +638,51 @@ fn tree() -> String {
 fn environment() {
     let mut session = 0u32;
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
-    log("env_session", &format!("process={session} console={}", unsafe { WTSGetActiveConsoleSessionId() }));
+    log(
+        "env_session",
+        &format!("process={session} console={}", unsafe {
+            WTSGetActiveConsoleSessionId()
+        }),
+    );
     let parent = PARENT.load(Ordering::SeqCst) as HWND;
     let child = CHILD.load(Ordering::SeqCst) as HWND;
-    log("env_dpi", &format!("parent={} child={} awareness={}", unsafe { GetDpiForWindow(parent) }, unsafe { GetDpiForWindow(child) }, unsafe {
-        GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext())
-    }));
-    unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, rect: *mut RECT, found: LPARAM) -> windows_sys::core::BOOL {
+    log(
+        "env_dpi",
+        &format!(
+            "parent={} child={} awareness={}",
+            unsafe { GetDpiForWindow(parent) },
+            unsafe { GetDpiForWindow(child) },
+            unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) }
+        ),
+    );
+    unsafe extern "system" fn each(
+        monitor: HMONITOR,
+        _: HDC,
+        rect: *mut RECT,
+        found: LPARAM,
+    ) -> windows_sys::core::BOOL {
         let found = unsafe { &mut *(found as *mut Vec<String>) };
         let (mut x, mut y) = (0u32, 0u32);
         unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) };
         let rect = unsafe { *rect };
-        found.push(format!("[{},{} {}x{} dpi={x}]", rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top));
+        found.push(format!(
+            "[{},{} {}x{} dpi={x}]",
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top
+        ));
         1
     }
     let mut monitors: Vec<String> = Vec::new();
-    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut monitors as *mut Vec<String> as LPARAM) };
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(each),
+            &mut monitors as *mut Vec<String> as LPARAM,
+        )
+    };
     log("env_monitors", &monitors.join(" "));
     log("env_tree", &tree());
 }
@@ -517,7 +700,8 @@ fn foreground() -> bool {
     unsafe { AttachThreadInput(ours, theirs, 1) };
     unsafe { SetForegroundWindow(parent) };
     unsafe { AttachThreadInput(ours, theirs, 0) };
-    unsafe { GetForegroundWindow() } == parent
+    let now = unsafe { GetForegroundWindow() };
+    now == parent
 }
 
 /// The z-order and pixel rows: the native view over the terminal box, the page field, and
@@ -550,16 +734,28 @@ fn focus_rows() {
     std::thread::sleep(Duration::from_millis(300));
     log("focus_after_click_term", &focus_class());
     let before = CHARS.load(Ordering::SeqCst);
-    log("keys_abc_events", &format!("{} via=SendInput", type_text("abc")));
+    log(
+        "keys_abc_events",
+        &format!("{} via=SendInput", type_text("abc")),
+    );
     std::thread::sleep(Duration::from_millis(300));
-    log("keys_abc_to_native", &(CHARS.load(Ordering::SeqCst) - before).to_string());
+    log(
+        "keys_abc_to_native",
+        &(CHARS.load(Ordering::SeqCst) - before).to_string(),
+    );
     log("click_field_events", &click(field).to_string());
     std::thread::sleep(Duration::from_millis(300));
     log("focus_after_click_field", &focus_class());
     let before = CHARS.load(Ordering::SeqCst);
-    log("keys_xyz_events", &format!("{} via=SendInput", type_text("xyz")));
+    log(
+        "keys_xyz_events",
+        &format!("{} via=SendInput", type_text("xyz")),
+    );
     std::thread::sleep(Duration::from_millis(300));
-    log("keys_xyz_to_native", &(CHARS.load(Ordering::SeqCst) - before).to_string());
+    log(
+        "keys_xyz_to_native",
+        &(CHARS.load(Ordering::SeqCst) - before).to_string(),
+    );
     eval("window.reportField()");
     std::thread::sleep(Duration::from_millis(200));
     log("click_term_again_events", &click(term).to_string());
@@ -568,8 +764,14 @@ fn focus_rows() {
     let before = CHARS.load(Ordering::SeqCst);
     type_text("q");
     std::thread::sleep(Duration::from_millis(300));
-    log("key_q_to_native", &(CHARS.load(Ordering::SeqCst) - before).to_string());
-    log("focus_get_focus_on_ui", &on_main(|| class_of(unsafe { GetFocus() })).unwrap_or_else(|| "timeout".into()));
+    log(
+        "key_q_to_native",
+        &(CHARS.load(Ordering::SeqCst) - before).to_string(),
+    );
+    log(
+        "focus_get_focus_on_ui",
+        &on_main(|| class_of(unsafe { GetFocus() })).unwrap_or_else(|| "timeout".into()),
+    );
 }
 
 /// The key-to-frame row: each key goes through `SendInput`, its WM_CHAR draws a frame at
@@ -585,11 +787,24 @@ fn key_rows() {
         std::thread::sleep(Duration::from_millis(40));
     }
     let keys = on_main(|| STATE.with(|state| state.borrow().keys.clone())).unwrap_or_default();
-    let column = |pick: fn(&(f64, f64, f64, f64)) -> f64| keys.iter().map(pick).collect::<Vec<f64>>();
-    log("summary_key_send_to_submit_ms", &percentiles(&mut column(|key| key.0)));
-    log("summary_key_handler_to_submit_ms", &percentiles(&mut column(|key| key.1)));
-    log("summary_key_build_ms", &percentiles(&mut column(|key| key.2)));
-    log("summary_key_acquire_ms", &percentiles(&mut column(|key| key.3)));
+    let column =
+        |pick: fn(&(f64, f64, f64, f64)) -> f64| keys.iter().map(pick).collect::<Vec<f64>>();
+    log(
+        "summary_key_send_to_submit_ms",
+        &percentiles(&mut column(|key| key.0)),
+    );
+    log(
+        "summary_key_handler_to_submit_ms",
+        &percentiles(&mut column(|key| key.1)),
+    );
+    log(
+        "summary_key_build_ms",
+        &percentiles(&mut column(|key| key.2)),
+    );
+    log(
+        "summary_key_acquire_ms",
+        &percentiles(&mut column(|key| key.3)),
+    );
 }
 
 /// The frame-time row: `FRAMES` text frames drawn back to back on the window's thread,
@@ -614,8 +829,10 @@ fn frame_rows() {
     };
     let mut builds: Vec<f64> = timings.iter().map(|timing| timing.build_ms).collect();
     let mut acquires: Vec<f64> = timings.iter().map(|timing| timing.acquire_ms).collect();
-    let mut intervals: Vec<f64> =
-        timings.windows(2).map(|pair| (pair[1].submitted - pair[0].submitted).as_secs_f64() * 1000.0).collect();
+    let mut intervals: Vec<f64> = timings
+        .windows(2)
+        .map(|pair| (pair[1].submitted - pair[0].submitted).as_secs_f64() * 1000.0)
+        .collect();
     log("summary_frame_build_ms", &percentiles(&mut builds));
     log("summary_frame_acquire_ms", &percentiles(&mut acquires));
     log("summary_frame_interval_ms", &percentiles(&mut intervals));
@@ -630,9 +847,18 @@ fn dpi_rows() {
     unsafe { GetClientRect(child, &mut rect) };
     let (term, _, scale) = LAYOUT.lock().map(|layout| *layout).unwrap_or_default();
     let (_, _, w, h) = client_rect(term, scale);
-    let surface = on_main(|| STATE.with(|state| state.borrow().gpu.as_ref().map(Gpu::size))).flatten();
-    log("dpi_view", &format!("child_dpi={} parent_dpi={} client={}x{} expected={w}x{h} surface={surface:?} dpr={scale}",
-        unsafe { GetDpiForWindow(child) }, unsafe { GetDpiForWindow(parent) }, rect.right, rect.bottom));
+    let surface =
+        on_main(|| STATE.with(|state| state.borrow().gpu.as_ref().map(Gpu::size))).flatten();
+    log(
+        "dpi_view",
+        &format!(
+            "child_dpi={} parent_dpi={} client={}x{} expected={w}x{h} surface={surface:?} dpr={scale}",
+            unsafe { GetDpiForWindow(child) },
+            unsafe { GetDpiForWindow(parent) },
+            rect.right,
+            rect.bottom
+        ),
+    );
 }
 
 /// The IME rows: the view has an input context, the composition window follows the
@@ -645,23 +871,47 @@ fn ime_rows() {
         let context = unsafe { ImmGetContext(child) };
         let mut lines = vec![format!("context_null={}", context.is_null())];
         if !context.is_null() {
-            let form = COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: POINT { x: 8, y: 400 }, rcArea: RECT::default() };
+            let form = COMPOSITIONFORM {
+                dwStyle: CFS_POINT,
+                ptCurrentPos: POINT { x: 8, y: 400 },
+                rcArea: RECT::default(),
+            };
             let set = unsafe { ImmSetCompositionWindow(context, &form) };
             let mut read = COMPOSITIONFORM::default();
             let got = unsafe { ImmGetCompositionWindow(context, &mut read) };
-            lines.push(format!("composition_window set={set} got={got} at={},{}", read.ptCurrentPos.x, read.ptCurrentPos.y));
+            lines.push(format!(
+                "composition_window set={set} got={got} at={},{}",
+                read.ptCurrentPos.x, read.ptCurrentPos.y
+            ));
         }
         let mut layouts = [std::ptr::null_mut(); 32];
-        let count = unsafe { GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()) }.max(0) as usize;
-        let named: Vec<String> =
-            layouts[..count].iter().map(|hkl: &HKL| format!("{:08X} ime={}", *hkl as usize & 0xFFFF_FFFF, unsafe { ImmIsIME(*hkl) })).collect();
+        let count = unsafe { GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()) }
+            .max(0) as usize;
+        let named: Vec<String> = layouts[..count]
+            .iter()
+            .map(|hkl: &HKL| {
+                format!("{:08X} ime={}", *hkl as usize & 0xFFFF_FFFF, unsafe {
+                    ImmIsIME(*hkl)
+                })
+            })
+            .collect();
         lines.push(format!("layouts={}", named.join(",")));
-        let ime = layouts[..count].iter().copied().find(|hkl| unsafe { ImmIsIME(*hkl) } != 0);
+        let ime = layouts[..count]
+            .iter()
+            .copied()
+            .find(|hkl| unsafe { ImmIsIME(*hkl) } != 0);
         if let (Some(hkl), false) = (ime, context.is_null()) {
             unsafe { ActivateKeyboardLayout(hkl, KLF_ACTIVATE) };
             let text: Vec<u16> = "\u{304b}".encode_utf16().collect();
             let set = unsafe {
-                ImmSetCompositionStringW(context, SCS_SETSTR, text.as_ptr().cast(), (text.len() * 2) as u32, std::ptr::null(), 0)
+                ImmSetCompositionStringW(
+                    context,
+                    SCS_SETSTR,
+                    text.as_ptr().cast(),
+                    (text.len() * 2) as u32,
+                    std::ptr::null(),
+                    0,
+                )
             };
             let done = unsafe { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0) };
             lines.push(format!("composition set={set} complete={done}"));
@@ -675,16 +925,29 @@ fn ime_rows() {
     });
     log("ime_setup", &report.unwrap_or_else(|| "timeout".into()));
     std::thread::sleep(Duration::from_millis(500));
-    let result = IME_RESULT.lock().map(|result| result.clone()).unwrap_or_default();
-    log("ime_messages", &format!("starts={} compositions={} ime_chars={} result={result:?}", IME_STARTS.load(Ordering::SeqCst),
-        IME_COMPOSITIONS.load(Ordering::SeqCst), IME_CHARS.load(Ordering::SeqCst)));
+    let result = IME_RESULT
+        .lock()
+        .map(|result| result.clone())
+        .unwrap_or_default();
+    log(
+        "ime_messages",
+        &format!(
+            "starts={} compositions={} ime_chars={} result={result:?}",
+            IME_STARTS.load(Ordering::SeqCst),
+            IME_COMPOSITIONS.load(Ordering::SeqCst),
+            IME_CHARS.load(Ordering::SeqCst)
+        ),
+    );
 }
 
 /// The clipboard row: `CLIP_CHARS` characters written as CF_UNICODETEXT by the view's
 /// window and read back equal, timed. Output: the row line.
 fn clipboard() -> String {
     let child = CHILD.load(Ordering::SeqCst) as HWND;
-    let text: Vec<u16> = (0..CLIP_CHARS).map(|index| u16::from(b'a' + (index % 26) as u8)).chain(std::iter::once(0)).collect();
+    let text: Vec<u16> = (0..CLIP_CHARS)
+        .map(|index| u16::from(b'a' + (index % 26) as u8))
+        .chain(std::iter::once(0))
+        .collect();
     let start = Instant::now();
     if unsafe { OpenClipboard(child) } == 0 {
         return "open refused".into();
@@ -720,7 +983,10 @@ fn clipboard() -> String {
         }
     }
     unsafe { CloseClipboard() };
-    format!("placed={placed} equal={equal} chars={CLIP_CHARS} write_ms={written:.2} read_ms={:.2}", start.elapsed().as_secs_f64() * 1000.0)
+    format!(
+        "placed={placed} equal={equal} chars={CLIP_CHARS} write_ms={written:.2} read_ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    )
 }
 
 /// The run's rows in order, then the exit. Runs on its own thread; each window step goes
@@ -739,7 +1005,10 @@ fn drive() {
     frame_rows();
     dpi_rows();
     ime_rows();
-    log("clipboard", &on_main(clipboard).unwrap_or_else(|| "timeout".into()));
+    log(
+        "clipboard",
+        &on_main(clipboard).unwrap_or_else(|| "timeout".into()),
+    );
     if let Some(window) = APP.get().and_then(|app| app.get_webview_window("main")) {
         let _ = window.set_size(tauri::PhysicalSize::new(1400u32, 900u32));
     }
@@ -752,7 +1021,17 @@ fn drive() {
     layering("_after_reload");
     on_main(|| {
         let child = CHILD.load(Ordering::SeqCst) as HWND;
-        unsafe { SetWindowPos(child, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE) };
+        unsafe {
+            SetWindowPos(
+                child,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
+            )
+        };
     });
     std::thread::sleep(Duration::from_millis(300));
     layering("_after_reraise");

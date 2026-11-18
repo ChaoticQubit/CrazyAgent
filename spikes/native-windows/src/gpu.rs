@@ -13,7 +13,12 @@ const COLUMNS: usize = 80;
 
 /// The clear colour of every frame: pure green, so a screen pixel read at the view's centre
 /// tells the native view (0, 255, 0) from the page's red terminal box behind it.
-const CLEAR: wgpu::Color = wgpu::Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 };
+const CLEAR: wgpu::Color = wgpu::Color {
+    r: 0.0,
+    g: 1.0,
+    b: 0.0,
+    a: 1.0,
+};
 
 /// Times of one drawn frame: CPU build (text shaping and glyph upload), the wait for a
 /// drawable, and the instant the frame was handed to the display.
@@ -45,7 +50,8 @@ pub struct Gpu {
 /// Output: the font system, or the reason it has no font.
 fn fonts() -> Result<FontSystem, String> {
     let mut db = fontdb::Database::new();
-    db.load_font_file("C:\\Windows\\Fonts\\consola.ttf").map_err(|e| e.to_string())?;
+    db.load_font_file("C:\\Windows\\Fonts\\consola.ttf")
+        .map_err(|e| e.to_string())?;
     db.set_monospace_family("Consolas");
     Ok(FontSystem::new_with_locale_and_db("en-US".into(), db))
 }
@@ -59,7 +65,10 @@ fn adapters(instance: &wgpu::Instance) -> Vec<String> {
         .iter()
         .map(|adapter| {
             let info = adapter.get_info();
-            format!("{} | {:?} | {:?} | {}", info.name, info.device_type, info.backend, info.driver)
+            format!(
+                "{} | {:?} | {:?} | {}",
+                info.name, info.device_type, info.backend, info.driver
+            )
         })
         .collect()
 }
@@ -69,7 +78,13 @@ impl Gpu {
     /// mode and a frame latency of one, falling back to the software adapter when no
     /// hardware one answers. Inputs: the window and module handles, width, height and the
     /// scale. Output: the GPU state, or the setup error.
-    pub fn new(hwnd: isize, hinstance: isize, width: u32, height: u32, scale: f32) -> Result<Gpu, String> {
+    pub fn new(
+        hwnd: isize,
+        hinstance: isize,
+        width: u32,
+        height: u32,
+        scale: f32,
+    ) -> Result<Gpu, String> {
         let window = NonZeroIsize::new(hwnd).ok_or("null HWND")?;
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::DX12,
@@ -84,7 +99,8 @@ impl Gpu {
             ),
             raw_window_handle: raw_window_handle::RawWindowHandle::Win32(handle),
         };
-        let surface = unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())?;
+        let surface =
+            unsafe { instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())?;
         let request = |fallback: bool| {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
@@ -92,9 +108,14 @@ impl Gpu {
                 force_fallback_adapter: fallback,
             }))
         };
-        let adapter = request(false).or_else(|_| request(true)).map_err(|e| e.to_string())?;
+        let adapter = request(false)
+            .or_else(|_| request(true))
+            .map_err(|e| e.to_string())?;
         let info = adapter.get_info();
-        let named = format!("{} | {:?} | {:?}", info.name, info.device_type, info.backend);
+        let named = format!(
+            "{} | {:?} | {:?}",
+            info.name, info.device_type, info.backend
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("native-windows-spike"),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
@@ -147,7 +168,8 @@ impl Gpu {
     /// Reconfigures the surface for a new size in physical pixels; a zero or unchanged
     /// size is ignored. Inputs: width and height.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 || (width == self.config.width && height == self.config.height) {
+        if width == 0 || height == 0 || (width == self.config.width && height == self.config.height)
+        {
             return;
         }
         self.config.width = width;
@@ -168,25 +190,55 @@ impl Gpu {
         let (width, height) = (self.config.width, self.config.height);
         if text {
             let attrs = Attrs::new().family(Family::Monospace);
-            let shown: String = typed.chars().rev().take(COLUMNS).collect::<Vec<_>>().into_iter().rev().collect();
+            let shown: String = typed
+                .chars()
+                .rev()
+                .take(COLUMNS)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
             if let Some(last) = self.rows.last_mut() {
-                last.set_text(&mut self.fonts, &format!("$ {shown}_"), &attrs, Shaping::Basic);
+                last.set_text(
+                    &mut self.fonts,
+                    &format!("$ {shown}_"),
+                    &attrs,
+                    Shaping::Basic,
+                );
                 last.shape_until_scroll(&mut self.fonts, false);
             }
-            self.viewport.update(&self.queue, Resolution { width, height });
-            let bounds = TextBounds { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+            self.viewport
+                .update(&self.queue, Resolution { width, height });
+            let bounds = TextBounds {
+                left: 0,
+                top: 0,
+                right: width as i32,
+                bottom: height as i32,
+            };
             let line_px = self.line_px;
-            let areas = self.rows.iter().enumerate().map(|(index, buffer)| TextArea {
-                buffer,
-                left: 8.0,
-                top: 8.0 + index as f32 * line_px,
-                scale: 1.0,
-                bounds,
-                default_color: Color::rgb(0x10, 0x10, 0x10),
-                custom_glyphs: &[],
-            });
+            let areas = self
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, buffer)| TextArea {
+                    buffer,
+                    left: 8.0,
+                    top: 8.0 + index as f32 * line_px,
+                    scale: 1.0,
+                    bounds,
+                    default_color: Color::rgb(0x10, 0x10, 0x10),
+                    custom_glyphs: &[],
+                });
             self.text
-                .prepare(&self.device, &self.queue, &mut self.fonts, &mut self.atlas, &self.viewport, areas, &mut self.swash)
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.fonts,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut self.swash,
+                )
                 .map_err(|e| e.to_string())?;
         }
         let built = Instant::now();
@@ -195,7 +247,9 @@ impl Gpu {
             e.to_string()
         })?;
         let acquired = Instant::now();
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -203,14 +257,19 @@ impl Gpu {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(CLEAR), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(CLEAR),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
             if text {
-                self.text.render(&self.atlas, &self.viewport, &mut pass).map_err(|e| e.to_string())?;
+                self.text
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .map_err(|e| e.to_string())?;
             }
         }
         self.queue.submit(Some(encoder.finish()));
