@@ -2462,6 +2462,67 @@ async fn a_master_turn_no_account_can_run_names_each_account_and_why() {
 }
 
 #[tokio::test]
+async fn a_sign_out_that_outlasts_its_bound_is_pending_and_runs_while_the_host_stays_frozen() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    let path = fs::canonicalize(case.root.path())
+        .unwrap()
+        .join("engine.db");
+    let hold = crate::storage::hold_claims(&path);
+    let sent = case
+        .owner
+        .logout_native_auth(NativeAuthLogout {
+            request_id: RequestId::new("routing-sign-out-held").unwrap(),
+            scope: case.auth_scope("claude-a"),
+        })
+        .await;
+    assert_eq!(
+        sent.map(|reply| reply.fact.action).map_err(|error| error.0),
+        Err("access_change_pending".to_owned()),
+        "a sign-out that outlasts its bound is pending, never withdrawn or unknown"
+    );
+    let frozen = || {
+        case.runtime()
+            .authority
+            .native_auth_host
+            .lock()
+            .unwrap()
+            .frozen
+    };
+    assert!(
+        frozen(),
+        "the host stays frozen while the sign-out is pending"
+    );
+    drop(hold);
+    let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    db.busy_timeout(Duration::from_secs(1)).unwrap();
+    let deadline = Instant::now() + TEST_BOUND;
+    let phase = loop {
+        let logout = db
+            .prepare("SELECT fact FROM native_auth_operations ORDER BY generation DESC")
+            .unwrap()
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|bytes| crate::engine::owner::native_auth::decode_fact(&bytes.unwrap()).unwrap())
+            .find(|fact| {
+                fact.action == NativeAuthAction::Logout
+                    && fact.binding.connection.id == reference("claude-a")
+            });
+        match &logout {
+            Some(fact) if !fact.phase.unfinished() => break fact.phase,
+            _ if Instant::now() >= deadline => {
+                panic!("the pending sign-out never ran: {logout:?}")
+            }
+            _ => tokio::time::sleep(Duration::from_millis(50)).await,
+        }
+    };
+    assert_ne!(phase, NativeAuthPhase::AuthenticatedObserved);
+    assert!(frozen(), "the freeze holds until the sign-out has run");
+    drop(db);
+    case.finish().await;
+}
+
+#[tokio::test]
 async fn a_master_turn_moves_past_an_account_that_signed_out() {
     let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
     case.sign_in("claude-a", true).await;
