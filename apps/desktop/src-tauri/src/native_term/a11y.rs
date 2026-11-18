@@ -131,6 +131,13 @@ pub fn marks(term: &Term<VoidListener>) -> Marks {
     Marks { cursor, selection }
 }
 
+/// One hash of the accessibility text a terminal shows. Input: the terminal. Output: the
+/// hash; not written yet.
+pub fn text_key(term: &Term<VoidListener>) -> u64 {
+    let _ = term;
+    0
+}
+
 /// One hash of a frame's row hashes, so a view posts a value change only when a row did.
 /// Input: the row hashes. Output: the hash.
 pub fn rows_key(keys: &[u64]) -> u64 {
@@ -401,6 +408,34 @@ mod tests {
         assert_eq!(build(&visible(&wide)).selection, Some((1, 3)));
         select(&mut wide, (0, 0), (0, 1));
         assert_eq!(build(&visible(&wide)).selection, Some((0, 2)));
+    }
+
+    #[test]
+    fn the_text_key_changes_exactly_when_the_text_voiceover_reads_does() {
+        let inputs: [&[u8]; 12] = [
+            b"ab",
+            b"\x1b[31mab",
+            b"ab\r\n\x1b[41m  \x1b[1;3H",
+            b"ac",
+            b"e",
+            "e\u{301}".as_bytes(),
+            b"ab  ",
+            b"abc",
+            b"abc\x1b[1;2H",
+            b"\x1b[?25lab\x1b[1;6H",
+            b"ab\r\n",
+            b"a\r\nb",
+        ];
+        let terms: Vec<_> = inputs.iter().map(|bytes| term(10, 2, bytes)).collect();
+        for a in &terms {
+            for b in &terms {
+                let same = build(&visible(a)).string == build(&visible(b)).string;
+                assert_eq!(text_key(a) == text_key(b), same);
+            }
+        }
+        let mut selected = term(10, 2, b"ab");
+        select(&mut selected, (0, 0), (0, 1));
+        assert_eq!(text_key(&selected), text_key(&terms[0]));
     }
 
     #[test]
