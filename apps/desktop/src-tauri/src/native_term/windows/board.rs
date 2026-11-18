@@ -6,6 +6,9 @@ use super::place::SCALE_KEYS;
 /// The most native views one render thread draws.
 pub const VIEWS_MAX: usize = 64;
 
+/// The most swap-chain waits in a row that may fail before a view's change is dropped.
+pub const MISSES_MAX: u8 = 3;
+
 /// The plain code for adding a view past `VIEWS_MAX`.
 pub const VIEWS_FULL: &str = "native_terminal_views_full";
 
@@ -223,6 +226,15 @@ impl<T> Board<T> {
         owed.then_some(slot.geometry)
     }
 
+    /// The render thread's word that a ready view's swap-chain wait failed: the change stays
+    /// owed for another round, up to `MISSES_MAX` misses in a row, then is dropped until the
+    /// next post, so a surface lost for good cannot spin the thread. Input: the view id.
+    /// Output: whether the change is still owed.
+    pub fn missed(&self, id: u64) -> bool {
+        let _ = id;
+        unimplemented!("H1 r2 red")
+    }
+
     /// A view's newest frame, taken after the swap-chain wait, so a frame posted during
     /// the wait is drawn in it; clears the view's change. Input: the view id. Output: the
     /// frame posted since the last take, or none.
@@ -283,6 +295,15 @@ mod tests {
             .expect("wait returns after the change");
         waiter.join().expect("the waiter");
         round
+    }
+
+    fn round_within(board: &Arc<Board<&'static str>>) -> Round {
+        let (send, receive) = mpsc::channel();
+        let render = Arc::clone(board);
+        thread::spawn(move || send.send(render.wait()).expect("the round"));
+        receive
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a round, not a wait")
     }
 
     fn shown_board() -> Arc<Board<&'static str>> {
@@ -369,6 +390,47 @@ mod tests {
             "a change after the take is owed again"
         );
         assert_eq!(board.take(1), Some("after"));
+    }
+
+    #[test]
+    fn a_geometry_posted_during_the_swap_chain_wait_is_owed_after_the_take() {
+        let board = shown_board();
+        assert!(board.post_frame(1, "a"));
+        assert_eq!(board.wait().ready, vec![1]);
+        assert_eq!(board.geometry(1), None);
+        let resized = Geometry {
+            size: (10, 10),
+            ..ONE
+        };
+        assert!(board.post_geometry(1, resized));
+        assert_eq!(board.take(1), Some("a"));
+        assert_eq!(
+            round_within(&board).ready,
+            vec![1],
+            "the owed geometry redraws"
+        );
+        assert_eq!(board.geometry(1), Some(resized));
+        assert_eq!(board.take(1), None);
+        let idle = round_after(&board, || assert!(board.post_frame(1, "b")));
+        assert_eq!(idle.ready, vec![1], "nothing owed after that take");
+    }
+
+    #[test]
+    fn a_failed_swap_chain_wait_keeps_the_change_for_a_bounded_retry() {
+        let board = shown_board();
+        assert!(board.post_frame(1, "a"));
+        for miss in 1..MISSES_MAX {
+            assert_eq!(round_within(&board).ready, vec![1], "retry {miss}");
+            assert!(board.missed(1), "miss {miss} keeps the change");
+        }
+        assert_eq!(round_within(&board).ready, vec![1]);
+        assert!(!board.missed(1), "the last miss drops the change");
+        let after = round_after(&board, || assert!(board.post_shown(1, true)));
+        assert_eq!(after.ready, vec![1], "the next post owes it again");
+        assert_eq!(board.take(1), Some("a"), "the frame was never taken");
+        assert!(board.post_frame(1, "b"));
+        assert_eq!(board.wait().ready, vec![1]);
+        assert!(board.missed(1), "a take starts the count again");
     }
 
     #[test]
