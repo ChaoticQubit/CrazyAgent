@@ -916,6 +916,7 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     restarts: BTreeMap<i64, (ProjectId, Restart)>,
     hidden_next: BTreeMap<ProjectId, Instant>,
+    followed: Option<(i64, u64)>,
     access_restarts: BTreeMap<i64, ProjectId>,
     access_widened: BTreeSet<ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
@@ -1270,6 +1271,7 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             restarts: BTreeMap::new(),
             hidden_next: BTreeMap::new(),
+            followed: None,
             access_restarts: BTreeMap::new(),
             access_widened: BTreeSet::new(),
             master_restarts: BTreeSet::new(),
@@ -1878,6 +1880,7 @@ impl TeamRuntime {
         self.sweep()?;
         if self.follow_due()? {
             crate::ide::workspace::follow(&self.connection, &self.root)?;
+            self.followed = Some(self.database_mark()?);
         }
         self.watch_master_questions()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
@@ -1890,7 +1893,18 @@ impl TeamRuntime {
     /// (`PRAGMA data_version`) or by this one (`total_changes`), since a workspace is built
     /// from stored rows alone. Takes the runtime. Returns the answer, or a failed read.
     fn follow_due(&self) -> Result<bool, EngineError> {
-        Ok(true)
+        Ok(self.followed != Some(self.database_mark()?))
+    }
+
+    /// Marks how far the database has moved, as [`TeamRuntime::follow_due`] compares it:
+    /// the commits of other connections (`PRAGMA data_version`) and the rows this one
+    /// changed. Takes the runtime. Returns the mark, or a failed read.
+    fn database_mark(&self) -> Result<(i64, u64), EngineError> {
+        let version: i64 = self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get(0))
+            .map_err(error)?;
+        Ok((version, self.connection.total_changes()))
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's
