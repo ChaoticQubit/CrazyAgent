@@ -348,6 +348,11 @@ run_cell sway-desync-hide-below sway vulkan desync vsync 1 placed,hidden 40 belo
 run_cell sway-desync-hide-offscreen sway vulkan desync vsync 1 placed,hidden 40 offscreen
 run_cell sway-sync-hide-below sway vulkan sync vsync 1 placed,hidden 40 below
 run_cell sway-desync-input sway vulkan desync vsync 1 placed,type_a,type_b,ime_a,ime_b,clip 120 below
+load_on
+run_cell wl-desync-hide-below-loaded weston vulkan desync vsync 1 placed,hidden 40 below
+run_cell sway-desync-hide-below-loaded sway vulkan desync vsync 1 placed,hidden 40 below
+run_cell sway-desync-input-loaded sway vulkan desync vsync 1 placed,type_a,type_b 120 below
+load_off
 
 {
   printf '## Native terminal Linux embed spike\n\nSoftware rendering only (lavapipe / llvmpipe on a GitHub runner). WEBKIT_DISABLE_DMABUF_RENDERER=1. Frames only clear the surface: they time the present path, not glyph drawing. Cells ending in -loaded run with every core busy.\n\n'
