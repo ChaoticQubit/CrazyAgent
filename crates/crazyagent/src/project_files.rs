@@ -40,7 +40,7 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
 /// in git's order, or `project_files_folder_missing`, `project_files_no_repository` or
 /// `project_files_git_failed`. The git is setup's on Unix
 /// (`research::runner::setup_git`) and on Windows the one the engine's PATH or Git
-/// for Windows names ([`crate::github::git_program`]), with the engine's PATH and
+/// for Windows names (`crate::github::git_program`), with the engine's PATH and
 /// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`] and
 /// handed to git as `git_path` gives them, so Git for Windows never gets a verbatim path. The
 /// repository's own `core.excludesFile` is never read, and on Windows a `.git` that points
@@ -258,11 +258,15 @@ fn redirected(git_dir: &Path) -> bool {
         })
 }
 
+/// A step a test runs inside `list`, given the `.git` folder.
+#[cfg(test)]
+type Step = Box<dyn Fn(&Path)>;
+
 #[cfg(test)]
 thread_local! {
     /// A step the tests run once `list` has checked the `.git` folder and before git starts,
     /// with that folder, standing in for an agent that changes it meanwhile. None runs nothing.
-    static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
+    static AFTER_CHECK: std::cell::RefCell<Option<Step>> =
         const { std::cell::RefCell::new(None) };
 }
 
