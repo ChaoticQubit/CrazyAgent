@@ -383,9 +383,10 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
 
     let pty = Pty::launch_at(tmux, &engine.socket(), user.path());
     open_team(&pty, PROJECT);
-    let screen = pty.screen();
-    assert!(screen.contains("Master"), "{screen}");
-    assert!(!screen.contains("Not ready yet"), "{screen}");
+    pty.until(
+        "the team tree shows the Master and no Not ready yet",
+        |screen| screen.contains("Master") && !screen.contains("Not ready yet"),
+    );
     drop(pty);
     engine.stop();
 }
@@ -552,16 +553,16 @@ fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
         on_team(screen, STOPPED_PROJECT) && !screen.contains("in Finished: press Esc")
     });
     pty.keys(&["f"]);
-    let finished = pty.until("f lists the stopped agents", |screen| {
-        screen.contains("Finished (3)")
-            && screen.contains(&lead_name)
-            && worker_names
-                .iter()
-                .all(|worker| screen.contains(worker.as_str()))
-    });
-    assert!(
-        finished.contains("Finished agents: Hide. They leave the team tree for this list."),
-        "{finished}"
+    pty.until(
+        "f lists the stopped agents and says Hide takes them out of the team tree",
+        |screen| {
+            screen.contains("Finished (3)")
+                && screen.contains(&lead_name)
+                && worker_names
+                    .iter()
+                    .all(|worker| screen.contains(worker.as_str()))
+                && screen.contains("Finished agents: Hide. They leave the team tree for this list.")
+        },
     );
     drop(pty);
     engine.stop();
@@ -743,9 +744,27 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     });
 
     let review = pty.until_within(
-        "both setup steps finish and the draft shows",
+        "both setup steps finish and the draft shows the graph step's end and any mapping failure whole",
         SETTLE_TIME,
-        |screen| screen.contains("Confirm setup"),
+        |screen| {
+            let line =
+                |label: &str| screen.lines().find(|line| line.contains(label)).unwrap_or_default();
+            let graph = line("Build the code graph");
+            let reason = line("Mapping failed:")
+                .split("Mapping failed:")
+                .nth(1)
+                .unwrap_or_default()
+                .trim();
+            screen.contains("Confirm setup")
+                && ["Done", "Failed", "Turned off", "Not installed"]
+                    .iter()
+                    .any(|end| graph.contains(end))
+                && (!graph.contains("Turned off") || screen.contains("Graphify is off in Setup"))
+                && (!graph.contains("Not installed") || screen.contains("Graphify isn't installed"))
+                && (!screen.contains("Mapping failed:")
+                    || (!reason.is_empty()
+                        && screen.contains("Fill in the setup yourself to skip it")))
+        },
     );
     let status = runtime.block_on(setup_status(&engine));
     let graph_state = status
@@ -822,15 +841,13 @@ fn the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui()
     if review.contains("Plan a roadmap after research") {
         pty.keys(&["Tab"]);
     }
-    let confirm = pty.until("Confirm is focused", |screen| {
-        screen.contains("Enter Confirm setup")
-    });
-    if mapping_failed {
-        assert!(
-            confirm.contains("r Retry mapping"),
-            "a failed mapping offers Retry on Confirm:\n{confirm}"
-        );
-    }
+    pty.until(
+        "Confirm is focused, with Retry mapping after a failed mapping",
+        |screen| {
+            screen.contains("Enter Confirm setup")
+                && (!mapping_failed || screen.contains("r Retry mapping"))
+        },
+    );
     pty.keys(&["Enter"]);
     pty.until("the setup is saved and the project opens", |screen| {
         screen.contains(&format!("{REPO} is ready."))
