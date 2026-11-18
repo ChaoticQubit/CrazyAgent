@@ -977,11 +977,21 @@ pub fn linux_holds_fully(
     })
 }
 
-/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
-/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
-/// answer.
-pub fn linux_not_full(error: &SandboxError) -> bool {
-    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where bubblewrap cannot start agents in namespaces of their own.
+pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
+
+/// The code a launch refusal has of its own, so a caller shows its plain line: the strict
+/// setting's ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the code, or none for a
+/// refusal with no code of its own.
+pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
+    let SandboxError::Unavailable(reason) = error else {
+        return None;
+    };
+    match reason.as_str() {
+        LINUX_NOT_FULL_LINE => Some(LINUX_NOT_FULL),
+        _ => None,
+    }
 }
 
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
@@ -5599,13 +5609,18 @@ mod linux_sockets_tests {
 
     #[test]
     fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
-        assert!(linux_not_full(&SandboxError::Unavailable(
-            LINUX_NOT_FULL_LINE.into()
-        )));
-        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
-        assert!(!linux_not_full(&SandboxError::Invalid(
-            LINUX_NOT_FULL_LINE.into()
-        )));
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into())),
+            Some(LINUX_NOT_FULL)
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable("other".into())),
+            None
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Invalid(LINUX_NOT_FULL_LINE.into())),
+            None
+        );
         let line = crate::config::plain_problem(LINUX_NOT_FULL);
         assert!(line.is_some(), "the strict refusal has a plain sentence");
         let line = line.unwrap();
@@ -5614,6 +5629,25 @@ mod linux_sockets_tests {
             "Agent access",
             "Settings",
         ] {
+            assert!(line.contains(part), "{line}");
+        }
+    }
+
+    /// rv-code4 F2 (#622): the Linux refusal of hidden folders where bubblewrap cannot
+    /// start agents in namespaces of their own has its own code, so the owner reads what
+    /// makes hidden folders work there instead of the generic sandbox line.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_hidden_folder_refusal_has_its_own_code_and_reads_plainly() {
+        let refused = SandboxError::Unavailable(linux::HIDDEN_NEEDS_NAMESPACES.into());
+        assert_eq!(refusal_code(&refused), Some(LINUX_HIDDEN_NEEDS_NAMESPACES));
+        let line = crate::config::plain_problem(LINUX_HIDDEN_NEEDS_NAMESPACES);
+        assert!(
+            line.is_some(),
+            "the hidden folder refusal has a plain sentence"
+        );
+        let line = line.unwrap();
+        for part in ["bubblewrap", "namespaces", "Hidden folders"] {
             assert!(line.contains(part), "{line}");
         }
     }

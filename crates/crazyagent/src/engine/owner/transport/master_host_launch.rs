@@ -1077,10 +1077,9 @@ fn turn_sandbox(
     let profile = runtime.path.join(MASTER_PROFILE);
     let installed =
         InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(|error| {
-            if crate::sandbox::linux_not_full(&error) {
-                failure(crate::sandbox::LINUX_NOT_FULL)
-            } else {
-                refused(error)
+            match crate::sandbox::refusal_code(&error) {
+                Some(code) => failure(code),
+                None => refused(error),
             }
         })?;
     let installed = if policy.access == AgentAccess::Full {

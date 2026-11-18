@@ -4271,9 +4271,10 @@ fn a_link_the_agent_makes_to_a_hidden_folder_reads_only_the_empty_folder() {
     }
 }
 
-/// A hidden folder that is gone when the agent starts stays gone: the folder above it,
-/// a writable child's folder, takes no new entry, so the agent cannot make the folder and
-/// fill it, while the plain file beside it is still written.
+/// A hidden folder that is gone when the agent starts comes back only as the engine's
+/// empty folder under the cover (rv-sec2 F2, #622): the folder above it, a writable
+/// child's folder, takes no new entry, so the agent cannot make the folder or fill it,
+/// while the plain file beside it is still written.
 #[test]
 fn an_absent_hidden_folder_cannot_be_made_on_both_bubblewrap_backends() {
     for backend in HIDING {
@@ -4299,7 +4300,43 @@ fn an_absent_hidden_folder_cannot_be_made_on_both_bubblewrap_backends() {
             "{backend:?}"
         );
         assert_eq!(fs::read_to_string(&hidden.plain).unwrap(), "plain\nagent\n");
-        assert!(!hidden.folder.exists(), "{backend:?}");
+        assert!(
+            fs::read_dir(&hidden.folder).is_ok_and(|mut entries| entries.next().is_none()),
+            "{backend:?}"
+        );
+    }
+}
+
+/// rv-sec2 F2 (#622): a hidden folder that is gone when the agent starts and that the
+/// owner makes while it runs stays out of its reach on both hiding backends, since the
+/// engine makes it empty before the cover and the owner's file lands under the cover,
+/// while the plain file beside it is still read.
+#[test]
+fn a_hidden_folder_made_during_the_run_stays_out_of_reach_on_both_bubblewrap_backends() {
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        fs::remove_dir_all(&hidden.folder).unwrap();
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let script = format!(
+            "echo ready; read go; cat {plain}; cat {folder}/secret.txt 2>/dev/null; \
+             ls -A {folder} 2>/dev/null; echo done",
+            plain = quoted(&hidden.plain),
+            folder = quoted(&hidden.folder)
+        );
+        let (mut child, mut output) = started(&sandbox, &case, &script);
+        fs::create_dir_all(&hidden.folder).unwrap();
+        fs::write(hidden.folder.join("secret.txt"), SECRET).unwrap();
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        let mut rest = String::new();
+        output.read_to_string(&mut rest).unwrap();
+        assert!(child.wait().unwrap().success(), "{backend:?}");
+        assert_eq!(rest, "plain\ndone\n", "{backend:?}");
     }
 }
 
