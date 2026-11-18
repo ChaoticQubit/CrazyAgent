@@ -2520,6 +2520,18 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
     assert!(!absent.supervised, "{absent:?}");
 }
 
+/// What the engine reads of this machine goes through the helper its launches take, so in a
+/// plain cargo test it is cargo's build of the helper, not the missing one beside the test
+/// binary, and it agrees with a read through that build: no engine root is recorded in this
+/// process, so neither read has a data folder (V243-LANDLOCK-TEST-HELPER-PATH).
+#[test]
+fn the_engine_reads_this_machine_through_the_helper_its_launches_take() {
+    let host = crazyagent::sandbox::linux_host().unwrap();
+    let direct = crazyagent::sandbox::linux::read_host(Path::new(HELPER), None);
+    assert_eq!(host, direct);
+    assert_eq!(host.nested, nesting_bwrap().is_some(), "{host:?}");
+}
+
 #[test]
 fn a_host_whose_landlock_does_not_hold_reports_the_process_namespace_bubblewrap_gives() {
     let refusing = Path::new("/bin/false");

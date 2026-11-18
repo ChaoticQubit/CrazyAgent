@@ -40,6 +40,33 @@ pub use egress::{NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED,
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
 
+/// The Landlock helper for the engine executable at `engine`: the one beside it. Only in a
+/// debug build, an executable whose own folder is cargo's `deps`, as a test binary's is, with
+/// no helper beside it takes cargo's build one folder up, the one candidate, and logs it.
+/// Input: the executable's absolute path. Output: the helper's path.
+pub fn helper_for(engine: &Path) -> PathBuf {
+    assert!(engine.is_absolute());
+    let beside = engine.with_file_name(HELPER_NAME);
+    #[cfg(debug_assertions)]
+    if let Some(built) = engine
+        .parent()
+        .filter(|folder| folder.file_name() == Some(OsStr::new("deps")))
+        .map(|deps| deps.with_file_name(HELPER_NAME))
+        && !beside.is_file()
+        && built.is_file()
+    {
+        eprintln!("linux_helper_cargo_build: {}", built.display());
+        return built;
+    }
+    beside
+}
+
+/// The Landlock helper for this engine, as [`helper_for`] picks it. Output: the path, or the
+/// error reading the engine's own executable path.
+pub fn helper_beside_engine() -> std::io::Result<PathBuf> {
+    Ok(helper_for(&std::env::current_exe()?))
+}
+
 /// Fixed places a distribution installs bubblewrap. It is never looked up through `PATH`.
 pub const BWRAP_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 
@@ -2235,10 +2262,11 @@ type KeptHost = Mutex<Option<(Instant, super::LinuxHost)>>;
 /// marks unsupervised ([`forget_supervisor`]).
 static HOST_READ: KeptHost = Mutex::new(None);
 
-/// [`read_host`] for the helper beside this executable and the engine's data folder, read
-/// again once what is kept is older than `age_max`, or with no age only when nothing is
-/// kept. The lock is not held while the helper runs, so a reader of what is kept never
-/// waits on it. Input: the age. Output: the facts, each false when it cannot be asked.
+/// [`read_host`] for the helper launches take ([`helper_beside_engine`]) and the engine's
+/// data folder, read again once what is kept is older than `age_max`, or with no age only
+/// when nothing is kept. The lock is not held while the helper runs, so a reader of what is
+/// kept never waits on it. Input: the age. Output: the facts, each false when it cannot be
+/// asked.
 fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
@@ -2246,7 +2274,7 @@ fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
     {
         return host;
     }
-    let helper = std::env::current_exe().map(|engine| engine.with_file_name(HELPER_NAME));
+    let helper = helper_beside_engine();
     let host = read_host(&helper.unwrap_or_default(), crate::tools::engine_root());
     *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), host));
     host
@@ -5255,5 +5283,45 @@ mod tests {
                 "{name} is not writable"
             );
         }
+    }
+
+    /// An engine whose own folder is not cargo's `deps` takes only the helper beside it, even
+    /// with none there and a helper in the folder above, and a `deps` folder further up the
+    /// path changes nothing (V243-LANDLOCK-TEST-HELPER-PATH).
+    #[test]
+    fn an_engine_outside_a_deps_folder_never_takes_another_helper() {
+        let root = tempfile::tempdir().unwrap();
+        for folder in ["opt/bin", "deps/bin", "depsx"] {
+            let engine = root.path().join(folder).join("crazyagent");
+            fs::create_dir_all(engine.parent().unwrap()).unwrap();
+            fs::write(engine.parent().unwrap().with_file_name(HELPER_NAME), "").unwrap();
+            assert_eq!(
+                helper_for(&engine),
+                engine.with_file_name(HELPER_NAME),
+                "{folder}"
+            );
+        }
+    }
+
+    /// A debug test binary in cargo's `deps` folder with no helper beside it takes cargo's own
+    /// build of the helper in the folder above; one beside it wins, and with neither it keeps
+    /// the missing one beside it (V243-LANDLOCK-TEST-HELPER-PATH).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_test_binary_in_cargos_deps_folder_takes_cargos_helper_build_only_when_none_is_beside_it() {
+        let root = tempfile::tempdir().unwrap();
+        let deps = root.path().join("debug").join("deps");
+        fs::create_dir_all(&deps).unwrap();
+        let engine = deps.join("linux_sandbox-0123abcd");
+        let (beside, built) = (deps.join(HELPER_NAME), deps.with_file_name(HELPER_NAME));
+        assert_eq!(
+            helper_for(&engine),
+            beside,
+            "neither: the missing one beside it"
+        );
+        fs::write(&built, "").unwrap();
+        assert_eq!(helper_for(&engine), built, "cargo's build, one folder up");
+        fs::write(&beside, "").unwrap();
+        assert_eq!(helper_for(&engine), beside, "the one beside it wins");
     }
 }
