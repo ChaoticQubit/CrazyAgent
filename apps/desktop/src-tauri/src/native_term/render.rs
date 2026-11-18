@@ -315,10 +315,10 @@ fn rect_pipeline(
     (pipeline, layout)
 }
 
-/// Makes the device for the first surface: the low-power adapter that can present to it,
-/// with the adapter's own limits instead of wgpu's defaults (a 2D texture side of 8192),
-/// an error handler that logs a wgpu error and records it instead of panicking, and a
-/// lost callback that logs the loss and marks the device lost and faulted.
+/// Makes a device for a surface, the first one or the first after a loss: the low-power
+/// adapter that can present to it, with the adapter's own limits instead of wgpu's defaults
+/// (a 2D texture side of 8192), an error handler that logs a wgpu error and records it
+/// instead of panicking, and a lost callback that logs the loss and marks it lost and faulted.
 fn device_for(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'static>,
@@ -461,9 +461,9 @@ impl Shared {
 
     /// The device a new surface is made on: the held one, or after a loss a fresh one while
     /// attempts are left. A lost device is forgotten, never dropped: wgpu 25's queue drop
-    /// waits up to 6.3 s on the main thread and can panic. Leak: one device per loss, at
-    /// most `DEVICE_REPLACE_MAX` per scale per run. Input: the new surface. Output: the
-    /// device, `native_terminal_gpu` once the attempts are spent, or `device_for`'s error.
+    /// waits up to 6.3 s on the main thread and can panic. Leak: one device per loss, at most
+    /// `DEVICE_REPLACE_MAX` + 1 per scale per run (the first and each fresh one). Input: the
+    /// new surface. Output: the device, `native_terminal_gpu` once spent, or `device_for`'s error.
     fn device_on(&mut self, surface: &wgpu::Surface<'static>) -> Result<&Device, String> {
         if self.device.as_ref().is_some_and(Device::is_lost) {
             std::mem::forget(self.device.take());
