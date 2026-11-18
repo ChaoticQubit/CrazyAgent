@@ -392,6 +392,7 @@ test("off a Mac, a Shift drag on the normal screen selects the dragged text with
     const shiftClick = async (at) => {
       await send("Input.dispatchMouseEvent", { type: "mousePressed", ...at, button: "left", buttons: 1, clickCount: 1, modifiers: 8 });
       await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...at, button: "left", buttons: 0, clickCount: 1, modifiers: 8 });
+      await send("Input.dispatchMouseEvent", { type: "mouseMoved", ...spot(300, 1) });
     };
     await drag(send, spot(2, 0), spot(60, 0));
     await shiftClick(spot(140, 0));

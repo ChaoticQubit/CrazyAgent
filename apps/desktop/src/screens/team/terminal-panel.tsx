@@ -290,6 +290,50 @@ export function keepSelection(terminal: Terminal, screen: HTMLElement): IDisposa
   };
 }
 
+/** Off a Mac, Shift forces a drag to select while the app reads the mouse, but on the normal
+ * screen xterm reads a Shift press as extending the selection from the last click, so a Shift
+ * drag with nothing selected selected nothing (G1 N3). Such a press waits for the gesture: a
+ * drag hands it to xterm without Shift, starting a new selection at the press, and a release
+ * without moving hands it on as it was. Inputs: the terminal, the element around its screen
+ * and whether this is a Mac. Output: the subscription. */
+export function shiftDragSelects(terminal: Terminal, screen: HTMLElement, mac: boolean = isMac()): IDisposable {
+  const page = screen.ownerDocument;
+  let held: { target: EventTarget; init: MouseEventInit } | null = null;
+  const handOn = (shiftKey: boolean) => {
+    if (held === null) return;
+    const { target, init } = held;
+    held = null;
+    target.dispatchEvent(new MouseEvent("mousedown", { ...init, shiftKey }));
+  };
+  const down = (event: MouseEvent) => {
+    held = null;
+    if (mac || !event.isTrusted || !event.shiftKey || event.button !== 0 || event.target === null) return;
+    if (terminal.modes.mouseTrackingMode !== "none" || terminal.hasSelection()) return;
+    event.stopPropagation();
+    event.preventDefault();
+    held = {
+      target: event.target,
+      init: { bubbles: true, cancelable: true, composed: true, view: event.view, detail: event.detail, screenX: event.screenX, screenY: event.screenY, clientX: event.clientX, clientY: event.clientY, ctrlKey: event.ctrlKey, altKey: event.altKey, metaKey: event.metaKey, button: event.button, buttons: event.buttons },
+    };
+  };
+  const move = (event: MouseEvent) => {
+    if ((event.buttons & 1) !== 0) handOn(false);
+  };
+  const up = (event: MouseEvent) => {
+    if (event.button === 0) handOn(true);
+  };
+  screen.addEventListener("mousedown", down, true);
+  page.addEventListener("mousemove", move, true);
+  page.addEventListener("mouseup", up, true);
+  return {
+    dispose: () => {
+      screen.removeEventListener("mousedown", down, true);
+      page.removeEventListener("mousemove", move, true);
+      page.removeEventListener("mouseup", up, true);
+    },
+  };
+}
+
 /** Where the owner right-clicked a terminal, in page coordinates, and what was selected then. */
 export type MenuAt = { x: number; y: number; selection: string };
 
@@ -611,6 +655,7 @@ export class KeptView implements Held {
     const scrolled = followScroll(terminal, (behind) => this.set({ behind }));
     const moused = followMouse(terminal, (mouse) => this.set({ mouse }));
     const selected = keepSelection(terminal, this.host);
+    const shifted = shiftDragSelects(terminal, this.host);
     const resized = terminal.onResize(() => {
       window.clearTimeout(this.resizeTimer);
       this.resizeTimer = window.setTimeout(() => this.sendSize(), RESIZE_PAUSE_MS);
@@ -631,6 +676,7 @@ export class KeptView implements Held {
       scrolled.dispose();
       moused.dispose();
       selected.dispose();
+      shifted.dispose();
       terminal.dispose();
     };
     this.connect();
