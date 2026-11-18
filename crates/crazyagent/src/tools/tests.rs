@@ -829,6 +829,58 @@ fn only_a_passed_over_own_prefix_node_refuses_a_launch() {
     assert_eq!(launched.interpreter().unwrap().program, places_node);
 }
 
+/// V243-OWN-PREFIX-NODE-REFUSE: with no `node` in the places, a Codex npm script whose own
+/// prefix `node` the resolver passes over is refused naming that file, never reported as
+/// needing a `node` installed, since one in the places would not start it either. The
+/// launch and the harness list give that same line.
+#[test]
+fn a_passed_over_own_prefix_node_with_none_in_the_places_is_named_not_missing() {
+    let (_folder, home) = scratch();
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    let missing = resolve_entry(&entry, &places).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.tool, "codex");
+    assert_eq!(
+        missing.refused.as_ref().map(|refused| &refused.file),
+        Some(&own)
+    );
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert_eq!(line, missing.line());
+    let needs = crate::harnesses::update::needs(&entry, &places).expect("a harness that can't run");
+    assert_eq!(needs.line, line);
+    assert_eq!(needs.program, None);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: only a first line that asks `env` for `node` asks the own
+/// prefix, as [`named_interpreter`] does. A script under an npm prefix whose first line names
+/// a version-manager shim's `node` by path runs the shim's real install and launches, even
+/// beside a prefix `node` the resolver passes over.
+#[test]
+fn a_shim_named_by_path_under_an_npm_prefix_never_asks_its_own_node() {
+    let (_folder, home) = scratch();
+    let shim = program(&home.join(".volta/bin/node"), NODE);
+    let real = program(&home.join(".volta/tools/image/node/22.11.0/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    let script = program(
+        &prefix.join("lib/node_modules/pkg/cli.js"),
+        &format!("#!{}\n", shim.display()),
+    );
+    let refused = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let tool = resolve_entry(&script, &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, real);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let launched = crate::harnesses::interactive::launch_tool(&script, &places).unwrap();
+    assert_eq!(launched.interpreter().unwrap().program, real);
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
 /// On Linux a folder of this user's private group is not passed over either, by design
