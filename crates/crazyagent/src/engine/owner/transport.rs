@@ -1791,12 +1791,13 @@ impl Engine {
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
         let submit_by = tokio::time::Instant::now() + self.timeout;
-        self.storage
+        let taken = self
+            .storage
             .submit(job, submit_by, "owner_queue_not_submitted")
             .await?;
         tokio::time::timeout(deadline, receive)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -1813,9 +1814,22 @@ impl Engine {
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
         let submit_by = tokio::time::Instant::now() + self.timeout;
-        self.storage
+        let submitted = self
+            .storage
             .submit(job, submit_by, "owner_queue_not_submitted")
-            .await?;
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(stored) = receive.await {
+                        let _ = settle(stored);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => return Err(refused),
+        };
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -1824,7 +1838,7 @@ impl Engine {
         });
         tokio::time::timeout(deadline, settled)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -2760,7 +2774,7 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = crate::storage::not_submitted(&e.0)
+        let known = crate::storage::storage_answer(&e.0)
             || matches!(
                 e.0.as_str(),
                 "owner_busy"

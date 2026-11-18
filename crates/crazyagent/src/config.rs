@@ -784,6 +784,10 @@ pub const STORAGE_STARTING_LINE: &str =
 /// work past its bound and was withdrawn unrun, so nothing changed and a retry is safe.
 pub const STORAGE_BUSY_LINE: &str = "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.";
 
+/// The sentence for `access_change_pending`: a change that narrows access waited past its
+/// bound and stays queued or running, so it still takes effect and need not be sent again.
+pub const ACCESS_CHANGE_PENDING_LINE: &str = "CrazyAgent's database is busy, so this change is waiting its turn. It takes effect when the database gets to it; you don't need to do it again.";
+
 /// The sentence for `engine_version_mismatch`: the running engine and this app speak
 /// different versions, read from a version check or from a reply the app could not read.
 pub const ENGINE_VERSION_LINE: &str =
@@ -797,6 +801,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "owner_busy" => Some(OWNER_BUSY_LINE),
         "storage_starting_not_submitted" => Some(STORAGE_STARTING_LINE),
         "storage_busy_not_submitted" => Some(STORAGE_BUSY_LINE),
+        "access_change_pending" => Some(ACCESS_CHANGE_PENDING_LINE),
         "engine_version_mismatch" => Some(ENGINE_VERSION_LINE),
         "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
         "pool_needs_account" => Some(

@@ -332,6 +332,8 @@ export function nativeAuthError(code: string): string {
       return "CrazyAgent is busy with other requests. Try again in a moment.";
     case "storage_starting_not_submitted":
       return "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.";
+    case "access_change_pending":
+      return "CrazyAgent's database is busy, so this change is waiting its turn. It takes effect when the database gets to it; you don't need to do it again.";
     case "storage_busy_not_submitted":
       return "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.";
     default:
@@ -354,7 +356,7 @@ export function nativeAuthFailureCode(error: unknown): string {
     "native_profile_identity_invalid",
     "native_profile_capacity", "native_profile_new_home_not_empty", "native_profile_in_use",
     "native_profile_lock_unavailable", "owner_queue_not_submitted", "owner_busy",
-    "storage_starting_not_submitted", "storage_busy_not_submitted",
+    "storage_starting_not_submitted", "storage_busy_not_submitted", "access_change_pending",
     "native_auth_identity_unavailable",
     "native_auth_cannot_display_safely", "native_auth_presentation_limit",
     "native_auth_sign_in_running"];

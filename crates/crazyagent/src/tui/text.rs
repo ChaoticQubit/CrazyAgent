@@ -304,9 +304,9 @@ pub fn plain_code(problem: &str) -> bool {
 /// The screen's sentence for a problem it has no copy for, naming the code.
 /// Inputs: the sentence and the problem. Output: "<sentence> (code: <code>)",
 /// with `UNPLAIN_CODE` in place of a problem that is not a plain code, so raw
-/// error text never reaches the screen; a request refused by the full request queue, or not
-/// sent on by a starting or busy database, and a version mismatch read as their own
-/// sentences on every screen.
+/// error text never reaches the screen; a request refused by the full request queue, not
+/// sent on by a starting or busy database, or an access change still pending, and a
+/// version mismatch read as their own sentences on every screen.
 pub fn coded(sentence: &str, problem: &str) -> String {
     if problem == super::seam::OWNER_BUSY {
         return crate::config::OWNER_BUSY_LINE.to_owned();
@@ -316,6 +316,9 @@ pub fn coded(sentence: &str, problem: &str) -> String {
     }
     if problem == "storage_busy_not_submitted" {
         return crate::config::STORAGE_BUSY_LINE.to_owned();
+    }
+    if problem == "access_change_pending" {
+        return crate::config::ACCESS_CHANGE_PENDING_LINE.to_owned();
     }
     if problem == "engine_version_mismatch" {
         return crate::config::ENGINE_VERSION_LINE.to_owned();

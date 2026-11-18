@@ -30,6 +30,7 @@ const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   storage_starting_not_submitted: "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.",
+  access_change_pending: "CrazyAgent's database is busy, so this change is waiting its turn. It takes effect when the database gets to it; you don't need to do it again.",
   storage_busy_not_submitted: "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.",
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",

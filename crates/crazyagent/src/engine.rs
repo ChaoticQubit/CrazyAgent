@@ -524,12 +524,13 @@ impl Engine {
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
         let submit_by = tokio::time::Instant::now() + self.timeout;
-        self.storage
+        let taken = self
+            .storage
             .submit(build(send), submit_by, "owner_queue_not_submitted")
             .await?;
         tokio::time::timeout(wait, receive)
             .await
-            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| taken.lost(owner::native_auth::outcome_unknown()))?
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
@@ -550,11 +551,22 @@ impl Engine {
             .storage
             .submit(build(send), submit_by, "owner_queue_not_submitted")
             .await;
-        if let Err(refused) = submitted {
-            let refused = Err(refused);
-            settle(&refused)?;
-            return refused;
-        }
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(result) = receive.await {
+                        let _ = settle(&result);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => {
+                let refused = Err(refused);
+                settle(&refused)?;
+                return refused;
+            }
+        };
         let answered = tokio::spawn(async move {
             let result = receive
                 .await
@@ -563,7 +575,7 @@ impl Engine {
         });
         tokio::time::timeout(self.timeout, answered)
             .await
-            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| taken.lost(owner::native_auth::outcome_unknown()))?
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
@@ -670,12 +682,13 @@ impl Engine {
             .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
-        self.storage
+        let taken = self
+            .storage
             .submit(Job::Apply(request, send), submit_by, QUEUE_FULL)
             .await?;
         tokio::time::timeout(self.timeout, receive)
             .await
-            .map_err(|_| EngineError("outcome_unknown_retry_same_identity".into()))?
+            .map_err(|_| taken.lost(EngineError("outcome_unknown_retry_same_identity".into())))?
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
@@ -686,12 +699,13 @@ impl Engine {
             .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         config.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
-        self.storage
+        let taken = self
+            .storage
             .submit(Job::Config(config, send), submit_by, QUEUE_FULL)
             .await?;
         tokio::time::timeout(self.timeout, receive)
             .await
-            .map_err(|_| EngineError("configuration_update_outcome_unknown".into()))?
+            .map_err(|_| taken.lost(EngineError("configuration_update_outcome_unknown".into())))?
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 

@@ -1044,7 +1044,7 @@ pub(crate) fn outcome_unknown() -> EngineError {
 }
 
 fn public_error(code: &str) -> bool {
-    crate::storage::not_submitted(code)
+    crate::storage::storage_answer(code)
         || matches!(
             code,
             "owner_busy"

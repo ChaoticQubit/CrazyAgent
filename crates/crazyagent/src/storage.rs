@@ -401,6 +401,43 @@ pub(crate) enum Job {
     BusyHandler(fn(i32) -> bool, oneshot::Sender<Result<(), EngineError>>),
 }
 
+/// Tells whether a plugin change removes or turns off something an agent could use, or
+/// detaches a secret. Input: the command. Output: the answer.
+fn plugin_narrows_access(command: &plugins::Command) -> bool {
+    use crate::coord::tool_switches::Switch;
+    matches!(
+        command,
+        plugins::Command::RemoveSkill { .. }
+            | plugins::Command::RemoveServer { .. }
+            | plugins::Command::DetachSecret { .. }
+            | plugins::Command::SetSkill { enabled: false, .. }
+            | plugins::Command::SetHook { enabled: false, .. }
+            | plugins::Command::SetServer { enabled: false, .. }
+            | plugins::Command::Switch { on: false, .. }
+            | plugins::Command::SetTool {
+                switch: Switch::Off | Switch::Hidden,
+                ..
+            }
+    )
+}
+
+/// Tells whether an owner mutation may narrow what agents can reach: read and hidden
+/// paths, agent policy, sandbox settings and model access as whole setters, a pack entry
+/// turned off or removed, and a baseline revoked. Input: the mutation. Output: the answer.
+fn mutation_narrows_access(mutation: &OwnerMutation) -> bool {
+    matches!(
+        mutation,
+        OwnerMutation::SetProjectReadPaths { .. }
+            | OwnerMutation::SetProjectHiddenPaths { .. }
+            | OwnerMutation::SetProjectAgentPolicy { .. }
+            | OwnerMutation::SetSandboxSettings { .. }
+            | OwnerMutation::ModelAccess { .. }
+            | OwnerMutation::SetPackEntry { on: false, .. }
+            | OwnerMutation::RemovePackEntry { .. }
+            | OwnerMutation::RevokeBaseline { .. }
+    )
+}
+
 pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
     admission: Arc<tokio::sync::Semaphore>,
@@ -443,6 +480,36 @@ impl Claim {
     }
 }
 
+/// The answer for an access-narrowing job whose bound ran out: it stays queued or running
+/// and takes effect when storage gets to it, so the owner need not send it again.
+pub(crate) const ACCESS_CHANGE_PENDING: &str = "access_change_pending";
+
+/// What `Storage::submit` hands back once the worker took the job: whether the job narrows
+/// access, which decides what a caller answers when its reply timer then runs out.
+pub(crate) struct Taken {
+    narrowing: bool,
+}
+
+impl Taken {
+    /// The answer for a reply that did not come in time. Input: the caller's unknown answer.
+    /// Output: access_change_pending for an access-narrowing job, which runs to its end,
+    /// else the unknown answer.
+    pub(crate) fn lost(&self, unknown: EngineError) -> EngineError {
+        if self.narrowing {
+            error(ACCESS_CHANGE_PENDING)
+        } else {
+            unknown
+        }
+    }
+}
+
+/// Tells whether a code is one of storage's own definite answers, which every client shows
+/// by name. Input: the error code. Output: true for the not-submitted refusals and
+/// access_change_pending.
+pub(crate) fn storage_answer(code: &str) -> bool {
+    not_submitted(code) || code == ACCESS_CHANGE_PENDING
+}
+
 /// Tells whether a storage refusal means the job never reached the worker, so nothing ran
 /// and the same request can be sent again. Input: the error code. Output: true for a full
 /// queue, a worker still starting, and a job withdrawn before the worker took it.
@@ -456,6 +523,28 @@ pub(crate) fn not_submitted(code: &str) -> bool {
 }
 
 impl Job {
+    /// Tells whether losing this job would leave more access than the owner asked for:
+    /// a revocation, a sign-out or sign-in cancel, an account or secret removal, a grant
+    /// narrowed, or an access level that may be lowered. Such a job is never withdrawn.
+    /// Input: the job. Output: the answer.
+    pub(crate) fn narrows_access(&self) -> bool {
+        match self {
+            Self::OwnerControl(_, control, _) => control.decision == OwnerDecision::Revoke,
+            Self::NativeAuth(_, command, _) => matches!(
+                command,
+                owner_auth::Command::Logout(_) | owner_auth::Command::Cancel(_)
+            ),
+            Self::Accounts(_, command, _) => matches!(command, accounts::Command::Remove(_)),
+            Self::Plugins(command, _) => plugin_narrows_access(command),
+            Self::OwnerApply(_, request, _) => match &request.operation {
+                OwnerOperation::Apply { mutation } => mutation_narrows_access(mutation),
+                _ => false,
+            },
+            Self::Config(..) => true,
+            _ => false,
+        }
+    }
+
     /// Chooses how long a caller waits for this job's reply.
     /// Input: the owner request timeout from settings. Output: that timeout, or at
     /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
@@ -472,21 +561,24 @@ impl Job {
 impl Storage {
     /// Queues one timed job once the worker receives jobs, then waits until the worker takes it.
     /// Inputs: the job, the deadline for both waits, and the refusal for a full queue.
-    /// Output: Ok once the worker took the job, so the caller's reply timer starts then;
-    /// otherwise storage_starting_not_submitted, storage_busy_not_submitted or `full`, with
-    /// nothing run.
+    /// Output: `Taken` once the worker took the job, so the caller's reply timer starts then;
+    /// otherwise storage_starting_not_submitted, storage_busy_not_submitted or `full` with
+    /// nothing run, or access_change_pending for an access-narrowing job left queued.
     pub(crate) async fn submit(
         &self,
         job: Job,
         deadline: tokio::time::Instant,
         full: &str,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Taken, EngineError> {
         assert!(!matches!(job, Job::Claimed(..)));
-        let mut receiving = self.receiving.clone();
-        match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
-            Err(_) => return Err(error("storage_starting_not_submitted")),
-            Ok(Err(_)) => return Err(error(full)),
-            Ok(Ok(_)) => {}
+        let narrowing = job.narrows_access();
+        if !narrowing {
+            let mut receiving = self.receiving.clone();
+            match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
+                Err(_) => return Err(error("storage_starting_not_submitted")),
+                Ok(Err(_)) => return Err(error(full)),
+                Ok(Ok(_)) => {}
+            }
         }
         let permit = self
             .admission
@@ -504,10 +596,13 @@ impl Storage {
         let late = tokio::time::timeout_at(deadline, claim.taken.notified())
             .await
             .is_err();
+        if late && narrowing {
+            return Err(error(ACCESS_CHANGE_PENDING));
+        }
         if late && claim.decide(WITHDRAWN) {
             return Err(error("storage_busy_not_submitted"));
         }
-        Ok(())
+        Ok(Taken { narrowing })
     }
 
     pub(crate) async fn open(
@@ -3756,6 +3851,54 @@ fn read_owner_page(
 #[cfg(all(test, unix))]
 mod owner_actor_tests {
     use super::*;
+
+    #[test]
+    fn only_a_change_whose_loss_leaves_more_access_is_classed_narrowing() {
+        let secret = plugins::Command::DetachSecret {
+            id: "server".into(),
+            name: "token".into(),
+        };
+        let removed = plugins::Command::RemoveServer {
+            id: "server".into(),
+            version: 1,
+        };
+        let skill_removed = plugins::Command::RemoveSkill {
+            id: "skill".into(),
+            version: 1,
+        };
+        for (on, narrowing) in [(false, true), (true, false)] {
+            let server = plugins::Command::SetServer {
+                id: "server".into(),
+                enabled: on,
+                version: 1,
+            };
+            let skill = plugins::Command::SetSkill {
+                id: "skill".into(),
+                enabled: on,
+                version: 1,
+            };
+            let hook = plugins::Command::SetHook {
+                id: "hook".into(),
+                enabled: on,
+            };
+            let pack = OwnerMutation::SetPackEntry {
+                id: "rust".into(),
+                on,
+                version: 1,
+            };
+            assert_eq!(plugin_narrows_access(&server), narrowing);
+            assert_eq!(plugin_narrows_access(&skill), narrowing);
+            assert_eq!(plugin_narrows_access(&hook), narrowing);
+            assert_eq!(mutation_narrows_access(&pack), narrowing);
+        }
+        assert!(plugin_narrows_access(&secret));
+        assert!(plugin_narrows_access(&removed));
+        assert!(plugin_narrows_access(&skill_removed));
+        assert!(mutation_narrows_access(&OwnerMutation::RemovePackEntry {
+            id: "rust".into(),
+            version: 1,
+        }));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
