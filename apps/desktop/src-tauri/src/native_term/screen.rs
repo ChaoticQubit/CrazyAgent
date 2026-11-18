@@ -508,6 +508,22 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_keeps_at_most_zero_width_max_marks_in_its_text_and_row_key() {
+        let most = super::super::a11y::ZERO_WIDTH_MAX;
+        let theme = Theme::default();
+        let flood = format!("e{}x", "\u{301}".repeat(200));
+        let held = format!("e{}x", "\u{301}".repeat(most));
+        let flood = frame(&screen(flood.as_bytes()), &theme, false, None);
+        let held = frame(&screen(held.as_bytes()), &theme, false, None);
+        let first = &flood.rows[0][0];
+        assert!(first.cluster);
+        assert_eq!(first.text.chars().count(), 1 + most);
+        assert_eq!(first.text, held.rows[0][0].text);
+        assert_eq!(flood.keys[0], held.keys[0]);
+        assert_eq!(flood.rows[0][1].column, 1);
+    }
+
+    #[test]
     fn a_blink_off_phase_hides_the_cursor_and_its_block() {
         let theme = Theme::default();
         let term = screen(b"AB");
