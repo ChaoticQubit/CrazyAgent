@@ -2728,7 +2728,7 @@ impl ProjectScreen {
                     project_id: self.project.clone(),
                 }))
             }
-            KeyCode::Char('k') if self.hidden_offered() => {
+            KeyCode::Char('k') => {
                 match &self.hidden_paths {
                     Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
@@ -2853,25 +2853,14 @@ impl ProjectScreen {
             .map(|entry| entry.strategy)
     }
 
-    /// Whether the Settings tab offers hidden folders: until the engine's read says this
-    /// system has none (DEC-194), so the row shows while it loads. Takes the screen.
-    /// Returns the answer.
-    pub fn hidden_offered(&self) -> bool {
-        !self
-            .hidden_paths
-            .as_ref()
-            .is_some_and(|saved| saved.unavailable)
-    }
-
     /// The running agents the team graph names as able to open a folder hidden after they
     /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
     /// their labels in graph order, none while nothing is hidden or the graph loads.
     pub fn hidden_seers(&self) -> Vec<&str> {
-        let hides = self.hidden_offered()
-            && self
-                .hidden_paths
-                .as_ref()
-                .is_some_and(|saved| !saved.paths.is_empty());
+        let hides = self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| !saved.paths.is_empty());
         match self.team.ready() {
             Some(graph) if hides => graph
                 .nodes

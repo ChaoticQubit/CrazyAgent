@@ -8821,7 +8821,6 @@ fn settings_with_jobs_loaded_sends_restart_them_on_capital_r_and_r_still_refresh
                                 paths: vec!["/Users/owner/secret".into()],
                                 version: 1,
                                 runs: Vec::new(),
-                                unavailable: false,
                             }))
                         }
                         _ => Err("row_skips_this_read".to_owned()),

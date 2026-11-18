@@ -31,29 +31,18 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Lists a project's files for `@` tags: the paths git tracks and the untracked paths it
-/// does not ignore, relative to the project folder, whose path contains the query in any
-/// case. Never lists `.git`, a link, or a file reached through a link out of the folder.
-/// Runs the real git with no outside config, hooks or fsmonitor, and stops at the limit,
-/// at a 48 KiB reply or at `stop`, answering with the paths found by then. Inputs: the
-/// absolute project folder, the query, the limit and the time to stop. Output: the paths
-/// in git's order, or `project_files_folder_missing`, `project_files_no_repository` or
-/// `project_files_git_failed`. The git is setup's on Unix
-/// (`research::runner::setup_git`) and on Windows the one the engine's PATH or Git
-/// for Windows names (`crate::github::git_program`), with the engine's PATH and
-/// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`] and
-/// handed to git as `git_path` gives them, so Git for Windows never gets a verbatim path. The
-/// repository's own `core.excludesFile` is never read, and on Windows a `.git` that points
-/// git elsewhere (`redirected`) gives `project_files_no_repository`. Git is given the `.git`
-/// folder as its common folder on every system, so a `commondir` planted after that check,
-/// or on Unix at any time, redirects nothing.
+/// Lists a project's files for `@` tags through [`owner_git`]: the tracked paths and the
+/// untracked ones git does not ignore, relative to the folder and holding the query in any
+/// case, never `.git`, a link or a file reached through one, up to the limit, a 48 KiB reply
+/// or `stop`. Inputs: the absolute folder, the query, the limit and the stop. Output: the paths
+/// in git's order, or `project_files_folder_missing`, `_no_repository` or `_git_failed`.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
     limit: u16,
     stop: Instant,
 ) -> Result<Vec<String>, EngineError> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     validate(query, limit)?;
     if !folder.is_absolute() {
         return Err(failure("project_files_folder_missing"));
@@ -62,41 +51,11 @@ pub(crate) fn list(
         .ok()
         .filter(|root| root.is_dir())
         .ok_or_else(|| failure("project_files_folder_missing"))?;
-    let git_dir = root.join(".git");
-    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir())
-        || (cfg!(windows) && redirected(&git_dir))
-    {
-        return Err(failure("project_files_no_repository"));
-    }
-    #[cfg(test)]
-    AFTER_CHECK.with(|step| {
-        if let Some(step) = step.borrow().as_ref() {
-            step(&git_dir);
-        }
-    });
-    let git_root = git_path(&root);
-    let git_failed = |_| failure("project_files_git_failed");
-    #[cfg(unix)]
-    let git = crate::research::runner::setup_git().to_path_buf();
-    #[cfg(not(unix))]
-    let git = crate::github::git_program(std::env::var_os("PATH").as_deref())
-        .ok_or_else(|| failure("project_files_git_failed"))?;
-    let mut command = Command::new(git);
+    let mut command = owner_git(&root).map_err(|missing| match missing {
+        NoOwnerGit::Unavailable => failure("project_files_git_failed"),
+        NoOwnerGit::Absent | NoOwnerGit::Refused => failure("project_files_no_repository"),
+    })?;
     command
-        .env_clear()
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
-        .env("GIT_COMMON_DIR", git_root.join(".git"))
-        .envs(crate::research::runner::GIT_SAFE_ENV)
-        .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
-        .args(["-c", "core.untrackedCache=false", "-c"])
-        .arg(format!("core.excludesFile={}", crate::github::NULL_DEVICE))
-        .arg("--git-dir")
-        .arg(git_root.join(".git"))
-        .arg("--work-tree")
-        .arg(&git_root)
-        .current_dir(&git_root)
         .args([
             "ls-files",
             "-z",
@@ -104,17 +63,8 @@ pub(crate) fn list(
             "--others",
             "--exclude-standard",
         ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    command.env("PATH", "/usr/bin:/bin");
-    #[cfg(not(unix))]
-    for name in ["PATH", "SystemRoot"] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
+        .stdout(Stdio::piped());
+    let git_failed = |_| failure("project_files_git_failed");
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(git_failed)?;
     let output = child
         .stdout
@@ -142,6 +92,74 @@ pub(crate) fn list(
         Some(status) if !status.success() && !full => Err(failure("project_files_git_failed")),
         _ => Ok(paths),
     }
+}
+
+/// Why [`owner_git`] gives no git: `Absent` with no `.git`, `Refused` when `.git` is not a
+/// real folder, cannot be read or, on Windows, points git elsewhere (`redirected`), and
+/// `Unavailable` with no git program to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoOwnerGit {
+    Absent,
+    Refused,
+    Unavailable,
+}
+
+/// The engine's git for a canonical project folder, run as the owner: setup's git on Unix, the
+/// engine's PATH or Git for Windows on Windows with PATH and SystemRoot kept, under no outside
+/// config, hooks, fsmonitor or excludes file, with `.git` as repository and common folder so a
+/// planted `commondir` redirects nothing. Input: the folder. Output: the command, to which the
+/// caller adds the subcommand and stdout, or [`NoOwnerGit`].
+pub(crate) fn owner_git(root: &Path) -> Result<std::process::Command, NoOwnerGit> {
+    use std::process::{Command, Stdio};
+    let git_dir = root.join(".git");
+    match std::fs::symlink_metadata(&git_dir) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+            return Err(NoOwnerGit::Absent);
+        }
+        Ok(meta) if meta.is_dir() && !(cfg!(windows) && redirected(&git_dir)) => {}
+        _ => return Err(NoOwnerGit::Refused),
+    }
+    #[cfg(test)]
+    AFTER_CHECK.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step(&git_dir);
+        }
+    });
+    #[cfg(unix)]
+    let git = Some(crate::research::runner::setup_git().to_path_buf());
+    #[cfg(not(unix))]
+    let git = crate::github::git_program(std::env::var_os("PATH").as_deref());
+    let Some(git) = git else {
+        return Err(NoOwnerGit::Unavailable);
+    };
+    let git_root = git_path(root);
+    let mut command = Command::new(git);
+    command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
+        .env("GIT_COMMON_DIR", git_root.join(".git"))
+        .envs(crate::research::runner::GIT_SAFE_ENV)
+        .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
+        .args(["-c", "core.untrackedCache=false", "-c"])
+        .arg(format!("core.excludesFile={}", crate::github::NULL_DEVICE))
+        .arg("--git-dir")
+        .arg(git_root.join(".git"))
+        .arg("--work-tree")
+        .arg(&git_root)
+        .current_dir(&git_root)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin");
+    #[cfg(not(unix))]
+    for name in ["PATH", "SystemRoot"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    Ok(command)
 }
 
 /// Reads git's NUL-separated listing and keeps each distinct path a tag may name that
@@ -258,19 +276,20 @@ fn redirected(git_dir: &Path) -> bool {
         })
 }
 
-/// A step a test runs inside `list`, given the `.git` folder.
+/// A step a test runs inside `owner_git`, given the `.git` folder.
 #[cfg(test)]
 type Step = Box<dyn Fn(&Path)>;
 
 #[cfg(test)]
 thread_local! {
-    /// A step the tests run once `list` has checked the `.git` folder and before git starts,
-    /// with that folder, standing in for an agent that changes it meanwhile. None runs nothing.
+    /// A step the tests run once `owner_git` has checked the `.git` folder and before git
+    /// starts, with that folder, standing in for an agent that changes it meanwhile. None runs
+    /// nothing.
     static AFTER_CHECK: std::cell::RefCell<Option<Step>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Lists a repository while a step plants a `commondir` after `list` checked the `.git`
+/// Lists a repository while a step plants a `commondir` after `owner_git` checked the `.git`
 /// folder, naming a common folder whose `info/exclude` hides `notes.txt`. Inputs: a
 /// repository with an untracked `notes.txt` and a new folder for the common one. Output:
 /// what `list` answered.

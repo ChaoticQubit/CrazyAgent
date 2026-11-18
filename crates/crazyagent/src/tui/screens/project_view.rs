@@ -2878,15 +2878,13 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
     ];
-    if screen.hidden_offered() {
-        lines.push(entry("Hidden", hidden_line(screen, look)));
-        lines.extend(seers_line(screen, look).map(|row| entry("", row)));
-        lines.extend(
-            runs_lines(screen, content.saturating_sub(10), look)
-                .into_iter()
-                .map(|row| entry("", row)),
-        );
-    }
+    lines.push(entry("Hidden", hidden_line(screen, look)));
+    lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+    lines.extend(
+        runs_lines(screen, content.saturating_sub(10), look)
+            .into_iter()
+            .map(|row| entry("", row)),
+    );
     lines.extend([
         entry(
             "Access",

@@ -544,13 +544,6 @@ export function seersLine(agents: TeamAgent[]): string {
   return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
 }
 
-/** Whether the hidden folders section is offered: until the engine's read says this system
- * has no hidden folders (DEC-194), so it shows while loading. Input: the latest read, or null.
- * Output: true when offered. */
-export function hiddenOffered(saved: HiddenPaths | null): boolean {
-  return saved?.unavailable !== true;
-}
-
 function HiddenSection({ data }: { data: ProjectData }) {
   const [saved, setSaved] = useState<HiddenPaths | null>(null);
   const [latest, setLatest] = useState<HiddenPaths | null>(null);
@@ -636,7 +629,6 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.reloadTeam();
   }
 
-  if (!hiddenOffered(latest)) return null;
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>

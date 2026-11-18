@@ -400,63 +400,43 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
 
 /// The longest the tracked-files check lets git run before it is killed and the folder is
 /// refused as unchecked.
-#[cfg(unix)]
 const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(unix)]
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's answer the check reads; a tracked folder shows in the first bytes.
-#[cfg(unix)]
 const CHECK_BYTES_MAX: u64 = 64 * 1024;
 
-/// Whether git tracks any file inside this folder, asked in the project's own checkout with
-/// the real git under no outside config, hooks, fsmonitor or lazy fetch, so a hostile
-/// imported repository cannot run a command as the owner. A hidden folder covers only files
-/// git does not track; a tracked file is copied into each agent's worktree and lives in
-/// history, so hiding one would be a false promise. Run outside any sandbox with a deadline
-/// that kills git. Inputs: the project root and the canonical folder. Output: `Ok(true)` when
-/// git names any path (whatever its exit status, so a listing past the read cap still counts
-/// as tracked), `Ok(false)` when the folder is outside the root or the root has no `.git` at
-/// all or git lists nothing and exits clean, and `Err("hidden_path_unchecked")` when `.git`
-/// exists but is not a real folder (a linked worktree or submodule gitlink), or on any git
-/// error, non-zero exit with no output, timeout or unreadable answer, so the caller fails
-/// closed.
-#[cfg(unix)]
+/// Whether git tracks any file inside this folder, asked through
+/// [`crate::project_files::owner_git`] with `ls-files` on its one literal path joined by `/`,
+/// killed after 5 s; a tracked file lives in every agent's worktree and in history. Inputs:
+/// the project root and the canonical folder. Output: `Ok(true)` when git names any path, else
+/// `Ok(false)` outside the root, with no `.git` or on a clean empty answer, else unchecked.
 pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
+    use crate::project_files::NoOwnerGit;
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let unchecked = "hidden_path_unchecked";
     let root = canonical(project_root).map_err(|_| unchecked)?;
     let real = canonical(folder).map_err(|_| unchecked)?;
     let Ok(relative) = real.strip_prefix(&root) else {
         return Ok(false);
     };
-    let git_dir = root.join(".git");
-    match std::fs::symlink_metadata(&git_dir) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Err(unchecked),
-        Ok(meta) if !meta.is_dir() => return Err(unchecked),
-        Ok(_) => {}
+    let mut command = match crate::project_files::owner_git(&root) {
+        Ok(command) => command,
+        Err(NoOwnerGit::Absent) => return Ok(false),
+        Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => return Err(unchecked),
+    };
+    let mut pathspec = std::ffi::OsString::new();
+    for part in relative.components() {
+        if !pathspec.is_empty() {
+            pathspec.push("/");
+        }
+        pathspec.push(part.as_os_str());
     }
-    let mut command = Command::new(crate::research::runner::setup_git());
     command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_LITERAL_PATHSPECS", "1")
-        .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
-        .arg("--git-dir")
-        .arg(&git_dir)
-        .arg("--work-tree")
-        .arg(&root)
-        .current_dir(&root)
         .args(["ls-files", "-z", "--"])
-        .arg(relative)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .arg(pathspec)
+        .stdout(Stdio::piped());
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
     let mut stdout = child.stdout.take().ok_or(unchecked)?;
     let reader = std::thread::spawn(move || {
@@ -490,18 +470,6 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
     } else {
         Err(unchecked)
     }
-}
-
-/// Whether this system offers no hidden folders, so neither app shows the setting (DEC-194):
-/// true where the tracked-files check runs no confined git and [`git_tracks`] refuses every
-/// folder (V243-WIN-HIDDEN-GIT). The engine's refusal on a save stays the guard.
-pub const UNAVAILABLE: bool = cfg!(not(unix));
-
-/// Refuses the tracked-files check where no confined git runs. Inputs unused. Output:
-/// `Err("hidden_path_unchecked")`, so the caller fails closed.
-#[cfg(not(unix))]
-pub fn git_tracks(_project_root: &Path, _folder: &Path) -> Result<bool, &'static str> {
-    Err("hidden_path_unchecked")
 }
 
 /// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
@@ -606,21 +574,6 @@ mod tests {
                 Err("hidden_path_not_plain"),
                 "{bad}"
             );
-        }
-    }
-
-    /// The setting is unavailable exactly where the tracked-files check cannot answer for a
-    /// folder with no repository, and there a list holding any folder is still refused, so
-    /// an old saved setting or a forged save never gets through (DEC-194).
-    #[test]
-    fn hidden_folders_are_unavailable_exactly_where_the_git_check_cannot_answer() {
-        let root = project();
-        let base = canonical(root.path()).unwrap();
-        let folder = base.join("plain");
-        std::fs::create_dir(&folder).unwrap();
-        assert_eq!(UNAVAILABLE, git_tracks(&base, &folder).is_err());
-        if UNAVAILABLE {
-            assert_eq!(none_tracked(&base, &[folder]), Err("hidden_path_unchecked"));
         }
     }
 

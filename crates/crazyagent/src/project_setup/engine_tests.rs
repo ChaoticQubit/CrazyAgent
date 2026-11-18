@@ -3748,7 +3748,6 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
             paths: vec![text(&secret)],
             version: 1,
             runs: Vec::new(),
-            unavailable: false,
         },
         "the stale window changed nothing"
     );
@@ -3771,7 +3770,6 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
             paths: vec![text(&secret), text(&vendor)],
             version: 2,
             runs: Vec::new(),
-            unavailable: false,
         },
         "after a re-read the redo lands"
     );
@@ -3796,7 +3794,6 @@ async fn stale_hidden_paths_write_is_refused_so_a_stale_screen_never_unhides_a_f
             paths: vec![],
             version: 3,
             runs: Vec::new(),
-            unavailable: false,
         },
         "the project added again under the same id starts with no hidden folders"
     );

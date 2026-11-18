@@ -3153,7 +3153,6 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
-                unavailable: crate::sandbox::hidden_paths::UNAVAILABLE,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())
