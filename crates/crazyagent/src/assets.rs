@@ -2,7 +2,6 @@ use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::memory::{capacity, error, hash, principal, reject};
 use crate::protocol::*;
-#[cfg(unix)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -98,7 +97,6 @@ pub enum AssetAction {
     },
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(

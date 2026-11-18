@@ -29,7 +29,6 @@ macro_rules! trash_columns {
     };
 }
 
-#[cfg(unix)]
 const SCHEMA: &str = concat!(
     "CREATE TABLE IF NOT EXISTS file_trash ",
     trash_columns!(),
@@ -37,7 +36,6 @@ const SCHEMA: &str = concat!(
 );
 /// Rebuilds a trash table from before hook folders with the current check, keeping every
 /// note, for the upgrade step that lets it hold hook folders.
-#[cfg(unix)]
 pub(super) const WIDEN: &str = concat!(
     "CREATE TABLE file_trash_next ",
     trash_columns!(),
@@ -49,7 +47,6 @@ ALTER TABLE file_trash_next RENAME TO file_trash;"
 
 /// Creates the table of files a committed removal left to delete.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }

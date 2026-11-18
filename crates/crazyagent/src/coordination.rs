@@ -4,7 +4,6 @@ use crate::protocol::*;
 use crate::routing::{
     ApprovalMode, QueueEntry, ResourceBudget, RouteRequest, SchedulingPolicy, order_queue,
 };
-#[cfg(unix)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -216,7 +215,6 @@ pub enum OwnerAction {
     RemoveLink { link_id: RequestId },
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(

@@ -27,7 +27,6 @@ macro_rules! items_columns {
     };
 }
 
-#[cfg(any(unix, test))]
 const SCHEMA: &str = concat!(
     "CREATE TABLE IF NOT EXISTS plugin_items ",
     items_columns!(),
@@ -40,7 +39,6 @@ CREATE TABLE IF NOT EXISTS plugin_switches (
 );
 /// Rebuilds an item table from before hooks with the current check, keeping every row, for
 /// the upgrade step that lets it hold hooks.
-#[cfg(unix)]
 pub(super) const WIDEN_ITEMS: &str = concat!(
     "CREATE TABLE plugin_items_next ",
     items_columns!(),
@@ -252,7 +250,6 @@ struct ServerRecord {
 
 /// Creates the skill, MCP server and hook tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }

@@ -4,7 +4,8 @@ use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
-#[cfg(unix)]
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -19,7 +20,6 @@ pub(crate) mod accounts;
 pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
-#[cfg(unix)]
 pub(crate) mod migrations;
 #[cfg(all(test, unix))]
 pub(crate) use master_session::turn_task_id;
@@ -28,7 +28,6 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
-#[cfg(unix)]
 pub use migrations::backup_failure;
 pub(crate) mod agent_text;
 mod native_auth;
@@ -1231,16 +1230,70 @@ struct OpenedDatabase {
     custody: Result<NativeProfileCustody, EngineError>,
 }
 
-/// Refuses engine storage where the Unix owner and mode checks do not exist.
-/// Takes the database path and read-only mode, both unused.
-/// Returns `storage_unavailable` until Windows has its own owner-only access check.
-#[cfg(not(unix))]
+/// Opens engine storage in a W1 private data folder on Windows (DESIGN-0256 D1-D4): the
+/// folder and the database are held, so neither can be renamed or replaced, before the lock
+/// is taken and SQLite opens the same path, and a fresh open must then be the held file.
+/// Inputs: the database path, read-only mode and the settings sources for an upgrade
+/// backup. Output: the connection, the lock holding both, and the custody result.
+#[cfg(windows)]
 fn open_actor_database(
-    _path: &Path,
-    _readonly: bool,
-    _settings: Option<&settings::SettingsSources>,
+    path: &Path,
+    readonly: bool,
+    settings: Option<&settings::SettingsSources>,
 ) -> Result<OpenedDatabase, EngineError> {
-    Err(error("storage_unavailable"))
+    let parent = path
+        .parent()
+        .ok_or_else(|| error("database parent missing"))?;
+    let folder = private::dir(parent)
+        .map_err(|e| error(format!("database requires private owner directory: {e}")))?;
+    if !readonly {
+        match private::file(path, true) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+    }
+    let database = private::file(path, false)
+        .map_err(|e| error(format!("database must be a private owner file: {e}")))?;
+    let metadata = database.metadata().map_err(error)?;
+    let lock = lock_database(path, folder, database)?;
+    let flags = if readonly {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let mut connection = Connection::open_with_flags(
+        path,
+        flags | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(error)?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(error)?;
+    if readonly {
+        migrations::check(&connection, migrations::STEPS)?;
+    } else {
+        migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
+        initialize_authority_schemas(&connection)?;
+        let started = std::time::Instant::now();
+        if let Some(held @ 1..) = crate::project_setup::removed::hold_left(&connection)? {
+            eprintln!(
+                "projects_removed_backfill held={held} ms={}",
+                started.elapsed().as_millis()
+            );
+        }
+    }
+    assert!(connection.is_autocommit());
+    let named = private::file(path, false).map_err(error)?;
+    if !private::same(&named, &lock.held[1]).map_err(error)? {
+        return Err(error("database_replaced_after_open"));
+    }
+    let custody = NativeProfileCustody::capture(path, &metadata);
+    Ok(OpenedDatabase {
+        connection,
+        lock,
+        custody,
+    })
 }
 
 #[cfg(unix)]
@@ -1324,7 +1377,6 @@ fn open_actor_database(
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
@@ -1536,6 +1588,8 @@ fn gateway_connection_state(
 /// database locked after the hold ends (a restart in the same process then locks at once).
 struct EngineLock {
     file: std::fs::File,
+    #[cfg(windows)]
+    held: [std::fs::File; 2],
 }
 
 impl Drop for EngineLock {
@@ -1571,6 +1625,29 @@ fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
     Ok(EngineLock { file: lock })
 }
 
+/// Takes the engine lock on Windows (DESIGN-0256 D4): `.engine-lock` beside the database is
+/// a W1 private file locked exclusively at once, and the lock keeps the held data folder and
+/// database open as long as it lives. Inputs: the database path and both held handles.
+/// Output: the lock, `invalid_engine_lock_file` or `database_lock_acquire_failed`.
+#[cfg(windows)]
+fn lock_database(
+    path: &Path,
+    folder: std::fs::File,
+    database: std::fs::File,
+) -> Result<EngineLock, EngineError> {
+    let lock_path = path.with_extension("engine-lock");
+    let lock = match private::file(&lock_path, true) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => private::file(&lock_path, false),
+        opened => opened,
+    }
+    .map_err(|e| error(format!("invalid_engine_lock_file: {e}")))?;
+    private::lock(&lock).map_err(|e| error(format!("database_lock_acquire_failed: {e}")))?;
+    Ok(EngineLock {
+        file: lock,
+        held: [folder, database],
+    })
+}
+
 /// Says whether no engine holds the database lock of a data folder, so a new engine can
 /// open its database. Input: the data folder. Output: true when the lock file is missing or
 /// free, false while an engine holds it or when it cannot be opened. The probe's own shared
@@ -1592,18 +1669,29 @@ pub fn engine_lock_released(root: &Path) -> bool {
     }
 }
 
+/// Says whether no engine holds the database lock of a data folder on Windows (DESIGN-0256
+/// D4). Input: the data folder. Output: true when the lock file is missing or free, false
+/// while an engine holds it or when it cannot be opened as a private file. The probe's own
+/// shared lock is released at once, so it never keeps the new engine out.
+#[cfg(windows)]
+pub fn engine_lock_released(root: &Path) -> bool {
+    match private::file(&root.join("engine.db").with_extension("engine-lock"), false) {
+        Ok(lock) => private::free(&lock).unwrap_or(false),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Releases the engine database lock and reports whether the unlock succeeded.
 /// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
 fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
     unlock_database(&lock.file)
 }
 
-/// Unlocks the engine database lock file with the standard library file lock.
+/// Unlocks the engine database lock file on Windows over the range `private::lock` took.
 /// Takes the locked file. Returns `database_lock_release_failed` when the unlock fails.
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
-    file.unlock()
-        .map_err(|e| error(format!("database_lock_release_failed: {e}")))
+    private::unlock(file).map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
 #[cfg(unix)]
@@ -1623,7 +1711,6 @@ pub fn wal_refused(connection: &Connection) -> rusqlite::Result<Option<String>> 
     Ok(kept.then_some(mode))
 }
 
-#[cfg(unix)]
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
     if let Some(mode) = wal_refused(connection).map_err(error)? {

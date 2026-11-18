@@ -1585,7 +1585,6 @@ pub(super) fn filed_model<'a>(
 /// spellings of one harness become one row, and the message a transcript was counting moves
 /// to `usage_messages`. A store already in the new shape only gets what it lacks.
 /// Input: the open upgrade transaction. Output: done, or `usage_unavailable`.
-#[cfg(any(unix, test))]
 pub(crate) fn migrate_counts(tx: &Connection) -> Result<(), EngineError> {
     let shaped: bool = tx
         .query_row(

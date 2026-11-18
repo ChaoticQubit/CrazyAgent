@@ -213,6 +213,21 @@ fn the_lock_probe_sees_a_held_engine_lock_and_leaves_none_of_its_own() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// W1 D3: two handles on one private file are the same file and two private files are not,
+/// the twin of the `dev` and `ino` compare engine storage runs once SQLite has opened.
+#[test]
+fn same_tells_one_private_file_from_another() {
+    let root = scratch("same");
+    let held = private::dir(&root).unwrap();
+    let one = private::file(&root.join("one.db"), true).unwrap();
+    let again = private::file(&root.join("one.db"), false).unwrap();
+    let other = private::file(&root.join("other.db"), true).unwrap();
+    assert!(private::same(&one, &again).unwrap());
+    assert!(!private::same(&one, &other).unwrap());
+    drop((other, again, one, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// W1 D1 (rv-sec3 N4): a private file given a low mandatory label, which lets a low
 /// integrity process of the user write it, is refused on open.
 #[test]

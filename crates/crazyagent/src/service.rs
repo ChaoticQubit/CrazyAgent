@@ -1839,15 +1839,9 @@ fn logged_ready(layout: &Layout, since: u64) -> bool {
 
 /// Whether the last upgrade backup of the engine at a layout failed, as the record the
 /// engine leaves beside its database says (F36), read without an engine. Input: the layout.
-/// Output: the backup code, or none; always none where no engine database runs.
+/// Output: the backup code, or none.
 pub fn backup_failure(layout: &Layout) -> Option<&'static str> {
-    #[cfg(unix)]
-    return crate::storage::backup_failure(layout.root());
-    #[cfg(not(unix))]
-    {
-        let _ = layout;
-        None
-    }
+    crate::storage::backup_failure(layout.root())
 }
 
 /// Why an engine that did not start may have stopped: its upgrade backup failed. Input: the
