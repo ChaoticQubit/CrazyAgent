@@ -193,6 +193,20 @@ jobs:
           mkdir -p "$out"
           rows=(ipc:: engine::tests:: engine::owner::transport:: engine::bootstrap:: tui::client:: ide::bridge::)
           cargo test -p crazyagent --lib --locked -- "${rows[@]}" > "$out/after.txt" 2>&1
+          alone=(engine::owner::transport::intake_parallel_tests::a_stop_of_one_job_leaves_the_other_running engine::owner::transport::setup::install_tests::fixes_of_two_tools_run_together_and_the_same_tool_twice_is_busy)
+          for name in "${alone[@]}"; do
+            passed=0
+            for round in 1 2 3; do
+              cargo test -p crazyagent --lib --locked -- --exact "$name" > "$out/alone.txt" 2>&1
+              if grep -qE '^test result: ok\. 1 passed' "$out/alone.txt"; then
+                passed=$((passed + 1))
+              else
+                echo "alone after D6, $name, round $round:"
+                tail -30 "$out/alone.txt"
+              fi
+            done
+            echo "alone after D6, $name: $passed/3 passed"
+          done
           git fetch --no-tags --depth=1 origin "$BEFORE_D6" || exit 1
           git checkout --detach "$BEFORE_D6" || exit 1
           cargo test -p crazyagent --lib --locked --no-run || exit 1
