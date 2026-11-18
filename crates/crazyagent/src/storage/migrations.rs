@@ -880,10 +880,8 @@ mod windows_tests {
     /// Runs a Windows tool and fails the test when it fails. Inputs: the program and its
     /// arguments.
     fn run(program: &str, args: &[&str]) {
-        let status = std::process::Command::new(program)
-            .args(args)
-            .status()
-            .unwrap();
+        let status =
+            crate::spawn_gate::status(std::process::Command::new(program).args(args)).unwrap();
         assert!(status.success(), "{program} {args:?} failed: {status}");
     }
 
