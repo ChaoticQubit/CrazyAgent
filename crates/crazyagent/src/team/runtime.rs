@@ -9529,10 +9529,10 @@ impl TeamRuntime {
         } else {
             None
         };
-        let network =
-            policy
-                .network
-                .reach(os, tools, remote, proxy.as_ref().map(|proxy| proxy.port()));
+        let network = policy
+            .network
+            .reach(os, tools, remote, proxy.as_ref().map(|proxy| proxy.port()))
+            .map_err(sandboxed)?;
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;

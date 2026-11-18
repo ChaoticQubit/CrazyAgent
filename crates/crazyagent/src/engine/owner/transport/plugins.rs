@@ -1594,6 +1594,10 @@ fn boundary_check(
         crate::sandbox::LinuxStrict::Off,
     );
     let profile = check_profile(&checks, id);
+    if let Some(problem) = crate::plugins::check_network_refused(std::env::consts::OS, &network) {
+        eprintln!("plugin_check_boundary_refused cause=windows_network_limit");
+        return Err(problem);
+    }
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .map(ProjectSandbox::as_job_folder)
         .and_then(|sandbox| sandbox.keep_ports(kept))

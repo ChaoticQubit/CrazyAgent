@@ -539,6 +539,8 @@ test("on Windows Full access is refused with its own sentence, a loopback model 
     assert.equal(client.errorMessage({ code }), sentence, `${code} reads the same on the owner path`);
     assert.ok(config.includes(`"${code}" => Some(`) && config.includes(`"${sentence}"`), `${code} reads the same in the TUI`);
   }
-  assert.match(api.knownError("sandbox_full_unavailable_windows"), /Full access[\s\S]*Windows[\s\S]*Windows sandbox/);
+  const full = api.knownError("sandbox_full_unavailable_windows");
+  assert.match(full, /Full access[\s\S]*Windows/);
+  assert.doesNotMatch(full, /Sandboxed|Own branch|always run/, "Full's sentence names no level Windows refuses in this version (#519 F3)");
   assert.match(api.knownError("model_loopback_unavailable_windows"), /on this computer[\s\S]*Windows/);
 });
