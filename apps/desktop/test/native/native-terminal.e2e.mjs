@@ -113,6 +113,13 @@ function turns(seen) {
   return seen.rows.filter((row) => /stand-in turn/.test(row)).length;
 }
 
+/** Reads the width of the master's pane on the test engine's server. Output: the columns. */
+function paneWidth() {
+  const width = Number(tmux("list-panes", "-t", `${SESSION}:=${master}`, "-F", "#{pane_width}"));
+  assert.ok(Number.isInteger(width) && width > 0, `the pane width: ${width}`);
+  return width;
+}
+
 /** Closes a view the spec opened. Input: the view. Output: none. */
 async function close(view) {
   opened.delete(view);
@@ -189,6 +196,22 @@ describe("Native terminal views in the real window", () => {
     } finally {
       tmux("kill-pane", "-t", extra);
     }
+  });
+
+  it("a 2x backing scale refits the grid and the pane width follows, then 1x again", async () => {
+    const shown = await open(true);
+    await ready(shown);
+    const width = paneWidth();
+    try {
+      await probe(shown.view, { kind: "scale", factor: 2 });
+      await until(async () => (await probe(shown.view, READ)) && paneWidth() < width, UI_MS,
+        `the pane stayed ${width} columns at a 2x backing scale`);
+    } finally {
+      await probe(shown.view, { kind: "scale", factor: 0 });
+    }
+    await until(async () => (await probe(shown.view, READ)) && paneWidth() === width, UI_MS,
+      `the pane never came back to ${width} columns at the window's own scale`);
+    await close(shown.view);
   });
 
   it("an ended terminal closes the direct view", async () => {

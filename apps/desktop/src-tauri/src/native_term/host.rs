@@ -170,7 +170,26 @@ fn scale_key(scale: f64) -> u32 {
     key
 }
 
+#[cfg(feature = "native-webdriver")]
+thread_local! {
+    static TRIAL_SCALE: Cell<Option<f64>> = const { Cell::new(None) };
+}
+
+/// Test builds only: makes every native view read this backing scale in place of its
+/// window's, or its window's own again with none, so a trial on a 1x display drives the
+/// refit a move to a 2x display starts. Input: the scale, 1 to 4, or none. Output: none.
+#[cfg(feature = "native-webdriver")]
+pub fn trial_scale(scale: Option<f64>) {
+    assert!(scale.is_none_or(|scale| (1.0..=4.0).contains(&scale)));
+    TRIAL_SCALE.with(|trial| trial.set(scale));
+    assert_eq!(TRIAL_SCALE.with(Cell::get), scale);
+}
+
 fn backing(view: &NSView) -> f64 {
+    #[cfg(feature = "native-webdriver")]
+    if let Some(scale) = TRIAL_SCALE.with(Cell::get) {
+        return scale;
+    }
     let scale = view
         .window()
         .map_or(2.0, |window| window.backingScaleFactor());

@@ -11,13 +11,15 @@ pub const TEXT_BYTES_MAX: usize = 4096;
 
 /// One step a native-webdriver trial takes on an open native view, through the view's own
 /// AppKit selectors so its input reaches the pane as the owner's would: a key down, an input
-/// method's marked text, an input method's commit, or nothing before a read.
+/// method's marked text, an input method's commit, a backing scale every view reads from
+/// then on (1 to 4, or 0 for the window's own), or nothing before a read.
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Step {
     Key { characters: String, code: u16 },
     Compose { text: String },
     Commit { text: String },
+    Scale { factor: f64 },
     Read,
 }
 
@@ -62,6 +64,11 @@ pub fn take(
             let text = checked(&text)?;
             commit(&view, &text);
         }
+        Step::Scale { factor } if factor == 0.0 => host::trial_scale(None),
+        Step::Scale { factor } if (1.0..=4.0).contains(&factor) => {
+            host::trial_scale(Some(factor));
+        }
+        Step::Scale { .. } => return Err("native_terminal_probe_failed"),
         Step::Read => {}
     }
     let look = host::look(window, page)?;
