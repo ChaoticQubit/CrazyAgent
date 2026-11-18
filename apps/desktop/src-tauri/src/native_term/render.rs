@@ -1199,6 +1199,25 @@ mod tests {
         drop(layer);
     }
 
+    /// A frame the caller acquired before the device was lost (the Windows render thread
+    /// waits for the swap chain first) is never dropped when the paint stops at the loss,
+    /// since the drop discards it and that panics on a lost device in wgpu 25: the paint
+    /// reports `native_terminal_gpu`. Synthetic, as above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_frame_acquired_before_a_loss_and_painted_after_it_is_not_dropped() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
+        let output = shared.acquire(&mut surface).expect("a frame");
+        lose(&shared);
+        let painted = shared.paint(&mut surface, &frame_of("after"), Some(output));
+        assert_eq!(painted, Err(GPU_FAULT.to_owned()));
+        drop(surface);
+        drop(layer);
+    }
+
     /// A view as wide as the adapter's own largest texture side, past wgpu's default 8192
     /// (a window across two 6K displays is 12032 px; Apple GPUs allow 16384), configures
     /// at that full width and draws: the device asks the adapter's limits (#569). A GPU
