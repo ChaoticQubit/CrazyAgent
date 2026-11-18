@@ -1716,6 +1716,23 @@ fn unread_projects_count_every_place_under_home_under_either_data_volume_name() 
     }
 }
 
+/// V243-FIRMLINK-AGENT-WRITABLE r2: a set-up project the engine recorded through the data
+/// volume is agent-writable under either name of the place, the short one included.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_set_up_project_recorded_through_the_data_volume_is_agent_writable_under_either_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let project = home.join("work/older");
+    let bin = project.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    engine_with_projects(&root, &[&data_volume_name(&project)]);
+    let places = Places::at_roots(Some(&root), None);
+    for path in [bin.clone(), data_volume_name(&bin)] {
+        assert!(places.agent_writable(&path), "{}", path.display());
+    }
+}
+
 /// rv-code2 r1 F1, vid 1's race in the shared resolver: `entry_at` reads the entry's real file
 /// before it checks the entry, so the file it hands back must pass the check itself. An owner
 /// entry whose middle link moves between the two leads to a file planted in a project when the
