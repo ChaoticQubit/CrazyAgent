@@ -2289,7 +2289,8 @@ async fn a_leftover_sign_out_the_harness_cannot_finish_keeps_the_profile_blocked
 }
 
 impl Restart {
-    /// The engine's intent store, opened beside its database the way storage opens it.
+    /// The engine's intent store, opened beside its database the way storage opens it, so
+    /// a row reads and writes the same files the engine does.
     /// Output: the store.
     fn intents(&self) -> crate::storage::narrowing::Intents {
         crate::storage::narrowing::Intents::open(&std::fs::canonicalize(self.root.path()).unwrap())
@@ -2297,7 +2298,9 @@ impl Restart {
             .expect("the intent store opens on unix")
     }
 
-    /// How many intents the engine keeps on disk now. Output: the count.
+    /// How many intents the engine keeps on disk now, every file judged and parsed as at
+    /// open, none refused.
+    /// Output: the count.
     fn kept(&self) -> usize {
         let listing = self.intents().list().unwrap();
         assert_eq!(listing.refused, 0);
@@ -2307,7 +2310,8 @@ impl Restart {
 
 impl Run {
     /// Keeps a sign-out of the account on disk the way the engine keeps one storage has not
-    /// taken yet. Inputs: the case and the request name. Output: the sign-out and its intent.
+    /// taken yet, for this run's database.
+    /// Inputs: the case and the request name. Output: the sign-out and its intent.
     async fn keep_sign_out(
         &self,
         restart: &Restart,
@@ -2329,7 +2333,8 @@ impl Run {
 }
 
 /// V243-NARROWING-DURABLE r2: a sign-out storage refuses by name is a final answer. Its
-/// intent ends with the refusal, so the next start never signs the profile out for it.
+/// intent ends with the refusal, so the next start never signs the profile out for a
+/// sign-out the owner was told was refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sign_out_storage_refuses_keeps_no_intent_and_the_profile_launches_after_a_restart() {
     let restart = Restart::new();
@@ -2368,7 +2373,8 @@ async fn a_sign_out_storage_refuses_keeps_no_intent_and_the_profile_launches_aft
 }
 
 /// V243-NARROWING-DURABLE r2: an owner's new sign-in ends the kept sign-outs of its
-/// profile, so neither the drainer nor the next open signs the newer sign-in out.
+/// profile, so neither the drainer nor the next open signs the newer sign-in out, and the
+/// profile still launches after a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_owner_sign_in_ends_the_kept_sign_outs_of_its_profile_so_a_restart_keeps_it() {
     let restart = Restart::new();
@@ -2400,7 +2406,8 @@ async fn an_owner_sign_in_ends_the_kept_sign_outs_of_its_profile_so_a_restart_ke
 }
 
 /// V243-NARROWING-DURABLE r2: a drained sign-out whose intent is gone, as after a newer
-/// owner sign-in ended it, is refused, so the sign-in stays and the profile launches.
+/// owner sign-in ended it, is refused by storage before it records anything, so the sign-in
+/// stays and the profile launches.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drained_sign_out_whose_intent_is_gone_is_refused_and_the_sign_in_stays() {
     let restart = Restart::new();

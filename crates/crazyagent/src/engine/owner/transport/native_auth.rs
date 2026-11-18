@@ -109,8 +109,9 @@ pub(super) fn refusal(bytes: &[u8], code: &str) -> Result<Vec<u8>, EngineError> 
     )
 }
 
-/// How long before the owner's exchange is cut its native-auth answer is due, so the reply
-/// is still written after a pending answer: the barrier, the second check and the write.
+/// How long before the owner's exchange is cut its native-auth answer is due. The reply is
+/// still written after a pending answer: the barrier, the second check and the write all
+/// fit in this margin.
 const ANSWER_MARGIN: Duration = Duration::from_millis(250);
 
 /// Serves one native-auth request of the owner, its answer due `ANSWER_MARGIN` before the

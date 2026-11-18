@@ -15,7 +15,8 @@ fn root() -> tempfile::TempDir {
     root
 }
 
-/// Opens the intent store of an engine root, which on Unix is always some store.
+/// Opens the intent store of an engine root, which on Unix is always some store, never
+/// the none a platform without a private folder judge opens.
 /// Input: the engine root. Output: the store.
 fn store(root: &Path) -> Intents {
     Intents::open(root)
@@ -37,7 +38,8 @@ fn revocation(name: &str, epoch: i64) -> Intent {
 }
 
 /// The intent file names in the folder, sorted; none while the folder was never made, as
-/// before the first write. Input: the engine root. Output: the names.
+/// before the first write.
+/// Input: the engine root. Output: the names.
 fn names(root: &Path) -> Vec<String> {
     let folder = match std::fs::read_dir(root.join(FOLDER)) {
         Ok(folder) => folder,

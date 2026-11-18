@@ -362,25 +362,29 @@ pub(crate) enum Intents {}
 
 #[cfg(not(unix))]
 impl Intents {
-    /// Opens no store, so storage still opens on this platform.
+    /// Opens no store, so storage still opens on this platform and every narrowing change
+    /// is answered as before the store.
     /// Input: the engine root, unused. Output: none, never an error.
     pub(crate) fn open(_root: &Path) -> Result<Option<Self>, EngineError> {
         Ok(None)
     }
 
-    /// Unreachable: no store has a value here. Input: the intent, unused.
-    /// Output: none.
+    /// Unreachable: no store has a value on this platform, so no intent is ever written
+    /// here.
+    /// Input: the intent, unused. Output: none.
     pub(crate) fn write(&self, _intent: &Intent) -> Result<IntentId, EngineError> {
         match *self {}
     }
 
-    /// Unreachable: no store has a value here. Input: the name, unused.
-    /// Output: none.
+    /// Unreachable: no store has a value on this platform, so no intent is ever removed
+    /// here.
+    /// Input: the name, unused. Output: none.
     pub(crate) fn remove(&self, _id: &IntentId) -> Result<(), EngineError> {
         match *self {}
     }
 
-    /// Unreachable: no store has a value here.
+    /// Unreachable: no store has a value on this platform, so no intent is ever listed
+    /// here.
     /// Output: none.
     pub(crate) fn list(&self) -> Result<Listing, EngineError> {
         match *self {}
