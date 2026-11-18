@@ -64,7 +64,7 @@ pub fn take(
             let text = checked(&text)?;
             commit(&view, &text);
         }
-        Step::Scale { factor } if factor == 0.0 => host::trial_scale(None),
+        Step::Scale { factor: 0.0 } => host::trial_scale(None),
         Step::Scale { factor } if (1.0..=4.0).contains(&factor) => {
             host::trial_scale(Some(factor));
         }
