@@ -2452,7 +2452,7 @@ fn report_loss(
 /// Starts the engine, or repairs its login service, as `crazyagent tui` does before it
 /// opens, and gives up once the TUI stops so a quit never waits on it (DS-118). Inputs:
 /// the default layout and service and the stop flag. Output: Ok once the engine answers,
-/// else `engine_backup_failed` when its upgrade backup failed or `engine_start_failed`.
+/// else `git_safe_unavailable` (#598 sec N1), `engine_backup_failed` or `engine_start_failed`.
 async fn start_engine(
     engine: &(crate::paths::Layout, crate::service::Service),
     stopped: &AtomicBool,
@@ -2477,6 +2477,9 @@ async fn start_engine(
     };
     if started {
         return Ok(());
+    }
+    if let Some(code) = crate::research::runner::git_safe_refusal() {
+        return Err(code.into());
     }
     if crate::service::backup_failure(layout).is_some() {
         return Err("engine_backup_failed".into());

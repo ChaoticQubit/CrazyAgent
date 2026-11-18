@@ -89,25 +89,51 @@ pub(crate) fn no_program() -> &'static str {
 }
 
 /// What a git the engine or the IDE starts names for a hook folder or a program it must
-/// never run, on Windows: [`windows_no_program`] of the system folder, read once, where a
+/// never run, on Windows: [`windows_value`] of the system folder, read once, where a
 /// drive-relative `/dev/null` reached a hook any user can plant under `C:\dev\null`
-/// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; an unusable folder is a panic.
+/// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; the engine start refuses an
+/// unusable folder first ([`git_safe_refusal`]), so the `expect` asserts that gate.
 #[cfg(windows)]
 pub(crate) fn no_program() -> &'static str {
-    static VALUE: LazyLock<Result<String, &'static str>> =
-        LazyLock::new(|| windows_value(crazyagent_win_sandbox::system_folder()));
-    VALUE
+    WINDOWS_VALUE
         .as_deref()
-        .expect("the system folder is a plain <letter>:\\ folder")
+        .expect("the engine start refuses git_safe_unavailable before any git runs")
+}
+
+/// [`no_program`]'s Windows value, read once and kept as a Result, so an unusable folder
+/// never panics inside the lock and poisons it for every later git (#598 sec N1).
+#[cfg(windows)]
+static WINDOWS_VALUE: LazyLock<Result<String, &'static str>> =
+    LazyLock::new(|| windows_value(crazyagent_win_sandbox::system_folder()));
+
+/// The code an engine start refuses with when this computer cannot give [`no_program`] its
+/// value, so no engine and no git runs there (#598 sec N1).
+pub const GIT_SAFE_UNAVAILABLE: &str = "git_safe_unavailable";
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Unix it always can. Output: None.
+#[cfg(unix)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    None
+}
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Windows not when the system folder can't be read or
+/// [`windows_no_program`] refuses it. Output: [`GIT_SAFE_UNAVAILABLE`], or None.
+#[cfg(windows)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    WINDOWS_VALUE.as_ref().err().copied()
 }
 
 /// The Windows value from the system folder GetSystemDirectoryW gave, as
 /// [`windows_no_program`] builds it. Input: the folder, or the read's error. Output: the
-/// value; an error or an unusable folder is a panic.
+/// value, or [`GIT_SAFE_UNAVAILABLE`] for an error or an unusable folder.
 #[cfg(any(windows, test))]
 fn windows_value(folder: io::Result<PathBuf>) -> Result<String, &'static str> {
-    let folder = folder.expect("GetSystemDirectoryW names the system folder");
-    Ok(windows_no_program(&folder).expect("the system folder is a plain <letter>:\\ folder"))
+    folder
+        .ok()
+        .and_then(|folder| windows_no_program(&folder))
+        .ok_or(GIT_SAFE_UNAVAILABLE)
 }
 
 /// The Windows value for a hook folder or a program no git may run: `folder` with forward

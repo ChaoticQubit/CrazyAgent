@@ -229,11 +229,14 @@ async fn start_engine(
         .map_err(|_| engine_failure(start_failure(layout)))
 }
 
-/// The code of an engine start that did not answer: `engine_backup_failed` when the engine's
+/// The code of an engine start that did not answer: `git_safe_unavailable` when this
+/// computer's gits can't be kept safe (#598 sec N1), `engine_backup_failed` when the engine's
 /// record says its upgrade backup failed (F36), else `engine_start_failed`. Input: the
 /// layout. Output: the code.
 fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
-    if crazyagent::service::backup_failure(layout).is_some() {
+    if let Some(code) = crazyagent::research::runner::git_safe_refusal() {
+        code
+    } else if crazyagent::service::backup_failure(layout).is_some() {
         "engine_backup_failed"
     } else {
         "engine_start_failed"
