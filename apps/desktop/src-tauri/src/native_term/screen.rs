@@ -1,3 +1,4 @@
+use super::ime::char_cells;
 use super::style::{Theme, blend};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
@@ -6,7 +7,6 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{RenderableContent, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
-use unicode_width::UnicodeWidthChar;
 
 /// A fixed grid size for a terminal: no scrollback beyond the screen.
 pub struct GridSize {
@@ -205,7 +205,7 @@ fn place_marked(
     let mut text = String::new();
     let mut cells = 0usize;
     for c in marked.chars() {
-        let width = c.width().unwrap_or(0);
+        let width = char_cells(c);
         assert!(width <= 2);
         if width == 0 {
             continue;
@@ -318,7 +318,7 @@ pub fn frame(
             if column == cells.column {
                 let mut at = cells.column;
                 for c in text.chars() {
-                    let wide = c.width() == Some(2);
+                    let wide = char_cells(c) == 2;
                     let style = (false, false, true);
                     let fg = theme.foreground;
                     push_char(&mut rows[row], &mut keys[row], c, fg, style, (at, wide));
@@ -542,10 +542,7 @@ mod tests {
         assert_eq!(typed.cursor.map(|c| c.column), Some(3));
         let marked = frame(&sized(10, 2, b"ab"), &theme, true, Some("\u{17D8}x"));
         assert_eq!(text_rows(&marked)[0], "ab\u{17D8}x");
-        assert_eq!(
-            marked.preedit.map(|p| (p.column, p.cells)),
-            Some((2, 3))
-        );
+        assert_eq!(marked.preedit.map(|p| (p.column, p.cells)), Some((2, 3)));
         let wide = marked.rows[0].iter().find(|s| s.column == 2);
         assert!(wide.is_some_and(|s| s.wide && s.cells == 2));
     }

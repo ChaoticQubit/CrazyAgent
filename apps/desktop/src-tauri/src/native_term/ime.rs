@@ -111,6 +111,13 @@ pub fn text_inputs(text: &str) -> Vec<Input> {
     inputs
 }
 
+/// The cells a character takes in the terminal grid: 0 when zero-width, else 1 or 2, since
+/// the grid draws every character wider than one cell (U+17D8 is 3) across two cells.
+/// Input: the character. Output: its cells.
+pub fn char_cells(c: char) -> usize {
+    c.width().unwrap_or(0).min(2)
+}
+
 /// The UTF-16 length of a text, the unit of every AppKit text range. Input: the text.
 /// Output: its length in UTF-16 units.
 pub fn units(text: &str) -> usize {
@@ -248,7 +255,7 @@ impl Ime {
                 break;
             }
             at += c.len_utf16();
-            cells += c.width().unwrap_or(0);
+            cells += char_cells(c);
         }
         assert!(cells <= 2 * units(&self.marked));
         cells
