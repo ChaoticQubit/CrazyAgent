@@ -311,14 +311,14 @@ pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
 /// so a folder above the firmlink, such as the data volume itself, is seen to hold it.
 /// Input: the path. Output: the other name, none for a path with no other.
 #[cfg(target_os = "macos")]
-fn data_twin(path: &Path) -> Option<PathBuf> {
+pub(crate) fn data_twin(path: &Path) -> Option<PathBuf> {
     let twin = Path::new(DATA_VOLUME).join(path.strip_prefix("/").ok()?);
     same_entry(path, &twin).then_some(twin)
 }
 
 /// Off macOS a path has one name. Input: the path. Output: none.
 #[cfg(not(target_os = "macos"))]
-fn data_twin(_path: &Path) -> Option<PathBuf> {
+pub(crate) fn data_twin(_path: &Path) -> Option<PathBuf> {
     None
 }
 

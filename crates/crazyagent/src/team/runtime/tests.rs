@@ -34722,6 +34722,108 @@ fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is
     );
 }
 
+/// A project stored under the data volume's long name of its folder, with a hidden folder
+/// saved in that name too, still launches an agent: its sandbox is built on the short name,
+/// the only one Seatbelt matches, so the project stays readable, the worktree writable and
+/// the hidden folder closed under either name (V243-FIRMLINK-LAUNCH-ROOT).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
+    let mut fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let project = fixture.base.join("project");
+    assert!(long(&project).is_dir());
+    std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    let drafts = project.join("drafts");
+    std::fs::create_dir(&drafts).unwrap();
+    std::fs::write(drafts.join("plan.txt"), "plan\n").unwrap();
+    fixture.setup.folder = long(&project).to_str().unwrap().into();
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&drafts)]).unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        },
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let plan = runtime
+        .prepare(
+            &fixture.setup,
+            1,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+            false,
+        )
+        .unwrap_or_else(|cause| panic!("a long-stored project must launch an agent: {cause}"))
+        .1;
+    assert!(plan.working_dir.starts_with(&project));
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "(cat {owner} >/dev/null) 2>/dev/null && echo owner=read || echo owner=refused\n\
+         (cat {plan} >/dev/null) 2>/dev/null && echo plan=read || echo plan=refused\n\
+         (cat {long_plan} >/dev/null) 2>/dev/null && echo long_plan=read || echo long_plan=refused\n\
+         (echo mine > mine.txt) 2>/dev/null && echo wrote || echo write=refused\n",
+        owner = quoted(&project.join("owner.txt")),
+        plan = quoted(&drafts.join("plan.txt")),
+        long_plan = quoted(&long(&drafts).join("plan.txt")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&plan.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(1).join("home"))
+            .env("TMPDIR", runtime.agent_folder(1).join("tmp"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "owner=read\nplan=refused\nlong_plan=refused\nwrote\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(plan.working_dir.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
 /// How many ended tasks, answered owner messages and stopped agents the idle-cost row puts
 /// in front of the tick's active project read.
 const HISTORY_ROWS: i64 = 300;

@@ -188,7 +188,10 @@ pub(crate) fn below_root(
     repo: &std::path::Path,
     hidden: &[std::path::PathBuf],
 ) -> Option<Vec<String>> {
-    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let root = repo
+        .canonicalize()
+        .map(crate::projects_home::one_spelling)
+        .unwrap_or_else(|_| repo.to_path_buf());
     hidden
         .iter()
         .map(|folder| {

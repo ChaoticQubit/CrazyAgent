@@ -5227,10 +5227,6 @@ pub(crate) fn windows_clean_text(text: &str) -> bool {
     })
 }
 
-/// The canonical form of an existing path. On Windows the verbatim `\\?\` prefix that
-/// `canonicalize` adds to a drive path is removed, so the result equals the plain drive path;
-/// any other verbatim form stays as it is and fails [`clean_absolute`]. Input: the path.
-/// Output: the canonical path, or the I/O error.
 /// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
 /// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
 /// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
@@ -5247,6 +5243,11 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
     (program != package.as_path() && program.starts_with(&package)).then_some(package)
 }
 
+/// The canonical form of an existing path. On macOS a path named through the data volume
+/// comes back under its short name, so a root given in the long name is not canonical. On
+/// Windows the verbatim `\\?\` prefix `canonicalize` adds to a drive path is removed; any other
+/// verbatim form stays and fails [`clean_absolute`]. Input: the path. Output: the canonical
+/// path, or the I/O error.
 pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
     #[cfg(target_os = "windows")]
@@ -5257,7 +5258,7 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     {
         return Ok(PathBuf::from(plain));
     }
-    Ok(resolved)
+    Ok(crate::projects_home::one_spelling(resolved))
 }
 
 #[cfg(test)]
@@ -6080,5 +6081,37 @@ mod profile_string_tests {
         assert!(tailed.is_empty(), "{tailed:#?}");
         let below = bodies.iter().filter(|body| body.ends_with("(/|$)")).count();
         assert!(below >= 20, "{below}");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod firmlink_tests {
+    use super::*;
+
+    /// V243-FIRMLINK-SANDBOX-ROOT (sweep #3): a root named through /System/Volumes/Data is
+    /// refused, since Seatbelt matches only the short name and every rule written in the long
+    /// one would never match; an extra read path typed that way is checked under its short
+    /// name, so one holding the engine's data is refused.
+    #[test]
+    fn a_root_named_through_the_data_volume_is_refused_and_a_read_path_is_checked_short() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp", "engine"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        assert!(long(&root.join("project")).is_dir());
+        let network = || SandboxNetwork::Only(Vec::new());
+        let (home, tmp) = (root.join("home"), root.join("tmp"));
+        let refused = ProjectSandbox::new(&long(&root.join("project")), &home, &tmp, network());
+        assert!(
+            matches!(&refused, Err(SandboxError::Invalid(reason)) if reason.contains("canonical")),
+            "{refused:?}"
+        );
+        assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
+        assert_eq!(
+            extra_paths::checked(long(&root).to_str().unwrap(), &root.join("engine")),
+            Err("read_path_engine_data")
+        );
     }
 }
