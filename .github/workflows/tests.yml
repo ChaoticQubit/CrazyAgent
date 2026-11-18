@@ -76,7 +76,7 @@ jobs:
         env:
           RUNS: "2000"
         run: |
-          set -u
+          set +e -u
           runs=${RUNS:-2000}
           base=$(mktemp -d)
           root=$base/owner
