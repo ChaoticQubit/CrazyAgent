@@ -2,9 +2,9 @@ set +e -uo pipefail
 label=${1:?usage: v244-batch.sh <label>}
 out="$RUNNER_TEMP/v244-batch-$label.txt"
 table="$RUNNER_TEMP/v244-batch-$label.md"
-git log --oneline -1 | tee "$out"
 printf '| %s step | exit |\n| --- | --- |\n' "$label" > "$table"
-fail=0
+: > "$out"
+rc_of=()
 step() {
   local name=$1
   shift
@@ -12,49 +12,29 @@ step() {
   local rc=${PIPESTATUS[0]}
   echo "== $name rc=$rc" | tee -a "$out"
   printf '| %s | %s |\n' "$name" "$rc" >> "$table"
-  [ "$rc" = 0 ] || fail=1
+  rc_of+=("$rc")
 }
+[ "$RUNNER_OS" = Windows ] || { echo "::error::the bisect is Windows only, not $RUNNER_OS"; exit 1; }
 cargo=(cargo +"$RUST_TOOLCHAIN")
-case "$RUNNER_OS" in
-  Windows)
-    step "win-sandbox test --lib" "${cargo[@]}" test -p crazyagent-win-sandbox --lib --locked --no-fail-fast
-    for target in boundary private_judge private_windows; do
-      step "win-sandbox test --test $target" "${cargo[@]}" test -p crazyagent-win-sandbox --test "$target" --locked --no-fail-fast
-    done
-    step "build --bin crazyagent-win-boundary" "${cargo[@]}" build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
-    mkdir -p target/debug/deps && cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe || fail=1
-    step "crazyagent test --lib --no-run" "${cargo[@]}" test -p crazyagent --lib --locked --no-run
-    step "crazyagent lib rows (sandbox policy and windows, plugins, storage, context_mode windows)" "${cargo[@]}" test -p crazyagent --lib --locked --no-fail-fast -- sandbox::policy::tests sandbox::windows::tests plugins:: storage:: context_mode::windows_tests
-    step "crazyagent clippy --lib" "${cargo[@]}" clippy -p crazyagent --lib --locked -- -D warnings
-    step "crazyagent clippy --tests" "${cargo[@]}" clippy -p crazyagent --tests --locked --keep-going -- -D warnings
-    step "win-sandbox clippy --lib" "${cargo[@]}" clippy -p crazyagent-win-sandbox --lib --locked -- -D warnings
-    step "win-sandbox clippy --bins" "${cargo[@]}" clippy -p crazyagent-win-sandbox --bins --locked -- -D warnings
-    step "win-sandbox clippy --tests" "${cargo[@]}" clippy -p crazyagent-win-sandbox --tests --locked --keep-going -- -D warnings
-    ;;
-  Linux)
-    step "build --bin crazyagent-landlock" "${cargo[@]}" build -p crazyagent --bin crazyagent-landlock --locked
-    mkdir -p target/debug/deps && cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock || fail=1
-    step "build --bin crazyagent" "${cargo[@]}" build -p crazyagent --bin crazyagent --locked
-    step "test --lib --no-run" "${cargo[@]}" test -p crazyagent --lib --locked --no-run
-    step "test --lib" "${cargo[@]}" test -p crazyagent --lib --locked --no-fail-fast -- --skip github::tests::signed_in_gh_cli_token_is_reused_through_the_real_gh
-    step "clippy --lib" "${cargo[@]}" clippy -p crazyagent --lib --locked -- -D warnings
-    step "clippy --tests" "${cargo[@]}" clippy -p crazyagent --tests --locked --keep-going -- -D warnings
-    ;;
-  macOS)
-    step "build --lib" "${cargo[@]}" build -p crazyagent --lib --locked
-    step "clippy --lib" "${cargo[@]}" clippy -p crazyagent --lib --locked -- -D warnings
-    step "clippy --tests" "${cargo[@]}" clippy -p crazyagent --tests --locked --keep-going -- -D warnings
-    ;;
-  *)
-    echo "::error::no batch recipe for RUNNER_OS=$RUNNER_OS"
-    exit 1
-    ;;
-esac
-failed=$(awk '/^test .* \.\.\. FAILED$/ {print $2}' "$out" | sort -u)
+rows=(
+  engine::owner::transport::plugins::tests::a_check_container_with_no_stored_server_is_released_at_engine_start
+  engine::owner::transport::plugins::tests::a_check_profile_that_cannot_be_released_stays_for_the_next_start
+)
+for sha in da95470d4 933efa14d; do
+  git checkout -q --detach "$sha" || { echo "::error::cannot check out $sha"; exit 1; }
+  git log --oneline -1 | tee -a "$out"
+  step "$sha clippy --tests" "${cargo[@]}" clippy -p crazyagent --tests --locked --keep-going -- -D warnings
+  step "$sha test --lib --no-run" "${cargo[@]}" test -p crazyagent --lib --locked --no-run
+  step "$sha two file_trash rows" "${cargo[@]}" test -p crazyagent --lib --locked --no-fail-fast -- --exact "${rows[@]}"
+done
+got="${rc_of[*]}"
+pass() { [ "$1" = 0 ]; }
+matched=no
+if pass "${rc_of[0]}" && pass "${rc_of[1]}" && pass "${rc_of[2]}" && ! pass "${rc_of[3]}" && pass "${rc_of[4]}" && ! pass "${rc_of[5]}"; then matched=yes; fi
 {
   cat "$table"
   echo
-  echo "Failed rows: $(printf '%s' "$failed" | grep -c .)"
-  [ -z "$failed" ] || printf -- '- %s\n' $failed
+  echo "Exits: $got. Expected: green at da95470d4 (clippy, build, rows) and, at 933efa14d, a clippy red, a green build and red rows. Matched: $matched"
 } >> "$GITHUB_STEP_SUMMARY"
-exit "$fail"
+echo "bisect matched=$matched exits=$got" | tee -a "$out"
+[ "$matched" = yes ]
