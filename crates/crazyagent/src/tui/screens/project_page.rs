@@ -1433,10 +1433,6 @@ impl ProjectPage {
         assert!(self.job_sent.is_some());
     }
 
-    /// Takes the reply to this page's move or delete start, then follows the started move in
-    /// the job the shell keeps until it ends or is gone, when the project's setup is read again
-    /// for its new folder; a started delete is followed on Home, where the page goes. Takes the
-    /// reply and the context. Returns whether the page changed.
     /// Reads the reinstall offer the engine keeps for this project's folder, unless a read or
     /// a dismiss of it is already on its way. Takes the context. Returns nothing.
     fn read_reinstall(&mut self, ctx: &mut Ctx) {
@@ -1450,6 +1446,10 @@ impl ProjectPage {
         super::intake::ask(ctx, query);
     }
 
+    /// Takes the reply to this page's move or delete start, then follows the started move in
+    /// the job the shell keeps until it ends or is gone, when the project's setup is read again
+    /// for its new folder; a started delete is followed on Home, where the page goes. Takes the
+    /// reply and the context. Returns whether the page changed.
     fn intake_arrived(&mut self, event: &IntakeEvent, ctx: &mut Ctx) -> bool {
         if self.publish_asked.as_ref() == Some(&event.query) {
             self.publish_answered(event, ctx);

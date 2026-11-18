@@ -35,6 +35,9 @@ const MEMORY_BYTES_MAX: usize = 4096;
 pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
 pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
+/// What `a` says when the owner's text and the drafted message pass one message's bound.
+const REINSTALL_TOO_LONG: &str = "Your message and the drafted one don't fit in one message. Send or \
+                                  shorten yours, then press a again.";
 const NAME_BYTES_MAX: usize = 256;
 const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
@@ -1946,7 +1949,9 @@ impl ProjectScreen {
     }
 
     /// Hands the reinstall offer's drafted message to the master's input and starts typing;
-    /// the offer stays until it is dismissed. Takes the screen. Returns nothing.
+    /// the offer stays until it is dismissed. When the owner's text and the draft pass one
+    /// message's bound, the input stays as typed and the problem says why, so nothing is cut.
+    /// Takes the screen. Returns nothing.
     fn ask_reinstall(&mut self) {
         let draft = self
             .reinstall
@@ -1955,6 +1960,10 @@ impl ProjectScreen {
             .draft
             .clone();
         let text = console::seeded(self.input.value(), &draft);
+        if text.len() > MESSAGE_BYTES_MAX {
+            self.problem = Some(REINSTALL_TOO_LONG.into());
+            return;
+        }
         self.input.set(&text);
         self.typing = true;
     }

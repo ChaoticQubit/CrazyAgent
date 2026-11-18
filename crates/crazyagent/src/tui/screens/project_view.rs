@@ -1816,8 +1816,9 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         Vec::new()
     };
     let prompt_extra = if typed { prompt.len() - 1 } else { 0 };
-    let notice = reinstall_rows(screen, content, look);
-    let available = room.saturating_sub(4 + prompt_extra + below.len() + notice.len());
+    let free = room.saturating_sub(4 + prompt_extra + below.len());
+    let notice = reinstall_rows(screen, content, free / 2, look);
+    let available = free - notice.len();
     let (body, top, input, help): (Vec<Row>, bool, Vec<Row>, Help) = if !screen.pool_ready {
         (
             vec![Row::of(
@@ -1987,10 +1988,17 @@ pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Of
 }
 
 /// The reinstall offer's rows above the input: its sentence, the sign-in sentence while the
-/// master's accounts aren't signed in, and the keys that act on it, `a` only while the
-/// master can take a message; while typing they come after Tab. Takes the screen, the width and
-/// the look. Returns the rows, none without an offer.
-fn reinstall_rows(screen: &ProjectScreen, content: usize, look: &Look) -> Vec<Row> {
+/// master's accounts aren't signed in, then the keys that act on it on rows of their own, `a`
+/// only while the master can take a message; while typing they come after Tab. At most
+/// `rows_max` rows: the sentence is cut short to fit, and with no room for one row of it
+/// beside the keys nothing is drawn. Takes the screen, the width, the row bound and the
+/// look. Returns the rows, none without an offer.
+fn reinstall_rows(
+    screen: &ProjectScreen,
+    content: usize,
+    rows_max: usize,
+    look: &Look,
+) -> Vec<Row> {
     let Some(offer) = screen.reinstall.as_ref() else {
         return Vec::new();
     };
@@ -2007,11 +2015,24 @@ fn reinstall_rows(screen: &ProjectScreen, content: usize, look: &Look) -> Vec<Ro
         true => "Press Tab, then",
         false => "Press",
     };
-    text.push_str(&format!(" {lead} {keys}"));
-    wrap_words(&text, content)
+    let keys = wrap_words(&format!("{lead} {keys}"), content);
+    if keys.len() >= rows_max {
+        return Vec::new();
+    }
+    let room = rows_max - keys.len();
+    let mut said = wrap_words(&text, content);
+    if said.len() > room {
+        let joined = format!("{} {}", said[room - 1], said[room]);
+        said.truncate(room);
+        said[room - 1] = crate::tui::text::cut(&joined, content, look.glyph("\u{2026}"));
+    }
+    let rows: Vec<Row> = said
         .into_iter()
+        .chain(keys)
         .map(|line| Row::of(line, look.fg))
-        .collect()
+        .collect();
+    assert!(rows.len() <= rows_max);
+    rows
 }
 
 fn input_row(screen: &ProjectScreen, look: &Look) -> Row {

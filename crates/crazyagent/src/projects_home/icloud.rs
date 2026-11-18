@@ -510,12 +510,32 @@ pub struct SkippedFolders {
     pub more: Option<SkippedMore>,
 }
 
+/// Whether a rebuildable folder rebuilds itself the next time its program runs, so it needs
+/// no reinstall: a `__pycache__`. Input: the folder's path. Output: the answer.
+pub fn rebuilds_itself(path: &str) -> bool {
+    Path::new(path).file_name() == Some(std::ffi::OsStr::new("__pycache__"))
+}
+
 impl SkippedFolders {
-    /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted.
-    /// Input: the folder. Output: none.
+    /// Adds one folder, named while fewer than `SKIPPED_LISTED_MAX` are, else counted. Once the
+    /// names are full, a folder that needs a reinstall takes the place of the first named one
+    /// that rebuilds itself, which is counted instead, so a reinstall offer sees every folder
+    /// it needs. Input: the folder. Output: none.
     pub fn push(&mut self, folder: Skipped) {
         if self.listed.len() < SKIPPED_LISTED_MAX {
             self.listed.push(folder);
+        } else if !rebuilds_itself(&folder.path)
+            && let Some(at) = self
+                .listed
+                .iter()
+                .position(|named| rebuilds_itself(&named.path))
+        {
+            let freed = self.listed.remove(at);
+            self.listed.push(folder);
+            self.count(SkippedMore {
+                folders: 1,
+                files: freed.files,
+            });
         } else {
             self.count(SkippedMore {
                 folders: 1,
