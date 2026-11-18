@@ -1426,6 +1426,30 @@ mod tests {
         pump_for(Duration::from_millis(200));
     }
 
+    /// Presents once at the wgpu surface's old size after a place, as a host that has not
+    /// resized yet does. X11 may refuse the present; on Wayland the crop stays inside the
+    /// old buffer, so GTK's connection and the child live on. Inputs: the child, its
+    /// terminal and the old size.
+    fn present_unresized(
+        child: &mut Child,
+        shared: &mut Shared,
+        surface: &mut Surface,
+        frame: &Frame,
+        size: (u32, u32),
+    ) {
+        wait_ready(child);
+        child.presenting(size);
+        match shared.draw(surface, frame) {
+            Ok(()) => child.presented(),
+            Err(_) => child.not_presented(),
+        }
+        pump_for(Duration::from_millis(200));
+        assert!(
+            !child.pacing.get().is_gone(),
+            "a present before the host resizes leaves the child live"
+        );
+    }
+
     /// Writes a clip step for the farm's screenshot: the step, the child's rectangle and
     /// the part on screen. Inputs: the step and the child.
     fn clip_checkpoint(step: &str, child: &Child) {
@@ -1439,13 +1463,11 @@ mod tests {
         crate::native_term::linux::rows::checkpoint(step, &line);
     }
 
-    /// A child placed past the page's right and bottom edges and past the toplevel's,
-    /// over a blue toplevel the farm sees around it: only the part inside the page shows.
-    /// The page then shrinks, shrinks out of the rectangle, and grows back, each through
-    /// its size-allocate with no host call: the part follows, the child stays off screen
-    /// and never presents while no part is left, and comes back owing a frame. Under
-    /// NATIVE_ROW_DIR the farm checks the pixels inside the part, beside it in the toplevel
-    /// and outside the toplevel at each step, before the row checks the part.
+    /// A child past the page's and the toplevel's right and bottom edges, over a blue toplevel:
+    /// only its part inside the page shows. The page shrinks, shrinks out of the rect and grows
+    /// back through size-allocate alone, the child never presenting with no part; it then moves
+    /// to a larger and a smaller rect, each shown first with its old buffer. Under
+    /// NATIVE_ROW_DIR the farm checks pixels in, beside and outside the part at each step.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
     fn a_child_shows_only_its_part_inside_the_webview_and_reclips_on_size_allocate() {
@@ -1493,6 +1515,45 @@ mod tests {
         show_frame(&mut child, &mut shared, &mut surface, &frame, size);
         clip_checkpoint("back", &child);
         assert_eq!(child.part(), part(100, 100));
+
+        let larger = Rect {
+            x: 250,
+            y: 150,
+            w: 700,
+            h: 500,
+        };
+        let larger_part = Some(Rect {
+            x: 250,
+            y: 150,
+            w: 150,
+            h: 150,
+        });
+        child.place(larger);
+        pump_for(Duration::from_millis(200));
+        clip_checkpoint("larger_old", &child);
+        assert_eq!(child.part(), larger_part);
+        present_unresized(&mut child, &mut shared, &mut surface, &frame, size);
+        let larger_size = child.size();
+        shared.resize(&mut surface, larger_size.0, larger_size.1);
+        show_frame(&mut child, &mut shared, &mut surface, &frame, larger_size);
+        clip_checkpoint("larger", &child);
+        assert_eq!(child.part(), larger_part);
+
+        let smaller = Rect {
+            x: 320,
+            y: 220,
+            w: 40,
+            h: 30,
+        };
+        child.place(smaller);
+        pump_for(Duration::from_millis(200));
+        clip_checkpoint("smaller_old", &child);
+        assert_eq!(child.part(), Some(smaller));
+        let smaller_size = child.size();
+        shared.resize(&mut surface, smaller_size.0, smaller_size.1);
+        show_frame(&mut child, &mut shared, &mut surface, &frame, smaller_size);
+        clip_checkpoint("smaller", &child);
+        assert_eq!(child.part(), Some(smaller));
 
         drop(surface);
         drop(child);
