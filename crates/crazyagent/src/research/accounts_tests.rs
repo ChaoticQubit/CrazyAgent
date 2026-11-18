@@ -77,6 +77,11 @@ fn account(member: &str, account: ResearchAccount) -> AccountPick {
 /// on Windows. Inputs: the harness, the member and its account. Output: the expected pick.
 fn keyed(harness: &str, member: &str, expected: ResearchAccount) -> AccountPick {
     assert!(crate::harnesses::KEY_RELAYED.contains(&harness));
+    assert!(matches!(
+        &expected,
+        ResearchAccount::Endpoint { key: Some(_), .. }
+            | ResearchAccount::AnthropicEndpoint { key: Some(_), .. }
+    ));
     if crate::harnesses::keyed_runs_here(harness) {
         account(member, expected)
     } else {
