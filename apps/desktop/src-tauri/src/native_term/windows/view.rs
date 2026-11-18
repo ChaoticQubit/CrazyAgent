@@ -31,6 +31,29 @@ const KEY_DEFAULT: u32 = *SCALE_KEYS.start();
 
 static CLASS: OnceLock<Option<Vec<u16>>> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TRIAL_KEY: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+/// Test builds only: makes this thread's views read this scale key in place of their
+/// window's DPI, as a move to a display of another scale does. Input: the key, or none.
+#[cfg(test)]
+pub fn trial_key(key: Option<u32>) {
+    assert!(key.is_none_or(|key| SCALE_KEYS.contains(&key)));
+    TRIAL_KEY.with(|trial| trial.set(key));
+    assert_eq!(TRIAL_KEY.with(Cell::get), key);
+}
+
+/// The scale key for a view's window: its DPI's, or none when Windows cannot read it.
+fn read_key(hwnd: HWND) -> Option<u32> {
+    #[cfg(test)]
+    if let Some(key) = TRIAL_KEY.with(Cell::get) {
+        return Some(key);
+    }
+    place::scale_key(unsafe { GetDpiForWindow(hwnd) })
+}
+
 fn module() -> HINSTANCE {
     unsafe { GetModuleHandleW(ptr::null()) }
 }
@@ -109,7 +132,7 @@ impl View {
         if hwnd.is_null() {
             return Err(UNAVAILABLE);
         }
-        let key = place::scale_key(unsafe { GetDpiForWindow(hwnd) }).unwrap_or(KEY_DEFAULT);
+        let key = read_key(hwnd).unwrap_or(KEY_DEFAULT);
         assert!(SCALE_KEYS.contains(&key));
         let inner = Box::new(Inner {
             id,
@@ -238,8 +261,7 @@ impl Inner {
     /// Reads the window's DPI again after its parent moved to a display of another scale
     /// and places the box at it; an unreadable DPI keeps the scale it had.
     fn rescale(&self, hwnd: HWND) {
-        let read = place::scale_key(unsafe { GetDpiForWindow(hwnd) });
-        self.key.set(read.unwrap_or(self.key.get()));
+        self.key.set(read_key(hwnd).unwrap_or(self.key.get()));
         assert!(SCALE_KEYS.contains(&self.key.get()), "a view's scale key");
         let _ = self.apply(hwnd);
     }

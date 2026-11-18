@@ -15,8 +15,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GW_CHILD, GetSystemMetrics,
     GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW,
-    RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, TranslateMessage, WNDCLASSEXW, WS_CHILD,
-    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SendMessageW, TranslateMessage,
+    WM_DPICHANGED_AFTERPARENT, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use super::super::event::ViewEvent;
@@ -24,10 +25,14 @@ use super::super::pane::Pane;
 use super::super::screen::{self, Frame};
 use super::super::style::{Style, Theme, font_for};
 use super::draw;
-use super::view::View;
+use super::view::{self, View};
 
 /// The longest a farm step waits for the render thread, on a loaded software adapter.
 const FARM_WAIT: Duration = Duration::from_secs(60);
+
+/// The longest a teardown may take: well under the render thread's drop bound, so a pass
+/// means the surface went, not that the wait ran out.
+const TEARDOWN_MAX: Duration = Duration::from_secs(1);
 
 /// The stand-in parent's colour, then the stand-in webview's (COLORREF is 0x00BBGGRR).
 const RED: COLORREF = 0x0000_00ff;
@@ -338,6 +343,30 @@ fn focus_follows_clicks(view: &View, webview: HWND, centre: POINT) {
     assert!(seen.iter().all(|(id, _)| *id == 1));
 }
 
+/// A move to a 150 percent display: the view takes the new device rectangle and the render
+/// thread makes its surface again on the 1.5x shared state, then presents.
+fn rescaled_on_a_dpi_change(parent: HWND, view: &View) {
+    let before = presents();
+    view::trial_key(Some(150));
+    unsafe { SendMessageW(view.hwnd(), WM_DPICHANGED_AFTERPARENT, 0, 0) };
+    view::trial_key(None);
+    let want = (WEBVIEW_AT.0 + 75, WEBVIEW_AT.1 + 60, 600, 450);
+    assert_eq!(
+        placement(parent, view.hwnd()),
+        (want, true, true),
+        "at 1.5x"
+    );
+    await_present("the present at 1.5x", before);
+    let centre = on_screen(parent, (want.0 + 300, want.1 + 300));
+    assert_color(centre, background(), "the view draws at 1.5x");
+    assert_eq!(
+        draw::counts().1,
+        0,
+        "the surface was made again without a failure"
+    );
+    println!("h1 row: 1.5x placed {want:?}, presents {}", presents());
+}
+
 fn parent_destroys_a_live_view(parent: HWND, webview: HWND) {
     let second = View::new(parent, webview, 2, sink, &style()).expect("a second view");
     let before = presents();
@@ -347,7 +376,13 @@ fn parent_destroys_a_live_view(parent: HWND, webview: HWND) {
         .expect("a second box");
     await_present("the second view's present", before);
     let hwnd = second.hwnd();
+    let started = Instant::now();
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes first");
+    let took = started.elapsed();
+    assert!(
+        took < TEARDOWN_MAX,
+        "the surface went within {took:?}, not at the bound"
+    );
     assert_eq!(unsafe { IsWindow(hwnd) }, 0);
     assert!(
         !second.feed(fed_frame(&Theme::default(), b"late\r\n")),
@@ -369,8 +404,15 @@ fn a_view_sits_over_the_webview_draws_a_fed_screen_hides_and_drops_its_surface_f
     let centre = placed_shown_and_drawn(parent, &view);
     covered_and_shown_again(&view, centre);
     focus_follows_clicks(&view, webview, centre);
+    rescaled_on_a_dpi_change(parent, &view);
     let hwnd = view.hwnd();
+    let started = Instant::now();
     drop(view);
+    let took = started.elapsed();
+    assert!(
+        took < TEARDOWN_MAX,
+        "the surface went within {took:?}, not at the bound"
+    );
     assert_eq!(
         unsafe { IsWindow(hwnd) },
         0,
