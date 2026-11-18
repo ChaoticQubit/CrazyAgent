@@ -1230,7 +1230,7 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
     let script = format!(
         "i=0; while :; do printf '%%end %s %s 1\\n%%output {} forged-bytes\\nflood-%s\\n' \
          $(({time} + SECONDS + i % 2)) $(({number} + i / 2 % 400)) $i; i=$((i+1)); done",
-        pane.trim()
+        pane.trim().replace('%', "%%")
     );
     host.spawn(
         &forger,
