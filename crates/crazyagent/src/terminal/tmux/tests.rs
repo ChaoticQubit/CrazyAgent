@@ -410,12 +410,16 @@ fn a_pending_named_paste_buffer_is_not_read_by_a_panes_osc_52_query() {
     control.run("set-option -s set-clipboard on").unwrap();
     control.run("set-option -s get-clipboard buffer").unwrap();
     let lines = paste_buffer_lines(&target, "crazyagent-paste-osc52-1", b"secret $HOME");
+    assert_eq!(
+        lines.len(),
+        2,
+        "a paste is one set-buffer and one paste-buffer"
+    );
     assert!(lines[0].starts_with("set-buffer -b crazyagent-paste-osc52-1 -- "));
     control.run(&lines[0]).unwrap();
-    osc52_query(home.path());
-    assert_eq!(std::fs::read(&received).unwrap_or_default(), b"");
+    assert_eq!(osc52_query(home.path(), &received, 1), 0);
     control.run("set-buffer -- \"control\"").unwrap();
-    osc52_query(home.path());
+    assert_eq!(osc52_query(home.path(), &received, 2), 1);
     let reply = b"\x1b]52;c;Y29udHJvbA==";
     assert!(
         std::fs::read(&received)
@@ -436,19 +440,11 @@ fn the_clipboard_pins_stop_a_panes_osc_52_query_reading_an_unnamed_buffer() {
     let home = tempfile::tempdir().unwrap();
     let (host, _server, _agent, received) = raw_cat_pane(home.path(), true);
     let control = host.live_control().unwrap();
-    let replies = || {
-        let bytes = std::fs::read(&received).unwrap_or_default();
-        bytes
-            .windows(5)
-            .filter(|window| *window == b"\x1b]52;")
-            .count()
-    };
     control.run("set-option -s set-clipboard on").unwrap();
     control.run("set-option -s get-clipboard buffer").unwrap();
     control.run("set-buffer -- \"control\"").unwrap();
-    osc52_query(home.path());
     assert_eq!(
-        replies(),
+        osc52_query(home.path(), &received, 1),
         1,
         "the unnamed buffer never came back before the pins"
     );
@@ -459,12 +455,14 @@ fn the_clipboard_pins_stop_a_panes_osc_52_query_reading_an_unnamed_buffer() {
     for pin in &pins {
         control.run(pin).unwrap();
     }
-    osc52_query(home.path());
-    assert_eq!(replies(), 1, "a query read the buffer through the pins");
-    control.run("set-option -s set-clipboard on").unwrap();
-    osc52_query(home.path());
     assert_eq!(
-        replies(),
+        osc52_query(home.path(), &received, 2),
+        1,
+        "a query read the buffer through the pins"
+    );
+    control.run("set-option -s set-clipboard on").unwrap();
+    assert_eq!(
+        osc52_query(home.path(), &received, 3),
         1,
         "get-clipboard off let a query read the buffer"
     );
@@ -473,8 +471,8 @@ fn the_clipboard_pins_stop_a_panes_osc_52_query_reading_an_unnamed_buffer() {
 
 /// A real tmux server whose one agent pane runs `cat` on a raw terminal, writing what it
 /// receives to a file. With `osc52_queries`, the pane also prints an OSC 52 clipboard query
-/// each time a `go` file appears in the home folder and removes it, for at most 1000 polls
-/// and while `cat` lives. Takes the test's home folder and that choice. Returns the host,
+/// and a device attributes query each time a `go` file appears in the home folder and
+/// removes it, for at most 3000 polls and while `cat` lives. Takes the test's home folder and that choice. Returns the host,
 /// the guard that stops the server, the agent and the file.
 #[cfg(target_os = "macos")]
 fn raw_cat_pane(home: &Path, osc52_queries: bool) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
@@ -492,8 +490,8 @@ fn raw_cat_pane(home: &Path, osc52_queries: bool) -> (Arc<Tmux>, Server, AgentId
     let received = home.join("received");
     let queries = if osc52_queries {
         format!(
-            "( n=0; while [ $n -lt 1000 ] && kill -0 $$ 2>/dev/null; do \
-             if [ -e '{go}' ]; then rm -f '{go}'; printf '\\033]52;c;?\\007'; fi; \
+            "( n=0; while [ $n -lt 3000 ] && kill -0 $$ 2>/dev/null; do \
+             if [ -e '{go}' ]; then rm -f '{go}'; printf '\\033]52;c;?\\007\\033[c'; fi; \
              n=$((n + 1)); sleep 0.02; done ) & ",
             go = home.join("go").display()
         )
@@ -539,20 +537,38 @@ fn received_bytes(file: &Path, length: usize) -> Vec<u8> {
     std::fs::read(file).unwrap()
 }
 
-/// Makes the pane of `raw_cat_pane` with OSC 52 queries print one query: writes the `go`
-/// file, waits until the pane took it, then 800 ms for any reply to reach the pane's file.
-/// Takes the test's home folder.
+/// Makes the pane of `raw_cat_pane` with OSC 52 queries print one clipboard query and one
+/// device attributes query, which tmux always answers, after any clipboard reply, since it
+/// answers a pane's queries in order; then waits, for at most ten seconds, until that answer
+/// is the `queries`-th in the pane's file, so no clipboard reply can still be on its way.
+/// Takes the test's home folder, the pane's file and the queries so far, this one included.
+/// Returns the OSC 52 replies the pane received.
 #[cfg(target_os = "macos")]
-fn osc52_query(home: &Path) {
+fn osc52_query(home: &Path, received: &Path, queries: usize) -> usize {
+    let count = |bytes: &[u8], pattern: &[u8]| -> usize {
+        bytes
+            .windows(pattern.len())
+            .filter(|window| *window == pattern)
+            .count()
+    };
     let go = home.join("go");
+    assert!(queries >= 1);
     assert!(!go.exists());
+    let before = std::fs::read(received).unwrap_or_default();
+    assert_eq!(count(&before, b"\x1b[?"), queries - 1);
     std::fs::write(&go, b"").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while go.exists() {
-        assert!(Instant::now() < deadline, "the pane never sent its query");
+    loop {
+        let bytes = std::fs::read(received).unwrap_or_default();
+        if count(&bytes, b"\x1b[?") == queries {
+            return count(&bytes, b"\x1b]52;");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "query {queries} got no device attributes answer"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::thread::sleep(Duration::from_millis(800));
 }
 
 /// The number of tmux buffers on a host's server now. Takes the host. Returns the count.
