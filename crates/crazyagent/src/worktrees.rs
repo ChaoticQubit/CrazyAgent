@@ -3826,6 +3826,32 @@ mod tests {
         );
     }
 
+    /// V243-WORKTREE-GIT-FLOOR: on a git older than the 2.39 floor an agent worktree is
+    /// refused with its own code at admission and at every later check, before the
+    /// repository's config is read; the floor itself goes on to the config check.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_worktree_on_a_git_older_than_the_floor_is_refused_before_its_config_is_read() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        let path = repository.to_str().unwrap();
+        let admission = inspect(path).unwrap();
+        crate::landing::shape_git(Some("git version 2.34.1"));
+        assert_eq!(verify(&admission).unwrap_err().0, "worktree_git_old");
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(inspect(path).unwrap_err().0, "worktree_git_old");
+        crate::landing::shape_git(Some("git version 2.39.0"));
+        assert_eq!(
+            inspect(path).unwrap_err().0,
+            "repository_config_refused:core_fsmonitor"
+        );
+        crate::landing::shape_git(None);
+    }
+
     /// The engine's worktree git, asked outright for the signature of an owner commit in any
     /// armor, runs none of the repository's signature programs (RV-DS241-39).
     #[test]

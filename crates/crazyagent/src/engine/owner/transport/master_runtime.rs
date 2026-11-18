@@ -2156,6 +2156,18 @@ mod tests {
         }
     }
 
+    /// V243-WORKTREE-GIT-FLOOR: a master turn whose agent worktree refused a git older than
+    /// the floor names that reason, so the owner reads which Git to update instead of
+    /// "Something went wrong".
+    #[test]
+    fn a_turn_refused_for_an_old_git_names_its_own_reason() {
+        let reason = reason_for_error(&EngineError("worktree_git_old".into()));
+        assert_eq!(
+            serde_json::to_value(reason).unwrap(),
+            serde_json::json!("git_too_old")
+        );
+    }
+
     /// DEC-185 S2a (rv-sec3 F1): a master turn whose harness the Linux call supervisor
     /// stopped, because it could not take back an entry read as a held name, names the
     /// sandbox as its reason, never the runtime or Unknown.
