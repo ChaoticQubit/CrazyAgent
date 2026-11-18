@@ -47,11 +47,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Red checks out the red commit
         if: matrix.side == 'red'
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth 1 origin "$RED_SHA"
           git checkout --detach "$RED_SHA"
           git log --oneline -1
       - name: Install Linux build packages
