@@ -96,10 +96,6 @@ mod tests {
 /// endpoint's plain purpose (1-32 of a-z, 0-9, '.' and '-') and the per-start random part.
 /// Output: the pipe name.
 #[cfg(any(windows, test))]
-#[cfg_attr(
-    all(windows, not(test)),
-    expect(dead_code, reason = "the D8 Windows listener is its first caller")
-)]
 pub(crate) fn pipe_name(root: &[u16], purpose: &str, random: &[u8; 16]) -> String {
     use sha2::{Digest, Sha256};
     assert!(!root.is_empty(), "a protected root has a final name");
