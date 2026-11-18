@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,6 +115,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -145,7 +148,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +195,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +257,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +303,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +467,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -527,7 +532,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,155 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  npm-boundary-proof:
+    name: Npm boundary proof ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+          - runner: windows-2025
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Put back the base workflow so the tree is the base
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD~1)" = 691d62fa44d92550df2878a070531e470d19fd28
+          test "$(git diff --name-only HEAD~1 HEAD)" = .github/workflows/tests.yml
+          git checkout HEAD~1 -- .github/workflows/tests.yml
+          git diff --quiet HEAD~1
+      - name: Show the Node folder and Program Files access lists
+        shell: pwsh
+        run: |
+          foreach ($path in @($env:ProgramFiles, (Join-Path $env:ProgramFiles 'nodejs'))) {
+            Write-Host "==== $path"
+            icacls $path
+            $acl = Get-Acl -LiteralPath $path
+            Write-Host "owner $($acl.Owner) protected $($acl.AreAccessRulesProtected)"
+          }
+          where.exe node
+          node -v
+          $keys = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')
+          Get-ItemProperty $keys -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'Node.js*' } | Format-List DisplayName, DisplayVersion, InstallLocation, InstallSource, InstallDate, Publisher
+      - name: Install SQLite for Windows
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build the engine lib tests and the boundary helper beside them
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $lines = cargo test -p crazyagent --lib --no-run --locked --message-format=json
+          if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed with $LASTEXITCODE" }
+          $exe = $lines | Where-Object { $_.StartsWith('{') } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'crazyagent' -and $_.profile.test -and $_.executable } | Select-Object -Last 1 -ExpandProperty executable
+          if (-not $exe) { throw 'no crazyagent lib test binary' }
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          if ($LASTEXITCODE -ne 0) { throw "helper build failed with $LASTEXITCODE" }
+          Copy-Item -LiteralPath target\debug\crazyagent-win-boundary.exe -Destination (Split-Path -Parent $exe) -Force
+          Write-Host "engine tests $exe"
+          "ENGINE_EXE=$exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Run the npm row as a standard local user, then again once all packages read the Node folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $user = 'castd'
+          $alphabet = [char[]]'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+          $password = (-join (1..24 | ForEach-Object { $alphabet | Get-Random })) + 'aZ7!'
+          net user $user $password /add /y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "net user failed with $LASTEXITCODE" }
+          $admins = net localgroup Administrators
+          if ($admins -contains $user) { throw "$user is an administrator" }
+          icacls $env:GITHUB_WORKSPACE /grant "${user}:(OI)(CI)(RX)" /C /Q | Out-Null
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          $logs = Join-Path $env:RUNNER_TEMP 'standard-user'
+          New-Item -ItemType Directory -Force $logs | Out-Null
+          $script:codes = [ordered]@{}
+          function Invoke-AsUser([string]$name, [string]$program, [string[]]$arguments) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new($program)
+            foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+            $start.UserName = $user
+            $start.Domain = '.'
+            $start.Password = $secure
+            $start.LoadUserProfile = $true
+            $start.UseShellExecute = $false
+            $start.WorkingDirectory = $env:GITHUB_WORKSPACE
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            try {
+              $process = [System.Diagnostics.Process]::Start($start)
+            } catch {
+              Write-Host "==== $name did not start: $($_.Exception.Message)"
+              $script:codes[$name] = 'not started'
+              return
+            }
+            $out = $process.StandardOutput.ReadToEndAsync()
+            $err = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(1800000)) { $process.Kill($true) }
+            $process.WaitForExit()
+            Set-Content -LiteralPath (Join-Path $logs "$name.out.txt") -Value $out.Result
+            Set-Content -LiteralPath (Join-Path $logs "$name.err.txt") -Value $err.Result
+            Write-Host "==== $name exit $($process.ExitCode)"
+            Write-Host $out.Result
+            Write-Host $err.Result
+            $script:codes[$name] = $process.ExitCode
+          }
+          $row = 'context_mode::windows_tests::npm_installs_into_a_fresh_staging_folder'
+          $control = 'context_mode::windows_tests::the_node_probe_leaves_no_container_behind'
+          Invoke-AsUser 'whoami' "$env:SystemRoot\System32\whoami.exe" @('/all')
+          Invoke-AsUser 'control' $env:ENGINE_EXE @($control, '--exact', '--test-threads', '1')
+          Invoke-AsUser 'npm-as-is' $env:ENGINE_EXE @($row, '--exact', '--ignored', '--test-threads', '1', '--nocapture')
+          $node = Join-Path $env:ProgramFiles 'nodejs'
+          icacls $node /grant '*S-1-15-2-1:(OI)(CI)(RX)'
+          if ($LASTEXITCODE -ne 0) { throw "icacls grant failed with $LASTEXITCODE" }
+          icacls $node
+          Invoke-AsUser 'npm-packages-read' $env:ENGINE_EXE @($row, '--exact', '--ignored', '--test-threads', '1', '--nocapture')
+          $rows = $script:codes.GetEnumerator() | ForEach-Object { "| $($_.Key) | $($_.Value) |" }
+          @('| run as castd | exit |', '| --- | --- |') + $rows | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $rows | ForEach-Object { Write-Host $_ }
+          exit 0
+      - name: Show the access list a fresh Node MSI gives its folder
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "v$env:NODE_VERSION"
+          $msi = "node-$version-x64.msi"
+          $work = Join-Path $env:RUNNER_TEMP 'node-msi'
+          New-Item -ItemType Directory -Force $work | Out-Null
+          Invoke-WebRequest "https://nodejs.org/dist/$version/SHASUMS256.txt" -OutFile (Join-Path $work 'sums.txt')
+          Invoke-WebRequest "https://nodejs.org/dist/$version/$msi" -OutFile (Join-Path $work $msi)
+          $want = ((Select-String -LiteralPath (Join-Path $work 'sums.txt') -Pattern "  $msi$").Line -split '\s+')[0]
+          $got = (Get-FileHash -LiteralPath (Join-Path $work $msi) -Algorithm SHA256).Hash.ToLower()
+          if ($want -ne $got) { throw "msi sha256 $got is not $want" }
+          $dir = Join-Path $env:ProgramFiles 'nodejs-msi-probe'
+          $installed = Start-Process msiexec.exe -ArgumentList @('/i', (Join-Path $work $msi), '/qn', '/norestart', "INSTALLDIR=$dir") -Wait -PassThru
+          Write-Host "msiexec exit $($installed.ExitCode)"
+          icacls $dir
+          $acl = Get-Acl -LiteralPath $dir
+          Write-Host "owner $($acl.Owner) protected $($acl.AreAccessRulesProtected)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: npm-boundary-proof-${{ matrix.runner }}
+          path: ${{ runner.temp }}/standard-user
+          if-no-files-found: warn
+          retention-days: 14
