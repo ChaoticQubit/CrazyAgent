@@ -17,6 +17,10 @@ case "$SIDE" in
   mutant)
     ruby .farm/mutant.rb crates/crazyagent/src/team/cleanup.rs
     ;;
+  mutant-mode)
+    perl -0pi -e '$n = s/Mode::RUSR \| Mode::XUSR,\n        AtFlags::SYMLINK_NOFOLLOW,\n/Mode::RUSR | Mode::XUSR,\n        AtFlags::empty(),\n/g; die "chmodat flag found $n times, want 1\n" unless $n == 1' crates/crazyagent/src/team/cleanup.rs
+    git diff --stat
+    ;;
   tip) ;;
   *) echo "::error::unknown side $SIDE"; exit 1 ;;
 esac

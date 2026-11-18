@@ -10,7 +10,7 @@ if [ "$PLATFORM" = linux ]; then
   cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
   ls -l target/debug/deps/crazyagent-landlock
 fi
-if [ "$SIDE" = mutant ]; then
+if [ "$SIDE" = mutant ] || [ "$SIDE" = mutant-mode ]; then
   SWAP_ROWS="$MUTANT_ROWS" bash .farm/swap.sh
   swaps="$RUNNER_TEMP/open-up-swap-$SIDE.txt"
   verdict=pass
@@ -21,6 +21,12 @@ if [ "$SIDE" = mutant ]; then
     failed=$(sed -E "s/.* failed=([0-9]+) .*/\1/" <<< "$line")
     opened=$(sed -E "s/.* failed_opened_up=([0-9]+) .*/\1/" <<< "$line")
     [ "${failed:-0}" = "$SWAP_RUNS" ] && [ "${opened:-0}" = "$SWAP_RUNS" ] || verdict=fail
+    points=$(grep -E "^swap $row run [0-9]+: FAILED " "$swaps" | grep -oE " point=[A-Za-z]+" | sort | uniq -c | tr -s ' ' | tr '\n' ',')
+    echo "mutant row $row points:$points"
+    if [ "$SIDE" = mutant-mode ]; then
+      at_mode=$(grep -E "^swap $row run [0-9]+: FAILED " "$swaps" | grep -c " point=BeforeMode ")
+      [ "$at_mode" = "$SWAP_RUNS" ] || verdict=fail
+    fi
     echo "| $SIDE | $row | ${failed:-none} | ${opened:-none} | $SWAP_RUNS |" >> "$GITHUB_STEP_SUMMARY"
     echo "mutant row $row: failed=${failed:-none} failed_opened_up=${opened:-none} of $SWAP_RUNS"
   done

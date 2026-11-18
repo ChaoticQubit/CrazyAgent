@@ -8,8 +8,9 @@ for row in "${swaps[@]}"; do
     cargo +"$RUST_TOOLCHAIN" test -p crazyagent --locked --lib -- --exact "$row" > "$RUNNER_TEMP/swap-one.txt" 2>&1
     got=$(grep -E "^test $row \.\.\. " "$RUNNER_TEMP/swap-one.txt" | sed -E 's/.* \.\.\. //')
     opened=$(grep -c "was opened up" "$RUNNER_TEMP/swap-one.txt")
+    point=$(grep -m1 -oE "(Start|BeforeClear|BeforeMode): the owner's folder was opened up" "$RUNNER_TEMP/swap-one.txt" | cut -d: -f1)
     why=$(grep -m1 -E "was opened up|lost its ACL|no link was planted|panicked at|called .Result::unwrap" "$RUNNER_TEMP/swap-one.txt" | cut -c1-200)
-    echo "swap $row run $run: ${got:-none} opened_up_lines=$opened ${why}" | tee -a "$out"
+    echo "swap $row run $run: ${got:-none} opened_up_lines=$opened point=${point:-none} ${why}" | tee -a "$out"
   done
 done
 for row in "${swaps[@]}"; do

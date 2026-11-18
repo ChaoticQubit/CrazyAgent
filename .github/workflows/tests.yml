@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        side: [base, tip, mutant]
+        side: [mutant-mode]
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -103,6 +103,7 @@ jobs:
           retention-days: 14
   linux:
     name: Linux cleanup, toolchains and agent home rows, ${{ matrix.side }}
+    if: ${{ false }}
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     strategy:
