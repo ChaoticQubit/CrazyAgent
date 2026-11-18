@@ -714,12 +714,10 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
 }
 
 /// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
-/// optional `--unshare-net`, at most [`crate::sandbox::HIDDEN_MAX`] hidden folder covers
-/// (`--tmpfs P --remount-ro P`, one clean absolute P below the root), an optional `--chdir`
-/// with a clean absolute folder, then `--` and the command, so no caller adds a capability,
-/// filter, namespace, bind or descriptor option to the agent's bubblewrap (rv-sa241
-/// SBX-2-R2 N2, rv-code2 N5). Input: the words after the fixed arguments. Output: true when
-/// they are.
+/// optional `--unshare-net`, at most [`crate::sandbox::HIDDEN_MAX`] `--tmpfs P --remount-ro P`
+/// covers (P clean, absolute, below the root), an optional clean absolute `--chdir`, then `--`
+/// and the command, so no caller adds another bubblewrap option (rv-sa241 SBX-2-R2 N2,
+/// rv-code2 N5). Input: the words after the fixed arguments. Output: true when they are.
 fn own_options(words: &[OsString]) -> bool {
     let mut words = match words {
         [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
@@ -1609,9 +1607,8 @@ impl LinuxSandbox {
     /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
     /// worktree, whose git denies neither backend can hold, for a limited network the
     /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
-    /// out by itself ([`kept_outside_picked`]), or on Landlock alone for a hidden folder
-    /// ([`HIDDEN_NEEDS_NAMESPACES`]). Bubblewrap starts only a closed agent, in a network of
-    /// its own, where no port it takes is a host port.
+    /// out by itself ([`kept_outside_picked`]) or a hidden folder ([`HIDDEN_NEEDS_NAMESPACES`]).
+    /// Bubblewrap starts only a closed agent, in a network of its own with no host port.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
         if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
@@ -2491,14 +2488,14 @@ impl Sandbox for LinuxSandbox {
 /// under those grants, as the call supervisor holds it (protected paths in a git grant,
 /// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
 /// a clone's store names, [`clone_store`]), which that supervisor must hold before a
-/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2). No write
-/// grant covers a hidden folder ([`split_above`]); `hidden` names the ones that exist,
-/// which bubblewrap covers with an empty read-only folder.
+/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     git_write: Vec<PathBuf>,
     guarded: Held,
+    /// The hidden folders that exist, each covered by bubblewrap with an empty read-only
+    /// folder; no write grant covers any hidden folder ([`split_above`]).
     hidden: Vec<PathBuf>,
 }
 
@@ -2883,11 +2880,10 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 
 /// The command for a nested agent up to its harness: the helper asked to start bubblewrap
 /// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
-/// the policy. With route or bridged ports the route flags lead, then the bridge flags,
-/// and bubblewrap gives the agent a network of its own; each existing hidden folder gets
-/// an empty read-only folder over it ([`own_options`]). Inputs: bubblewrap, the helper,
-/// the policy, marked nested, the hidden folders, the working folder, the bridged ports and
-/// the route ports. Output: the command, which the harness follows after `--`.
+/// the policy. With route or bridged ports the route flags lead, then the bridge flags, and
+/// bubblewrap gives the agent a network of its own; an empty read-only folder covers each
+/// existing hidden folder. Inputs: bubblewrap, the helper, the nested policy, the hidden
+/// folders, the working folder, the bridged and route ports. Output: the command up to `--`.
 fn nest_command(
     bwrap: &Path,
     helper: &Path,

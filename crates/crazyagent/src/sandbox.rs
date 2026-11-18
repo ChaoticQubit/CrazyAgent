@@ -2339,9 +2339,8 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt holds it, and so do the
-    /// Linux bubblewrap backends (an empty read-only folder over it, no write above it);
-    /// plain Landlock and Windows refuse a sandbox with hidden folders.
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt and the Linux bubblewrap
+    /// backends hold it; plain Landlock and Windows refuse a sandbox with hidden folders.
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
