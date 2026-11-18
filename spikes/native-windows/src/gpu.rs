@@ -3,7 +3,10 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, fontdb,
 };
 use std::num::NonZeroIsize;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
+use windows_sys::Win32::System::Com::CoTaskMemFree;
+use windows_sys::Win32::UI::Shell::{FOLDERID_Fonts, SHGetKnownFolderPath};
 
 /// Rows of the stand-in terminal screen each text frame draws.
 const ROWS: usize = 24;
@@ -41,19 +44,95 @@ pub struct Gpu {
     atlas: TextAtlas,
     text: TextRenderer,
     rows: Vec<Buffer>,
+    font_px: f32,
     line_px: f32,
     pub adapter: String,
     pub adapters: Vec<String>,
 }
 
-/// Loads Consolas, the monospace font every Windows install carries.
-/// Output: the font system, or the reason it has no font.
-fn fonts() -> Result<FontSystem, String> {
+/// The fonts folder from the shell's known folder, never a fixed drive letter.
+/// Output: the folder, or the shell's error.
+pub fn fonts_dir() -> Result<PathBuf, String> {
+    let mut raw: *mut u16 = std::ptr::null_mut();
+    let result =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Fonts, 0, std::ptr::null_mut(), &mut raw) };
+    if result < 0 || raw.is_null() {
+        unsafe { CoTaskMemFree(raw as *const core::ffi::c_void) };
+        return Err(format!("SHGetKnownFolderPath {result:#x}"));
+    }
+    let length = (0..32_768)
+        .take_while(|&index| unsafe { *raw.add(index) } != 0)
+        .count();
+    let folder = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(raw, length) });
+    unsafe { CoTaskMemFree(raw as *const core::ffi::c_void) };
+    assert!(
+        length < 32_768,
+        "a known folder path ends within the long-path limit"
+    );
+    Ok(PathBuf::from(folder))
+}
+
+/// Loads one font file as the monospace family. Input: the file.
+/// Output: the font system and the family name, or why the file gave no face.
+fn font_system(path: &Path) -> Result<(FontSystem, String), String> {
     let mut db = fontdb::Database::new();
-    db.load_font_file("C:\\Windows\\Fonts\\consola.ttf")
-        .map_err(|e| e.to_string())?;
-    db.set_monospace_family("Consolas");
-    Ok(FontSystem::new_with_locale_and_db("en-US".into(), db))
+    db.load_font_file(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let family = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first())
+        .map(|(name, _)| name.clone())
+        .ok_or_else(|| format!("{}: no face", path.display()))?;
+    assert!(!family.is_empty(), "a loaded face has a family name");
+    db.set_monospace_family(family.clone());
+    Ok((
+        FontSystem::new_with_locale_and_db("en-US".into(), db),
+        family,
+    ))
+}
+
+/// One filler row of the stand-in screen. Input: the row index. Output: `COLUMNS` chars.
+fn filler(row: usize) -> String {
+    let text: String = (0..COLUMNS)
+        .map(|column| char::from(b'!' + ((row * 7 + column) % 90) as u8))
+        .collect();
+    assert_eq!(text.len(), COLUMNS);
+    text
+}
+
+/// The prompt row: the last `COLUMNS` typed characters after "$ " with a cursor mark.
+/// Input: the typed text. Output: the row text.
+fn prompt(typed: &str) -> String {
+    let skip = typed.chars().count().saturating_sub(COLUMNS);
+    let shown: String = typed.chars().skip(skip).collect();
+    assert!(shown.chars().count() <= COLUMNS);
+    format!("$ {shown}_")
+}
+
+/// The text a text frame draws, rows joined by newlines, so an accessibility reader can
+/// be checked against the screen. Input: the typed text. Output: the screen text.
+pub fn screen_text(typed: &str) -> String {
+    let mut rows: Vec<String> = (0..ROWS - 1).map(filler).collect();
+    rows.push(prompt(typed));
+    assert_eq!(rows.len(), ROWS);
+    rows.join("\n")
+}
+
+/// Shaped buffers for the filler rows at one size. Inputs: the font system and the
+/// font and line sizes. Output: `ROWS` buffers.
+fn shaped_rows(fonts: &mut FontSystem, font_px: f32, line_px: f32) -> Vec<Buffer> {
+    let attrs = Attrs::new().family(Family::Monospace);
+    let rows: Vec<Buffer> = (0..ROWS)
+        .map(|row| {
+            let mut buffer = Buffer::new(fonts, Metrics::new(font_px, line_px));
+            buffer.set_text(fonts, &filler(row), &attrs, Shaping::Basic);
+            buffer.shape_until_scroll(fonts, false);
+            buffer
+        })
+        .collect();
+    assert_eq!(rows.len(), ROWS);
+    rows
 }
 
 /// Names every Direct3D 12 adapter the instance sees, with its type and driver, so a run
@@ -132,21 +211,10 @@ impl Gpu {
         let viewport = Viewport::new(&device, &cache);
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
         let text = TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let mut fonts = fonts()?;
+        let (mut fonts, _) = font_system(&fonts_dir()?.join("consola.ttf"))?;
         let font_px = 13.0 * scale;
         let line_px = (font_px * 1.25).round();
-        let attrs = Attrs::new().family(Family::Monospace);
-        let rows = (0..ROWS)
-            .map(|row| {
-                let mut buffer = Buffer::new(&mut fonts, Metrics::new(font_px, line_px));
-                let filler: String = (0..COLUMNS)
-                    .map(|column| char::from(b'!' + ((row * 7 + column) % 90) as u8))
-                    .collect();
-                buffer.set_text(&mut fonts, &filler, &attrs, Shaping::Basic);
-                buffer.shape_until_scroll(&mut fonts, false);
-                buffer
-            })
-            .collect();
+        let rows = shaped_rows(&mut fonts, font_px, line_px);
         assert!(line_px > 0.0, "a text row has height");
         Ok(Gpu {
             surface,
@@ -159,6 +227,7 @@ impl Gpu {
             atlas,
             text,
             rows,
+            font_px,
             line_px,
             adapter: named,
             adapters: seen,
@@ -177,6 +246,16 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Draws with another font file from now on, reshaping every row.
+    /// Input: the file. Output: its family name, or why it could not load.
+    pub fn use_font(&mut self, path: &Path) -> Result<String, String> {
+        let (mut fonts, family) = font_system(path)?;
+        self.rows = shaped_rows(&mut fonts, self.font_px, self.line_px);
+        self.fonts = fonts;
+        assert_eq!(self.rows.len(), ROWS);
+        Ok(family)
+    }
+
     /// The surface size in physical pixels. Output: width and height.
     pub fn size(&self) -> (u32, u32) {
         (self.config.width, self.config.height)
@@ -190,21 +269,8 @@ impl Gpu {
         let (width, height) = (self.config.width, self.config.height);
         if text {
             let attrs = Attrs::new().family(Family::Monospace);
-            let shown: String = typed
-                .chars()
-                .rev()
-                .take(COLUMNS)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
             if let Some(last) = self.rows.last_mut() {
-                last.set_text(
-                    &mut self.fonts,
-                    &format!("$ {shown}_"),
-                    &attrs,
-                    Shaping::Basic,
-                );
+                last.set_text(&mut self.fonts, &prompt(typed), &attrs, Shaping::Basic);
                 last.shape_until_scroll(&mut self.fonts, false);
             }
             self.viewport

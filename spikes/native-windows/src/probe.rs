@@ -27,15 +27,16 @@ use windows_sys::Win32::UI::HiDpi::{
     GetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
 };
 use windows_sys::Win32::UI::Input::Ime::{
-    CFS_POINT, COMPOSITIONFORM, CPS_COMPLETE, GCS_RESULTSTR, ImmGetCompositionStringW,
-    ImmGetCompositionWindow, ImmGetContext, ImmIsIME, ImmNotifyIME, ImmReleaseContext,
-    ImmSetCompositionStringW, ImmSetCompositionWindow, NI_COMPOSITIONSTR, SCS_SETSTR,
+    CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, CPS_COMPLETE, GCS_COMPSTR, GCS_CURSORPOS,
+    GCS_RESULTSTR, HIMC, ImmGetCompositionStringW, ImmGetCompositionWindow, ImmGetContext,
+    ImmIsIME, ImmNotifyIME, ImmReleaseContext, ImmSetCompositionStringW, ImmSetCompositionWindow,
+    NI_COMPOSITIONSTR, SCS_SETSTR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetFocus, GetKeyboardLayoutList, HKL, INPUT, INPUT_0, INPUT_KEYBOARD,
-    INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, KLF_ACTIVATE,
+    ActivateKeyboardLayout, GetFocus, GetKeyState, GetKeyboardLayoutList, HKL, INPUT, INPUT_0,
+    INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, KLF_ACTIVATE,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput, SetFocus,
+    MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput, SetFocus, VK_CONTROL, VK_MENU,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, EnumChildWindows, GUITHREADINFO,
@@ -43,10 +44,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindow, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IDC_ARROW,
     LoadCursorW, MA_ACTIVATE, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CHAR,
+    SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CHAR, WM_DEADCHAR,
     WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_STARTCOMPOSITION, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_SETFOCUS,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE, WindowFromPoint,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_MOUSEACTIVATE, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE, WindowFromPoint,
 };
 
 /// The window class of the native view, so a hit test names it apart from WebView2's.
@@ -59,9 +61,34 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 /// runner took over 10 s for them (farm run 44245995942).
 const FRAMES_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long the frame loop may draw before it stops short and reports how many frames it
+/// drew, inside `FRAMES_TIMEOUT`, so a loaded runner never leaves the window's thread busy
+/// past the row's wait.
+const FRAMES_BUDGET: Duration = Duration::from_secs(45);
+
+/// How long the key row waits for one key's character before it sends the next, so a
+/// send time is never paired with an earlier key's frame.
+const KEY_WAIT: Duration = Duration::from_secs(1);
+
 /// How long the whole run may take before the watchdog ends it, so a stuck runner still
 /// prints its log.
-const WATCHDOG: Duration = Duration::from_secs(240);
+const WATCHDOG: Duration = Duration::from_secs(300);
+
+/// The most key, character and IME messages kept between two reads by a row.
+const NOTES_MAX: usize = 512;
+
+/// The font files the font row looks for: the monospace candidates and the fallbacks.
+const FONT_CANDIDATES: [&str; 5] = [
+    "CascadiaMono.ttf",
+    "CascadiaCode.ttf",
+    "consola.ttf",
+    "seguiemj.ttf",
+    "seguisym.ttf",
+];
+
+/// Text frames per font in the font row, and how long they may take.
+const FONT_FRAMES: usize = 60;
+const FONT_BUDGET: Duration = Duration::from_secs(20);
 
 /// Frames drawn back to back for the frame-time row, and keys for the key-to-frame row.
 const FRAMES: usize = 300;
@@ -126,10 +153,12 @@ static IME_STARTS: AtomicUsize = AtomicUsize::new(0);
 static IME_COMPOSITIONS: AtomicUsize = AtomicUsize::new(0);
 static IME_CHARS: AtomicUsize = AtomicUsize::new(0);
 static IME_RESULT: Mutex<String> = Mutex::new(String::new());
+static TYPED: Mutex<String> = Mutex::new(String::new());
+static NOTES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Writes one log line, milliseconds since start then kind then detail, to the log file
 /// and stdout, flushed at once so a killed run keeps every line. Inputs: kind and detail.
-fn log(kind: &str, detail: &str) {
+pub(crate) fn log(kind: &str, detail: &str) {
     let ms = START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
     let line = format!("{ms:.1} {kind} {detail}\n");
     print!("{line}");
@@ -143,7 +172,7 @@ fn log(kind: &str, detail: &str) {
 }
 
 /// UTF-16 with a trailing zero, for a Win32 wide string. Input: the text. Output: the units.
-fn wide(text: &str) -> Vec<u16> {
+pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
@@ -160,8 +189,48 @@ fn class_of(hwnd: HWND) -> String {
 
 /// Runs a closure on the window's thread and waits for its result up to `STEP_TIMEOUT`.
 /// Input: the closure. Output: its result, or None when the app is gone or it timed out.
-fn on_main<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+pub(crate) fn on_main<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     on_main_within(STEP_TIMEOUT, work)
+}
+
+/// The native view's window, null before it exists.
+pub(crate) fn child() -> HWND {
+    CHILD.load(Ordering::SeqCst) as HWND
+}
+
+/// The id of the window's thread, zero before the view exists.
+pub(crate) fn ui_thread() -> u32 {
+    UI_THREAD.load(Ordering::SeqCst)
+}
+
+/// The text typed into the view so far, for readers off the window's thread.
+pub(crate) fn typed() -> String {
+    TYPED.lock().map(|typed| typed.clone()).unwrap_or_default()
+}
+
+/// Keeps one key, character or IME message for the row that reads it; past `NOTES_MAX`
+/// the rest are dropped. Input: the entry.
+fn note(entry: String) {
+    if let Ok(mut notes) = NOTES.lock()
+        && notes.len() < NOTES_MAX
+    {
+        notes.push(entry);
+    }
+}
+
+/// Takes every kept message, oldest first, and starts a new list. Output: the messages.
+pub(crate) fn take_notes() -> Vec<String> {
+    NOTES
+        .lock()
+        .map(|mut notes| std::mem::take(&mut *notes))
+        .unwrap_or_default()
+}
+
+/// Clicks the terminal box, which focuses the view, and waits for the focus to land.
+pub(crate) fn click_term() {
+    let (term, _) = centres();
+    click(term);
+    std::thread::sleep(Duration::from_millis(300));
 }
 
 /// Runs a closure on the window's thread and waits for its result up to `wait`.
@@ -207,6 +276,9 @@ fn on_char(unit: u32) {
         };
         if let Some(letter) = char::from_u32(unit) {
             state.typed.push(letter);
+            if let Ok(mut typed) = TYPED.lock() {
+                typed.push(letter);
+            }
         }
         let State {
             gpu, typed, text, ..
@@ -230,8 +302,80 @@ fn on_char(unit: u32) {
     }
 }
 
-/// The native view's window procedure: a click focuses it, characters and IME messages are
-/// counted, paint draws a frame and every other message goes to the default procedure.
+/// One IME string of the view's context. Inputs: the context and which string.
+/// Output: the string, empty when the IME has none.
+fn ime_string(context: HIMC, kind: u32) -> String {
+    let mut units = [0u16; 256];
+    let bytes = unsafe {
+        ImmGetCompositionStringW(
+            context,
+            kind,
+            units.as_mut_ptr().cast(),
+            (units.len() * 2) as u32,
+        )
+    };
+    if bytes <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&units[..(bytes as usize / 2).min(units.len())])
+}
+
+/// Keeps what a WM_IME_COMPOSITION carries: the marked string, its cursor and the result.
+/// Inputs: the view's window and the message's flags.
+fn on_composition(hwnd: HWND, lparam: LPARAM) {
+    IME_COMPOSITIONS.fetch_add(1, Ordering::SeqCst);
+    let flags = lparam as u32;
+    let context = unsafe { ImmGetContext(hwnd) };
+    if context.is_null() {
+        note(format!("ime_comp:{flags:X} context_null"));
+        return;
+    }
+    let mut entry = format!("ime_comp:{flags:X}");
+    if flags & GCS_COMPSTR != 0 {
+        entry += &format!(" comp={:?}", ime_string(context, GCS_COMPSTR));
+    }
+    if flags & GCS_CURSORPOS != 0 {
+        let cursor =
+            unsafe { ImmGetCompositionStringW(context, GCS_CURSORPOS, std::ptr::null_mut(), 0) };
+        entry += &format!(" cursor={cursor}");
+    }
+    if flags & GCS_RESULTSTR != 0 {
+        let result = ime_string(context, GCS_RESULTSTR);
+        entry += &format!(" result={result:?}");
+        if let Ok(mut kept) = IME_RESULT.lock() {
+            *kept = result;
+        }
+    }
+    unsafe { ImmReleaseContext(hwnd, context) };
+    note(entry);
+}
+
+/// Keeps a key or character message with its code and the Ctrl and Alt state Windows had
+/// for it. Inputs: the message and its code.
+fn note_key(message: u32, wparam: WPARAM) {
+    let kind = match message {
+        WM_KEYDOWN => "kd",
+        WM_SYSKEYDOWN => "skd",
+        WM_SYSKEYUP => "sku",
+        WM_CHAR => "ch",
+        WM_DEADCHAR => "dc",
+        WM_SYSCHAR => "sc",
+        WM_SYSDEADCHAR => "sdc",
+        _ => "other",
+    };
+    let ctrl = unsafe { GetKeyState(i32::from(VK_CONTROL)) } < 0;
+    let alt = unsafe { GetKeyState(i32::from(VK_MENU)) } < 0;
+    note(format!(
+        "{kind}:{:04X}{}{}",
+        wparam & 0xFFFF,
+        if ctrl { "+c" } else { "" },
+        if alt { "+a" } else { "" }
+    ));
+}
+
+/// The native view's window procedure: a click focuses it, key, character and IME
+/// messages are kept for the rows, paint draws a frame, and with the `uia` feature the
+/// root object request gets the view's provider; the rest go to the default procedure.
 /// Inputs: the Win32 message. Output: its result.
 unsafe extern "system" fn view_proc(
     hwnd: HWND,
@@ -254,38 +398,32 @@ unsafe extern "system" fn view_proc(
             "native_focus",
             &format!("kill to={}", class_of(wparam as HWND)),
         ),
+        WM_KEYDOWN => note_key(message, wparam),
+        WM_SYSKEYDOWN | WM_SYSKEYUP | WM_DEADCHAR | WM_SYSCHAR | WM_SYSDEADCHAR => {
+            note_key(message, wparam);
+            return 0;
+        }
         WM_CHAR => {
+            note_key(message, wparam);
             on_char(wparam as u32);
             return 0;
         }
         WM_IME_STARTCOMPOSITION => {
             IME_STARTS.fetch_add(1, Ordering::SeqCst);
+            note("ime_start".into());
         }
-        WM_IME_COMPOSITION => {
-            IME_COMPOSITIONS.fetch_add(1, Ordering::SeqCst);
-            if (lparam as u32) & GCS_RESULTSTR != 0 {
-                let context = unsafe { ImmGetContext(hwnd) };
-                let mut units = [0u16; 64];
-                let bytes = unsafe {
-                    ImmGetCompositionStringW(
-                        context,
-                        GCS_RESULTSTR,
-                        units.as_mut_ptr().cast(),
-                        (units.len() * 2) as u32,
-                    )
-                };
-                unsafe { ImmReleaseContext(hwnd, context) };
-                if bytes > 0
-                    && let Ok(mut result) = IME_RESULT.lock()
-                {
-                    *result =
-                        String::from_utf16_lossy(&units[..(bytes as usize / 2).min(units.len())]);
-                }
-            }
-        }
+        WM_IME_COMPOSITION => on_composition(hwnd, lparam),
+        WM_IME_ENDCOMPOSITION => note("ime_end".into()),
         WM_IME_CHAR => {
             IME_CHARS.fetch_add(1, Ordering::SeqCst);
+            note(format!("ime_ch:{:04X}", wparam & 0xFFFF));
             return 0;
+        }
+        #[cfg(feature = "uia")]
+        windows_sys::Win32::UI::WindowsAndMessaging::WM_GETOBJECT => {
+            if let Some(result) = crate::uia::answer(hwnd as isize, wparam, lparam) {
+                return result;
+            }
         }
         WM_PAINT => {
             if let Err(error) = draw() {
@@ -327,48 +465,44 @@ fn screen_point(css: (f64, f64), scale: f64) -> POINT {
 
 /// Creates the native view on first call, as the top child of the window above WebView2,
 /// with its GPU; later calls move and size it without changing its z-order. Runs on the
-/// window's thread. Inputs: the app and the terminal rectangle with its scale.
+/// window's thread and logs how long it took. Inputs: the app and the terminal rectangle
+/// with its scale.
 fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
+    let started = Instant::now();
     let (x, y, w, h) = client_rect(term, scale);
     let child = CHILD.load(Ordering::SeqCst) as HWND;
-    if !child.is_null() {
-        unsafe {
-            SetWindowPos(
-                child,
-                std::ptr::null_mut(),
-                x,
-                y,
-                w,
-                h,
-                SWP_NOACTIVATE | SWP_NOZORDER,
-            )
-        };
-        STATE.with(|state| {
-            if let Ok(mut state) = state.try_borrow_mut()
-                && let Some(gpu) = state.gpu.as_mut()
-            {
-                gpu.resize(w as u32, h as u32);
-            }
-        });
-        if let Err(error) = draw() {
-            log("draw_error", &error);
-        }
-        log("placed", &format!("{x},{y} {w}x{h}"));
+    if child.is_null() {
+        create_view(app, (x, y, w, h), scale);
         return;
     }
-    let Some(window) = app.get_webview_window("main") else {
-        log("error", "no main window");
-        return;
+    unsafe {
+        SetWindowPos(
+            child,
+            std::ptr::null_mut(),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOACTIVATE | SWP_NOZORDER,
+        )
     };
-    let parent = match window.hwnd() {
-        Ok(hwnd) => hwnd.0 as HWND,
-        Err(error) => {
-            log("error", &format!("hwnd: {error}"));
-            return;
+    STATE.with(|state| {
+        if let Ok(mut state) = state.try_borrow_mut()
+            && let Some(gpu) = state.gpu.as_mut()
+        {
+            gpu.resize(w as u32, h as u32);
         }
-    };
-    PARENT.store(parent as isize, Ordering::SeqCst);
-    UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+    });
+    if let Err(error) = draw() {
+        log("draw_error", &error);
+    }
+    let took = started.elapsed().as_secs_f64() * 1000.0;
+    log("placed", &format!("{x},{y} {w}x{h} place_ms={took:.2}"));
+}
+
+/// Registers the view's class and creates the view at a client rectangle of the window.
+/// Inputs: the parent window and the rectangle. Output: the view, or null on failure.
+fn create_child(parent: HWND, (x, y, w, h): (i32, i32, i32, i32)) -> HWND {
     let module = unsafe { GetModuleHandleW(std::ptr::null()) };
     let class = wide(CLASS);
     let registered = unsafe {
@@ -386,7 +520,7 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
         })
     };
     log("class_registered", &registered.to_string());
-    let child = unsafe {
+    unsafe {
         CreateWindowExW(
             0,
             class.as_ptr(),
@@ -401,7 +535,27 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
             module,
             std::ptr::null(),
         )
+    }
+}
+
+/// Creates the view over the terminal box with its GPU and draws its first frame, logging
+/// the surface setup and first-frame times, then starts the rows. Runs on the window's
+/// thread. Inputs: the app, the client rectangle and the scale.
+fn create_view(app: &tauri::AppHandle, (x, y, w, h): (i32, i32, i32, i32), scale: f64) {
+    let Some(window) = app.get_webview_window("main") else {
+        log("error", "no main window");
+        return;
     };
+    let parent = match window.hwnd() {
+        Ok(hwnd) => hwnd.0 as HWND,
+        Err(error) => {
+            log("error", &format!("hwnd: {error}"));
+            return;
+        }
+    };
+    PARENT.store(parent as isize, Ordering::SeqCst);
+    UI_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::SeqCst);
+    let child = create_child(parent, (x, y, w, h));
     if child.is_null() {
         log("error", "CreateWindowExW returned null");
         return;
@@ -412,6 +566,8 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
         "child_created",
         &format!("{x},{y} {w}x{h} parent={}", class_of(parent)),
     );
+    let module = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let setup = Instant::now();
     match Gpu::new(
         child as isize,
         module as isize,
@@ -420,6 +576,10 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
         scale as f32,
     ) {
         Ok(gpu) => {
+            log(
+                "summary_surface_setup_ms",
+                &format!("{:.1}", setup.elapsed().as_secs_f64() * 1000.0),
+            );
             log("env_adapter_used", &gpu.adapter);
             for (index, adapter) in gpu.adapters.iter().enumerate() {
                 log("env_adapter_seen", &format!("{index}: {adapter}"));
@@ -428,8 +588,13 @@ fn place_view(app: &tauri::AppHandle, term: Rect, scale: f64) {
         }
         Err(error) => log("gpu_error", &error),
     }
-    if let Err(error) = draw() {
-        log("draw_error", &error);
+    let first = Instant::now();
+    match draw() {
+        Ok(_) => log(
+            "summary_first_frame_ms",
+            &format!("{:.1}", first.elapsed().as_secs_f64() * 1000.0),
+        ),
+        Err(error) => log("draw_error", &error),
     }
     if DRIVE.set(()).is_ok() {
         std::thread::spawn(drive);
@@ -650,6 +815,8 @@ fn tree() -> String {
 /// Logs the run's environment: sessions, the foreground window, DPI and awareness, the
 /// monitors, and the parent's child window tree.
 fn environment() {
+    let cores = std::thread::available_parallelism().map_or(0, usize::from);
+    log("env_cores", &cores.to_string());
     let mut session = 0u32;
     unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
     log(
@@ -789,17 +956,28 @@ fn focus_rows() {
 }
 
 /// The key-to-frame row: each key goes through `SendInput`, its WM_CHAR draws a frame at
-/// once, and the time from the send to the frame's submit is kept.
+/// once, and the time from the send to the frame's submit is kept. The next key waits for
+/// this key's character (up to `KEY_WAIT`), so a loaded runner never pairs a send with an
+/// earlier key's frame; keys whose character never came are counted.
 fn key_rows() {
     on_main(|| STATE.with(|state| state.borrow_mut().text = true));
     on_main(|| STATE.with(|state| state.borrow_mut().keys.clear()));
+    let mut lost = 0usize;
     for _ in 0..KEYS {
+        let before = CHARS.load(Ordering::SeqCst);
         if let Ok(mut sent) = SENT.lock() {
             *sent = Some(Instant::now());
         }
         type_text("k");
+        let waited = Instant::now();
+        while CHARS.load(Ordering::SeqCst) == before && waited.elapsed() < KEY_WAIT {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        lost += usize::from(CHARS.load(Ordering::SeqCst) == before);
         std::thread::sleep(Duration::from_millis(40));
     }
+    assert!(lost <= KEYS);
+    log("summary_key_lost", &format!("{lost} of {KEYS}"));
     let keys = on_main(|| STATE.with(|state| state.borrow().keys.clone())).unwrap_or_default();
     let column =
         |pick: fn(&(f64, f64, f64, f64)) -> f64| keys.iter().map(pick).collect::<Vec<f64>>();
@@ -827,7 +1005,8 @@ fn frame_rows() {
     let start = Instant::now();
     let timings = on_main_within(FRAMES_TIMEOUT, || {
         let mut out = Vec::with_capacity(FRAMES);
-        for _ in 0..FRAMES {
+        let started = Instant::now();
+        while out.len() < FRAMES && started.elapsed() < FRAMES_BUDGET {
             match draw() {
                 Ok(timing) => out.push(timing),
                 Err(error) => {
@@ -884,70 +1063,114 @@ fn dpi_rows() {
     );
 }
 
-/// The IME rows: the view has an input context, the composition window follows the
-/// cursor, the installed layouts and which are IMEs, and with an IME a set composition
-/// string reaches the view as composition and character messages.
-fn ime_rows() {
-    let report = on_main(|| {
-        let child = CHILD.load(Ordering::SeqCst) as HWND;
-        unsafe { SetFocus(child) };
-        let context = unsafe { ImmGetContext(child) };
-        let mut lines = vec![format!("context_null={}", context.is_null())];
-        if !context.is_null() {
-            let form = COMPOSITIONFORM {
-                dwStyle: CFS_POINT,
-                ptCurrentPos: POINT { x: 8, y: 400 },
-                rcArea: RECT::default(),
-            };
-            let set = unsafe { ImmSetCompositionWindow(context, &form) };
-            let mut read = COMPOSITIONFORM::default();
-            let got = unsafe { ImmGetCompositionWindow(context, &mut read) };
-            lines.push(format!(
-                "composition_window set={set} got={got} at={},{}",
-                read.ptCurrentPos.x, read.ptCurrentPos.y
-            ));
-        }
-        let mut layouts: [HKL; 32] = [std::ptr::null_mut(); 32];
-        let count = unsafe { GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()) }
-            .max(0) as usize;
-        let named: Vec<String> = layouts[..count]
-            .iter()
-            .map(|hkl: &HKL| {
-                format!("{:08X} ime={}", *hkl as usize & 0xFFFF_FFFF, unsafe {
-                    ImmIsIME(*hkl)
-                })
+/// The IME setup, on the window's thread: the view has an input context, the composition
+/// window follows the cursor, the installed layouts and which report as IMEs, and the
+/// first of those is activated. Output: the row line.
+fn ime_setup() -> String {
+    let child = CHILD.load(Ordering::SeqCst) as HWND;
+    unsafe { SetFocus(child) };
+    let context = unsafe { ImmGetContext(child) };
+    let mut lines = vec![format!("context_null={}", context.is_null())];
+    if !context.is_null() {
+        let form = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT { x: 8, y: 400 },
+            rcArea: RECT::default(),
+        };
+        let set = unsafe { ImmSetCompositionWindow(context, &form) };
+        let mut read = COMPOSITIONFORM::default();
+        let got = unsafe { ImmGetCompositionWindow(context, &mut read) };
+        lines.push(format!(
+            "composition_window set={set} got={got} at={},{}",
+            read.ptCurrentPos.x, read.ptCurrentPos.y
+        ));
+        unsafe { ImmReleaseContext(child, context) };
+    }
+    let mut layouts: [HKL; 32] = [std::ptr::null_mut(); 32];
+    let count = unsafe { GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()) }.max(0)
+        as usize;
+    assert!(count <= layouts.len());
+    let named: Vec<String> = layouts[..count]
+        .iter()
+        .map(|hkl: &HKL| {
+            format!("{:08X} ime={}", *hkl as usize & 0xFFFF_FFFF, unsafe {
+                ImmIsIME(*hkl)
             })
-            .collect();
-        lines.push(format!("layouts={}", named.join(",")));
-        let ime = layouts[..count]
-            .iter()
-            .copied()
-            .find(|hkl| unsafe { ImmIsIME(*hkl) } != 0);
-        if let (Some(hkl), false) = (ime, context.is_null()) {
+        })
+        .collect();
+    lines.push(format!("layouts={}", named.join(",")));
+    match layouts[..count]
+        .iter()
+        .copied()
+        .find(|hkl| unsafe { ImmIsIME(*hkl) } != 0)
+    {
+        Some(hkl) => {
             unsafe { ActivateKeyboardLayout(hkl, KLF_ACTIVATE) };
-            let text: Vec<u16> = "\u{304b}".encode_utf16().collect();
-            let set = unsafe {
-                ImmSetCompositionStringW(
-                    context,
-                    SCS_SETSTR,
-                    text.as_ptr().cast(),
-                    (text.len() * 2) as u32,
-                    std::ptr::null(),
-                    0,
-                )
-            };
-            let done = unsafe { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_COMPLETE, 0) };
-            lines.push(format!("composition set={set} complete={done}"));
-        } else {
-            lines.push("no IME layout installed: composition not driven".into());
+            lines.push(format!("activated={:08X}", hkl as usize & 0xFFFF_FFFF));
         }
-        if !context.is_null() {
-            unsafe { ImmReleaseContext(child, context) };
-        }
-        lines.join(" | ")
-    });
-    log("ime_setup", &report.unwrap_or_else(|| "timeout".into()));
-    std::thread::sleep(Duration::from_millis(500));
+        None => lines.push("no IME layout installed".into()),
+    }
+    lines.join(" | ")
+}
+
+/// Sets the view's marked text as an IME would, on the window's thread.
+/// Input: the marked text. Output: whether the IME took it.
+fn set_marked(text: &str) -> String {
+    let child = CHILD.load(Ordering::SeqCst) as HWND;
+    let context = unsafe { ImmGetContext(child) };
+    if context.is_null() {
+        return "context_null".into();
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let set = unsafe {
+        ImmSetCompositionStringW(
+            context,
+            SCS_SETSTR,
+            units.as_ptr().cast(),
+            (units.len() * 2) as u32,
+            std::ptr::null(),
+            0,
+        )
+    };
+    unsafe { ImmReleaseContext(child, context) };
+    format!("set={set}")
+}
+
+/// Completes or cancels the view's composition, on the window's thread.
+/// Input: CPS_COMPLETE or CPS_CANCEL. Output: whether the IME took it.
+fn finish_marked(action: u32) -> String {
+    assert!(action == CPS_COMPLETE || action == CPS_CANCEL);
+    let child = CHILD.load(Ordering::SeqCst) as HWND;
+    let context = unsafe { ImmGetContext(child) };
+    if context.is_null() {
+        return "context_null".into();
+    }
+    let done = unsafe { ImmNotifyIME(context, NI_COMPOSITIONSTR, action, 0) };
+    unsafe { ImmReleaseContext(child, context) };
+    format!("notified={done}")
+}
+
+/// Runs one IME step on the window's thread and logs what reached the view.
+/// Inputs: the row name and the step.
+fn ime_step(row: &str, step: fn() -> String) {
+    let done = on_main(step).unwrap_or_else(|| "timeout".into());
+    std::thread::sleep(Duration::from_millis(300));
+    log(row, &format!("{done} got={}", take_notes().join(" ")));
+}
+
+/// The IME rows: setup, then marked text "か", then "かな" with its cursor, the commit and
+/// its result, then marked text again and a cancel that must leave no result.
+fn ime_rows() {
+    log(
+        "ime_setup",
+        &on_main(ime_setup).unwrap_or_else(|| "timeout".into()),
+    );
+    take_notes();
+    ime_step("ime_marked_ka", || set_marked("\u{304b}"));
+    ime_step("ime_marked_kana", || set_marked("\u{304b}\u{306a}"));
+    ime_step("ime_commit", || finish_marked(CPS_COMPLETE));
+    ime_step("ime_marked_again", || set_marked("\u{304b}"));
+    ime_step("ime_cancel", || finish_marked(CPS_CANCEL));
     let result = IME_RESULT
         .lock()
         .map(|result| result.clone())
@@ -960,6 +1183,108 @@ fn ime_rows() {
             IME_COMPOSITIONS.load(Ordering::SeqCst),
             IME_CHARS.load(Ordering::SeqCst)
         ),
+    );
+}
+
+/// The font row: which candidate files the fonts folder holds, then for each monospace
+/// candidate present its family, the first text frame (cold glyphs) and the warm build
+/// times; Consolas is drawn again after.
+fn font_rows() {
+    let dir = match crate::gpu::fonts_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            log("fonts_dir", &format!("error {error}"));
+            return;
+        }
+    };
+    log("fonts_dir", &dir.display().to_string());
+    for name in FONT_CANDIDATES {
+        let bytes = std::fs::metadata(dir.join(name)).map(|meta| meta.len());
+        log("font_candidate", &format!("{name} bytes={bytes:?}"));
+    }
+    for name in ["CascadiaMono.ttf", "consola.ttf"] {
+        let path = dir.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let line = on_main_within(FRAMES_TIMEOUT, move || font_frames(&path));
+        log(
+            "font_build_ms",
+            &format!("{name} {}", line.unwrap_or_else(|| "timeout".into())),
+        );
+    }
+}
+
+/// Switches the view to one font file and draws text frames with it, on the window's
+/// thread. Input: the file. Output: the row line.
+fn font_frames(path: &std::path::Path) -> String {
+    STATE.with(|state| {
+        let Ok(mut state) = state.try_borrow_mut() else {
+            return "state busy".to_string();
+        };
+        let State { gpu, typed, .. } = &mut *state;
+        let Some(gpu) = gpu.as_mut() else {
+            return "no gpu".to_string();
+        };
+        let family = match gpu.use_font(path) {
+            Ok(family) => family,
+            Err(error) => return format!("load error {error}"),
+        };
+        let started = Instant::now();
+        let mut builds = Vec::with_capacity(FONT_FRAMES);
+        while builds.len() < FONT_FRAMES && started.elapsed() < FONT_BUDGET {
+            match gpu.draw(true, typed) {
+                Ok(timing) => builds.push(timing.build_ms),
+                Err(error) => return format!("family={family} draw error {error}"),
+            }
+        }
+        let first = builds.first().copied().unwrap_or(f64::NAN);
+        let warm = percentiles(
+            builds
+                .get(1..)
+                .map(<[f64]>::to_vec)
+                .unwrap_or_default()
+                .as_mut_slice(),
+        );
+        format!("family={family:?} first={first:.2} warm {warm}")
+    })
+}
+
+/// The accessibility row: an out-of-process UI Automation reader asks the view for its
+/// text. Without the `uia` feature there is no provider and no text pattern (the red);
+/// with it, the text equals the drawn screen and a selection is refused (the green).
+fn uia_rows() {
+    log("uia_provider_built", &cfg!(feature = "uia").to_string());
+    on_main(|| STATE.with(|state| state.borrow_mut().text = true));
+    on_main(|| {
+        let _ = draw();
+    });
+    let expected: Vec<u16> = crate::gpu::screen_text(&typed()).encode_utf16().collect();
+    let tail = String::from_utf16_lossy(&expected[expected.len().saturating_sub(24)..]);
+    log(
+        "uia_expected",
+        &format!("chars={} tail={tail}", expected.len()),
+    );
+    let lines = match crate::uia::read(CHILD.load(Ordering::SeqCst)) {
+        Ok(lines) => lines,
+        Err(error) => {
+            log("uia_reader", &format!("error {error}"));
+            return;
+        }
+    };
+    for line in &lines {
+        log("uia_reader", line);
+    }
+    let has = |wanted: &str| lines.iter().any(|line| line.as_str() == wanted);
+    let pattern = has("reader_text_pattern=True");
+    let equal = has(&format!("reader_text_chars={}", expected.len()))
+        && has(&format!("reader_text_tail={tail}"));
+    let refused = lines
+        .iter()
+        .any(|line| line.starts_with("reader_select=refused"));
+    log(
+        "uia_verdict",
+        &format!("text_pattern={pattern} text_equal={equal} select_refused={refused}"),
     );
 }
 
@@ -1012,15 +1337,31 @@ fn clipboard() -> String {
     )
 }
 
-/// The run's rows in order, then the exit. Runs on its own thread; each window step goes
-/// through `on_main`, input through `SendInput`.
-fn drive() {
-    std::thread::sleep(Duration::from_millis(1500));
-    on_main(|| {
-        let _ = draw();
-    });
-    std::thread::sleep(Duration::from_millis(300));
-    environment();
+/// Which rows a run takes, from `SPIKE_ROWS`: `base` (every deterministic row, the default),
+/// `perf` (keys and frames only, for the quiet and loaded cells), `uia` (the reader) or
+/// `lang` (real IMEs and the emoji panel, after the language step).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Rows {
+    Base,
+    Perf,
+    Uia,
+    Lang,
+}
+
+/// The rows `SPIKE_ROWS` asks for. Output: the set, or None for an unknown name.
+fn rows() -> Option<Rows> {
+    match std::env::var("SPIKE_ROWS").as_deref() {
+        Err(_) | Ok("base") => Some(Rows::Base),
+        Ok("perf") => Some(Rows::Perf),
+        Ok("uia") => Some(Rows::Uia),
+        Ok("lang") => Some(Rows::Lang),
+        Ok(_) => None,
+    }
+}
+
+/// Every deterministic row: layering, focus, keys, frames, DPI, IME, layouts, clipboard,
+/// fonts, the accessibility reader, then resize, reload and re-raise.
+fn base_rows() {
     layering("");
     popover_rows();
     focus_rows();
@@ -1028,10 +1369,14 @@ fn drive() {
     frame_rows();
     dpi_rows();
     ime_rows();
+    crate::keys::dead_key_rows();
+    crate::keys::altgr_rows();
     log(
         "clipboard",
         &on_main(clipboard).unwrap_or_else(|| "timeout".into()),
     );
+    font_rows();
+    uia_rows();
     if let Some(window) = APP.get().and_then(|app| app.get_webview_window("main")) {
         let _ = window.set_size(tauri::PhysicalSize::new(1400u32, 900u32));
     }
@@ -1058,6 +1403,37 @@ fn drive() {
     });
     std::thread::sleep(Duration::from_millis(300));
     layering("_after_reraise");
+}
+
+/// The run's rows in order, then the exit. Runs on its own thread; each window step goes
+/// through `on_main`, input through `SendInput`.
+fn drive() {
+    std::thread::sleep(Duration::from_millis(1500));
+    on_main(|| {
+        let _ = draw();
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    environment();
+    let Some(rows) = rows() else {
+        log("rows_refused", "SPIKE_ROWS is not base, perf, uia or lang");
+        std::process::exit(5);
+    };
+    log("rows", &format!("{rows:?}"));
+    match rows {
+        Rows::Base => base_rows(),
+        Rows::Perf => {
+            log("foreground", &foreground().to_string());
+            click_term();
+            key_rows();
+            frame_rows();
+        }
+        Rows::Uia => uia_rows(),
+        Rows::Lang => {
+            log("foreground", &foreground().to_string());
+            crate::keys::real_ime_rows();
+            crate::keys::emoji_rows();
+        }
+    }
     log("done", "");
     std::process::exit(0);
 }
@@ -1071,6 +1447,12 @@ pub fn main() {
         *file = std::fs::File::create(&path).ok();
     }
     log("start", &path);
+    let condition: String = std::env::var("SPIKE_CONDITION")
+        .unwrap_or_else(|_| "unset".into())
+        .chars()
+        .take(32)
+        .collect();
+    log("env_condition", &condition);
     std::thread::spawn(|| {
         std::thread::sleep(WATCHDOG);
         log("watchdog_exit", &WATCHDOG.as_secs().to_string());
