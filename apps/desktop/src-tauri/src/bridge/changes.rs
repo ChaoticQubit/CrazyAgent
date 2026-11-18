@@ -5,6 +5,7 @@ use crazyagent::landing::{
     AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, OwnerDirty, TargetBranches,
 };
 use crazyagent::protocol::ProjectId;
+use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 pub(super) fn changes_error(error: EngineError) -> BridgeError {
@@ -14,6 +15,7 @@ pub(super) fn changes_error(error: EngineError) -> BridgeError {
     caused(
         CHANGES_CODES
             .iter()
+            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("changes_outcome_unknown"),

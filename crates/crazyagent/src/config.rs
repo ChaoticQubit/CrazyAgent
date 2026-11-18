@@ -775,6 +775,11 @@ fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
 pub const OWNER_BUSY_LINE: &str =
     "CrazyAgent is busy with other requests. Nothing changed; try again in a moment.";
 
+/// The sentence for `owner_queue_not_submitted`: the engine's request queue was full, so the
+/// request was refused before it was queued, nothing changed and a retry is safe.
+pub const OWNER_QUEUE_LINE: &str =
+    "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.";
+
 /// The sentence for `storage_starting_not_submitted`: the request reached the engine before
 /// its database took requests and was not sent on, so nothing changed and a retry is safe.
 pub const STORAGE_STARTING_LINE: &str =
@@ -800,6 +805,7 @@ pub const ENGINE_VERSION_LINE: &str =
 pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
         "owner_busy" => Some(OWNER_BUSY_LINE),
+        "owner_queue_not_submitted" => Some(OWNER_QUEUE_LINE),
         "storage_starting_not_submitted" => Some(STORAGE_STARTING_LINE),
         "storage_busy_not_submitted" => Some(STORAGE_BUSY_LINE),
         "access_change_pending" => Some(ACCESS_CHANGE_PENDING_LINE),

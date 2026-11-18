@@ -3,6 +3,7 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{IDE_EXTENSIONS_CODES, OwnerClient};
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::protocol::ProjectId;
+use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 pub(super) fn extensions_error(error: EngineError) -> BridgeError {
@@ -12,6 +13,7 @@ pub(super) fn extensions_error(error: EngineError) -> BridgeError {
     caused(
         IDE_EXTENSIONS_CODES
             .iter()
+            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("ide_extensions_outcome_unknown"),

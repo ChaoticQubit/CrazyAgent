@@ -2,6 +2,7 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountExtras, OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
+use crazyagent::storage::STORAGE_ANSWERS;
 use crazyagent::usage::WindowKind;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneyChoice;
@@ -16,6 +17,7 @@ pub(super) fn usage_error(error: EngineError) -> BridgeError {
     caused(
         USAGE_CODES
             .iter()
+            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("usage_outcome_unknown"),

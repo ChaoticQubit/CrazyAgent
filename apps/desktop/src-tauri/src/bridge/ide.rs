@@ -2,6 +2,7 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{IDE_TAB_CODES, IdeTabServer, IdeTabState, OwnerClient};
 use crazyagent::protocol::ProjectId;
+use crazyagent::storage::STORAGE_ANSWERS;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -20,6 +21,7 @@ pub(super) fn ide_error(error: EngineError) -> BridgeError {
     uncaused(
         IDE_TAB_CODES
             .iter()
+            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("ide_tab_outcome_unknown"),

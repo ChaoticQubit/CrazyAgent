@@ -311,6 +311,9 @@ pub fn coded(sentence: &str, problem: &str) -> String {
     if problem == super::seam::OWNER_BUSY {
         return crate::config::OWNER_BUSY_LINE.to_owned();
     }
+    if problem == "owner_queue_not_submitted" {
+        return crate::config::OWNER_QUEUE_LINE.to_owned();
+    }
     if problem == "storage_starting_not_submitted" {
         return crate::config::STORAGE_STARTING_LINE.to_owned();
     }

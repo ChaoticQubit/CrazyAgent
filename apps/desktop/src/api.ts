@@ -29,6 +29,7 @@ const ACCOUNT_PAGES_MAX = 100;
 const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  owner_queue_not_submitted: "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.",
   storage_starting_not_submitted: "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.",
   access_change_pending: "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.",
   storage_busy_not_submitted: "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.",

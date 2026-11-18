@@ -2,6 +2,7 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{IDE_CODES, OwnerClient};
 use crazyagent::ide::bridge::reveal::RevealFocus;
+use crazyagent::storage::STORAGE_ANSWERS;
 use std::sync::Arc;
 
 pub(super) fn ide_error(error: EngineError) -> BridgeError {
@@ -11,6 +12,7 @@ pub(super) fn ide_error(error: EngineError) -> BridgeError {
     caused(
         IDE_CODES
             .iter()
+            .chain(STORAGE_ANSWERS)
             .copied()
             .find(|known| *known == error.0)
             .unwrap_or("ide_outcome_unknown"),

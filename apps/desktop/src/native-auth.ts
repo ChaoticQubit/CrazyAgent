@@ -330,6 +330,8 @@ export function nativeAuthError(code: string): string {
       return "Paste the complete code and state shown by the official Claude sign-in page.";
     case "owner_busy":
       return "CrazyAgent is busy with other requests. Try again in a moment.";
+    case "owner_queue_not_submitted":
+      return "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.";
     case "storage_starting_not_submitted":
       return "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.";
     case "access_change_pending":
