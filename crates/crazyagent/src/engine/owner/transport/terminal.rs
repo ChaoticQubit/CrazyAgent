@@ -464,6 +464,19 @@ struct View {
     viewer: Option<TerminalStream>,
 }
 
+impl View {
+    /// The full view of one attached viewer, at the viewer's agent and size. Takes the
+    /// viewer. Returns the view.
+    fn of(viewer: TerminalStream) -> View {
+        View {
+            agent: viewer.agent.clone(),
+            cols: viewer.cols,
+            rows: viewer.rows,
+            viewer: Some(viewer),
+        }
+    }
+}
+
 /// One owner paste the engine gathers from its `Paste` chunks before it filters and pastes
 /// it whole: the bytes so far, at most `PASTE_BYTES_MAX`.
 #[cfg(unix)]
@@ -512,18 +525,24 @@ fn paste(host: &Arc<dyn Host>, agent: &AgentId, keys: Vec<u8>) -> Sending {
     tokio::task::spawn_blocking(move || host.paste(&agent, &keys).map(|()| None))
 }
 
-/// Tells whether an input-only view's agent is gone from its host, read on a blocking
-/// thread; a host that cannot list its agents leaves the view open. Takes the host and the
-/// agent. Returns the answer.
+/// Tells whether an input-only view's terminal is gone, read on a blocking thread through
+/// the call its keys take, routed as they are, so a teammate the engine adopted onto its
+/// lead's server, which the host's agent list never names, counts while its pane lives.
+/// Gone once that call answers the terminal or the pane ended, or fails while the host no
+/// longer lists the agent; a host that cannot tell leaves the view open. Takes the host and
+/// the agent. Returns the answer.
 #[cfg(unix)]
 async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId) -> bool {
     let host = host.clone();
     let agent = agent.clone();
-    tokio::task::spawn_blocking(move || host.alive().map(|alive| !alive.contains(&agent)))
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or(false)
+    tokio::task::spawn_blocking(move || match host.input_live(&agent) {
+        Ok(_) => false,
+        Err(error) if crate::terminal::ended_code(&error.0) => true,
+        Err(error) if error.0 == "terminal_pane_unknown" => true,
+        Err(_) => host.alive().is_ok_and(|alive| !alive.contains(&agent)),
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Starts sending one owner request to the host on a blocking thread: typed and wheel keys
@@ -557,12 +576,13 @@ fn send(
 }
 
 /// The attach handshake, all of it bounded by the attach deadline: checks the peer and the
-/// owner grant, reads the `Attach`, `AttachPane` or `AttachSized` request, sizes the window
-/// first for `AttachSized`, and attaches to the agent terminal or that one pane of its
-/// window. Takes the connection, its packet, the engine and
-/// the authority. Writes nothing, so a refusal can still be sent whole. Returns the
-/// admission, the attached viewer, its host and the team agent the owner's prompts and
-/// typing count for, none for a pane, which is not that agent's own app.
+/// owner grant, reads the `Attach`, `AttachPane`, `AttachSized` or `AttachInput` request,
+/// sizes the window first for the last two, and attaches to the agent terminal or that one
+/// pane of its window, or for `AttachInput` checks the terminal answers and attaches no
+/// viewer. Takes the connection, its packet, the engine and the authority. Writes nothing,
+/// so a refusal can still be sent whole. Returns the admission, the view, its host and the
+/// team agent the owner's prompts and typing count for, none for a pane, which is not that
+/// agent's own app.
 async fn open(
     stream: &mut UnixStream,
     packet: &[u8; 37],
@@ -619,15 +639,7 @@ async fn open(
                     viewer: None,
                 })
             }
-            None => {
-                let viewer = attaching.attach(&agent_id)?;
-                Ok(View {
-                    agent: viewer.agent.clone(),
-                    cols: viewer.cols,
-                    rows: viewer.rows,
-                    viewer: Some(viewer),
-                })
-            }
+            None => Ok(View::of(attaching.attach(&agent_id)?)),
         }
     })
     .await

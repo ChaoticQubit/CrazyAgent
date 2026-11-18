@@ -392,10 +392,16 @@ async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
     };
     let (requests, mut asked) = tokio::sync::mpsc::channel(REQUESTS_QUEUED);
     let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
-    let pumping =
-        tokio::spawn(
-            async move { pump(&mut ours, viewer, &mut asked, host, &Open::default()).await },
-        );
+    let pumping = tokio::spawn(async move {
+        pump(
+            &mut ours,
+            View::of(viewer),
+            &mut asked,
+            host,
+            &Open::default(),
+        )
+        .await
+    });
     for key in [b"a", b"b"] {
         let bytes = key.to_vec();
         requests
@@ -468,7 +474,9 @@ async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
     let viewing = Arc::new(Open::default());
     let mut pumping = {
         let viewing = viewing.clone();
-        tokio::spawn(async move { pump(&mut ours, viewer, &mut asked, host, &*viewing).await })
+        tokio::spawn(
+            async move { pump(&mut ours, View::of(viewer), &mut asked, host, &*viewing).await },
+        )
     };
     let text = "go".to_owned();
     requests
@@ -617,20 +625,27 @@ async fn fifty_typed_keys_echo_back_within_budget() {
         .unwrap();
 }
 
-/// A host that records each owner paste and typed request it takes and lists the agents a
-/// row gives it as alive; every other call answers at once.
+/// A host that records each owner paste and typed request it takes, lists the agents a row
+/// gives it as alive, none when it cannot list, and answers `input_live` as the row sets it;
+/// every other call answers at once.
 struct Recording {
     pasted: std::sync::Mutex<Vec<(AgentId, Vec<u8>)>>,
     typed: std::sync::Mutex<Vec<Vec<u8>>>,
-    alive: Vec<AgentId>,
+    alive: Option<Vec<AgentId>>,
+    live: std::sync::Mutex<Result<bool, String>>,
 }
 
 impl Recording {
     fn new(alive: Vec<AgentId>) -> Arc<Recording> {
+        Recording::living(Some(alive), Ok(true))
+    }
+
+    fn living(alive: Option<Vec<AgentId>>, live: Result<bool, &str>) -> Arc<Recording> {
         Arc::new(Recording {
             pasted: std::sync::Mutex::new(Vec::new()),
             typed: std::sync::Mutex::new(Vec::new()),
             alive,
+            live: std::sync::Mutex::new(live.map_err(str::to_owned)),
         })
     }
 }
@@ -669,8 +684,14 @@ impl Host for Recording {
         Ok(())
     }
 
+    fn input_live(&self, _: &AgentId) -> Result<bool, HostError> {
+        self.live.lock().unwrap().clone().map_err(HostError)
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
-        Ok(self.alive.clone())
+        self.alive
+            .clone()
+            .ok_or_else(|| HostError("terminal_unavailable".into()))
     }
 }
 
@@ -869,7 +890,7 @@ async fn an_open_paste_takes_no_other_request_and_a_revoked_grant_pastes_nothing
 }
 
 /// Slice C: an input-only view types its requests into the host, writes no output frame,
-/// and ends as `terminal_ended` once its agent is gone from the host at the grant check.
+/// and ends as `terminal_ended` once its terminal answers gone at the grant check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone() {
     use tokio::io::AsyncReadExt;
@@ -887,7 +908,8 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
     assert_eq!(reason, "terminal_detached");
     assert_eq!(*alive.typed.lock().unwrap(), vec![b"typed".to_vec()]);
 
-    let gone: Arc<dyn Host> = Recording::new(Vec::new());
+    let gone: Arc<dyn Host> =
+        Recording::living(Some(vec![agent.clone()]), Err("terminal_agent_unknown"));
     let (_queue, mut asked) = tokio::sync::mpsc::channel::<TerminalRequest>(1);
     let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
     let view = View {
@@ -1023,4 +1045,73 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         .await
         .unwrap()
         .unwrap();
+}
+
+/// #477 r1 F2: an input-only view's terminal is gone only by the call its keys take: a
+/// teammate the engine adopted onto its lead's server answers there although the host's
+/// agent list never names it, so it stays; an ended terminal, teammates' server or pane is
+/// gone; any other failure counts as gone only once the host no longer lists the agent, and
+/// a host that cannot list leaves the view open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_input_only_view_is_gone_only_by_the_call_its_keys_take() {
+    let agent = AgentId::team(1).unwrap();
+    let listed = || Some(vec![agent.clone()]);
+    for (alive, live, gone) in [
+        (Some(Vec::new()), Ok(true), false),
+        (Some(Vec::new()), Ok(false), false),
+        (listed(), Err("terminal_agent_unknown"), true),
+        (listed(), Err("terminal_teammates_server_ended"), true),
+        (listed(), Err("terminal_pane_unknown"), true),
+        (Some(Vec::new()), Err("terminal_command_failed"), true),
+        (listed(), Err("terminal_command_failed"), false),
+        (None, Err("terminal_command_failed"), false),
+    ] {
+        let host: Arc<dyn Host> = Recording::living(alive.clone(), live);
+        assert_eq!(
+            agent_gone(&host, &agent).await,
+            gone,
+            "listed {alive:?}, answer {live:?}"
+        );
+    }
+}
+
+/// #477 r1 F2: an input-only view of a terminal its host does not list, as an adopted
+/// teammate is, stays open past the grant check that runs as it opens and takes its keys
+/// until the owner detaches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_input_only_view_of_a_teammate_its_host_does_not_list_stays_open() {
+    let agent = AgentId::team(1).unwrap();
+    let host = Recording::living(Some(Vec::new()), Ok(true));
+    let (queue, mut asked) = tokio::sync::mpsc::channel(4);
+    let running = {
+        let (host, agent): (Arc<dyn Host>, AgentId) = (host.clone(), agent.clone());
+        tokio::spawn(async move {
+            let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+            let view = View {
+                agent,
+                cols: 80,
+                rows: 24,
+                viewer: None,
+            };
+            let viewing = Counted::allowing(usize::MAX);
+            pump(&mut ours, view, &mut asked, host, &viewing).await
+        })
+    };
+    queue
+        .send(TerminalRequest::Input {
+            bytes: b"x".to_vec(),
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !running.is_finished(),
+        "the view stayed open past its first grant check"
+    );
+    assert_eq!(*host.typed.lock().unwrap(), vec![b"x".to_vec()]);
+    drop(queue);
+    assert_eq!(
+        tokio::time::timeout(WAIT, running).await.unwrap().unwrap(),
+        "terminal_detached"
+    );
 }
