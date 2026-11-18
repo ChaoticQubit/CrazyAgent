@@ -396,14 +396,17 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
     Ok(listener)
 }
 
-/// Holds a free loopback TCP port that refuses every connect, as a model provider that is
-/// down: a listener takes one connection from this process and is closed, so the port stays
-/// in use by that connection with nothing listening on it. On unix the system then gives the
-/// port to no port-0 bind and refuses a bind that names it without `SO_REUSEADDR`. Input:
-/// none. Output: the connection's two ends, which free the port when dropped, and the port.
+/// Holds a free loopback TCP port from the low block that refuses every connect, as a model
+/// provider that is down, where an owner's model port would be: outside every range the
+/// system hands out by itself, which a kept model port on Linux must stay out of. A listener
+/// takes one connection from this process and is closed, so the port stays in use by that
+/// connection with nothing listening on it, and on unix a bind that names it without
+/// `SO_REUSEADDR` fails. Input: none. Output: the connection's two ends, which free the port
+/// when dropped, and the port.
 pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
-    let listener = bind_tcp_std("127.0.0.1:0")?;
+    let listener = low_tcp_listener()?;
     let address = listener.local_addr()?;
+    assert!(LOW_PORTS.contains(&address.port()));
     let near = connect_tcp_std(address)?;
     let (far, _) = accept_tcp_std(&listener)?;
     drop(listener);
@@ -434,6 +437,16 @@ const _: () = {
 /// sandboxed child's, binds it. Each call in this process starts past the port the last call
 /// gave. Input: none. Output: the port, which nothing holds when this returns.
 pub fn free_low_tcp_port() -> io::Result<u16> {
+    let port = low_tcp_listener()?.local_addr()?.port();
+    assert!(LOW_PORTS.contains(&port));
+    Ok(port)
+}
+
+/// Binds a loopback listener on a low block port nothing holds now. The bind itself takes
+/// the port, so another process racing for it fails its own bind and moves on; each call in
+/// this process starts past the port the last call took. Input: none. Output: the
+/// listener, or `AddrInUse` when every low port is taken.
+fn low_tcp_listener() -> io::Result<std::net::TcpListener> {
     static NEXT: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
     let span = u32::from(LOW_PORTS.end() - LOW_PORTS.start()) + 1;
     let mut next = NEXT
@@ -445,10 +458,10 @@ pub fn free_low_tcp_port() -> io::Result<u16> {
         let offset = (first + step) % span;
         let port = LOW_PORTS.start() + u16::try_from(offset).map_err(io::Error::other)?;
         let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-        if bind_tcp_std_exclusive(address).is_ok() {
+        if let Ok(listener) = bind_tcp_std_exclusive(address) {
             assert!(LOW_PORTS.contains(&port));
             *next = Some((offset + 1) % span);
-            return Ok(port);
+            return Ok(listener);
         }
     }
     Err(io::Error::new(

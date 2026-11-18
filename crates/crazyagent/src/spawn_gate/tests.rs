@@ -175,6 +175,27 @@ fn a_refusing_port_turns_connects_away_and_stays_taken_while_held() {
     drop(held);
 }
 
+/// A refusing port stands for a stopped model provider in a row's settings, so it lies where
+/// an owner's model port would: below every range the system hands out by itself, which on
+/// Linux a kept model port must stay out of or no Landlock agent starts (G1 N8 P4), and apart
+/// from the owner's and the model proxy's ports.
+#[test]
+fn a_refusing_port_lies_below_the_ports_the_system_hands_out() {
+    use crate::sandbox::OWNER_PORTS;
+    use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+    let held: Vec<_> = (0..4)
+        .map(|_| super::refusing_tcp_port().unwrap())
+        .collect();
+    for (_, port) in &held {
+        assert!(*port > 1024 && *port < PICKED_PORTS_START, "{port}");
+        assert!(
+            !PROXY_PORTS.contains(port) && !OWNER_PORTS.contains(port),
+            "{port}"
+        );
+    }
+    assert_eq!(held.len(), 4);
+}
+
 /// A low free port lies below every range the system hands out by itself, below the ports
 /// Linux node services use, and apart from the owner's and the model proxy's ports. A
 /// listener of its own binds it, and the next call in this process names another port.
