@@ -457,11 +457,11 @@ impl Shared {
                 by_key.entry(row.key).or_default().push(index);
             }
         }
-        for index in 0..lines {
-            if next[index].is_none()
-                && let Some(found) = by_key.get_mut(&frame.keys[index]).and_then(Vec::pop)
+        for (slot, key) in next.iter_mut().zip(&frame.keys) {
+            if slot.is_none()
+                && let Some(found) = by_key.get_mut(key).and_then(Vec::pop)
             {
-                next[index] = old[found].take();
+                *slot = old[found].take();
             }
         }
         let mut spare: Vec<Row> = old.into_iter().flatten().collect();
