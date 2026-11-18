@@ -115,9 +115,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
-    name: W1a win-sandbox rows and clippy on ${{ matrix.runner }}
+    name: W1 storage rows and clippy on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -136,6 +136,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Install SQLite for Windows
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -145,11 +154,26 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent-win-sandbox --all-targets --locked -- -D warnings
-      - name: W1a rows in crazyagent-win-sandbox
+      - name: W1 rows in crazyagent-win-sandbox
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           cargo test -p crazyagent-win-sandbox --locked --lib --test private_judge --test private_windows -- --test-threads 1
+      - name: Clippy on the crazyagent library
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          cargo clippy -p crazyagent --lib --locked -- -D warnings
+      - name: W1b storage rows on Windows
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent --lib --locked storage::windows_tests -- --test-threads 1
+      - name: Storage migrations rows on Linux
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent --lib --locked storage::migrations -- --test-threads 1
 
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
