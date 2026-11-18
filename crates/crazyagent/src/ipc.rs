@@ -429,6 +429,24 @@ mod windows_tests {
         assert_eq!(entries(&root), ["pipes", "pipes.keep"]);
     }
 
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-code2 #554 N3): a client reading the pipes file holds
+    /// it without delete sharing, which blocks the rename over it; a later start waits a
+    /// bounded time for that read to end instead of failing, and leaves nothing staged.
+    #[test]
+    fn a_publish_waits_for_a_client_reading_the_pipes_file() {
+        let (_temp, root) = private_root();
+        publish(&root, "engine.sock").unwrap();
+        let reader = private::read_only(&root.join("pipes")).unwrap();
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            drop(reader);
+        });
+        let second = publish(&root, "engine.sock").unwrap();
+        released.join().unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap(), second);
+        assert_eq!(entries(&root), ["pipes"]);
+    }
+
     /// D7 (leader 07:46): a pipes file already in the root that another account owns is
     /// refused and left as it was, never replaced, and nothing is staged beside it.
     #[test]
