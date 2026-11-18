@@ -1064,21 +1064,31 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     }
 }
 
-/// The program an agent named, made absolute against this command's current folder unless it
-/// is a bare file name, so Windows starts the file the agent meant and the spawn gate, which
-/// refuses a relative program, lets it through (V244-WIN-ROOT-RELATIVE-PROGRAM). Input: the
-/// program. Output: the program to start, or why it could not be made absolute.
+/// The program an agent named: an absolute or bare one as it is, one relative to this
+/// command's current folder made absolute against it, and one named from a drive root or a
+/// drive's own folder refused as the spawn gate refuses it, since another local user may plant
+/// it there (V244-WIN-ROOT-RELATIVE-PROGRAM, rv-code2 #537 F1). Input: the program. Output:
+/// the program to start, or the refusal or why it could not be made absolute.
 #[cfg(not(unix))]
 fn own_program(program: &OsStr) -> std::io::Result<OsString> {
     let path = Path::new(program);
-    let mut parts = path.components();
-    if matches!(
-        (parts.next(), parts.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    ) {
+    if crate::tools::fixed_program(path) {
         return Ok(program.to_owned());
     }
-    std::path::absolute(path).map(PathBuf::into_os_string)
+    if path.has_root()
+        || matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "spawn_relative_program_refused",
+        ));
+    }
+    let absolute = std::path::absolute(path)?;
+    assert!(crate::tools::fixed_program(&absolute));
+    Ok(absolute.into_os_string())
 }
 
 #[cfg(all(test, unix))]
