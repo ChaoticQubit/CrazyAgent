@@ -69,11 +69,36 @@ fn under(column: &str) -> String {
     format!("({column}=?1 OR substr({column},1,length(?1)+1)=?1||'/')")
 }
 
-/// Says where a path inside the old project folder is after the move. Inputs: the path and
-/// both folders. Output: the same place inside the new folder, or None for a path outside
-/// the old one.
+/// The short name of a folder stored under the macOS data volume: the same path without the
+/// `/System/Volumes/Data` prefix, which [`checked`] made sure names the same folder before
+/// the move was planned. Input: the stored folder. Output: the short name, none otherwise.
+#[cfg(target_os = "macos")]
+fn short_name(origin: &Path) -> Option<PathBuf> {
+    let rest = origin.strip_prefix(super::DATA_VOLUME).ok()?;
+    Some(Path::new("/").join(rest))
+}
+
+/// Off macOS a folder has one name. Input: the stored folder. Output: none.
+#[cfg(not(target_os = "macos"))]
+fn short_name(_origin: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// The names the old project folder's rows may use: as stored, and its short name when it
+/// is stored under the data volume. Input: the stored folder. Output: one or two names.
+fn origin_names(origin: &Path) -> Vec<PathBuf> {
+    let mut names = vec![origin.to_path_buf()];
+    names.extend(short_name(origin));
+    assert!(!names.is_empty() && names.len() <= 2);
+    names
+}
+
+/// Says where a path inside the old project folder, under either of its names, is after
+/// the move. Inputs: the path and both folders. Output: the same place inside the new
+/// folder, or None for a path outside the old one.
 fn moved(path: &Path, origin: &Path, target: &Path) -> Option<PathBuf> {
-    let rest = path.strip_prefix(origin).ok()?;
+    let names = origin_names(origin);
+    let rest = names.iter().find_map(|name| path.strip_prefix(name).ok())?;
     Some(if rest.as_os_str().is_empty() {
         target.to_path_buf()
     } else {
@@ -323,17 +348,18 @@ pub(crate) fn pending(connection: &Connection) -> Result<Option<Pending>, Engine
     .transpose()
 }
 
-/// The owner repositories landing work of the project runs in: the project's folder, and
-/// each repository one of its change sets names that is that folder or inside it under
-/// either name of a data-volume folder, in the spelling the change set stores, since landing
-/// work takes its hold by that. Inputs: an engine connection, the project and its stored
-/// folder. Output: the roots, or `move_project_unavailable` (also past the max).
+/// The owner repositories landing work of the project runs in, in each spelling landing
+/// work takes its hold by: the project's folder under both names of a data-volume folder,
+/// and each repository a change set names, as stored, that is that folder or inside it
+/// under either name. Inputs: an engine connection, the project and its stored folder.
+/// Output: the roots, or `move_project_unavailable` (also past the max).
 pub(super) fn landing_repositories(
     db: &Connection,
     project: &ProjectId,
     origin: &Path,
 ) -> Result<BTreeSet<PathBuf>, EngineError> {
-    let mut roots = BTreeSet::from([origin.to_path_buf()]);
+    let short = one_spelling(origin.to_path_buf());
+    let mut roots = BTreeSet::from([origin.to_path_buf(), short.clone()]);
     if !present(db, "landing_change_sets").map_err(sql)? {
         return Ok(roots);
     }
@@ -346,7 +372,6 @@ pub(super) fn landing_repositories(
             |row| row.get::<_, String>(0),
         )
         .map_err(sql)?;
-    let short = one_spelling(origin.to_path_buf());
     let under_origin = |path: &Path| path.starts_with(origin) || path.starts_with(&short);
     for repository in stored {
         let repository = PathBuf::from(repository.map_err(sql)?);
@@ -576,7 +601,7 @@ fn checked(
     if one_spelling(real.clone()).starts_with(one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
-    if real != found.folder {
+    if real != found.folder || (short_name(&real).is_some() && one_spelling(real.clone()) == real) {
         return Err(refused("move_project_folder_link"));
     }
     let source = text(&real)?;
@@ -602,8 +627,9 @@ fn checked(
 /// the hold: no agent or research run starts in the folder until the move is finished or
 /// forgotten ([`holds`]). Refusals, with nothing written: another project move pending
 /// (`move_project_in_progress`), no projects home, a project without setup, a folder
-/// already in the home (`move_project_already_home`), a folder reached through a link
-/// (`move_project_folder_link`), another project using the folder (`home_move_project`),
+/// already in the home (`move_project_already_home`), a folder reached through a link or
+/// stored under the data volume with no short name (`move_project_folder_link`), another
+/// project using the folder (`home_move_project`),
 /// what [`busy`] names, a Copy while an agent works in a linked worktree
 /// (`move_project_copy_worktrees`), a Move that breaks git worktrees kept outside the
 /// folder unless the owner went past it (`home_move_worktrees`), every refusal of
@@ -739,7 +765,7 @@ pub(crate) fn finish(
 /// git then refuses it instead of reading another store. Inputs: the transaction and both
 /// folders. Output: how many copies were rewritten.
 fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, EngineError> {
-    let from = text(origin)?;
+    let names = origin_names(origin);
     let mut copies: Vec<(String, String, String)> = Vec::new();
     for table in COPY_TABLES {
         if !present(tx, table).map_err(sql)? {
@@ -750,15 +776,17 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
             under("git_dir")
         );
         let mut statement = tx.prepare(&query).map_err(sql)?;
-        let rows = statement
-            .query_map(params![from, COPIES_MAX], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .map_err(sql)?;
-        for row in rows {
-            let copy = row.map_err(sql)?;
-            if !copies.contains(&copy) {
-                copies.push(copy);
+        for name in &names {
+            let rows = statement
+                .query_map(params![text(name)?, COPIES_MAX], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(sql)?;
+            for row in rows {
+                let copy = row.map_err(sql)?;
+                if !copies.contains(&copy) {
+                    copies.push(copy);
+                }
             }
         }
     }
@@ -814,7 +842,7 @@ fn rewrite(
     origin: &Path,
     target: &Path,
 ) -> Result<(), EngineError> {
-    let (from, to) = (text(origin)?, text(target)?);
+    let to = text(target)?;
     let json = |e: serde_json::Error| EngineError(e.to_string());
     let body: Option<String> = tx
         .query_row(
@@ -875,19 +903,22 @@ fn rewrite(
             .map_err(sql)?;
         }
     }
+    let names = origin_names(origin);
     for (table, column) in PATH_COLUMNS {
         if !present(tx, table).map_err(sql)? {
             continue;
         }
-        tx.execute(
-            &format!(
-                "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
-                 WHERE {}",
-                under(column)
-            ),
-            params![from, to],
-        )
-        .map_err(sql)?;
+        for name in &names {
+            tx.execute(
+                &format!(
+                    "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
+                     WHERE {}",
+                    under(column)
+                ),
+                params![text(name)?, to],
+            )
+            .map_err(sql)?;
+        }
     }
     Ok(())
 }
