@@ -142,6 +142,14 @@ impl Focus {
         })
     }
 
+    /// Notes whether any part of the view's rectangle shows inside the page; going off
+    /// screen drops native focus, which only a click or the host gives back. Input: shown
+    /// or not. Output: the new activity when it changed.
+    pub fn shown(&mut self, shown: bool) -> Option<bool> {
+        let _ = shown;
+        None
+    }
+
     fn change(&mut self, edit: impl FnOnce(&mut Focus)) -> Option<bool> {
         let before = self.active();
         edit(self);
@@ -797,6 +805,7 @@ mod tests {
     use crate::native_term::linux::rows::{STEP_WAIT, checkpoint, pump_for, pump_until, row_dir};
     use crate::native_term::linux::surface::{self, Rect};
     use crate::native_term::pane::Named;
+    use gtk::glib::translate::{IntoGlib, ToGlibPtr};
     use serde_json::json;
     use std::cell::RefCell;
     use std::time::Duration;
@@ -900,6 +909,7 @@ mod tests {
     #[test]
     fn keys_go_to_the_view_only_with_native_and_toplevel_focus_and_no_cover() {
         let mut focus = Focus::new(true);
+        assert_eq!(focus.shown(true), None);
         assert!(!focus.active());
         assert_eq!(focus.native(true), Some(true));
         assert_eq!(focus.native(true), None);
@@ -913,6 +923,7 @@ mod tests {
     #[test]
     fn a_cover_drops_native_focus_until_the_page_gives_it_back() {
         let mut focus = Focus::new(true);
+        assert_eq!(focus.shown(true), None);
         assert_eq!(focus.native(true), Some(true));
         assert_eq!(focus.cover(true), Some(false));
         assert_eq!(focus.native(true), None);
@@ -925,6 +936,7 @@ mod tests {
     #[test]
     fn a_commit_lands_only_while_the_view_is_active() {
         let mut focus = Focus::new(true);
+        assert_eq!(focus.shown(true), None);
         assert_eq!(commit_event(focus, "a"), None);
         assert_eq!(focus.native(true), Some(true));
         assert_eq!(commit_event(focus, "a"), Some(text(b"a")));
@@ -936,6 +948,27 @@ mod tests {
         assert_eq!(commit_event(focus, "a"), None);
         assert_eq!(focus.cover(false), None);
         assert_eq!(commit_event(focus, "a"), None);
+    }
+
+    #[test]
+    fn a_view_off_screen_refuses_native_focus_and_going_off_screen_drops_it() {
+        let mut focus = Focus::new(true);
+        assert_eq!(
+            focus.native(true),
+            None,
+            "a view not on screen refuses native focus"
+        );
+        assert_eq!(focus.shown(true), None);
+        assert_eq!(focus.native(true), Some(true));
+        assert_eq!(focus.shown(false), Some(false));
+        assert!(!focus.is_native(), "going off screen drops native focus");
+        assert_eq!(focus.native(true), None);
+        assert_eq!(focus.shown(true), None);
+        assert!(
+            !focus.is_native(),
+            "coming back on screen gives no native focus back"
+        );
+        assert_eq!(focus.native(true), Some(true));
     }
 
     const DOUBLE: DoubleClick = DoubleClick {
@@ -1123,6 +1156,7 @@ mod tests {
             text: "p".to_owned(),
         }));
         let mut focus = Focus::new(true);
+        assert_eq!(focus.shown(true), None);
         assert_eq!(primary_paste(focus, true, text()), paste);
         assert_eq!(primary_paste(focus, false, text()), None);
         assert_eq!(primary_paste(focus, true, None), None);
@@ -1233,6 +1267,210 @@ mod tests {
         assert_eq!(clicks(left(&mut pointer, (116.0, 134.0), 150)), 1);
     }
 
+    /// The ids of the two-view rows' views: A, wired to the page first, and B.
+    const A: u64 = 11;
+    const B: u64 = 12;
+
+    const RECT_A: Rect = Rect {
+        x: 20,
+        y: 20,
+        w: 200,
+        h: 100,
+    };
+
+    const RECT_B: Rect = Rect {
+        x: 300,
+        y: 20,
+        w: 200,
+        h: 100,
+    };
+
+    /// A toplevel whose page widget sits at its top left in a fixed container, and two
+    /// placed views on the page, A wired first, then B, which holds native focus in a
+    /// toplevel both treat as focused. Output: the toplevel, the page, its GDK window and
+    /// the views.
+    fn two_views() -> (gtk::Window, gtk::DrawingArea, gdk::Window, View, View) {
+        gtk::init().expect("a display");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("native-row");
+        window.set_default_size(640, 480);
+        let fixed = gtk::Fixed::new();
+        let page = gtk::DrawingArea::new();
+        page.set_size_request(600, 400);
+        fixed.put(&page, 0, 0);
+        window.add(&fixed);
+        window.show_all();
+        pump_until("the toplevel mapped", || {
+            window.window().is_some_and(|gdk| gdk.is_viewable())
+        });
+        pump_for(Duration::from_millis(300));
+        let gdk = window.window().expect("a GDK window");
+        let view = |id| {
+            View::new(
+                &window,
+                page.upcast_ref(),
+                id,
+                seen,
+                Rc::new(Clip::private()),
+            )
+            .expect("a view")
+        };
+        let a = view(A);
+        let b = view(B);
+        a.place(Some(RECT_A));
+        b.place(Some(RECT_B));
+        for one in [&a, &b] {
+            one.inner.moving(|f| f.toplevel(true), false);
+        }
+        b.focus(true);
+        assert!(b.inner.focus.get().active(), "B takes keys");
+        (window, page, gdk, a, b)
+    }
+
+    /// A key press of a key on a window, built as GDK builds one. Inputs: the window and
+    /// the key. Output: the event.
+    fn key_event(window: &gdk::Window, keyval: Key) -> EventKey {
+        let event: gdk::Event = unsafe {
+            let event = gdk::ffi::gdk_event_new(gdk::ffi::GDK_KEY_PRESS);
+            assert!(!event.is_null());
+            (*event).key.window = window.to_glib_full();
+            (*event).key.keyval = keyval.into_glib();
+            (*event).key.time = 1;
+            gtk::glib::translate::from_glib_full(event)
+        };
+        event.downcast::<EventKey>().expect("a key event")
+    }
+
+    /// A left button event at a point of a toplevel, built as GDK builds one. Inputs: the
+    /// event type, the toplevel's GDK window and the point. Output: the event.
+    fn left_event(
+        kind: gdk::ffi::GdkEventType,
+        window: &gdk::Window,
+        at: (f64, f64),
+    ) -> gdk::Event {
+        let (_, x, y) = window.origin();
+        unsafe {
+            let event = gdk::ffi::gdk_event_new(kind);
+            assert!(!event.is_null());
+            (*event).button.window = window.to_glib_full();
+            (*event).button.time = 1;
+            (*event).button.x = at.0;
+            (*event).button.y = at.1;
+            (*event).button.x_root = f64::from(x) + at.0;
+            (*event).button.y_root = f64::from(y) + at.1;
+            (*event).button.button = 1;
+            gtk::glib::translate::from_glib_full(event)
+        }
+    }
+
+    /// Resizes the page widget and runs GTK's layout. Inputs: the page and its size.
+    fn resize_page(page: &gtk::DrawingArea, size: (i32, i32)) {
+        page.set_size_request(size.0, size.1);
+        pump_until("the page's new allocation", || {
+            (page.allocated_width(), page.allocated_height()) == size
+        });
+        pump_for(Duration::from_millis(100));
+    }
+
+    fn assert_no_keys() {
+        let seen: Vec<(u64, ViewEvent)> = SEEN.with(|seen| seen.borrow_mut().drain(..).collect());
+        assert!(
+            seen.iter()
+                .all(|(_, event)| !matches!(event, ViewEvent::Key(_))),
+            "no key reached a view: {seen:?}"
+        );
+    }
+
+    fn close(window: gtk::Window, a: View, b: View) {
+        drop(b);
+        drop(a);
+        unsafe {
+            window.destroy();
+        }
+    }
+
+    /// A view the host unplaces while it holds native focus sends its keys on to the page
+    /// and gets no native focus back when placed again.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb and sway"]
+    fn an_unplaced_view_sends_its_keys_on_to_the_page() {
+        let (window, _page, gdk, a, b) = two_views();
+        let x = key_event(&gdk, key::x);
+        assert!(b.inner.focus.get().active());
+        b.place(None);
+        assert_eq!(
+            b.inner.key_press(&x),
+            Propagation::Proceed,
+            "an unplaced view's keys go on to the page"
+        );
+        b.place(Some(RECT_B));
+        assert!(
+            !b.inner.focus.get().is_native(),
+            "placing again gives no native focus back"
+        );
+        b.focus(true);
+        assert!(b.inner.focus.get().active());
+        assert_no_keys();
+        close(window, a, b);
+    }
+
+    /// A view whose rectangle the page shrinks away from, with no host call, sends its keys
+    /// on to the page and gets no native focus back when the page grows again.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb and sway"]
+    fn a_view_clipped_out_of_the_page_sends_its_keys_on_to_the_page() {
+        let (window, page, gdk, a, b) = two_views();
+        let x = key_event(&gdk, key::x);
+        assert!(b.inner.focus.get().active());
+        resize_page(&page, (250, 400));
+        assert_eq!(
+            b.inner.key_press(&x),
+            Propagation::Proceed,
+            "a view with no part inside the page takes no keys"
+        );
+        resize_page(&page, (600, 400));
+        assert!(
+            !b.inner.focus.get().is_native(),
+            "showing again gives no native focus back"
+        );
+        b.focus(true);
+        assert!(b.inner.focus.get().active());
+        assert_no_keys();
+        close(window, a, b);
+    }
+
+    /// A press in view A, wired to the page first, takes native focus from view B, whose
+    /// handler never sees the press, so a cover over A leaves the keys to neither view.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb and sway"]
+    fn a_press_in_one_view_takes_native_focus_from_the_other() {
+        let (window, page, gdk, a, b) = two_views();
+        let x = key_event(&gdk, key::x);
+        let at = (60.0, 60.0);
+        assert!(
+            page.event(&left_event(gdk::ffi::GDK_BUTTON_PRESS, &gdk, at)),
+            "A takes a press in its rectangle"
+        );
+        assert!(page.event(&left_event(gdk::ffi::GDK_BUTTON_RELEASE, &gdk, at)));
+        assert!(
+            a.inner.focus.get().active(),
+            "the press gives A native focus"
+        );
+        assert!(
+            !b.inner.focus.get().is_native(),
+            "A taking native focus releases B"
+        );
+        a.cover(true);
+        assert_eq!(a.inner.key_press(&x), Propagation::Proceed);
+        assert_eq!(
+            b.inner.key_press(&x),
+            Propagation::Proceed,
+            "with A covered, keys go to neither view"
+        );
+        assert_no_keys();
+        close(window, a, b);
+    }
+
     fn page_text(page: &webkit2gtk::WebView) -> String {
         page.title()
             .map(|title| title.to_string())
@@ -1276,6 +1514,12 @@ mod tests {
             Rc::new(Clip::desktop()),
         )
         .expect("a view");
+        view.place(Some(Rect {
+            x: 20,
+            y: 20,
+            w: 200,
+            h: 100,
+        }));
 
         step("page");
         pump_until("page typing", || page_text(&page) == "v:xy");
