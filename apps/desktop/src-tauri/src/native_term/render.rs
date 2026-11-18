@@ -39,8 +39,8 @@ struct Row {
 }
 
 /// The device every native view draws with, made with the first view's surface: the
-/// largest texture side it allows and whether its error handler recorded a wgpu error
-/// since the last render call took it.
+/// largest texture side it allows, whether its error handler recorded a wgpu error since
+/// the last render call took it, and whether wgpu reported the device lost.
 struct Device {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -51,9 +51,17 @@ struct Device {
     cache: Cache,
     side_max: u32,
     faulted: Arc<AtomicBool>,
+    lost: Arc<AtomicBool>,
 }
 
 impl Device {
+    /// Whether wgpu reported this device lost. wgpu runs the lost callback inside the call
+    /// that lost the device, and every wgpu call here runs on the main thread, so a loss is
+    /// seen by the next check on that thread. Output: the answer; it never clears.
+    fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
     /// Takes the wgpu error the handler recorded since the last call. wgpu reports an
     /// error inside the call that caused it, so the render call that asks owns it.
     /// Output: ok, or `native_terminal_gpu`.
@@ -291,7 +299,8 @@ fn rect_pipeline(
 
 /// Makes the device for the first surface: the low-power adapter that can present to it,
 /// with the adapter's own limits instead of wgpu's defaults (a 2D texture side of 8192),
-/// and an error handler that logs a wgpu error and records it instead of panicking.
+/// an error handler that logs a wgpu error and records it instead of panicking, and a
+/// lost callback that logs the loss and marks the device lost and faulted.
 fn device_for(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'static>,
@@ -323,6 +332,13 @@ fn device_for(
         eprintln!("{GPU_FAULT}: {error}");
         sink.store(true, Ordering::Release);
     }));
+    let lost = Arc::new(AtomicBool::new(false));
+    let (lost_mark, fault_mark) = (Arc::clone(&lost), Arc::clone(&faulted));
+    device.set_device_lost_callback(move |reason, message| {
+        eprintln!("{GPU_FAULT}: device lost ({reason:?}): {message}");
+        lost_mark.store(true, Ordering::Release);
+        fault_mark.store(true, Ordering::Release);
+    });
     let format = surface
         .get_capabilities(&adapter)
         .formats
@@ -341,6 +357,7 @@ fn device_for(
         cache,
         side_max,
         faulted,
+        lost,
     })
 }
 
@@ -720,12 +737,16 @@ impl Shared {
     }
 
     /// Paints one frame: reshapes changed rows, uploads rectangles and glyphs, renders and
-    /// presents; a lost surface is reconfigured at its held size. Inputs: the surface and
-    /// the frame. Output: ok, or why it was skipped.
+    /// presents; a lost surface is reconfigured at its held size. On a lost device it does
+    /// no GPU work, since glyphon's buffer map then panics in wgpu 25. Inputs: the surface
+    /// and the frame. Output: ok, why it was skipped, or `native_terminal_gpu`.
     fn paint(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
         let set = self.device.as_ref().ok_or("no device")?;
+        if set.is_lost() {
+            return Err(GPU_FAULT.to_owned());
+        }
         let (width, height) = (surface.config.width, surface.config.height);
         let screen = [width as f32, height as f32, 0.0, 0.0];
         set.queue
@@ -783,8 +804,9 @@ impl Shared {
 }
 
 /// Hands an acquired frame back to wgpu: presents it once encoded, or lets it drop, which
-/// discards it, when encoding failed. Inputs: the device, the frame and the encode result.
-/// Output: ok, or the encode error.
+/// discards it, when encoding failed. On a lost device both panic in wgpu 25, so the frame
+/// is forgotten instead: one frame leaks, and its view ends. Inputs: the device, the frame
+/// and the encode result. Output: ok, the encode error, or `native_terminal_gpu`.
 fn hand_back(
     set: &Device,
     output: wgpu::SurfaceTexture,
@@ -792,6 +814,10 @@ fn hand_back(
 ) -> Result<(), String> {
     assert!(output.texture.width() <= set.side_max);
     assert!(output.texture.height() <= set.side_max);
+    if set.is_lost() {
+        std::mem::forget(output);
+        return Err(GPU_FAULT.to_owned());
+    }
     encoded?;
     output.present();
     Ok(())
