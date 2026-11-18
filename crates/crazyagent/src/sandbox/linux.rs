@@ -118,9 +118,15 @@ pub const NEST_ARGS: [&str; 10] = [
     "/proc",
 ];
 const RESOLVER_ROOT: &str = "/run/systemd/resolve";
-const HELPER_MISSING: &str = "this Linux cannot fully enforce Landlock file rules (Linux 6.2 \
-     or newer), and CrazyAgent's sandbox helper, which keeps a bubblewrap agent off Unix \
-     sockets, is missing; reinstall CrazyAgent";
+const HELPER_MISSING: &str = "CrazyAgent's sandbox helper is missing, and no Linux agent \
+     starts without it; reinstall CrazyAgent.";
+/// How the helper says the kernel holds the ruleset only in part or not at all, the one probe
+/// failure a kernel refusal names ([`probe_refusal`]).
+const HOLD_REFUSED: &str = "this kernel cannot hold the boundary";
+/// How a refusal starts when the probe failed for any reason but the kernel's answer.
+const PROBE_FAILED: &str = "the sandbox check failed";
+/// The most bytes of the probe's own reason a refusal carries.
+const PROBE_REASON_MAX: usize = 200;
 /// The launch refusal when this computer's nest check passed ([`nest_held`]) but the launch's
 /// own nest probe failed (rv-sa241 SBX-2-R2 LOW-1), so no agent runs on the shared network
 /// with Landlock rules alone while the Agent access page says it is nested.
@@ -1218,10 +1224,7 @@ fn hold(
     match enforce(policy, launch.is_some()) {
         Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
-            eprintln!(
-                "crazyagent-landlock: this kernel cannot hold the boundary ({:?})",
-                status.ruleset
-            );
+            eprintln!("crazyagent-landlock: {HOLD_REFUSED} ({:?})", status.ruleset);
             return ExitCode::from(3);
         }
         Err(error) => {
@@ -1674,13 +1677,18 @@ impl LinuxSandbox {
     /// Picks the backend as [`LinuxSandbox::detect`] does, with bubblewrap looked for only
     /// at `bwraps`, so a caller with none pins the plain Landlock backend. Inputs: the
     /// project policy, the helper executable and the bubblewrap places, in order. Output:
-    /// the sandbox, or `Unavailable` when no backend can hold it.
+    /// the sandbox, or `Unavailable` naming a missing helper, the kernel's answer or the
+    /// probe's own reason ([`probe_refusal`]) when no backend can hold it.
     pub fn detect_among(
         sandbox: ProjectSandbox,
         helper: &Path,
         bwraps: &[&Path],
     ) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
+        if !clean_absolute(helper) || !helper.is_file() {
+            eprintln!("linux_helper_missing: expected at {}", helper.display());
+            return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
+        }
         let mut probe = Command::new(helper);
         probe.arg(PROBE);
         let open = matches!(sandbox.network(), SandboxNetwork::Open);
@@ -1693,8 +1701,8 @@ impl LinuxSandbox {
             }
         }
         let flags: Vec<OsString> = probe.get_args().map(OsStr::to_os_string).collect();
-        let held = clean_absolute(helper) && helper.is_file() && passes(&mut probe);
-        if held {
+        let failed = probe_failure(&mut probe);
+        if failed.is_none() {
             let helper = helper.to_path_buf();
             let nest = bwraps
                 .iter()
@@ -1728,13 +1736,15 @@ impl LinuxSandbox {
             assert!(detected.routed.is_none() || detected.sandbox.bridged_ports().is_none());
             return Ok(detected);
         }
+        let named = failed.and_then(|reason| probe_refusal(&reason));
         if open {
-            return Err(SandboxError::Unavailable(
-                LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into(),
-            ));
+            let reason = named.unwrap_or_else(|| LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into());
+            return Err(SandboxError::Unavailable(reason));
         }
-        if !clean_absolute(helper) || !helper.is_file() {
-            return Err(SandboxError::Unavailable(HELPER_MISSING.into()));
+        let limited =
+            matches!(sandbox.network(), SandboxNetwork::Only(remotes) if !remotes.is_empty());
+        if let Some(reason) = named.as_ref().filter(|_| limited) {
+            return Err(SandboxError::Unavailable(reason.clone()));
         }
         match bwraps.iter().find(|path| path.is_file()) {
             Some(bwrap) => Self::new(
@@ -1744,11 +1754,11 @@ impl LinuxSandbox {
                     helper: helper.to_path_buf(),
                 },
             ),
-            None => Err(SandboxError::Unavailable(
+            None => Err(SandboxError::Unavailable(named.unwrap_or_else(|| {
                 "this Linux cannot fully enforce Landlock file rules (Linux 6.2 or newer) and \
                  has no bubblewrap; install bubblewrap"
-                    .into(),
-            )),
+                    .into()
+            }))),
         }
     }
 
@@ -1878,6 +1888,58 @@ fn supervises(helper: &Path, bwrap: Option<&Path>, data: &Path, root: bool) -> b
         );
     }
     held
+}
+
+/// Runs a probe with no environment and no input, keeping what it says on stderr, which goes
+/// to the log whole. Input: the probe command. Output: none when it ran and exited 0, else
+/// its reason ([`probe_reason`]).
+fn probe_failure(probe: &mut Command) -> Option<String> {
+    let ran = crate::spawn_gate::output(
+        probe
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    );
+    let (said, ended) = match ran {
+        Ok(output) if output.status.success() => return None,
+        Ok(output) => (
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            output.status.to_string(),
+        ),
+        Err(error) => (String::new(), error.to_string()),
+    };
+    let flags: Vec<&OsStr> = probe.get_args().collect();
+    eprintln!("linux_probe_failed: {flags:?} {ended}: {said}");
+    Some(probe_reason(&said, &ended))
+}
+
+/// The reason a refusal carries for a failed probe: the first line it said, or how it ended
+/// when that line is blank, with control characters dropped and cut to [`PROBE_REASON_MAX`]
+/// bytes on a character boundary. Inputs: its stderr and how it ended. Output: the reason.
+fn probe_reason(said: &str, ended: &str) -> String {
+    let clean = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
+    let first = clean(said.lines().next().unwrap_or_default());
+    let source = if first.trim().is_empty() {
+        clean(ended)
+    } else {
+        first
+    };
+    let mut cut = PROBE_REASON_MAX.min(source.len());
+    while !source.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    source[..cut].to_owned()
+}
+
+/// The refusal a failed probe names, unless the probe gave the kernel's answer that it holds
+/// the ruleset only in part or not at all, for which the kernel refusals stay. Input: the
+/// probe's reason ([`probe_reason`]). Output: the refusal, or none for the kernel's answer.
+fn probe_refusal(reason: &str) -> Option<String> {
+    let kernel = [RulesetStatus::PartiallyEnforced, RulesetStatus::NotEnforced]
+        .iter()
+        .any(|status| reason == format!("crazyagent-landlock: {HOLD_REFUSED} ({status:?})"));
+    (!kernel).then(|| format!("{PROBE_FAILED}: {reason}"))
 }
 
 /// Runs a probe with no environment and no input or output. Input: the probe command.
