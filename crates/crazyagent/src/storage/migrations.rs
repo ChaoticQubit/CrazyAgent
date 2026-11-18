@@ -22,6 +22,7 @@ pub(crate) const BACKUPS: &str = "backups";
 
 /// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
 pub(crate) const BACKUPS_KEPT: usize = 5;
+const _: () = assert!(BACKUPS_KEPT >= 1);
 
 /// The database file name inside a backup folder.
 const DATABASE: &str = "engine.db";
@@ -543,7 +544,7 @@ fn backup(
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);
     }
-    prune(&folder)?;
+    prune(&folder, &target)?;
     Ok(target)
 }
 
@@ -749,10 +750,11 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
     file.sync_all().map_err(backup_failed)
 }
 
-/// Removes all but the newest BACKUPS_KEPT backup folders. Only real folders named
-/// `<from>-to-<to>-<UTC time>` count; anything else in the folder is left alone.
-/// Input: the backups folder. Output: Ok once the older backups are gone.
-fn prune(folder: &Path) -> Result<(), EngineError> {
+/// Keeps the backup just made and the newest BACKUPS_KEPT - 1 others, removing the rest.
+/// Only real folders of this user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count;
+/// anything else, another account's folder included, is neither counted nor removed.
+/// Inputs: the backups folder and the new backup. Output: Ok once the older backups are gone.
+fn prune(folder: &Path, made: &Path) -> Result<(), EngineError> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(folder).map_err(backup_failed)? {
         let entry = entry.map_err(backup_failed)?;
@@ -762,16 +764,54 @@ fn prune(folder: &Path) -> Result<(), EngineError> {
         let Some(time) = backup_time(&name).map(str::to_owned) else {
             continue;
         };
-        if entry.file_type().map_err(backup_failed)?.is_dir() {
+        let path = folder.join(&name);
+        if path != made && own_folder(&path) {
             found.push((time, name));
         }
     }
     found.sort();
-    let excess = found.len().saturating_sub(BACKUPS_KEPT);
+    let excess = found.len().saturating_sub(BACKUPS_KEPT - 1);
     for (_, name) in &found[..excess] {
         std::fs::remove_dir_all(folder.join(name)).map_err(backup_failed)?;
     }
     Ok(())
+}
+
+/// Whether a backups entry is a real folder of this user, read without following a link, so
+/// a link, a file or a folder another account placed there is never counted or removed.
+/// Input: the entry's path. Output: the answer, false for anything unreadable or gone.
+#[cfg(unix)]
+fn own_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_dir() && metadata.uid() == rustix::process::getuid().as_raw()
+    })
+}
+
+/// Whether a backups entry is a real folder of this user, opened as itself, never a link's
+/// target: a folder that is no reparse point, with this user or, for an elevated user, the
+/// administrators as owner (DESIGN-0256 C6). Input: the entry's path. Output: the answer,
+/// false for anything unreadable or gone, so an unknown folder is never removed.
+#[cfg(windows)]
+fn own_folder(path: &Path) -> bool {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    let Ok(folder) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    else {
+        return false;
+    };
+    let (Ok(metadata), Ok(facts), Ok(user)) = (
+        folder.metadata(),
+        private::facts(&folder),
+        private::user_sid(),
+    ) else {
+        return false;
+    };
+    metadata.is_dir()
+        && !facts.reparse
+        && crazyagent_win_sandbox::dacl::trusted_owner(&facts.owner, &user)
 }
 
 /// The UTC time part of a backup folder name `<from>-to-<to>-<time>`.
