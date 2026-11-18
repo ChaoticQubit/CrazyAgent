@@ -1,0 +1,123 @@
+diff --git a/crates/crazyagent/src/engine/owner/transport/harness_catalog.rs b/crates/crazyagent/src/engine/owner/transport/harness_catalog.rs
+index 7ccb88caa..6559454e1 100644
+--- a/crates/crazyagent/src/engine/owner/transport/harness_catalog.rs
++++ b/crates/crazyagent/src/engine/owner/transport/harness_catalog.rs
+@@ -156,7 +156,14 @@ async fn look_again(
+         }
+     }
+     for id in finding::CHOOSABLE {
+-        if let Ok(Found::Refused { code, .. }) = runtime.look_again(id) {
++        let diag_one = std::time::Instant::now();
++        let diag_found = runtime.look_again(id);
++        ca_diag(&format!(
++            "look_again {id} took={:?} ok={}",
++            diag_one.elapsed(),
++            diag_found.is_ok()
++        ));
++        if let Ok(Found::Refused { code, .. }) = diag_found {
+             eprintln!("{id} was found on Check again but not used ({code})");
+         }
+     }
+@@ -188,9 +195,11 @@ pub(super) async fn serve(
+         engine: engine.clone(),
+         authority: authority.clone(),
+     };
++    let diag_start = std::time::Instant::now();
+     if matches!(action, Action::Check) {
+         look_again(engine, authority, packet, admission, &runtime).await?;
+     }
++    let diag_look = diag_start.elapsed();
+     let mut search = runtime
+         .held_search()?
+         .unwrap_or_else(Search::from_environment);
+@@ -212,6 +221,7 @@ pub(super) async fn serve(
+             search = search.with_registered(id, listed);
+         }
+     }
++    let diag_registered = diag_start.elapsed();
+     if !matches!(action, Action::List | Action::Check) {
+         return updates::serve(stream, engine, authority, packet, admission, search, action).await;
+     }
+@@ -228,6 +238,11 @@ pub(super) async fn serve(
+     .await
+     .map_err(|_| failure("harness_catalog_unavailable"))?;
+     assert!(!entries.is_empty());
++    ca_diag(&format!(
++        "catalog check={} look_again={diag_look:?} registered={diag_registered:?} total_before_reply={:?}",
++        matches!(action, Action::Check),
++        diag_start.elapsed()
++    ));
+     let _barrier = engine.owner_egress.write().await;
+     let reply = if &authority.authenticate(packet)? == admission {
+         WireReply::Catalog { entries }
+@@ -239,3 +254,17 @@ pub(super) async fn serve(
+     let frame = encode_frame(&reply).map_err(|_| failure("harness_catalog_response_bounds"))?;
+     stream.write_all(&frame).await.map_err(io_error)
+ }
++
++fn ca_diag(text: &str) {
++    eprintln!("CA_DIAG {text}");
++    if let Some(dir) = std::env::var_os("CA_DIAG_DIR") {
++        use std::io::Write;
++        if let Ok(mut file) = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(std::path::Path::new(&dir).join("diag.log"))
++        {
++            let _ = writeln!(file, "{} {text}", std::process::id());
++        }
++    }
++}
+diff --git a/crates/crazyagent/src/terminal/tmux.rs b/crates/crazyagent/src/terminal/tmux.rs
+index a8ae10474..45306fb17 100644
+--- a/crates/crazyagent/src/terminal/tmux.rs
++++ b/crates/crazyagent/src/terminal/tmux.rs
+@@ -1753,6 +1753,13 @@ fn viewer(
+ }
+ 
+ fn error_code(lines: &[Vec<u8>]) -> HostError {
++    ca_diag(&format!(
++        "tmux error lines={:?}",
++        lines
++            .iter()
++            .map(|line| String::from_utf8_lossy(line).into_owned())
++            .collect::<Vec<_>>()
++    ));
+     let missing = lines
+         .iter()
+         .any(|line| line.windows(10).any(|word| word == b"can't find"));
+@@ -2263,6 +2270,16 @@ impl Tmux {
+             pid,
+             dead: false,
+         };
++        {
++            let server = self.server_pid();
++            let parents = crate::team::caller::process_parents();
++            let parent = parents.as_ref().map(|table| table.get(&pid).copied());
++            ca_diag(&format!(
++                "spawn pane={pane} pid={pid} server={server:?} parent_of_pid={parent:?} table_len={:?} alive_proc={}",
++                parents.as_ref().map(|table| table.len()),
++                std::path::Path::new(&format!("/proc/{pid}")).exists()
++            ));
++        }
+         if self.served(&[first]).is_empty() {
+             let _ = control.run(&format!("kill-window -t {}", target(agent)));
+             return Err(failure("terminal_command_failed"));
+@@ -2618,3 +2635,17 @@ mod servers;
+ #[cfg(test)]
+ #[path = "tmux/tests.rs"]
+ mod tests;
++
++fn ca_diag(text: &str) {
++    eprintln!("CA_DIAG {text}");
++    if let Some(dir) = std::env::var_os("CA_DIAG_DIR") {
++        use std::io::Write;
++        if let Ok(mut file) = std::fs::OpenOptions::new()
++            .create(true)
++            .append(true)
++            .open(std::path::Path::new(&dir).join("diag.log"))
++        {
++            let _ = writeln!(file, "{} {text}", std::process::id());
++        }
++    }
++}
