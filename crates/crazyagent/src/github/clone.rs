@@ -177,7 +177,10 @@ pub(super) fn credential_git(git: &Path, empty_home: &Path, helper: &str, scheme
         .arg(format!("credential.helper={helper}"))
         .args(["-c", "credential.interactive=never"])
         .arg("-c")
-        .arg(format!("core.hooksPath={NULL_DEVICE}"))
+        .arg(format!(
+            "core.hooksPath={}",
+            crate::research::runner::no_program()
+        ))
         .args(["-c", "core.fsmonitor=false"])
         .args(["-c", "core.pager=cat"])
         .args(["-c", "core.askPass="])
