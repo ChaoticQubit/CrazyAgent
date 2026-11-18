@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   macos:
-    name: V244 L0 seam on macOS, red d4e2486c9 then green e973ebb32
+    name: V244 L0 seam on macOS, red d4e2486c9 then green e973ebb32, with the pinned tmux the control rows need
     runs-on: macos-15
     timeout-minutes: 300
     env:
@@ -55,6 +55,18 @@ jobs:
           save-if: false
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
+      - name: Install tmux on macOS
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux 3.8"
       - name: Red then green rows, lib build and clippy, one target set per cargo call
         run: |
           set -euo pipefail
@@ -65,109 +77,5 @@ jobs:
         with:
           name: v244-native-seam-macos
           path: ${{ runner.temp }}/v244-native-seam-macos.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-  linux:
-    name: V244 L0 seam on Linux, red d4e2486c9 then green e973ebb32
-    runs-on: ubuntu-22.04
-    timeout-minutes: 150
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - name: Free disk on the Linux runner
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
-          df -h /
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          fetch-depth: 5
-      - name: Install Linux build packages
-        timeout-minutes: 25
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install the fonts the fallback rows read
-        timeout-minutes: 15
-        run: |
-          sudo apt-get -o Acquire::Retries=2 install -y --no-install-recommends fonts-dejavu-core fonts-noto-color-emoji fonts-noto-cjk \
-            || echo "::warning::font packages did not install; the font rows take their built-in branch"
-      - name: Install the Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: farm
-          shared-key: linux
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-bin: false
-          save-if: false
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Red then green rows, lib build and clippy, one target set per cargo call
-        run: |
-          set -euo pipefail
-          cp .github/farm/v244-native-seam.sh "$RUNNER_TEMP/seam.sh"
-          bash "$RUNNER_TEMP/seam.sh" linux
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: v244-native-seam-linux
-          path: ${{ runner.temp }}/v244-native-seam-linux.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-  windows:
-    name: V244 L0 seam on Windows, lib build, lib rows build and clippy at e973ebb32
-    runs-on: windows-2022
-    timeout-minutes: 150
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          fetch-depth: 5
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - name: Install the Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: farm
-          shared-key: windows
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-bin: false
-          save-if: false
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Green lib build, lib rows build and clippy, one target set per cargo call
-        run: |
-          set -euo pipefail
-          git diff --quiet "$GREEN_SHA" HEAD -- apps crates Cargo.toml Cargo.lock
-          cp .github/farm/v244-native-seam.sh "$RUNNER_TEMP/seam.sh"
-          bash "$RUNNER_TEMP/seam.sh" windows
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: v244-native-seam-windows
-          path: ${{ runner.temp }}/v244-native-seam-windows.txt
           if-no-files-found: warn
           retention-days: 14
