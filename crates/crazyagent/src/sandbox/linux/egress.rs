@@ -1021,6 +1021,42 @@ mod tests {
         }
     }
 
+    /// V243-LINUX-EGRESS-REJECT: every rule that refuses a packet answers it, so an agent's
+    /// refused connect fails at once instead of waiting out its SYN retries, about 127 s
+    /// each. A last rule answers whatever no rule let out, and the DROP policy stays behind it.
+    #[test]
+    fn a_refused_packet_is_answered_so_a_refused_connect_fails_at_once() {
+        for (rules, refuse) in [
+            (
+                egress_rules(&[443]),
+                "-j REJECT --reject-with icmp-port-unreachable",
+            ),
+            (
+                egress_rules(&[443, 8443]),
+                "-j REJECT --reject-with icmp-port-unreachable",
+            ),
+            (
+                egress_rules_v6(),
+                "-j REJECT --reject-with icmp6-port-unreachable",
+            ),
+        ] {
+            let output: Vec<&str> = rules
+                .lines()
+                .filter(|line| line.starts_with("-A OUTPUT "))
+                .collect();
+            assert!(
+                output.iter().all(|line| !line.ends_with(" -j DROP")),
+                "{rules}"
+            );
+            assert_eq!(
+                output.last().copied(),
+                Some(format!("-A OUTPUT {refuse}").as_str()),
+                "{rules}"
+            );
+            assert!(rules.contains("\n:OUTPUT DROP [0:0]\n"), "{rules}");
+        }
+    }
+
     #[test]
     fn the_read_back_drops_comments_and_counters_and_keeps_every_policy_and_rule() {
         let canonical = concat!(

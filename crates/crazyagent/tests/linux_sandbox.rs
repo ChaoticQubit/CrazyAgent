@@ -2824,6 +2824,28 @@ fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_ho
     assert_eq!(bash(&sandbox, &case, &gateway), "gateway=refused\n");
 }
 
+/// V243-LINUX-EGRESS-REJECT: a routed agent's refused connect, to another host's port and to
+/// slirp's gateway, fails at once instead of waiting out its SYN retries, about 127 s each.
+/// The bound covers the whole run, the routed network's start included.
+#[test]
+fn a_refused_connect_from_a_routed_agent_fails_at_once() {
+    let case = case();
+    let other = outward_address();
+    let (any, port) = (pong_everywhere(), pong_everywhere());
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(any)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    for host in [other.to_string(), "10.0.2.2".to_owned()] {
+        let refused =
+            format!("(exec 4<>/dev/tcp/{host}/{port}) 2>/dev/null && echo reached || echo refused");
+        let started = Instant::now();
+        assert_eq!(bash(&sandbox, &case, &refused), "refused\n", "{host}");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(30), "{host}: {took:?}");
+    }
+}
+
 #[test]
 fn a_routed_agent_holds_no_capability_and_cannot_change_its_rules() {
     let case = case();
