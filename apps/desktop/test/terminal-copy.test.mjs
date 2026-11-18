@@ -415,3 +415,41 @@ test("off a Mac, a Shift drag on the normal screen selects the dragged text with
   assert.equal(seen.fromClick, seen.fresh, "with nothing showing, a Shift click without a drag still selected from the last click to it, as xterm does");
   assert.equal(seen.jittered, seen.fresh, "a Shift click whose pointer moved 1 px while pressed is still a click, so it selected from the last click (#490 F1)");
 });
+
+test("off a Mac, a held Shift press whose release never reached the page is dropped, so a later left drag from outside the terminal hands xterm no stale press (V243-LINUX-COPY-STALE-HELD)", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    await send("Emulation.setUserAgentOverride", LINUX_PAGE);
+    server = await securePage(evaluate, send, context);
+    await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate(harnessPanel);
+    await evaluate('Fixture.open("master", "claude-code")');
+    assert.equal(await evaluate("Fixture.until(() => Fixture.view().live)"), true, "the terminal went live");
+    await evaluate(`Fixture.output(${JSON.stringify(`${APP_STARTS["claude-code"].classic}first line of output\r\nsecond line`)})`);
+    assert.equal(await evaluate('Fixture.until(() => Fixture.view().text.includes("second line"))'), true, "the app's output drew");
+    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+    const at = await evaluate("Fixture.view()");
+    const press = { x: Math.round(at.screen.left + 2), y: Math.round(at.screen.top + at.rowHeight * 0.5) };
+    const outside = await evaluate(`(() => {
+      const host = document.querySelector(".tg-terminal-screen .tg-terminal-host");
+      for (const [x, y] of [[500, 695], [995, 350], [500, 5], [5, 350]]) {
+        const found = document.elementFromPoint(x, y);
+        if (found !== null && !host.contains(found)) return { x, y };
+      }
+      return null;
+    })()`);
+    assert.notEqual(outside, null, "the page has a spot outside the terminal");
+    await evaluate('window.handedOn = 0; document.addEventListener("mousedown", (event) => { if (!event.isTrusted) window.handedOn += 1; }, true)');
+    await drag(send, press, { x: press.x + 40, y: press.y }, 8);
+    const control = await evaluate("window.handedOn");
+    await mouse(send, Math.round(at.screen.left + 200), Math.round(at.screen.top + at.rowHeight * 1.5), "left");
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", ...press, button: "left", buttons: 1, clickCount: 1, modifiers: 8 });
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: press.x + 1, y: press.y, button: "none", buttons: 0 });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", ...outside, button: "left", buttons: 1, clickCount: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: press.x + 40, y: press.y, button: "left", buttons: 1 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: press.x + 40, y: press.y, button: "left", buttons: 0, clickCount: 1 });
+    return { control, after: await evaluate("window.handedOn") };
+  }).finally(() => server?.close());
+  assert.equal(seen.control, 1, "a Shift drag on the terminal hands its press on once, so the count sees a hand-on");
+  assert.equal(seen.after, seen.control, "a Shift press whose release was lost handed nothing on to a later drag from outside the terminal (rv-code #494 N1)");
+});
