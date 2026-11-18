@@ -1,10 +1,12 @@
 use super::style::{Theme, blend};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{RenderableContent, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
+use unicode_width::UnicodeWidthChar;
 
 /// A fixed grid size for a terminal: no scrollback beyond the screen.
 pub struct GridSize {
@@ -177,21 +179,96 @@ fn cursor_at(content: &RenderableContent<'_>, lines: usize, shown: bool) -> Opti
     (row < lines).then_some(Cursor { row, column, shape })
 }
 
+/// Where marked text goes: the terminal cursor cell (followed even while the cursor is
+/// hidden, as input methods expect), clipped to the cells left in the row. Inputs: the
+/// marked text, the cursor point, the display offset and the screen size. Output: the
+/// marked cells and the text that fits, or none when nothing is marked or the cursor is off
+/// the screen.
+fn place_marked(
+    marked: Option<&str>,
+    point: Point,
+    offset: i32,
+    size: (usize, usize),
+) -> Option<(Preedit, String)> {
+    let (columns, lines) = size;
+    assert!(columns > 0 && lines > 0);
+    let marked = marked.filter(|text| !text.is_empty())?;
+    let row = usize::try_from(point.line.0 + offset)
+        .ok()
+        .filter(|row| *row < lines)?;
+    let column = point.column.0.min(columns - 1);
+    let room = columns - column;
+    let mut text = String::new();
+    let mut cells = 0usize;
+    for c in marked.chars() {
+        let width = c.width().unwrap_or(0);
+        if cells + width > room {
+            break;
+        }
+        text.push(c);
+        cells += width;
+    }
+    if cells == 0 {
+        return None;
+    }
+    assert!(column + cells <= columns);
+    Some((Preedit { row, column, cells }, text))
+}
+
+/// Adds one cell's background to the fills, widening the last fill when it is the cell to
+/// its left in the same colour. Inputs: the fills, the cell's row and column, its colour.
+fn push_fill(fills: &mut Vec<Fill>, row: usize, column: usize, color: Rgb) {
+    let count = fills.len();
+    match fills.last_mut() {
+        Some(f) if f.row == row && f.column + f.width == column && f.color == color => f.width += 1,
+        _ => fills.push(Fill {
+            row,
+            column,
+            width: 1,
+            color,
+        }),
+    }
+    assert!(fills.len() == count || fills.len() == count + 1);
+}
+
+/// Appends one character to a row's spans and folds it into the row's key. Inputs: the
+/// row's spans and key, the character, its colour, and whether it is bold, italic and
+/// marked text.
+fn push_char(spans: &mut Vec<Span>, key: &mut u64, c: char, fg: Rgb, style: (bool, bool, bool)) {
+    let (bold, italic, marked) = style;
+    let count = spans.len();
+    let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
+    let flags = (u64::from(bold) << 24) | (u64::from(italic) << 25) | (u64::from(marked) << 26);
+    *key = mix(mix(*key, c as u64), packed | flags);
+    match spans.last_mut() {
+        Some(s) if s.fg == fg && s.bold == bold && s.italic == italic => s.text.push(c),
+        _ => spans.push(Span {
+            text: c.to_string(),
+            fg,
+            bold,
+            italic,
+        }),
+    }
+    assert!(spans.len() == count || spans.len() == count + 1);
+}
+
 /// Builds the frame for the visible screen. Inputs: the terminal, the theme, whether the
 /// cursor shows now (false in a blink's off phase) and the marked text, if any. Output:
 /// rows, fills, the cursor and the marked text's cells; wide-character spacer cells add no
-/// text.
+/// text, and marked text replaces the cells from the terminal cursor on (clipped at the row
+/// end, in the foreground on the background, the cursor hidden while it shows).
 pub fn frame(
     term: &Term<VoidListener>,
     theme: &Theme,
     cursor_shown: bool,
     marked: Option<&str>,
 ) -> Frame {
-    let _ = marked;
     let content = term.renderable_content();
     let lines = term.screen_lines();
     let offset = content.display_offset as i32;
-    let cursor = cursor_at(&content, lines, cursor_shown);
+    let size = (term.columns(), lines);
+    let overlay = place_marked(marked, content.cursor.point, offset, size);
+    let cursor = cursor_at(&content, lines, cursor_shown && overlay.is_none());
     let mut rows: Vec<Vec<Span>> = (0..lines).map(|_| Vec::new()).collect();
     let mut keys = vec![0xcbf2_9ce4_8422_2325u64; lines];
     let mut fills: Vec<Fill> = Vec::new();
@@ -200,52 +277,47 @@ pub fn frame(
     for indexed in content.display_iter {
         let row = usize::try_from(indexed.point.line.0 + offset).unwrap_or(usize::MAX);
         assert!(row < lines, "display row inside the screen");
-        let cell = indexed.cell;
         let column = indexed.point.column.0;
+        if let Some((cells, text)) = overlay.as_ref()
+            && cells.row == row
+            && (cells.column..cells.column + cells.cells).contains(&column)
+        {
+            if column == cells.column {
+                for c in text.chars() {
+                    let style = (false, false, true);
+                    push_char(&mut rows[row], &mut keys[row], c, theme.foreground, style);
+                }
+            }
+            continue;
+        }
+        let cell = indexed.cell;
         let block = cursor
             .is_some_and(|c| c.shape == CursorShape::Block && (c.row, c.column) == (row, column));
         let selected = selection.is_some_and(|range| range.contains(indexed.point));
         let (fg, bg) = cell_colors(cell, content.colors, theme, block, selected);
         if bg != theme.background {
-            match fills.last_mut() {
-                Some(f) if f.row == row && f.column + f.width == column && f.color == bg => {
-                    f.width += 1
-                }
-                _ => fills.push(Fill {
-                    row,
-                    column,
-                    width: 1,
-                    color: bg,
-                }),
-            }
+            push_fill(&mut fills, row, column, bg);
         }
         if cell.flags.intersects(spacer) {
             continue;
         }
-        let bold = cell.flags.contains(Flags::BOLD);
-        let italic = cell.flags.contains(Flags::ITALIC);
-        let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
-        let style = (u64::from(bold) << 24) | (u64::from(italic) << 25);
-        keys[row] = mix(mix(keys[row], cell.c as u64), packed | style);
-        let spans = &mut rows[row];
-        match spans.last_mut() {
-            Some(s) if s.fg == fg && s.bold == bold && s.italic == italic => s.text.push(cell.c),
-            _ => spans.push(Span {
-                text: cell.c.to_string(),
-                fg,
-                bold,
-                italic,
-            }),
-        }
+        let style = (
+            cell.flags.contains(Flags::BOLD),
+            cell.flags.contains(Flags::ITALIC),
+            false,
+        );
+        push_char(&mut rows[row], &mut keys[row], cell.c, fg, style);
     }
+    let preedit = overlay.map(|(cells, _)| cells);
     assert_eq!(rows.len(), lines);
     assert!(cursor.is_none_or(|c| c.row < lines));
+    assert!(preedit.is_none() || cursor.is_none());
     Frame {
         rows,
         keys,
         fills,
         cursor,
-        preedit: None,
+        preedit,
     }
 }
 
