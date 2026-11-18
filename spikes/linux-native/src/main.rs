@@ -421,14 +421,14 @@ fn x11_child(gdk: &gtk::gdk::Window, device: (i32, i32, u32, u32)) -> Result<Nat
         .ok_or("the toplevel is not an X11 window")?
         .xid();
     let gdk_display = gdk.display();
-    let raw: *mut gdkx11::ffi::GdkX11Display = gdk_display.to_glib_none().0 as *mut _;
-    let display =
-        unsafe { gdkx11::ffi::gdk_x11_display_get_xdisplay(raw) }.cast::<x11_dl::xlib::Display>();
+    let raw: *mut gtk::gdk::ffi::GdkDisplay = gdk_display.to_glib_none().0;
+    let display = unsafe { gdkx11::ffi::gdk_x11_display_get_xdisplay(raw.cast()) }
+        .cast::<x11_dl::xlib::Display>();
     if display.is_null() {
         return Err("GDK gave no X display".into());
     }
     let xlib = x11_dl::xlib::Xlib::open().map_err(|error| error.to_string())?;
-    let xfixes = x11_dl::xfixes::XFixes::open().map_err(|error| error.to_string())?;
+    let xfixes = x11_dl::xfixes::Xlib::open().map_err(|error| error.to_string())?;
     unsafe {
         let screen = (xlib.XDefaultScreen)(display);
         let window = (xlib.XCreateSimpleWindow)(
@@ -457,11 +457,12 @@ fn x11_child(gdk: &gtk::gdk::Window, device: (i32, i32, u32, u32)) -> Result<Nat
 /// the subsurface, or why not.
 fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Result<Native, String> {
     let gdk_display = gdk.display();
-    let raw_display: *mut gdkwayland_sys::GdkWaylandDisplay =
-        gdk_display.to_glib_none().0 as *mut _;
-    let raw_window: *mut gdkwayland_sys::GdkWaylandWindow = gdk.to_glib_none().0 as *mut _;
-    let display = unsafe { gdkwayland_sys::gdk_wayland_display_get_wl_display(raw_display) };
-    let parent_ptr = unsafe { gdkwayland_sys::gdk_wayland_window_get_wl_surface(raw_window) };
+    let raw_display: *mut gtk::gdk::ffi::GdkDisplay = gdk_display.to_glib_none().0;
+    let raw_window: *mut gtk::gdk::ffi::GdkWindow = gdk.to_glib_none().0;
+    let display =
+        unsafe { gdk_wayland_sys::gdk_wayland_display_get_wl_display(raw_display.cast()) };
+    let parent_ptr =
+        unsafe { gdk_wayland_sys::gdk_wayland_window_get_wl_surface(raw_window.cast()) };
     if display.is_null() || parent_ptr.is_null() {
         return Err("GDK gave no Wayland display or surface".into());
     }
