@@ -1,29 +1,10 @@
+use super::style::{Theme, blend};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
+use alacritty_terminal::term::{RenderableContent, Term};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
-
-/// The default text colour.
-pub const FOREGROUND: Rgb = Rgb {
-    r: 0xd8,
-    g: 0xd8,
-    b: 0xd8,
-};
-
-/// The default background colour.
-pub const BACKGROUND: Rgb = Rgb {
-    r: 0x1e,
-    g: 0x1e,
-    b: 0x1e,
-};
-
-/// The first 16 colours of the xterm palette.
-const BASE16: [u32; 16] = [
-    0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
-    0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-];
 
 /// A fixed grid size for a terminal: no scrollback beyond the screen.
 pub struct GridSize {
@@ -59,28 +40,37 @@ pub struct Fill {
     pub color: Rgb,
 }
 
+/// The cursor a frame draws: its cell and shape. A block is drawn into the cell's colours;
+/// the other shapes are drawn over the cell in the theme's cursor colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub row: usize,
+    pub column: usize,
+    pub shape: CursorShape,
+}
+
 /// What one frame draws: the spans of every row, a hash per row to skip unchanged rows, the
-/// background fills and the cursor cell.
+/// background fills and the cursor.
 pub struct Frame {
     pub rows: Vec<Vec<Span>>,
     pub keys: Vec<u64>,
     pub fills: Vec<Fill>,
-    pub cursor: Option<(usize, usize)>,
+    pub cursor: Option<Cursor>,
 }
 
-/// The xterm 256-colour palette entry for an index. Input: the index. Output: the colour.
-pub fn indexed(index: u8) -> Rgb {
-    let value = match index {
-        0..=15 => BASE16[usize::from(index)],
-        16..=231 => {
-            let level = |n: u8| if n == 0 { 0 } else { 55 + u32::from(n) * 40 };
-            let cube = index - 16;
-            (level(cube / 36) << 16) | (level(cube / 6 % 6) << 8) | level(cube % 6)
-        }
-        _ => {
-            let gray = 8 + u32::from(index - 232) * 10;
-            (gray << 16) | (gray << 8) | gray
-        }
+/// The xterm 256-colour palette entry for an index, with the theme's 16 colours first.
+/// Inputs: the index and the theme. Output: the colour.
+pub fn indexed(index: u8, theme: &Theme) -> Rgb {
+    if index < 16 {
+        return theme.ansi[usize::from(index)];
+    }
+    let value = if index < 232 {
+        let level = |n: u8| if n == 0 { 0 } else { 55 + u32::from(n) * 40 };
+        let cube = index - 16;
+        (level(cube / 36) << 16) | (level(cube / 6 % 6) << 8) | level(cube % 6)
+    } else {
+        let gray = 8 + u32::from(index - 232) * 10;
+        (gray << 16) | (gray << 8) | gray
     };
     assert!(value <= 0xffffff);
     Rgb {
@@ -90,34 +80,29 @@ pub fn indexed(index: u8) -> Rgb {
     }
 }
 
-fn dim(color: Rgb) -> Rgb {
-    Rgb {
-        r: color.r / 3 * 2,
-        g: color.g / 3 * 2,
-        b: color.b / 3 * 2,
-    }
-}
-
 /// The colour a cell colour shows as, with the terminal's own overrides first.
-fn resolve(color: Color, colors: &Colors) -> Rgb {
+fn resolve(color: Color, colors: &Colors, theme: &Theme) -> Rgb {
     match color {
         Color::Spec(rgb) => rgb,
-        Color::Indexed(index) => colors[usize::from(index)].unwrap_or_else(|| indexed(index)),
+        Color::Indexed(index) => {
+            colors[usize::from(index)].unwrap_or_else(|| indexed(index, theme))
+        }
         Color::Named(name) => {
             let slot = name as usize;
             if let Some(rgb) = colors[slot] {
                 return rgb;
             }
+            let dims = NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize;
             match name {
-                NamedColor::Background => BACKGROUND,
-                NamedColor::DimForeground => dim(FOREGROUND),
-                _ if slot < 16 => indexed(slot as u8),
-                _ if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize)
-                    .contains(&slot) =>
-                {
-                    dim(indexed((slot - NamedColor::DimBlack as usize) as u8))
+                NamedColor::Background => theme.background,
+                NamedColor::Cursor => theme.cursor,
+                NamedColor::DimForeground => blend(theme.foreground, 0.5, theme.background),
+                _ if slot < 16 => theme.ansi[slot],
+                _ if dims.contains(&slot) => {
+                    let base = theme.ansi[slot - NamedColor::DimBlack as usize];
+                    blend(base, 0.5, theme.background)
                 }
-                _ => FOREGROUND,
+                _ => theme.foreground,
             }
         }
     }
@@ -127,37 +112,69 @@ fn mix(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
-/// The colours one cell draws in: its resolved foreground and background, swapped once for
-/// inverse video and once more when selected, the foreground dimmed for faint text and
-/// equal to the background for hidden text. Inputs: the cell, the palette and whether the
-/// cell is selected. Output: (foreground, background).
-fn cell_colors(cell: &Cell, colors: &Colors, selected: bool) -> (Rgb, Rgb) {
-    let pair = (resolve(cell.fg, colors), resolve(cell.bg, colors));
-    let (mut fg, mut bg) = pair;
+/// The colours one cell draws in, as today's xterm panel draws them: bold text in one of
+/// the 8 base colours takes its bright twin, inverse video swaps, the block cursor shows
+/// the theme's cursor behind the cursor accent, faint text is the foreground at half over
+/// the background, hidden text equals the background and a selected cell has the
+/// selection laid over its background. Inputs: the cell, the palette, the theme, whether
+/// the block cursor is on it and whether it is selected. Output: (foreground, background).
+fn cell_colors(
+    cell: &Cell,
+    colors: &Colors,
+    theme: &Theme,
+    block: bool,
+    selected: bool,
+) -> (Rgb, Rgb) {
+    let bold = cell.flags.contains(Flags::BOLD);
+    let fg_color = match cell.fg {
+        Color::Named(name) if bold && (name as usize) < 8 => Color::Indexed(name as u8 + 8),
+        Color::Indexed(index) if bold && index < 8 => Color::Indexed(index + 8),
+        color => color,
+    };
+    let (mut fg, mut bg) = (
+        resolve(fg_color, colors, theme),
+        resolve(cell.bg, colors, theme),
+    );
     if cell.flags.contains(Flags::INVERSE) {
         std::mem::swap(&mut fg, &mut bg);
     }
-    if selected {
-        std::mem::swap(&mut fg, &mut bg);
+    if block {
+        (fg, bg) = (theme.cursor_accent, theme.cursor);
     }
     if cell.flags.contains(Flags::DIM) {
-        fg = dim(fg);
+        fg = blend(fg, 0.5, bg);
     }
     if cell.flags.contains(Flags::HIDDEN) {
         fg = bg;
     }
-    assert!(!cell.flags.contains(Flags::HIDDEN) || fg == bg);
-    let faint = cell.flags.intersects(Flags::DIM | Flags::HIDDEN);
-    assert!(faint || (fg, bg) == pair || (bg, fg) == pair);
+    if selected {
+        bg = blend(theme.selection, theme.selection_alpha, bg);
+    }
+    assert!(!cell.flags.contains(Flags::HIDDEN) || selected || fg == bg);
+    assert!(!block || selected || bg == theme.cursor);
     (fg, bg)
 }
 
-/// Builds the frame for the visible screen. Input: the terminal. Output: rows, fills and the
-/// cursor; wide-character spacer cells add no text, and selected cells show swapped colours.
-pub fn frame(term: &Term<VoidListener>) -> Frame {
+/// Where the cursor shows on screen, if it does: its row, column and shape. Inputs: the
+/// terminal's renderable content, the screen lines and whether the blink shows it now.
+fn cursor_at(content: &RenderableContent<'_>, lines: usize, shown: bool) -> Option<Cursor> {
+    let shape = content.cursor.shape;
+    if !shown || shape == CursorShape::Hidden {
+        return None;
+    }
+    let row = usize::try_from(content.cursor.point.line.0 + content.display_offset as i32).ok()?;
+    let column = content.cursor.point.column.0;
+    (row < lines).then_some(Cursor { row, column, shape })
+}
+
+/// Builds the frame for the visible screen. Inputs: the terminal, the theme and whether the
+/// cursor shows now (false in a blink's off phase). Output: rows, fills and the cursor;
+/// wide-character spacer cells add no text.
+pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Frame {
     let content = term.renderable_content();
     let lines = term.screen_lines();
     let offset = content.display_offset as i32;
+    let cursor = cursor_at(&content, lines, cursor_shown);
     let mut rows: Vec<Vec<Span>> = (0..lines).map(|_| Vec::new()).collect();
     let mut keys = vec![0xcbf2_9ce4_8422_2325u64; lines];
     let mut fills: Vec<Fill> = Vec::new();
@@ -167,10 +184,12 @@ pub fn frame(term: &Term<VoidListener>) -> Frame {
         let row = usize::try_from(indexed.point.line.0 + offset).unwrap_or(usize::MAX);
         assert!(row < lines, "display row inside the screen");
         let cell = indexed.cell;
-        let selected = selection.is_some_and(|range| range.contains(indexed.point));
-        let (fg, bg) = cell_colors(cell, content.colors, selected);
         let column = indexed.point.column.0;
-        if bg != BACKGROUND {
+        let block = cursor
+            .is_some_and(|c| c.shape == CursorShape::Block && (c.row, c.column) == (row, column));
+        let selected = selection.is_some_and(|range| range.contains(indexed.point));
+        let (fg, bg) = cell_colors(cell, content.colors, theme, block, selected);
+        if bg != theme.background {
             match fills.last_mut() {
                 Some(f) if f.row == row && f.column + f.width == column && f.color == bg => {
                     f.width += 1
@@ -202,13 +221,8 @@ pub fn frame(term: &Term<VoidListener>) -> Frame {
             }),
         }
     }
-    let cursor = (content.cursor.shape != CursorShape::Hidden)
-        .then(|| {
-            let row = usize::try_from(content.cursor.point.line.0 + offset).ok()?;
-            (row < lines).then_some((row, content.cursor.point.column.0))
-        })
-        .flatten();
     assert_eq!(rows.len(), lines);
+    assert!(cursor.is_none_or(|c| c.row < lines));
     Frame {
         rows,
         keys,
@@ -239,34 +253,85 @@ pub fn text_rows(frame: &Frame) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::term::Config;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn screen(bytes: &[u8]) -> Term<VoidListener> {
+        let size = GridSize {
+            columns: 10,
+            lines: 2,
+        };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        term
+    }
 
     #[test]
     fn palette_corners() {
-        assert_eq!(indexed(16), Rgb { r: 0, g: 0, b: 0 });
+        let theme = Theme::default();
+        assert_eq!(indexed(16, &theme), Rgb { r: 0, g: 0, b: 0 });
         assert_eq!(
-            indexed(231),
+            indexed(231, &theme),
             Rgb {
                 r: 255,
                 g: 255,
                 b: 255
             }
         );
-        assert_eq!(indexed(232), Rgb { r: 8, g: 8, b: 8 });
+        assert_eq!(indexed(232, &theme), Rgb { r: 8, g: 8, b: 8 });
         assert_eq!(
-            indexed(255),
+            indexed(255, &theme),
             Rgb {
                 r: 238,
                 g: 238,
                 b: 238
             }
         );
+        assert_eq!(indexed(1, &theme), theme.ansi[1]);
+    }
+
+    #[test]
+    fn cells_draw_in_the_theme_colours() {
+        let theme = Theme::default();
+        let term = screen(b"\x1b[1;31mA\x1b[0;31mB\x1b[0;7mC\x1b[0mD");
+        let frame = frame(&term, &theme, true);
+        let fg: Vec<Rgb> = frame.rows[0].iter().map(|s| s.fg).collect();
+        let (back, fore) = (theme.background, theme.foreground);
+        assert_eq!(theme.cursor_accent, back);
         assert_eq!(
-            indexed(1),
-            Rgb {
-                r: 0xcd,
-                g: 0,
-                b: 0
-            }
+            fg,
+            vec![theme.ansi[9], theme.ansi[1], back, fore, back, fore]
         );
+        assert_eq!(
+            frame.rows[0]
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<String>(),
+            "ABCD      "
+        );
+        let fills: Vec<(usize, usize, Rgb)> = frame
+            .fills
+            .iter()
+            .map(|f| (f.column, f.width, f.color))
+            .collect();
+        assert_eq!(fills, vec![(2, 1, theme.foreground), (4, 1, theme.cursor)]);
+        let cursor = Cursor {
+            row: 0,
+            column: 4,
+            shape: CursorShape::Block,
+        };
+        assert_eq!(frame.cursor, Some(cursor));
+    }
+
+    #[test]
+    fn a_blink_off_phase_hides_the_cursor_and_its_block() {
+        let theme = Theme::default();
+        let term = screen(b"AB");
+        let frame = frame(&term, &theme, false);
+        assert_eq!(frame.cursor, None);
+        assert!(frame.fills.is_empty());
+        let shown = super::frame(&term, &theme, true);
+        assert_ne!(shown.keys[0], frame.keys[0]);
     }
 }

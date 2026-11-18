@@ -4,6 +4,8 @@ mod keymap;
 mod pane;
 mod render;
 mod screen;
+mod style;
+mod view;
 
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};
 use std::ffi::OsStr;

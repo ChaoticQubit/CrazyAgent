@@ -1,43 +1,30 @@
-use super::screen::{BACKGROUND, FOREGROUND, Frame, Span};
-use alacritty_terminal::vte::ansi::Rgb;
+use super::screen::{Cursor, Frame, Span};
+use super::style::{FaceEm, Style, Theme, cell_px};
+use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use glyphon::{
     Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
-    fontdb,
+    Style as FontStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Weight, Wrap, fontdb,
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::path::Path;
 use std::ptr::NonNull;
-use std::time::Instant;
 
-/// The font files loaded, a fixed set instead of every system font, to keep memory small;
-/// Apple Color Emoji is the only system font with U+23FA, the bullet Claude Code prints.
-const FONT_PATHS: [&str; 4] = [
-    "/System/Library/Fonts/Menlo.ttc",
+/// The fallback font files loaded beside the style's family, a fixed set instead of every
+/// system font, to keep memory small; Apple Color Emoji is the only system font with
+/// U+23FA, the bullet Claude Code prints. A missing fallback only leaves its glyphs blank.
+const FALLBACK_PATHS: [&str; 3] = [
     "/System/Library/Fonts/Apple Symbols.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/System/Library/Fonts/Apple Color Emoji.ttc",
 ];
-
-/// The font size in points before the display scale.
-const FONT_POINTS: f32 = 13.0;
 
 /// The most background rectangles one frame draws.
 const RECTS_MAX: usize = 1 << 16;
 
 /// Bytes of one rectangle: position, size and colour as f32.
 const RECT_BYTES: usize = 32;
-
-/// The padding around the grid, in points.
-const PAD_POINTS: f32 = 4.0;
-
-/// Times of one drawn frame: CPU build (rows, rects, glyph prepare), the wait for a drawable
-/// and the instant the frame was handed to the display.
-pub struct Timing {
-    pub build_ms: f64,
-    pub acquire_ms: f64,
-    pub submitted: Instant,
-}
 
 struct Row {
     buffer: Buffer,
@@ -56,19 +43,24 @@ struct Device {
 }
 
 /// What all native views share: one wgpu instance and device, one font system and glyph
-/// rasterizer cache, and the cell size at the display scale.
+/// rasterizer cache, and the style: the family drawn with, the font size and cell size in
+/// device pixels and the colours. `generation` counts style changes, so a surface reshapes
+/// its rows after one.
 pub struct Shared {
     instance: wgpu::Instance,
     device: Option<Device>,
     fonts: FontSystem,
     swash: SwashCache,
-    pub scale: f32,
-    pub cell: (f32, f32),
-    pub pad: f32,
+    scale: f32,
+    family: String,
+    font_px: f32,
+    cell: (f32, f32),
+    theme: Theme,
+    generation: u64,
 }
 
-/// One native view's own drawing state: its Metal surface, glyph atlas, shaped rows and
-/// rectangle buffers.
+/// One native view's own drawing state: its Metal surface, glyph atlas, shaped rows (of the
+/// style generation they were shaped in) and rectangle buffers.
 pub struct Surface {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -76,6 +68,7 @@ pub struct Surface {
     atlas: TextAtlas,
     text: TextRenderer,
     rows: Vec<Row>,
+    generation: u64,
     rect_buffer: wgpu::Buffer,
     screen_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -99,32 +92,51 @@ fn linear_rgba(color: Rgb, alpha: f32) -> [f32; 4] {
     ]
 }
 
-fn load_fonts() -> FontSystem {
+fn load_fallbacks() -> FontSystem {
     let mut db = fontdb::Database::new();
-    for path in FONT_PATHS {
-        if std::path::Path::new(path).exists() {
-            let _ = db.load_font_file(path);
+    for path in FALLBACK_PATHS {
+        if Path::new(path).is_file() && db.load_font_file(path).is_err() {
+            continue;
         }
     }
-    assert!(db.len() > 0, "at least one font loaded");
-    db.set_monospace_family("Menlo");
     FontSystem::new_with_locale_and_db("en-US".into(), db)
 }
 
-fn cell_size(fonts: &mut FontSystem, font_px: f32) -> (f32, f32) {
-    assert!(font_px > 0.0);
-    let line = (font_px * 1.25).round();
-    let mut probe = Buffer::new(fonts, Metrics::new(font_px, line));
-    let attrs = Attrs::new().family(Family::Monospace);
-    probe.set_text(fonts, "M", &attrs, Shaping::Basic);
-    probe.shape_until_scroll(fonts, false);
-    let width = probe
-        .layout_runs()
-        .next()
-        .and_then(|r| r.glyphs.first())
-        .map_or(0.0, |g| g.w);
-    assert!(width > 0.0, "monospace cell has a width");
-    (width, line)
+/// The upright face loaded from a file whose weight is nearest regular, and its family.
+/// Inputs: the font database and the file. Output: the face id and family, or none.
+fn face_in(db: &fontdb::Database, file: &Path) -> Option<(fontdb::ID, String)> {
+    let from_file = |source: &fontdb::Source| match source {
+        fontdb::Source::File(path) | fontdb::Source::SharedFile(path, _) => path == file,
+        fontdb::Source::Binary(_) => false,
+    };
+    let face = db
+        .faces()
+        .filter(|face| face.style == fontdb::Style::Normal && from_file(&face.source))
+        .min_by_key(|face| face.weight.0.abs_diff(fontdb::Weight::NORMAL.0))?;
+    let family = face.families.first()?.0.clone();
+    assert!(from_file(&face.source));
+    Some((face.id, family))
+}
+
+/// A face's metrics in em, measured on 'W' as xterm measures its cell. Inputs: the font
+/// system and the face. Output: the metrics, or `native_terminal_style_invalid`.
+fn face_em(fonts: &mut FontSystem, id: fontdb::ID) -> Result<FaceEm, &'static str> {
+    let invalid = "native_terminal_style_invalid";
+    let font = fonts.get_font(id).ok_or(invalid)?;
+    let face = font.rustybuzz();
+    let em = f64::from(face.units_per_em());
+    let glyph = face.glyph_index('W').ok_or(invalid)?;
+    let advance = f64::from(face.glyph_hor_advance(glyph).ok_or(invalid)?);
+    let metrics = FaceEm {
+        advance: advance / em,
+        ascent: f64::from(face.ascender()) / em,
+        descent: -f64::from(face.descender()) / em,
+    };
+    if em <= 0.0 || metrics.advance <= 0.0 || metrics.ascent + metrics.descent <= 0.0 {
+        return Err(invalid);
+    }
+    assert!(metrics.advance.is_finite() && metrics.ascent.is_finite());
+    Ok(metrics)
 }
 
 const RECT_SHADER: &str = "
@@ -242,26 +254,63 @@ fn device_for(
 }
 
 impl Shared {
-    /// Loads the fonts and measures a cell at the display scale; no GPU work runs until the
-    /// first surface. Input: the display's backing scale. Output: the shared state.
-    pub fn new(scale: f32) -> Shared {
-        assert!(scale >= 1.0 && scale <= 4.0, "a Mac backing scale");
+    /// Loads the fallback fonts and applies the first style; no GPU work runs until the first
+    /// surface. Inputs: the display's backing scale and the style. Output: the shared state,
+    /// or `native_terminal_style_invalid` when the style's font cannot be loaded.
+    pub fn new(scale: f32, style: &Style) -> Result<Shared, &'static str> {
+        assert!((1.0..=4.0).contains(&scale), "a Mac backing scale");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
             ..Default::default()
         });
-        let mut fonts = load_fonts();
-        let cell = cell_size(&mut fonts, FONT_POINTS * scale);
-        let pad = PAD_POINTS * scale;
-        Shared {
+        let mut shared = Shared {
             instance,
             device: None,
-            fonts,
+            fonts: load_fallbacks(),
             swash: SwashCache::new(),
             scale,
-            cell,
-            pad,
+            family: String::new(),
+            font_px: 0.0,
+            cell: (0.0, 0.0),
+            theme: style.theme,
+            generation: 0,
+        };
+        shared.set_style(style)?;
+        assert!(shared.cell.0 >= 1.0 && shared.cell.1 >= 1.0);
+        Ok(shared)
+    }
+
+    /// Applies a style to every view: loads its font file once, measures the cell by
+    /// xterm's rule and takes its colours; each surface reshapes its rows on its next draw.
+    /// Input: the style. Output: ok, or `native_terminal_style_invalid`, leaving the old
+    /// style in place.
+    pub fn set_style(&mut self, style: &Style) -> Result<(), &'static str> {
+        let invalid = "native_terminal_style_invalid";
+        if face_in(self.fonts.db(), style.file).is_none() {
+            self.fonts
+                .db_mut()
+                .load_font_file(style.file)
+                .map_err(|_| invalid)?;
         }
+        let (id, family) = face_in(self.fonts.db(), style.file).ok_or(invalid)?;
+        let face = face_em(&mut self.fonts, id)?;
+        let (width, height) = cell_px(face, style.font_px, f64::from(self.scale));
+        self.family = family;
+        self.font_px = (style.font_px * f64::from(self.scale)) as f32;
+        self.cell = (width as f32, height as f32);
+        self.theme = style.theme;
+        self.generation += 1;
+        assert!(!self.family.is_empty() && self.font_px > 0.0);
+        Ok(())
+    }
+
+    /// The cell size in the view's points (CSS pixels), for the grid a host rect gives.
+    pub fn cell_points(&self) -> (f64, f64) {
+        let scale = f64::from(self.scale);
+        (
+            f64::from(self.cell.0) / scale,
+            f64::from(self.cell.1) / scale,
+        )
     }
 
     /// Makes one view's surface on its NSView, sized in physical pixels, Fifo present mode and
@@ -329,6 +378,7 @@ impl Shared {
             atlas,
             text,
             rows: Vec::new(),
+            generation: self.generation,
             rect_buffer,
             screen_buffer,
             bind_group,
@@ -354,11 +404,12 @@ impl Shared {
     }
 
     fn row_buffer(&mut self) -> Buffer {
-        let font_px = self.cell.1 / 1.25;
-        let mut buffer = Buffer::new(&mut self.fonts, Metrics::new(font_px, self.cell.1));
+        let metrics = Metrics::new(self.font_px, self.cell.1);
+        let mut buffer = Buffer::new(&mut self.fonts, metrics);
         buffer.set_wrap(&mut self.fonts, Wrap::None);
         buffer.set_size(&mut self.fonts, None, Some(self.cell.1));
         buffer.set_monospace_width(&mut self.fonts, Some(self.cell.0));
+        assert_eq!(buffer.metrics(), metrics);
         buffer
     }
 
@@ -368,6 +419,10 @@ impl Shared {
     fn shape_rows(&mut self, surface: &mut Surface, frame: &Frame) -> usize {
         let lines = frame.rows.len();
         assert_eq!(frame.keys.len(), lines);
+        if surface.generation != self.generation {
+            surface.rows.clear();
+            surface.generation = self.generation;
+        }
         let mut old: Vec<Option<Row>> = std::mem::take(&mut surface.rows)
             .into_iter()
             .map(Some)
@@ -395,7 +450,8 @@ impl Shared {
             }
         }
         let mut spare: Vec<Row> = old.into_iter().flatten().collect();
-        let base = Attrs::new().family(Family::Monospace);
+        let family = self.family.clone();
+        let base = Attrs::new().family(Family::Name(&family));
         let mut shaped = 0;
         for (index, spans) in frame.rows.iter().enumerate() {
             if next[index].is_some() {
@@ -410,7 +466,7 @@ impl Shared {
             };
             let pieces = spans
                 .iter()
-                .map(|s: &Span| (s.text.as_str(), span_attrs(s)));
+                .map(|s: &Span| (s.text.as_str(), span_attrs(s, &family)));
             row.buffer
                 .set_rich_text(&mut self.fonts, pieces, &base, Shaping::Advanced, None);
             row.buffer.shape_until_scroll(&mut self.fonts, false);
@@ -424,20 +480,43 @@ impl Shared {
         shaped
     }
 
+    /// The rectangle of a cursor drawn over its cell: a beam 1 point wide, an underline 1
+    /// point tall, or the 4 edges of a hollow block; a block is drawn in the cell colours.
+    fn cursor_rects(&self, cursor: Cursor) -> Vec<[f32; 4]> {
+        let (cw, ch) = self.cell;
+        let (x, y) = (cursor.column as f32 * cw, cursor.row as f32 * ch);
+        let line = self.scale.round().max(1.0);
+        let rects = match cursor.shape {
+            CursorShape::Beam => vec![[x, y, line, ch]],
+            CursorShape::Underline => vec![[x, y + ch - line, cw, line]],
+            CursorShape::HollowBlock => vec![
+                [x, y, cw, line],
+                [x, y + ch - line, cw, line],
+                [x, y, line, ch],
+                [x + cw - line, y, line, ch],
+            ],
+            CursorShape::Block | CursorShape::Hidden => Vec::new(),
+        };
+        assert!(rects.len() <= 4);
+        rects
+    }
+
     fn rect_bytes(&self, frame: &Frame) -> Vec<f32> {
         let (cw, ch) = self.cell;
-        let mut out = Vec::with_capacity((frame.fills.len() + 1) * 8);
-        for fill in frame.fills.iter().take(RECTS_MAX - 1) {
-            let x = self.pad + fill.column as f32 * cw;
-            let y = self.pad + fill.row as f32 * ch;
+        let mut out = Vec::with_capacity((frame.fills.len() + 4) * 8);
+        for fill in frame.fills.iter().take(RECTS_MAX - 4) {
+            let x = fill.column as f32 * cw;
+            let y = fill.row as f32 * ch;
             out.extend_from_slice(&[x, y, fill.width as f32 * cw, ch]);
             out.extend_from_slice(&linear_rgba(fill.color, 1.0));
         }
-        if let Some((row, column)) = frame.cursor {
-            let x = self.pad + column as f32 * cw;
-            let y = self.pad + row as f32 * ch;
-            out.extend_from_slice(&[x, y, cw, ch]);
-            out.extend_from_slice(&linear_rgba(FOREGROUND, 0.45));
+        for rect in frame
+            .cursor
+            .map(|c| self.cursor_rects(c))
+            .unwrap_or_default()
+        {
+            out.extend_from_slice(&rect);
+            out.extend_from_slice(&linear_rgba(self.theme.cursor, 1.0));
         }
         assert_eq!(out.len() % 8, 0);
         assert!(out.len() / 8 <= RECTS_MAX);
@@ -445,10 +524,9 @@ impl Shared {
     }
 
     /// Draws one frame on a surface: reshapes changed rows, uploads rectangles and glyphs,
-    /// renders and presents. Inputs: the surface and the frame. Output: its timing, or why it
-    /// was skipped.
-    pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<Timing, String> {
-        let start = Instant::now();
+    /// renders and presents. Inputs: the surface and the frame. Output: ok, or why it was
+    /// skipped.
+    pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
         let set = self.device.as_ref().ok_or("no device")?;
@@ -473,11 +551,11 @@ impl Shared {
             .enumerate()
             .map(|(index, row)| TextArea {
                 buffer: &row.buffer,
-                left: self.pad,
-                top: self.pad + index as f32 * self.cell.1,
+                left: 0.0,
+                top: index as f32 * self.cell.1,
                 scale: 1.0,
                 bounds,
-                default_color: text_color(FOREGROUND),
+                default_color: text_color(self.theme.foreground),
                 custom_glyphs: &[],
             });
         surface
@@ -492,23 +570,16 @@ impl Shared {
                 &mut self.swash,
             )
             .map_err(|e| e.to_string())?;
-        let built = Instant::now();
         let output = surface.surface.get_current_texture().map_err(|e| {
             surface.surface.configure(&set.device, &surface.config);
             e.to_string()
         })?;
-        let acquired = Instant::now();
-        encode(set, surface, &output, rects.len() / 8)?;
+        let clear = linear_rgba(self.theme.background, 1.0);
+        encode(set, surface, &output, rects.len() / 8, clear)?;
         output.present();
-        let submitted = Instant::now();
         surface.atlas.trim();
-        let build_ms = (built - start).as_secs_f64() * 1000.0;
-        let acquire_ms = (acquired - built).as_secs_f64() * 1000.0;
-        Ok(Timing {
-            build_ms,
-            acquire_ms,
-            submitted,
-        })
+        assert_eq!(surface.generation, self.generation);
+        Ok(())
     }
 }
 
@@ -517,12 +588,12 @@ fn encode(
     surface: &Surface,
     output: &wgpu::SurfaceTexture,
     rect_count: usize,
+    clear: [f32; 4],
 ) -> Result<(), String> {
     let view = output
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
     let mut encoder = set.device.create_command_encoder(&Default::default());
-    let clear = linear_rgba(BACKGROUND, 1.0);
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("frame"),
@@ -562,9 +633,9 @@ fn text_color(color: Rgb) -> TextColor {
     TextColor::rgb(color.r, color.g, color.b)
 }
 
-fn span_attrs(span: &Span) -> Attrs<'static> {
+fn span_attrs<'a>(span: &Span, family: &'a str) -> Attrs<'a> {
     Attrs::new()
-        .family(Family::Monospace)
+        .family(Family::Name(family))
         .color(text_color(span.fg))
         .weight(if span.bold {
             Weight::BOLD
@@ -572,8 +643,8 @@ fn span_attrs(span: &Span) -> Attrs<'static> {
             Weight::NORMAL
         })
         .style(if span.italic {
-            Style::Italic
+            FontStyle::Italic
         } else {
-            Style::Normal
+            FontStyle::Normal
         })
 }
