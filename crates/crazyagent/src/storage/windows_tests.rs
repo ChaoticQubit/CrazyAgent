@@ -90,6 +90,44 @@ async fn the_lock_probe_sees_a_running_engine_and_its_close() {
     assert!(super::engine_lock_released(&data));
 }
 
+/// W1c D5: the settings sources open on Windows in a private data folder with the engine,
+/// and a second writer of the same sources is refused while the first holds its lease.
+#[tokio::test]
+async fn settings_sources_open_privately_and_a_second_writer_is_busy() {
+    let (_root, path, _config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    let (global, project) = (data.join("global.toml"), data.join("project.toml"));
+    let (storage, _config) = Storage::open_with_settings_sources(&path, &global, &project)
+        .await
+        .unwrap();
+    let Err(error) = super::settings::SettingsSources::open(&global, &project) else {
+        panic!("a second settings writer opened the same sources");
+    };
+    assert!(error.0.contains("settings_writer_busy"), "{}", error.0);
+    close(storage).await;
+}
+
+/// W1c D5: a global settings file other users may read is refused with the code Unix gives
+/// a settings file that is not private.
+#[tokio::test]
+async fn a_settings_file_other_users_may_read_is_refused() {
+    let (_root, path, _config) = fixture();
+    let data = path.parent().unwrap().to_path_buf();
+    let global = data.join("global.toml");
+    std::fs::write(&global, "").unwrap();
+    let status = std::process::Command::new("icacls")
+        .args([global.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let Err(error) =
+        Storage::open_with_settings_sources(&path, &global, &data.join("project.toml")).await
+    else {
+        panic!("settings other users may read were opened");
+    };
+    assert!(error.0.contains("settings_metadata_invalid"), "{}", error.0);
+}
+
 /// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
 /// the blanket `storage_unavailable` refusal the port replaces.
 #[tokio::test]
