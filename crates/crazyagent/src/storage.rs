@@ -32,6 +32,7 @@ pub(crate) use master_session::{
 pub use migrations::backup_failure;
 pub(crate) mod agent_text;
 mod native_auth;
+pub(crate) mod narrowing;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
