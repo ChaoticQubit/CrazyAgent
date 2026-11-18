@@ -1384,6 +1384,7 @@ mod tests {
             keys: Vec::new(),
             fills: Vec::new(),
             cursor: None,
+            preedit: None,
         };
         (shared, surface, frame)
     }
@@ -1565,7 +1566,9 @@ mod tests {
         assert_eq!(child.part(), larger_part);
         present_unresized(&mut child, &mut shared, &mut surface, &frame, size, scale);
         let larger_size = child.size();
-        shared.resize(&mut surface, larger_size.0, larger_size.1);
+        shared
+            .resize(&mut surface, larger_size.0, larger_size.1)
+            .expect("a resize");
         child.changed();
         show_frame(
             &mut child,
@@ -1589,7 +1592,9 @@ mod tests {
         clip_checkpoint("smaller_old", &child);
         assert_eq!(child.part(), Some(smaller));
         let smaller_size = child.size();
-        shared.resize(&mut surface, smaller_size.0, smaller_size.1);
+        shared
+            .resize(&mut surface, smaller_size.0, smaller_size.1)
+            .expect("a resize");
         child.changed();
         show_frame(
             &mut child,
@@ -1625,7 +1630,9 @@ mod tests {
             );
             let rescaled_size = child.size();
             assert_eq!(rescaled_size, (smaller_size.0 * 2, smaller_size.1 * 2));
-            shared.resize(&mut surface, rescaled_size.0, rescaled_size.1);
+            shared
+                .resize(&mut surface, rescaled_size.0, rescaled_size.1)
+                .expect("a resize");
             child.changed();
             show_frame(
                 &mut child,
