@@ -48,9 +48,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CHAR, WM_DEADCHAR,
     WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
-    WM_MOUSEACTIVATE, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE, WindowFromPoint,
+    WM_IME_ENDCOMPOSITION, WM_IME_NOTIFY, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR,
+    WM_SYSDEADCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_VISIBLE,
+    WindowFromPoint,
 };
 
 /// The window class of the native view, so a hit test names it apart from WebView2's.
@@ -213,7 +214,7 @@ pub(crate) fn typed() -> String {
 
 /// Keeps one key, character or IME message for the row that reads it; past `NOTES_MAX`
 /// the rest are dropped. Input: the entry.
-fn note(entry: String) {
+pub(crate) fn note(entry: String) {
     if let Ok(mut notes) = NOTES.lock()
         && notes.len() < NOTES_MAX
     {
@@ -429,6 +430,12 @@ unsafe extern "system" fn view_proc(
         }
         WM_IME_COMPOSITION => on_composition(hwnd, lparam),
         WM_IME_ENDCOMPOSITION => note("ime_end".into()),
+        WM_IME_NOTIFY => note(format!("ime_ntf:{wparam:X}")),
+        WM_IME_REQUEST => {
+            if let Some(result) = crate::keys::answer_request(wparam, lparam) {
+                return result;
+            }
+        }
         WM_IME_CHAR => {
             IME_CHARS.fetch_add(1, Ordering::SeqCst);
             note(format!("ime_ch:{:04X}", wparam & 0xFFFF));
@@ -1563,6 +1570,7 @@ fn drive() {
         Rows::Uia => uia_rows(),
         Rows::Lang => {
             log("foreground", &foreground().to_string());
+            crate::keys::candidate_rows();
             crate::keys::real_ime_rows();
             crate::keys::emoji_rows();
         }

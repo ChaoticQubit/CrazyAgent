@@ -1,13 +1,16 @@
 use crate::probe::{
-    child, click_screen, click_term, log, on_main, on_main_within, take_notes, wide,
+    child, click_screen, click_term, log, note, on_main, on_main_within, take_notes, wide,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_CANDIDATEPOS, IME_CMODE_FULLSHAPE, IME_CMODE_HANGUL, IME_CMODE_NATIVE,
-    IME_CONVERSION_MODE, ImmGetContext, ImmGetConversionStatus, ImmGetOpenStatus,
-    ImmReleaseContext, ImmSetCandidateWindow, ImmSetConversionStatus, ImmSetOpenStatus,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, IME_CMODE_FULLSHAPE,
+    IME_CMODE_HANGUL, IME_CMODE_NATIVE, IME_CONVERSION_MODE, IMECHARPOSITION,
+    IMR_QUERYCHARPOSITION, ImmGetContext, ImmGetConversionStatus, ImmGetOpenStatus,
+    ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow, ImmSetConversionStatus,
+    ImmSetOpenStatus,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyboardLayout, GetKeyboardLayoutList, GetKeyboardLayoutNameW, HKL,
@@ -17,7 +20,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_Q, VK_R, VK_RETURN, VK_RMENU, VK_S, VK_SPACE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, IsWindowVisible,
+    CreateCaret, DestroyCaret, EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW,
+    IsWindowVisible, SetCaretPos,
 };
 
 /// How long a row waits for a hung window thread to answer again before going on.
@@ -25,6 +29,24 @@ const RECOVER_WAIT: Duration = Duration::from_secs(200);
 
 /// Where the IME rows ask the candidate list to open, in the view's client pixels.
 const CANDIDATE_AT: POINT = POINT { x: 8, y: 400 };
+
+/// The caret's height in client pixels for the candidate rows, and how far from the caret
+/// a candidate list may open and still count as placed.
+const LINE_PX: i32 = 16;
+const NEAR_PX: i32 = 200;
+const _: () = assert!(LINE_PX > 0 && LINE_PX < NEAR_PX);
+
+/// Whether the view answers the IME's caret query; on only while the query row runs.
+static ANSWER_QUERY: AtomicBool = AtomicBool::new(false);
+
+/// One way the view tells the IME where its caret is: an answer to the IME's caret query,
+/// a system caret, or the composition form with an excluded candidate area.
+#[derive(Clone, Copy, Debug)]
+enum Place {
+    Query,
+    Caret,
+    Exclude,
+}
 
 /// Keyboard layouts the layout rows load: US-International for dead keys, German for AltGr.
 const US_INTERNATIONAL: &str = "00020409";
@@ -115,7 +137,9 @@ fn load_layout(id: &'static str) -> Option<(isize, isize, String)> {
 /// Puts a layout back on the window's thread. Input: the layout.
 fn restore_layout(layout: isize) {
     on_main(move || {
+        log("ime_restore_step", "activate");
         unsafe { ActivateKeyboardLayout(layout as HKL, 0) };
+        log("ime_restore_step", "done");
     });
 }
 
@@ -414,4 +438,142 @@ pub fn emoji_rows() {
     }
     send_keys(&taps(&[VK_ESCAPE]), 0);
     std::thread::sleep(Duration::from_millis(300));
+}
+
+/// Answers the IME's caret query (WM_IME_REQUEST with IMR_QUERYCHARPOSITION) with the caret
+/// at `CANDIDATE_AT` while the query row runs, and notes every request. Inputs: the
+/// message's wparam and lparam, from the OS. Output: Some(1) when answered, else None.
+pub fn answer_request(wparam: usize, lparam: isize) -> Option<isize> {
+    note(format!("ime_req:{wparam:X}"));
+    if wparam != IMR_QUERYCHARPOSITION as usize || lparam == 0 {
+        return None;
+    }
+    if !ANSWER_QUERY.load(Ordering::SeqCst) {
+        return None;
+    }
+    let position = unsafe { &mut *(lparam as *mut IMECHARPOSITION) };
+    if (position.dwSize as usize) < std::mem::size_of::<IMECHARPOSITION>() {
+        return None;
+    }
+    let mut point = CANDIDATE_AT;
+    unsafe { ClientToScreen(child(), &mut point) };
+    let mut document = RECT::default();
+    unsafe { GetWindowRect(child(), &mut document) };
+    position.pt = point;
+    position.cLineHeight = LINE_PX as u32;
+    position.rcDocument = document;
+    Some(1)
+}
+
+/// Tells the IME where the caret is, one way, on the window's thread. Input: the way.
+/// Output: what each call returned.
+fn place(way: Place) -> String {
+    match way {
+        Place::Query => {
+            ANSWER_QUERY.store(true, Ordering::SeqCst);
+            "query_answer=on".into()
+        }
+        Place::Caret => {
+            let made = unsafe { CreateCaret(child(), std::ptr::null_mut(), 1, LINE_PX) };
+            let moved = unsafe { SetCaretPos(CANDIDATE_AT.x, CANDIDATE_AT.y) };
+            format!("caret_made={made} caret_moved={moved}")
+        }
+        Place::Exclude => {
+            let context = unsafe { ImmGetContext(child()) };
+            if context.is_null() {
+                return "context_null".into();
+            }
+            let composition = COMPOSITIONFORM {
+                dwStyle: CFS_POINT,
+                ptCurrentPos: CANDIDATE_AT,
+                rcArea: RECT::default(),
+            };
+            let composed = unsafe { ImmSetCompositionWindow(context, &composition) };
+            let area = RECT {
+                left: CANDIDATE_AT.x,
+                top: CANDIDATE_AT.y,
+                right: CANDIDATE_AT.x + 1,
+                bottom: CANDIDATE_AT.y + LINE_PX,
+            };
+            let exclude = CANDIDATEFORM {
+                dwIndex: 0,
+                dwStyle: CFS_EXCLUDE,
+                ptCurrentPos: CANDIDATE_AT,
+                rcArea: area,
+            };
+            let excluded = unsafe { ImmSetCandidateWindow(context, &exclude) };
+            unsafe { ImmReleaseContext(child(), context) };
+            format!("composition_set={composed} exclude_set={excluded}")
+        }
+    }
+}
+
+/// Undoes one way of telling the IME where the caret is, on the window's thread.
+/// Input: the way.
+fn unplace(way: Place) {
+    match way {
+        Place::Query => ANSWER_QUERY.store(false, Ordering::SeqCst),
+        Place::Caret => {
+            unsafe { DestroyCaret() };
+        }
+        Place::Exclude => {}
+    }
+}
+
+/// Where the open candidate list sits against the caret on the screen. Input: the caret.
+/// Output: GREEN within `NEAR_PX`, RED farther, INCONCLUSIVE when no list shows.
+fn candidate_verdict(caret: POINT) -> String {
+    let Some(rect) = top_windows()
+        .into_iter()
+        .find(|window| window.name.contains("candidate"))
+        .map(|window| window.rect)
+    else {
+        return "INCONCLUSIVE no candidate list".into();
+    };
+    let (dx, dy) = (rect.left - caret.x, rect.top - caret.y);
+    let near = dx.abs() <= NEAR_PX && dy.abs() <= NEAR_PX;
+    format!(
+        "{} at=[{},{} {},{}] caret={},{} dx={dx} dy={dy}",
+        if near { "GREEN" } else { "RED" },
+        rect.left,
+        rect.top,
+        rect.right,
+        rect.bottom,
+        caret.x,
+        caret.y
+    )
+}
+
+/// The candidate list rows: for each way of telling MS-IME where the caret is, types "ka"
+/// and converts twice so the list opens, logs where it opened against the caret, then
+/// cancels with Escape, never committing. A GREEN way keeps IME on IMM32; all RED sends
+/// candidate placement to TSF.
+pub fn candidate_rows() {
+    let installed = layouts();
+    let Some(&layout) = installed.iter().find(|&&layout| layout & 0xFFFF == 0x0411) else {
+        log("ime_candidate", "INCONCLUSIVE no Japanese layout");
+        return;
+    };
+    click_term();
+    let Some((before, line)) = open_ime(layout, IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE) else {
+        log("ime_candidate", "INCONCLUSIVE timeout opening the IME");
+        return;
+    };
+    log("ime_candidate_open", &line);
+    let mut caret = CANDIDATE_AT;
+    unsafe { ClientToScreen(child(), &mut caret) };
+    for way in [Place::Query, Place::Caret, Place::Exclude] {
+        let placed = on_main(move || place(way)).unwrap_or_else(|| "timeout".into());
+        take_notes();
+        type_keys(&[VK_K, VK_A, VK_SPACE, VK_SPACE], layout);
+        std::thread::sleep(SETTLE);
+        let verdict = candidate_verdict(caret);
+        type_keys(&[VK_ESCAPE, VK_ESCAPE, VK_ESCAPE], layout);
+        std::thread::sleep(SETTLE);
+        let _ = on_main(move || unplace(way));
+        let notes = take_notes().join(" ");
+        let row = format!("ime_candidate_{way:?}").to_lowercase();
+        log(&row, &format!("{verdict} {placed} notes={notes}"));
+    }
+    restore_layout(before);
 }
