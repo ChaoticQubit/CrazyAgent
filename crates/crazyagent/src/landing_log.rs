@@ -9,7 +9,9 @@ use kept::{
     CHANGE_SETS, KEPT_TABLES, ROW_PARTS_MAX, RULE_REQUESTS, VERIFICATION_TABLES, keep_row,
     kept_rows, release_row, restore_kept, upsert_kept,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+#[cfg(unix)]
+use rusqlite::OptionalExtension;
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 /// The body schema of every landing event.
@@ -676,6 +678,7 @@ pub(crate) fn within<T>(
 /// text an earlier save kept, and `ChangeSetSaved` carries the digest and the set's number.
 /// Inputs: the transaction and the set's id. Output: whether the set has a row to log, or
 /// the refusal.
+#[cfg(unix)]
 pub(crate) fn record_row(tx: &Transaction<'_>, id: &str) -> Result<bool, EngineError> {
     let Some((project, parts)) = keep_row(tx, CHANGE_SETS, &serde_json::json!(id))? else {
         return Ok(false);
@@ -968,7 +971,7 @@ const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 /// open's proof. A store without the `state` table or with no landing row gets no run, so
 /// it moves no revision. Inputs: the step's transaction and the open's proof. Output:
 /// whether a run was appended, or the log's refusal.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 pub(crate) fn first_run(
     tx: &Transaction<'_>,
     opening: crate::storage::opening::Opening,
@@ -1427,14 +1430,14 @@ fn removals(
 
 /// Seeds a test store for logged landing writes, as ide::log::seed does. Input: the store.
 /// Output: the running host.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn seed(db: &Connection) -> crate::engine::owner::HostStamp {
     crate::ide::log::seed(db)
 }
 
 /// Seeds a test store as [`seed`] does and hands it back, for a fixture that opens its store
 /// in one expression. Input: the store. Output: the same store.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn seeded(db: Connection) -> Connection {
     let host = seed(&db);
     assert_eq!(host.db_instance.len(), 64);
