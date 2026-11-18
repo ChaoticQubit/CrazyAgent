@@ -195,4 +195,11 @@ mod tests {
         assert!(key_input("\u{F704}", "\u{F704}").is_none());
         assert!(key_input("", "").is_none());
     }
+
+    #[test]
+    fn keypad_enter_is_return_and_control_c_stays_control_c() {
+        assert!(matches!(key_input("\u{3}", "\u{3}"), Some(Input::Text(b)) if b == b"\r"));
+        assert!(matches!(key_input("\u{3}", "c"), Some(Input::Text(b)) if b == b"\x03"));
+        assert!(matches!(key_input("\r", "\r"), Some(Input::Text(b)) if b == b"\r"));
+    }
 }

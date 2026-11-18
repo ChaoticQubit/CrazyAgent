@@ -15,24 +15,29 @@ pub struct Mods {
     pub command: bool,
     pub control: bool,
     pub option: bool,
+    pub shift: bool,
 }
 
 /// Where one key event goes: nowhere (Command keys go through the key equivalents), to the
 /// pane at once as today's key bytes, to the pane as Meta (Escape then the key, as the
-/// webview's Option-as-Meta did), or through the input method.
+/// webview's Option-as-Meta did), to the pane as a new line (Shift+Enter types Ctrl+J, as
+/// today's panel did), or through the input method.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     Ignore,
     Bypass,
     Meta,
+    NewLine,
     Interpret,
 }
 
 /// The route of one key event: Command keys are ignored; while composing every other key
-/// belongs to the input method; else Control keys bypass it, Option keys go as Meta and the
-/// rest go through it. Inputs: the modifiers and whether marked text was shown before the
-/// key. Output: the route.
-pub fn route(mods: Mods, composing: bool) -> Route {
+/// belongs to the input method; else Shift+Enter alone is a new line, Control keys bypass
+/// the input method, Option keys go as Meta and the rest go through it. Inputs: the
+/// modifiers, the characters ignoring modifiers (Return is "\r", keypad Enter "\u{3}") and
+/// whether marked text was shown before the key. Output: the route.
+pub fn route(mods: Mods, bare: &str, composing: bool) -> Route {
+    let _ = bare;
     let route = if mods.command {
         Route::Ignore
     } else if composing {
@@ -256,21 +261,56 @@ mod tests {
             command,
             control,
             option,
+            shift: false,
         }
     }
 
     #[test]
     fn keys_route_by_modifiers_and_composition() {
-        assert_eq!(route(mods(false, false, false), false), Route::Interpret);
-        assert_eq!(route(mods(false, true, false), false), Route::Bypass);
-        assert_eq!(route(mods(false, false, true), false), Route::Meta);
-        assert_eq!(route(mods(false, true, true), false), Route::Bypass);
-        assert_eq!(route(mods(true, false, false), false), Route::Ignore);
-        assert_eq!(route(mods(true, true, true), false), Route::Ignore);
-        assert_eq!(route(mods(false, false, false), true), Route::Interpret);
-        assert_eq!(route(mods(false, true, false), true), Route::Interpret);
-        assert_eq!(route(mods(false, false, true), true), Route::Interpret);
-        assert_eq!(route(mods(true, false, false), true), Route::Ignore);
+        assert_eq!(
+            route(mods(false, false, false), "a", false),
+            Route::Interpret
+        );
+        assert_eq!(route(mods(false, true, false), "a", false), Route::Bypass);
+        assert_eq!(route(mods(false, false, true), "a", false), Route::Meta);
+        assert_eq!(route(mods(false, true, true), "a", false), Route::Bypass);
+        assert_eq!(route(mods(true, false, false), "a", false), Route::Ignore);
+        assert_eq!(route(mods(true, true, true), "a", false), Route::Ignore);
+        assert_eq!(
+            route(mods(false, false, false), "a", true),
+            Route::Interpret
+        );
+        assert_eq!(route(mods(false, true, false), "a", true), Route::Interpret);
+        assert_eq!(route(mods(false, false, true), "a", true), Route::Interpret);
+        assert_eq!(route(mods(true, false, false), "a", true), Route::Ignore);
+    }
+
+    #[test]
+    fn shift_enter_alone_is_a_new_line_like_todays_panel() {
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        assert_eq!(route(shift, "\r", false), Route::NewLine);
+        assert_eq!(route(shift, "\u{3}", false), Route::NewLine);
+        assert_eq!(route(shift, "\r", true), Route::Interpret);
+        assert_eq!(route(shift, "A", false), Route::Interpret);
+        assert_eq!(route(Mods::default(), "\r", false), Route::Interpret);
+        let option = Mods {
+            option: true,
+            ..shift
+        };
+        assert_eq!(route(option, "\r", false), Route::Meta);
+        let control = Mods {
+            control: true,
+            ..shift
+        };
+        assert_eq!(route(control, "\r", false), Route::Bypass);
+        let command = Mods {
+            command: true,
+            ..shift
+        };
+        assert_eq!(route(command, "\r", false), Route::Ignore);
     }
 
     #[test]
