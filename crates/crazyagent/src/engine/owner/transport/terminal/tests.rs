@@ -1113,3 +1113,145 @@ async fn an_input_only_view_of_a_teammate_its_host_does_not_list_stays_open() {
         "terminal_detached"
     );
 }
+
+/// Reads an agent terminal's screen until a check passes or the wait runs out. Takes the
+/// host, the agent, the check and the wait. Returns the last screen read, as text.
+async fn screen_when(
+    host: &Arc<Tmux>,
+    agent: &AgentId,
+    check: fn(&str) -> bool,
+    wait: Duration,
+) -> String {
+    assert!(wait > Duration::ZERO && wait <= WAIT);
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let (host, agent) = (host.clone(), agent.clone());
+        let screen = tokio::task::spawn_blocking(move || host.screen(&agent))
+            .await
+            .unwrap()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        if check(&screen) || tokio::time::Instant::now() >= deadline {
+            return screen;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// V243-NATIVE-INPUT-PIN: an input-only view stays on the pane it opened on. Once that pane
+/// ends and a new terminal takes the agent's name, as the engine's restart of an agent does,
+/// the view's keys, paste and resize never reach the new pane, and the view ends as
+/// `terminal_ended` at a grant check, while before the end it typed into its own pane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-pin-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let first = InteractiveCommand {
+        argv: vec!["/bin/sh".into()],
+        cwd: root.to_path_buf(),
+        env: vec![("PS1".into(), "first$ ".into())],
+        transcript: Transcript::Unavailable,
+    };
+    let second = InteractiveCommand {
+        env: vec![("PS1".into(), "second$ ".into())],
+        ..first.clone()
+    };
+    let launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &first).unwrap();
+            Arc::new(launcher)
+        })
+        .await
+        .unwrap()
+    };
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = owner
+        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .await
+        .unwrap();
+    control.input(b"echo own-pane\r".to_vec()).await.unwrap();
+    let own = screen_when(
+        &launcher,
+        &agent,
+        |s| s.matches("own-pane").count() >= 2,
+        WAIT,
+    )
+    .await;
+    assert!(
+        own.matches("own-pane").count() >= 2,
+        "the view typed into its own pane: {own}"
+    );
+
+    {
+        let (launcher, agent) = (launcher.clone(), agent.clone());
+        tokio::task::spawn_blocking(move || {
+            launcher.kill(&agent).unwrap();
+            launcher.spawn(&agent, &second).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+    let fresh = screen_when(&launcher, &agent, |s| s.contains("second$"), WAIT).await;
+    assert!(fresh.contains("second$"), "the new terminal runs: {fresh}");
+    let TerminalSession { cols, rows, .. } = owner.terminal_attach(agent.clone()).await.unwrap();
+    let before = (cols, rows);
+    let _ = control.input(b"echo stale-keys\r".to_vec()).await;
+    let _ = control.paste(b"echo stale-paste".to_vec(), true).await;
+    let _ = control.input(b"\r".to_vec()).await;
+    let _ = control.resize(before.0 - 20, before.1 - 4).await;
+
+    let quiet = Duration::from_secs(2);
+    let new = screen_when(&launcher, &agent, |s| s.contains("stale"), quiet).await;
+    assert!(
+        !new.contains("stale"),
+        "a stale view's keys reached the new terminal: {new}"
+    );
+    let TerminalSession { cols, rows, .. } = owner.terminal_attach(agent).await.unwrap();
+    assert_eq!(
+        (cols, rows),
+        before,
+        "a stale view's resize sized the new terminal"
+    );
+    assert_eq!(closed(&mut output).await, "terminal_ended");
+
+    drop(control);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
