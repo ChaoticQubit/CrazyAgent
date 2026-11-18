@@ -3387,14 +3387,7 @@ impl TeamRuntime {
     fn active_projects(&self) -> Result<Vec<ProjectId>, EngineError> {
         let mut statement = self
             .connection
-            .prepare(
-                "SELECT project FROM team_messages WHERE state='pending'
-                 UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
-                     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
-                 UNION SELECT project FROM team_settings WHERE keep_warm=1
-                 UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
-                 UNION SELECT project FROM team_live_masters WHERE live=1",
-            )
+            .prepare(ACTIVE_PROJECTS_SQL)
             .map_err(error)?;
         let mut projects: BTreeSet<ProjectId> = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -13053,6 +13046,14 @@ const NOTE_RESULT_BYTES_MAX: usize = 300;
 const NOTE_PROBLEM_BYTES_MAX: usize = 200;
 const NOTE_PLACE_BYTES_MAX: usize = 120;
 const NOTES_PER_TICK_MAX: i64 = 16;
+/// The read behind `active_projects`: every project with pending owner messages, live or
+/// undelivered master tasks, Keep warm, live agents or a live master switched on.
+const ACTIVE_PROJECTS_SQL: &str = "SELECT project FROM team_messages WHERE state='pending'
+ UNION SELECT project FROM team_tasks WHERE status IN ('queued','needs_pool','running') OR (delivered=0 AND source='master' AND status IN ('done','failed','cancelled')
+     AND (session IS NULL OR session IN (SELECT id FROM master_sessions WHERE phase='configured')))
+ UNION SELECT project FROM team_settings WHERE keep_warm=1
+ UNION SELECT project FROM team_agents WHERE status IN ('starting','idle','working')
+ UNION SELECT project FROM team_live_masters WHERE live=1";
 
 /// One task a conversation master handed off that has ended, as the note sweep reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]

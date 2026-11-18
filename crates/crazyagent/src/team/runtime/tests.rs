@@ -34721,3 +34721,55 @@ fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is
         HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
     );
 }
+
+/// How many ended tasks, answered owner messages and stopped agents the idle-cost row puts
+/// in front of the tick's active project read.
+const HISTORY_ROWS: i64 = 300;
+/// The most SQLite steps that read may add over that history: far below one step per old
+/// row, so any arm that walks the history fails.
+const HISTORY_STEPS_SLACK: i32 = 32;
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): every tick reads which projects to step. Over a
+/// history of delivered ended tasks, answered owner messages and stopped agents the read
+/// takes as many SQLite steps as over none, so an idle tick does not grow with history.
+#[test]
+fn the_active_projects_read_does_not_grow_with_team_history() {
+    let fixture = Fixture::new(1);
+    let before = active_projects_steps(&fixture.connection);
+    for _ in 0..HISTORY_ROWS {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms)
+                 VALUES (?1,'master','codex',0,'Old','done',1,1)",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Old','answered',1)",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    }
+    let after = active_projects_steps(&fixture.connection);
+    assert!(
+        after <= before + HISTORY_STEPS_SLACK,
+        "active project steps grew from {before} to {after}"
+    );
+}
+
+/// Runs the tick's active project read to its end and counts its SQLite virtual machine
+/// steps. Input: the engine database. Output: the step count.
+fn active_projects_steps(connection: &Connection) -> i32 {
+    let mut statement = connection.prepare(ACTIVE_PROJECTS_SQL).unwrap();
+    let mut rows = statement.query([]).unwrap();
+    while rows.next().unwrap().is_some() {}
+    drop(rows);
+    let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(steps > 0);
+    steps
+}
