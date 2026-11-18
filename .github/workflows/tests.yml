@@ -295,7 +295,7 @@ jobs:
           exit "$rc"
 
   macos-tip:
-    name: Git safe r2 macOS at the tip, rows
+    name: Git safe r2 macOS at the tip with the pinned IDE build, rows
     runs-on: macos-15
     timeout-minutes: 200
     steps:
@@ -339,6 +339,37 @@ jobs:
           IFS=. read -r major minor _ <<< "${version#git version }"
           (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
           echo "confined-step git, which xcode-select does not move: $(/Library/Developer/CommandLineTools/usr/bin/git --version || echo missing)"
+      - name: Read the pinned IDE build, as the shard does
+        id: ide
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            import { appendFileSync, readFileSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("crates/crazyagent/src/ide/builds.json", "utf8"));
+            const { version } = manifest;
+            const build = manifest.builds["aarch64-apple-darwin"];
+            const url = `https://github.com/VSCodium/vscodium/releases/download/${version}/vscodium-reh-web-darwin-arm64-${version}.tar.gz`;
+            const pinned = /^[0-9]+(\.[0-9]+)*$/.test(version) && build?.url === url && /^[0-9a-f]{64}$/.test(build.sha256)
+              && Number.isSafeInteger(build.bytes) && build.bytes > 0 && build.bytes <= 150 * 1024 * 1024;
+            if (!pinned) throw new Error("builds.json does not pin an official darwin-arm64 VSCodium build");
+            appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nurl=${url}\nsha256=${build.sha256}\nbytes=${build.bytes}\n`);
+          '
+      - name: Provision the pinned IDE build, as the shard does
+        env:
+          IDE_VERSION: ${{ steps.ide.outputs.version }}
+          IDE_URL: ${{ steps.ide.outputs.url }}
+          IDE_SHA256: ${{ steps.ide.outputs.sha256 }}
+          IDE_BYTES: ${{ steps.ide.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/vscodium-reh-web"
+          build=".local-state/ide-cache/vscodium-$IDE_VERSION"
+          mkdir -p "$work" "$build"
+          curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize "$IDE_BYTES" -o "$work/vscodium.tgz" "$IDE_URL"
+          test "$(stat -f %z "$work/vscodium.tgz")" = "$IDE_BYTES"
+          echo "$IDE_SHA256  $work/vscodium.tgz" | shasum -a 256 -c -
+          tar -xzf "$work/vscodium.tgz" -C "$build"
+          test -f "$build/out/server-main.js"
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -359,13 +390,13 @@ jobs:
         timeout-minutes: 40
         run: |
           set +e -uo pipefail
-          cargo test -p crazyagent --lib --locked -- research::runner::program_tests:: ide::git:: ide::env:: ide::server::tests::server_env_holds_only_allowlisted_names ide::sandbox::tests::ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on landing::signature_tests:: worktrees::tests:: github::publish:: github::clone:: > "$RUNNER_TEMP/tip.txt" 2>&1
+          cargo test -p crazyagent --lib --locked -- research::runner::program_tests:: ide::git:: ide::env:: ide::server::tests::server_env_holds_only_allowlisted_names ide::server::tests::an_older_agents_root_too_large_to_read_keeps_the_git_stop ide::sandbox::tests::ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on landing::signature_tests:: worktrees::tests:: github::publish:: github::clone:: > "$RUNNER_TEMP/tip.txt" 2>&1
           rc=$?
           grep -E "^test result|FAILED|panicked" "$RUNNER_TEMP/tip.txt" | head -40
           grep -E "^test .* \.\.\. (ok|ignored)" "$RUNNER_TEMP/tip.txt" | sed 's/^test //' | sort > "$RUNNER_TEMP/tip-rows.txt"
           wc -l < "$RUNNER_TEMP/tip-rows.txt"
           grep -E "program_tests|clone::|ide::server::|ide::sandbox::|ignored" "$RUNNER_TEMP/tip-rows.txt"
-          for row in "$VALUE_UNIX" "$BUILDER" "$REFUSAL" "$CLONE" "$IDE_LOG" ide::server::tests::server_env_holds_only_allowlisted_names ide::sandbox::tests::ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor; do
+          for row in "$VALUE_UNIX" "$BUILDER" "$REFUSAL" "$CLONE" "$IDE_LOG" ide::server::tests::server_env_holds_only_allowlisted_names ide::server::tests::an_older_agents_root_too_large_to_read_keeps_the_git_stop ide::sandbox::tests::ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on landing::signature_tests::engine_setup_git_runs_no_repository_signature_program_in_any_armor; do
             grep -q "^test $row \.\.\. ok" "$RUNNER_TEMP/tip.txt" || { echo "ROW NOT OK: $row"; rc=1; }
           done
           exit "$rc"
