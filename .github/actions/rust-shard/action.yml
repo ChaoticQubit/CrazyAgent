@@ -133,6 +133,7 @@ runs:
         "$work/bin/uv" venv --no-project --no-config --python 3.12.15 "$venv"
         "$work/bin/uv" pip install --no-config --python "$venv/bin/python" --require-hashes --no-build --requirements crates/crazyagent/src/setup/locks/graphifyy-0.9.9.txt
         "$venv/bin/graphify" --help > /dev/null
+        ln -s "$venv/bin/graphify" "$work/bin/graphify"
         echo "CRAZYAGENT_GRAPHIFY=$venv/bin/graphify" >> "$GITHUB_ENV"
     - name: Install the pinned context-mode for the shared-install rows
       if: inputs.os == 'macos'
