@@ -902,6 +902,44 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
     );
 }
 
+/// V243-WORKTREES-GIT-FLAKE: in a project that asks every log for signatures and names its
+/// own signature programs, with a `false` first on the search path, the IDE's git logs a
+/// commit signed in any armor as its subject alone and runs none of them: no signature
+/// check, and no program a path lookup finds.
+#[test]
+fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
+    use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+    for armor in Armor::ALL {
+        let signed = signed(armor);
+        let bin = signed.base.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = signed.base.join("path-false");
+        planted(&bin.join("false"), &marker);
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let env: Vec<(&str, &str)> = CONFIG_ENV
+            .iter()
+            .copied()
+            .chain([("PATH", path.as_str())])
+            .collect();
+        let logged = git(&signed.root, &env, &["log", "-1", "--format=%s"]);
+        assert!(
+            logged.status.success(),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&logged.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&logged.stdout),
+            format!("{SUBJECT}\n"),
+            "{armor:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "{armor:?}: the IDE's git ran the path's false"
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+    }
+}
+
 /// SECAUDIT-IDE-SERVER-INDEX: with a private index the shim runs git on a copy, asks the
 /// engine only through its forwarder, and refuses a folder a shell word cannot hold.
 #[test]

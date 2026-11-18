@@ -3888,6 +3888,69 @@ mod tests {
         }
     }
 
+    /// The engine's worktree git, asked outright 40 times for an ssh signature while three
+    /// busy threads per processor hold up its signature program, reads the subject every
+    /// time: the program it pins never starts, so none can exit before git writes it the
+    /// payload and kill git with SIGPIPE (V243-WORKTREES-GIT-FLAKE). Linux only, where the
+    /// farm saw that race.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time() {
+        use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Clears the busy flag when dropped, so the busy threads stop and the scope ends
+        /// even when a read panics. Input: the flag. Output: none.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+
+        const RUNS: usize = 40;
+        let signed = signed(Armor::Ssh);
+        let busy = AtomicBool::new(true);
+        let threads = 3 * std::thread::available_parallelism().map_or(1, usize::from);
+        let reads: Vec<Result<Vec<u8>, EngineError>> = std::thread::scope(|scope| {
+            let _stop = Stop(&busy);
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    while busy.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                });
+            }
+            (0..RUNS)
+                .map(|_| {
+                    git_until(
+                        &signed.root,
+                        &["log", "--show-signature", "-1", "--format=%s"],
+                        OUTPUT_BYTES_MAX,
+                        Instant::now() + Duration::from_secs(60),
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(reads.len(), RUNS);
+        let subject = format!("{SUBJECT}\n");
+        let failed: Vec<(usize, String)> = reads
+            .iter()
+            .enumerate()
+            .filter_map(|(run, read)| match read {
+                Ok(bytes) if bytes.ends_with(subject.as_bytes()) => None,
+                Ok(bytes) => Some((run, format!("read {:?}", String::from_utf8_lossy(bytes)))),
+                Err(EngineError(code)) => Some((run, code.clone())),
+            })
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "Ssh: {} of {RUNS} runs failed under {threads} busy threads, (run, code): {failed:?}",
+            failed.len()
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "Ssh");
+    }
+
     /// Runs [`restarted_with`] for a pinned lease stored at `state`. Inputs: the state and
     /// the answers. Output: the state stored after the start and how many checks ran.
     fn restarted(state: LeaseState, answers: &[Result<(), &str>]) -> (LeaseState, usize) {
