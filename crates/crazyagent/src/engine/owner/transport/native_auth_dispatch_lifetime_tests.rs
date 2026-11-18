@@ -287,7 +287,12 @@ impl LifetimeCase {
             .host
             .engine
             .native_auth_job(|reply| {
-                Job::NativeAuth(self.admission(), Command::Start(self.start(id)), reply)
+                Job::NativeAuth(
+                    self.admission(),
+                    Command::Start(self.start(id)),
+                    crate::storage::NativeAuthAsk::Engine,
+                    reply,
+                )
             })
             .await
             .unwrap();

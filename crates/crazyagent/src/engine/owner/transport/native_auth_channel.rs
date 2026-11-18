@@ -1195,7 +1195,14 @@ impl OwnerRuntimeHandle {
         let begun = self
             .engine
             .native_auth_settled_job(
-                |reply| Job::NativeAuth(admission.clone(), command, reply),
+                |reply| {
+                    Job::NativeAuth(
+                        admission.clone(),
+                        command,
+                        crate::storage::NativeAuthAsk::Engine,
+                        reply,
+                    )
+                },
                 late,
             )
             .await?;
@@ -2949,7 +2956,14 @@ fallback_allowed = false
             };
             let begun = host
                 .engine
-                .native_auth_job(|reply| Job::NativeAuth(admission, command, reply))
+                .native_auth_job(|reply| {
+                    Job::NativeAuth(
+                        admission,
+                        command,
+                        crate::storage::NativeAuthAsk::Engine,
+                        reply,
+                    )
+                })
                 .await
                 .unwrap();
             assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);

@@ -191,6 +191,17 @@ const OPERATIONS_PER_CLIENT_MAX: usize = 64;
 /// Recent wire operations kept across all clients; the oldest finished rows go first.
 const OPERATIONS_MAX: usize = 1024;
 
+/// Who asks a native-auth job, which decides what it does with the owner's kept sign-outs:
+/// an owner's new sign-in ends those of its profile, a drained sign-out runs only while its
+/// intent is kept, and the engine's own check touches none. The owner waits until
+/// `answer_by`, a margin before its exchange is cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeAuthAsk {
+    Owner { answer_by: tokio::time::Instant },
+    Drained(narrowing::IntentId),
+    Engine,
+}
+
 pub(crate) enum Job {
     Accounts(
         Admission,
@@ -235,6 +246,7 @@ pub(crate) enum Job {
     NativeAuth(
         Admission,
         owner_auth::Command,
+        NativeAuthAsk,
         oneshot::Sender<Result<NativeAuthBegin, EngineError>>,
     ),
     NativeAuthFinish(
@@ -581,7 +593,7 @@ impl Job {
     pub(crate) fn narrows_access(&self) -> bool {
         match self {
             Self::OwnerControl(_, control, _, _) => control.decision == OwnerDecision::Revoke,
-            Self::NativeAuth(_, command, _) => matches!(
+            Self::NativeAuth(_, command, _, _) => matches!(
                 command,
                 owner_auth::Command::Logout(_) | owner_auth::Command::Cancel(_)
             ),
@@ -897,7 +909,7 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::NativeAuth(admission, command, reply) => {
+                        Job::NativeAuth(admission, command, _ask, reply) => {
                             let logout = match &command {
                                 owner_auth::Command::Logout(logout) => Some(logout.request_id.clone()),
                                 _ => None,

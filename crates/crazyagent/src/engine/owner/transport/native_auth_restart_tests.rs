@@ -624,7 +624,14 @@ impl Run {
         let begun = self
             .handle
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    admission.clone(),
+                    command,
+                    crate::storage::NativeAuthAsk::Engine,
+                    reply,
+                )
+            })
             .await
             .unwrap();
         assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);
