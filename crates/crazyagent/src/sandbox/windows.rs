@@ -92,11 +92,7 @@ impl WindowsSandbox {
             .ok_or_else(|| invalid("grants folder must exist"))?;
         make_guarded_folders(&sandbox)?;
         let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
-        if let Some(root) = boundary
-            .read_roots
-            .iter()
-            .find(|root| crazyagent_win_sandbox::unreadable_root(Path::new(root)))
-        {
+        if let Some(root) = crazyagent_win_sandbox::unreadable_read_root(&boundary) {
             eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
             return Err(SandboxError::Unreadable(PathBuf::from(root)));
         }

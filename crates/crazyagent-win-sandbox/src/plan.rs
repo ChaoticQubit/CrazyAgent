@@ -279,6 +279,13 @@ fn anchors(
     anchors
 }
 
+/// The read roots the helper grants: each outermost one outside every writable root, as
+/// [`plan`] keeps them (DEC-193 D1), since a root inside a granted one is reached through it.
+/// Input: the profile. Output: those roots.
+pub fn granted_read_roots(profile: &BoundaryProfile) -> Vec<&str> {
+    profile.read_roots.iter().map(String::as_str).collect()
+}
+
 fn outermost<'a>(roots: impl Iterator<Item = &'a str>, covered: &[&'a str]) -> Vec<&'a str> {
     let mut kept: Vec<&'a str> = Vec::new();
     for root in roots {
@@ -340,6 +347,21 @@ mod tests {
             .filter(|item| item.access == access)
             .map(|item| item.path.as_str())
             .collect()
+    }
+
+    /// V244-WIN-NPM r2 F1: the helper grants only the outermost read roots outside every
+    /// writable root, so a read root inside a writable root or inside another read root is
+    /// not one the boundary checks on its own.
+    #[test]
+    fn a_read_root_inside_a_granted_root_is_not_granted_for_itself() {
+        let vendor = format!(r"{PROJECT}\vendor");
+        let tools = r"C:\Tools\node";
+        let lib = r"C:\Tools\node\lib";
+        let shared = r"C:\Data\shared";
+        let nested = profile(&[&vendor, lib, tools, shared], &[PROJECT], &[]);
+        assert_eq!(granted_read_roots(&nested), vec![tools, shared]);
+        let granted = plan(&nested).unwrap();
+        assert_eq!(roles(&granted, Access::ReadExecute), vec![tools, shared]);
     }
 
     #[test]

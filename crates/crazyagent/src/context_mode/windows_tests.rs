@@ -465,7 +465,7 @@ fn npm_installs_into_a_fresh_staging_folder() {
 fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_own_code() {
     let bin = system_bin();
     assert!(
-        crazyagent_win_sandbox::unreadable_root(&bin),
+        crazyagent_win_sandbox::unreadable_root(&bin, "crazyagent.test.node"),
         "{}",
         bin.display()
     );

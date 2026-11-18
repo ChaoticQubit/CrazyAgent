@@ -1,9 +1,12 @@
 use super::acl::{ACL_BYTES_MAX, Local};
+use super::container::sid;
 use super::{BoundaryError, last_error, windows};
 use crate::dacl::{
     ANCESTOR_CHANGES, DENY_TYPES, FILE_CHANGES, OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX,
     first_changeable_part, held_only_by, read_root_refused,
 };
+use crate::plan::granted_read_roots;
+use crate::profile::BoundaryProfile;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -128,18 +131,27 @@ fn read_part(part: &Path) -> Part {
     }
 }
 
-/// Whether the boundary refuses `path` as a read root before its helper runs
-/// ([`crate::dacl::read_root_refused`]): its list is read where it sits, and only when no app
-/// container may read it is it opened for `WRITE_DAC`, the right the helper's write takes. A
-/// path that is missing, has no list or cannot be read is left to the helper, which refuses
-/// it by name. Input: the read root. Output: true to refuse.
-pub fn unreadable_root(path: &Path) -> bool {
-    let Ok((_, Some(list))) = security(path) else {
+/// Whether the boundary refuses `path` as a read root of `container` before its helper runs
+/// ([`crate::dacl::read_root_refused`]): its list is read where it sits, and only when neither
+/// every app container nor this one may read it is it opened for `WRITE_DAC`, the right the
+/// helper's write takes. Anything it cannot read is left to the helper, which names the path.
+/// Inputs: the read root and the container name. Output: true to refuse.
+pub fn unreadable_root(path: &Path, container: &str) -> bool {
+    let (Ok((_, Some(list))), Ok(own)) = (security(path), sid(container)) else {
         return false;
     };
-    read_root_refused(&list, || {
+    read_root_refused(&list, &own.bytes(), || {
         !matches!(opened(path, WRITE_DAC), Err(ERROR_ACCESS_DENIED))
     })
+}
+
+/// The first read root of `profile` the boundary refuses before its helper runs
+/// ([`unreadable_root`]), among those the helper grants ([`crate::plan::granted_read_roots`]).
+/// Input: the profile. Output: that root, or none.
+pub fn unreadable_read_root(profile: &BoundaryProfile) -> Option<&str> {
+    granted_read_roots(profile)
+        .into_iter()
+        .find(|root| unreadable_root(Path::new(root), &profile.container))
 }
 
 /// Opens the file or folder at `path` itself for `access`, with the link flag so a link or
