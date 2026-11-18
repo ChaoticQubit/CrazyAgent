@@ -141,7 +141,23 @@ pub const DRIVE_ROOT_RIGHTS: u32 = 0x0010_0080;
 /// allow entries do not count. Inputs: the list, the SID and the rights. Output: true when it
 /// does; false for a malformed list.
 pub fn holds_allow(acl: &[u8], sid: &[u8], mask: u32) -> bool {
-    todo!("{acl:?} {sid:?} {mask}")
+    assert_ne!(mask, 0);
+    entries(acl).is_ok_and(|found| {
+        found.iter().any(|entry| {
+            entry.allows
+                && entry.sid == sid
+                && entry.flags & INHERIT_ONLY == 0
+                && entry.mask & mask == mask
+        })
+    })
+}
+
+/// The size an access list's header gives it. Input: a list whose header [`spans`] checked.
+/// Output: the size in bytes.
+fn list_size(acl: &[u8]) -> usize {
+    let size = usize::from(u16::from_le_bytes([acl[2], acl[3]]));
+    assert!((ACL_HEADER_BYTES..=acl.len()).contains(&size));
+    size
 }
 
 /// The list with one plain allow entry giving `sid` exactly `mask` on this object only (no
@@ -150,7 +166,31 @@ pub fn holds_allow(acl: &[u8], sid: &[u8], mask: u32) -> bool {
 /// Output: the new list, None when [`holds_allow`] already holds, or the reason it is
 /// malformed or would pass an access list's size limit.
 pub fn with_allow(acl: &[u8], sid: &[u8], mask: u32) -> Result<Option<Vec<u8>>, &'static str> {
-    todo!("{acl:?} {sid:?} {mask}")
+    const TOO_BIG: &str = "the access list would grow past its limit";
+    let spans = spans(acl)?;
+    if holds_allow(acl, sid, mask) {
+        return Ok(None);
+    }
+    let size = list_size(acl);
+    let at = spans
+        .iter()
+        .rev()
+        .find(|span| acl[span.range.start + 1] & INHERITED == 0)
+        .map_or(ACL_HEADER_BYTES, |span| span.range.end);
+    let entry = ace_bytes(ACCESS_ALLOWED, 0, mask, sid);
+    let grown = u16::try_from(size + entry.len()).map_err(|_| TOO_BIG)?;
+    let count = u16::try_from(spans.len() + 1).map_err(|_| TOO_BIG)?;
+    let mut list = Vec::with_capacity(usize::from(grown));
+    list.extend_from_slice(&acl[..2]);
+    list.extend(grown.to_le_bytes());
+    list.extend(count.to_le_bytes());
+    list.extend_from_slice(&acl[6..at]);
+    list.extend_from_slice(&entry);
+    list.extend_from_slice(&acl[at..size]);
+    assert_eq!(list.len(), usize::from(grown));
+    assert_eq!(self::spans(&list)?.len(), spans.len() + 1);
+    assert!(holds_allow(&list, sid, mask));
+    Ok(Some(list))
 }
 
 /// The list without each entry byte-equal to the one [`with_allow`] adds for `sid` and
@@ -158,7 +198,33 @@ pub fn with_allow(acl: &[u8], sid: &[u8], mask: u32) -> Result<Option<Vec<u8>>, 
 /// end are kept. Inputs: the list, the SID and the rights. Output: the new list, None when it
 /// holds no such entry, or the reason it is malformed.
 pub fn without_allow(acl: &[u8], sid: &[u8], mask: u32) -> Result<Option<Vec<u8>>, &'static str> {
-    todo!("{acl:?} {sid:?} {mask}")
+    let spans = spans(acl)?;
+    let entry = ace_bytes(ACCESS_ALLOWED, 0, mask, sid);
+    let ours = |span: &Span<'_>| acl[span.range.clone()] == entry[..];
+    let removed = spans.iter().filter(|span| ours(span)).count();
+    if removed == 0 {
+        return Ok(None);
+    }
+    let size = list_size(acl);
+    let end = spans.last().map_or(ACL_HEADER_BYTES, |span| span.range.end);
+    let shrunk = u16::try_from(size - removed * entry.len()).expect("a list only shrinks");
+    let count = u16::try_from(spans.len() - removed).expect("a list only shrinks");
+    let mut list = Vec::with_capacity(usize::from(shrunk));
+    list.extend_from_slice(&acl[..2]);
+    list.extend(shrunk.to_le_bytes());
+    list.extend(count.to_le_bytes());
+    list.extend_from_slice(&acl[6..ACL_HEADER_BYTES]);
+    for span in spans.iter().filter(|span| !ours(span)) {
+        list.extend_from_slice(&acl[span.range.clone()]);
+    }
+    list.extend_from_slice(&acl[end..size]);
+    assert_eq!(list.len(), usize::from(shrunk));
+    assert!(
+        self::spans(&list)?
+            .iter()
+            .all(|span| list[span.range.clone()] != entry[..])
+    );
+    Ok(Some(list))
 }
 
 fn sid_at(bytes: &[u8]) -> Result<&[u8], &'static str> {
