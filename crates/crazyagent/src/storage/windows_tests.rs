@@ -1,0 +1,73 @@
+use super::Storage;
+use crazyagent_win_sandbox::private;
+use std::path::{Path, PathBuf};
+
+/// A temp root holding a W1 private data folder, the engine database path inside it and a
+/// config with no settings files. Output: the root guard, the database path and the config.
+fn fixture() -> (tempfile::TempDir, PathBuf, crate::config::EffectiveConfig) {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    (root, data.join("engine.db"), config)
+}
+
+/// Grants authenticated users inheritable modify on a folder through icacls. Input: the
+/// folder.
+fn open_to_other_users(folder: &Path) {
+    let status = std::process::Command::new("icacls")
+        .args([folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// W1 D1-D2: engine storage opens in a private data folder on Windows, and the database
+/// and the write-ahead and shared-memory files SQLite makes beside it pass W1's check.
+#[tokio::test]
+async fn engine_storage_opens_in_a_private_folder_and_its_side_files_stay_private() {
+    let (_root, path, config) = fixture();
+    let storage = Storage::open(&path, config, false).await.unwrap();
+    for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
+        let side = path.with_file_name(name);
+        let file = private::file(&side, false).unwrap_or_else(|error| panic!("{name}: {error}"));
+        private::check(&file).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    drop(storage);
+}
+
+/// W1 D4: a second engine on the same data folder is refused by the engine lock, as on
+/// Unix.
+#[tokio::test]
+async fn a_second_engine_on_the_same_folder_is_refused() {
+    let (_root, path, config) = fixture();
+    let first = Storage::open(&path, config.clone(), false).await.unwrap();
+    let Err(error) = Storage::open(&path, config, false).await else {
+        panic!("a second engine opened the same database");
+    };
+    assert!(
+        error.to_string().contains("database_lock_acquire_failed"),
+        "{error}"
+    );
+    drop(first);
+}
+
+/// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
+/// the blanket `storage_unavailable` refusal the port replaces.
+#[tokio::test]
+async fn a_data_folder_other_users_may_change_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    std::fs::create_dir(&data).unwrap();
+    open_to_other_users(&data);
+    let config =
+        crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+    let Err(error) = Storage::open(&data.join("engine.db"), config, false).await else {
+        panic!("storage opened in a folder other users may change");
+    };
+    assert!(
+        !error.to_string().contains("storage_unavailable"),
+        "{error}"
+    );
+}

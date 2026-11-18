@@ -57,6 +57,8 @@ mod projects_home;
 #[cfg(all(test, unix))]
 mod projects_home_tests;
 mod settings;
+#[cfg(all(test, windows))]
+mod windows_tests;
 pub(crate) mod worker_dispatch;
 
 /// Upper bound on waiting for a master runtime job. Preparing a master turn provisions
