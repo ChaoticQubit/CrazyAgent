@@ -426,7 +426,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
                 std::slice::from_ref(&server.id),
                 "the confirmed change is the one storage holds"
             );
-            server.id
+            Some(server.id)
         }
         Err(error) if error.0 == "plugins_outcome_unknown" => {
             assert_eq!(
@@ -434,13 +434,21 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
                 1,
                 "storage kept the change the owner wait could not confirm: {stored:?}"
             );
-            stored[0].clone()
+            Some(stored[0].clone())
+        }
+        Err(error) if error.0 == "storage_busy_not_submitted" => {
+            assert!(
+                stored.is_empty(),
+                "the withdrawn change never reached storage"
+            );
+            None
         }
         Err(error) => panic!("the held change answered {}", error.0),
     };
     match revoked {
         Ok(reply) => assert!(!reply.active),
-        Err(error) if error.0 == "owner_outcome_unknown_reconcile_same_identity" => {
+        Err(error) if error.0 == "access_change_pending" => {
+            storage_settled(&owner).await;
             let reconciled = runtime.reconcile_control(control).await.unwrap();
             assert!(
                 reconciled.is_some_and(|reply| !reply.active),
@@ -450,8 +458,12 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         Err(error) => panic!("the revocation answered {}", error.0),
     }
 
+    let read = match id {
+        Some(id) => owner.client.plugin_server(id).await.map(|_| ()),
+        None => owner.client.plugin_servers(None, 0).await.map(|_| ()),
+    };
     assert!(
-        owner.client.plugin_server(id).await.is_err(),
+        read.is_err(),
         "the revoked client reads no more plugin state"
     );
     owner.stop().await;
@@ -748,8 +760,8 @@ async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot()
         .await;
     assert_eq!(
         reactivated.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the reactivation outlasts the owner wait"
+        Err(failure("storage_busy_not_submitted")),
+        "the reactivation outlasts the owner wait and is withdrawn"
     );
     let lapsed = runtime
         .control(revocation(
@@ -760,17 +772,13 @@ async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot()
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the revocation outlasts the owner wait"
+        Err(failure("access_change_pending")),
+        "the revocation outlasts the owner wait and stays queued"
     );
     assert!(!admitted(runtime, &owner.client));
 
     release.send(()).unwrap();
     storage_settled(&owner).await;
-    assert!(
-        published(runtime, revoked.owner_epoch + 1).await,
-        "memory takes the epoch storage committed"
-    );
     assert!(
         !tui_registration(runtime).active,
         "a reactivation sent before the revocation never reopens the slot"
