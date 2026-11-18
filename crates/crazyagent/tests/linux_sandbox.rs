@@ -3199,6 +3199,10 @@ fn a_nested_agent_outlives_the_thread_that_started_it() {
 /// its environment: its agent sleeps for it, so the row finds that agent by command line.
 const KEPT_ENGINE: &str = "CRAZYAGENT_TEST_KEPT_ENGINE";
 
+/// The file a stand-in engine run of [`a_kept_nested_agent_ends_with_the_engine`] writes once
+/// its agent printed `ready`, so bubblewrap runs and has set its death signal by then.
+const KEPT_READY: &str = "CRAZYAGENT_TEST_KEPT_READY";
+
 /// rv-sec3 N1, a guard for the custody: a nested agent started through it still ends with the
 /// engine. The row runs itself again as a stand-in engine that starts the agent so and waits;
 /// once the stand-in is killed, nothing the agent runs is left. It holds with the agent
@@ -3209,13 +3213,15 @@ fn a_kept_nested_agent_ends_with_the_engine() {
     let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
         return;
     };
-    if let Ok(token) = std::env::var(KEPT_ENGINE) {
+    if let (Ok(token), Some(ready)) = (std::env::var(KEPT_ENGINE), std::env::var_os(KEPT_READY)) {
         let script = format!("echo ready; exec sleep {token}");
         let _kept = kept_started(&sandbox, &case, &script);
+        fs::write(ready, "ready").unwrap();
         std::thread::sleep(Duration::from_secs(60));
         return;
     }
     let token = format!("604.{}", std::process::id());
+    let ready = case.tmp.join("kept-engine-ready");
     let mut engine = crazyagent::spawn_gate::spawn(
         Command::new(std::env::current_exe().unwrap())
             .args([
@@ -3225,18 +3231,20 @@ fn a_kept_nested_agent_ends_with_the_engine() {
                 "--test-threads=1",
             ])
             .env(KEPT_ENGINE, &token)
+            .env(KEPT_READY, &ready)
             .stdin(Stdio::null())
             .stdout(Stdio::null()),
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !running(&token) {
+    while !ready.exists() {
         assert!(
             Instant::now() < deadline,
             "the stand-in engine never started its agent"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    assert!(running(&token), "the stand-in's agent is not running");
     assert_eq!(engine.try_wait().unwrap(), None);
     engine.kill().unwrap();
     engine.wait().unwrap();
