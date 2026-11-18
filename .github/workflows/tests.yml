@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,6 +115,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -143,9 +146,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-linux:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -190,9 +193,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-macos:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -252,9 +255,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   rust-windows:
+    if: false
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +303,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +467,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -525,9 +530,9 @@ jobs:
           retention-days: 14
 
   report:
+    if: false
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,83 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  rows:
+    name: slice D on slice A rows macos-15
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the base workflow so the tree is the base
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 334b4b55942b55a70b92c5bee4e7d0691c46b7f6 HEAD
+          test "$(git diff --name-only 334b4b55942b55a70b92c5bee4e7d0691c46b7f6 HEAD)" = .github/workflows/tests.yml
+          git checkout 334b4b55942b55a70b92c5bee4e7d0691c46b7f6 -- .github/workflows/tests.yml
+          git diff --quiet 334b4b55942b55a70b92c5bee4e7d0691c46b7f6
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Typecheck and build the desktop frontend
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Rows
+        timeout-minutes: 200
+        run: |
+          set -u +e +o pipefail
+          export CARGO_BUILD_JOBS=2
+          export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+          bad=0
+          row() {
+            local label=$1
+            shift
+            out=$(cargo test -p crazyagent-desktop --lib --locked -- "$@" 2>&1)
+            rc=$?
+            echo "row $label rc=$rc $(printf '%s\n' "$out" | grep -m1 'test result')"
+            printf '%s\n' "$out" | grep -E "^test .* (ok|FAILED|ignored)$" | sed 's/^/    /'
+            printf '%s\n' "$out" | grep -m20 "panicked at\|error\[E\|left: \|right: " | cut -c1-300 | sed 's/^/    /'
+            case $label in
+              green*) [ "$rc" -eq 0 ] || bad=1 ;;
+              red*) printf '%s\n' "$out" | grep -q 'test result: FAILED' || bad=1 ;;
+              info*) ;;
+            esac
+          }
+          n=apps/desktop/src-tauri/src/native_term
+          perl -pi -e 's/^        took\.command$/        false/' "$n/ime.rs"
+          perl -pi -e 's/else if mods\.control \|\| mods\.option \{/else if false {/' "$n/ime.rs"
+          perl -pi -e 's/let overlay = place_marked\(marked, content\.cursor\.point, offset, size\);/let overlay: Option<(Preedit, String)> = None;/' "$n/screen.rs"
+          perl -pi -e 's/let y = \(preedit\.row \+ 1\) as f32 \* ch - line;/let y = preedit.row as f32 * ch;/' "$n/render.rs"
+          git diff --numstat
+          test "$(git diff --numstat | tr '\t' ' ')" = "$(printf '2 2 %s/ime.rs\n1 1 %s/render.rs\n1 1 %s/screen.rs' $n $n $n)" || bad=1
+          row red-korean native_term::ime::tests::a_key_sends_its_own_bytes_once_unless_the_input_method_kept_it
+          row red-route native_term::ime::tests::keys_route_by_modifiers_and_composition
+          row red-overlay native_term::screen::tests::marked_text_replaces_cells_from_the_cursor_and_changes_only_its_row_key
+          row red-underline native_term::render::tests::marked_text_is_underlined_along_the_bottom_of_its_cells
+          git checkout -- apps
+          git diff --quiet 334b4b55942b55a70b92c5bee4e7d0691c46b7f6 || bad=1
+          row green-ime native_term::ime::
+          row green-a11y native_term::a11y::
+          row green-screen native_term::screen::tests::marked_text
+          row green-render native_term::render::tests::marked_text
+          row info-native-term native_term::
+          cargo clippy -p crazyagent-desktop --all-targets --locked > "$RUNNER_TEMP/clippy.txt" 2>&1
+          rc=$?
+          echo "row info-clippy rc=$rc"
+          grep -c '^error' "$RUNNER_TEMP/clippy.txt" | sed 's/^/    errors /'
+          awk '/^(warning|error)/{msg=$0} /-->/{print msg " @ " $2}' "$RUNNER_TEMP/clippy.txt" | sed 's/:[0-9]*:[0-9]*$//' | sort | uniq -c | sort -rn | head -60 | cut -c1-220 | sed 's/^/    /'
+          exit $bad
