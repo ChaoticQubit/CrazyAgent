@@ -7,6 +7,7 @@ use crate::engine::EngineError;
 use crate::project_setup::{StoredSetup, TeamPlan};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
+#[cfg(target_os = "macos")]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
