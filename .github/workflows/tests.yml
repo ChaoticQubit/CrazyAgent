@@ -180,12 +180,39 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p crazyagent --lib --locked -- --test-threads 1 ipc::
-      - name: D6 owner-class rows on Linux
+      - name: D6 owner-class rows on Linux, failures compared with the tree before D6
         if: ${{ !cancelled() && runner.os == 'Linux' }}
-        timeout-minutes: 40
+        timeout-minutes: 80
+        env:
+          BEFORE_D6: 0955a0977d2e6484e969d237ee0237598fe5ecf5
         run: |
-          set -euo pipefail
-          cargo test -p crazyagent --lib --locked -- ipc:: engine::tests:: engine::owner::transport:: engine::bootstrap:: tui::client::
+          set +e
+          set -uo pipefail
+          out="$RUNNER_TEMP/d6"
+          mkdir -p "$out"
+          rows=(ipc:: engine::tests:: engine::owner::transport:: engine::bootstrap:: tui::client::)
+          cargo test -p crazyagent --lib --locked -- "${rows[@]}" > "$out/after.txt" 2>&1
+          git fetch --no-tags --depth=1 origin "$BEFORE_D6" || exit 1
+          git checkout --detach "$BEFORE_D6" || exit 1
+          cargo test -p crazyagent --lib --locked --no-run || exit 1
+          cargo test -p crazyagent --lib --locked -- "${rows[@]}" > "$out/before.txt" 2>&1
+          for side in after before; do
+            grep -E '^test .* \.\.\. FAILED$' "$out/$side.txt" | sed -E 's/^test (.*) \.\.\. FAILED$/\1/' | sort -u > "$out/$side-failed.txt"
+            echo "$side: $(grep -E '^test result:' "$out/$side.txt" | tail -1)"
+          done
+          comm -23 "$out/after-failed.txt" "$out/before-failed.txt" > "$out/new.txt"
+          comm -13 "$out/after-failed.txt" "$out/before-failed.txt" > "$out/gone.txt"
+          echo "failing after D6 only: $(wc -l < "$out/new.txt")"
+          cat "$out/new.txt"
+          echo "failing before D6 only: $(wc -l < "$out/gone.txt")"
+          cat "$out/gone.txt"
+          while read -r name; do
+            echo "---- $name"
+            awk -v n="---- $name stdout ----" '$0 == n {p = 1; next} p && /^---- / {exit} p' "$out/after.txt" | head -40
+          done < "$out/new.txt"
+          grep -qE '^test result:' "$out/after.txt" || { echo "::error::the rows after D6 did not finish"; tail -40 "$out/after.txt"; exit 1; }
+          grep -qE '^test result:' "$out/before.txt" || { echo "::error::the rows before D6 did not finish"; tail -40 "$out/before.txt"; exit 1; }
+          [ ! -s "$out/new.txt" ]
 
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
