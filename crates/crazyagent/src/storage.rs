@@ -193,8 +193,8 @@ const OPERATIONS_MAX: usize = 1024;
 
 /// Who asks a native-auth job, which decides what it does with the owner's kept sign-outs:
 /// an owner's new sign-in ends those of its profile, a drained sign-out runs only while its
-/// intent is kept, and the engine's own check touches none. The owner waits until
-/// `answer_by`, a margin before its exchange is cut.
+/// intent is kept, and any other ask, such as the engine's own check, touches none. The
+/// owner waits until `answer_by`, a margin before its exchange is cut.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NativeAuthAsk {
     Owner { answer_by: tokio::time::Instant },
@@ -909,13 +909,19 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::NativeAuth(admission, command, _ask, reply) => {
+                        Job::NativeAuth(admission, command, ask, reply) => {
                             let logout = match &command {
                                 owner_auth::Command::Logout(logout) => Some(logout.request_id.clone()),
                                 _ => None,
                             };
+                            let signs_in = matches!(command, owner_auth::Command::Start(_))
+                                && matches!(ask, NativeAuthAsk::Owner { .. });
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
+                            } else if let NativeAuthAsk::Drained(id) = &ask
+                                && !still_kept(intents.as_deref(), id)
+                            {
+                                Err(error("native_auth_sign_out_superseded"))
                             } else {
                                 native_auth::execute(
                                     &mut connection,
@@ -932,6 +938,12 @@ impl Storage {
                                 && final_answer(&result)
                             {
                                 end_logout_intent(intents.as_deref(), request_id);
+                            }
+                            if signs_in
+                                && let Ok(begun) = &result
+                                && let Some(work) = &begun.work
+                            {
+                                end_superseded_sign_outs(&connection, intents.as_deref(), work);
                             }
                             if let Err(Ok(begun)) = reply.send(result)
                                 && let Some(work) = begun.work
@@ -3463,6 +3475,51 @@ fn replay_revoke(
             Ok(Replayed::NotApplicable("stale_epoch"))
         }
         Err(refused) => Err(refused),
+    }
+}
+
+/// Whether a drained sign-out's intent is still kept, so it may run. A store that cannot be
+/// read, or that refused some entries, counts as keeping it, so the sign-out still lands.
+/// Inputs: the store and the intent's name. Output: the verdict.
+fn still_kept(intents: Option<&narrowing::Intents>, id: &narrowing::IntentId) -> bool {
+    let Some(intents) = intents else {
+        return true;
+    };
+    match intents.list() {
+        Ok(listing) => listing.refused > 0 || listing.intents.iter().any(|(kept, _)| kept == id),
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            true
+        }
+    }
+}
+
+/// Ends the kept sign-outs an owner's new sign-in supersedes, so neither the drainer nor the
+/// next open signs that sign-in out. Inputs: the database, the store and the begun sign-in.
+/// Output: none; a store or table that cannot be read is logged and ends nothing, so those
+/// sign-outs still land.
+fn end_superseded_sign_outs(
+    db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    begun: &NativeAuthWork,
+) {
+    let Some(intents) = intents else {
+        return;
+    };
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    match native_auth::superseded_sign_outs(db, begun, &listing.intents) {
+        Ok(superseded) => {
+            for id in superseded {
+                end_intent(Some(intents), &id, true);
+            }
+        }
+        Err(refused) => eprintln!("narrowing_sign_outs_unchecked cause={}", refused.0),
     }
 }
 

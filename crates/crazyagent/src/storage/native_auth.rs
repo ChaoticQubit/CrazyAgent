@@ -1857,24 +1857,67 @@ fn newest_of(
     tx: &Transaction<'_>,
     connection: &CredentialRef,
 ) -> Result<Option<NativeAuthFact>, EngineError> {
-    let mut statement = tx
+    Ok(newest_facts(tx)?.remove(connection))
+}
+
+/// Finds the newest operation of every connection, whatever its settings say now, by the
+/// connection its fact is bound to. Input: the database. Output: each connection's fact
+/// with the highest generation.
+fn newest_facts(
+    db: &Connection,
+) -> Result<std::collections::BTreeMap<CredentialRef, NativeAuthFact>, EngineError> {
+    let mut statement = db
         .prepare("SELECT fact FROM native_auth_operations LIMIT ?1")
         .map_err(error)?;
     let rows = statement
         .query_map([OPERATIONS_MAX + 1], |row| row.get::<_, Vec<u8>>(0))
         .map_err(error)?;
-    let mut newest: Option<NativeAuthFact> = None;
+    let mut newest: std::collections::BTreeMap<CredentialRef, NativeAuthFact> =
+        std::collections::BTreeMap::new();
     for bytes in rows {
         let fact = decode_fact(&bytes.map_err(error)?)?;
-        if &fact.binding.connection.id == connection
-            && newest
-                .as_ref()
-                .is_none_or(|kept| kept.generation < fact.generation)
-        {
-            newest = Some(fact);
+        let older = newest
+            .get(&fact.binding.connection.id)
+            .is_none_or(|kept| kept.generation < fact.generation);
+        if older {
+            newest.insert(fact.binding.connection.id.clone(), fact);
         }
     }
+    assert!(newest.len() <= OPERATIONS_MAX + 1);
     Ok(newest)
+}
+
+/// Names the kept sign-outs an owner's new sign-in supersedes: those of its database whose
+/// replay at open would sign out the profile it began on, the profile of their connection's
+/// newest operation. Inputs: the database, the begun sign-in and the kept intents. Output:
+/// the names of the superseded sign-outs.
+pub(crate) fn superseded_sign_outs(
+    db: &Connection,
+    begun: &NativeAuthWork,
+    kept: &[(super::narrowing::IntentId, super::narrowing::Intent)],
+) -> Result<Vec<super::narrowing::IntentId>, EngineError> {
+    let logouts: Vec<(&super::narrowing::IntentId, &NativeAuthLogout)> = kept
+        .iter()
+        .filter(|(_, intent)| intent.db_instance == begun.fact.binding.database_instance)
+        .filter_map(|(id, intent)| match &intent.change {
+            super::narrowing::Change::Logout(logout) => Some((id, logout)),
+            super::narrowing::Change::Revoke { .. } => None,
+        })
+        .collect();
+    if logouts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key = profile_key(&begun.fact.binding.connection)?;
+    let newest = newest_facts(db)?;
+    Ok(logouts
+        .into_iter()
+        .filter(|(_, logout)| {
+            newest.get(&logout.scope.connection).is_some_and(|fact| {
+                profile_key(&fact.binding.connection).is_ok_and(|other| other == key)
+            })
+        })
+        .map(|(id, _)| id.clone())
+        .collect())
 }
 
 /// Lists the managed profiles whose newest operation is a sign-out the harness did not

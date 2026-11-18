@@ -1161,7 +1161,11 @@ impl OwnerRuntimeHandle {
             .await;
         self.pending_unless_taken(
             answer,
-            kept.map(|_| super::narrowing::Pending::Logout { admission, logout }),
+            kept.map(|id| super::narrowing::Pending::Logout {
+                admission,
+                logout,
+                id,
+            }),
         )
     }
 
