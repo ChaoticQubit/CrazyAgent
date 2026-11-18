@@ -72,10 +72,21 @@ fn graph_and_terminal_commands_are_registered_in_all_four_places() {
     }
 }
 
-const WALL_COMMANDS: [&str; 12] = [
+const WALL_COMMANDS: [&str; 23] = [
     "desktop_terminal_attach",
     "desktop_terminal_input",
     "desktop_terminal_prompt",
+    "desktop_native_terminal_enabled",
+    "desktop_native_terminal_open",
+    "desktop_native_terminal_place",
+    "desktop_native_terminal_cover",
+    "desktop_native_terminal_focus",
+    "desktop_native_terminal_style",
+    "desktop_native_terminal_copy",
+    "desktop_native_terminal_paste",
+    "desktop_native_terminal_jump",
+    "desktop_native_terminal_keys",
+    "desktop_native_terminal_close",
     "desktop_terminal_resize",
     "desktop_terminal_detach",
     "desktop_team_graph",

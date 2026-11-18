@@ -1,13 +1,16 @@
 mod a11y;
+mod clip;
 mod codec;
 mod control;
 mod ended;
+pub(crate) mod host;
 mod ime;
 mod keymap;
 mod pane;
 mod render;
 mod screen;
-mod style;
+pub(crate) mod style;
+mod table;
 mod view;
 mod view_text;
 

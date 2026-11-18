@@ -56,16 +56,21 @@ pub enum ViewEvent {
 /// The host function a view hands its events to, with the view's id.
 pub type Sink = fn(u64, ViewEvent);
 
+/// The longest label VoiceOver says for a view, in bytes.
+pub const LABEL_BYTES_MAX: usize = 256;
+
 /// The host function VoiceOver's text is read from, with the view's id: the visible grid,
 /// or none while the screen is busy, when the last text read serves.
 pub type Screen = fn(u64) -> Option<Grid>;
 
 /// The native view's own state: the id of the terminal view it draws, its host functions,
 /// its marked text, the key `interpretKeyEvents` works on, the cursor cell and geometry of
-/// the last frame, and what VoiceOver reads; nothing a getter needs waits on the host.
+/// the last frame, its label and what VoiceOver reads; nothing a getter needs waits on the
+/// host.
 pub struct Ivars {
     id: Cell<u64>,
     sink: Sink,
+    label: RefCell<String>,
     pub(super) screen: Screen,
     pub(super) ime: RefCell<Ime>,
     pub(super) key: RefCell<Option<KeyDown>>,
@@ -183,7 +188,7 @@ define_class!(
 
         #[unsafe(method_id(accessibilityLabel))]
         fn accessibility_label(&self) -> Option<Retained<NSString>> {
-            Some(NSString::from_str("Terminal"))
+            Some(NSString::from_str(&self.ivars().label.borrow()))
         }
 
         #[unsafe(method_id(accessibilityValue))]
@@ -331,6 +336,7 @@ impl TermView {
         let this = Self::alloc(mtm).set_ivars(Ivars {
             id: Cell::new(id),
             sink,
+            label: RefCell::new(String::from("Terminal")),
             screen,
             ime: RefCell::new(Ime::default()),
             key: RefCell::new(None),
@@ -347,6 +353,17 @@ impl TermView {
     /// The terminal view id this native view draws.
     pub fn id(&self) -> u64 {
         self.ivars().id.get()
+    }
+
+    /// Sets what VoiceOver says the view is, the page's label for its agent; an empty one
+    /// keeps "Terminal". Input: the checked label.
+    pub fn set_label(&self, label: &str) {
+        assert!(label.len() <= LABEL_BYTES_MAX);
+        if label.trim().is_empty() {
+            return;
+        }
+        *self.ivars().label.borrow_mut() = label.to_owned();
+        assert_eq!(*self.ivars().label.borrow(), label);
     }
 
     pub(super) fn send(&self, event: ViewEvent) {

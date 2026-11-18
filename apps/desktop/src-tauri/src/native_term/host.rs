@@ -1,0 +1,1064 @@
+use super::a11y::{self, Geometry};
+use super::clip::Clip;
+use super::codec;
+use super::control::{Control, Event};
+use super::ended::ended_final;
+use super::pane::{Action, GRID_MAX, Input};
+use super::render::{Shared, Surface};
+use super::screen;
+use super::style::Style;
+use super::table::{Entry, Outbox, Table, Told, changes};
+use super::view::{MouseKind, TermView, ViewEvent};
+use crate::bridge::BridgeError;
+use crate::bridge::feed::{EngineFeed, Fed, FeedEvent, Opener, Opening, Wake};
+use crate::bridge::terminal::{NATIVE_OVERFLOW, Reservation, ViewKey};
+use alacritty_terminal::grid::Dimensions;
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2_app_kit::{NSResponder, NSView, NSWindowOrderingMode};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
+use std::ffi::c_void;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager};
+use tokio::sync::mpsc;
+
+/// The most engine feed events waiting for the main thread.
+const INBOX_MAX: usize = 4096;
+
+/// The most events one drain applies before it lets the main loop run again.
+const DRAIN_MAX: usize = 512;
+
+/// The most direct-path events waiting for the main thread before the reader stops.
+const DIRECT_MAX: usize = 1 << 16;
+
+/// The most rounds the outermost host call spends on events AppKit sent meanwhile.
+const SETTLE_ROUNDS: usize = 8;
+
+/// The cursor blink half period, as the xterm panel blinks.
+const BLINK: Duration = Duration::from_millis(600);
+
+/// The engine feed codes an open can answer with, kept as they are; any other is
+/// `native_terminal_open_failed`.
+const OPEN_CODES: [&str; 4] = [
+    "terminal_size_bounds",
+    "native_view_opened",
+    "native_view_unbound",
+    "terminal_state_failed",
+];
+
+const _: () = assert!(SETTLE_ROUNDS > 0 && DRAIN_MAX > 0 && DRAIN_MAX < INBOX_MAX);
+
+thread_local! {
+    static NATIVE: RefCell<Option<Native>> = const { RefCell::new(None) };
+    static OUTBOX: RefCell<Outbox<ViewEvent>> = RefCell::new(Outbox::default());
+    static PENDING: Cell<bool> = const { Cell::new(false) };
+}
+
+static APP: OnceLock<AppHandle> = OnceLock::new();
+static SCHEDULED: AtomicBool = AtomicBool::new(false);
+static BLINKING: AtomicBool = AtomicBool::new(false);
+
+/// What a native view tells its panel, as `NativeEvent` in native-terminal.ts.
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum NativeEvent {
+    Ready {
+        cols: u16,
+        rows: u16,
+    },
+    Menu {
+        x: f64,
+        y: f64,
+    },
+    Mouse {
+        on: bool,
+    },
+    Behind {
+        behind: bool,
+    },
+    Ended {
+        code: String,
+        #[serde(rename = "final")]
+        last: bool,
+    },
+}
+
+pub use super::view::LABEL_BYTES_MAX;
+
+/// One open checked off the main thread: the calling window, the agent window name, the
+/// screen reader label, the place the shared gate took, the tmux program and engine socket
+/// when the direct path may draw it, the page place, the style, whether it opens covered,
+/// whether its keys go through, the wall window's project and the events channel.
+pub struct Open {
+    pub window: String,
+    pub name: String,
+    pub label: String,
+    pub place: Reservation,
+    pub direct: Option<(PathBuf, PathBuf)>,
+    pub rect: [f64; 4],
+    pub style: Style,
+    pub covered: bool,
+    pub keys: bool,
+    pub project: Option<String>,
+    pub events: Channel<NativeEvent>,
+}
+
+/// One page call on an open view.
+pub enum Command {
+    Place([f64; 4]),
+    Cover(bool),
+    Focus,
+    Copy(bool),
+    Paste(String),
+    Jump,
+    Keys(bool),
+    Close,
+}
+
+/// What the direct path's reader handed the main thread: its events in order, and whether
+/// it stopped on a full queue, which the drain reads as the client closing, so its views
+/// reopen engine-fed instead of waiting for output that never comes.
+#[derive(Default)]
+struct Direct {
+    queue: VecDeque<Event>,
+    lost: bool,
+}
+
+/// A view's AppKit and drawing parts: its NSView above the webview, the webview its place
+/// is measured in, its surface and the backing scale key it was made at, its events channel
+/// and the wall window's project a reopen needs.
+pub struct View {
+    ns: Retained<TermView>,
+    webview: Retained<NSView>,
+    surface: Option<Surface>,
+    scale: u32,
+    events: Channel<NativeEvent>,
+    project: Option<String>,
+}
+
+/// Everything the native terminals hold on the main thread.
+pub struct Native {
+    app: AppHandle,
+    feed: EngineFeed,
+    inbox: mpsc::Receiver<Fed>,
+    control: Option<Control>,
+    direct: Arc<Mutex<Direct>>,
+    table: Table<View>,
+    shared: HashMap<u32, Shared>,
+    style: Option<Style>,
+    shown: bool,
+    clip: Clip,
+}
+
+fn scale_key(scale: f64) -> u32 {
+    (scale.clamp(1.0, 4.0) * 100.0).round() as u32
+}
+
+fn backing(view: &NSView) -> f64 {
+    view.window()
+        .map_or(2.0, |window| window.backingScaleFactor())
+}
+
+fn io_code(error: &std::io::Error) -> &'static str {
+    let text = error.to_string();
+    OPEN_CODES
+        .into_iter()
+        .find(|code| *code == text)
+        .unwrap_or("native_terminal_open_failed")
+}
+
+/// Asks the main loop for one drain, coalesced: a burst of events costs one wake. Runs on
+/// any thread; never touches the native state itself.
+fn schedule() {
+    if SCHEDULED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let sent = APP
+        .get()
+        .is_some_and(|app| app.run_on_main_thread(drain).is_ok());
+    if !sent {
+        SCHEDULED.store(false, Ordering::Release);
+    }
+}
+
+fn drain() {
+    SCHEDULED.store(false, Ordering::Release);
+    if with_native(Native::drain).is_none() {
+        PENDING.with(|pending| pending.set(true));
+    }
+}
+
+/// Runs work on the native state when it exists and nothing further up this thread holds
+/// it, then applies what AppKit sent meanwhile. Input: the work. Output: its result, or
+/// none when the state is missing or in use.
+fn with_native<T>(work: impl FnOnce(&mut Native) -> T) -> Option<T> {
+    assert!(
+        MainThreadMarker::new().is_some(),
+        "native state is main-thread only"
+    );
+    NATIVE.with(|cell| {
+        let mut held = cell.try_borrow_mut().ok()?;
+        let native = held.as_mut()?;
+        let out = work(native);
+        native.settle();
+        Some(out)
+    })
+}
+
+/// The sink every TermView sends its events to: kept in order, applied by the outermost
+/// host call, so an event AppKit sends from inside a host call never re-enters the state.
+fn sink(page: u64, event: ViewEvent) {
+    assert!(page > 0);
+    OUTBOX.with(|outbox| outbox.borrow_mut().push(page, event));
+    let _ = with_native(|_| ());
+}
+
+/// The visible grid VoiceOver reads, or none while the state is in use.
+fn screen(page: u64) -> Option<a11y::Grid> {
+    NATIVE.with(|cell| {
+        let held = cell.try_borrow().ok()?;
+        let entry = held.as_ref()?.table.get(page)?;
+        entry.pane.term().map(a11y::visible)
+    })
+}
+
+/// Runs work on the main thread and waits for it without a deadline: a main loop that
+/// is gone drops the work and answers `native_terminal_main_busy`. Inputs: the app and the
+/// work. Output: its result.
+pub async fn on_main<T: Send + 'static>(
+    app: &AppHandle,
+    work: impl FnOnce(MainThreadMarker) -> T + Send + 'static,
+) -> Result<T, &'static str> {
+    let _ = APP.set(app.clone());
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        if let Some(mtm) = MainThreadMarker::new() {
+            let _ = sender.send(work(mtm));
+        }
+    })
+    .map_err(|_| "native_terminal_main_busy")?;
+    receiver.await.map_err(|_| "native_terminal_main_busy")
+}
+
+/// Opens one view above the calling page's webview; on the main thread. Inputs: the app,
+/// the marker, the WKWebView pointer and the checked open. Output: the page's view id, or
+/// a plain code with the place given back.
+pub fn open(
+    app: &AppHandle,
+    mtm: MainThreadMarker,
+    pointer: *mut c_void,
+    open: Open,
+) -> Result<u64, &'static str> {
+    let _ = APP.set(app.clone());
+    NATIVE.with(|cell| {
+        if let Ok(mut held) = cell.try_borrow_mut()
+            && held.is_none()
+        {
+            *held = Some(Native::started(app));
+        }
+    });
+    let opened = with_native(|native| native.open(mtm, pointer, open));
+    let page = opened.ok_or("native_terminal_main_busy")??;
+    assert!(page > 0);
+    Ok(page)
+}
+
+/// Applies one page call to a view the calling window opened; on the main thread. A
+/// close of a view that is gone is fine. Inputs: the window label, the view id and the
+/// call. Output: ok, or a plain code.
+pub fn command(window: &str, page: u64, call: Command) -> Result<(), &'static str> {
+    let closing = matches!(call, Command::Close);
+    let done = with_native(|native| native.command(window, page, call));
+    match done {
+        Some(result) => result,
+        None if closing => Ok(()),
+        None => Err("native_terminal_view_unknown"),
+    }
+}
+
+/// Takes out every view a window opened, telling no page, as that window's page reloads
+/// or the window closes; their feeds and direct paths close with them. It runs on the main
+/// thread after work queued before it, so a view the new page opens later stays. Inputs:
+/// the app and the window label.
+pub fn window_gone(app: &AppHandle, window: &str) {
+    assert!(!window.is_empty());
+    let window = window.to_owned();
+    let _ = app.run_on_main_thread(move || {
+        let _ = with_native(|native| native.forget_window(&window));
+    });
+}
+
+/// Sets how every view draws and every view opened later; on the main thread. Input: the
+/// checked style. Output: ok, or `native_terminal_style_invalid` with the old style kept.
+pub fn style(style: Style) -> Result<(), &'static str> {
+    with_native(|native| native.restyle(style)).unwrap_or(Ok(()))
+}
+
+fn blink() {
+    let more = with_native(|native| {
+        native.shown = !native.shown;
+        for (_, entry) in native.table.entries_mut() {
+            entry.pane.dirty = true;
+        }
+        !native.table.is_empty() && native.style.as_ref().is_some_and(|s| s.blink)
+    });
+    if more != Some(true) {
+        BLINKING.store(false, Ordering::Release);
+        with_native(|native| native.shown = true);
+    }
+}
+
+fn start_blink() {
+    if BLINKING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let started = std::thread::Builder::new()
+        .name("native-blink".into())
+        .spawn(|| {
+            while BLINKING.load(Ordering::Acquire) {
+                std::thread::sleep(BLINK);
+                let sent = APP
+                    .get()
+                    .is_some_and(|app| app.run_on_main_thread(blink).is_ok());
+                if !sent {
+                    BLINKING.store(false, Ordering::Release);
+                }
+            }
+        });
+    if started.is_err() {
+        BLINKING.store(false, Ordering::Release);
+    }
+}
+
+impl Native {
+    fn started(app: &AppHandle) -> Native {
+        let terminals = Arc::clone(&app.state::<crate::TerminalState>().0);
+        let opening = app.clone();
+        let opener: Opener = Arc::new(
+            move |key: ViewKey, grid: (u16, u16), input_only: bool| -> Opening {
+                let app = opening.clone();
+                Box::pin(async move {
+                    let state = app.state::<crate::NativeState>();
+                    let mut bridge = crate::lock(&state).await?;
+                    bridge
+                        .open_terminal(key.agent, key.pane, Some(grid), input_only)
+                        .await
+                })
+            },
+        );
+        let (sender, inbox) = mpsc::channel(INBOX_MAX);
+        let wake: Wake = Arc::new(schedule);
+        Native {
+            app: app.clone(),
+            feed: EngineFeed::new(terminals, opener, sender, wake),
+            inbox,
+            control: None,
+            direct: Arc::new(Mutex::new(Direct::default())),
+            table: Table::default(),
+            shared: HashMap::new(),
+            style: None,
+            shown: true,
+            clip: Clip::new(),
+        }
+    }
+
+    /// Applies what AppKit sent while this call held the state: overflowed views end, the
+    /// rest apply in order, then a drain that found the state busy runs; then it draws.
+    fn settle(&mut self) {
+        for _ in 0..SETTLE_ROUNDS {
+            let (events, over) = OUTBOX.with(|outbox| outbox.borrow_mut().take());
+            let pending = PENDING.with(|pending| pending.replace(false));
+            if events.is_empty() && over.is_empty() && !pending {
+                self.draw_dirty();
+                return;
+            }
+            for page in over {
+                self.end(page, NATIVE_OVERFLOW);
+            }
+            for (page, event) in events {
+                self.on_view(page, event);
+            }
+            if pending {
+                self.drain();
+            }
+        }
+        self.draw_dirty();
+        schedule();
+    }
+
+    /// Takes waiting engine feed and direct-path events, a bounded batch, and asks for
+    /// another drain when more wait.
+    fn drain(&mut self) {
+        let mut taken = 0;
+        while taken < DRAIN_MAX {
+            let Ok(fed) = self.inbox.try_recv() else {
+                break;
+            };
+            taken += 1;
+            if let Some(event) = self.feed.take(fed) {
+                self.on_feed(event);
+            }
+        }
+        let (direct, lost) = {
+            let mut waiting = self.direct.lock().unwrap_or_else(PoisonError::into_inner);
+            let count = waiting.queue.len().min(DRAIN_MAX);
+            let direct: Vec<Event> = waiting.queue.drain(..count).collect();
+            let lost = waiting.queue.is_empty() && std::mem::take(&mut waiting.lost);
+            (direct, lost)
+        };
+        let more = taken == DRAIN_MAX || direct.len() == DRAIN_MAX;
+        for event in direct {
+            self.on_direct(event);
+        }
+        if lost {
+            self.on_direct(Event::Closed);
+        }
+        if more {
+            schedule();
+        }
+        assert!(taken <= DRAIN_MAX);
+    }
+}
+
+impl Native {
+    fn open(
+        &mut self,
+        mtm: MainThreadMarker,
+        pointer: *mut c_void,
+        open: Open,
+    ) -> Result<u64, &'static str> {
+        if self.table.full() {
+            return Err("native_terminal_views_full");
+        }
+        let webview = unsafe { Retained::retain(pointer.cast::<NSView>()) }
+            .ok_or("native_terminal_webview_missing")?;
+        let host = unsafe { webview.superview() }.ok_or("native_terminal_webview_missing")?;
+        if self.style.is_none() || self.table.is_empty() {
+            self.restyle(open.style.clone())?;
+        }
+        let key = scale_key(backing(&webview));
+        let grid = self.grid(key, open.rect)?;
+        let direct = match &open.direct {
+            Some((tmux, socket)) => self.ensure_control(tmux, socket),
+            None => false,
+        };
+        let page = self.table.fresh();
+        self.feed
+            .bind(page, open.place, direct)
+            .map_err(|error| error.code)?;
+        if let Err(error) = self.feed.open(page, grid) {
+            self.feed.close(page);
+            return Err(io_code(&error));
+        }
+        let ns = TermView::new(mtm, page, sink, screen);
+        ns.set_label(&open.label);
+        ns.setHidden(true);
+        host.addSubview_positioned_relativeTo(&ns, NSWindowOrderingMode::Above, Some(&webview));
+        let platform = View {
+            ns,
+            webview,
+            surface: None,
+            scale: key,
+            events: open.events,
+            project: open.project,
+        };
+        let entry = Entry {
+            window: open.window,
+            name: open.name,
+            pane: super::pane::Pane::new(page, open.keys),
+            feed: page,
+            direct,
+            rect: open.rect,
+            covered: open.covered,
+            told: Told::default(),
+            carry: 0.0,
+            platform,
+        };
+        self.table.insert(page, entry);
+        if self.style.as_ref().is_some_and(|style| style.blink) {
+            start_blink();
+        }
+        assert!(self.table.page_of(page) == Some(page));
+        Ok(page)
+    }
+
+    fn grid(&mut self, key: u32, rect: [f64; 4]) -> Result<(u16, u16), &'static str> {
+        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
+        let shared = shared_at(&mut self.shared, key, style)?;
+        let (columns, lines) = codec::grid_for(rect[2], rect[3], shared.cell_points(), GRID_MAX);
+        let grid = (
+            u16::try_from(columns).unwrap_or(u16::MAX),
+            u16::try_from(lines).unwrap_or(u16::MAX),
+        );
+        assert!(grid.0 >= 2 && grid.1 >= 2);
+        assert!(usize::from(grid.0) <= GRID_MAX && usize::from(grid.1) <= GRID_MAX);
+        Ok(grid)
+    }
+
+    fn ensure_control(&mut self, tmux: &std::path::Path, socket: &std::path::Path) -> bool {
+        if self.control.is_some() {
+            return true;
+        }
+        let queue = Arc::clone(&self.direct);
+        let sink = move |event: Event| {
+            let mut waiting = queue.lock().unwrap_or_else(PoisonError::into_inner);
+            let kept = waiting.queue.len() < DIRECT_MAX && !waiting.lost;
+            if kept {
+                waiting.queue.push_back(event);
+            } else {
+                waiting.lost = true;
+            }
+            drop(waiting);
+            schedule();
+            kept
+        };
+        self.control = Control::attach(tmux, socket, sink).ok();
+        self.control.is_some()
+    }
+
+    fn restyle(&mut self, style: Style) -> Result<(), &'static str> {
+        let refused = self
+            .shared
+            .values_mut()
+            .map(|shared| shared.set_style(&style))
+            .find_map(Result::err);
+        if let Some(code) = refused {
+            if let Some(old) = self.style.as_ref() {
+                for shared in self.shared.values_mut() {
+                    let _ = shared.set_style(old);
+                }
+            }
+            return Err(code);
+        }
+        let blink = style.blink;
+        self.style = Some(style);
+        for page in self.table.pages() {
+            self.layout(page);
+        }
+        if blink && !self.table.is_empty() {
+            start_blink();
+        }
+        assert!(self.style.is_some());
+        Ok(())
+    }
+}
+
+fn shared_at<'a>(
+    map: &'a mut HashMap<u32, Shared>,
+    key: u32,
+    style: &Style,
+) -> Result<&'a mut Shared, &'static str> {
+    assert!((100..=400).contains(&key));
+    if !map.contains_key(&key) {
+        let shared = Shared::new(key as f32 / 100.0, style)?;
+        map.insert(key, shared);
+    }
+    map.get_mut(&key).ok_or("native_terminal_style_invalid")
+}
+
+impl Native {
+    fn command(&mut self, window: &str, page: u64, call: Command) -> Result<(), &'static str> {
+        let closing = matches!(call, Command::Close);
+        let entry = match self.table.owned(window, page) {
+            Ok(entry) => entry,
+            Err(_) if closing => return Ok(()),
+            Err(code) => return Err(code),
+        };
+        let action = match call {
+            Command::Place(rect) => {
+                entry.rect = rect;
+                Action::Nothing
+            }
+            Command::Cover(covered) => {
+                entry.covered = covered;
+                Action::Nothing
+            }
+            Command::Focus => {
+                let responder: &NSResponder = &entry.platform.ns;
+                if let Some(window) = entry.platform.ns.window() {
+                    let _ = window.makeFirstResponder(Some(responder));
+                }
+                return Ok(());
+            }
+            Command::Copy(output) => {
+                let text = entry.pane.copy(output)?;
+                if !self.clip.write(&text) {
+                    return Err("native_terminal_copy_failed");
+                }
+                return Ok(());
+            }
+            Command::Paste(text) => entry.pane.seed(&text)?,
+            Command::Jump => {
+                entry.pane.jump();
+                Action::Local
+            }
+            Command::Keys(on) => {
+                entry.pane.set_keys(on);
+                return Ok(());
+            }
+            Command::Close => {
+                self.dismiss(page);
+                return Ok(());
+            }
+        };
+        self.layout(page);
+        self.act(page, action);
+        self.tell(page);
+        Ok(())
+    }
+}
+
+impl Native {
+    fn on_feed(&mut self, event: FeedEvent) {
+        match event {
+            FeedEvent::Attached { view, cols, rows } => self.attached(view, cols, rows),
+            FeedEvent::Output { view, bytes } => {
+                let Some(page) = self.table.page_of(view) else {
+                    return;
+                };
+                if let Some(entry) = self.table.get_mut(page) {
+                    entry.pane.on_output(&bytes);
+                }
+                self.tell(page);
+            }
+            FeedEvent::Ended { view, code } => {
+                if let Some(page) = self.table.page_of(view) {
+                    self.end(page, &code);
+                }
+            }
+        }
+    }
+
+    fn attached(&mut self, feed: u64, cols: u16, rows: u16) {
+        let Some(page) = self.table.page_of(feed) else {
+            return;
+        };
+        let Some(entry) = self.table.get_mut(page) else {
+            return;
+        };
+        if !entry.pane.on_attached(cols, rows) {
+            self.end(page, "terminal_size_bounds");
+            return;
+        }
+        let bound = match (entry.direct, self.control.as_mut()) {
+            (true, Some(control)) => control.bind(page, &entry.name).is_ok(),
+            (direct, _) => !direct,
+        };
+        entry.told = Told::default();
+        let _ = entry
+            .platform
+            .events
+            .send(NativeEvent::Ready { cols, rows });
+        if !bound {
+            self.reopen(page);
+        }
+        self.layout(page);
+        assert!(self.table.get(page).is_none_or(|e| e.pane.ready()));
+    }
+
+    fn on_direct(&mut self, event: Event) {
+        match event {
+            Event::Restored { view, bytes } => {
+                if let Some(entry) = self.table.get_mut(view).filter(|e| e.direct) {
+                    entry.pane.on_output(&bytes);
+                }
+                self.tell(view);
+            }
+            Event::Output { views, bytes } => {
+                for page in views {
+                    if let Some(entry) = self.table.get_mut(page).filter(|e| e.direct) {
+                        entry.pane.on_output(&bytes);
+                    }
+                    self.tell(page);
+                }
+            }
+            Event::Refused { view, .. } => self.reopen(view),
+            Event::Closed => {
+                self.control = None;
+                let direct: Vec<u64> = self
+                    .table
+                    .pages()
+                    .into_iter()
+                    .filter(|page| self.table.get(*page).is_some_and(|e| e.direct))
+                    .collect();
+                for page in direct {
+                    self.reopen(page);
+                }
+            }
+        }
+    }
+
+    /// Drops a view whose direct path was refused to engine-fed output: its input-only
+    /// session closes, and a full session opens under a fresh feed id through the shared
+    /// gate again; the page keeps its id. Input: the page id.
+    fn reopen(&mut self, page: u64) {
+        let Some(entry) = self.table.get(page).filter(|e| e.direct) else {
+            return;
+        };
+        let old = entry.feed;
+        let (window, name) = (entry.window.clone(), entry.name.clone());
+        let project = entry.platform.project.clone();
+        self.feed.close(old);
+        if let Some(control) = self.control.as_mut() {
+            control.close(page);
+        }
+        let Some((_, new)) = self.table.refeed(page) else {
+            return;
+        };
+        assert!(new > old);
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            let placed = crate::native_place(&app, &window, &name, project.as_deref()).await;
+            let _ = app.run_on_main_thread(move || {
+                with_native(|native| native.reopened(page, new, placed));
+            });
+        });
+    }
+
+    fn reopened(&mut self, page: u64, feed: u64, placed: Result<Reservation, BridgeError>) {
+        let Some(entry) = self.table.get(page).filter(|e| e.feed == feed) else {
+            return;
+        };
+        let (rect, key) = (entry.rect, entry.platform.scale);
+        let place = match placed {
+            Ok(place) => place,
+            Err(error) => return self.end(page, error.code),
+        };
+        let grid = match self.grid(key, rect) {
+            Ok(grid) => grid,
+            Err(code) => return self.end(page, code),
+        };
+        if let Err(error) = self.feed.bind(feed, place, false) {
+            return self.end(page, error.code);
+        }
+        if let Err(error) = self.feed.open(feed, grid) {
+            self.end(page, io_code(&error));
+        }
+        assert!(self.table.get(page).is_none_or(|e| !e.direct));
+    }
+
+    /// Takes a view out in the order nothing can reach it after: its feed and direct path
+    /// closed, marked text dropped, its surface before its NSView. Input: the page id.
+    /// Output: its events channel, if it was open.
+    fn dismiss(&mut self, page: u64) -> Option<Channel<NativeEvent>> {
+        let entry = self.table.remove(page)?;
+        self.feed.close(entry.feed);
+        if let Some(control) = self.control.as_mut() {
+            control.close(page);
+        }
+        let View {
+            ns,
+            surface,
+            events,
+            ..
+        } = entry.platform;
+        ns.cancel_marked();
+        drop(surface);
+        ns.removeFromSuperview();
+        if self.table.is_empty() {
+            self.control = None;
+            BLINKING.store(false, Ordering::Release);
+        }
+        assert!(self.table.page_of(entry.feed).is_none());
+        Some(events)
+    }
+
+    fn end(&mut self, page: u64, code: &str) {
+        assert!(!code.is_empty());
+        if let Some(events) = self.dismiss(page) {
+            let last = ended_final(code);
+            let _ = events.send(NativeEvent::Ended {
+                code: code.to_owned(),
+                last,
+            });
+        }
+    }
+
+    fn forget_window(&mut self, window: &str) {
+        let owned = |table: &Table<View>| -> Vec<u64> {
+            let pages = table.pages().into_iter();
+            pages
+                .filter(|page| table.get(*page).is_some_and(|e| e.window == window))
+                .collect()
+        };
+        for page in owned(&self.table) {
+            let _ = self.dismiss(page);
+        }
+        assert!(owned(&self.table).is_empty());
+    }
+}
+
+impl Native {
+    fn on_view(&mut self, page: u64, event: ViewEvent) {
+        let Native {
+            table,
+            shared,
+            clip,
+            ..
+        } = self;
+        let Some(entry) = table.get_mut(page) else {
+            return;
+        };
+        let action = match event {
+            ViewEvent::Key(input) => entry.pane.apply(input),
+            ViewEvent::Wheel {
+                point,
+                delta,
+                precise,
+            } => wheel(shared, entry, point, delta, precise),
+            ViewEvent::Mouse {
+                kind,
+                point,
+                option,
+                clicks,
+            } => {
+                let cell = cell_of(shared, entry, point);
+                let input = match kind {
+                    MouseKind::Press => Input::Press {
+                        cell,
+                        option,
+                        clicks,
+                    },
+                    MouseKind::Drag => Input::Drag { cell, option },
+                    MouseKind::Release => Input::Release { cell, option },
+                };
+                entry.pane.apply(input)
+            }
+            ViewEvent::Menu { point } => {
+                let (x, y) = (entry.rect[0] + point.0, entry.rect[1] + point.1);
+                let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
+                Action::Nothing
+            }
+            ViewEvent::Copy => {
+                if let Ok(text) = entry.pane.copy(false) {
+                    let _ = clip.write(&text);
+                }
+                Action::Nothing
+            }
+            ViewEvent::Paste => match clip.read() {
+                Some(text) => entry.pane.apply(Input::Paste { text }),
+                None => Action::Nothing,
+            },
+            ViewEvent::SelectAll => {
+                entry.pane.select_all();
+                Action::Local
+            }
+            ViewEvent::Focus(_) | ViewEvent::Marked => {
+                entry.pane.dirty = true;
+                Action::Nothing
+            }
+        };
+        self.act(page, action);
+        self.tell(page);
+    }
+
+    /// Sends what an input asks for through the engine feed. A refusal needs no answer
+    /// here: a full queue ends the view through the feed's own `Ended`, and input before
+    /// the attach or after an end has no session to reach. Inputs: the page id and the
+    /// action.
+    fn act(&mut self, page: u64, action: Action) {
+        let Some(feed) = self.table.get(page).map(|entry| entry.feed) else {
+            return;
+        };
+        let sent = match action {
+            Action::Input { bytes, wheel } => self.feed.input(feed, &bytes, wheel),
+            Action::Paste { text } => self.feed.paste(feed, text.as_bytes()),
+            Action::Local | Action::Nothing => Ok(()),
+        };
+        match sent {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => schedule(),
+            Err(_) => {}
+        }
+    }
+
+    fn tell(&mut self, page: u64) {
+        let Some(entry) = self.table.get_mut(page) else {
+            return;
+        };
+        let now = Told {
+            mouse: entry.pane.mouse_mode(),
+            behind: entry.pane.behind(),
+        };
+        let (mouse, behind) = changes(entry.told, now);
+        let events = &entry.platform.events;
+        if let Some(on) = mouse {
+            let _ = events.send(NativeEvent::Mouse { on });
+        }
+        if let Some(behind) = behind {
+            let _ = events.send(NativeEvent::Behind { behind });
+        }
+        entry.told = now;
+        assert_eq!(entry.told, now);
+    }
+}
+
+fn cell_of(
+    shared: &HashMap<u32, Shared>,
+    entry: &Entry<View>,
+    point: (f64, f64),
+) -> (usize, usize) {
+    let (Some(shared), Some(term)) = (shared.get(&entry.platform.scale), entry.pane.term()) else {
+        return (0, 0);
+    };
+    let (columns, lines) = (term.columns(), term.screen_lines());
+    let cell = codec::cell_at(point.0, point.1, shared.cell_points(), columns, lines);
+    assert!(cell.0 < columns && cell.1 < lines);
+    cell
+}
+
+fn wheel(
+    shared: &HashMap<u32, Shared>,
+    entry: &mut Entry<View>,
+    point: (f64, f64),
+    delta: f64,
+    precise: bool,
+) -> Action {
+    let cell = cell_of(shared, entry, point);
+    let line = shared
+        .get(&entry.platform.scale)
+        .map_or(17.0, |s| s.cell_points().1);
+    assert!(line > 0.0 && delta.is_finite());
+    let lines = if precise {
+        let (lines, carry) = codec::wheel_lines(delta, entry.carry, line);
+        entry.carry = carry;
+        lines
+    } else {
+        delta.round().clamp(-1000.0, 1000.0) as i32
+    };
+    if lines == 0 {
+        return Action::Nothing;
+    }
+    entry.pane.apply(Input::Wheel { lines, cell })
+}
+
+impl Native {
+    /// Puts a view over its page place, sizes its surface and the agent's window to the
+    /// grid that fits, and shows it once its mirror is ready and nothing covers it; a
+    /// surface that cannot be made ends the view. Input: the page id.
+    fn layout(&mut self, page: u64) {
+        let Native {
+            table,
+            shared,
+            feed,
+            style,
+            ..
+        } = self;
+        let (Some(entry), Some(style)) = (table.get_mut(page), style.as_ref()) else {
+            return;
+        };
+        let [x, y, width, height] = entry.rect;
+        let shown = entry.pane.ready() && !entry.covered && width >= 1.0 && height >= 1.0;
+        let view = &mut entry.platform;
+        if !shown {
+            if !view.ns.isHidden() {
+                view.ns.cancel_marked();
+            }
+            view.ns.setHidden(true);
+            return;
+        }
+        let host = unsafe { view.ns.superview() };
+        let css = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+        view.ns
+            .setFrame(view.webview.convertRect_toView(css, host.as_deref()));
+        view.ns.setHidden(false);
+        let scale = backing(&view.ns);
+        let key = scale_key(scale);
+        if view.scale != key {
+            view.surface = None;
+            view.scale = key;
+        }
+        let pixels = (
+            (width * scale).round() as u32,
+            (height * scale).round() as u32,
+        );
+        let Ok(shared) = shared_at(shared, key, style) else {
+            return;
+        };
+        let made = match view.surface.as_mut() {
+            Some(surface) => {
+                shared.resize(surface, pixels.0, pixels.1);
+                true
+            }
+            None => {
+                let pointer = Retained::as_ptr(&view.ns) as *mut c_void;
+                let made = shared.surface(pointer, pixels.0, pixels.1);
+                view.surface = made.ok();
+                view.surface.is_some()
+            }
+        };
+        let grid = codec::grid_for(width, height, shared.cell_points(), GRID_MAX);
+        if let Some(size) = entry.pane.resize(grid) {
+            let _ = feed.resize(entry.feed, size);
+        }
+        entry.pane.dirty = true;
+        if !made {
+            self.end(page, "native_terminal_gpu");
+        }
+    }
+
+    /// Draws every shown view whose screen changed, refits one whose backing scale changed,
+    /// and hands VoiceOver and the input method what the frame showed.
+    fn draw_dirty(&mut self) {
+        let moved: Vec<u64> = self
+            .table
+            .pages()
+            .into_iter()
+            .filter(|page| {
+                self.table.get(*page).is_some_and(|e| {
+                    !e.platform.ns.isHidden()
+                        && scale_key(backing(&e.platform.ns)) != e.platform.scale
+                })
+            })
+            .collect();
+        for page in moved {
+            self.layout(page);
+        }
+        let Native {
+            table,
+            shared,
+            style,
+            shown,
+            ..
+        } = self;
+        let Some(style) = style.as_ref() else {
+            return;
+        };
+        for (_, entry) in table.entries_mut() {
+            let view = &mut entry.platform;
+            let able = view.surface.is_some() && entry.pane.term().is_some();
+            if !entry.pane.dirty || view.ns.isHidden() || !able {
+                continue;
+            }
+            entry.pane.dirty = false;
+            let (Some(surface), Some(term), Some(shared)) = (
+                view.surface.as_mut(),
+                entry.pane.term(),
+                shared.get_mut(&view.scale),
+            ) else {
+                continue;
+            };
+            let marked = view.ns.marked_text();
+            let frame = screen::frame(term, &style.theme, *shown, marked.as_deref());
+            assert_eq!(frame.rows.len(), term.screen_lines());
+            if shared.draw(surface, &frame).is_err() {
+                continue;
+            }
+            let scale = f64::from(view.scale) / 100.0;
+            let (width, height) = shared.cell_points();
+            let geometry = Geometry {
+                cell: (width * scale, height * scale),
+                pad: 0.0,
+                scale,
+            };
+            view.ns
+                .drawn(geometry, a11y::marks(term), a11y::text_key(term));
+        }
+    }
+}
