@@ -1251,16 +1251,7 @@ fn skill_name(name: &str) -> bool {
 }
 
 fn read_home_file(path: &Path, bytes_max: usize) -> Result<String, AgentHomeError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32);
-    #[cfg(not(unix))]
-    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err(failure("agent_instructions_unsafe"));
-    }
-    let file = match options.open(path) {
+    let file = match crate::platform::open_plain(path) {
         Ok(file) => file,
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
             return Ok(String::new());

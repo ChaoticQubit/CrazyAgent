@@ -3092,3 +3092,18 @@ fn a_walk_budget_of_exactly_what_a_pass_lists_clears_a_home_pass_and_a_memory_pa
     assert_eq!(memories_left(&projects), 0);
     assert!(projects.join("p1").is_dir() && projects.join("p2").is_dir());
 }
+
+#[cfg(windows)]
+#[test]
+fn an_instruction_file_that_is_a_link_is_refused_and_never_read_through() {
+    let (_directory, root) = folder();
+    let target = root.join("secret.md");
+    fs::write(&target, "owner text").unwrap();
+    let link = root.join("CLAUDE.md");
+    std::os::windows::fs::symlink_file(&target, &link).unwrap();
+    assert_eq!(read_home_file(&target, 64).unwrap(), "owner text");
+    assert_eq!(
+        read_home_file(&link, 64).unwrap_err().0,
+        "agent_instructions_unsafe"
+    );
+}
