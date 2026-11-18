@@ -147,6 +147,35 @@ fn layout_prepare_makes_every_entry_private_and_refuses_an_open_root() {
     assert!(crate::paths::Layout::new(open).unwrap().prepare().is_err());
 }
 
+/// W1c D5: an MCP server secret round-trips through the Windows plugin key store as a W1
+/// private file, a secret file other users may read is refused as unsafe, and a removed
+/// secret is gone.
+#[test]
+fn a_plugin_secret_round_trips_privately_and_an_open_one_is_refused() {
+    use super::plugins;
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let reference = plugins::new_secret_reference().unwrap();
+    plugins::store_secret(&data, &reference, b"0123456789".to_vec()).unwrap();
+    assert_eq!(plugins::read_secret(&data, &reference).unwrap(), b"0123456789");
+    let file = plugins::store_folder(&data, &[plugins::SECRETS])
+        .unwrap()
+        .join(&reference);
+    private::check(&private::read_only(&file).unwrap()).unwrap();
+    let status = std::process::Command::new("icacls")
+        .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        plugins::read_secret(&data, &reference).unwrap_err().0,
+        "plugin_store_unsafe"
+    );
+    plugins::remove_secret(&data, &reference).unwrap();
+    assert!(!file.exists());
+}
+
 /// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
 /// the blanket `storage_unavailable` refusal the port replaces.
 #[tokio::test]
