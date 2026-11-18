@@ -741,3 +741,55 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
     assert!(!staged.exists());
     assert!(!work.exists());
 }
+
+/// Farm proof only (V243-WIN-NPM-BOUNDARY-ACL cause 2): boxed `node.exe` from the Node
+/// folder on PATH resolves its own path with the JS and the native realpath, inside the
+/// node probe's boundary, and prints what each gave. Input: none. Output: passes when the
+/// JS realpath, the one Node's module loader uses, works.
+#[test]
+#[ignore = "farm proof only"]
+fn proof_boxed_node_reads_its_own_real_path() {
+    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    let script = "const fs = require('fs'); for (const [name, real] of [['js', fs.realpathSync], ['native', fs.realpathSync.native]]) { try { console.log(name + ' ok ' + real(process.execPath)); } catch (error) { console.log(name + ' ' + error.code + ' ' + error.message); } }";
+    let bin = system_bin();
+    let directory = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = base.join("engine");
+    let scratch = base.join("scratch");
+    private_folder(&root).unwrap();
+    let mut folders = Vec::new();
+    for name in ["project", "home", "tmp"] {
+        private_folder(&scratch.join(name)).unwrap();
+        folders.push(crate::sandbox::canonical(&scratch.join(name)).unwrap());
+    }
+    let homes = ToolHomes::owner().unwrap();
+    let sandbox = ProjectSandbox::new(
+        &folders[0],
+        &folders[1],
+        &folders[2],
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .and_then(|sandbox| sandbox.guard_engine(&root))
+    .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
+    .and_then(|sandbox| sandbox.allow_read(&bin))
+    .unwrap();
+    let settings = os::boundary_settings(&root).unwrap();
+    let profile = scratch.join(NODE_PROFILE);
+    let sandbox = InstalledSandbox::install(
+        sandbox,
+        &profile,
+        settings.linux_supervisor,
+        settings.linux_strict,
+    )
+    .unwrap();
+    let mut node = std::process::Command::new(bin.join(NODE));
+    node.args(["-e", script]).current_dir(&folders[0]);
+    let ran = run_command(sandbox.wrap(&node).unwrap(), Duration::from_secs(60));
+    let canonical = crate::sandbox::canonical(&scratch).unwrap();
+    end_check(&scratch, &canonical);
+    let (passed, output) = ran.unwrap();
+    let output = String::from_utf8_lossy(&output).into_owned();
+    println!("proof boxed node passed={passed}\n{output}");
+    assert!(output.contains("js ok"), "{output}");
+}
