@@ -3468,13 +3468,101 @@ mod tests {
         }
         let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
         assert!(LinuxSandbox::new(sandbox, backend()).is_ok());
-        let (_absent, sandbox) = project(SandboxNetwork::Open);
-        match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
-            Err(SandboxError::Unavailable(reason)) => {
-                assert_eq!(reason, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK);
-            }
-            other => panic!("an open network without the helper must be refused: {other:?}"),
+    }
+
+    /// The refusal a detection gives, for the rows that expect one. Input: the detection.
+    /// Output: its reason; a sandbox or another error fails the row.
+    fn refusal(detected: Result<LinuxSandbox, SandboxError>) -> String {
+        match detected {
+            Err(SandboxError::Unavailable(reason)) => reason,
+            other => panic!("a refusal was expected: {other:?}"),
         }
+    }
+
+    /// V243-LINUX-KEEP-FREE-REFUSAL-NAME: without the helper no agent starts on any network,
+    /// and the refusal says the helper is missing, not that the kernel is too old.
+    #[test]
+    fn no_agent_starts_without_the_helper_and_the_refusal_says_so() {
+        for network in [
+            SandboxNetwork::Open,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+            SandboxNetwork::Only(Vec::new()),
+        ] {
+            let (_absent, sandbox) = project(network.clone());
+            let missing = Path::new("/nonexistent/crazyagent-landlock");
+            assert_eq!(
+                refusal(LinuxSandbox::detect(sandbox, missing)),
+                HELPER_MISSING,
+                "{network:?}"
+            );
+        }
+    }
+
+    /// V243-LINUX-KEEP-FREE-REFUSAL-NAME: a probe that says the kernel cannot hold the
+    /// boundary keeps the kernel refusals; any other failure is named, its first line cut to
+    /// 200 bytes with no control characters. A network with ports never widens to open, and
+    /// a closed network keeps its bubblewrap fallback either way.
+    #[test]
+    fn a_failed_probe_names_its_own_reason_and_only_an_enforcement_answer_names_the_kernel() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let bwrap = std::env::current_exe().unwrap();
+        let fake = |name: &str, said: &str| {
+            let path = root.join(name);
+            fs::write(&path, format!("#!/bin/sh\nprintf '{said}' >&2\nexit 3\n")).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let detected = |helper: &Path, network: SandboxNetwork| {
+            let (_folders, sandbox) = project(network);
+            LinuxSandbox::detect_among(sandbox, helper, &[bwrap.as_path()])
+        };
+        let ports = || SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+        let falls_back = |helper: &Path| {
+            let closed = detected(helper, SandboxNetwork::Only(Vec::new()));
+            matches!(
+                closed.as_ref().map(LinuxSandbox::backend),
+                Ok(LinuxBackend::Bubblewrap { .. })
+            )
+        };
+        for status in ["PartiallyEnforced", "NotEnforced"] {
+            let said =
+                format!("crazyagent-landlock: this kernel cannot hold the boundary ({status})\\n");
+            let helper = fake(status, &said);
+            assert_eq!(
+                refusal(detected(&helper, SandboxNetwork::Open)),
+                LINUX_OPEN_NETWORK_NEEDS_LANDLOCK
+            );
+            let limited = refusal(detected(&helper, ports()));
+            assert!(
+                limited.starts_with("limiting an agent's network to a few ports needs Landlock"),
+                "{limited}"
+            );
+            assert!(falls_back(&helper), "{status}");
+        }
+        let other = fake(
+            "other",
+            "crazyagent-landlock: seccomp\\007 filter refused\\nsecond line\\n",
+        );
+        let named = "the sandbox check failed: crazyagent-landlock: seccomp filter refused";
+        assert_eq!(refusal(detected(&other, SandboxNetwork::Open)), named);
+        assert_eq!(refusal(detected(&other, ports())), named);
+        assert!(falls_back(&other));
+        let silent = fake("silent", "");
+        assert_eq!(
+            refusal(detected(&silent, SandboxNetwork::Open)),
+            "the sandbox check failed: exit status: 3"
+        );
+        let wide = fake("wide", &"é".repeat(150));
+        let cut = refusal(detected(&wide, SandboxNetwork::Open));
+        let reason = cut.strip_prefix("the sandbox check failed: ").unwrap();
+        assert!(
+            reason.len() <= 200 && reason.len() > 190,
+            "{}",
+            reason.len()
+        );
+        assert!(reason.chars().all(|letter| letter == 'é'));
     }
 
     #[test]
