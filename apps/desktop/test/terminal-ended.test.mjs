@@ -37,8 +37,8 @@ test("a native view's end codes each say why in plain words, never the generic l
   for (const [code, line] of Object.entries(copy)) assert.equal(io.endCopy(code), line, code);
 });
 
-test("a native view the GPU stopped drawing says so and that a restart brings it back, since the code is final and a lost GPU device stays lost until CrazyAgent restarts (V243-NATIVE-PRESENT-FATAL, leader 11:04)", () => {
+test("a native view the GPU stopped drawing says so, that opening it again brings it back, and that a restart does once it keeps stopping, since the code is final and a fresh device is tried only a set number of times (V243-NATIVE-DEVICE-REPLACE, leader 11:58)", () => {
   const line = io.endCopy("native_terminal_gpu");
-  assert.equal(line, "The GPU stopped drawing this terminal, so the view closed. Restart CrazyAgent to bring it back.");
+  assert.equal(line, "The GPU stopped drawing this terminal, so the view closed. Open it again to bring it back. If it stops again, restart CrazyAgent.");
   assert.notEqual(line, io.endCopy("not_a_code"));
 });
