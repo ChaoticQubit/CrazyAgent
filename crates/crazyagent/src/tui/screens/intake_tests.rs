@@ -3580,7 +3580,8 @@ fn notes_delete(state: JobState) -> JobView {
 
 /// DEC-177 add.1, QUESTION-13:55 Q1 A: a delete cut short reads its count on Home; Enter
 /// (Finish delete) opens the project's remove ask on Delete everything, where the exact name
-/// is typed again, and sends nothing; d (Keep the project) dismisses the job. While folders
+/// is typed again, and starts nothing (the page reads only its reinstall offer); d (Keep the
+/// project) dismisses the job. While folders
 /// go to the Trash the card offers no Stop.
 #[test]
 fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project() {
@@ -3624,9 +3625,12 @@ fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project(
     assert_eq!(job_asks(&mut shell), [keep]);
 
     shell.key(Key::Enter);
-    assert!(
-        job_asks(&mut shell).is_empty(),
-        "nothing deletes in one click"
+    assert_eq!(
+        job_asks(&mut shell),
+        [IntakeQuery::ReinstallOffer {
+            project: ProjectId::new("notes").unwrap(),
+        }],
+        "nothing deletes in one click: the page only reads its reinstall offer"
     );
     assert_eq!(
         shell.place(),
@@ -3705,7 +3709,8 @@ fn delete_everything_on_notes() -> (Shell, Vec<Request>) {
 
 /// DEC-177 add.1: Delete everything on the project page, once the exact name is typed, starts
 /// the engine's delete job, never a direct change; the page then says to follow it on Home and
-/// goes Home. A refused start is said with the words that name the running job.
+/// goes Home. A start refused `job_busy` says the waiting list is full, never the running
+/// job's name, even while a job read shows one running (DEC-197).
 #[test]
 fn delete_everything_on_the_project_page_starts_the_engine_s_job_and_goes_home() {
     let (mut shell, requests) = delete_everything_on_notes();
@@ -3772,7 +3777,7 @@ fn delete_everything_on_the_project_page_starts_the_engine_s_job_and_goes_home()
         (said.tone, said.lead.as_str()),
         (
             Tone::Error,
-            "Moving reading-list is running. Wait for it to finish on Home."
+            "Several folders are already waiting. Wait for one to finish on Home."
         )
     );
     assert!(matches!(shell.place(), Some(Place::Project { .. })));

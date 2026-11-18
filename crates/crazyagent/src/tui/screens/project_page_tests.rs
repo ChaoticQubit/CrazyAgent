@@ -1478,9 +1478,10 @@ async fn delete_entered(shell: &mut Shell, connection: &mut Connection) -> Vec<&
 
 /// DEC-177 add.1: Delete everything on the project page starts the engine's delete job and goes
 /// Home, where it waits for the project's agents with nothing moved; another project's delete
-/// is refused naming it, a terminal started again shows it, and Enter there stops it, keeping
-/// the project and its folder. Runs on macOS only, the one platform that offers Delete
-/// everything (DEC-118).
+/// waits its turn behind it (DEC-197), a terminal started again shows both, Stop on the
+/// waiting one ends it with its folder kept and the running one left, and Enter on the running
+/// one stops it, keeping the project and its folder. Runs on macOS only, the one platform that
+/// offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_there_stops_it() {
@@ -1524,10 +1525,19 @@ async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_ther
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
     assert!(sent.contains(&"job start"), "{sent:?}");
-    let said = shell.ctx.message().expect("the refusal is said");
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(said.lead, "Deleting Reading List.");
+    let (queued, _) = job_until(&mut shell, &mut connection, |job| {
+        job.id != waiting.id && job.kind == JobKind::Delete
+    })
+    .await;
+    assert_eq!(queued.source, "Reading List");
     assert_eq!(
-        said.lead,
-        "Deleting Notes CLI is running. Wait for it to finish on Home."
+        queued.state,
+        JobState::Waiting {
+            behind: "Notes CLI".into()
+        },
+        "the second delete waits its turn behind the running one"
     );
     assert!(kept.is_dir(), "{kept:?}");
     drop(shell);
@@ -1535,16 +1545,46 @@ async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_ther
 
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
-    let shown = shell
+    let shown: Vec<_> = shell
         .ctx
         .store
         .intake
-        .first()
-        .cloned()
-        .expect("the running delete");
+        .iter()
+        .map(|job| job.id.clone())
+        .collect();
     assert_eq!(
-        shown.id, waiting.id,
-        "a terminal started again shows the running delete"
+        shown,
+        [waiting.id.clone(), queued.id.clone()],
+        "a terminal started again shows the running delete first, then the waiting one"
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Waiting for Notes CLI to finish..."),
+        "{rows}"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let (dropped, _) = job_until(&mut shell, &mut connection, |job| {
+        job.id == queued.id && !super::intake_job::running(job)
+    })
+    .await;
+    assert_eq!(
+        dropped.state,
+        JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Waiting
+        },
+        "{dropped:?}"
+    );
+    assert!(kept.is_dir(), "a stopped waiting delete keeps its folder");
+    assert!(
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .any(|job| job.id == waiting.id && super::intake_job::running(job)),
+        "stopping the waiting delete leaves the running one"
     );
     shell.key(Key::Home);
     shell.key(Key::Enter);
