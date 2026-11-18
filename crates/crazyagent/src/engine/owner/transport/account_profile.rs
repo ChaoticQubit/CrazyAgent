@@ -158,10 +158,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("account_profile_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -254,7 +254,7 @@ pub(super) fn refusal(bytes: &[u8], code: &str) -> Result<Vec<u8>, EngineError> 
 }
 
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -595,7 +595,7 @@ fn profile_wire(value: ResultValue) -> Result<WireReply, EngineError> {
 }
 
 async fn receive_secret(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     present: bool,
 ) -> Result<Option<AccountSecret>, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -632,7 +632,7 @@ async fn receive_secret(
     .map_err(|_| failure("account_profile_secret_frame_invalid"))?
 }
 
-async fn write_wire(stream: &mut UnixStream, reply: &WireReply) -> Result<(), EngineError> {
+async fn write_wire(stream: &mut Stream, reply: &WireReply) -> Result<(), EngineError> {
     stream
         .write_all(&encode_frame(reply).map_err(|_| failure("account_profile_response_bounds"))?)
         .await
@@ -641,7 +641,7 @@ async fn write_wire(stream: &mut UnixStream, reply: &WireReply) -> Result<(), En
 
 async fn read_wire(
     client: &OwnerClient,
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     read: Option<&str>,
 ) -> Result<WireReply, EngineError> {
     let frame = read_frame(stream).await.map_err(|_| unknown())?;

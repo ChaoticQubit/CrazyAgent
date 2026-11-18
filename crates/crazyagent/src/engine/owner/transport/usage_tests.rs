@@ -92,13 +92,13 @@ impl Usage {
 
 /// A connected socket pair whose buffers hold about 1 KiB, so a reply larger than that
 /// waits for its client to read. Output: the engine end and the client end.
-fn small_buffers() -> (UnixStream, UnixStream) {
+fn small_buffers() -> (Stream, Stream) {
     let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
     for end in [&server, &client] {
         end.set_nonblocking(true).unwrap();
     }
-    let server = UnixStream::from_std(server).unwrap();
-    let client = UnixStream::from_std(client).unwrap();
+    let server = Stream::from_std(server).unwrap();
+    let client = Stream::from_std(client).unwrap();
     nix::sys::socket::setsockopt(&server, nix::sys::socket::sockopt::SndBuf, &1024usize).unwrap();
     nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize).unwrap();
     (server, client)
