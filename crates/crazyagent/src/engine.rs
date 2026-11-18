@@ -572,10 +572,10 @@ impl Engine {
     }
 
     /// Runs one storage job for a record that refers to files written before it, and hands
-    /// storage's answer to `settle` even when the owner stops waiting first, so a late commit
-    /// never loses a file its record refers to. Inputs: the job and the settle step. Output:
-    /// the settle error, else the job's result; a not-submitted code (settled at once);
-    /// access_change_pending for a narrowing job; or outcome-unknown when a taken job is late.
+    /// storage's answer to `settle` even after the owner stops waiting, so a late commit never
+    /// loses a file its record refers to. Inputs: the job and the settle step. Output: the settle
+    /// error, else the job's result; a not-submitted code, settled at once; access_change_pending
+    /// for a narrowing job; or outcome-unknown when a taken job is late or storage went away.
     async fn settled_job<T: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
