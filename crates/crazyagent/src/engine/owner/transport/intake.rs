@@ -126,9 +126,10 @@ impl Held {
         !self.job.ended()
     }
 
-    /// Whether the job waits for its turn: its task has not been let go.
+    /// Whether the job waits for its turn: it has not ended and its task has not been let
+    /// go. A job its task's guard ended before its turn, as an abort does, waits no more.
     fn waiting(&self) -> bool {
-        self.turn.is_some()
+        self.turn.is_some() && self.live()
     }
 
     /// Whether the job runs: let go and not ended.
