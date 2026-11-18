@@ -25,7 +25,8 @@ const CREATE_PAUSE: Duration = Duration::from_millis(50);
 const SID_BYTES_MIN: usize = 8;
 
 /// Opens the AppContainer profile named `name`, creating it the first time, and returns a copy
-/// of its SID. Input: a name `check_container` accepted. Output: the SID, or the failed step.
+/// of its SID; a creation that lost Windows' Packages-folder race is tried again ([`retried`]).
+/// Input: a name `check_container` accepted. Output: the SID, or the failed step.
 pub(super) fn open(name: &str) -> Result<Words, BoundaryError> {
     let name = wide(name);
     let display = wide("CrazyAgent agent");
@@ -86,13 +87,23 @@ pub(super) fn capabilities(list: &[Capability]) -> Result<Vec<Words>, BoundaryEr
         .collect()
 }
 
-/// Calls `create`, the AppContainer creation, once. The retry of a lost Packages-folder race
-/// lands with V243-WIN2025-CONTAINER-FLAKE's fix. Inputs: the call and the pause between
-/// tries. Output: the call's result.
+/// Calls `create`, the AppContainer creation, again while it returns 0x8007000A: the race
+/// Windows loses when two first creations for one user make that user's Packages folder at
+/// once, after which the folder exists for the next call. At most `CREATE_TRIES` calls,
+/// `pause` apart; any other result is taken at once. Inputs: the call and the pause. Output:
+/// the first other result, or the race after the last try, which the caller refuses.
 fn retried<T>(mut create: impl FnMut() -> Result<T, i32>, pause: Duration) -> Result<T, i32> {
     assert!(pause <= CREATE_PAUSE);
     assert!(CREATE_TRIES >= 2);
-    create()
+    let mut tries = 1;
+    let mut result = create();
+    while tries < CREATE_TRIES && matches!(result, Err(PROFILE_RACED)) {
+        std::thread::sleep(pause);
+        tries += 1;
+        result = create();
+    }
+    assert!(tries <= CREATE_TRIES);
+    result
 }
 
 /// Creates the AppContainer profile and returns a copy of its SID. Relies on the three names
