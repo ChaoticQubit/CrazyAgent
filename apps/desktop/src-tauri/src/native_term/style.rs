@@ -11,14 +11,38 @@ pub const FONT_PX_MAX: f64 = 72.0;
 /// The longest colour string accepted, in bytes.
 const COLOR_BYTES_MAX: usize = 64;
 
+/// Where a family's faces come from: a system font file, or faces built into the app.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FontSource {
+    File(&'static str),
+    Built(&'static [&'static [u8]]),
+}
+
+/// JetBrains Mono 2.304 (regular, bold, italic, bold italic), the first font of the panel's
+/// list, built into the app. Its metrics equal the webview's woff2 (2.305): 1000 units per
+/// em, ascent 1020, descent 300, no line gap, advance 600.
+const JETBRAINS_MONO: [&[u8]; 4] = [
+    include_bytes!("../../fonts/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../../fonts/JetBrainsMono-Bold.ttf"),
+    include_bytes!("../../fonts/JetBrainsMono-Italic.ttf"),
+    include_bytes!("../../fonts/JetBrainsMono-BoldItalic.ttf"),
+];
+
+const MENLO: FontSource = FontSource::File("/System/Library/Fonts/Menlo.ttc");
+
 /// The monospace families the native view can draw with, by the names a CSS font list uses,
-/// and the system file of each, in the order a list is matched against. The system SF Mono
-/// file is left out: its default instance is Light (weight class 295), not the Regular that
-/// `ui-monospace` gives in the webview, so `ui-monospace` draws with Menlo.
-const FAMILIES: [(&str, &str, &str); 3] = [
-    ("menlo", "Menlo", "/System/Library/Fonts/Menlo.ttc"),
-    ("ui-monospace", "Menlo", "/System/Library/Fonts/Menlo.ttc"),
-    ("monospace", "Menlo", "/System/Library/Fonts/Menlo.ttc"),
+/// and where the faces of each come from, in the order a list is matched against. The
+/// system SF Mono file is left out: its default instance is Light (weight class 295), not
+/// the Regular that `ui-monospace` gives in the webview, so `ui-monospace` draws with Menlo.
+const FAMILIES: [(&str, &str, FontSource); 4] = [
+    (
+        "jetbrains mono",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
+    ("menlo", "Menlo", MENLO),
+    ("ui-monospace", "Menlo", MENLO),
+    ("monospace", "Menlo", MENLO),
 ];
 
 /// The colours a native view draws with, as the panel's `--terminal-*` tokens give them:
@@ -208,12 +232,12 @@ pub struct StyleText {
     pub theme: ThemeText,
 }
 
-/// A checked style: the font family drawn with and its file, the size in CSS pixels, the
-/// cursor blink and the colours.
+/// A checked style: the font family drawn with and where its faces come from, the size in
+/// CSS pixels, the cursor blink and the colours.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Style {
     pub family: &'static str,
-    pub file: &'static Path,
+    pub source: FontSource,
     pub font_px: f64,
     pub blink: bool,
     pub theme: Theme,
@@ -228,10 +252,10 @@ impl Style {
         if !(FONT_PX_MIN..=FONT_PX_MAX).contains(&size) {
             return Err("native_terminal_style_invalid");
         }
-        let (family, file) = font_for(&text.font_family)?;
+        let (family, source) = font_for(&text.font_family)?;
         let style = Style {
             family,
-            file,
+            source,
             font_px: size,
             blink: text.cursor_blink,
             theme: Theme::from_text(&text.theme)?,
@@ -249,27 +273,35 @@ pub struct FaceEm {
     pub descent: f64,
 }
 
-/// The cell size in device pixels, by the rule today's xterm panel uses (its WebGL renderer
-/// floors the character width and ceils the line height at the device scale, letter
-/// spacing 0, line height 1), so a host rect gives the same grid. Inputs: the font metrics,
-/// the size in CSS pixels and the backing scale. Output: (width, height) in device pixels.
+/// The cell size in device pixels, by the rule today's xterm panel uses with its WebGL
+/// renderer, letter spacing 0 and line height 1: the width is the advance at the device
+/// scale, floored; the height is WebKit's font box (ascent and descent each rounded to
+/// whole CSS pixels) at the device scale, ceiled. So one host rect gives one grid. Measured
+/// on the rig (hresearch team4c 02:15, dpr 1): JetBrains Mono 13 px gives 7 x 17 cells.
+/// Inputs: the font metrics, the size in CSS pixels and the backing scale. Output: (width,
+/// height) in device pixels.
 pub fn cell_px(face: FaceEm, font_px: f64, scale: f64) -> (f64, f64) {
     assert!((FONT_PX_MIN..=FONT_PX_MAX).contains(&font_px));
     assert!((1.0..=4.0).contains(&scale));
-    assert!(face.advance > 0.0 && face.ascent + face.descent > 0.0);
+    assert!(face.advance > 0.0 && face.ascent > 0.0 && face.descent >= 0.0);
     let width = (face.advance * font_px * scale).floor();
-    let height = ((face.ascent + face.descent) * font_px * scale).ceil();
+    let line = (face.ascent * font_px).round() + (face.descent * font_px).round();
+    let height = (line * scale).ceil();
     assert!(width >= 1.0 && height >= 1.0);
     (width, height)
 }
 
-/// The first family of a CSS font list the native view can draw with and whose file is
-/// installed: its family name and file. Families it does not know count as not installed.
-/// Input: the list. Output: (family, file), or `native_terminal_style_invalid`.
-pub fn font_for(list: &str) -> Result<(&'static str, &'static Path), &'static str> {
+/// The first family of a CSS font list the native view can draw with and whose faces are
+/// present: built in, or an installed system file. Families it does not know count as not
+/// installed. Input: the list. Output: (family, source), or `native_terminal_style_invalid`.
+pub fn font_for(list: &str) -> Result<(&'static str, FontSource), &'static str> {
     if list.len() > FONT_LIST_BYTES_MAX {
         return Err("native_terminal_style_invalid");
     }
+    let present = |source: &FontSource| match source {
+        FontSource::File(path) => Path::new(path).is_file(),
+        FontSource::Built(faces) => !faces.is_empty(),
+    };
     let found = list
         .split(',')
         .map(|name| {
@@ -280,13 +312,13 @@ pub fn font_for(list: &str) -> Result<(&'static str, &'static Path), &'static st
         .find_map(|name| {
             FAMILIES
                 .iter()
-                .find(|(css, _, file)| *css == name && Path::new(file).is_file())
-                .map(|(_, family, file)| (*family, Path::new(*file)))
+                .find(|(css, _, source)| *css == name && present(source))
+                .map(|(_, family, source)| (*family, *source))
         });
-    let (family, file) = found.ok_or("native_terminal_style_invalid")?;
-    assert!(file.is_absolute());
+    let (family, source) = found.ok_or("native_terminal_style_invalid")?;
+    assert!(present(&source));
     assert!(!family.is_empty());
-    Ok((family, file))
+    Ok((family, source))
 }
 
 #[cfg(test)]
@@ -364,14 +396,14 @@ mod tests {
             ascent: 1.02,
             descent: 0.3,
         };
-        assert_eq!(cell_px(jet, 13.0, 2.0), (15.0, 35.0));
-        assert_eq!(cell_px(jet, 13.0, 1.0), (7.0, 18.0));
+        assert_eq!(cell_px(jet, 13.0, 1.0), (7.0, 17.0));
+        assert_eq!(cell_px(jet, 13.0, 2.0), (15.0, 34.0));
         let menlo = FaceEm {
             advance: 1233.0 / 2048.0,
             ascent: 1901.0 / 2048.0,
-            descent: 0.2358,
+            descent: 483.0 / 2048.0,
         };
-        assert_eq!(cell_px(menlo, 13.0, 2.0), (15.0, 31.0));
+        assert_eq!(cell_px(menlo, 13.0, 2.0), (15.0, 30.0));
     }
 
     #[test]
@@ -410,6 +442,7 @@ mod tests {
             (style.family, style.font_px, style.blink),
             ("Menlo", 13.0, true)
         );
+        assert_eq!(style.source, MENLO);
         assert_eq!(style.theme, theme);
         for size in [5.9, 72.1, f64::NAN, f64::INFINITY] {
             assert_eq!(
@@ -424,10 +457,26 @@ mod tests {
     }
 
     #[test]
+    fn the_built_in_faces_are_truetype_files() {
+        for face in JETBRAINS_MONO {
+            assert_eq!(face[..4], [0, 1, 0, 0]);
+            assert!(face.len() > 200_000 && face.len() < 300_000);
+        }
+    }
+
+    #[test]
     fn the_first_known_installed_family_is_used() {
         let list = "\"JetBrains Mono\", ui-monospace, \"SF Mono\", Menlo, monospace";
-        assert_eq!(font_for(list).map(|f| f.0), Ok("Menlo"));
-        assert_eq!(font_for("\"SF Mono\""), Err("native_terminal_style_invalid"));
+        assert_eq!(font_for(list).map(|f| f.0), Ok("JetBrains Mono"));
+        assert_eq!(
+            font_for(list).map(|f| f.1),
+            Ok(FontSource::Built(&JETBRAINS_MONO))
+        );
+        assert_eq!(font_for("ui-monospace").map(|f| f.0), Ok("Menlo"));
+        assert_eq!(
+            font_for("\"SF Mono\""),
+            Err("native_terminal_style_invalid")
+        );
         assert_eq!(font_for("Courier, Menlo").map(|f| f.0), Ok("Menlo"));
         assert_eq!(font_for("Courier"), Err("native_terminal_style_invalid"));
         let long = "x,".repeat(FONT_LIST_BYTES_MAX);

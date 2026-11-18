@@ -1,5 +1,5 @@
 use super::screen::{Cursor, Frame, Preedit, Span};
-use super::style::{FaceEm, Style, Theme, cell_px};
+use super::style::{FaceEm, FontSource, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use glyphon::{
     Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
 /// system font, to keep memory small; Apple Color Emoji is the only system font with
@@ -117,20 +118,40 @@ fn load_fallbacks() -> FontSystem {
     FontSystem::new_with_locale_and_db("en-US".into(), db)
 }
 
-/// The upright face loaded from a file whose weight is nearest regular, and its family.
-/// Inputs: the font database and the file. Output: the face id and family, or none.
-fn face_in(db: &fontdb::Database, file: &Path) -> Option<(fontdb::ID, String)> {
-    let from_file = |source: &fontdb::Source| match source {
-        fontdb::Source::File(path) | fontdb::Source::SharedFile(path, _) => path == file,
-        fontdb::Source::Binary(_) => false,
-    };
+/// The upright face of a loaded family whose weight is nearest regular. Inputs: the font
+/// database and the family. Output: the face id, or none when the family is not loaded.
+fn face_for(db: &fontdb::Database, family: &str) -> Option<fontdb::ID> {
     let face = db
         .faces()
-        .filter(|face| face.style == fontdb::Style::Normal && from_file(&face.source))
+        .filter(|face| face.style == fontdb::Style::Normal)
+        .filter(|face| face.families.iter().any(|(name, _)| name == family))
         .min_by_key(|face| face.weight.0.abs_diff(fontdb::Weight::NORMAL.0))?;
-    let family = face.families.first()?.0.clone();
-    assert!(from_file(&face.source));
-    Some((face.id, family))
+    assert!(face.families.iter().any(|(name, _)| name == family));
+    Some(face.id)
+}
+
+/// Loads a family's faces into the database: a system file, or the faces built into the
+/// app, read in place. Inputs: the database and the source. Output: ok, or
+/// `native_terminal_style_invalid` when a face does not load.
+fn load(db: &mut fontdb::Database, source: FontSource) -> Result<(), &'static str> {
+    let invalid = "native_terminal_style_invalid";
+    let before = db.len();
+    match source {
+        FontSource::File(path) => db.load_font_file(path).map_err(|_| invalid)?,
+        FontSource::Built(faces) => {
+            for face in faces {
+                let face: &'static [u8] = face;
+                if db
+                    .load_font_source(fontdb::Source::Binary(Arc::new(face)))
+                    .is_empty()
+                {
+                    return Err(invalid);
+                }
+            }
+        }
+    }
+    assert!(db.len() > before);
+    Ok(())
 }
 
 /// A face's metrics in em, measured on 'W' as xterm measures its cell. Inputs: the font
@@ -147,7 +168,7 @@ fn face_em(fonts: &mut FontSystem, id: fontdb::ID) -> Result<FaceEm, &'static st
         ascent: f64::from(face.ascender()) / em,
         descent: -f64::from(face.descender()) / em,
     };
-    if em <= 0.0 || metrics.advance <= 0.0 || metrics.ascent + metrics.descent <= 0.0 {
+    if em <= 0.0 || metrics.advance <= 0.0 || metrics.ascent <= 0.0 || metrics.descent < 0.0 {
         return Err(invalid);
     }
     assert!(metrics.advance.is_finite() && metrics.ascent.is_finite());
@@ -301,16 +322,13 @@ impl Shared {
     /// style in place.
     pub fn set_style(&mut self, style: &Style) -> Result<(), &'static str> {
         let invalid = "native_terminal_style_invalid";
-        if face_in(self.fonts.db(), style.file).is_none() {
-            self.fonts
-                .db_mut()
-                .load_font_file(style.file)
-                .map_err(|_| invalid)?;
+        if face_for(self.fonts.db(), style.family).is_none() {
+            load(self.fonts.db_mut(), style.source)?;
         }
-        let (id, family) = face_in(self.fonts.db(), style.file).ok_or(invalid)?;
+        let id = face_for(self.fonts.db(), style.family).ok_or(invalid)?;
         let face = face_em(&mut self.fonts, id)?;
         let (width, height) = cell_px(face, style.font_px, f64::from(self.scale));
-        self.family = family;
+        self.family = style.family.to_owned();
         self.font_px = (style.font_px * f64::from(self.scale)) as f32;
         self.cell = (width as f32, height as f32);
         self.theme = style.theme;
@@ -673,6 +691,52 @@ fn span_attrs<'a>(span: &Span, family: &'a str) -> Attrs<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::native_term::codec::grid_for;
+    use crate::native_term::style::font_for;
+
+    fn metrics_of(list: &str) -> FaceEm {
+        let (family, source) = font_for(list).expect("a known font");
+        let db = fontdb::Database::new();
+        let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
+        load(fonts.db_mut(), source).expect("faces load");
+        let id = face_for(fonts.db(), family).expect("an upright face");
+        face_em(&mut fonts, id).expect("face metrics")
+    }
+
+    #[test]
+    fn the_built_in_font_gives_the_rig_xterm_grid() {
+        let face = metrics_of("\"JetBrains Mono\", monospace");
+        assert_eq!(
+            face,
+            FaceEm {
+                advance: 0.6,
+                ascent: 1.02,
+                descent: 0.3
+            }
+        );
+        let cell = cell_px(face, 13.0, 1.0);
+        assert_eq!(cell, (7.0, 17.0));
+        assert_eq!(grid_for(666.0, 362.0, cell, 1000), (93, 21));
+        assert_eq!(cell_px(face, 13.0, 2.0), (15.0, 34.0));
+    }
+
+    #[test]
+    fn menlo_loads_from_its_system_file() {
+        let face = metrics_of("Menlo");
+        assert_eq!(face.advance, 1233.0 / 2048.0);
+        assert_eq!(cell_px(face, 13.0, 2.0), (15.0, 30.0));
+    }
+
+    #[test]
+    fn built_in_faces_load_once_by_family() {
+        let mut db = fontdb::Database::new();
+        assert_eq!(face_for(&db, "JetBrains Mono"), None);
+        let (_, source) = font_for("JetBrains Mono").expect("built in");
+        load(&mut db, source).expect("faces load");
+        assert_eq!(db.len(), 4);
+        assert!(face_for(&db, "JetBrains Mono").is_some());
+        assert_eq!(face_for(&db, "Menlo"), None);
+    }
 
     #[test]
     fn marked_text_is_underlined_along_the_bottom_of_its_cells() {
