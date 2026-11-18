@@ -110,6 +110,9 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextMo
             ForCheck::Run(shared) => return Ok(shared),
             ForCheck::Refused(NODE_TOO_OLD) => ContextModeOff::NodeTooOld,
             ForCheck::Refused(NODE_FOLDER_UNREADABLE) => ContextModeOff::NodeFolderUnreadable,
+            ForCheck::Refused(NODE_DRIVE_ROOT_UNREADABLE) => {
+                ContextModeOff::NodeDriveRootUnreadable
+            }
             _ if mismatch => ContextModeOff::Mismatch,
             ForCheck::SettingUp | ForCheck::Refused("context_mode_installs_busy") => {
                 ContextModeOff::SettingUp
@@ -568,8 +571,9 @@ fn running(folder: &Path) -> bool {
 }
 
 /// Says whether an install of one version can start now, before it is registered, with the
-/// same refusals [`install`] would return at once. Inputs: the engine root, npx's folder and
-/// the version. Output: none, or the refusal.
+/// same refusals [`install`] would return at once, and a drive root of the engine root or
+/// npx's folder no app container may read ([`NODE_DRIVE_ROOT_UNREADABLE`]). Inputs: the
+/// engine root, npx's folder and the version. Output: none, or the refusal.
 fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
     if pin(version).is_none() || program_pin(version).is_none() {
         return Some(Begin::Refused("context_mode_integrity_unpinned"));
@@ -581,6 +585,10 @@ fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
         Ok(true) => {}
         Ok(false) => return Some(Begin::Refused(NODE_TOO_OLD)),
         Err(error) => return Some(Begin::Refused(error.0)),
+    }
+    if let Some(drive) = os::unreadable_drive_root(&[root, bin]) {
+        eprintln!("context_mode_drive_root_refused root={}", drive.display());
+        return Some(Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE));
     }
     backoff_left(&failed_marker(root, version)).map(Begin::Failed)
 }

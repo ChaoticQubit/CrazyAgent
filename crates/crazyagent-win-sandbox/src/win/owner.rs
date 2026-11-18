@@ -2,8 +2,9 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::container::sid;
 use super::{BoundaryError, last_error, windows};
 use crate::dacl::{
-    ANCESTOR_CHANGES, DENY_TYPES, FILE_CHANGES, OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX,
-    first_changeable_part, held_only_by, read_root_refused,
+    ALL_APPLICATION_PACKAGES, ANCESTOR_CHANGES, DENY_TYPES, DRIVE_ROOT_RIGHTS, FILE_CHANGES,
+    OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX, first_changeable_part, held_only_by, holds_allow,
+    read_root_refused,
 };
 use crate::plan::granted_read_roots;
 use crate::profile::BoundaryProfile;
@@ -22,8 +23,8 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
-    WRITE_OWNER,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetVolumeInformationW, OPEN_EXISTING,
+    READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
@@ -32,6 +33,7 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const TOKEN_USER_BYTES_MAX: usize = 256;
+const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 const FOLDERS_MAX: usize = 128;
 
 const _: () = assert!(
@@ -159,14 +161,41 @@ pub fn unreadable_read_root(profile: &BoundaryProfile) -> Option<&str> {
 /// form: `C:\` for `C:\x`, `\\?\C:\` for `\\?\C:\x`. Input: the path. Output: the root, or
 /// none for a relative path.
 fn drive_root(path: &Path) -> Option<&Path> {
-    todo!("{path:?}")
+    if !path.is_absolute() {
+        return None;
+    }
+    let root = path.ancestors().last()?;
+    assert!(root.parent().is_none());
+    assert!(path.starts_with(root));
+    Some(root)
 }
 
 /// Whether the volume whose root is `root` keeps access lists (`FILE_PERSISTENT_ACLS`); FAT
 /// and exFAT do not, so no list there keeps a container out. Input: the root, with its
 /// trailing separator. Output: the answer, false too when Windows cannot say.
 fn keeps_access_lists(root: &Path) -> bool {
-    todo!("{root:?}")
+    let wide: Vec<u16> = root
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if wide[..wide.len() - 1].contains(&0) {
+        return false;
+    }
+    let mut flags = 0_u32;
+    let read = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    read != 0 && flags & FILE_PERSISTENT_ACLS != 0
 }
 
 /// Whether the list of `path` itself, read where it sits, keeps every app container from
@@ -175,7 +204,10 @@ fn keeps_access_lists(root: &Path) -> bool {
 /// one whose list cannot be read is left to the launch. Input: the path. Output: true to
 /// refuse.
 fn attributes_unreadable(path: &Path) -> bool {
-    todo!("{path:?}")
+    matches!(
+        security(path),
+        Ok((_, Some(list))) if !holds_allow(&list, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+    )
 }
 
 /// The first drive root among `paths`' roots ([`drive_root`]) on a volume that keeps access
@@ -183,7 +215,17 @@ fn attributes_unreadable(path: &Path) -> bool {
 /// attributes ([`attributes_unreadable`]), each root asked once: a boxed Node.js fails to
 /// resolve a path there (V244-WIN-ADMIN-STEP). Input: the paths. Output: that root, or none.
 pub fn unreadable_drive_root<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
-    todo!("{:?}", paths.into_iter().count())
+    let mut asked: Vec<&Path> = Vec::new();
+    for root in paths.into_iter().filter_map(drive_root) {
+        if asked.contains(&root) {
+            continue;
+        }
+        asked.push(root);
+        if keeps_access_lists(root) && attributes_unreadable(root) {
+            return Some(root.to_path_buf());
+        }
+    }
+    None
 }
 
 /// Opens the file or folder at `path` itself for `access`, with the link flag so a link or
