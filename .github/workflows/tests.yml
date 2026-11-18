@@ -217,7 +217,7 @@ jobs:
           git checkout HEAD -- crates/crazyagent-win-sandbox || exit 1
           git diff --quiet HEAD || exit 1
           cargo test -p crazyagent-win-sandbox --lib --locked --no-run || exit 1
-          cargo test -p crazyagent-win-sandbox --lib --locked -- --nocapture --test-threads 1 win::owner::tests:: dacl::tests:: > "$RUNNER_TEMP/green.txt" 2>&1
+          cargo test -p crazyagent-win-sandbox --lib --locked -- --test-threads 1 win::owner::tests:: dacl::tests:: > "$RUNNER_TEMP/green.txt" 2>&1
           rc=$?
           grep -E "^test result|FAILED|panicked|system drive root keeps" "$RUNNER_TEMP/green.txt" | head -30
           [ "$rc" -eq 0 ] || exit 1
@@ -301,7 +301,7 @@ jobs:
           rc=$?
           grep -E "^test |^test result|panicked" "$RUNNER_TEMP/rows.txt" | grep -v " ok$" | head -40
           grep -c " \.\.\. ok$" "$RUNNER_TEMP/rows.txt"
-          cargo test -p crazyagent --lib --locked -- --ignored --exact --nocapture context_mode::windows_tests::a_drive_root_no_app_container_reads_refuses_the_install_by_its_own_code > "$RUNNER_TEMP/drive.txt" 2>&1
+          cargo test -p crazyagent --lib --locked -- --ignored --exact context_mode::windows_tests::a_drive_root_no_app_container_reads_refuses_the_install_by_its_own_code > "$RUNNER_TEMP/drive.txt" 2>&1
           drive=$?
           grep -E "^test |^test result|panicked|context_mode_drive_root_refused|assert" "$RUNNER_TEMP/drive.txt" | head -20
           [ "$drive" -eq 0 ] || rc=1
