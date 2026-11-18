@@ -835,6 +835,13 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                 **query,
                 QuestionsQuery::Counts | QuestionsQuery::List { .. }
             ),
+            Request::Intake(job) => matches!(
+                job.query(),
+                IntakeQuery::GitHubPublishStatus { project }
+                    | IntakeQuery::GitHubPublishPrompt { project }
+                    | IntakeQuery::ReinstallOffer { project }
+                    if project == notes
+            ),
             other => matches!(
                 other,
                 Request::Pools
