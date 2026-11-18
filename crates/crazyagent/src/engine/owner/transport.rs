@@ -70,6 +70,8 @@ use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
 mod intake_parallel_tests;
 #[cfg(all(test, unix))]
+mod narrowing_rest_tests;
+#[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_diagnostic_tests;

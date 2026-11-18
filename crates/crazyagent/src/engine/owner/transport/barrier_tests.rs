@@ -822,7 +822,7 @@ async fn a_revocation_storage_refuses_still_refuses_the_client_until_a_newer_rea
 
 /// The database path the engine gave `Storage::open`, the key of every storage hold.
 /// Input: the engine. Output: the path.
-fn database(owner: &Usage) -> PathBuf {
+pub(super) fn database(owner: &Usage) -> PathBuf {
     std::fs::canonicalize(owner.root.path())
         .unwrap()
         .join("engine.db")
@@ -847,7 +847,7 @@ fn stored_tui(root: &Path) -> (i64, String) {
 /// Waits until the storage worker of `path` used up its death mark, so the next open of the
 /// same database never meets it. Input: the database path. Output: whether it did within
 /// `PUBLISHED_WAIT`.
-async fn worker_died(path: &Path) -> bool {
+pub(super) async fn worker_died(path: &Path) -> bool {
     let deadline = tokio::time::Instant::now() + PUBLISHED_WAIT;
     while crate::storage::dying(path) {
         if tokio::time::Instant::now() >= deadline {
