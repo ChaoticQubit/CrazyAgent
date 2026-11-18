@@ -574,10 +574,10 @@ jobs:
       - name: Put back the base workflow so the tree is the base
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD~1)" = 3b9393f1aaa28b7620f60b2287cdf97b54d3f429
-          test "$(git diff --name-only HEAD~1 HEAD)" = .github/workflows/tests.yml
-          git checkout HEAD~1 -- .github/workflows/tests.yml
-          git diff --quiet HEAD~1
+          git merge-base --is-ancestor 3b9393f1aaa28b7620f60b2287cdf97b54d3f429 HEAD
+          test "$(git diff --name-only 3b9393f1aaa28b7620f60b2287cdf97b54d3f429 HEAD)" = .github/workflows/tests.yml
+          git checkout 3b9393f1aaa28b7620f60b2287cdf97b54d3f429 -- .github/workflows/tests.yml
+          git diff --quiet 3b9393f1aaa28b7620f60b2287cdf97b54d3f429
       - name: Install Linux packages
         timeout-minutes: 10
         run: bash scripts/ci/linux-packages.sh
@@ -589,7 +589,7 @@ jobs:
       - name: Rows
         timeout-minutes: 90
         run: |
-          set -u
+          set -u +e +o pipefail
           green=0
           row() {
             local label=$1
