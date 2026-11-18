@@ -3,6 +3,9 @@ pub mod ide;
 pub mod theme;
 mod updates;
 
+#[cfg(target_os = "macos")]
+mod native_term;
+
 #[cfg(feature = "native-webdriver")]
 mod e2e_window;
 #[cfg(feature = "native-webdriver")]
