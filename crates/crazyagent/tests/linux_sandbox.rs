@@ -2925,23 +2925,32 @@ fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_ho
 }
 
 /// V243-LINUX-EGRESS-REJECT: a routed agent's refused connect, to another host's port and to
-/// slirp's gateway, fails at once instead of waiting out its SYN retries, about 127 s each.
-/// The bound covers the whole run, the routed network's start included.
+/// slirp's gateway, gets "Connection refused" at once instead of waiting out its SYN retries,
+/// about 127 s each; the bound covers the routed network's start too. The port is a bridged
+/// port of the policy, so Landlock network rules let the connect reach the egress rules
+/// (V243-EGRESS-TIMED-ROW-LANDLOCK).
 #[test]
 fn a_refused_connect_from_a_routed_agent_fails_at_once() {
     let case = case();
     let other = outward_address();
     let (any, port) = (pong_everywhere(), pong_everywhere());
-    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(any)]);
+    let network = SandboxNetwork::Only(vec![
+        SandboxRemote::AnyHost(any),
+        SandboxRemote::Loopback(port),
+    ]);
     let Some(sandbox) = routed(policy(&case, network)) else {
         return;
     };
     for host in [other.to_string(), "10.0.2.2".to_owned()] {
         let refused =
-            format!("(exec 4<>/dev/tcp/{host}/{port}) 2>/dev/null && echo reached || echo refused");
+            format!("(exec 4<>/dev/tcp/{host}/{port}) 2>&1 && echo reached || echo refused");
         let started = Instant::now();
-        assert_eq!(bash(&sandbox, &case, &refused), "refused\n", "{host}");
+        let said = bash(&sandbox, &case, &refused);
         let took = started.elapsed();
+        assert!(
+            said.ends_with("refused\n") && said.contains("Connection refused"),
+            "{host}: {said}"
+        );
         assert!(took < Duration::from_secs(30), "{host}: {took:?}");
     }
 }
