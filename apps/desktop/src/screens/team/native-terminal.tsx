@@ -49,7 +49,14 @@ export type NativeReport = { type: "ready" } | { type: "ended"; code: string } |
  * caret, an insert, an unmark or an accessibility read. Input: the event detail. Output: the
  * hook event fields, or null for anything else. */
 export function textOp(detail: unknown): Record<string, unknown> | null {
-  void detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const op = detail as { kind?: unknown; text?: unknown; at?: unknown };
+  if (op.kind === "unmark" || op.kind === "access") return { kind: op.kind };
+  if (typeof op.text !== "string") return null;
+  if (op.kind === "insert") return { kind: "insert", text: op.text };
+  const at = op.at;
+  const inside = typeof at === "number" && Number.isInteger(at) && at >= 0 && at <= op.text.length;
+  if (op.kind === "marked" && inside) return { kind: "marked", text: op.text, at };
   return null;
 }
 
@@ -72,6 +79,7 @@ const ENDED_MAX = 256;
 declare global {
   interface Window {
     __nativeTerminalReports?: NativeProbe[];
+    __nativeTerminalAccess?: NativeAccess | null;
     __nativeTerminalExpect?: string | null;
     __nativeTerminalEnded?: NativeEnded[];
   }
@@ -134,7 +142,8 @@ export function overlayCovers(rect: Rect, element: Element, candidates: Iterable
 
 /** Forwards the page events the latency harness dispatches on the terminal to the native
  * view's own input handlers: text, named and Control keys, Cmd-C, wheel, left-button press,
- * drag and release (points relative to the element) and paste with its text. Inputs: the
+ * drag and release (points relative to the element), paste with its text, and the
+ * `native-terminal-text` operations on its input method client and accessibility. Inputs: the
  * element and the sender, given the event fields and the event's time stamp. Output: the
  * undo. */
 function hook(element: HTMLElement, send: (event: Record<string, unknown>, stamp: number) => void): () => void {
@@ -179,6 +188,10 @@ function hook(element: HTMLElement, send: (event: Record<string, unknown>, stamp
       const text = paste.clipboardData?.getData("text/plain") ?? "";
       paste.preventDefault();
       if (text) send({ kind: "paste", text }, paste.timeStamp);
+    }],
+    ["native-terminal-text", (event) => {
+      const op = textOp((event as CustomEvent).detail);
+      if (op) send(op, event.timeStamp);
     }],
   ];
   for (const [type, listener] of listeners) element.addEventListener(type, listener, { passive: false });
@@ -236,6 +249,10 @@ export function NativeScreen({ name, onReady, onEnded }: { name: string; onReady
         const { type: _type, ...probe } = report;
         window.__nativeTerminalReports = keepReport(window.__nativeTerminalReports ?? [], probe);
         window.dispatchEvent(new CustomEvent("native-terminal-report", { detail: probe }));
+      } else if (report.type === "access") {
+        const { type: _type, ...access } = report;
+        window.__nativeTerminalAccess = access;
+        window.dispatchEvent(new CustomEvent("native-terminal-access", { detail: access }));
       } else if (report.type === "ready") ready.current();
       else if (!gone) ended.current(report.code);
     });
