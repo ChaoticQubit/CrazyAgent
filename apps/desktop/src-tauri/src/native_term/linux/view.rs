@@ -218,6 +218,26 @@ pub enum Route {
     },
 }
 
+/// The pointer buttons GDK's modifier state carries.
+const BUTTONS: ModifierType = ModifierType::BUTTON1_MASK
+    .union(ModifierType::BUTTON2_MASK)
+    .union(ModifierType::BUTTON3_MASK)
+    .union(ModifierType::BUTTON4_MASK)
+    .union(ModifierType::BUTTON5_MASK);
+
+/// The modifier bit of a pointer button, for the buttons GDK's state carries. Input: the
+/// button. Output: its bit, or none above the fifth button.
+fn button_bit(button: u32) -> ModifierType {
+    match button {
+        1 => ModifierType::BUTTON1_MASK,
+        2 => ModifierType::BUTTON2_MASK,
+        3 => ModifierType::BUTTON3_MASK,
+        4 => ModifierType::BUTTON4_MASK,
+        5 => ModifierType::BUTTON5_MASK,
+        _ => ModifierType::empty(),
+    }
+}
+
 /// One left press, kept to count the next one.
 #[derive(Clone, Copy, Debug)]
 struct Click {
@@ -270,9 +290,10 @@ impl Pointer {
     }
 
     /// Routes a button press: the left button presses with a click count and takes focus,
-    /// the right opens the menu, the middle pastes PRIMARY, others are held without
-    /// events. Inputs: the button, the point, the event time in ms, GDK's modifier state,
-    /// whether the view is covered and the double-click limits. Output: the route.
+    /// the right opens the menu, the middle pastes PRIMARY, others are held without events;
+    /// with another button down the press stays with whoever holds that one. Inputs: the
+    /// button, the point, the time in ms, GDK's modifier state, whether the view is covered
+    /// and the double-click limits. Output: the route.
     pub fn press(
         &mut self,
         button: u32,
@@ -289,7 +310,8 @@ impl Pointer {
                 event: None,
             };
         }
-        let Some(point) = self.inside(at).filter(|_| !covered) else {
+        let others = state & BUTTONS & !button_bit(button);
+        let Some(point) = self.inside(at).filter(|_| !covered && others.is_empty()) else {
             return Route::Page;
         };
         self.pressing = Some(button);
