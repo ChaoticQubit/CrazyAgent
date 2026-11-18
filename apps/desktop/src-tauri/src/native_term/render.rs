@@ -811,6 +811,7 @@ impl Shared {
     /// Draws one frame into a texture `acquire` gave and takes any wgpu error as `draw`
     /// does. Inputs: the surface, the frame and the texture. Output: ok, why it was
     /// skipped, or `native_terminal_gpu`.
+    #[cfg(windows)]
     pub fn draw_acquired(
         &mut self,
         surface: &mut Surface,

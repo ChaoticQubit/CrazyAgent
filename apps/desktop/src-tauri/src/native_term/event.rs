@@ -32,6 +32,7 @@ pub enum ViewEvent {
     Copy,
     /// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C): the host copies the
     /// selection if there is one, else applies this input (^C).
+    #[cfg(windows)]
     CopyKey(Input),
     Paste,
     SelectAll,
