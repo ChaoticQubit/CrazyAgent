@@ -381,7 +381,8 @@ fn repair_refuses_a_folder_that_already_holds_a_file_and_changes_nothing() {
 /// The medium label with no-write-up, no-read-up and no-execute-up every store carries
 /// (V244-WIN-STORE-LABEL-NX).
 const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
-/// The medium label with no-write-up and no-read-up alone that 2.4.3 gave the stores.
+/// The medium label with no-write-up and no-read-up alone that an earlier build gave the
+/// stores (#524 r3).
 const EARLIER: Option<(u32, u32)> = Some((0x2000, 0x3));
 
 /// The mandatory label that applies to an open folder or file itself. Input: the object.
@@ -389,6 +390,29 @@ const EARLIER: Option<(u32, u32)> = Some((0x2000, 0x3));
 fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
     let facts = private::facts(object).unwrap();
     facts.label.and_then(|sacl| dacl::label(&sacl).unwrap())
+}
+
+/// Every mandatory label entry an object's system list holds, as its flags, level and
+/// policy, read without the reader's checks, so a row sees a second entry beside the first
+/// (#568 rv-code F1). Input: the object. Output: the entries in list order.
+fn label_entries(object: &std::fs::File) -> Vec<(u8, u32, u32)> {
+    let Some(sacl) = private::facts(object).unwrap().label else {
+        return Vec::new();
+    };
+    let count = usize::from(u16::from_le_bytes([sacl[4], sacl[5]]));
+    let mut at = 8;
+    let mut found = Vec::new();
+    for _ in 0..count {
+        let size = usize::from(u16::from_le_bytes([sacl[at + 2], sacl[at + 3]]));
+        assert!(size >= 8 && at + size <= sacl.len(), "{sacl:?}");
+        if sacl[at] == 0x11 {
+            assert_eq!(size, 20, "{sacl:?}");
+            let word = |from: usize| u32::from_le_bytes(sacl[from..from + 4].try_into().unwrap());
+            found.push((sacl[at + 1], word(at + size - 4), word(at + 4)));
+        }
+        at += size;
+    }
+    found
 }
 
 /// #524 r3 (rv-code4 F2, leader 05:45), V244-WIN-STORE-LABEL-NX: the database folder, the
@@ -589,6 +613,7 @@ fn closed_to_low_holders(path: &Path) {
             .open(path)
     };
     let low = low_token();
+    let mut held = Vec::new();
     for (hold, access) in [
         ("read", FILE_GENERIC_READ),
         ("execute only", FILE_EXECUTE),
@@ -605,34 +630,37 @@ fn closed_to_low_holders(path: &Path) {
                 .map(|_| ())
                 .map_err(io::Error::raw_os_error)
         );
-        assert!(
-            lowered.is_err(),
-            "a low-il process holds {path:?} for {hold}"
-        );
+        if lowered.is_ok() {
+            held.push(hold);
+        }
     }
+    assert!(
+        held.is_empty(),
+        "a low-il process holds {path:?} for {held:?}"
+    );
 }
 
 /// V244-WIN-STORE-LABEL-NX (leader 09:13): engine.db in the database folder and a file in a
-/// secret store are closed to a lower integrity process of the user, to read and for execute
-/// only with no sharing, so a confined agent cannot hold either and block the engine.
+/// secret store are closed to a lower integrity process of the user with no sharing, to read,
+/// for execute only, for delete only or to write, so a confined agent cannot hold either and
+/// block the engine; the label is read only after the effect is shown.
 #[test]
 fn a_low_integrity_holder_cannot_open_engine_db_or_a_secret_store_file() {
     let database = scratch("nx-database");
     let held = private::store_dir(&database, private::Store::Database).unwrap();
     let engine_db = database.join("engine.db");
     drop(private::file(&engine_db, true).unwrap());
-    assert_eq!(
-        own_label(&private::file(&engine_db, false).unwrap()),
-        MEDIUM_FULL
-    );
     closed_to_low_holders(&engine_db);
-    drop(held);
+    let opened = private::file(&engine_db, false).unwrap();
+    println!("engine.db label entries: {:?}", label_entries(&opened));
+    assert_eq!(own_label(&opened), MEDIUM_FULL);
+    drop((opened, held));
     let secret = scratch("nx-secret");
     let held_secret = private::store_dir(&secret, private::Store::Secret).unwrap();
     let key = secret.join("secret-1");
     drop(private::file(&key, true).unwrap());
-    assert_eq!(own_label(&private::file(&key, false).unwrap()), MEDIUM_FULL);
     closed_to_low_holders(&key);
+    assert_eq!(own_label(&private::file(&key, false).unwrap()), MEDIUM_FULL);
     drop(held_secret);
     std::fs::remove_dir_all(&database).unwrap();
     std::fs::remove_dir_all(&secret).unwrap();
@@ -656,11 +684,11 @@ fn an_earlier_store_label_is_raised_at_open_with_the_files_it_holds() {
         assert_eq!(own_label(&before), EARLIER, "{name} before");
         drop(before);
         let held = private::store_dir(&root, store).unwrap();
-        let after = private::file(&inside, false).unwrap();
-        assert_eq!(own_label(&after), MEDIUM_FULL, "{name} after");
-        drop(after);
         closed_to_low_holders(&inside);
-        drop(held);
+        let after = private::file(&inside, false).unwrap();
+        println!("{name} label entries after: {:?}", label_entries(&after));
+        assert_eq!(own_label(&after), MEDIUM_FULL, "{name} after");
+        drop((after, held));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -681,6 +709,31 @@ fn a_private_file_with_a_weaker_label_is_refused() {
     }
     set_label(&path, false, 0x7, 0);
     drop(private::file(&path, false).expect("the full label opens"));
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #568 rv-code F1 (leader 09:19): a secret file made in the database folder, as the engine
+/// publishes its `pipes` file in the data root, holds one label entry, its own full label,
+/// with none the folder hands down beside it, and is closed to a lower integrity holder.
+#[test]
+fn a_secret_file_in_the_database_folder_holds_one_full_label() {
+    let root = scratch("nx-pipes-root");
+    let held = private::store_dir(&root, private::Store::Database).unwrap();
+    let pipes = root.join("pipes");
+    let made = private::secret_file(&pipes);
+    let seen = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .open(&pipes)
+        .unwrap();
+    let entries = label_entries(&seen);
+    println!(
+        "pipes in the database root: made {:?}, label entries {entries:?}",
+        made.as_ref().map(|_| ()).map_err(io::Error::to_string)
+    );
+    drop((made.unwrap(), seen));
+    closed_to_low_holders(&pipes);
+    assert_eq!(entries, [(0, 0x2000, 0x7)]);
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
 }
