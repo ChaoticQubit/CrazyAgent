@@ -1259,6 +1259,24 @@ mod tests {
         );
     }
 
+    /// V244-WIN-NPM: a check whose context-mode install met a Node.js folder no Windows
+    /// sandbox may read, and only an administrator can open, reads one sentence of its own,
+    /// a code the desktop knows; a boundary reason that names a folder shows that folder.
+    #[test]
+    fn a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence() {
+        let words = "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.";
+        assert_eq!(check_problem("server_node_folder_unreadable"), words);
+        assert_eq!(plain_problem("server_node_folder_unreadable"), Some(words));
+        assert_eq!(
+            known_code("server_node_folder_unreadable"),
+            Some("server_node_folder_unreadable")
+        );
+        let folder = std::path::Path::new(r"C:\Program Files\nodejs");
+        let reason = crate::sandbox::unreadable_reason(folder);
+        assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
+        assert!(check_problem(&check_refused(&reason)).contains(&reason));
+    }
+
     /// RV-DS241-153: the pinned context-mode launch is read from the full npx path that
     /// `validate` accepts on this system, a drive path on Windows since WIN-PACK-SEED, so it is
     /// the pinned launch there too and is never run through npx as approved.

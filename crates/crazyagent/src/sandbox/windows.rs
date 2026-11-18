@@ -628,6 +628,35 @@ mod tests {
         }
     }
 
+    /// V244-WIN-NPM: install refuses a read root no app container reads and this standard
+    /// user cannot change, made by an administrator and named in
+    /// `CRAZYAGENT_TEST_UNCHANGEABLE_ROOT`, by that folder and before any profile is written,
+    /// and installs the same policy reading a folder this user owns.
+    #[test]
+    #[ignore = "needs an administrator-made folder and a standard user (test farm)"]
+    fn install_refuses_a_read_root_only_an_administrator_can_open_to_containers() {
+        let folders = folders();
+        let fixture = std::env::var_os("CRAZYAGENT_TEST_UNCHANGEABLE_ROOT").unwrap();
+        let fixture = canonical(Path::new(&fixture)).unwrap();
+        let helper = std::env::current_exe().unwrap();
+        let path = folders.profiles.join("agent.sb");
+        let refused = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .allow_read(&fixture)
+            .unwrap();
+        match WindowsSandbox::install(refused, &helper, &path, &folders.grants) {
+            Err(SandboxError::Unreadable(folder)) => assert_eq!(folder, fixture),
+            other => panic!("expected the unreadable root refusal, got {other:?}"),
+        }
+        assert!(!path.exists());
+        let own = folders.profiles.join("own");
+        fs::create_dir_all(&own).unwrap();
+        let allowed = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .allow_read(&own)
+            .unwrap();
+        WindowsSandbox::install(allowed, &helper, &path, &folders.grants).unwrap();
+        assert!(path.is_file());
+    }
+
     #[test]
     fn wrap_starts_the_harness_through_the_helper_with_pinned_folders() {
         let folders = folders();
