@@ -988,8 +988,8 @@ fn turn_sandbox(
     if policy.access.unavailable().is_some() {
         return Err(failure("agent_access_unavailable"));
     }
-    let repository = &crate::sandbox::canonical(repository).map_err(io_error)?;
-    let worktree = &crate::sandbox::canonical(worktree).map_err(io_error)?;
+    let repository = &crate::projects_home::one_spelling(repository.to_path_buf());
+    let worktree = &crate::projects_home::one_spelling(worktree.to_path_buf());
     crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {

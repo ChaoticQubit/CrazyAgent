@@ -371,7 +371,11 @@ fn placed(db: &Connection, project: &ProjectId, place: &Place) -> Result<bool, E
     let Some(stored) = crate::project_setup::load_setup(db, project).map_err(unavailable)? else {
         return Ok(false);
     };
-    let Ok(folder) = crate::sandbox::canonical(&stored.project_folder()) else {
+    let Ok(folder) = stored
+        .project_folder()
+        .canonicalize()
+        .map(crate::projects_home::one_spelling)
+    else {
         return Ok(false);
     };
     assert!(folder.is_absolute());
