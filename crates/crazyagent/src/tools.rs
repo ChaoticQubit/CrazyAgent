@@ -478,17 +478,19 @@ impl Places {
     /// inside a project ([`in_project`]), inside a folder the engine names for agents
     /// ([`Places::in_set_up_project`]), inside the engine's data folder outside its `setup`
     /// folder, or inside an agent's short temp folder
-    /// ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
+    /// ([`crate::sandbox::toolchains::in_agent_tmp`]). HOME's names are read once per call.
+    /// Input: the path. Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         let plain = crate::sandbox::canonical(path).ok();
+        let homes = home_names(self.home());
         let mut forms = std::iter::once(path)
             .chain(real.as_deref())
             .chain(plain.as_deref());
         forms.any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
-                || in_project(self.home(), path)
-                || self.in_set_up_project(path)
+                || in_project(&homes, path)
+                || self.in_set_up_project(&homes, path)
                 || in_engine_data(&self.engine_roots, path)
                 || crate::sandbox::toolchains::in_agent_tmp(path)
         })
@@ -496,15 +498,14 @@ impl Places {
 
     /// Whether a path lies in a folder the engine names for agents ([`registered_projects`]),
     /// which they can write whole. When those could not be read it fails closed: every path
-    /// under HOME outside the engine's data folder counts. Input: the path. Output: the
-    /// answer.
-    fn in_set_up_project(&self, path: &Path) -> bool {
+    /// under HOME outside the engine's data folder counts. Inputs: HOME's names
+    /// ([`home_names`]) and the path. Output: the answer.
+    fn in_set_up_project(&self, homes: &[PathBuf], path: &Path) -> bool {
+        assert!(homes.len() <= 4);
         match &self.projects {
             Some(roots) => roots.iter().any(|root| path.starts_with(root)),
             None => {
-                home_names(self.home.as_deref())
-                    .iter()
-                    .any(|home| path.starts_with(home))
+                homes.iter().any(|home| path.starts_with(home))
                     && !self.engine_roots.iter().any(|root| path.starts_with(root))
             }
         }
@@ -621,12 +622,12 @@ pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
 /// Whether a path is inside a CrazyAgent project: it or a folder above it, other than HOME
 /// under any of its names ([`home_names`]) and `/`, holds a `.crazyagent` entry, which the
 /// sandbox never lets an agent remove. A path deeper than [`ANCESTORS_MAX`] counts as
-/// inside. Inputs: HOME and the path. Output: the answer.
-fn in_project(home: Option<&Path>, path: &Path) -> bool {
+/// inside. Inputs: HOME's names and the path. Output: the answer.
+fn in_project(homes: &[PathBuf], path: &Path) -> bool {
+    assert!(homes.len() <= 4);
     if path.components().count() > ANCESTORS_MAX {
         return true;
     }
-    let homes = home_names(home);
     path.ancestors()
         .filter(|folder| {
             folder.parent().is_some() && !homes.iter().any(|home| home.as_path() == *folder)
