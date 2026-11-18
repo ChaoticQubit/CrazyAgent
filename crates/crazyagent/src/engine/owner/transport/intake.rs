@@ -210,12 +210,20 @@ fn found(
 /// not run beside is still waiting, so a job running alone is never passed for good. Every
 /// job left waiting names the job it waits behind. Input: the held jobs.
 fn admit(held: &mut [Held]) {
+    admit_with(held, |_| {});
+}
+
+/// Admits as [`admit`] does, calling `between` on each job found waiting before it is let
+/// go or told to wait, where a row ends the job as its task's guard can at that moment.
+/// Inputs: the held jobs and the call. Output: none.
+fn admit_with(held: &mut [Held], mut between: impl FnMut(&Held)) {
     for at in 0..held.len() {
         if !held[at].waiting() {
             continue;
         }
         let (before, rest) = held.split_at_mut(at);
         let (current, after) = rest.split_first_mut().expect("the job at `at` is held");
+        between(&*current);
         let others = || before.iter().chain(after.iter());
         let running = others().filter(|other| other.running()).count();
         let blocker = others()
@@ -1147,5 +1155,31 @@ mod tests {
         assert!(!jobs[1].running());
         assert!(jobs[0].running());
         assert_eq!(jobs.iter().filter(|current| current.waiting()).count(), 0);
+    }
+
+    /// V243-INTAKE-WAIT-ASSERT r2 (#574 F1): the guard ends a job outside the held lock, so
+    /// its end can land after admit found the job waiting and before admit tells it to wait
+    /// behind the running job of the same name. That wait leaves the ended job as it is, with
+    /// no panic, and the running job keeps running.
+    #[test]
+    fn a_job_its_guard_ends_while_admit_runs_stays_ended() {
+        let (turn, _turned) = oneshot::channel();
+        let mut jobs = vec![
+            held("add-running", "/outside/notes", None),
+            held("add-waiting", "/elsewhere/notes", Some(turn)),
+        ];
+        let waiting = Arc::clone(&jobs[1].job);
+        let mut ended = 0;
+        admit_with(&mut jobs, |current| {
+            assert!(Arc::ptr_eq(&current.job, &waiting));
+            assert!(current.job.stop());
+            current.job.end(Err(failure(current.job.interrupted())));
+            ended += 1;
+        });
+        assert_eq!(ended, 1);
+        assert!(waiting.ended());
+        assert!(!jobs[1].waiting());
+        assert!(!jobs[1].running());
+        assert!(jobs[0].running());
     }
 }
