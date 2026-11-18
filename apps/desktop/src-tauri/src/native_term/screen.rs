@@ -198,6 +198,22 @@ fn place_marked(
     Some((Preedit { row, column, cells }, text))
 }
 
+/// Adds one cell's background to the fills, widening the last fill when it is the cell to
+/// its left in the same colour. Inputs: the fills, the cell's row and column, its colour.
+fn push_fill(fills: &mut Vec<Fill>, row: usize, column: usize, color: Rgb) {
+    let count = fills.len();
+    match fills.last_mut() {
+        Some(f) if f.row == row && f.column + f.width == column && f.color == color => f.width += 1,
+        _ => fills.push(Fill {
+            row,
+            column,
+            width: 1,
+            color,
+        }),
+    }
+    assert!(fills.len() == count || fills.len() == count + 1);
+}
+
 /// Appends one character to a row's spans and its key. Inputs: the row's spans and key, the
 /// character, its colour and style, and whether it is marked text. Output: none.
 fn push_char(spans: &mut Vec<Span>, key: &mut u64, c: char, fg: Rgb, style: (bool, bool, bool)) {
@@ -256,17 +272,7 @@ pub fn frame(term: &Term<VoidListener>, marked: Option<&str>) -> Frame {
         let selected = selection.is_some_and(|range| range.contains(indexed.point));
         let (fg, bg) = cell_colors(cell, content.colors, selected);
         if bg != BACKGROUND {
-            match fills.last_mut() {
-                Some(f) if f.row == row && f.column + f.width == column && f.color == bg => {
-                    f.width += 1
-                }
-                _ => fills.push(Fill {
-                    row,
-                    column,
-                    width: 1,
-                    color: bg,
-                }),
-            }
+            push_fill(&mut fills, row, column, bg);
         }
         if cell.flags.intersects(spacer) {
             continue;
