@@ -1,10 +1,14 @@
 use super::pane::Input;
-use super::view::key_input;
+use crazyagent::terminal::INPUT_BYTES_MAX;
 use unicode_width::UnicodeWidthChar;
 
 /// The most UTF-16 units of marked text a view keeps; an input method never composes this
 /// much, and a longer marked text is kept cut at a character boundary.
 pub const MARKED_UNITS_MAX: usize = 1024;
+
+/// The most bytes one committed text sends (dictation and the emoji picker commit text,
+/// typing never this much); a longer commit is cut at a character boundary.
+pub const COMMIT_BYTES_MAX: usize = 1 << 20;
 
 /// Apple's private-use range for function keys, which never reaches a pane as text.
 const FUNCTION_CHARS: std::ops::RangeInclusive<char> = '\u{F700}'..='\u{F8FF}';
@@ -18,34 +22,33 @@ pub struct Mods {
 }
 
 /// Where one key event goes: nowhere (Command keys go through the key equivalents), to the
-/// pane at once as today's key bytes, to the pane as Meta (Escape then the key, as the
-/// webview's Option-as-Meta did), or through the input method.
+/// pane at once as the key map's bytes (Control bytes, Option as Meta), or through the input
+/// method, whose passed-back commands (Return, Shift+Enter, Tab, arrows) send the key map's
+/// bytes too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     Ignore,
-    Bypass,
-    Meta,
+    Direct,
     Interpret,
 }
 
 /// The route of one key event: Command keys are ignored; while composing every other key
-/// belongs to the input method; else Control keys bypass it, Option keys go as Meta and the
-/// rest go through it. Inputs: the modifiers and whether marked text was shown before the
-/// key. Output: the route.
+/// belongs to the input method; else Control and Option keys go straight to the key map and
+/// the rest go through the input method. Inputs: the modifiers and whether marked text was
+/// shown before the key. Output: the route.
 pub fn route(mods: Mods, composing: bool) -> Route {
     let route = if mods.command {
         Route::Ignore
     } else if composing {
         Route::Interpret
-    } else if mods.control {
-        Route::Bypass
-    } else if mods.option {
-        Route::Meta
+    } else if mods.control || mods.option {
+        Route::Direct
     } else {
         Route::Interpret
     };
     assert!(!mods.command || route == Route::Ignore);
     assert!(!composing || matches!(route, Route::Ignore | Route::Interpret));
+    assert!(route != Route::Direct || mods.control || mods.option);
     route
 }
 
@@ -78,34 +81,17 @@ pub fn own_bytes(took: Took) -> bool {
     sends
 }
 
-/// The Meta input of an Option key: Escape before its text, or its named key unchanged.
-/// Input: the characters ignoring modifiers (Shift still applied). Output: the input, or
-/// none for keys that send nothing.
-pub fn meta_input(bare: &str) -> Option<Input> {
-    match key_input(bare, bare)? {
-        Input::Text(bytes) => {
-            assert!(!bytes.is_empty());
-            let mut meta = Vec::with_capacity(bytes.len() + 1);
-            meta.push(0x1b);
-            meta.extend_from_slice(&bytes);
-            assert_eq!(meta.len(), bytes.len() + 1);
-            Some(Input::Text(meta))
-        }
-        other => Some(other),
-    }
-}
-
 /// The text inputs one committed text makes: Apple's private-use function characters
-/// dropped, the rest cut at character boundaries into inputs of at most `TEXT_BYTES_MAX`
-/// bytes, so nothing is lost up to `PASTE_BYTES_MAX` in all; text past that bound is not
+/// dropped, the rest cut at character boundaries into inputs of at most `INPUT_BYTES_MAX`
+/// bytes, so nothing is lost up to `COMMIT_BYTES_MAX` in all; text past that bound is not
 /// sent. Input: the text. Output: the inputs, none for an empty text.
 pub fn text_inputs(text: &str) -> Vec<Input> {
-    let chunk_max = super::TEXT_BYTES_MAX;
+    let chunk_max = INPUT_BYTES_MAX;
     let mut inputs = Vec::new();
     let mut chunk = String::new();
     let mut total = 0usize;
     for c in text.chars().filter(|c| !FUNCTION_CHARS.contains(c)) {
-        if total + c.len_utf8() > super::PASTE_BYTES_MAX {
+        if total + c.len_utf8() > COMMIT_BYTES_MAX {
             break;
         }
         if chunk.len() + c.len_utf8() > chunk_max {
@@ -117,7 +103,7 @@ pub fn text_inputs(text: &str) -> Vec<Input> {
     if !chunk.is_empty() {
         inputs.push(Input::Text(chunk.into_bytes()));
     }
-    assert!(total <= super::PASTE_BYTES_MAX);
+    assert!(total <= COMMIT_BYTES_MAX);
     assert!(inputs.iter().all(|input| matches!(
         input,
         Input::Text(bytes) if !bytes.is_empty() && bytes.len() <= chunk_max
@@ -291,9 +277,9 @@ mod tests {
     #[test]
     fn keys_route_by_modifiers_and_composition() {
         assert_eq!(route(mods(false, false, false), false), Route::Interpret);
-        assert_eq!(route(mods(false, true, false), false), Route::Bypass);
-        assert_eq!(route(mods(false, false, true), false), Route::Meta);
-        assert_eq!(route(mods(false, true, true), false), Route::Bypass);
+        assert_eq!(route(mods(false, true, false), false), Route::Direct);
+        assert_eq!(route(mods(false, false, true), false), Route::Direct);
+        assert_eq!(route(mods(false, true, true), false), Route::Direct);
         assert_eq!(route(mods(true, false, false), false), Route::Ignore);
         assert_eq!(route(mods(true, true, true), false), Route::Ignore);
         assert_eq!(route(mods(false, false, false), true), Route::Interpret);
@@ -350,18 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn option_keys_go_as_escape_then_the_key_and_named_keys_unchanged() {
-        assert!(matches!(meta_input("a"), Some(Input::Text(b)) if b == b"\x1ba"));
-        assert!(matches!(meta_input("A"), Some(Input::Text(b)) if b == b"\x1bA"));
-        assert!(matches!(
-            meta_input("\u{F702}"),
-            Some(Input::Key(super::super::pane::Named::Left))
-        ));
-        assert!(meta_input("").is_none());
-        assert!(meta_input("\u{F704}").is_none());
-    }
-
-    #[test]
     fn committed_text_is_cut_at_character_boundaries_with_nothing_lost() {
         assert!(text_inputs("").is_empty());
         let one = text_inputs("日本語😀");
@@ -369,20 +343,20 @@ mod tests {
         assert_eq!(text(&one[0]), "日本語😀".as_bytes());
         assert!(text_inputs("\u{F700}\u{F8FF}").is_empty());
         assert_eq!(text(&text_inputs("a\u{F701}b")[0]), b"ab");
-        let long = "界".repeat(super::super::TEXT_BYTES_MAX);
+        let long = "界".repeat(INPUT_BYTES_MAX);
         let parts = text_inputs(&long);
         assert!(parts.len() >= 3);
         let mut joined = Vec::new();
         for part in &parts {
             let bytes = text(part);
-            assert!(!bytes.is_empty() && bytes.len() <= super::super::TEXT_BYTES_MAX);
+            assert!(!bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX);
             assert!(std::str::from_utf8(bytes).is_ok());
             joined.extend_from_slice(bytes);
         }
         assert_eq!(joined, long.as_bytes());
-        let huge = "a".repeat(super::super::PASTE_BYTES_MAX + 10);
+        let huge = "a".repeat(COMMIT_BYTES_MAX + 10);
         let sent: usize = text_inputs(&huge).iter().map(|part| text(part).len()).sum();
-        assert_eq!(sent, super::super::PASTE_BYTES_MAX);
+        assert_eq!(sent, COMMIT_BYTES_MAX);
     }
 
     #[test]
