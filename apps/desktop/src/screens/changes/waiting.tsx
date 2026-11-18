@@ -1,8 +1,8 @@
+import { useEffect, useState } from "react";
+import { loadChanges } from "../../api-changes";
+import { readOnChanges } from "../../engine-changes";
 import { Notice, formatRoute } from "../../ui";
 import { waitingCount, waitingLine } from "./model";
-import { useChangeList } from "./poll";
-
-const WAITING_POLL_MS = 10_000;
 
 /** The notice that change sets wait for the owner, linking to the tab they are reviewed in:
  * Changes, or the IDE once it replaces Changes. Inputs: the project id, how many wait and
@@ -15,11 +15,15 @@ export function WaitingChangesView({ projectId, count, place = "changes" }: { pr
   </div>;
 }
 
-/** Reads the project's change sets a few seconds after each reply, one read at a time, and
- * shows how many wait for the owner. Inputs: the project id and the tab change sets are
- * reviewed in. Output: the notice, or nothing while none wait or the list can't be read. */
+/** Reads the project's change sets on the engine's watch, after each landing change, one read
+ * at a time (v2.5 S4), and shows how many wait for the owner. Inputs: the project id and the
+ * tab change sets are reviewed in. Output: the notice, or nothing while none wait or the list
+ * can't be read. */
 export function WaitingChanges({ projectId, place }: { projectId: string; place: "changes" | "ide" }) {
-  const [list] = useChangeList(projectId, WAITING_POLL_MS);
-  const count = list?.kind === "ok" ? waitingCount(list.value) : 0;
+  const [count, setCount] = useState(0);
+  useEffect(() => readOnChanges(["landing"], () => loadChanges(projectId), (list) => {
+    setCount(list.kind === "ok" ? waitingCount(list.value) : 0);
+    return true;
+  }), [projectId]);
   return <WaitingChangesView projectId={projectId} count={count} place={place} />;
 }

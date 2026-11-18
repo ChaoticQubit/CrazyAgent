@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type Ref } from "react";
 import type { Failure, Result } from "../../api";
 import { ANSWER_BYTES_MAX, BULK_DISMISS_MAX, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, PAUSED_NOTE, URGENT_WORD, answerQuestion, askedInTerminal, askerLabel, bulkDismissNote, bulkDismissedLine, dismissNote, dismissQuestion, dismissQuestions, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
 import type { OwnerQuestion, QuestionChoice, QuestionKind, QuestionPage } from "../../api-questions";
+import { readOnChanges } from "../../engine-changes";
 import { Button, ConfirmDialog, TextArea, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { ago } from "./research";
@@ -9,7 +10,6 @@ import { Badge, NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
 import "./questions.css";
 
-export const LIST_POLL_MS = 5000;
 /** The section an urgent question's toast opens the Questions tab at (S4-R1). */
 export const URGENT_SECTION = "urgent";
 
@@ -236,8 +236,8 @@ export function dismissAllOf(questions: readonly OwnerQuestion[]): OwnerQuestion
  * the urgent section by a toast's Open, the list is read again and the keyboard goes once to
  * the first urgent question waiting, as soon as it is read, unless the owner put the
  * keyboard somewhere (S4-R1).
- * Inputs: the project data and the route's section. Output: the tab; the list rereads every
- * few seconds while it is open. */
+ * Inputs: the project data and the route's section. Output: the tab; the list is read again
+ * after each team change while it is open (v2.5 S4). */
 export function QuestionsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [first, setFirst] = useState<Result<QuestionPage>>();
   const [older, setOlder] = useState<OlderPages>({ items: [], next: null });
@@ -269,16 +269,11 @@ export function QuestionsTab({ data, section }: { data: ProjectData; section?: s
     setRound((value) => value + 1);
   };
   const { busy, setBusy, note, setNote, answer, askDismiss, dialog } = useQuestionActions(data, reread);
-  useEffect(() => {
-    let current = true;
-    void loadQuestions(data.id, null).then((result) => {
-      if (!current) return;
-      setFirst(result);
-      if (result.kind === "ok") setOlder((shown) => olderAfter(shown, { kind: "first", next: result.value.next }));
-    });
-    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
-    return () => { current = false; clearInterval(timer); };
-  }, [data.id, round]);
+  useEffect(() => readOnChanges(["team"], () => loadQuestions(data.id, null), (result) => {
+    setFirst(result);
+    if (result.kind === "ok") setOlder((shown) => olderAfter(shown, { kind: "first", next: result.value.next }));
+    return true;
+  }), [data.id, round]);
 
   async function dismissAll(waiting: OwnerQuestion[]) {
     setBusy(true);

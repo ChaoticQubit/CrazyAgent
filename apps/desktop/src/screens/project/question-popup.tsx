@@ -2,7 +2,8 @@ import { useEffect, useId, useRef, useState, type FocusEvent } from "react";
 import { QUESTIONS_SHOWN_CHOICES, askerLabel, loadQuestions, orderQuestions } from "../../api-questions";
 import type { OwnerQuestion, QuestionChoice, QuestionsShown } from "../../api-questions";
 import { Button, Segmented, SettingLine } from "../../ui";
-import { LIST_POLL_MS, QuestionCard, useQuestionActions } from "./questions";
+import { readOnChanges } from "../../engine-changes";
+import { QuestionCard, useQuestionActions } from "./questions";
 import type { ProjectData } from "./shared";
 import "./questions.css";
 
@@ -124,10 +125,10 @@ export function QuestionDock({ waiting, shown, now, busy, note, settled, onAnswe
   </div>;
 }
 
-/** The questions pop-up of one project page: reads the project's questions every few seconds
- * and once more each time a tab starts showing it, so a question settled on the Questions tab
- * is gone when it shows again, and settles them with the Questions tab's own actions, so an
- * answer here closes the question there too. Inputs: the project data and whether the tab
+/** The questions pop-up of one project page: reads the project's questions on the engine's
+ * watch, after each team change (v2.5 S4), and once more each time a tab starts showing it,
+ * so a question settled on the Questions tab is gone when it shows again, and settles them
+ * with the Questions tab's own actions, so an answer here closes the question there too. Inputs: the project data and whether the tab
  * shown shows it. Output: the pop-up. */
 export function QuestionPopup({ data, shown }: { data: ProjectData; shown: boolean }) {
   const [questions, setQuestions] = useState<OwnerQuestion[]>([]);
@@ -142,14 +143,10 @@ export function QuestionPopup({ data, shown }: { data: ProjectData; shown: boole
     if (shown && !wasShown.current) setRound((value) => value + 1);
     wasShown.current = shown;
   }, [shown]);
-  useEffect(() => {
-    let current = true;
-    void loadQuestions(data.id, null).then((result) => {
-      if (current && result.kind === "ok") setQuestions(result.value.items);
-    });
-    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
-    return () => { current = false; clearInterval(timer); };
-  }, [data.id, round]);
+  useEffect(() => readOnChanges(["team"], () => loadQuestions(data.id, null), (result) => {
+    if (result.kind === "ok") setQuestions(result.value.items);
+    return true;
+  }), [data.id, round]);
   return <>
     <QuestionDock waiting={popupQuestions(questions)} shown={shown} now={data.now} busy={busy} note={note} settled={settled}
       onAnswer={answer} onDismiss={askDismiss} onOpenTab={() => data.navigate(`/projects/${encodeURIComponent(data.id)}/questions`)} />

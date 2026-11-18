@@ -12,32 +12,26 @@ import { MarkdownView } from "./markdown";
 import { agentKey, finishedLabel, finishedRows, liveAgent, teamLimitsLine, teamPanel } from "./research";
 import type { FinishedRow, TeamAgentRow, TeamFilter, TeamTaskRow, TeammateRow } from "./research";
 import { startRead, stampRead } from "../../state";
+import { readOnChanges } from "../../engine-changes";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
 
-const TEAM_POLL_MS = 3000;
-
-/** Reads the project's live team now and every few seconds while shown; stops asking when the
- * engine has no team command. Input: the project id. Output: the latest read with its time, and a reload. */
+/** Reads the project's live team once the page watches the engine, then after each team change
+ * (v2.5 S4); stops asking when the engine has no team command. Input: the project id. Output:
+ * the latest read with its time, and a reload. */
 export function useTeam(id: string): [TeamRead, () => void] {
   const [team, setTeam] = useState<TeamRead>({ result: undefined, at: 0 });
   const [round, setRound] = useState(0);
-  useEffect(() => {
-    let live = true;
-    let timer: number | undefined;
-    const read = () => {
-      const started = startRead();
-      void loadTeamStatus(id).then((result) => {
-        stampRead(result, started);
-        if (!live) return;
-        setTeam({ result, at: Date.now() });
-        if (result.kind === "not_ready" && timer !== undefined) window.clearInterval(timer);
-      });
-    };
-    read();
-    timer = window.setInterval(read, TEAM_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [id, round]);
+  useEffect(() => readOnChanges(["team"], () => {
+    const started = startRead();
+    return loadTeamStatus(id).then((result) => {
+      stampRead(result, started);
+      return result;
+    });
+  }, (result) => {
+    setTeam({ result, at: Date.now() });
+    return result.kind !== "not_ready";
+  }), [id, round]);
   return [team, () => setRound((value) => value + 1)];
 }
 

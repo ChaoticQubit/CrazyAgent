@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { loadRunMode } from "../../api-ide";
-import { acceptOverviewTab, loadOverview, overviewCopy, refreshOverview, rejectOverviewTab, saveOverviewTab, OVERVIEW_POLL_MS, OVERVIEW_WAIT_MAX_MS, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
+import { acceptOverviewTab, loadOverview, overviewCopy, refreshOverview, rejectOverviewTab, saveOverviewTab, type OverviewTabId, type ProjectOverview, type Readme, type TabState } from "../../api-overview";
 import { lineDiff } from "../../api-process";
 import { failureCopy, openLink, receiptState, updateProjectSetup, type JobKind, type ResearchJob } from "../../api-projects";
+import { readOnChanges } from "../../engine-changes";
 import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
 import { draftOf, editRequest } from "../new-project/wizard";
@@ -192,18 +193,6 @@ export function storeDrafts(projectId: string, drafts: OpenDrafts, store?: TabSt
   } catch {
     return;
   }
-}
-
-/** How often to read the tabs again: at the run pace while a run is writing, and while a run
- * waits and can come, once it is due as the engine says, between the run pace and ten minutes
- * (none comes while the tabs are off or the project is outside the CrazyAgent folder). Input:
- * the overview or null. Output: the wait in milliseconds, or null to read once. */
-export function pollEvery(overview: ProjectOverview | null): number | null {
-  if (overview === null) return null;
-  if (overview.running) return OVERVIEW_POLL_MS;
-  const due = overview.stale && overview.refresh !== "off" && !overview.needs_home;
-  if (!due) return null;
-  return Math.min(OVERVIEW_WAIT_MAX_MS, Math.max(OVERVIEW_POLL_MS, overview.due_in_ms ?? 0));
 }
 
 /** The read the tabs show after a new one: a failed read keeps the last good one, as the TUI
@@ -801,8 +790,9 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
 }
 
 /** The Overview tabs of one project, read from the engine once per visit, on each tab pick (a
- * tab file can change outside CrazyAgent), after each action, and again only while a run writes
- * or one waits, at the wait `pollEvery` gives; keeps the picked tab for the session.
+ * tab file can change outside CrazyAgent), after each action, and on the engine's watch after
+ * each project change, which a run's writes and a due run's start are (v2.5 S4); keeps the
+ * picked tab for the session.
  * Inputs: the project data, how Quick info renders a text, the Activity panel and the read.
  * Output: the strip and its panel. */
 export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOverview }: {
@@ -815,13 +805,10 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
   const [read, setRead] = useState<{ project: string; result: Result<ProjectOverview> } | undefined>(undefined);
   const [round, setRound] = useState(0);
   const [runMode, setRunMode] = useState<RunMode>("off");
-  useEffect(() => {
-    let live = true;
-    void load(data.id).then((result) => {
-      if (live) setRead((last) => ({ project: data.id, result: keptRead(last?.project === data.id ? last.result : undefined, result) }));
-    });
-    return () => { live = false; };
-  }, [data.id, round, load]);
+  useEffect(() => readOnChanges(["projects"], () => load(data.id), (result) => {
+    setRead((last) => ({ project: data.id, result: keptRead(last?.project === data.id ? last.result : undefined, result) }));
+    return true;
+  }), [data.id, round, load]);
   useEffect(() => {
     let live = true;
     void loadRunMode(data.id).then((result) => { if (live) setRunMode(result.kind === "ok" ? result.value : "off"); });
@@ -829,12 +816,6 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
   }, [data.id]);
   const shown = read?.project === data.id ? read.result : undefined;
   const overview = shown?.kind === "ok" ? shown.value : null;
-  const every = pollEvery(overview);
-  useEffect(() => {
-    if (every === null) return;
-    const timer = window.setInterval(() => setRound((count) => count + 1), every);
-    return () => window.clearInterval(timer);
-  }, [every]);
   const problem = shown?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
     : shown?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(shown)}` : undefined;
   return <OverviewTabs key={data.id} data={data} overview={overview} problem={problem} now={data.now} selected={selected}

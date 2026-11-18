@@ -12,7 +12,7 @@
   "apps/desktop/src/screens/intake/intake.ts": 1178,
   "apps/desktop/src/screens/metrics/view.tsx": 670,
   "apps/desktop/src/screens/process.tsx": 946,
-  "apps/desktop/src/screens/project/overview-tabs.tsx": 844,
+  "apps/desktop/src/screens/project/overview-tabs.tsx": 825,
   "apps/desktop/src/screens/project/research.ts": 874,
   "apps/desktop/src/screens/project/settings.tsx": 908,
   "apps/desktop/src/screens/settings/plugins.tsx": 883,
