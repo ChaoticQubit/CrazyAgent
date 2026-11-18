@@ -21,6 +21,7 @@ env:
   CLAUDE_CODE_VERSION: "2.1.309"
   CODEX_VERSION: "0.164.0"
   UV_VERSION: "0.13.5"
+  NEXTEST_VERSION: "0.9.152"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
 
@@ -29,63 +30,10 @@ defaults:
     shell: bash
 
 jobs:
-  windows:
-    name: Batch check on ${{ matrix.image }} (win-sandbox, crazyagent lib rows, clippy)
-    runs-on: ${{ matrix.image }}
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        image: [windows-2022, windows-2025]
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install SQLite for Windows
-        run: |
-          set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - name: Install the Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: farm
-          shared-key: windows
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-bin: false
-          save-if: false
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Batch check, one target set per cargo call
-        env:
-          IMAGE: ${{ matrix.image }}
-        run: |
-          cp .github/farm/v244-batch.sh "$RUNNER_TEMP/v244-batch.sh"
-          bash "$RUNNER_TEMP/v244-batch.sh" "$IMAGE"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-v244-batch-${{ matrix.image }}
-          path: ${{ runner.temp }}/v244-batch-${{ matrix.image }}.txt
-          if-no-files-found: warn
-          retention-days: 14
-
   linux:
-    name: Batch check on ubuntu-22.04 (lib build, lib tests, clippy)
+    name: Batch-1 Linux recheck on ubuntu-22.04 (the 50 rows the trunk way at 32f588970 and 4efef630d)
     runs-on: ubuntu-22.04
-    timeout-minutes: 300
+    timeout-minutes: 240
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -99,6 +47,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Install Linux build packages
         timeout-minutes: 10
         run: bash scripts/ci/linux-packages.sh
@@ -150,9 +99,11 @@ jobs:
           add-rust-environment-hash-key: false
           cache-bin: false
           save-if: false
+      - name: Install cargo-nextest
+        run: bash scripts/ci/install-nextest.sh
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
-      - name: Batch check, one target set per cargo call
+      - name: Recheck the 50 rows at both shas, one target set per cargo call
         run: |
           cp .github/farm/v244-batch.sh "$RUNNER_TEMP/v244-batch.sh"
           bash "$RUNNER_TEMP/v244-batch.sh" ubuntu-22.04
@@ -164,36 +115,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  macos:
-    name: Batch check on macos-15 (lib build and clippy only)
-    runs-on: macos-15
-    timeout-minutes: 180
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install the Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Batch check, one target set per cargo call
-        run: |
-          cp .github/farm/v244-batch.sh "$RUNNER_TEMP/v244-batch.sh"
-          bash "$RUNNER_TEMP/v244-batch.sh" macos-15
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-v244-batch-macos-15
-          path: ${{ runner.temp }}/v244-batch-macos-15.txt
-          if-no-files-found: warn
-          retention-days: 14
