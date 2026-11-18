@@ -552,3 +552,53 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+  p4-red-row:
+    name: P4 red row at 4227b951e ubuntu-22.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        run: |
+          set -euo pipefail
+          tip=39ef73bbd27ca5b95ec392c188d0fb94629568ec
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
+      - name: Install Linux packages
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install Rust toolchain
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+      - name: Install cargo-nextest
+        timeout-minutes: 10
+        run: bash scripts/ci/install-nextest.sh
+      - name: Red row
+        timeout-minutes: 90
+        run: |
+          set -u +e +o pipefail
+          red=$(git rev-parse 4227b951e) || exit 2
+          git checkout -q --detach "$red" || exit 2
+          cargo fetch --locked || exit 2
+          cargo nextest run -p crazyagent --lib --locked --offline --no-tests=fail -E 'binary_id(=crazyagent) & test(/^spawn_gate::tests::/)' > red.log 2>&1
+          rc=$?
+          echo "red commit $red rc=$rc $(grep -m1 -E '^ +Summary' red.log)"
+          grep -E '^ +(FAIL|PASS) ' red.log | sed 's/^/    /' | head -20
+          grep -E 'panicked at|assertion' -A2 red.log | cut -c1-300 | sed 's/^/    /' | head -12
+          if grep -qE '^ +FAIL .*a_refusing_port_lies_below_the_ports_the_system_hands_out' red.log; then echo "new row red as expected"; exit 0; fi
+          echo "::error::the new row was not red at $red"
+          exit 1
