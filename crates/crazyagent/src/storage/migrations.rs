@@ -518,10 +518,10 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 }
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
-/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), then keeps it and
-/// the newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the
-/// connection, its path, the settings sources and both versions. Output: the new backup
-/// folder.
+/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600; on Windows a
+/// database store, so the copies take engine.db's no-read-up label), then keeps it and the
+/// newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the connection,
+/// its path, the settings sources and both versions. Output: the new backup folder.
 fn backup(
     db: &Connection,
     path: &Path,
@@ -541,7 +541,13 @@ fn backup(
         .create(&target)
         .map_err(backup_failed)?;
     #[cfg(windows)]
-    std::fs::create_dir(&target).map_err(backup_failed)?;
+    {
+        std::fs::create_dir(&target).map_err(backup_failed)?;
+        if let Err(cause) = private::store_dir(&target, private::Store::Database) {
+            let _ = std::fs::remove_dir(&target);
+            return Err(backup_failed(cause));
+        }
+    }
     if let Err(cause) = fill(db, &target, settings) {
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);

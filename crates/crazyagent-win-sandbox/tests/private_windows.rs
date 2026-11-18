@@ -438,8 +438,14 @@ fn a_private_folder_and_file_carry_no_label_of_their_own() {
 fn an_existing_plain_folder_takes_its_store_label_only_once_judged_private() {
     let root = scratch("relabel");
     drop(private::dir(&root).unwrap());
+    let inside = root.join("made-before");
+    drop(private::file(&inside, true).unwrap());
     let held = private::store_dir(&root, private::Store::Secret).unwrap();
     assert_eq!(own_label(&held), MEDIUM_NO_UP);
+    println!(
+        "relabel probe: a file made before the label carries {:?} after it",
+        own_label(&private::file(&inside, false).unwrap())
+    );
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
     let foreign = scratch("relabel-foreign");

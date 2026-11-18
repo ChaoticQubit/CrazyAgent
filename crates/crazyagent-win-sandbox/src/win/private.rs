@@ -1,7 +1,7 @@
 use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, user_sid as token_user};
 use super::{Words, final_name, last_error};
-use crate::dacl::trusted_owner;
+use crate::dacl::{inherited_label, label, trusted_owner};
 use crate::private::{Facts, Store, judge, judge_folder, label_list, list};
 use std::fs::File;
 use std::io;
@@ -28,7 +28,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FileFullDirectoryInfo,
     FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    OPEN_EXISTING, READ_CONTROL, UnlockFileEx, WRITE_DAC,
+    OPEN_EXISTING, READ_CONTROL, UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -50,17 +50,18 @@ pub fn dir(path: &Path) -> io::Result<File> {
     made_dir(path, None)
 }
 
-/// Opens a secret store folder or the database folder at `path` as [`dir`] does, a new one
-/// made with that store's label of [`label_list`] too (#524 r3); a folder already there keeps
-/// the label it has. Inputs: the absolute path and the store. Output: the held folder, or
-/// why it is not private.
+/// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
+/// store's label of [`label_list`]: a new folder is made with it, and one already there
+/// takes it once judged private, whatever made it first (#524 r3, leader 06:32). Inputs: the
+/// absolute path and the store. Output: the held folder, or why it is not private.
 pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
     made_dir(path, Some(store))
 }
 
 /// The work of [`dir`] and [`store_dir`]: creates the folder when missing, with the store's
-/// label when one is named, then opens and judges it. Inputs: the absolute path and the
-/// store, if any. Output: the held folder, or why it is not private.
+/// label when one is named, then opens and judges it, and gives a judged store folder its
+/// label. Inputs: the absolute path and the store, if any. Output: the held folder, or why
+/// it is not private.
 fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
@@ -72,15 +73,49 @@ fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
             return Err(code(error));
         }
     }
+    let relabel = if store.is_some() { WRITE_OWNER } else { 0 };
     let folder = open(
         &name,
-        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | relabel,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
     )?;
     private_as(&folder, &user, true)?;
+    if let Some(store) = store {
+        store_labelled(&folder, store)?;
+    }
     Ok(folder)
+}
+
+/// Gives a store folder its store's label when the one it carries reads otherwise, as on a
+/// folder made before the store was labelled. Called only on a folder already judged private;
+/// medium is the engine's own level, so no privilege is needed, and only the label part of
+/// the system list changes. Inputs: the held folder, opened with WRITE_OWNER, and the store.
+/// Output: Ok, or the Windows error.
+fn store_labelled(folder: &File, store: Store) -> io::Result<()> {
+    let wanted = label_list(store);
+    let readings = |sacl: &[u8]| (label(sacl), inherited_label(sacl));
+    let held = security(folder)?.label;
+    if held.as_deref().map(readings) == Some(readings(wanted.as_slice())) {
+        return Ok(());
+    }
+    let words = Words::from_bytes(&wanted);
+    let status = unsafe {
+        SetSecurityInfo(
+            folder.as_raw_handle(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            words.words.as_ptr().cast(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(code(status));
+    }
+    Ok(())
 }
 
 /// Makes an empty folder of this user private again, the twin of a Unix chmod to 0700: opened
