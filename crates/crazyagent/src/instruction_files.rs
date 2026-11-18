@@ -640,7 +640,6 @@ fn folded(name: &str) -> String {
 /// Tells whether a path part opens a `.git` entry on a case-insensitive volume, compared as
 /// [`folded`] compares names, so `.GIT`, `.g\u{200c}it` on HFS+ and `.g\u{131}t` on NTFS all
 /// count (RV-DS241-148). Input: the part. Output: true for one.
-#[cfg(unix)]
 pub(crate) fn names_git(part: &str) -> bool {
     folded(part) == ".git"
 }
