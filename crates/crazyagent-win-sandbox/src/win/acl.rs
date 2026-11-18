@@ -186,6 +186,14 @@ pub(super) fn present(path: &str) -> bool {
         .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
 }
 
+/// Whether the container may read and run `path` through its list as it is now: an allow
+/// entry for ALL APPLICATION PACKAGES or for the container itself ([`reads`]). Inputs: the
+/// container SID and a plain drive path. Output: the answer, or the failed read naming it.
+pub(super) fn reached(container: &Words, path: &str) -> Result<bool, BoundaryError> {
+    let current = read(path)?;
+    Ok(reads(&current.list, &ALL_APPLICATION_PACKAGES) || reads(&current.list, &container.bytes()))
+}
+
 /// Whether a path is a folder, or None when it is missing, a link or a junction and `optional`
 /// lets it be skipped; a path that must be there and is not is refused. Inputs: the path and
 /// whether it may be skipped. Output: true for a folder, or the refusal.
