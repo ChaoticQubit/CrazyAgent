@@ -40,8 +40,8 @@ type View = { kind: "connecting"; reason?: string; tries?: number } | { kind: "l
 type NativeState = { view: View; behind: boolean; mouse: boolean; menu: { x: number; y: number } | null };
 
 /** One open of a native view: its id once the desktop answers, whether it ended or was let
- * go, and when it went live. */
-type Opened = { id: number | null; ended: boolean; closed: boolean; liveAt: number | null };
+ * go, when it went live, and its own prompt queue, which stops for good with the open. */
+type Opened = { id: number | null; ended: boolean; closed: boolean; liveAt: number | null; send: (job: () => Promise<boolean>) => boolean };
 
 const IDLE: NativeState = { view: { kind: "connecting" }, behind: false, mouse: false, menu: null };
 
@@ -121,7 +121,6 @@ export class NativeView implements Held {
   private againTimer = 0;
   private frame = 0;
   private unwatch = () => {};
-  private readonly send = jobQueue(() => this.stopTyping());
 
   constructor(key: KeptKey, label: string, size: { width: number; height: number } | null = null) {
     assert(size === null || (size.width > 0 && size.height > 0), "a parked size is never empty");
@@ -217,9 +216,10 @@ export class NativeView implements Held {
   /** Sends a prompt to the agent as one message while the view is live, after any sent
    * before it. Input: the text. Output: whether it was queued. */
   prompt(text: string): boolean {
-    if (this.state.view.kind !== "live") return false;
+    const open = this.open;
+    if (this.state.view.kind !== "live" || open === null) return false;
     const { terminal, pane } = this.key;
-    return this.send(async () => (await promptTerminal(terminal, text, pane)).kind === "ok");
+    return open.send(async () => (await promptTerminal(terminal, text, pane)).kind === "ok");
   }
 
   /** Opens a new view after the owner's Open again, with the follow count started afresh.
@@ -270,7 +270,8 @@ export class NativeView implements Held {
     assert(!covered || this.size !== null, "a covered open knows its size");
     const rect = screen ? rectOf(screen) : { x: 0, y: 0, width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
     if (rect.width >= 1 && rect.height >= 1) this.size = { width: rect.width, height: rect.height };
-    const open: Opened = { id: null, ended: false, closed: false, liveAt: null };
+    const open: Opened = { id: null, ended: false, closed: false, liveAt: null, send: () => false };
+    open.send = jobQueue(() => this.stopTyping(open));
     this.open = open;
     this.told = covered;
     this.placed = `${rect.x},${rect.y},${rect.width},${rect.height}`;
@@ -289,6 +290,8 @@ export class NativeView implements Held {
           this.told = true;
           void coverNativeTerminal(result.value, true);
         }
+      } else if (open.ended || open !== this.open) {
+        return;
       } else if (result.kind === "not_ready") {
         this.open = null;
         this.set({ view: { kind: "not_ready" } });
@@ -310,6 +313,7 @@ export class NativeView implements Held {
   }
 
   private end(open: Opened, copy: string, final: boolean): void {
+    if (open.ended || open !== this.open) return;
     open.ended = true;
     this.unwatch();
     this.open = null;
@@ -324,9 +328,8 @@ export class NativeView implements Held {
     this.againTimer = window.setTimeout(() => this.again(), FOLLOW_MS);
   }
 
-  private stopTyping(): void {
-    const open = this.open;
-    if (open === null || this.dropped) return;
+  private stopTyping(open: Opened): void {
+    if (open !== this.open || open.ended || this.dropped) return;
     this.release();
     this.set({ view: { kind: "ended", copy: STOPPED_TYPING }, behind: false, mouse: false, menu: null });
   }
