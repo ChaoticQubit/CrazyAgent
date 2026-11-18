@@ -714,8 +714,36 @@ fn an_npm_prefix_under_a_sticky_shared_folder_starts_with_its_own_node() {
     assert_eq!(codex.interpreter().unwrap().program, own);
 }
 
+/// G1 P7: an npm prefix's own `node` the resolver passes over, here one every user can
+/// write, still falls back to the places' `node`, but never silently: the resolver writes
+/// its engine log line, once per file.
+#[test]
+fn a_passed_over_own_node_falls_back_and_is_logged_once_per_file() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let codex = resolve_entry(&prefix.join("bin/codex"), &places).unwrap();
+    assert_eq!(codex.interpreter().unwrap().program, places_node);
+    let passed = entry_at(&own, &places, 0).unwrap_err();
+    assert_eq!(passed.reason, Reason::Refused);
+    assert!(
+        !log_own_node_passed_over(&own, &passed),
+        "the resolver already logged it"
+    );
+    let other = home.join("other/bin/node");
+    assert!(log_own_node_passed_over(&other, &passed));
+    assert!(!log_own_node_passed_over(&other, &passed));
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
+/// On Linux a folder of this user's private group is not passed over either, by design
+/// (`service::private_group`), while one of a group the user shares, as a supplementary
+/// group, is (G1).
 #[test]
 fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     let (_folder, home) = scratch();
