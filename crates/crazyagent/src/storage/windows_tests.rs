@@ -179,6 +179,93 @@ fn a_plugin_secret_round_trips_privately_and_an_open_one_is_refused() {
     assert!(!file.exists());
 }
 
+/// W1c D5: an account key in the Windows key folder is read as a W1 private file, a key or
+/// a key folder other users may read is refused as unsafe, and a removed key is gone.
+#[test]
+fn an_account_key_is_read_privately_and_an_open_one_is_refused() {
+    use super::accounts::{ACCOUNT_KEYS, read_key_file, remove_key_file};
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let name = "anthropic-key-0123456789abcdef0123";
+    let reference = crate::protocol::CredentialRef::new(name).unwrap();
+    assert!(read_key_file(&data, &reference).unwrap().is_none());
+    assert!(!data.join(ACCOUNT_KEYS).exists());
+    let folder = data.join(ACCOUNT_KEYS);
+    drop(private::dir(&folder).unwrap());
+    let file = folder.join(name);
+    private::file(&file, true)
+        .unwrap()
+        .write_all(b"sk-ant-test-key")
+        .unwrap();
+    let key = read_key_file(&data, &reference).unwrap().unwrap();
+    assert_eq!(key.expose(), "sk-ant-test-key");
+    let status = std::process::Command::new("icacls")
+        .args([file.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        read_key_file(&data, &reference).unwrap_err().0,
+        "account_key_store_unsafe"
+    );
+    remove_key_file(&data, name).unwrap();
+    assert!(!file.exists());
+    remove_key_file(&data, name).unwrap();
+    open_to_other_users(&folder);
+    assert_eq!(
+        read_key_file(&data, &reference).unwrap_err().0,
+        "account_key_store_unsafe"
+    );
+    assert_eq!(
+        remove_key_file(&data, name).unwrap_err().0,
+        "account_key_store_unsafe"
+    );
+}
+
+/// W1c D5: the start sweep on Windows deletes the MCP secret, hook folder and account key a
+/// committed removal left noted and forgets their notes, and keeps the note of a native
+/// sign-in, whose custody Windows does not run, for a later start.
+#[test]
+fn the_start_sweep_deletes_what_a_removal_left_noted() {
+    use super::{accounts, plugins, trash};
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    drop(private::dir(&data).unwrap());
+    let connection = rusqlite::Connection::open(data.join("engine.db")).unwrap();
+    trash::initialize(&connection).unwrap();
+    plugins::initialize(&connection).unwrap();
+    accounts::initialize(&connection).unwrap();
+    let secret = plugins::new_secret_reference().unwrap();
+    plugins::store_secret(&data, &secret, b"0123456789".to_vec()).unwrap();
+    let secret_file = plugins::store_folder(&data, &[plugins::SECRETS])
+        .unwrap()
+        .join(&secret);
+    let hook = plugins::store_folder(&data, &[plugins::HOOKS, "hook-a"]).unwrap();
+    std::fs::write(hook.join("run.cmd"), "exit 0").unwrap();
+    let name = "anthropic-key-0123456789abcdef0123";
+    let keys = data.join(accounts::ACCOUNT_KEYS);
+    drop(private::dir(&keys).unwrap());
+    drop(private::file(&keys.join(name), true).unwrap());
+    trash::put(&connection, trash::MCP_SECRET, &secret).unwrap();
+    trash::put(&connection, trash::HOOK_FOLDER, "hook-a").unwrap();
+    trash::put(&connection, trash::ACCOUNT_KEY, name).unwrap();
+    trash::put(&connection, trash::NATIVE_SIGN_IN, name).unwrap();
+    trash::sweep_at_start(&connection, None).unwrap();
+    assert!(!secret_file.exists());
+    assert!(!hook.exists());
+    assert!(!keys.join(name).exists());
+    let left: Vec<String> = connection
+        .prepare("SELECT kind FROM file_trash")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(left, [trash::NATIVE_SIGN_IN]);
+}
+
 /// W1 D1 and D5: a data folder other users may change is refused by W1's check, not by
 /// the blanket `storage_unavailable` refusal the port replaces.
 #[tokio::test]
