@@ -1273,7 +1273,7 @@ fn read_home_file(path: &Path, bytes_max: usize) -> Result<String, AgentHomeErro
     let held = file
         .metadata()
         .map_err(|_| failure("agent_instructions_unreadable"))?;
-    if !held.is_file() || !sole_own_link(&held) {
+    if !held.is_file() || !sole_own_link(&file, &held) {
         return Err(failure("agent_instructions_unsafe"));
     }
     let mut bytes = Vec::new();
@@ -1289,14 +1289,23 @@ fn read_home_file(path: &Path, bytes_max: usize) -> Result<String, AgentHomeErro
     }
 }
 
+/// Tells whether an open file has one link and the engine's user as owner, read from its
+/// metadata. Inputs: the open file, unused here, and its metadata. Output: true only then.
 #[cfg(unix)]
-fn sole_own_link(metadata: &fs::Metadata) -> bool {
+fn sole_own_link(_file: &File, metadata: &fs::Metadata) -> bool {
     metadata.nlink() == 1 && metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-#[cfg(not(unix))]
-fn sole_own_link(_metadata: &fs::Metadata) -> bool {
-    true
+/// Tells whether an open file has one link and the engine's user as owner, both read from
+/// the handle on Windows (DESIGN-0256 C6). Inputs: the open file and its metadata, unused
+/// here. Output: true only then; a handle whose owner or links cannot be read is false.
+#[cfg(windows)]
+fn sole_own_link(file: &File, _metadata: &fs::Metadata) -> bool {
+    use crazyagent_win_sandbox::private;
+    match (private::facts(file), private::user_sid()) {
+        (Ok(facts), Ok(user)) => facts.links == 1 && facts.owner == user,
+        _ => false,
+    }
 }
 
 fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
@@ -1742,7 +1751,10 @@ fn keep_only(
                 .find(|(known, _)| name == *known)
                 .map(|(_, kind)| *kind);
             match wanted {
-                Some(Kept::File) if metadata.is_file() && sole_own_link(&metadata) => {}
+                Some(Kept::File)
+                    if metadata.is_file()
+                        && crate::platform::open_plain(&path)
+                            .is_ok_and(|file| sole_own_link(&file, &metadata)) => {}
                 Some(Kept::Lock) if crate::launch_context::lock_kept(&metadata) => {}
                 Some(Kept::Folder | Kept::Cache) if metadata.is_dir() => {}
                 Some(Kept::Transcripts) if metadata.is_dir() => clear_memory(&path)?,

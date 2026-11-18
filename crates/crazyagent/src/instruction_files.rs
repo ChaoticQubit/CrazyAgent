@@ -1557,7 +1557,7 @@ fn find(root: &Path) -> Vec<Found> {
 fn owned_text(target: &Path) -> Result<String, &'static str> {
     let file = crate::platform::open_plain(target).map_err(|_| "process_import_unreadable")?;
     let held = file.metadata().map_err(|_| "process_import_unreadable")?;
-    if !held.is_file() || !owned(&held) {
+    if !held.is_file() || !owned(&file, &held) {
         return Err("process_import_unsafe");
     }
     if held.len() > crate::agent_home::TEXT_BYTES_MAX as u64 {
@@ -1578,14 +1578,23 @@ fn owned_text(target: &Path) -> Result<String, &'static str> {
     Ok(text)
 }
 
+/// Tells whether the engine's user owns an open file, read from its metadata. Inputs: the
+/// open file, unused here, and its metadata. Output: true only then.
 #[cfg(unix)]
-fn owned(metadata: &fs::Metadata) -> bool {
+fn owned(_file: &fs::File, metadata: &fs::Metadata) -> bool {
     metadata.uid() == rustix::process::geteuid().as_raw()
 }
 
-#[cfg(not(unix))]
-fn owned(_metadata: &fs::Metadata) -> bool {
-    true
+/// Tells whether the engine's user owns an open file, its owner SID read from the handle on
+/// Windows (DESIGN-0256 C6). Inputs: the open file and its metadata, unused here. Output:
+/// true only then; a handle whose owner cannot be read is false.
+#[cfg(windows)]
+fn owned(file: &fs::File, _metadata: &fs::Metadata) -> bool {
+    use crazyagent_win_sandbox::private;
+    match (private::facts(file), private::user_sid()) {
+        (Ok(facts), Ok(user)) => facts.owner == user,
+        _ => false,
+    }
 }
 
 /// Moves one project instruction file, or the link at its path, or arrived project
