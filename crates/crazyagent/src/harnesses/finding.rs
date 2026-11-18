@@ -132,8 +132,9 @@ impl AgentSpace {
 
     /// Builds the space from the engine folder, the folders the database names and the
     /// engine's own temp folder. Inputs: the engine folder, the named folders and the temp
-    /// folder as given and real. Output: the space, each absolute folder kept as named and as
-    /// its real path in one spelling, none that holds the owner's home.
+    /// folder as given and real. Output: the space, the engine folder kept as given, as its
+    /// real path and in one spelling, each named folder as named and as its real path in one
+    /// spelling, none that holds the owner's home.
     fn of(root: &Path, named: Vec<PathBuf>, temp: &[PathBuf]) -> Self {
         let owner = crate::projects_home::owner_home().ok();
         let usable = |folder: &PathBuf| {
@@ -143,10 +144,13 @@ impl AgentSpace {
                     .as_deref()
                     .is_some_and(|owner| owner.starts_with(folder))
         };
-        let engine: Vec<PathBuf> = crate::tools::engine_roots(Some(root))
+        let mut engine: Vec<PathBuf> = crate::tools::engine_roots(Some(root))
             .into_iter()
+            .chain(crate::sandbox::canonical(root).ok())
             .filter(usable)
             .collect();
+        engine.sort();
+        engine.dedup();
         let mut folders = Vec::new();
         for folder in named {
             let real = crate::sandbox::canonical(&folder).ok();
@@ -159,7 +163,7 @@ impl AgentSpace {
             .filter(|folder| usable(folder))
             .cloned()
             .collect();
-        assert!(engine.len() <= 2);
+        assert!(engine.len() <= 3);
         assert!(temp.len() <= 2);
         assert!(folders.len() <= AGENT_FOLDERS_MAX);
         Self {
