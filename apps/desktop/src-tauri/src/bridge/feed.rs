@@ -100,15 +100,14 @@ pub fn paste_requests(keys: &[u8]) -> Vec<TerminalRequest> {
 }
 
 /// Where one native view stands: bound to its gated place, opening its engine session under
-/// the token of that one open, or open as the window's view with this serial.
+/// the token of that one open (its task holds the window and key), or open as the window's
+/// view with this serial.
 enum Slot {
     Bound {
         place: Reservation,
         input_only: bool,
     },
     Opening {
-        window: String,
-        key: ViewKey,
         task: tauri::async_runtime::JoinHandle<()>,
         token: u64,
     },
@@ -229,7 +228,7 @@ impl EngineFeed {
             Arc::clone(&self.wake),
             Arc::clone(&self.slots),
         );
-        let (task_window, task_key) = (window.clone(), key.clone());
+        let (task_window, task_key) = (window, key);
         let task = tauri::async_runtime::spawn(async move {
             let attached = match opening.await {
                 Ok(session) => place.attach(session, sink),
@@ -277,15 +276,7 @@ impl EngineFeed {
                 }
             }
         });
-        slots.insert(
-            view,
-            Slot::Opening {
-                window,
-                key,
-                task,
-                token,
-            },
-        );
+        slots.insert(view, Slot::Opening { task, token });
         drop(slots);
         self.live.insert(view, token);
         Ok(())
