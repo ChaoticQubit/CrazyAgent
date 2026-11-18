@@ -8,7 +8,9 @@ use crate::engine::{Engine, EngineError, io_error, read_frame, verify_peer};
 use crate::platform::unix_socket::UnixStream;
 use crate::protocol::encode_frame;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
+use tokio::time::Instant;
 
 impl OwnerClient {
     pub async fn start_native_auth(
@@ -107,6 +109,14 @@ pub(super) fn refusal(bytes: &[u8], code: &str) -> Result<Vec<u8>, EngineError> 
     )
 }
 
+/// How long before the owner's exchange is cut its native-auth answer is due, so the reply
+/// is still written after a pending answer: the barrier, the second check and the write.
+const ANSWER_MARGIN: Duration = Duration::from_millis(250);
+
+/// Serves one native-auth request of the owner, its answer due `ANSWER_MARGIN` before the
+/// exchange is cut, so a pending answer is written, never cut. Inputs: the stream, engine,
+/// authority, packet, admission, request bytes and the exchange deadline. Output: none once
+/// the reply is written, else the refusal.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -114,6 +124,7 @@ pub(super) async fn serve(
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
+    deadline: Instant,
 ) -> Result<(), EngineError> {
     if bytes.len() > auth::REQUEST_BYTES_MAX {
         return Err(failure("native_auth_request_bounds"));
@@ -132,7 +143,14 @@ pub(super) async fn serve(
         engine: engine.clone(),
         authority: authority.clone(),
     };
-    let result = match host.native_auth_command(admission.clone(), command).await {
+    let answer_by = deadline
+        .checked_sub(ANSWER_MARGIN)
+        .unwrap_or_else(Instant::now);
+    let ask = crate::storage::NativeAuthAsk::Owner { answer_by };
+    let result = match host
+        .native_auth_command(admission.clone(), command, ask)
+        .await
+    {
         Err(error) if error.0 == "native_auth_host_busy" => {
             Err(failure("native_auth_recovery_required"))
         }

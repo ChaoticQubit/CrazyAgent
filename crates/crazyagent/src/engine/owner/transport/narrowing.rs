@@ -142,7 +142,11 @@ impl OwnerRuntimeHandle {
                 Pending::Revoke { control, id } => self.land_revocation(control, id).await,
                 Pending::Logout { admission, logout } => {
                     let answer = self
-                        .native_auth_submit(admission.clone(), Command::Logout(logout.clone()))
+                        .native_auth_submit(
+                            admission.clone(),
+                            Command::Logout(logout.clone()),
+                            crate::storage::NativeAuthAsk::Engine,
+                        )
                         .await;
                     !unsubmitted(&answer)
                 }

@@ -4,6 +4,7 @@ use crate::engine::owner::{
     NativeAuthLogout, NativeAuthMethod, NativeAuthQuery, NativeAuthStart, random_id,
 };
 use crate::protocol::SessionId;
+use crate::storage::NativeAuthAsk;
 
 const REPROOF_WAIT: Duration = Duration::from_secs(90);
 const REPROOF_POLL: Duration = Duration::from_millis(100);
@@ -120,7 +121,11 @@ impl OwnerRuntimeHandle {
             operation_id: logout.request_id.clone(),
         };
         let mut reply = self
-            .native_auth_command(admission.clone(), Command::Logout(logout))
+            .native_auth_command(
+                admission.clone(),
+                Command::Logout(logout),
+                NativeAuthAsk::Engine,
+            )
             .await?;
         while reply.fact.phase.unfinished() {
             if Instant::now() >= deadline {
@@ -128,7 +133,11 @@ impl OwnerRuntimeHandle {
             }
             tokio::time::sleep(REPROOF_POLL).await;
             reply = self
-                .native_auth_command(admission.clone(), Command::Read(query.clone()))
+                .native_auth_command(
+                    admission.clone(),
+                    Command::Read(query.clone()),
+                    NativeAuthAsk::Engine,
+                )
                 .await?;
         }
         assert_eq!(reply.fact.operation_id, query.operation_id);
@@ -222,7 +231,11 @@ impl OwnerRuntimeHandle {
             operation_id: start.request_id.clone(),
         };
         let mut reply = self
-            .native_auth_command(admission.clone(), Command::Start(start.clone()))
+            .native_auth_command(
+                admission.clone(),
+                Command::Start(start.clone()),
+                NativeAuthAsk::Engine,
+            )
             .await?;
         while reply.fact.phase.unfinished() {
             if Instant::now() >= deadline {
@@ -230,7 +243,11 @@ impl OwnerRuntimeHandle {
             }
             tokio::time::sleep(REPROOF_POLL).await;
             reply = self
-                .native_auth_command(admission.clone(), Command::Read(query.clone()))
+                .native_auth_command(
+                    admission.clone(),
+                    Command::Read(query.clone()),
+                    NativeAuthAsk::Engine,
+                )
                 .await?;
         }
         assert_eq!(reply.fact.operation_id, query.operation_id);

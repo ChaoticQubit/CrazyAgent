@@ -2401,7 +2401,7 @@ async fn serve_admitted(
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
-                return native_auth::serve(stream, engine, authority, auth, &a, body)
+                return native_auth::serve(stream, engine, authority, auth, &a, body, deadline)
                     .await
                     .map(|()| None);
             }
