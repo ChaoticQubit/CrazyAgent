@@ -157,7 +157,10 @@ fn id(object: &File) -> io::Result<(u64, [u8; 16])> {
     if read == 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok((information.VolumeSerialNumber, information.FileId.Identifier))
+    Ok((
+        information.VolumeSerialNumber,
+        information.FileId.Identifier,
+    ))
 }
 
 /// Locks the whole file with `flags`. Relies on the handle staying open for the call and on
