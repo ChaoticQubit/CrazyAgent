@@ -8,13 +8,9 @@ pub const FILES_MAX: u16 = 200;
 pub const QUERY_BYTES_MAX: usize = 256;
 /// The longest a file-list read lets git run before it answers with what it has.
 pub const LISTING_TIME: Duration = Duration::from_secs(5);
-#[cfg(unix)]
 const PATH_BYTES_MAX: usize = 512;
-#[cfg(unix)]
 const REPLY_BYTES_MAX: usize = 48 * 1024;
-#[cfg(unix)]
 const LISTING_BYTES_MAX: u64 = 32 * 1024 * 1024;
-#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(2);
 
 fn failure(code: &str) -> EngineError {
@@ -41,8 +37,11 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
 /// at a 48 KiB reply or at `stop`, answering with the paths found by then. Inputs: the
 /// absolute project folder, the query, the limit and the time to stop. Output: the paths
 /// in git's order, or `project_files_folder_missing`, `project_files_no_repository` or
-/// `project_files_git_failed`.
-#[cfg(unix)]
+/// `project_files_git_failed`. The git is setup's on Unix
+/// (`research::runner::setup_git`) and on Windows the one the engine's PATH or Git
+/// for Windows names ([`crate::github::git_program`]), with the engine's PATH and
+/// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`], so
+/// Git for Windows never gets a `\\?\` path.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
@@ -54,8 +53,7 @@ pub(crate) fn list(
     if !folder.is_absolute() {
         return Err(failure("project_files_folder_missing"));
     }
-    let root = folder
-        .canonicalize()
+    let root = crate::sandbox::canonical(folder)
         .ok()
         .filter(|root| root.is_dir())
         .ok_or_else(|| failure("project_files_folder_missing"))?;
@@ -64,12 +62,16 @@ pub(crate) fn list(
         return Err(failure("project_files_no_repository"));
     }
     let git_failed = |_| failure("project_files_git_failed");
-    let mut command = Command::new(crate::research::runner::setup_git());
+    #[cfg(unix)]
+    let git = crate::research::runner::setup_git().to_path_buf();
+    #[cfg(not(unix))]
+    let git = crate::github::git_program(std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| failure("project_files_git_failed"))?;
+    let mut command = Command::new(git);
     command
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE)
@@ -89,6 +91,14 @@ pub(crate) fn list(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin");
+    #[cfg(not(unix))]
+    for name in ["PATH", "SystemRoot"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(git_failed)?;
     let output = child
         .stdout
@@ -118,23 +128,10 @@ pub(crate) fn list(
     }
 }
 
-/// Refuses a file list where the engine's git listing does not exist. Takes the folder,
-/// query, limit and stop, unused. Returns `project_files_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn list(
-    _folder: &Path,
-    _query: &str,
-    _limit: u16,
-    _stop: Instant,
-) -> Result<Vec<String>, EngineError> {
-    Err(failure("project_files_unavailable"))
-}
-
 /// Reads git's NUL-separated listing and keeps each distinct path a tag may name that
 /// contains the query. Inputs: git's output, the canonical project folder, the lowercased
 /// query and the limit. Output: the kept paths and whether the limit or the reply bound
 /// ended the reading before git's output did.
-#[cfg(unix)]
 fn collect(
     output: impl std::io::Read,
     root: &Path,
@@ -178,7 +175,6 @@ fn collect(
 /// at most 512 bytes with no part a case-insensitive volume opens as `.git`
 /// ([`crate::instruction_files::names_git`]) and no control character, not itself a link,
 /// in a folder that resolves inside the project. Inputs: the canonical folder and the path.
-#[cfg(unix)]
 fn inside(root: &Path, path: &str) -> bool {
     let relative = Path::new(path);
     let plain = relative.components().all(|part| match part {
@@ -194,7 +190,7 @@ fn inside(root: &Path, path: &str) -> bool {
     std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file())
         && full
             .parent()
-            .and_then(|parent| parent.canonicalize().ok())
+            .and_then(|parent| crate::sandbox::canonical(parent).ok())
             .is_some_and(|parent| parent.starts_with(root))
 }
 
