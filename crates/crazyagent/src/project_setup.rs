@@ -2692,12 +2692,11 @@ fn set_read_paths(
     Ok(Outcome::Applied)
 }
 
-/// Saves a project's hidden folders once each passes
-/// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
-/// kept out of them, and the owner's screen showed the current ones. Takes the transaction,
-/// project, the version the screen showed and the typed paths. Returns Applied, or a plain
-/// rejection for an unknown project, a refused path or `stale_revision` when the folders
-/// changed since, so a stale screen never un-hides a folder.
+/// Saves a project's hidden folders once each passes [`crate::sandbox::hidden_paths::checked`]
+/// against the project's folder and the screen showed the current ones. Takes the transaction,
+/// project, the version shown and the typed paths. Returns Applied, or a plain rejection for an
+/// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], or
+/// `stale_revision` when the folders changed since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2707,6 +2706,9 @@ fn set_hidden_paths(
     let Some(setup) = load_setup(tx, project_id)? else {
         return Ok(rejected("invalid_project"));
     };
+    if crate::sandbox::HIDDEN_UNHELD && !paths.is_empty() {
+        return Ok(rejected("hidden_paths_need_macos"));
+    }
     let folder = setup.project_folder();
     let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
         Ok(checked) => checked,
