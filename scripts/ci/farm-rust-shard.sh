@@ -11,12 +11,30 @@ workspace=${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}
 [ "${NEXTEST_PROFILE:-}" = farm ] || { echo "::error::NEXTEST_PROFILE must be farm, the profile that writes target/nextest/farm/junit.xml"; exit 2; }
 exe=""
 [ "${RUNNER_OS:-}" != Windows ] || exe=.exe
-filter=$(node scripts/ci/nextest-filter.mjs)
-echo "filter: $filter"
+rows=$(grep -E '^[a-z_]+(::[a-z0-9_]+)+$' .github/farm/baseline-47.txt | sed -E 's/^(.*)$/test(=\1)/' | paste -sd'|' -)
+[ "$(grep -c . .github/farm/baseline-47.txt)" = 47 ] || { echo "::error::the baseline list is not 47 rows"; exit 2; }
+filter="package(=crazyagent) & kind(lib) & ($rows)"
+echo "filter: the 47 baseline rows"
 export CRAZYAGENT_TEST_NATIVE_AUTH_HOST="$workspace/target/debug/crazyagent$exe"
 run=(cargo nextest run --archive-file "$archive" --workspace-remap "$workspace" --extract-to "$workspace" --extract-overwrite --partition "slice:$part/$parts" --no-tests=warn -E "$filter")
-if [ "${RUNNER_OS:-}" = Linux ]; then
-  dbus-run-session -- bash -euo pipefail -c 'printf "%s\n" ci-keyring | gnome-keyring-daemon --replace --daemonize --unlock --components=secrets >/dev/null; exec "$@"' farm "${run[@]}"
-else
-  "${run[@]}"
-fi
+junit=target/nextest/farm/junit.xml
+bad=0
+for attempt in 1 2 3; do
+  rm -f "$junit"
+  "${run[@]}" || bad=1
+  [ -s "$junit" ] || { echo "::error::run $attempt wrote no JUnit report"; exit 1; }
+  cp "$junit" "target/nextest/farm/junit-run-$attempt.xml"
+done
+python3 -I - target/nextest/farm <<'PY'
+import pathlib, sys, xml.etree.ElementTree as ET
+folder = pathlib.Path(sys.argv[1])
+root = ET.Element("testsuites")
+for attempt in (1, 2, 3):
+    for suite in ET.parse(folder / f"junit-run-{attempt}.xml").getroot().iter("testsuite"):
+        suite.set("name", f"{suite.get('name')} run {attempt}")
+        root.append(suite)
+ET.ElementTree(root).write(folder / "junit.xml")
+for attempt in (1, 2, 3):
+    (folder / f"junit-run-{attempt}.xml").unlink()
+PY
+exit "$bad"
