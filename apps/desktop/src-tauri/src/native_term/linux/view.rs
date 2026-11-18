@@ -1138,6 +1138,45 @@ mod tests {
         assert_eq!(pointer.release(1, (120.0, 140.0), false), Route::Page);
     }
 
+    /// A GDK scroll event of a direction and deltas, built as GDK builds one; no display
+    /// is needed. Inputs: the direction and the deltas. Output: the event.
+    fn scroll_event(direction: gdk::ffi::GdkScrollDirection, dx: f64, dy: f64) -> gdk::Event {
+        unsafe {
+            let event = gdk::ffi::gdk_event_new(gdk::ffi::GDK_SCROLL);
+            assert!(!event.is_null());
+            (*event).scroll.direction = direction;
+            (*event).scroll.delta_x = dx;
+            (*event).scroll.delta_y = dy;
+            gtk::glib::translate::from_glib_full(event)
+        }
+    }
+
+    /// A real wheel or touchpad sends smooth scrolls, whose GDK direction reads as none;
+    /// the view takes their deltas. Only the farm's XTest wheel sends discrete ones.
+    #[test]
+    fn a_smooth_scroll_gives_its_vertical_delta_and_a_discrete_one_a_line() {
+        assert_eq!(
+            scroll_dy(&scroll_event(gdk::ffi::GDK_SCROLL_SMOOTH, 0.0, 1.5)),
+            (1.5, false)
+        );
+        assert_eq!(
+            scroll_dy(&scroll_event(gdk::ffi::GDK_SCROLL_SMOOTH, 0.0, -0.25)),
+            (-0.25, false)
+        );
+        assert_eq!(
+            scroll_dy(&scroll_event(gdk::ffi::GDK_SCROLL_SMOOTH, 2.0, 0.0)),
+            (0.0, false)
+        );
+        assert_eq!(
+            scroll_dy(&scroll_event(gdk::ffi::GDK_SCROLL_DOWN, 0.0, 0.0)),
+            (1.0, false)
+        );
+        assert_eq!(
+            scroll_dy(&scroll_event(gdk::ffi::GDK_SCROLL_UP, 0.0, 0.0)),
+            (-1.0, false)
+        );
+    }
+
     #[test]
     fn a_wheel_inside_is_lines_for_a_mouse_and_points_for_a_touchpad() {
         let pointer = placed();
