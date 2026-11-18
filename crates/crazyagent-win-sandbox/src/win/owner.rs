@@ -2,9 +2,9 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::container::sid;
 use super::{BoundaryError, last_error, windows};
 use crate::dacl::{
-    ALL_APPLICATION_PACKAGES, ANCESTOR_CHANGES, DENY_TYPES, DRIVE_ROOT_RIGHTS, FILE_CHANGES,
-    OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX, first_changeable_part, held_only_by, holds_allow,
-    read_root_refused,
+    ALL_APPLICATION_PACKAGES, ANCESTOR_CHANGES, DENY_TYPES, DEVICE_GRANTS, DRIVE_ROOT_RIGHTS,
+    DeviceGrant, FILE_CHANGES, OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX, first_changeable_part,
+    held_only_by, holds_allow, read_root_refused,
 };
 use crate::plan::granted_read_roots;
 use crate::profile::BoundaryProfile;
@@ -226,6 +226,22 @@ pub fn unreadable_drive_root<'a>(paths: impl IntoIterator<Item = &'a Path>) -> O
         }
     }
     None
+}
+
+/// Whether the access list of `grant`'s device, read as this process, gives every app
+/// container its rights ([`DeviceGrant::granted`]); a device with no list grants everyone.
+/// Input: the grant. Output: the answer, or the Windows error when the list cannot be read.
+pub fn device_grant_held(grant: &DeviceGrant) -> Result<bool, u32> {
+    let _ = grant;
+    todo!("B2")
+}
+
+/// The first of [`DEVICE_GRANTS`] its device does not hold ([`device_grant_held`]), a list
+/// that cannot be read counting as not held, so a caller falls to the path that needs no
+/// grant. Output: that grant, or None when the machine holds both.
+pub fn missing_device_grant() -> Option<&'static DeviceGrant> {
+    let _ = &DEVICE_GRANTS;
+    todo!("B2")
 }
 
 /// Opens the file or folder at `path` itself for `access`, with the link flag so a link or

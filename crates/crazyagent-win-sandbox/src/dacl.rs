@@ -152,6 +152,39 @@ pub fn holds_allow(acl: &[u8], sid: &[u8], mask: u32) -> bool {
     })
 }
 
+/// One device object the administrator step's boot task opens to every app container: its
+/// Win32 device path, as CreateFileW takes it, and the exact rights of the one plain allow
+/// entry for ALL APPLICATION PACKAGES on that object only (V244-WIN-ADMIN-STEP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceGrant {
+    pub path: &'static str,
+    pub mask: u32,
+}
+
+/// The device grants, one table for the boot task and the engine's checks: `\\.\NUL` read
+/// and write (P1: a boxed git opens it for both), and the mount manager read-attributes and
+/// synchronize (P2f: a boxed git's folder-name lookup, UNC-SIBLINGS option 1).
+pub const DEVICE_GRANTS: [DeviceGrant; 2] = [
+    DeviceGrant {
+        path: r"\\.\NUL",
+        mask: 0x0012_019f,
+    },
+    DeviceGrant {
+        path: r"\\.\MountPointManager",
+        mask: 0x0010_0080,
+    },
+];
+
+impl DeviceGrant {
+    /// Whether `acl`, the device's access list, already gives every app container this
+    /// grant's rights on the object itself ([`holds_allow`]). Input: the list bytes. Output:
+    /// true when it does; false for a malformed list.
+    pub fn granted(&self, acl: &[u8]) -> bool {
+        let _ = acl;
+        todo!("B2")
+    }
+}
+
 /// The size an access list's header gives it. Input: a list whose header [`spans`] checked.
 /// Output: the size in bytes.
 fn list_size(acl: &[u8]) -> usize {
@@ -1976,5 +2009,76 @@ mod tests {
         for owner in [&USERS[..], &OTHER_ACCOUNT, &CONTAINER, &OWNER_RIGHTS] {
             assert!(!trusted_owner(owner, &OWNER), "{owner:?}");
         }
+    }
+
+    #[test]
+    fn the_device_grants_are_nul_read_write_and_the_mount_manager_lookup() {
+        assert_eq!(
+            DEVICE_GRANTS,
+            [
+                DeviceGrant {
+                    path: r"\\.\NUL",
+                    mask: 0x0012_019f
+                },
+                DeviceGrant {
+                    path: r"\\.\MountPointManager",
+                    mask: DRIVE_ROOT_RIGHTS
+                },
+            ]
+        );
+        let package = &ALL_APPLICATION_PACKAGES;
+        let stock = acl(&[
+            ace(ACCESS_ALLOWED, 0, 0x001f_01ff, &SYSTEM),
+            ace(ACCESS_ALLOWED, 0, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0, 0x0012_019f, &EVERYONE),
+        ]);
+        for grant in DEVICE_GRANTS {
+            assert!(!grant.granted(&stock), "{grant:?} on a stock list");
+            let added = with_allow(&stock, package, grant.mask).unwrap().unwrap();
+            assert!(grant.granted(&added), "{grant:?} after with_allow");
+            let narrower = grant.mask & !0x0010_0000;
+            for (extra, holds, why) in [
+                (
+                    ace(ACCESS_ALLOWED, 0, 0x001f_01ff, package),
+                    true,
+                    "a wider allow",
+                ),
+                (
+                    ace(ACCESS_ALLOWED, 0, narrower, package),
+                    false,
+                    "a narrower allow",
+                ),
+                (
+                    ace(ACCESS_ALLOWED, 0x08, grant.mask, package),
+                    false,
+                    "inherit-only",
+                ),
+                (
+                    ace(ACCESS_ALLOWED, 0, grant.mask, &USERS),
+                    false,
+                    "another SID",
+                ),
+                (ace(ACCESS_DENIED, 0, grant.mask, package), false, "a deny"),
+            ] {
+                let mut list = vec![
+                    ace(ACCESS_ALLOWED, 0, 0x001f_01ff, &SYSTEM),
+                    ace(ACCESS_ALLOWED, 0, 0x0012_019f, &EVERYONE),
+                ];
+                list.push(extra);
+                assert_eq!(grant.granted(&acl(&list)), holds, "{grant:?}: {why}");
+            }
+            assert!(!grant.granted(&[2, 0, 4, 0]), "{grant:?}: a malformed list");
+        }
+        assert!(
+            DeviceGrant {
+                path: r"\\.\NUL",
+                mask: 0x0012_0089
+            }
+            .granted(&with_allow(&stock, package, 0x0012_0089).unwrap().unwrap())
+        );
+        assert!(
+            !DEVICE_GRANTS[0].granted(&with_allow(&stock, package, 0x0012_0089).unwrap().unwrap()),
+            "P1: read alone is not the NUL grant"
+        );
     }
 }
