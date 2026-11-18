@@ -67,6 +67,15 @@ fn keychain_unavailable() -> EngineError {
     failure("native_profile_agent_keychain_unavailable")
 }
 
+/// Whether an agent home lies in the account profiles folder below the engine folder, or the
+/// profiles folder cannot be read, so no agent keychain is made there. Inputs: the engine
+/// folder and the agent home. Output: the answer.
+#[cfg(target_os = "macos")]
+fn inside_profiles(engine: &Path, home: &Path) -> bool {
+    std::fs::canonicalize(engine.join(super::ROOT))
+        .map_or(true, |profiles| home.starts_with(profiles))
+}
+
 /// The Claude OAuth scope prefix an agent's copy may never carry. A Console sign-in holds
 /// `org:create_api_key`, which turns a copy into a durable API key, and the `org:` family
 /// grants organisation-wide access; a subscription sign-in holds only `user:` scopes
@@ -170,9 +179,7 @@ impl AgentKeychain {
             .to_str()
             .filter(|text| text.is_ascii())
             .ok_or_else(keychain_unavailable)?;
-        if std::fs::canonicalize(engine.join(super::ROOT))
-            .map_or(true, |profiles| home.starts_with(profiles))
-        {
+        if inside_profiles(engine, home) {
             return Err(keychain_unavailable());
         }
         let mates = crate::launch_context::mates_home(home);
@@ -998,4 +1005,37 @@ fn open_folder(parent: &File, name: &str) -> Result<File, EngineError> {
         return Err(unavailable());
     }
     Ok(folder)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod profile_home_tests {
+    use super::inside_profiles;
+    use std::path::{Path, PathBuf};
+
+    /// V243-FIRMLINK-SWEEP D4: an agent home in the account profiles folder counts as inside
+    /// it whichever of the two macOS names the engine folder and the home use, so no agent
+    /// keychain is made there; a home beside the profiles folder is not inside.
+    #[test]
+    fn a_profile_home_named_through_the_data_volume_is_inside_the_profiles() {
+        let base = tempfile::tempdir().unwrap();
+        let engine = base.path().canonicalize().unwrap();
+        let profile = engine.join(super::super::ROOT).join("account");
+        let agent = engine.join("agents").join("one");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&agent).unwrap();
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        assert!(long(&profile).is_dir());
+        for (engine, home) in [
+            (engine.clone(), profile.clone()),
+            (engine.clone(), long(&profile)),
+            (long(&engine), profile.clone()),
+        ] {
+            assert!(
+                inside_profiles(&engine, &home),
+                "engine {engine:?}, home {home:?}"
+            );
+        }
+        assert!(!inside_profiles(&engine, &agent));
+        assert!(!inside_profiles(&long(&engine), &agent));
+    }
 }

@@ -876,3 +876,27 @@ fn one_reader_names_the_agent_folders_and_its_caller_says_what_a_bad_row_does() 
         Err(finding::PATH_UNREADABLE.to_owned())
     );
 }
+
+/// V243-FIRMLINK-SWEEP D3: a PATH folder named through /System/Volumes/Data inside a temp
+/// folder is set aside, and a kept file linked into a temp folder by its data volume name
+/// leads into temp all the same, so the engine search finds neither harness.
+#[cfg(target_os = "macos")]
+#[test]
+fn temp_folders_named_through_the_data_volume_are_still_temp() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let temps = vec![root.join("tmp")];
+    let set_aside = root.join("tmp/bin");
+    let kept = root.join("kept/bin");
+    runnable(&set_aside.join("codex"));
+    let real = runnable(&root.join("tmp/real/claude"));
+    std::fs::create_dir_all(&kept).unwrap();
+    std::os::unix::fs::symlink(long(&real), kept.join("claude")).unwrap();
+    assert!(long(&set_aside).is_dir());
+    let path = std::env::join_paths([long(&set_aside), kept.clone()]).unwrap();
+    let search = Search::engine_in(Some(&path), &[], None, &temps);
+    assert_eq!(search.find("codex"), None);
+    assert_eq!(search.find("claude-code"), None);
+    assert!(crate::tools::in_temp_of(&long(&set_aside), &temps));
+}
