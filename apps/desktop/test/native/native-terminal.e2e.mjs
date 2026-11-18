@@ -214,6 +214,18 @@ describe("Native terminal views in the real window", () => {
     await close(shown.view);
   });
 
+  it("the message box's prompt reaches a direct view's terminal as one submission (#632)", async () => {
+    const shown = await open(false);
+    const seen = await ready(shown);
+    assert.equal(seen.direct, true, "the prompt goes through a direct view");
+    const base = turns(seen);
+    await invoke("desktop_terminal_prompt", { agent: master, text: "w5 message box prompt", pane: null });
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 1, UI_MS, "the message box's prompt never reached the terminal");
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 1, "the prompt was one submission, one turn");
+    await close(shown.view);
+  });
+
   it("an ended terminal closes the direct view", async () => {
     const shown = await open(true);
     assert.equal((await ready(shown)).direct, true);
