@@ -167,6 +167,14 @@ mod name_tests {
         }
         assert!(pipe_name(&units(ROOT), "engine.sock", &RANDOM).contains("-engine.sock-"));
     }
+
+    /// rv-code #551 F3: a protected root always has a name, so naming a pipe from an empty
+    /// one is a programming error, never a name every empty root would share.
+    #[test]
+    fn an_empty_root_is_a_programming_error() {
+        let named = std::panic::catch_unwind(|| pipe_name(&[], "engine", &RANDOM));
+        assert!(named.is_err());
+    }
 }
 
 #[cfg(all(test, windows))]

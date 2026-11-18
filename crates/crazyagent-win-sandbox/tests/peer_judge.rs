@@ -1,4 +1,6 @@
-use crazyagent_win_sandbox::pipe::{Peer, Pin, Served, judge_peer, judge_server};
+use crazyagent_win_sandbox::pipe::{
+    Peer, Pin, Reverted, Served, after_revert, judge_peer, judge_server,
+};
 
 /// A user SID shaped as S-1-5-21-1-2-3-1001.
 const USER: [u8; 28] = [
@@ -68,6 +70,27 @@ fn each_peer_rule_refuses_on_its_own() {
             Err("a lower integrity process is at the other end of the pipe"),
             "{integrity:#x}"
         );
+    }
+}
+
+/// rv-code #551 F3: the engine always knows its own user SID, so judging a peer against an
+/// empty one is a programming error, never a pass or a refusal.
+#[test]
+fn judging_a_peer_against_an_empty_user_is_a_programming_error() {
+    let judged = std::panic::catch_unwind(|| judge_peer(&peer(0x2000), &[]));
+    assert!(judged.is_err());
+}
+
+/// rv-code #551 F1 (leader 07:48): after the D9 check reverts, only a probe that opens a
+/// thread token, so one is still held, aborts; ERROR_NO_TOKEN (1008) is clean; any other
+/// failed probe refuses the check, never panicking a pool thread.
+#[test]
+fn only_a_token_still_held_after_the_revert_aborts() {
+    assert_eq!(after_revert(true, 0), Reverted::Held);
+    assert_eq!(after_revert(true, 1008), Reverted::Held);
+    assert_eq!(after_revert(false, 1008), Reverted::Clean);
+    for error in [0, 5, 8, 1450] {
+        assert_eq!(after_revert(false, error), Reverted::Unread(error));
     }
 }
 
