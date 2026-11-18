@@ -271,6 +271,7 @@ impl Case {
                 params![worktree, repo],
             )
             .unwrap();
+        crate::landing_log::seed(&self.db);
         crate::landing::owner_edit::record(&self.db, Path::new(worktree), "README", 1).unwrap();
         self.db
             .execute(

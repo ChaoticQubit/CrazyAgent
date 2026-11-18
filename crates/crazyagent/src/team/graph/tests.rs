@@ -1203,9 +1203,9 @@ fn git(dir: &Path, args: &[&str]) -> String {
 fn branches_name_what_each_real_linked_worktree_and_own_clone_has_checked_out() {
     let directory = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(directory.path()).unwrap();
-    let repo = root.join("repo");
-    let worktrees = root.join("worktrees");
-    for folder in [&repo, &worktrees, &root.join("engine")] {
+    let (repo, worktrees) = (root.join("repo"), root.join("worktrees"));
+    let engine = root.join("engine");
+    for folder in [&repo, &worktrees, &engine] {
         std::fs::create_dir(folder).unwrap();
     }
     git(&repo, &["init", "-q", "--template=", "-b", "main"]);
@@ -1214,7 +1214,7 @@ fn branches_name_what_each_real_linked_worktree_and_own_clone_has_checked_out() 
     std::fs::write(repo.join("README"), "tidepool\n").unwrap();
     git(&repo, &["add", "README"]);
     git(&repo, &["commit", "-q", "-m", "Start"]);
-    let connection = crate::landing::open(&root.join("engine")).unwrap();
+    let connection = crate::landing_log::seeded(crate::landing::open(&engine).unwrap());
     crate::team::initialize(&connection).unwrap();
     let status = tree();
     let linked = |id: i64, task: Option<&str>| {

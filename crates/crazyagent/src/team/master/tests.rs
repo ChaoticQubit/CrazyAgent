@@ -1,8 +1,8 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
-use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
+use crate::{landing_log::seeded, terminal::FOLDER};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
@@ -31,7 +31,7 @@ impl Fixture {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
-        let connection = Connection::open(base.join("engine.db")).unwrap();
+        let connection = seeded(Connection::open(base.join("engine.db")).unwrap());
         crate::storage::initialize_authority_schemas(&connection).unwrap();
         super::super::initialize(&connection).unwrap();
         crate::project_setup::initialize(&connection).unwrap();

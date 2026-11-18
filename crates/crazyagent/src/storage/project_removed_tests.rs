@@ -19,6 +19,8 @@ const OTHER: &str = "other";
 mod areas;
 /// The removal's redaction of the project's ide events and its ide rows (v2.5 L7, #309 N1).
 mod ide_events;
+/// Create demo's clear of an earlier id tombstones its landing events (v2.5 L9, QUESTION-1046).
+mod landing_events;
 
 /// The settings aggregate (v2.5 L10) on this module's store: a removal tombstones the
 /// removed project's settings events, and an owner settings save logs at its revision.

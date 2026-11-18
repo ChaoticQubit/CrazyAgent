@@ -936,6 +936,9 @@ async fn readonly_actor_does_not_install_owner_schema_or_publish_capabilities() 
 async fn owner_candidate_discovery_reports_actual_unavailable_verification() {
     use crazyagent::verification::CandidateSnapshot;
     let (root, config, engine) = owner_fixture().await;
+    let (server, _host) = OwnerServer::bind(root.path(), engine.clone(), &config)
+        .await
+        .unwrap();
     let mut revision = 0;
     let draft = baseline();
     let baseline_id = draft.identity().unwrap();
@@ -1009,9 +1012,6 @@ async fn owner_candidate_discovery_reports_actual_unavailable_verification() {
         },
     )
     .await;
-    let (server, _host) = OwnerServer::bind(root.path(), engine.clone(), &config)
-        .await
-        .unwrap();
     let (stop, rx) = oneshot::channel();
     let task = tokio::spawn(server.run(rx));
     let client =

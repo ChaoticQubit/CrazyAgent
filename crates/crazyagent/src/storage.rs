@@ -417,7 +417,8 @@ impl Storage {
                     if let Err(e) = projects_home::delete_settle(&connection, None, false) {
                         eprintln!("project_delete_not_settled cause={}", e.0);
                     }
-                    match crate::github::proposals::start_store(&connection) {
+                    let open = opening::Opening::now();
+                    match crate::github::proposals::start_store(&connection, open) {
                         Ok(0) => {}
                         Ok(ended) => eprintln!("github_rule_proposals_cut_short count={ended}"),
                         Err(e) => eprintln!("github_rule_proposals_not_settled cause={}", e.0),
@@ -1318,9 +1319,9 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::verification::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::project_setup::removed::initialize(connection)?;
-    let opened_ms = crate::state_log::replay::Clock::System.now_ms();
-    crate::worktrees::log::sweep(connection, opening::Opening::new(opened_ms))?;
-    crate::memory::log::sweep(connection, opening::Opening::new(opened_ms))?;
+    let opened = opening::Opening::now();
+    crate::worktrees::log::sweep(connection, opened.clone())?;
+    crate::memory::log::sweep(connection, opened)?;
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
@@ -1878,7 +1879,7 @@ fn execute(
             crate::memory::library::execute(tx, config, action, revision)
         }
         Command::ProposeBaseline { .. } | Command::OwnerVerification { .. } => {
-            crate::verification::execute(tx, config, command)
+            crate::verification::execute(tx, config, command, revision)
         }
         Command::Knowledge { action } => crate::memory::execute(tx, config, action, revision),
         Command::Assets { action } => crate::assets::execute(tx, config, action),
@@ -2566,6 +2567,7 @@ fn owner_apply_with(
         });
     }
     let deleting = matches!(effect, Some(Effect::Delete(_)));
+    let removing = crate::project_setup::removed::event::removing(&tx, &command, deleting)?;
     let mut onboarded = None;
     let outcome = match (effect, &command) {
         (Some(Effect::Home(effect)), _) => {
@@ -2646,15 +2648,9 @@ fn owner_apply_with(
             command,
         };
         persist_event(&tx, config, &wire, next)?;
-        if let Some(removed) =
-            crate::project_setup::removed::event::removal(&wire.command, deleting)
-        {
-            let seq = crate::project_setup::removed::event::append(&tx, next, a, &removed)?;
-            let fence = crate::state_log::fence::Fence::Owner(a.clone());
-            let project = removed.project.as_str();
-            redacted = crate::worktrees::log::forget_project(&tx, project, Some(seq), &fence)?;
-            redacted += crate::ide::log::forget_project(&tx, project, Some(seq), &fence)?;
-            redacted += crate::settings_log::forget_project(&tx, project, Some(seq), &fence)?;
+        if let Some((removed, worktrees)) = &removing {
+            redacted =
+                crate::project_setup::removed::event::settle(&tx, next, a, removed, worktrees)?;
         }
     }
     let provenance = OwnerProvenance {

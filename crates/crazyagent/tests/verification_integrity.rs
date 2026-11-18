@@ -73,6 +73,7 @@ impl Harness {
         let engine = Engine::open(&root.path().join("db"), config.clone())
             .await
             .unwrap();
+        engine.start_owner_runtime().await.unwrap();
         Self {
             root,
             engine,
@@ -224,6 +225,289 @@ async fn human_admission_is_exact_and_current_baseline_does_not_rewrite_pin() {
     h.engine.close().await.unwrap();
 }
 
+/// V250-L9: an owner approval appends one `BaselineApproved` landing event at the revision
+/// its reply carries, whose body holds only the project and baseline ids; a refused approval
+/// appends none.
+#[tokio::test]
+async fn an_approval_is_logged_once_at_the_revision_its_reply_carries() {
+    let mut h = Harness::open().await;
+    let project = Command::CreateProject {
+        project_id: ProjectId::new("project").unwrap(),
+        spec: ProjectSpec {
+            name: "project".into(),
+            repositories: vec![],
+        },
+    };
+    assert_eq!(h.call(project).await, Outcome::Applied);
+    assert_eq!(
+        h.call(Command::ProposeBaseline { draft: draft() }).await,
+        Outcome::Applied
+    );
+    let mut unknown = draft();
+    unknown.requirements.push_str(" and never proposed");
+    let missing = OwnerVerification::Approve {
+        baseline_id: unknown.identity().unwrap(),
+    };
+    assert_ne!(h.owner(missing).await, Outcome::Applied);
+    let baseline_id = draft().identity().unwrap();
+    let approve = OwnerVerification::Approve {
+        baseline_id: baseline_id.clone(),
+    };
+    assert_eq!(h.owner(approve).await, Outcome::Applied);
+    let approved_at = h.revision;
+    h.engine.close().await.unwrap();
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let db = rusqlite::Connection::open_with_flags(h.root.path().join("db"), flags).unwrap();
+    let logged: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let events: Vec<(String, i64, Vec<u8>)> = if logged {
+        db.prepare(
+            "SELECT kind, revision, body FROM state_log WHERE aggregate='landing' ORDER BY seq",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|event: &(String, i64, Vec<u8>)| {
+            event.0 == crazyagent::landing_log::BASELINE_APPROVED
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    assert_eq!(
+        events.len(),
+        1,
+        "one event for the approval, none for the refused one"
+    );
+    assert_eq!(events[0].0, crazyagent::landing_log::BASELINE_APPROVED);
+    assert_eq!(u64::try_from(events[0].1).unwrap(), approved_at);
+    let body: serde_json::Value = serde_json::from_slice(&events[0].2).unwrap();
+    let expected = serde_json::json!({"project": "project", "baseline": baseline_id.as_str()});
+    assert_eq!(body, expected);
+}
+
+/// The three verification tables' rows and the current baseline of each project as they
+/// stand, every column, by key. Input: the store. Output: each table's rows.
+fn verification_rows(db: &rusqlite::Connection) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+    let tables = [
+        "verification_baselines",
+        "verification_candidates",
+        "verification_attempts",
+        "verification_current",
+    ];
+    tables
+        .iter()
+        .map(|table| {
+            let mut statement = db
+                .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+                .unwrap();
+            let width = statement.column_count();
+            statement
+                .query_map([], |row| {
+                    (0..width)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        })
+        .collect()
+}
+
+/// V250-L9 (QUESTION-1132 A): every write of the three verification tables logs a
+/// VerificationSaved whose body holds only the table, the id, the project and the row's part
+/// digests, never the requirements, and a landing rebuild of the closed store equals the
+/// live rows.
+#[tokio::test]
+async fn verification_writes_log_their_rows_and_a_rebuild_equals_the_live_rows() {
+    let mut h = Harness::open().await;
+    let baseline_id = h.setup().await;
+    let request = h.request(Command::OwnerVerification {
+        action: OwnerVerification::Verify {
+            candidate_id: id("candidate"),
+            attempt_id: id("attempt"),
+        },
+    });
+    let first = h.engine.apply(request).await.unwrap();
+    assert_eq!(first.outcome, Outcome::Applied);
+    h.revision = first.revision.value();
+    let revoke = OwnerVerification::Revoke { baseline_id };
+    assert_eq!(h.owner(revoke).await, Outcome::Applied);
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let saved: Vec<serde_json::Value> = db
+        .prepare("SELECT body FROM state_log WHERE aggregate='landing' AND kind=?1 ORDER BY seq")
+        .unwrap()
+        .query_map([crazyagent::landing_log::VERIFICATION_SAVED], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .unwrap()
+        .map(|body| serde_json::from_slice(&body.unwrap()).unwrap())
+        .collect();
+    let tables: std::collections::BTreeSet<&str> = saved
+        .iter()
+        .filter_map(|body| body["table"].as_str())
+        .collect();
+    let expected = [
+        "verification_attempts",
+        "verification_baselines",
+        "verification_candidates",
+    ];
+    assert_eq!(tables, expected.into_iter().collect());
+    let requirements = draft().requirements;
+    for body in &saved {
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["id", "project", "row", "table"]);
+        assert!(!body.to_string().contains(&requirements), "{body}");
+    }
+    let live = verification_rows(&db);
+    assert!(live.iter().all(|rows| !rows.is_empty()));
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    assert_eq!(verification_rows(&db), live);
+}
+
+/// V250-L9 (QUESTION-1132 A): the 128-row cap's prunes are logged: the 129th candidate of a
+/// task prunes the oldest and its attempt, each a VerificationForgotten that released the
+/// row's kept text, so a rebuild equals the live rows with or without those events, and a
+/// rebuild that skips the last save leaves its row out.
+#[tokio::test]
+async fn a_pruned_row_is_logged_and_released_and_a_skipped_save_changes_the_rebuild() {
+    let mut h = Harness::open().await;
+    h.setup().await;
+    let verify = OwnerVerification::Verify {
+        candidate_id: id("candidate"),
+        attempt_id: id("attempt"),
+    };
+    assert_eq!(h.owner(verify).await, Outcome::Applied);
+    for n in 1..=128 {
+        let register = OwnerVerification::Register {
+            id: id(&format!("candidate-{n:03}")),
+            task_id: TaskId::new("task").unwrap(),
+            snapshot: snapshot(),
+            environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+        };
+        assert_eq!(h.owner(register).await, Outcome::Applied, "register {n}");
+    }
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let kind = crazyagent::landing_log::VERIFICATION_FORGOTTEN;
+    let forgotten: Vec<serde_json::Value> = db
+        .prepare("SELECT body FROM state_log WHERE aggregate='landing' AND kind=?1 ORDER BY seq")
+        .unwrap()
+        .query_map([kind], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|body| serde_json::from_slice(&body.unwrap()).unwrap())
+        .collect();
+    let pruned = [
+        serde_json::json!({"table": "verification_candidates", "id": "candidate"}),
+        serde_json::json!({"table": "verification_attempts", "id": "attempt"}),
+    ];
+    assert_eq!(forgotten, pruned);
+    let live = verification_rows(&db);
+    assert_eq!(live[1].len(), 128, "the cap holds 128 candidates");
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    assert_eq!(verification_rows(&db), live);
+    let skipped = db
+        .execute(
+            "DELETE FROM state_log WHERE aggregate='landing' AND kind=?1",
+            [kind],
+        )
+        .unwrap();
+    assert_eq!(skipped, 2);
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    assert_eq!(
+        verification_rows(&db),
+        live,
+        "the prune released the rows' texts"
+    );
+    let saved = crazyagent::landing_log::VERIFICATION_SAVED;
+    let last = db
+        .execute(
+            "DELETE FROM state_log WHERE seq=(SELECT MAX(seq) FROM state_log \
+             WHERE aggregate='landing' AND kind=?1)",
+            [saved],
+        )
+        .unwrap();
+    assert_eq!(last, 1);
+    crazyagent::landing_log::rebuild(&db).unwrap();
+    let replayed = verification_rows(&db);
+    assert_eq!(replayed[1].len(), 127, "a skipped save leaves its row out");
+}
+
+/// V250-L9 (QUESTION-1132 A): a register or a Verify the store refuses as a duplicate
+/// prunes nothing, even at the 128-row cap, since a refusal moves no revision and a prune
+/// there would change rows no landing event records.
+#[tokio::test]
+async fn a_refused_duplicate_at_the_cap_prunes_no_row() {
+    let mut h = Harness::open().await;
+    h.setup().await;
+    let verify = || OwnerVerification::Verify {
+        candidate_id: id("candidate"),
+        attempt_id: id("attempt"),
+    };
+    assert_eq!(h.owner(verify()).await, Outcome::Applied);
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    for n in 0..127 {
+        let stale = format!("stale-{n:03}");
+        db.execute(
+            "INSERT INTO verification_candidates VALUES (?1, '{\"task_id\":\"gone\"}')",
+            [&stale],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO verification_attempts VALUES (?1, 'gone', '{}')",
+            [&stale],
+        )
+        .unwrap();
+    }
+    drop(db);
+    h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
+        .await
+        .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
+    let register = OwnerVerification::Register {
+        id: id("candidate"),
+        task_id: TaskId::new("task").unwrap(),
+        snapshot: snapshot(),
+        environment_id: EnvironmentId::new("controlled-fixture").unwrap(),
+    };
+    let exists = |code: &str| Outcome::Rejected { code: code.into() };
+    assert_eq!(h.owner(register).await, exists("candidate_exists"));
+    assert_eq!(h.owner(verify()).await, exists("attempt_exists"));
+    h.engine.close().await.unwrap();
+    let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+    let count = |table: &str| -> i64 {
+        db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        count("verification_candidates"),
+        128,
+        "no stale candidate pruned"
+    );
+    assert_eq!(
+        count("verification_attempts"),
+        128,
+        "no orphan attempt pruned"
+    );
+}
+
 #[tokio::test]
 async fn unavailable_attempts_survive_restart_replay_and_revocation() {
     let mut h = Harness::open().await;
@@ -251,6 +535,7 @@ async fn unavailable_attempts_survive_restart_replay_and_revocation() {
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     assert_eq!(h.state().await, state);
     assert_eq!(h.engine.apply(request.clone()).await.unwrap(), first);
     assert_eq!(
@@ -735,6 +1020,7 @@ async fn storage_interruption_rolls_back_admission_and_operation_acknowledgement
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     let request = h.request(Command::OwnerVerification {
         action: OwnerVerification::Approve {
             baseline_id: draft().identity().unwrap(),
@@ -774,6 +1060,7 @@ async fn storage_interruption_rolls_back_admission_and_operation_acknowledgement
     h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
         .await
         .unwrap();
+    h.engine.start_owner_runtime().await.unwrap();
     assert_eq!(
         h.engine.apply(request).await.unwrap().outcome,
         Outcome::Applied
