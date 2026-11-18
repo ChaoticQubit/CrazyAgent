@@ -853,6 +853,7 @@ name = "crazyagent-win-sandbox"
 version = "2.4.2"
 dependencies = [
  "tempfile",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 
