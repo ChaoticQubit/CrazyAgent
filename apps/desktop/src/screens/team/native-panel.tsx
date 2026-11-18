@@ -218,8 +218,8 @@ export class NativeView implements Held {
   }
 
   /** Lets the owner's typed keys through to the view or not, per the Terminal input choice;
-   * each open is told once it has an id and again on every change. Input: whether keys go
-   * through. Output: none. */
+   * each open carries it, and an open view is told again on every change. Input: whether keys
+   * go through. Output: none. */
   setKeys(on: boolean): void {
     this.keys = on;
     this.tellKeys();
@@ -320,14 +320,14 @@ export class NativeView implements Held {
     assert(!covered || this.size !== null, "a covered open knows its size");
     if (screen) this.keepSize(screen);
     const rect = screen ? rectOf(screen) : { x: 0, y: 0, width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
-    const open: Opened = { id: null, ended: false, closed: false, liveAt: null, keys: true, send: () => false };
+    const open: Opened = { id: null, ended: false, closed: false, liveAt: null, keys: this.keys, send: () => false };
     open.send = jobQueue(() => this.stopTyping(open));
     this.open = open;
     this.told = covered;
     this.placed = `${rect.x},${rect.y},${rect.width},${rect.height}`;
     const events = new Channel<NativeEvent>((event) => this.heardEvent(open, event));
     const { terminal: name, pane } = this.key;
-    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered }).then((result) => {
+    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys }).then((result) => {
       if (open.closed) {
         if (result.kind === "ok" && !open.ended) void closeNativeTerminal(result.value);
         return;
