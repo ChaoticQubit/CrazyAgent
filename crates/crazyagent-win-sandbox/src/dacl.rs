@@ -1061,7 +1061,7 @@ mod tests {
         let added = with_allow(&acl(&[]), &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
             .unwrap()
             .unwrap();
-        assert_eq!(added, acl(&[entry.clone()]));
+        assert_eq!(added, acl(std::slice::from_ref(&entry)));
         let roomy = with_slack(&acl(&root), 12);
         let added = with_allow(&roomy, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
             .unwrap()
