@@ -55,6 +55,7 @@ gdkwayland-sys = "=0.18.2"
 x11-dl = "=2.21.0"
 wayland-client = "=0.31.15"
 wayland-backend = { version = "=0.3.17", features = ["client_system"] }
+wayland-protocols = { version = "=0.32.13", features = ["client"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 wgpu = "=25.0.2"
