@@ -129,14 +129,32 @@ pub struct Keeper {
     _release: std::sync::mpsc::SyncSender<()>,
 }
 
-/// Runs `start`, which forks a child, so the child outlives the calling thread and still
-/// ends with the engine (V243 P6). Input: the start. Output: what the start returned and
-/// its keeper, or the error that kept it from starting.
+/// Runs `start`, which forks a child, on a thread of its own that waits until the returned
+/// keeper drops, so the child outlives the calling thread and still ends with the engine
+/// (V243 P6). Input: the start, which may enter the gate. Output: what the start returned
+/// and its keeper, or the error that kept the thread or the child from starting.
 pub fn kept<T: Send + 'static>(
     start: impl FnOnce() -> io::Result<T> + Send + 'static,
 ) -> io::Result<(T, Keeper)> {
-    let (release, _released) = std::sync::mpsc::sync_channel(0);
-    Ok((start()?, Keeper { _release: release }))
+    assert!(
+        !HELD.get(),
+        "a kept start waits on a thread that already holds the spawn gate"
+    );
+    let (started_sender, started) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(0);
+    std::thread::Builder::new()
+        .name("spawn-keeper".to_owned())
+        .spawn(move || {
+            let result = start();
+            let holds = result.is_ok();
+            if started_sender.send(result).is_ok() && holds {
+                let _released = released.recv();
+            }
+        })?;
+    let result = started
+        .recv()
+        .map_err(|_| io::Error::other("spawn_keeper_lost"))??;
+    Ok((result, Keeper { _release: release }))
 }
 
 /// Starts a child through the gate and waits for it outside the gate.
