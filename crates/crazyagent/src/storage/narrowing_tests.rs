@@ -1,5 +1,8 @@
 use super::*;
+use crate::engine::owner::native_auth::NativeAuthScope;
+use crate::protocol::{ConfigId, CredentialRef};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::PathBuf;
 
 /// A private engine root of this user, as storage opens one.
 /// Output: the folder, removed when dropped.
