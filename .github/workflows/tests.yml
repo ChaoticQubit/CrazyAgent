@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
-      - name: Probe P2e which grant contained git needs for its cwd (call replay, mount manager, list on ancestors), then P2 and P3 contained latency
+      - name: Probe P2f option 1, the mount manager read for app containers, with user-owned repos, one refused mount change, then P2 and P3 contained latency
         shell: pwsh
         timeout-minutes: 50
         run: ./.github/farm/probe-git-unc.ps1

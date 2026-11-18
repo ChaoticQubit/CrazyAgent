@@ -246,15 +246,14 @@ public static class NulAccess {
     public static string Sddl(string path, bool folder) {
         using (SafeFileHandle handle = Open(path, folder)) { return Read(handle).GetSddlForm(AccessControlSections.Access); }
     }
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    static extern int DeriveAppContainerSidFromAppContainerName(string name, out IntPtr sid);
-    [DllImport("advapi32.dll")]
-    static extern IntPtr FreeSid(IntPtr sid);
-    public static string ContainerSid(string name) {
-        IntPtr sid;
-        int result = DeriveAppContainerSidFromAppContainerName(name, out sid);
-        if (result != 0) { throw new Win32Exception(result); }
-        try { return new SecurityIdentifier(sid).Value; } finally { FreeSid(sid); }
+    public static string Owner(string path, bool folder) {
+        using (SafeFileHandle handle = Open(path, folder)) {
+            uint needed;
+            GetKernelObjectSecurity(handle, 1, null, 0, out needed);
+            byte[] bytes = new byte[needed];
+            if (!GetKernelObjectSecurity(handle, 1, bytes, needed, out needed)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+            return new RawSecurityDescriptor(bytes, 0).Owner.Value;
+        }
     }
     public static string Grant(string path, bool folder, int mask) {
         return Set(path, folder, "S-1-15-2-1", mask);
@@ -307,60 +306,43 @@ $userProfile = Write-Profile 'p2-user' 'crazyagent.probe-git-user' @() @($userWo
 $latProfile = Write-Profile 'p3-lat' 'crazyagent.probe-lat' @() @("$base\lat")
 Set-Variant $emptyConfig
 
-$replay = "$base\io\cwdprobe.exe"
-$built = ((& rustc --edition 2021 -O -o $replay "$ws\.github\farm\cwdprobe.rs" 2>&1 | Out-String) -replace '\s+', ' ').Trim()
-foreach ($folder in @("$base\work\bin", "$userWork\bin")) {
-    New-Item -ItemType Directory -Force -Path $folder | Out-Null
-    Copy-Item -LiteralPath $replay -Destination $folder -Force -ErrorAction SilentlyContinue
+$tools = "$base\work\bin"
+New-Item -ItemType Directory -Force -Path $tools | Out-Null
+foreach ($tool in @('cwdprobe', 'mountprobe')) {
+    $built = ((& rustc --edition 2021 -O -o "$base\io\$tool.exe" "$ws\.github\farm\$tool.rs" 2>&1 | Out-String) -replace '\s+', ' ').Trim()
+    Copy-Item -LiteralPath "$base\io\$tool.exe" -Destination $tools -Force -ErrorAction SilentlyContinue
+    Write-Host "F $tool built=$(Test-Path "$tools\$tool.exe") [$built]"
 }
-Write-Host "E replay built=$(Test-Path $replay) [$built]"
 
 $root = 'C:\'
 $packages = 'S-1-15-2-1'
 $mount = '\\.\MountPointManager'
-$rootEntry = 0x00100080
-$listMask = 0x001000A1
-$places = @(
-    [pscustomobject]@{ Name = 'probe-root'; Profile = $gitProfile; Container = 'crazyagent.probe-git'; Repo = $clean; Replay = "$base\work\bin\cwdprobe.exe"; Middles = @($base) },
-    [pscustomobject]@{ Name = 'user-profile'; Profile = $userProfile; Container = 'crazyagent.probe-git-user'; Repo = $userClean; Replay = "$userWork\bin\cwdprobe.exe"; Middles = @((Split-Path $env:USERPROFILE), $env:USERPROFILE) },
-    [pscustomobject]@{ Name = 'lat'; Profile = $latProfile; Container = 'crazyagent.probe-lat'; Repo = ''; Replay = ''; Middles = @($base) }
-)
-foreach ($place in $places) { $place | Add-Member -NotePropertyName Sid -NotePropertyValue ([NulAccess]::ContainerSid($place.Container)) }
-$middles = @($places | ForEach-Object { $_.Middles } | Sort-Object -Unique)
-Write-Host "E sids $(($places | ForEach-Object { "$($_.Container)=$($_.Sid)" }) -join ' ')"
-Write-Host "E mount-manager dacl-before $(try { [NulAccess]::Sddl($mount, $false) } catch { "unread: $($_.Exception.Message)" })"
-foreach ($path in @($root) + $middles) { Write-Host "E dacl-before $path $([NulAccess]::Sddl($path, $true))" }
+$userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 
 function Set-Access([string]$path, [bool]$folder, [string]$sid, [int]$mask) {
     try { [NulAccess]::Set($path, $folder, $sid, $mask) } catch { "set failed: $($_.Exception.Message)" }
 }
 
-function Set-State($state) {
-    $null = Set-Access $root $true $packages $state.Root
-    foreach ($middle in $middles) { $null = Set-Access $middle $true $packages $state.Middle }
-    $mountLine = Set-Access $mount $false $packages $state.Mount
-    $own = if ($state.Own) { $listMask } else { 0 }
-    foreach ($place in $places) {
-        $null = Set-Access $root $true $place.Sid $own
-        foreach ($middle in $place.Middles) { $null = Set-Access $middle $true $place.Sid $own }
-    }
-    foreach ($path in @($root) + $middles) { Write-Host "E $($state.Name) acl $path $([NulAccess]::Sddl($path, $true))" }
-    Write-Host "E $($state.Name) acl mount-manager $mountLine"
+function Get-Owner([string]$path) {
+    try { [NulAccess]::Owner($path, $true) } catch { "unread: $($_.Exception.Message)" }
 }
 
-function Test-State($state) {
-    foreach ($place in @($places | Where-Object { $_.Replay -ne '' })) {
-        Push-Location -LiteralPath $place.Repo
-        $calls = Invoke-Contained $place.Profile $place.Replay @()
-        Pop-Location
-        Write-Host "E $($state.Name) $($place.Name) replay exit=$($calls.Exit) [$((@(($calls.Output -split "`r?`n") | Where-Object { $_.Trim() -ne '' })) -join ' | ')]"
-    }
+function Set-UserOwner([string]$path) {
+    $result = ((& icacls $path /setowner "*$userSid" /T /C /L /Q 2>&1 | Out-String) -replace '\s+', ' ').Trim()
+    Write-Host "F owner $path folder=$(Get-Owner $path) git=$(Get-Owner "$path\.git") [$result]"
+}
+
+function Format-Lines($result) {
+    "exit=$($result.Exit) [$((@(($result.Output -split "`r?`n") | Where-Object { $_.Trim() -ne '' })) -join ' | ')]"
+}
+
+function Test-Clean([string]$tag) {
     $exits = @()
     $failed = 0
     $first = ''
     $listed = $false
     foreach ($step in $steps) {
-        $result = Invoke-ContainedGit $gitProfile (Get-GitArgs $clean (Get-StepArgs $step "$base\work\b-$($state.Name).bundle"))
+        $result = Invoke-ContainedGit $gitProfile (Get-GitArgs $clean (Get-StepArgs $step "$base\work\b-mask-$tag.bundle"))
         $exits += "$step=$($result.Exit)"
         if ($step -eq 'ls-files') { $listed = $result.Exit -eq 0 -and $result.Output -match 'b\.txt' }
         if ($result.Exit -ne 0) {
@@ -370,39 +352,44 @@ function Test-State($state) {
     }
     $user = Invoke-ContainedGit $userProfile (Get-GitArgs $userClean (Get-StepArgs 'ls-files' ''))
     $userListed = $user.Exit -eq 0 -and $user.Output -match 'b\.txt'
-    Write-Host "E $($state.Name) probe-root $($exits -join ' ') lists-b=$listed first-failure=[$first]"
-    Write-Host "E $($state.Name) user-profile ls-files=$($user.Exit) lists-b=$userListed out=[$((($user.Output -replace '\s+', ' ').Trim()))]"
+    Write-Host "F mask $tag probe-root $($exits -join ' ') lists-b=$listed first-failure=[$first]"
+    Write-Host "F mask $tag user-profile ls-files=$($user.Exit) lists-b=$userListed out=[$((($user.Output -replace '\s+', ' ').Trim()))]"
     $listed -and $failed -eq 0 -and $userListed
 }
 
-Push-Location -LiteralPath $clean
-$ownerCalls = Invoke-Owner $replay @()
-Pop-Location
-Write-Host "E owner probe-root replay exit=$($ownerCalls.Exit) [$((@(($ownerCalls.Output -split "`r?`n") | Where-Object { $_.Trim() -ne '' })) -join ' | ')]"
+Write-Host "F user $userSid"
+foreach ($repo in @($clean, $userClean) + @($items.Keys | ForEach-Object { "$base\work\r-$_" })) { Set-UserOwner $repo }
+Write-Host "F root $(Set-Access $root $true $packages 0x00100080)"
+Write-Host "F mount-manager dacl-before $(try { [NulAccess]::Sddl($mount, $false) } catch { "unread: $($_.Exception.Message)" })"
 
-$states = @(
-    [pscustomobject]@{ Name = 'S0-admin-step-root'; Root = $rootEntry; Middle = 0; Mount = 0; Own = $false },
-    [pscustomobject]@{ Name = 'S1-mount-manager'; Root = $rootEntry; Middle = 0; Mount = 0x00120089; Own = $false },
-    [pscustomobject]@{ Name = 'S2-list-every-ancestor'; Root = $listMask; Middle = $listMask; Mount = 0; Own = $false },
-    [pscustomobject]@{ Name = 'S3-root-entry-middle-list'; Root = $rootEntry; Middle = $listMask; Mount = 0; Own = $false },
-    [pscustomobject]@{ Name = 'S4-root-list-no-middle'; Root = $listMask; Middle = 0; Mount = 0; Own = $false },
-    [pscustomobject]@{ Name = 'S5-own-container-list'; Root = $rootEntry; Middle = 0; Mount = 0; Own = $true }
-)
-$working = @()
-foreach ($state in $states) {
-    Set-State $state
-    if (Test-State $state) { $working += $state.Name }
+$kept = $null
+foreach ($mask in @(0x00100080, 0x00120089)) {
+    $tag = '0x{0:x6}' -f $mask
+    Write-Host "F mask $tag mount-manager $(Set-Access $mount $false $packages $mask)"
+    Push-Location -LiteralPath $clean
+    $calls = Invoke-Contained $gitProfile "$tools\cwdprobe.exe" @()
+    $mounts = Invoke-Contained $gitProfile "$tools\mountprobe.exe" @('query')
+    $change = Invoke-Contained $gitProfile "$tools\mountprobe.exe" @('create', 'Q')
+    Pop-Location
+    Write-Host "F mask $tag replay $(Format-Lines $calls)"
+    Write-Host "F mask $tag mount-query $(Format-Lines $mounts)"
+    Write-Host "F mask $tag mount-change $(Format-Lines $change)"
+    if (Test-Clean $tag) {
+        $kept = $mask
+        break
+    }
 }
-Write-Host "E WORKING [$($working -join ',')]"
-$preference = @('S0-admin-step-root', 'S1-mount-manager', 'S3-root-entry-middle-list', 'S4-root-list-no-middle', 'S5-own-container-list', 'S2-list-every-ancestor')
-$keep = @($preference | Where-Object { $working -contains $_ } | ForEach-Object { $name = $_; $states | Where-Object { $_.Name -eq $name } } | Select-Object -First 1)
-if ($keep.Count -eq 1) {
-    Set-State $keep[0]
-    Write-Host "E KEPT $($keep[0].Name) for P2 and P3"
+if ($null -eq $kept) {
+    Write-Host 'F KEPT none, 0x120089 left in place for P2 and P3'
 } else {
-    Set-State $states[0]
-    Write-Host 'E KEPT none, S0 restored for P2 and P3'
+    Write-Host "F KEPT $('0x{0:x6}' -f $kept) for P2 and P3"
 }
+
+Push-Location -LiteralPath $clean
+$ownerChange = Invoke-Owner "$base\io\mountprobe.exe" @('create', 'Q')
+Pop-Location
+Write-Host "F owner-control mount-change $(Format-Lines $ownerChange)"
+Write-Host "F owner-control cleanup $(((& mountvol Q: /D 2>&1 | Out-String) -replace '\s+', ' ').Trim()) exit=$LASTEXITCODE"
 
 $chosen = $null
 foreach ($variant in @($emptyConfig, 'NUL')) {
@@ -444,6 +431,7 @@ if ($gitWorks) {
 
 & $git clone -q $ws "$base\lat\repo"
 $latRepo = "$base\lat\repo"
+Set-UserOwner $latRepo
 $latFiles = @(& $git -C $latRepo ls-files).Count
 $latArgs = Get-GitArgs $latRepo (Get-StepArgs 'ls-files' '')
 $probe = Invoke-ContainedGit $latProfile $latArgs
