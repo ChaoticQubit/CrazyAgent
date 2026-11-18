@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use gtk::gdk::keys::Key;
 use gtk::gdk::keys::constants as key;
@@ -10,7 +10,7 @@ use gtk::prelude::*;
 use super::clip::{self, Board, Clip};
 use super::keys;
 use super::signals::Handlers;
-use super::surface::Rect;
+use super::surface::{Rect, page_bounds};
 use crate::native_term::event::{MouseKind, Sink, ViewEvent};
 use crate::native_term::pane::Input;
 
@@ -85,24 +85,26 @@ pub fn primary_paste(focus: Focus, placed: bool, text: Option<String>) -> Option
 }
 
 /// Where keyboard focus stands for one view: whether it holds native focus, whether its
-/// toplevel has keyboard focus and whether a page element covers it. Keys go to the view
-/// only while it is active: native, in a focused toplevel and uncovered. A cover drops
-/// native focus, which only the page gives back, as on macOS.
+/// toplevel has keyboard focus, whether a page element covers it and whether its rectangle
+/// shows inside the page. Keys go to the view only while it is active: native, in a focused
+/// toplevel, uncovered and on screen. A cover or going off screen drops native focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Focus {
     native: bool,
     toplevel: bool,
     covered: bool,
+    shown: bool,
 }
 
 impl Focus {
-    /// A new view's focus: not native and uncovered. Input: whether the toplevel has
-    /// keyboard focus. Output: the focus.
+    /// A new view's focus: not native, uncovered and not on screen. Input: whether the
+    /// toplevel has keyboard focus. Output: the focus.
     pub const fn new(toplevel: bool) -> Focus {
         Focus {
             native: false,
             toplevel,
             covered: false,
+            shown: false,
         }
     }
 
@@ -121,10 +123,10 @@ impl Focus {
         self.covered
     }
 
-    /// Gives or takes native focus; a covered view refuses it. Input: on or off. Output:
-    /// the new activity when it changed.
+    /// Gives or takes native focus; a covered view or one off screen refuses it. Input: on
+    /// or off. Output: the new activity when it changed.
     pub fn native(&mut self, on: bool) -> Option<bool> {
-        self.change(|focus| focus.native = on && !focus.covered)
+        self.change(|focus| focus.native = on && !focus.covered && focus.shown)
     }
 
     /// Notes the toplevel gaining or losing keyboard focus. Input: on or off. Output: the
@@ -146,14 +148,16 @@ impl Focus {
     /// screen drops native focus, which only a click or the host gives back. Input: shown
     /// or not. Output: the new activity when it changed.
     pub fn shown(&mut self, shown: bool) -> Option<bool> {
-        let _ = shown;
-        None
+        self.change(|focus| {
+            focus.shown = shown;
+            focus.native &= shown;
+        })
     }
 
     fn change(&mut self, edit: impl FnOnce(&mut Focus)) -> Option<bool> {
         let before = self.active();
         edit(self);
-        assert!(!(self.covered && self.native));
+        assert!(!(self.native && (self.covered || !self.shown)));
         let after = self.active();
         (before != after).then_some(after)
     }
@@ -450,6 +454,39 @@ fn scroll_dy(event: &gdk::Event) -> (f64, bool) {
     (dy, touchpad)
 }
 
+/// The view of one toplevel that holds native focus: a view taking native focus releases
+/// the one before, so keys go to one view per toplevel, whatever order the views' handlers
+/// run in.
+struct Owner {
+    view: RefCell<Weak<Inner>>,
+}
+
+thread_local! {
+    /// Each toplevel's native focus owner, while a view of that toplevel lives.
+    static OWNERS: RefCell<Vec<(WeakRef<gtk::Window>, Weak<Owner>)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The native focus owner every view of a toplevel shares. Input: the toplevel. Output:
+/// the owner.
+fn owner_of(toplevel: &gtk::Window) -> Rc<Owner> {
+    OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        owners.retain(|(window, owner)| window.upgrade().is_some() && owner.strong_count() > 0);
+        let found = owners
+            .iter()
+            .find(|(window, _)| window.upgrade().as_ref() == Some(toplevel))
+            .and_then(|(_, owner)| owner.upgrade());
+        found.unwrap_or_else(|| {
+            let owner = Rc::new(Owner {
+                view: RefCell::new(Weak::new()),
+            });
+            owners.push((toplevel.downgrade(), Rc::downgrade(&owner)));
+            owner
+        })
+    })
+}
+
 /// The state one view's signal handlers share.
 struct Inner {
     id: u64,
@@ -457,6 +494,8 @@ struct Inner {
     im: gtk::IMMulticontext,
     focus: Cell<Focus>,
     toplevel: gtk::Window,
+    area: gtk::Widget,
+    owner: Rc<Owner>,
     page: RefCell<Option<WeakRef<gtk::Widget>>>,
     pointer: RefCell<Pointer>,
     double: DoubleClick,
@@ -469,17 +508,25 @@ impl Inner {
         (self.sink)(self.id, event);
     }
 
-    /// Applies a focus change: GTK focus leaves the page before the view's input method
-    /// takes focus, the new focus is stored before a lost activity resets the input
-    /// method (so a commit the reset makes is dropped), and a cover drops a held press.
-    /// Inputs: the change and whether losing native focus gives GTK focus back to the
-    /// widget that had it. Output: none.
-    fn moving(&self, change: impl FnOnce(&mut Focus) -> Option<bool>, restore: bool) {
+    /// Applies a focus change: taking native focus releases the toplevel's other native
+    /// view, GTK focus leaves the page before the input method takes focus, and the focus
+    /// is stored before a lost activity resets the input method. Inputs: the change and
+    /// whether losing native focus gives GTK focus back. Output: the widget to give it back
+    /// to, when native focus was lost without giving it back.
+    fn moving(
+        self: &Rc<Self>,
+        change: impl FnOnce(&mut Focus) -> Option<bool>,
+        restore: bool,
+    ) -> Option<WeakRef<gtk::Widget>> {
         let before = self.focus.get();
         let mut next = before;
         let changed = change(&mut next);
         if !before.is_native() && next.is_native() {
+            let handed = self.supersede();
             self.take_page_focus();
+            if self.page.borrow().is_none() {
+                *self.page.borrow_mut() = handed;
+            }
         }
         self.focus.set(next);
         if next.is_covered() && !before.is_covered() {
@@ -494,11 +541,47 @@ impl Inner {
             self.send(ViewEvent::Focus(active));
         }
         if before.is_native() && !next.is_native() {
+            self.disown();
             let page = self.page.borrow_mut().take();
-            if restore {
-                self.give_page_focus(page);
+            if !restore {
+                return page;
             }
+            self.give_page_focus(page);
         }
+        None
+    }
+
+    /// Makes this view its toplevel's native focus owner and releases the view that was,
+    /// without giving GTK focus back. Output: the widget the released view would have given
+    /// it back to.
+    fn supersede(self: &Rc<Self>) -> Option<WeakRef<gtk::Widget>> {
+        let previous = self.owner.view.replace(Rc::downgrade(self)).upgrade();
+        let previous = previous.filter(|previous| !Rc::ptr_eq(previous, self))?;
+        let handed = previous.moving(|f| f.native(false), false);
+        assert!(!previous.focus.get().is_native());
+        assert!(Weak::ptr_eq(
+            &self.owner.view.borrow(),
+            &Rc::downgrade(self)
+        ));
+        handed
+    }
+
+    /// Stops being the toplevel's native focus owner, if this view is. Output: none.
+    fn disown(self: &Rc<Self>) {
+        let owning = Weak::ptr_eq(&self.owner.view.borrow(), &Rc::downgrade(self));
+        if owning {
+            *self.owner.view.borrow_mut() = Weak::new();
+        }
+    }
+
+    /// Notes whether the view's rectangle shows inside the page now; going off screen
+    /// releases native focus and gives GTK focus back to the page. Output: none.
+    fn reshow(self: &Rc<Self>) {
+        let rect = self.pointer.borrow().rect;
+        let shown = rect
+            .zip(page_bounds(&self.area, &self.toplevel))
+            .is_some_and(|(rect, bounds)| rect.visible(bounds).is_some());
+        self.moving(|f| f.shown(shown), true);
     }
 
     fn take_page_focus(&self) {
@@ -692,6 +775,8 @@ impl View {
             im,
             focus: Cell::new(Focus::new(toplevel.has_toplevel_focus())),
             toplevel: toplevel.clone(),
+            area: page.clone(),
+            owner: owner_of(toplevel),
             page: RefCell::new(None),
             pointer: RefCell::new(Pointer::new()),
             double: DoubleClick::from_settings(),
@@ -746,6 +831,10 @@ impl View {
             let me = me();
             page.connect_event(move |_, event| me.pointer_event(event))
         });
+        page_handlers.push({
+            let me = me();
+            page.connect_size_allocate(move |_, _| me.reshow())
+        });
         Ok(View {
             inner,
             handlers,
@@ -754,10 +843,13 @@ impl View {
         })
     }
 
-    /// Places the view's rectangle in the toplevel's logical coordinates, or unplaces it,
-    /// for the pointer. Input: the rectangle. Output: none.
+    /// Places the view's rectangle in the toplevel's logical coordinates, or unplaces it. A
+    /// view with no part of its rectangle inside the page, unplaced here or clipped away by
+    /// the page's size-allocate, releases native focus and gives GTK focus back to the
+    /// page; only a click or `focus` gives native focus back. Input: the rectangle.
     pub fn place(&self, rect: Option<Rect>) {
         self.inner.pointer.borrow_mut().place(rect);
+        self.inner.reshow();
     }
 
     /// Gives or takes native focus, as a click in the host rectangle or the page asks;
@@ -776,11 +868,12 @@ impl View {
 
 impl Drop for View {
     /// Disconnects the toplevel, page and input method handlers, cancels any open preedit,
-    /// releases the context and gives GTK focus back to the page if the view held native
-    /// focus. Output: none.
+    /// releases the context and, if the view held native focus, stops owning it and gives
+    /// GTK focus back to the page. Output: none.
     fn drop(&mut self) {
         let inner = &self.inner;
         let native = inner.focus.get().is_native();
+        inner.disown();
         self.handlers.disconnect();
         self.page_handlers.disconnect();
         if let Some(commit) = self.commit.take() {

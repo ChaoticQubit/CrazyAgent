@@ -487,6 +487,26 @@ struct Placement {
     part: Option<Rect>,
 }
 
+/// The page widget's area in its toplevel's logical pixels, inside the toplevel, which a
+/// child's crop and a view's focus both read. Inputs: the page and the toplevel. Output:
+/// the area, or none while the page is not realized or has no area.
+pub fn page_bounds(page: &gtk::Widget, toplevel: &gtk::Window) -> Option<Rect> {
+    let (x, y) = page.translate_coordinates(toplevel, 0, 0)?;
+    let area = Rect {
+        x,
+        y,
+        w: page.allocated_width(),
+        h: page.allocated_height(),
+    };
+    let inside = Rect {
+        x: 0,
+        y: 0,
+        w: toplevel.allocated_width(),
+        h: toplevel.allocated_height(),
+    };
+    area.visible(inside)
+}
+
 /// What a child shows of its rectangle: only the part inside the webview's area, since a
 /// Wayland subsurface is not clipped to its toplevel. The page's size-allocate handler
 /// shares it and re-clips with no host call, as a window shrink sends no new page rect.
@@ -502,20 +522,7 @@ impl Crop {
     /// The webview's area in the toplevel's logical pixels, inside the toplevel. Output: it,
     /// or none while the page is not realized or has no area.
     fn bounds(&self) -> Option<Rect> {
-        let (x, y) = self.page.translate_coordinates(&self.toplevel, 0, 0)?;
-        let page = Rect {
-            x,
-            y,
-            w: self.page.allocated_width(),
-            h: self.page.allocated_height(),
-        };
-        let toplevel = Rect {
-            x: 0,
-            y: 0,
-            w: self.toplevel.allocated_width(),
-            h: self.toplevel.allocated_height(),
-        };
-        page.visible(toplevel)
+        page_bounds(&self.page, &self.toplevel)
     }
 
     /// Shows the child's part inside the webview while on screen, else nothing: X11 shapes and
