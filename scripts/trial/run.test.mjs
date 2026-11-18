@@ -13,7 +13,8 @@ import { mask, options, renderPrompt, seed } from "./run.mjs";
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const RUN = join(TRIAL, "run.mjs");
 const BUILD = "32c3edf6";
-const QLMANAGE_MAC_ONLY = { skip: process.platform !== "darwin" && "the report step renders the TUI GIF frames with qlmanage (Quick Look), which only macOS ships" };
+const GIF_TOOLS_MISSING = ["qlmanage", "ffmpeg"].filter((tool) => spawnSync("/bin/sh", ["-c", "command -v \"$1\"", "sh", tool], { stdio: "ignore" }).status !== 0);
+const GIF_TOOLS_PRESENT = { skip: GIF_TOOLS_MISSING.length > 0 && `the report step builds the TUI GIF with qlmanage (Quick Look) and ffmpeg, and this machine has no ${GIF_TOOLS_MISSING.join(" and no ")}` };
 const PS_PATH_MAC_ONLY = { skip: process.platform !== "darwin" && "the relaunched app is matched by the full program path /bin/ps -o comm= prints, which only macOS gives" };
 
 const SECRETS = {
@@ -257,7 +258,7 @@ test("renderPrompt fills every project placeholder and refuses an unknown one", 
   assert.throws(() => renderPrompt("{{PROJECT}} and {{OTHER}}", "/p"), /OTHER/);
 });
 
-test("a full fixture run seeds, records, launches, writes the manifest, then audits and reports", QLMANAGE_MAC_ONLY, async () => {
+test("a full fixture run seeds, records, launches, writes the manifest, then audits and reports", GIF_TOOLS_PRESENT, async () => {
   const paths = fixture("ca-trial-run-");
   const result = await runner(args(paths), paths.env);
   assert.equal(result.code, 0, result.out);
