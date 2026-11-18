@@ -356,32 +356,37 @@ impl Surfaces {
     /// Crops the surface to the part on screen inside the buffer its next commit carries and
     /// places the subsurface there, all pending until the next commits. With no such part
     /// the surface is one pixel under the toplevel's surface at the page's top left, where
-    /// the opaque page covers it. The crop never reaches past that buffer: wp_viewport's
-    /// out_of_buffer error would end GTK's connection. Inputs: the placement, the buffer,
-    /// none before the first present, and the page's area. Output: none.
+    /// the opaque page covers it. The crop never reaches past that buffer, since
+    /// wp_viewport's out_of_buffer error would end GTK's connection, and before the first
+    /// buffer only the place is sent. Inputs: the placement, that buffer, none before the
+    /// first present, and the page's area. Output: none.
     fn crop(&self, placement: &Placement, buffer: Option<Buffer>, bounds: Option<Rect>) {
         let rect = placement.rect;
-        let content = buffer.map_or(rect, |buffer| buffer.at(rect.x, rect.y));
+        let shown = placement.part.and_then(|part| match buffer {
+            Some(buffer) => part.visible(buffer.at(rect.x, rect.y)),
+            None => Some(part),
+        });
         if let Some(buffer) = buffer {
-            self.surface.set_buffer_scale(buffer.scale);
-        }
-        match placement.part.and_then(|part| part.visible(content)) {
-            Some(shown) => {
+            let (source, size) = shown.map_or(((0, 0), (1, 1)), |shown| {
                 assert!(shown.x >= rect.x && shown.y >= rect.y);
-                self.viewport.set_source(
-                    f64::from(shown.x - rect.x),
-                    f64::from(shown.y - rect.y),
-                    f64::from(shown.w),
-                    f64::from(shown.h),
-                );
-                self.viewport.set_destination(shown.w, shown.h);
+                ((shown.x - rect.x, shown.y - rect.y), (shown.w, shown.h))
+            });
+            self.surface.set_buffer_scale(buffer.scale);
+            self.viewport.set_source(
+                f64::from(source.0),
+                f64::from(source.1),
+                f64::from(size.0),
+                f64::from(size.1),
+            );
+            self.viewport.set_destination(size.0, size.1);
+        }
+        match shown {
+            Some(shown) => {
                 self.subsurface.set_position(shown.x, shown.y);
                 self.subsurface.place_above(&self.parent);
             }
             None => {
                 let (x, y) = bounds.map_or((0, 0), |bounds| (bounds.x, bounds.y));
-                self.viewport.set_source(0.0, 0.0, 1.0, 1.0);
-                self.viewport.set_destination(1, 1);
                 self.subsurface.set_position(x, y);
                 self.subsurface.place_below(&self.parent);
             }
@@ -555,14 +560,14 @@ impl Crop {
         }
     }
 
-    /// Crops a Wayland surface for the buffer the host is about to present, the rectangle's
-    /// size at its scale, so the present's commit carries both. Output: none.
-    fn drawing(&self) {
+    /// Crops a Wayland surface for the buffer the host is about to present, so the
+    /// present's commit carries both. Input: the buffer's size in device pixels, at least
+    /// one logical pixel each way. Output: none.
+    fn drawing(&self, size: (u32, u32)) {
         let mut placement = self.placement.get();
-        let (_, _, width, height) = placement.rect.device(placement.scale);
         let buffer = Buffer {
-            width,
-            height,
+            width: size.0,
+            height: size.1,
             scale: placement.scale,
         };
         placement.drawing = Some(buffer);
@@ -605,7 +610,7 @@ impl Child {
     /// Makes a child over a host rectangle of a mapped toplevel, shown and owing its first
     /// frame when a part of the rectangle is inside the page widget, the webview, which must
     /// be in that toplevel. Inputs: the toplevel, the page widget and the rectangle. Output:
-    /// the child, or `native_terminal_surface_unavailable`.
+    /// the child, or `native_terminal_surface_unavailable`, also when the connection broke.
     pub fn new(
         toplevel: &gtk::Window,
         page: &gtk::Widget,
@@ -679,6 +684,9 @@ impl Child {
             handlers,
             page_handlers,
         };
+        if child.pacing.get().is_gone() {
+            return Err(UNAVAILABLE);
+        }
         assert_eq!(
             child.pacing.get().ready(),
             child.crop.placement.get().part.is_some()
@@ -805,11 +813,12 @@ impl Child {
         pacing.ready()
     }
 
-    /// Notes a present about to happen, right before the host draws at `size`, to which the
-    /// host has resized the wgpu surface. On Wayland it asks for the frame callback that
-    /// the present's commit carries, and crops the surface for the new buffer in that same
-    /// commit. Output: none.
-    pub fn presenting(&mut self) {
+    /// Notes a present about to happen, right before the host draws into its wgpu surface.
+    /// On Wayland it asks for the frame callback that the present's commit carries, and
+    /// crops the surface for that buffer in the same commit, so the crop holds even before
+    /// the host resizes to `size`. Input: the wgpu surface's configured size in device
+    /// pixels. Output: none.
+    pub fn presenting(&mut self, size: (u32, u32)) {
         let mut pacing = self.pacing.get();
         pacing.presenting();
         self.pacing.set(pacing);
@@ -820,7 +829,7 @@ impl Child {
                 let _callback = wayland.surfaces.surface.frame(&wayland.queue.handle(), ());
             }
         }
-        self.crop.drawing();
+        self.crop.drawing(size);
     }
 
     /// Notes that the host's present went out. On Wayland it then commits the toplevel's
@@ -1283,8 +1292,9 @@ mod tests {
         shared: &mut Shared,
         surface: &mut Surface,
         frame: &Frame,
+        size: (u32, u32),
     ) -> f64 {
-        child.presenting();
+        child.presenting(size);
         let started = Instant::now();
         shared.draw(surface, frame).expect("a present");
         let took = ms(started);
@@ -1400,11 +1410,17 @@ mod tests {
     }
 
     /// Presents until the child has shown a frame, then lets the compositor show it.
-    /// Inputs: the child and its terminal.
-    fn show_frame(child: &mut Child, shared: &mut Shared, surface: &mut Surface, frame: &Frame) {
+    /// Inputs: the child, its terminal and the wgpu surface's size.
+    fn show_frame(
+        child: &mut Child,
+        shared: &mut Shared,
+        surface: &mut Surface,
+        frame: &Frame,
+        size: (u32, u32),
+    ) {
         for _ in 0..3 {
             wait_ready(child);
-            present(child, shared, surface, frame);
+            present(child, shared, surface, frame, size);
             child.changed();
         }
         pump_for(Duration::from_millis(200));
@@ -1450,7 +1466,8 @@ mod tests {
         };
         let mut child = Child::new(&window, page.upcast_ref(), rect).expect("a child surface");
         let (mut shared, mut surface, frame) = green_terminal(&child);
-        show_frame(&mut child, &mut shared, &mut surface, &frame);
+        let size = child.size();
+        show_frame(&mut child, &mut shared, &mut surface, &frame, size);
         clip_checkpoint("cropped", &child);
         assert_eq!(child.part(), part(100, 100));
 
@@ -1473,7 +1490,7 @@ mod tests {
         clip_checkpoint("none", &child);
 
         resize_page(&page, (400, 300));
-        show_frame(&mut child, &mut shared, &mut surface, &frame);
+        show_frame(&mut child, &mut shared, &mut surface, &frame, size);
         clip_checkpoint("back", &child);
         assert_eq!(child.part(), part(100, 100));
 
@@ -1514,12 +1531,13 @@ mod tests {
         };
         let mut child = Child::new(&window, page.upcast_ref(), placed).expect("a child surface");
         let (mut shared, mut surface, frame) = green_terminal(&child);
+        let size = child.size();
 
         let mut presents = Vec::with_capacity(FRAMES);
         let mut waits = Vec::with_capacity(FRAMES);
         while presents.len() < FRAMES {
             waits.push(wait_ready(&mut child));
-            presents.push(present(&mut child, &mut shared, &mut surface, &frame));
+            presents.push(present(&mut child, &mut shared, &mut surface, &frame, size));
             child.changed();
         }
         pump_for(Duration::from_millis(200));
@@ -1538,7 +1556,7 @@ mod tests {
 
         child.show();
         let shown_wait = wait_ready(&mut child);
-        let shown_present = present(&mut child, &mut shared, &mut surface, &frame);
+        let shown_present = present(&mut child, &mut shared, &mut surface, &frame, size);
         pump_for(Duration::from_millis(200));
         checkpoint("shown", &child);
 
