@@ -1740,7 +1740,6 @@ fn open_up<P: rustix::path::Arg + Copy>(
     name: P,
 ) -> rustix::io::Result<()> {
     use rustix::fs::{AtFlags, FileType, Mode};
-    use std::os::fd::AsFd;
     #[cfg(all(test, target_os = "macos"))]
     open_up_step(OpenUpPoint::Start, &name);
     let found = match rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW) {

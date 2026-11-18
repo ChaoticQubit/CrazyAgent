@@ -886,7 +886,7 @@ fn removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned() {
     let home = tempfile::tempdir().unwrap();
     let tmp = make_tmp(home.path()).unwrap();
     let socket = tmp.join("kept.sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let _listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     shut_and_pin(&tmp);
     let removed = remove_tmp_keeping(home.path(), "kept.sock");
     let names: Vec<_> = fs::read_dir(&tmp)
