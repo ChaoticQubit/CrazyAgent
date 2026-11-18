@@ -423,6 +423,9 @@ fn owner_only(program: &Path) -> Option<()> {
                 eprintln!("harness_version_owner_refused cause={step} code={code}");
             }
             BoundaryError::Profile(_) => eprintln!("harness_version_owner_refused cause=profile"),
+            BoundaryError::Unreached(_) => {
+                eprintln!("harness_version_owner_refused cause=unreached");
+            }
         })
         .ok()
 }
