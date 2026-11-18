@@ -9,6 +9,8 @@ mod screen;
 mod style;
 #[cfg(target_os = "macos")]
 mod view;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(unix)]
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};
