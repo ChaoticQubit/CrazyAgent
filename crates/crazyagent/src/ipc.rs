@@ -370,6 +370,65 @@ mod windows_tests {
         assert_eq!(entries(&root), ["pipes"]);
     }
 
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-sec3 #555 N1, leader 08:08): the pipes file carries a
+    /// medium label with no-write-up and no-read-up from its creation, in a root that holds no
+    /// label of its own, so no lower integrity process can open it to read, hold it and so
+    /// block the next start's rename.
+    #[test]
+    fn a_pipes_file_is_labelled_medium_no_read_up_in_an_unlabelled_root() {
+        let (_temp, root) = private_root();
+        let held = private::dir(&root).unwrap();
+        let root_label = private::facts(&held).unwrap().label;
+        assert_eq!(
+            root_label.map_or(Ok(None), |sacl| crazyagent_win_sandbox::dacl::label(&sacl)),
+            Ok(None)
+        );
+        drop(held);
+        publish(&root, "engine.sock").unwrap();
+        let file = private::read_only(&root.join("pipes")).unwrap();
+        let sacl = private::facts(&file)
+            .unwrap()
+            .label
+            .expect("a labelled pipes file");
+        assert_eq!(
+            crazyagent_win_sandbox::dacl::label(&sacl),
+            Ok(Some((0x2000, 0x3)))
+        );
+    }
+
+    /// D7 and #555 N1 in the engine's real root, the database store folder, whose label passes
+    /// to the files made in it: the pipes file still reads back the same and carries the
+    /// medium no-write-up no-read-up label.
+    #[test]
+    fn a_pipes_file_in_the_database_root_reads_back_labelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        drop(private::store_dir(&root, private::Store::Database).unwrap());
+        let published = publish(&root, "engine.sock").unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap(), published);
+        let file = private::read_only(&root.join("pipes")).unwrap();
+        let sacl = private::facts(&file)
+            .unwrap()
+            .label
+            .expect("a labelled pipes file");
+        assert_eq!(
+            crazyagent_win_sandbox::dacl::label(&sacl),
+            Ok(Some((0x2000, 0x3)))
+        );
+    }
+
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-code2 #554 N4, leader 08:08): a staged pipes file an
+    /// earlier start left behind, private to this user, is swept at the next publish, while a
+    /// file of any other name in the root is kept.
+    #[test]
+    fn a_staged_pipes_file_an_earlier_start_left_is_swept_at_publish() {
+        let (_temp, root) = private_root();
+        drop(private::secret_file(&root.join("pipes.0123456789abcdef.new")).unwrap());
+        drop(private::secret_file(&root.join("pipes.keep")).unwrap());
+        publish(&root, "engine.sock").unwrap();
+        assert_eq!(entries(&root), ["pipes", "pipes.keep"]);
+    }
+
     /// D7 (leader 07:46): a pipes file already in the root that another account owns is
     /// refused and left as it was, never replaced, and nothing is staged beside it.
     #[test]

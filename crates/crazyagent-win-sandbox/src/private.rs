@@ -5,8 +5,8 @@ use crate::dacl::{
 
 #[cfg(windows)]
 pub use crate::win::private::{
-    check, dir, facts, file, free, identity, lock, read_only, repair, same, store_dir, sync_folder,
-    unlock, user_sid,
+    check, dir, facts, file, free, identity, lock, read_only, repair, same, secret_file, store_dir,
+    sync_folder, unlock, user_sid,
 };
 
 const FULL_ACCESS: u32 = 0x001f_01ff;
@@ -123,4 +123,11 @@ pub fn label_list(store: Store) -> Vec<u8> {
         Store::Database => FILES_IN_FOLDER,
     };
     labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP, flags)
+}
+
+/// The system list a secret file is created with (rv-sec3 #555 N1): the same medium label
+/// with no-write-up and no-read-up, on the file itself with nothing to pass on, so it holds
+/// in a folder that carries no label. Output: the bytes.
+pub fn secret_file_label() -> Vec<u8> {
+    labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP, 0)
 }
