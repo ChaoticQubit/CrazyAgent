@@ -16,11 +16,6 @@ pub const GRID_MIN: usize = SIZE_MIN as usize;
 
 const _: () = assert!(GRID_MAX == 1000 && GRID_MIN == 2);
 
-/// The most wheel lines one event turns into keys or reports.
-const WHEEL_LINES_MAX: u32 = 50;
-
-const _: () = assert!(WHEEL_LINES_MAX as usize * 16 <= INPUT_BYTES_MAX);
-
 /// The xterm modifier bits a named key carries: Shift, Alt (Option) and Control.
 pub const SHIFT: u8 = 1;
 pub const ALT: u8 = 2;
@@ -273,9 +268,11 @@ impl Pane {
 }
 
 impl Pane {
-    /// Applies one input: keys and text ask for bytes, the wheel and mouse ask for reports
-    /// when the pane reads the mouse (else they scroll and select locally), a paste asks for
-    /// the owner's text unchanged. Input: the input. Output: what the host must do.
+    /// Applies one input, as the xterm panel does: keys and text ask for bytes; the wheel asks
+    /// for reports when the pane reads the mouse, for one arrow on the alternate screen, else
+    /// scrolls locally, and reaches the agent even with keys off; presses and drags ask for
+    /// reports only with keys on, else select locally; a paste asks for the owner's text
+    /// unchanged. Input: the input. Output: what the host must do.
     pub fn apply(&mut self, input: Input) -> Action {
         if !self.ready() {
             return Action::Nothing;
@@ -363,19 +360,13 @@ impl Pane {
         if lines == 0 {
             return Action::Nothing;
         }
-        let count = lines.unsigned_abs().min(WHEEL_LINES_MAX);
-        if self.reads_mouse(false) {
-            let report = codec::sgr_wheel(lines > 0, cell.0, cell.1);
-            let bytes: Vec<u8> = (0..count).flat_map(|_| report.iter().copied()).collect();
+        if self.mouse_mode() {
+            let bytes = codec::sgr_wheel(lines > 0, cell.0, cell.1);
             return Action::Input { bytes, wheel: true };
         }
-        if self.keys
-            && mode.contains(TermMode::ALT_SCREEN)
-            && mode.contains(TermMode::ALTERNATE_SCROLL)
-        {
+        if mode.contains(TermMode::ALT_SCREEN) {
             let key = if lines > 0 { Named::Up } else { Named::Down };
-            let arrow = named_bytes(key, 0, mode.contains(TermMode::APP_CURSOR));
-            let bytes: Vec<u8> = (0..count).flat_map(|_| arrow.iter().copied()).collect();
+            let bytes = named_bytes(key, 0, mode.contains(TermMode::APP_CURSOR));
             return Action::Input { bytes, wheel: true };
         }
         let Some(term) = self.term.as_mut() else {

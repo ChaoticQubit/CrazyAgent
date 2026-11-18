@@ -130,18 +130,49 @@ fn the_wheel_in_mouse_mode_asks_for_wheel_reports() {
 }
 
 #[test]
-fn the_wheel_on_the_alternate_screen_sends_arrows_as_wheel_keys() {
-    let mut pane = attached(b"\x1b[?1049h\x1b[?1007h");
+fn the_wheel_on_the_alternate_screen_sends_one_arrow_by_cursor_mode() {
+    let mut pane = attached(b"\x1b[?1049h");
+    let wheel = |lines| Input::Wheel {
+        lines,
+        cell: (0, 0),
+    };
     assert_eq!(
-        pane.apply(Input::Wheel {
-            lines: -2,
-            cell: (0, 0)
-        }),
+        pane.apply(wheel(-3)),
         Action::Input {
-            bytes: b"\x1bOB\x1bOB".to_vec(),
+            bytes: b"\x1b[B".to_vec(),
             wheel: true
         }
     );
+    assert!(pane.on_output(b"\x1b[?1h"));
+    assert_eq!(
+        pane.apply(wheel(2)),
+        Action::Input {
+            bytes: b"\x1bOA".to_vec(),
+            wheel: true
+        }
+    );
+}
+
+#[test]
+fn with_keys_off_the_wheel_still_reaches_the_agent_but_presses_select() {
+    let mut pane = attached(b"\x1b[?1000h\x1b[?1006h");
+    pane.set_keys(false);
+    assert_eq!(
+        pane.apply(Input::Wheel {
+            lines: 4,
+            cell: (0, 0)
+        }),
+        Action::Input {
+            bytes: codec::sgr_wheel(true, 0, 0),
+            wheel: true
+        }
+    );
+    let press = Input::Press {
+        cell: (0, 0),
+        option: false,
+        clicks: 1,
+    };
+    assert_eq!(pane.apply(press), Action::Local);
 }
 
 #[test]
