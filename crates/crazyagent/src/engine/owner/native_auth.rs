@@ -1043,7 +1043,10 @@ pub(crate) fn outcome_unknown() -> EngineError {
     failure("native_auth_outcome_unknown_read_same_operation")
 }
 
-fn public_error(code: &str) -> bool {
+/// Whether a refusal is one every client shows by name: storage's own answers and the
+/// native-auth refusals. Any other error reaches the client as outcome unknown.
+/// Input: the code. Output: the verdict.
+pub(crate) fn public_error(code: &str) -> bool {
     crate::storage::storage_answer(code)
         || matches!(
             code,

@@ -524,7 +524,7 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
     let control = revocation(runtime, OwnerClientKind::Desktop, "revoke-before-add");
     let (revoked, registration) = runtime
         .engine
-        .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
+        .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, None, reply))
         .await
         .unwrap();
     runtime
@@ -820,23 +820,225 @@ async fn a_revocation_storage_refuses_still_refuses_the_client_until_a_newer_rea
     owner.stop().await;
 }
 
+/// The database path the engine gave `Storage::open`, the key of every storage hold.
+/// Input: the engine. Output: the path.
+fn database(owner: &Usage) -> PathBuf {
+    std::fs::canonicalize(owner.root.path())
+        .unwrap()
+        .join("engine.db")
+}
+
+/// The TUI identity as storage holds it, read through a connection of its own.
+/// Input: the engine folder. Output: the epoch and the status.
+fn stored_tui(root: &Path) -> (i64, String) {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.query_row(
+        "SELECT owner_epoch,status FROM owner_identities WHERE client_kind='tui'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .unwrap()
+}
+
+/// Waits until the storage worker of `path` used up its death mark, so the next open of the
+/// same database never meets it. Input: the database path. Output: whether it did within
+/// `PUBLISHED_WAIT`.
+async fn worker_died(path: &Path) -> bool {
+    let deadline = tokio::time::Instant::now() + PUBLISHED_WAIT;
+    while crate::storage::dying(path) {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+/// Waits until storage holds the TUI identity revoked one epoch past `epoch`.
+/// Inputs: the engine folder and the epoch the revocation expected. Output: whether it
+/// did within `PUBLISHED_WAIT`.
+async fn stored_revoked(root: &Path, epoch: i64) -> bool {
+    let deadline = tokio::time::Instant::now() + PUBLISHED_WAIT;
+    while stored_tui(root) != (epoch + 1, "revoked".to_owned()) {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revocation_that_never_reaches_storage_still_refuses_the_client() {
+async fn a_revocation_that_never_gets_the_owner_barrier_is_pending_and_lands_while_the_engine_runs()
+{
     let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
     let runtime = owner.runtime();
+    let epoch = runtime.epoch(OwnerClientKind::Tui).unwrap();
     let held = runtime.engine.owner_egress.read().await;
     assert_eq!(
         runtime
-            .control(revocation(runtime, OwnerClientKind::Tui, "revoke-held"))
+            .control(revocation(
+                runtime,
+                OwnerClientKind::Tui,
+                "revoke-barrier-kept"
+            ))
             .await
             .map(|reply| reply.active),
-        Err(failure("owner_control_not_submitted")),
-        "the revocation never gets the owner barrier"
+        Err(failure("access_change_pending")),
+        "a revocation that never gets the owner barrier is kept and pending"
     );
+    assert!(!admitted(runtime, &owner.client));
     drop(held);
     assert!(
-        !admitted(runtime, &owner.client),
-        "a revocation that never reached storage still refuses the client"
+        stored_revoked(owner.root.path(), epoch).await,
+        "the kept revocation lands while the engine runs"
+    );
+    assert!(!admitted(runtime, &fresh_client(&owner)));
+    owner.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_the_full_queue_refuses_is_pending_and_lands_while_the_engine_runs() {
+    let owner = Usage::start_settings(&format!(
+        "timeout_ms = {LAPSE_WAIT_MS}\nqueue_capacity = 1\n"
+    ))
+    .await;
+    let runtime = owner.runtime();
+    let epoch = runtime.epoch(OwnerClientKind::Tui).unwrap();
+    let hold = crate::storage::hold_claims(&database(&owner));
+    let engine = runtime.engine.clone();
+    let filler = tokio::spawn(async move {
+        let (send, _answer) = oneshot::channel();
+        engine
+            .storage
+            .submit(
+                crate::storage::Job::Setup(crate::storage::setup::Command::Sweep, send),
+                tokio::time::Instant::now() + Duration::from_millis(PATIENT_WAIT_MS),
+                "owner_queue_not_submitted",
+            )
+            .await
+            .map(|_| ())
+    });
+    tokio::time::sleep(IN_FLIGHT).await;
+    assert_eq!(
+        runtime
+            .control(revocation(
+                runtime,
+                OwnerClientKind::Tui,
+                "revoke-queue-kept"
+            ))
+            .await
+            .map(|reply| reply.active),
+        Err(failure("access_change_pending")),
+        "a revocation the full queue refuses is kept and pending"
+    );
+    assert!(!admitted(runtime, &owner.client));
+    drop(hold);
+    filler.await.unwrap().unwrap();
+    assert!(
+        stored_revoked(owner.root.path(), epoch).await,
+        "the kept revocation lands while the engine runs"
     );
     owner.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_pending_when_the_engine_dies_lands_at_the_next_open() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let runtime = owner.runtime();
+    let epoch = runtime.epoch(OwnerClientKind::Tui).unwrap();
+    let path = database(&owner);
+    let hold = crate::storage::hold_claims(&path);
+    assert_eq!(
+        runtime
+            .control(revocation(runtime, OwnerClientKind::Tui, "revoke-then-die"))
+            .await
+            .map(|reply| reply.active),
+        Err(failure("access_change_pending")),
+        "the revocation outlasts the owner wait and is pending"
+    );
+    crate::storage::die_at_claim(&path);
+    drop(hold);
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at its claim"
+    );
+    let restarted = owner.restarted().await;
+    assert_eq!(
+        stored_tui(restarted.root.path()),
+        (epoch + 1, "revoked".to_owned()),
+        "the next open applies the revocation the dead engine never ran"
+    );
+    assert!(!tui_registration(restarted.runtime()).active);
+    restarted.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_refused_at_the_barrier_lands_at_the_next_open_when_the_engine_dies_mid_drain()
+{
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let runtime = owner.runtime();
+    let epoch = runtime.epoch(OwnerClientKind::Tui).unwrap();
+    let path = database(&owner);
+    let hold = crate::storage::hold_claims(&path);
+    let held = runtime.engine.owner_egress.read().await;
+    assert_eq!(
+        runtime
+            .control(revocation(
+                runtime,
+                OwnerClientKind::Tui,
+                "revoke-drain-die"
+            ))
+            .await
+            .map(|reply| reply.active),
+        Err(failure("access_change_pending")),
+        "a revocation that never gets the owner barrier is kept and pending"
+    );
+    drop(held);
+    tokio::time::sleep(IN_FLIGHT).await;
+    crate::storage::die_at_claim(&path);
+    drop(hold);
+    assert!(
+        worker_died(&path).await,
+        "the storage worker dies at the drain's claim"
+    );
+    let restarted = owner.restarted().await;
+    assert_eq!(
+        stored_tui(restarted.root.path()),
+        (epoch + 1, "revoked".to_owned()),
+        "the next open applies the kept revocation the drain never landed"
+    );
+    assert!(!tui_registration(restarted.runtime()).active);
+    restarted.stop().await;
+}
+
+/// V243-NARROWING-DURABLE r2, pre-existing: an engine whose TUI client storage holds
+/// revoked still starts, since its start probe asks only the clients it holds active, and
+/// the revoked TUI stays refused while the Desktop client is admitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_engine_whose_tui_is_revoked_starts_and_refuses_the_tui() {
+    let owner = Usage::start().await;
+    let epoch = owner.runtime().epoch(OwnerClientKind::Tui).unwrap();
+    assert!(!revoke_settled(&owner, "revoke-before-restart").await.active);
+    let restarted = owner.restarted().await;
+    assert_eq!(
+        stored_tui(restarted.root.path()),
+        (epoch + 1, "revoked".to_owned())
+    );
+    let runtime = restarted.runtime();
+    assert!(!tui_registration(runtime).active);
+    let root = &runtime.authority.root.path;
+    let tui = OwnerClient::attach(root, OwnerClientKind::Tui, Duration::from_secs(2)).unwrap();
+    let desktop =
+        OwnerClient::attach(root, OwnerClientKind::Desktop, Duration::from_secs(2)).unwrap();
+    assert!(!admitted(runtime, &tui), "the revoked TUI stays refused");
+    assert!(
+        admitted(runtime, &desktop),
+        "the active Desktop client is admitted"
+    );
+    restarted.stop().await;
 }

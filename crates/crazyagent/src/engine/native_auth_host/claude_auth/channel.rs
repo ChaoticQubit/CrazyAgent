@@ -537,7 +537,11 @@ pub(in crate::engine::owner::transport) async fn serve_input(
         }
     }
     let fact = host
-        .native_auth_command(admission.clone(), read.clone())
+        .native_auth_command(
+            admission.clone(),
+            read.clone(),
+            crate::storage::NativeAuthAsk::Engine,
+        )
         .await?
         .fact;
     {
@@ -571,7 +575,11 @@ pub(in crate::engine::owner::transport) async fn serve_input(
         return Err(failure("native_auth_claude_input_invalid"));
     }
     let fact = host
-        .native_auth_command(admission.clone(), read)
+        .native_auth_command(
+            admission.clone(),
+            read,
+            crate::storage::NativeAuthAsk::Engine,
+        )
         .await?
         .fact;
     {

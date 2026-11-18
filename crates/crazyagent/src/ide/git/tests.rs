@@ -902,6 +902,79 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
     );
 }
 
+/// V243-WORKTREES-GIT-FLAKE: in a project that asks every log for signatures and names its
+/// own signature programs, with a `false` first on the search path, the IDE's git logs a
+/// commit signed in any armor as its subject alone and runs none of them: no signature
+/// check, and no program a path lookup finds.
+#[test]
+fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
+    use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+    for armor in Armor::ALL {
+        let signed = signed(armor);
+        let bin = signed.base.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = signed.base.join("path-false");
+        planted(&bin.join("false"), &marker);
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let env: Vec<(&str, &str)> = CONFIG_ENV
+            .iter()
+            .copied()
+            .chain([("PATH", path.as_str())])
+            .collect();
+        let logged = git(&signed.root, &env, &["log", "-1", "--format=%s"]);
+        assert!(
+            !marker.exists(),
+            "{armor:?}: the IDE's git ran the path's false"
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        assert!(
+            logged.status.success(),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&logged.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&logged.stdout),
+            format!("{SUBJECT}\n"),
+            "{armor:?}"
+        );
+    }
+}
+
+/// V243-WORKTREES-GIT-FLAKE: with a `false` first on the search path, an ssh transport
+/// under the IDE's git configuration fails without running it: the ssh command is an
+/// absolute path git cannot start, never a name a path lookup resolves.
+#[test]
+fn the_ide_git_ssh_transport_runs_no_false_the_path_finds() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    let bin = base.join("bin");
+    for folder in [&repo, &bin] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    ok(&repo, &["init", "-q"]);
+    let marker = base.join("path-false");
+    let planted_false = bin.join("false");
+    std::fs::write(
+        &planted_false,
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&planted_false, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let env: Vec<(&str, &str)> = CONFIG_ENV
+        .iter()
+        .copied()
+        .chain([("PATH", path.as_str())])
+        .collect();
+    let listed = git(&repo, &env, &["ls-remote", "ssh://example.invalid/x"]);
+    assert!(!listed.status.success());
+    assert!(
+        !marker.exists(),
+        "the IDE's git ran the path's false as its ssh command"
+    );
+}
+
 /// SECAUDIT-IDE-SERVER-INDEX: with a private index the shim runs git on a copy, asks the
 /// engine only through its forwarder, and refuses a folder a shell word cannot hold.
 #[test]

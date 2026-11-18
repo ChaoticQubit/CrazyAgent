@@ -506,25 +506,27 @@ impl Engine {
 
     /// Runs one native-auth job whose answer carries work only its caller runs, such as the
     /// dispatch that signs out. When an access-narrowing job answers after the owner stopped
-    /// waiting, `late` gets that answer, so the work still runs. Inputs: the job and the late
-    /// step. Output: the job's result, or the error the owner sees.
+    /// waiting, `late` gets that answer, so the work still runs. Inputs: the job, the late
+    /// step and when the owner's answer is due, else each wait takes the engine's bound.
+    /// Output: the job's result, or the error the owner sees.
     async fn native_auth_settled_job<T, F>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
         late: impl FnOnce(T) -> F + Send + 'static,
+        answer_by: Option<tokio::time::Instant>,
     ) -> Result<T, EngineError>
     where
         T: Send + 'static,
         F: std::future::Future<Output = ()> + Send + 'static,
     {
         let (send, mut receive) = oneshot::channel();
-        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let bound = || answer_by.unwrap_or_else(|| tokio::time::Instant::now() + self.timeout);
         let submitted = self
             .storage
-            .submit(build(send), submit_by, "owner_queue_not_submitted")
+            .submit(build(send), bound(), "owner_queue_not_submitted")
             .await;
         let lost = match submitted {
-            Ok(taken) => match tokio::time::timeout(self.timeout, &mut receive).await {
+            Ok(taken) => match tokio::time::timeout_at(bound(), &mut receive).await {
                 Ok(answer) => return answer.map_err(|_| owner::native_auth::outcome_unknown())?,
                 Err(_) => taken.lost(owner::native_auth::outcome_unknown()),
             },
