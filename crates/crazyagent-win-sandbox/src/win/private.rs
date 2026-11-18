@@ -2,7 +2,7 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, user_sid as token_user};
 use super::{Words, final_name, last_error};
 use crate::dacl::{inherited_label, label, trusted_owner};
-use crate::private::{Facts, Store, judge, judge_folder, label_list, list};
+use crate::private::{Facts, Store, judge, judge_folder, label_list, list, secret_file_label};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -65,7 +65,7 @@ pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
 fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
-    let mut planned = Planned::new(&user, true, store)?;
+    let mut planned = Planned::new(&user, true, store.map(label_list))?;
     let attributes = planned.attributes();
     if unsafe { CreateDirectoryW(name.as_ptr(), &attributes) } == 0 {
         let error = last_error();
@@ -242,6 +242,25 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
         disposition,
         0,
         planned.as_mut(),
+    )?;
+    private_as(&opened, &user, false)?;
+    Ok(opened)
+}
+
+/// Creates the private file at `path` as [`file`] does with `create`, carrying from creation
+/// the medium no-write-up, no-read-up and no-execute-up label of [`secret_file_label`] on the
+/// file itself, so in any folder no lower integrity process opens or holds it (#555 N1, #562
+/// F1). Input: the absolute path, which must not exist. Output: the open file, or the error.
+pub fn secret_file(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let mut planned = Planned::new(&user, false, Some(secret_file_label()))?;
+    let opened = open(
+        &name,
+        GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+        CREATE_NEW,
+        0,
+        Some(&mut planned),
     )?;
     private_as(&opened, &user, false)?;
     Ok(opened)
@@ -523,9 +542,9 @@ fn open(
 }
 
 /// The security descriptor a private folder or file is created with: the user as owner, the
-/// protected list of [`list`] and, for a store folder, the label of [`label_list`] in an
-/// unprotected system list, as a protected one needs SeSecurityPrivilege (error 1314). The
-/// buffers do not move when this value does, so the descriptor's pointers stay valid.
+/// protected list of [`list`] and, when one is named, a label in an unprotected system list,
+/// as a protected one needs SeSecurityPrivilege (error 1314). The buffers do not move when
+/// this value does, so the descriptor's pointers stay valid.
 struct Planned {
     owner: Words,
     list: Words,
@@ -535,13 +554,13 @@ struct Planned {
 
 impl Planned {
     /// Builds the descriptor. Inputs: the user's SID, whether it is for a folder and the
-    /// store a folder is, if any. Output: the descriptor, or the Windows error.
-    fn new(user: &[u8], folder: bool, store: Option<Store>) -> io::Result<Self> {
-        assert!(folder || store.is_none(), "only a folder is a store");
+    /// system list holding its label, if any. Output: the descriptor, or the Windows error.
+    fn new(user: &[u8], folder: bool, label: Option<Vec<u8>>) -> io::Result<Self> {
+        assert!(label.as_ref().is_none_or(|sacl| sacl.len() > 8));
         let mut planned = Self {
             owner: Words::from_bytes(user),
             list: Words::from_bytes(&list(user, folder)),
-            label: store.map(|store| Words::from_bytes(&label_list(store))),
+            label: label.map(|sacl| Words::from_bytes(&sacl)),
             descriptor: SECURITY_DESCRIPTOR::default(),
         };
         let descriptor: PSECURITY_DESCRIPTOR = (&raw mut planned.descriptor).cast();
