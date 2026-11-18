@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,6 +115,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -145,7 +148,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +195,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +257,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +303,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +467,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -527,7 +532,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,208 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  win-npm-rows:
+    name: WIN-NPM 1+2 red and green ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2022
+          - runner: windows-2025
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the tip workflow so the tree is the tip
+        shell: bash
+        run: |
+          set -euo pipefail
+          tip=de8d9a1f2f8889ee2533222c691100beffbe4504
+          git merge-base --is-ancestor "$tip" HEAD
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml
+          git checkout "$tip" -- .github/workflows/tests.yml
+          git diff --quiet "$tip"
+      - name: Install SQLite for Windows
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          set -euo pipefail
+          vcpkg install sqlite3:x64-windows-static-md
+          {
+            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
+            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
+          } >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Red at each red commit, green at the tip, the boundary rows as a standard local user
+        timeout-minutes: 150
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = 'C:\v244-unchangeable-root'
+          New-Item -ItemType Directory -Force $fixture | Out-Null
+          icacls $fixture /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)(F)' '*S-1-5-32-544:(OI)(CI)(F)' '*S-1-5-32-545:(OI)(CI)(RX)'
+          if ($LASTEXITCODE -ne 0) { throw "icacls on the fixture failed with $LASTEXITCODE" }
+          icacls $fixture
+          [Environment]::SetEnvironmentVariable('CRAZYAGENT_TEST_UNCHANGEABLE_ROOT', $fixture, 'Machine')
+          $env:CRAZYAGENT_TEST_UNCHANGEABLE_ROOT = $fixture
+          icacls (Join-Path $env:ProgramFiles 'nodejs')
+          $user = 'castd'
+          $alphabet = [char[]]'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+          $password = (-join (1..24 | ForEach-Object { $alphabet | Get-Random })) + 'aZ7!'
+          net user $user $password /add /y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "net user failed with $LASTEXITCODE" }
+          $admins = net localgroup Administrators
+          if ($admins -contains $user) { throw "$user is an administrator" }
+          icacls $env:GITHUB_WORKSPACE /grant "${user}:(OI)(CI)(RX)" /C /Q | Out-Null
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          $logs = Join-Path $env:RUNNER_TEMP 'win-npm-rows'
+          New-Item -ItemType Directory -Force $logs | Out-Null
+          $script:verdicts = [ordered]@{}
+          function Invoke-Row([string]$name, [bool]$asUser, [string]$program, [string[]]$arguments, [bool]$expectPass) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new($program)
+            foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+            if ($asUser) {
+              $start.UserName = $user
+              $start.Domain = '.'
+              $start.Password = $secure
+              $start.LoadUserProfile = $true
+            }
+            $start.UseShellExecute = $false
+            $start.WorkingDirectory = $env:GITHUB_WORKSPACE
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            $process = [System.Diagnostics.Process]::Start($start)
+            $out = $process.StandardOutput.ReadToEndAsync()
+            $err = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(1800000)) { $process.Kill($true) }
+            $process.WaitForExit()
+            Set-Content -LiteralPath (Join-Path $logs "$name.out.txt") -Value $out.Result
+            Set-Content -LiteralPath (Join-Path $logs "$name.err.txt") -Value $err.Result
+            $passed = $process.ExitCode -eq 0 -and $out.Result -match 'test result: ok\. [1-9]'
+            $verdict = if ($passed -eq $expectPass) { 'as expected' } else { 'UNEXPECTED' }
+            Write-Host "==== $name exit $($process.ExitCode) passed=$passed expected=$expectPass $verdict"
+            Write-Host $out.Result
+            Write-Host $err.Result
+            $script:verdicts[$name] = "exit $($process.ExitCode) passed=$passed expected=$expectPass $verdict"
+          }
+          function Test-Exe([string]$package, [string[]]$selector) {
+            $lines = cargo test -p $package @selector --no-run --locked --message-format=json
+            if ($LASTEXITCODE -ne 0) { throw "cargo test -p $package $selector --no-run failed with $LASTEXITCODE" }
+            $exe = $lines | Where-Object { $_.StartsWith('{') } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable } | Select-Object -Last 1 -ExpandProperty executable
+            if (-not $exe) { throw "no test binary for $package $selector" }
+            $exe
+          }
+          function Checkout([string]$sha) {
+            git checkout -q -f --detach $sha
+            if ($LASTEXITCODE -ne 0) { throw "checkout $sha failed" }
+            Write-Host "######## at $(git log --oneline -1)"
+          }
+          function Build-Helper([string]$beside) {
+            cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+            if ($LASTEXITCODE -ne 0) { throw "helper build failed with $LASTEXITCODE" }
+            Copy-Item -LiteralPath target\debug\crazyagent-win-boundary.exe -Destination (Split-Path -Parent $beside) -Force
+          }
+          $predicate = 'dacl::tests::a_read_root_is_refused_only_when_no_package_reads_it_and_this_user_cannot_change_it'
+          $named = 'a_read_root_only_an_administrator_can_open_to_containers_is_refused_by_name'
+          $install = 'sandbox::windows::tests::install_refuses_a_read_root_only_an_administrator_can_open_to_containers'
+          $node = 'context_mode::windows_tests::a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_own_code'
+          $sentence = 'plugins::tests::a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence'
+          $tui = 'tui::screens::settings_plugins::tests::a_check_on_a_node_folder_windows_sandboxes_cannot_read_reads_the_engine_words'
+          $control = 'context_mode::windows_tests::the_node_probe_leaves_no_container_behind'
+          $one = @('--exact', '--test-threads', '1', '--nocapture')
+          $ignored = @('--exact', '--ignored', '--test-threads', '1', '--nocapture')
+
+          Checkout 5c028bb66
+          $lib = Test-Exe 'crazyagent-win-sandbox' @('--lib')
+          Invoke-Row 'red-5c028bb66-predicate' $false $lib (@($predicate) + $one) $false
+
+          Checkout 676468626
+          $boundary = Test-Exe 'crazyagent-win-sandbox' @('--test', 'boundary')
+          Invoke-Row 'red-676468626-helper-names-path' $true $boundary (@($named) + $ignored) $false
+
+          Checkout 2d283ecdb
+          $engine = Test-Exe 'crazyagent' @('--lib')
+          Build-Helper $engine
+          Invoke-Row 'red-2d283ecdb-install' $true $engine (@($install) + $ignored) $false
+          Invoke-Row 'red-2d283ecdb-context-mode' $true $engine (@($node) + $ignored) $false
+          Invoke-Row 'red-2d283ecdb-sentence' $false $engine (@($sentence) + $one) $false
+          Invoke-Row 'red-2d283ecdb-tui' $false $engine (@($tui) + $one) $false
+
+          Checkout de8d9a1f2f8889ee2533222c691100beffbe4504
+          $lib = Test-Exe 'crazyagent-win-sandbox' @('--lib')
+          $boundary = Test-Exe 'crazyagent-win-sandbox' @('--test', 'boundary')
+          $engine = Test-Exe 'crazyagent' @('--lib')
+          Build-Helper $engine
+          Invoke-Row 'tip-predicate' $false $lib (@($predicate) + $one) $true
+          Invoke-Row 'tip-helper-names-path' $true $boundary (@($named) + $ignored) $true
+          Invoke-Row 'tip-install' $true $engine (@($install) + $ignored) $true
+          Invoke-Row 'tip-context-mode' $true $engine (@($node) + $ignored) $true
+          Invoke-Row 'tip-sentence' $false $engine (@($sentence) + $one) $true
+          Invoke-Row 'tip-tui' $false $engine (@($tui) + $one) $true
+          Invoke-Row 'tip-control-as-castd' $true $engine (@($control) + $one) $true
+          Invoke-Row 'tip-win-sandbox-lib' $false $lib @('--test-threads', '1') $true
+          Invoke-Row 'tip-win-sandbox-boundary' $false $boundary @('--test-threads', '1') $true
+          Invoke-Row 'tip-engine-windows-sandbox' $false $engine @('sandbox::windows::', '--test-threads', '1') $true
+          Invoke-Row 'tip-engine-context-mode' $false $engine @('context_mode::windows_tests::', '--test-threads', '1') $true
+          Invoke-Row 'tip-engine-plugins' $false $engine @('plugins::tests::', '--test-threads', '1') $true
+          $rows = $script:verdicts.GetEnumerator() | ForEach-Object { "| $($_.Key) | $($_.Value) |" }
+          @('| row | result |', '| --- | --- |') + $rows | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $rows | ForEach-Object { Write-Host $_ }
+          if ($rows -match 'UNEXPECTED') { exit 1 }
+          exit 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: win-npm-rows-${{ matrix.runner }}
+          path: ${{ runner.temp }}/win-npm-rows
+          retention-days: 7
+
+  win-npm-desktop-row:
+    name: WIN-NPM desktop sentence red and green
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Red at 2d283ecdb, green at the tip
+        run: |
+          set -u +e +o pipefail
+          tip=de8d9a1f2f8889ee2533222c691100beffbe4504
+          git merge-base --is-ancestor "$tip" HEAD || exit 2
+          test "$(git diff --name-only "$tip" HEAD)" = .github/workflows/tests.yml || exit 2
+          (cd apps/desktop && npm ci --ignore-scripts --no-audit --no-fund) || exit 2
+          bad=0
+          for pair in 2d283ecdb:fail "$tip":pass; do
+            sha=${pair%%:*}; want=${pair##*:}
+            git checkout -q -f --detach "$sha" || exit 2
+            node --test --test-name-pattern 'Node.js folder no Windows sandbox' apps/desktop/test/settings-plugins.test.mjs > row.log 2>&1
+            rc=$?
+            echo "== $sha rc=$rc want=$want $(grep -m1 -E '^# (pass|fail) ' row.log) $(grep -E '^# fail ' row.log)"
+            grep -E '^(not )?ok ' row.log | head -5
+            if { [ "$want" = pass ] && [ $rc -ne 0 ]; } || { [ "$want" = fail ] && [ $rc -eq 0 ]; }; then bad=1; echo "::error::$sha not $want"; fi
+          done
+          exit $bad
