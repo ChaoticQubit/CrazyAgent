@@ -123,6 +123,7 @@ jobs:
 
   win-git-hookspath-probe:
     name: What Git for Windows runs for core.hooksPath=/dev/null and a missing system folder, publish's update-ref under GIT_SAFE ${{ matrix.runner }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -222,4 +223,128 @@ jobs:
               Run "hooks kind=$kind drive=$($drive.name) value=$value cmd=checkout" $project @{} @('-c', "core.hooksPath=$value", 'checkout', '-q', '-b', 'probe2')
             }
           }
+          }
+
+  win-git-signature-env-probe:
+    name: Why the engine's signature check runs no planted /usr/bin/false where a plain git does ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2022, windows-2025]
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - name: The git and PATH a bash step's cargo test sees
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v git
+          cygpath -w "$(command -v git)" > "$RUNNER_TEMP/row-git.txt"
+          cygpath -w -p "$PATH" > "$RUNNER_TEMP/row-path.txt"
+          cat "$RUNNER_TEMP/row-git.txt"
+          tr ';' '\n' < "$RUNNER_TEMP/row-path.txt" | head -8
+      - name: Replay the engine's signature check, then change one thing per case
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $t = $env:RUNNER_TEMP
+          $cmdGit = 'C:\Program Files\Git\cmd\git.exe'
+          $rowGit = (Get-Content (Join-Path $t 'row-git.txt') -Raw).Trim()
+          $rowPath = (Get-Content (Join-Path $t 'row-path.txt') -Raw).Trim()
+          "row git: $rowGit"
+          & $cmdGit --version
+          $marker = Join-Path $t 'marker.exe'
+          $src = Join-Path $t 'marker.rs'
+          $code = "fn main() {`n    let me = std::env::current_exe().unwrap();`n    let _ = std::fs::write(me.with_extension(`"ran`"), me.display().to_string());`n    std::process::exit(1);`n}`n"
+          [IO.File]::WriteAllText($src, $code)
+          rustc -O $src -o $marker
+          if ($LASTEXITCODE -ne 0) { throw 'marker build failed' }
+          $planted = @('C:\usr\bin\false', 'C:\usr\bin\false.exe', 'D:\usr\bin\false', 'D:\usr\bin\false.exe')
+          foreach ($p in $planted) {
+            New-Item -ItemType Directory -Force (Split-Path $p) | Out-Null
+            Copy-Item $marker $p -Force
+          }
+          function Ran {
+            $found = @()
+            foreach ($p in $planted) {
+              $m = [IO.Path]::ChangeExtension($p, 'ran')
+              if (Test-Path $m) { $found += (Get-Content $m -Raw); Remove-Item $m -Force }
+            }
+            return (($found | Sort-Object -Unique) -join ', ')
+          }
+          function New-Fixture([string]$base) {
+            $repo = Join-Path $base 'project'
+            $homeDir = Join-Path $base 'home'
+            New-Item -ItemType Directory -Force $repo, $homeDir | Out-Null
+            & $cmdGit -C $repo init -q --template= -b main | Out-Null
+            $empty = Join-Path $base 'empty'
+            [IO.File]::WriteAllBytes($empty, [byte[]]@())
+            $tree = (& $cmdGit -C $repo hash-object -t tree -w $empty).Trim()
+            $p = 'Owner <owner@example.invalid> 1700000000 +0000'
+            $commits = @{}
+            foreach ($armor in 'ssh', 'pgp') {
+              $b, $e = switch ($armor) {
+                'ssh' { '-----BEGIN SSH SIGNATURE-----', '-----END SSH SIGNATURE-----' }
+                'pgp' { '-----BEGIN PGP SIGNATURE-----', '-----END PGP SIGNATURE-----' }
+              }
+              $f = Join-Path $base "c-$armor.txt"
+              [IO.File]::WriteAllText($f, "tree $tree`nauthor $p`ncommitter $p`ngpgsig $b`n `n U0lHTkFUVVJF`n $e`n`nSigned subject`n")
+              $commits[$armor] = (& $cmdGit -C $repo hash-object -t commit -w $f).Trim()
+            }
+            $signers = Join-Path $base 'allowed_signers'
+            [IO.File]::WriteAllText($signers, '')
+            & $cmdGit -C $repo config gpg.ssh.allowedSignersFile $signers
+            return @{ repo = $repo; home = $homeDir; commits = $commits }
+          }
+          $safe = @('-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'submodule.recurse=false', '-c', 'protocol.allow=never', '-c', 'gpg.program=/usr/bin/false', '-c', 'gpg.x509.program=/usr/bin/false', '-c', 'gpg.ssh.program=/usr/bin/false', '-c', 'log.showSignature=false')
+          $gpgOnly = @('-c', 'gpg.program=/usr/bin/false', '-c', 'gpg.x509.program=/usr/bin/false', '-c', 'gpg.ssh.program=/usr/bin/false')
+          function Run([string]$label, [string]$git, [string]$cwd, [bool]$clean, [hashtable]$vars, [string[]]$gitArgs) {
+            $null = Ran
+            $trace = Join-Path $t 'trace.txt'
+            if (Test-Path $trace) { Remove-Item $trace -Force }
+            $psi = [System.Diagnostics.ProcessStartInfo]::new($git)
+            foreach ($a in $gitArgs) { $psi.ArgumentList.Add($a) }
+            $psi.WorkingDirectory = $cwd
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            if ($clean) { $psi.Environment.Clear() }
+            foreach ($k in $vars.Keys) { $psi.Environment[$k] = $vars[$k] }
+            $psi.Environment['GIT_TRACE'] = $trace
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $proc.StandardInput.Close()
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            $proc.WaitForExit()
+            $out = $outTask.Result.Trim() -replace "`r?`n", ' | '
+            $err = (($errTask.Result -split "`r?`n" | Where-Object { $_ } | Select-Object -First 3) -join ' | ')
+            $spawn = ((Select-String -Path $trace -Pattern 'run_command|start_command|cannot|temporary' -ErrorAction SilentlyContinue | Select-Object -First 3 | ForEach-Object { ($_.Line -split 'trace: ')[-1] }) -join ' | ')
+            "$label rc=$($proc.ExitCode) ran=[$(Ran)] out=[$out] err=[$err] trace=[$spawn]"
+          }
+          foreach ($drive in @(@{ name = 'C'; base = (Join-Path $env:USERPROFILE 'sp') }, @{ name = 'D'; base = (Join-Path $t 'sp') })) {
+            $fx = New-Fixture $drive.base
+            "== project on $($drive.name): $($fx.repo)"
+            $engine = @{ HOME = $fx.home; GIT_NO_LAZY_FETCH = '1'; GIT_CONFIG_NOSYSTEM = '1'; GIT_ATTR_NOSYSTEM = '1'; GIT_TERMINAL_PROMPT = '0'; GIT_CONFIG_GLOBAL = 'NUL'; PATH = $rowPath; SystemRoot = $env:SystemRoot; GIT_DIR = (Join-Path $fx.repo '.git'); GIT_WORK_TREE = $fx.repo }
+            $withTemp = $engine.Clone(); $withTemp['TEMP'] = $env:TEMP; $withTemp['TMP'] = $env:TMP
+            $dirs = @{ GIT_DIR = (Join-Path $fx.repo '.git'); GIT_WORK_TREE = $fx.repo }
+            foreach ($gitCase in @(@{ name = 'rowgit'; exe = $rowGit }, @{ name = 'cmdgit'; exe = $cmdGit })) {
+              foreach ($armor in 'ssh', 'pgp') {
+                $tail = @('log', '--show-signature', '-1', '--format=%s', $fx.commits[$armor])
+                $at = "drive=$($drive.name) git=$($gitCase.name) armor=$armor"
+                Run "A row-exact $at" $gitCase.exe $fx.repo $true $engine ($safe + $tail)
+                Run "B row+TEMP $at" $gitCase.exe $fx.repo $true $withTemp ($safe + $tail)
+                Run "C row-env,gpg-only $at" $gitCase.exe $fx.repo $true $engine ($gpgOnly + $tail)
+                Run "D full-env,GIT_SAFE $at" $gitCase.exe $fx.repo $false $dirs ($safe + $tail)
+                Run "E full-env,gpg-only $at" $gitCase.exe $fx.repo $false $dirs ($gpgOnly + $tail)
+                Run "F probe1-shape $at" $gitCase.exe $fx.repo $false @{} ($gpgOnly + $tail)
+              }
+            }
           }
