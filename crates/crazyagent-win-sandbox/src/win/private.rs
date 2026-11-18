@@ -2,7 +2,7 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, user_sid as token_user};
 use super::{Words, final_name, last_error};
 use crate::dacl::trusted_owner;
-use crate::private::{Facts, judge, judge_folder, label_list, list};
+use crate::private::{Facts, Store, judge, judge_folder, label_list, list};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -47,9 +47,24 @@ pub fn user_sid() -> io::Result<Vec<u8>> {
 /// delete, so the folder cannot be renamed while it is held. Input: the absolute path.
 /// Output: the held folder, or why it is not private.
 pub fn dir(path: &Path) -> io::Result<File> {
+    made_dir(path, None)
+}
+
+/// Opens a secret store folder or the database folder at `path` as [`dir`] does, a new one
+/// made with that store's label of [`label_list`] too (#524 r3); a folder already there keeps
+/// the label it has. Inputs: the absolute path and the store. Output: the held folder, or
+/// why it is not private.
+pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
+    made_dir(path, Some(store))
+}
+
+/// The work of [`dir`] and [`store_dir`]: creates the folder when missing, with the store's
+/// label when one is named, then opens and judges it. Inputs: the absolute path and the
+/// store, if any. Output: the held folder, or why it is not private.
+fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
-    let mut planned = Planned::new(&user, true)?;
+    let mut planned = Planned::new(&user, true, store)?;
     let attributes = planned.attributes();
     if unsafe { CreateDirectoryW(name.as_ptr(), &attributes) } == 0 {
         let error = last_error();
@@ -181,7 +196,7 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = if create {
-        Some(Planned::new(&user, false)?)
+        Some(Planned::new(&user, false, None)?)
     } else {
         None
     };
@@ -473,36 +488,40 @@ fn open(
 }
 
 /// The security descriptor a private folder or file is created with: the user as owner, the
-/// protected list of [`list`] and the label of [`label_list`], its system list unprotected as
-/// a protected one needs SeSecurityPrivilege (error 1314). The buffers do not move when this
-/// value does, so the descriptor's pointers stay valid.
+/// protected list of [`list`] and, for a store folder, the label of [`label_list`] in an
+/// unprotected system list, as a protected one needs SeSecurityPrivilege (error 1314). The
+/// buffers do not move when this value does, so the descriptor's pointers stay valid.
 struct Planned {
     owner: Words,
     list: Words,
-    label: Words,
+    label: Option<Words>,
     descriptor: SECURITY_DESCRIPTOR,
 }
 
 impl Planned {
-    /// Builds the descriptor. Inputs: the user's SID and whether it is for a folder. Output:
-    /// the descriptor, or the Windows error.
-    fn new(user: &[u8], folder: bool) -> io::Result<Self> {
+    /// Builds the descriptor. Inputs: the user's SID, whether it is for a folder and the
+    /// store a folder is, if any. Output: the descriptor, or the Windows error.
+    fn new(user: &[u8], folder: bool, store: Option<Store>) -> io::Result<Self> {
+        assert!(folder || store.is_none(), "only a folder is a store");
         let mut planned = Self {
             owner: Words::from_bytes(user),
             list: Words::from_bytes(&list(user, folder)),
-            label: Words::from_bytes(&label_list(folder)),
+            label: store.map(|store| Words::from_bytes(&label_list(store))),
             descriptor: SECURITY_DESCRIPTOR::default(),
         };
         let descriptor: PSECURITY_DESCRIPTOR = (&raw mut planned.descriptor).cast();
         let owner: PSID = planned.owner.words.as_mut_ptr().cast();
         let dacl: *const ACL = planned.list.words.as_ptr().cast();
-        let sacl: *const ACL = planned.label.words.as_ptr().cast();
+        let sacl: Option<*const ACL> = planned
+            .label
+            .as_ref()
+            .map(|label| label.words.as_ptr().cast());
         let protected = SE_DACL_PROTECTED;
         let built = unsafe {
             InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) != 0
                 && SetSecurityDescriptorOwner(descriptor, owner, 0) != 0
                 && SetSecurityDescriptorDacl(descriptor, 1, dacl, 0) != 0
-                && SetSecurityDescriptorSacl(descriptor, 1, sacl, 0) != 0
+                && sacl.is_none_or(|sacl| SetSecurityDescriptorSacl(descriptor, 1, sacl, 0) != 0)
                 && SetSecurityDescriptorControl(descriptor, protected, protected) != 0
         };
         if !built {

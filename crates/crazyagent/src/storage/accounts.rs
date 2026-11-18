@@ -91,7 +91,10 @@ fn key_folder(
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(error("account_key_store_unavailable")),
     }
-    match crazyagent_win_sandbox::private::dir(&path) {
+    match crazyagent_win_sandbox::private::store_dir(
+        &path,
+        crazyagent_win_sandbox::private::Store::Secret,
+    ) {
         Ok(held) => Ok(Some((held, path))),
         Err(problem) if problem.kind() == std::io::ErrorKind::PermissionDenied => {
             Err(error("account_key_store_unsafe"))

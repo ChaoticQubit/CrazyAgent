@@ -1,7 +1,7 @@
 use crazyagent_win_sandbox::dacl::{
     self, ADMINISTRATORS, ALL_APPLICATION_PACKAGES, OWNER_RIGHTS, SYSTEM, TRUSTED_INSTALLER,
 };
-use crazyagent_win_sandbox::private::{Facts, judge, judge_folder, label_list, list};
+use crazyagent_win_sandbox::private::{Facts, Store, judge, judge_folder, label_list, list};
 
 const USER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
@@ -31,6 +31,7 @@ const NO_READ_UP: u32 = 0x2;
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
 const INHERITABLE: u8 = 0x03;
+const NO_PROPAGATE: u8 = 0x04;
 const INHERIT_ONLY: u8 = 0x08;
 const INHERITED: u8 = 0x10;
 const FULL: u32 = 0x001f_01ff;
@@ -279,26 +280,25 @@ fn the_planned_list_is_private_and_names_only_the_trusted_accounts() {
     }
 }
 
-/// #512 r2 (rv-sec2 N1, leader 05:03): a private folder or file is made with a medium label
-/// that keeps a lower integrity process of the user from writing or reading it, handed on by
-/// a folder to what is made in it, and both judges accept it.
+/// #524 r3 (rv-code4 F2, leader 05:45): only the secret stores carry the medium label with
+/// no-write-up and no-read-up. A secret folder labels itself and all made in it; the database
+/// folder, the data root, labels only the files made directly in it, never itself or a folder
+/// below, which may be a root granted to an AppContainer. Both forms pass the folder judge.
 #[test]
-fn the_label_private_objects_are_made_with_keeps_lower_integrity_out() {
+fn a_store_label_reaches_only_what_the_store_holds() {
     let both = Ok(Some((0x2000, NO_WRITE_UP | NO_READ_UP)));
-    let mut folder = facts(Some(list(&USER, true)));
-    folder.label = Some(label_list(true));
-    assert_eq!(dacl::label(folder.label.as_deref().unwrap()), both);
-    assert_eq!(
-        dacl::inherited_label(folder.label.as_deref().unwrap()),
-        both
-    );
-    assert_eq!(judge_folder(&folder, &USER), Ok(()));
-    let mut file = facts(Some(list(&USER, false)));
-    file.label = Some(label_list(false));
-    assert_eq!(dacl::label(file.label.as_deref().unwrap()), both);
-    assert_eq!(
-        dacl::inherited_label(file.label.as_deref().unwrap()),
-        Ok(None)
-    );
-    assert_eq!(judge(&file, &USER), Ok(()));
+    let mut secret = facts(Some(list(&USER, true)));
+    secret.label = Some(label_list(Store::Secret));
+    let sacl = secret.label.as_deref().unwrap();
+    assert_eq!(sacl[9], INHERITABLE);
+    assert_eq!(dacl::label(sacl), both);
+    assert_eq!(dacl::inherited_label(sacl), both);
+    assert_eq!(judge_folder(&secret, &USER), Ok(()));
+    let mut database = facts(Some(list(&USER, true)));
+    database.label = Some(label_list(Store::Database));
+    let sacl = database.label.as_deref().unwrap();
+    assert_eq!(sacl[9], OBJECT_INHERIT | NO_PROPAGATE | INHERIT_ONLY);
+    assert_eq!(dacl::label(sacl), Ok(None));
+    assert_eq!(dacl::inherited_label(sacl), both);
+    assert_eq!(judge_folder(&database, &USER), Ok(()));
 }

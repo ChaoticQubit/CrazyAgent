@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Guard, Guarded, HEADER, check_path};
 use crazyagent_win_sandbox::request::REFUSED_EXIT;
 use std::fs;
@@ -487,6 +488,51 @@ fn an_agent_writes_in_its_roots_but_not_outside_them_or_into_protected_paths() {
         ran(&deleted),
         sddl(&watched)
     );
+}
+
+/// #524 r3 (rv-code4 F2, leader 05:45; V244-WIN-HOME-UNDER-NO-READ-UP): an agent writes and
+/// reads a root the engine made under its data root, through `private::dir` as the setup npm
+/// roots are or plainly as the plugin check folders are, so the database label on the data
+/// root reaches neither those roots nor what the agent makes in them.
+#[test]
+fn an_agent_writes_and_reads_a_root_made_under_the_data_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    drop(private::store_dir(&data, private::Store::Database).unwrap());
+    let made = data.join("setup");
+    drop(private::dir(&made).unwrap());
+    let check = data.join("check");
+    fs::create_dir(&check).unwrap();
+    let grants = temp.path().join("grants");
+    let profiles = temp.path().join("profiles");
+    for folder in [&grants, &profiles] {
+        fs::create_dir(folder).unwrap();
+    }
+    let profile = BoundaryProfile {
+        container: "crazyagent.test.dataroot".into(),
+        capabilities: Vec::new(),
+        read_roots: Vec::new(),
+        write_roots: vec![plain(&made), plain(&check)],
+        guarded: Vec::new(),
+        active_processes: 32,
+        grants: plain(&grants),
+    };
+    let path = profiles.join("agent.profile");
+    fs::write(&path, profile.encode().unwrap()).unwrap();
+    for root in [&made, &check] {
+        let file = root.join("agent.txt");
+        let cmd = || agent(&path, root, &system("cmd.exe"));
+        let wrote = output(cmd(), &["/C", "echo", "written>", &plain(&file)]);
+        let read = output(cmd(), &["/C", "type", &plain(&file)]);
+        assert!(
+            read.status.success() && String::from_utf8_lossy(&read.stdout).contains("written"),
+            "{}\nwrite: {}\nread: {}\n{}",
+            root.display(),
+            ran(&wrote),
+            ran(&read),
+            sddl(&[root])
+        );
+    }
 }
 
 #[test]
