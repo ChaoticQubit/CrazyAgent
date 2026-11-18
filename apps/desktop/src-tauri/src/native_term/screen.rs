@@ -534,4 +534,19 @@ mod tests {
         assert_eq!(text_rows(&blink)[0], "abz");
         assert_eq!(blink.cursor, None);
     }
+
+    #[test]
+    fn a_marked_character_wider_than_two_cells_takes_two_like_the_grid() {
+        let theme = Theme::default();
+        let typed = frame(&sized(10, 2, "\u{17D8}x".as_bytes()), &theme, true, None);
+        assert_eq!(typed.cursor.map(|c| c.column), Some(3));
+        let marked = frame(&sized(10, 2, b"ab"), &theme, true, Some("\u{17D8}x"));
+        assert_eq!(text_rows(&marked)[0], "ab\u{17D8}x");
+        assert_eq!(
+            marked.preedit.map(|p| (p.column, p.cells)),
+            Some((2, 3))
+        );
+        let wide = marked.rows[0].iter().find(|s| s.column == 2);
+        assert!(wide.is_some_and(|s| s.wide && s.cells == 2));
+    }
 }

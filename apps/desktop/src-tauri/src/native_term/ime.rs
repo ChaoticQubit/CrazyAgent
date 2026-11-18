@@ -415,4 +415,15 @@ mod tests {
         assert_eq!(ime.cells_before(5), 6);
         assert_eq!(ime.cells_before(99), 6);
     }
+
+    #[test]
+    fn a_marked_character_wider_than_two_cells_counts_two_like_the_grid() {
+        assert_eq!('\u{17D8}'.width(), Some(3));
+        let mut ime = Ime::default();
+        assert!(ime.set_marked("\u{17D8}", (0, 0)));
+        assert_eq!(ime.cells_before(1), 2);
+        assert!(ime.set_marked("a\u{17D8}b", (0, 0)));
+        assert_eq!(ime.cells_before(2), 3);
+        assert_eq!(ime.cells_before(3), 4);
+    }
 }
