@@ -131,7 +131,9 @@ fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
         focused,
         active: NSApplication::sharedApplication(mtm).isActive(),
         key: window.as_ref().is_some_and(|window| window.isKeyWindow()),
-        scale: window.as_ref().map_or(0.0, |window| window.backingScaleFactor()),
+        scale: window
+            .as_ref()
+            .map_or(0.0, |window| window.backingScaleFactor()),
         marked: look.view.marked_text(),
         pasteboard: look.pasteboard,
     };
