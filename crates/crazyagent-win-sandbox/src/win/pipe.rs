@@ -47,13 +47,11 @@ const LABEL_BYTES_MAX: usize = 256;
 const LABEL_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 16];
 const _: () = assert!(ERROR_NO_TOKEN == NO_TOKEN);
 
-/// Creates one instance of the local named pipe `name` for the engine (DESIGN-0256 D8):
-/// byte mode, overlapped for Tokio, remote clients refused, at most `instances` instances
-/// of the name, and a protected list giving read and write to the user and SYSTEM only,
-/// with the user as owner. With `first` the create fails with access denied when any
-/// instance of the name exists, so a name someone else made first is never joined.
-/// Inputs: the full name under `\\.\pipe\` with one plain part, whether this is the first
-/// instance and the instance cap. Output: the server handle, or the Windows error.
+/// Creates one instance of the local named pipe `name` for the engine (DESIGN-0256 D8): byte
+/// mode, overlapped, remote clients refused, at most `instances` of the name, and a protected
+/// list, owned by the user, giving read and write to the user and SYSTEM only. With `first`,
+/// a name that already exists fails with access denied and is never joined. Inputs: the name
+/// under `\\.\pipe\` (one plain part), first or not, the cap. Output: the handle, or the error.
 pub fn create(name: &str, first: bool, instances: u32) -> io::Result<OwnedHandle> {
     let part = name.strip_prefix(PREFIX).unwrap_or_default();
     if part.is_empty() || name.len() > NAME_MAX || part.contains(['\\', '/', '\0']) {

@@ -58,15 +58,11 @@ pub(super) struct Withdrawal {
     pub(super) owner_changed: bool,
 }
 
-/// What the container's role on one path needs, from the path's list now (DEC-193): the
-/// container's own entries become the role's, and a guarded path or anchored folder is cut
-/// and every other package narrowed. A granted root must exist and must not be a link or
-/// junction; a guarded path or anchored folder that is missing, a link or a junction gets
-/// nothing, since the plan keeps the entries of the present folder above it. A read root every
-/// container already reads, a folder down to its files and subfolders as `C:\Program Files`
-/// ([`reads_root`]), is left as it is unless it still holds an entry of the container's own.
-/// Inputs: the container SID, the role and the path's saved snapshot. Output: the step, or
-/// the refusal or failed step.
+/// What the container's role on one path needs, from the path's list now (DEC-193): a granted
+/// root must exist and not be a link or junction, and a guarded path or anchored folder is cut,
+/// every other package narrowed. A read root every package already reads ([`reads_root`]) is
+/// left alone unless it holds an entry of the container's own. Inputs: the container SID, the
+/// role and the path's saved snapshot. Output: the step, or the refusal or failed step.
 pub(super) fn role(
     container: &Words,
     ace: &Ace,
