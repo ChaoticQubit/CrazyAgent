@@ -44,13 +44,20 @@ tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "sync", 
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSControl", "NSDockTile", "NSEvent", "NSGraphics", "NSImage", "NSImageView", "NSPasteboard", "NSResponder", "NSView", "NSWindow", "objc2-core-foundation"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDate", "NSGeometry", "NSObjCRuntime", "NSString", "objc2-core-foundation"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 rustix = { version = "=1.1.5", features = ["process"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux", windows))'.dependencies]
 wgpu = "=25.0.2"
 glyphon = "=0.9.0"
 alacritty_terminal = "=0.25.1"
 pollster = "=0.4.0"
 bytemuck = "=1.25.2"
 raw-window-handle = "=0.6.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 tauri = { version = "=2.12.4", features = ["test"] }

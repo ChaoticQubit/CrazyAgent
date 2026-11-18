@@ -7,20 +7,60 @@ use glyphon::{
     Style as FontStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
     Weight, Wrap, fontdb,
 };
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
-use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::Arc;
 
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
 /// system font, to keep memory small; Apple Color Emoji is the only system font with
 /// U+23FA, the bullet Claude Code prints. A missing fallback only leaves its glyphs blank.
-const FALLBACK_PATHS: [&str; 3] = [
-    "/System/Library/Fonts/Apple Symbols.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/System/Library/Fonts/Apple Color Emoji.ttc",
+#[cfg(target_os = "macos")]
+const FALLBACKS: [FontSource; 3] = [
+    FontSource::File("/System/Library/Fonts/Apple Symbols.ttf"),
+    FontSource::File("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+    FontSource::File("/System/Library/Fonts/Apple Color Emoji.ttc"),
 ];
+
+/// The fallback font files on Linux: DejaVu Sans for symbols, Noto Color Emoji and Noto
+/// Sans CJK, each where Debian and Ubuntu, Fedora and Arch install it. A missing file only
+/// leaves its glyphs blank.
+#[cfg(target_os = "linux")]
+const FALLBACKS: [FontSource; 9] = [
+    FontSource::File("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    FontSource::File("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"),
+    FontSource::File("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+    FontSource::File("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+    FontSource::File("/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf"),
+    FontSource::File("/usr/share/fonts/noto/NotoColorEmoji.ttf"),
+    FontSource::File("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    FontSource::File("/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc"),
+    FontSource::File("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+];
+
+/// The fallback font files on Windows, in its fonts folder: Segoe UI Symbol and Segoe UI
+/// Emoji. A missing file only leaves its glyphs blank.
+#[cfg(windows)]
+const FALLBACKS: [FontSource; 2] = [
+    FontSource::Fonts("seguisym.ttf"),
+    FontSource::Fonts("seguiemj.ttf"),
+];
+
+/// The wgpu backends the native views draw with on macOS.
+#[cfg(target_os = "macos")]
+const BACKENDS: wgpu::Backends = wgpu::Backends::METAL;
+
+/// The wgpu backends on Linux: Vulkan and GL. wgpu ranks the adapters that can present by
+/// device type, a hardware GPU before a software one, and Vulkan before GL on the same type.
+#[cfg(target_os = "linux")]
+const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::GL);
+
+/// The wgpu backends on Windows: DX12, with the adapter left to wgpu.
+#[cfg(windows)]
+const BACKENDS: wgpu::Backends = wgpu::Backends::DX12;
 
 /// The most background rectangles one frame draws.
 const RECTS_MAX: usize = 1 << 16;
@@ -62,7 +102,7 @@ pub struct Shared {
     generation: u64,
 }
 
-/// One native view's own drawing state: its Metal surface, glyph atlas, shaped rows (of the
+/// One native view's own drawing state: its wgpu surface, glyph atlas, shaped rows (of the
 /// style generation they were shaped in) and rectangle buffers.
 pub struct Surface {
     surface: wgpu::Surface<'static>,
@@ -97,8 +137,8 @@ fn linear_rgba(color: Rgb, alpha: f32) -> [f32; 4] {
 
 fn load_fallbacks() -> FontSystem {
     let mut db = fontdb::Database::new();
-    for path in FALLBACK_PATHS {
-        if Path::new(path).is_file() && db.load_font_file(path).is_err() {
+    for path in FALLBACKS.iter().filter_map(FontSource::file) {
+        if path.is_file() && db.load_font_file(&path).is_err() {
             continue;
         }
     }
@@ -124,7 +164,6 @@ fn load(db: &mut fontdb::Database, source: FontSource) -> Result<(), &'static st
     let invalid = "native_terminal_style_invalid";
     let before = db.len();
     match source {
-        FontSource::File(path) => db.load_font_file(path).map_err(|_| invalid)?,
         FontSource::Built(faces) => {
             for face in faces {
                 let face: &'static [u8] = face;
@@ -135,6 +174,10 @@ fn load(db: &mut fontdb::Database, source: FontSource) -> Result<(), &'static st
                     return Err(invalid);
                 }
             }
+        }
+        system => {
+            let path = system.file().ok_or(invalid)?;
+            db.load_font_file(path).map_err(|_| invalid)?;
         }
     }
     if db.len() == before {
@@ -284,9 +327,9 @@ impl Shared {
     /// surface. Inputs: the display's backing scale and the style. Output: the shared state,
     /// or `native_terminal_style_invalid` when the style's font cannot be loaded.
     pub fn new(scale: f32, style: &Style) -> Result<Shared, &'static str> {
-        assert!((1.0..=4.0).contains(&scale), "a Mac backing scale");
+        assert!((1.0..=4.0).contains(&scale), "a display backing scale");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
+            backends: BACKENDS,
             ..Default::default()
         });
         let mut shared = Shared {
@@ -338,9 +381,10 @@ impl Shared {
         )
     }
 
-    /// Makes one view's surface on its NSView, sized in physical pixels, Fifo present mode and
-    /// a frame latency of one. Inputs: the NSView pointer, width and height. Output: the
-    /// surface, or the setup error.
+    /// Makes one view's surface on its NSView through `surface_raw`. Inputs: the NSView
+    /// pointer, which must stay a live view until the surface is dropped, width and height.
+    /// Output: the surface, or the setup error.
+    #[cfg(target_os = "macos")]
     pub fn surface(
         &mut self,
         view: *mut c_void,
@@ -348,12 +392,25 @@ impl Shared {
         height: u32,
     ) -> Result<Surface, String> {
         let pointer = NonNull::new(view).ok_or("null NSView")?;
-        let handle = raw_window_handle::AppKitWindowHandle::new(pointer);
+        let display = RawDisplayHandle::AppKit(raw_window_handle::AppKitDisplayHandle::new());
+        let window = RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(pointer));
+        unsafe { self.surface_raw(display, window, width, height) }
+    }
+
+    /// Makes one view's surface on a native window, sized in physical pixels, Fifo present
+    /// mode and a frame latency of one. Safety: both handles must name a live display and
+    /// window that outlive the returned surface. Inputs: the handles, width and height.
+    /// Output: the surface, or the setup error.
+    pub unsafe fn surface_raw(
+        &mut self,
+        display: RawDisplayHandle,
+        window: RawWindowHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<Surface, String> {
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_window_handle::RawDisplayHandle::AppKit(
-                raw_window_handle::AppKitDisplayHandle::new(),
-            ),
-            raw_window_handle: raw_window_handle::RawWindowHandle::AppKit(handle),
+            raw_display_handle: display,
+            raw_window_handle: window,
         };
         let surface =
             unsafe { self.instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())?;
@@ -937,6 +994,7 @@ mod tests {
         assert_eq!(cell_px(face, 13.0, 2.0), (15.0, 34.0));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn menlo_loads_from_its_system_file() {
         let face = metrics_of("Menlo");

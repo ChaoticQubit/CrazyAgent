@@ -1,5 +1,5 @@
 use alacritty_terminal::vte::ansi::Rgb;
-use std::path::Path;
+use std::path::PathBuf;
 
 /// The longest font list a style may carry, in bytes.
 pub const FONT_LIST_BYTES_MAX: usize = 256;
@@ -11,11 +11,68 @@ pub const FONT_PX_MAX: f64 = 72.0;
 /// The longest colour string accepted, in bytes.
 const COLOR_BYTES_MAX: usize = 64;
 
-/// Where a family's faces come from: a system font file, or faces built into the app.
+/// Where a family's faces come from: a system font file at a fixed path, a file named in
+/// the Windows fonts folder, or faces built into the app.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FontSource {
     File(&'static str),
+    #[cfg(windows)]
+    Fonts(&'static str),
     Built(&'static [&'static [u8]]),
+}
+
+impl FontSource {
+    /// The file a system source names: its fixed path, or the named file in the Windows
+    /// fonts folder. Output: the path, or none for faces built into the app or a fonts
+    /// folder the shell does not name.
+    pub fn file(&self) -> Option<PathBuf> {
+        match self {
+            FontSource::File(path) => Some(PathBuf::from(path)),
+            #[cfg(windows)]
+            FontSource::Fonts(name) => {
+                assert!(!name.is_empty() && !name.contains(['/', '\\']));
+                fonts_folder().map(|folder| folder.join(name))
+            }
+            FontSource::Built(_) => None,
+        }
+    }
+}
+
+/// The longest path a Windows known folder may have, in UTF-16 units.
+#[cfg(windows)]
+const PATH_UNITS_MAX: usize = 32_767;
+
+/// The Windows fonts folder (FOLDERID_Fonts), asked of the shell once. Output: the
+/// absolute folder, or none when the shell does not name one.
+#[cfg(windows)]
+pub fn fonts_folder() -> Option<PathBuf> {
+    static FOLDER: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FOLDER.get_or_init(known_fonts_folder).clone()
+}
+
+/// Asks the shell for FOLDERID_Fonts and frees the string it returns, on success or not.
+/// Output: the absolute folder, or none on a failed call or an unterminated string.
+#[cfg(windows)]
+fn known_fonts_folder() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{FOLDERID_Fonts, SHGetKnownFolderPath};
+    let mut text: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let result =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Fonts, 0, std::ptr::null_mut(), &mut text) };
+    let folder = if result >= 0 && !text.is_null() {
+        let units = (0..PATH_UNITS_MAX)
+            .take_while(|&at| unsafe { *text.add(at) } != 0)
+            .count();
+        (units < PATH_UNITS_MAX).then(|| {
+            let wide = unsafe { std::slice::from_raw_parts(text, units) };
+            PathBuf::from(std::ffi::OsString::from_wide(wide))
+        })
+    } else {
+        None
+    };
+    unsafe { CoTaskMemFree(text.cast_const().cast()) };
+    folder.filter(|path| path.is_absolute())
 }
 
 /// JetBrains Mono 2.304 (regular, bold, italic, bold italic), the first font of the panel's
@@ -28,12 +85,14 @@ const JETBRAINS_MONO: [&[u8]; 4] = [
     include_bytes!("../../fonts/JetBrainsMono-BoldItalic.ttf"),
 ];
 
+#[cfg(target_os = "macos")]
 const MENLO: FontSource = FontSource::File("/System/Library/Fonts/Menlo.ttc");
 
 /// The monospace families the native view can draw with, by the names a CSS font list uses,
 /// and where the faces of each come from, in the order a list is matched against. The
 /// system SF Mono file is left out: its default instance is Light (weight class 295), not
 /// the Regular that `ui-monospace` gives in the webview, so `ui-monospace` draws with Menlo.
+#[cfg(target_os = "macos")]
 const FAMILIES: [(&str, &str, FontSource); 4] = [
     (
         "jetbrains mono",
@@ -43,6 +102,81 @@ const FAMILIES: [(&str, &str, FontSource); 4] = [
     ("menlo", "Menlo", MENLO),
     ("ui-monospace", "Menlo", MENLO),
     ("monospace", "Menlo", MENLO),
+];
+
+/// DejaVu Sans Mono's regular face where Debian and Ubuntu, Fedora and Arch install it.
+#[cfg(target_os = "linux")]
+const DEJAVU_SANS_MONO: [FontSource; 3] = [
+    FontSource::File("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+    FontSource::File("/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf"),
+    FontSource::File("/usr/share/fonts/TTF/DejaVuSansMono.ttf"),
+];
+
+/// The monospace families the native view can draw with on Linux, by the names a CSS font
+/// list uses, in the order a list is matched against: the built-in JetBrains Mono, and
+/// DejaVu Sans Mono, which `ui-monospace` and `monospace` also draw with where it is
+/// installed, else the built-in font.
+#[cfg(target_os = "linux")]
+const FAMILIES: [(&str, &str, FontSource); 12] = [
+    (
+        "jetbrains mono",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
+    ("dejavu sans mono", "DejaVu Sans Mono", DEJAVU_SANS_MONO[0]),
+    ("dejavu sans mono", "DejaVu Sans Mono", DEJAVU_SANS_MONO[1]),
+    ("dejavu sans mono", "DejaVu Sans Mono", DEJAVU_SANS_MONO[2]),
+    ("ui-monospace", "DejaVu Sans Mono", DEJAVU_SANS_MONO[0]),
+    ("ui-monospace", "DejaVu Sans Mono", DEJAVU_SANS_MONO[1]),
+    ("ui-monospace", "DejaVu Sans Mono", DEJAVU_SANS_MONO[2]),
+    (
+        "ui-monospace",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
+    ("monospace", "DejaVu Sans Mono", DEJAVU_SANS_MONO[0]),
+    ("monospace", "DejaVu Sans Mono", DEJAVU_SANS_MONO[1]),
+    ("monospace", "DejaVu Sans Mono", DEJAVU_SANS_MONO[2]),
+    (
+        "monospace",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
+];
+
+#[cfg(windows)]
+const CASCADIA_MONO: FontSource = FontSource::Fonts("CascadiaMono.ttf");
+
+#[cfg(windows)]
+const CONSOLAS: FontSource = FontSource::Fonts("consola.ttf");
+
+/// The monospace families the native view can draw with on Windows, by the names a CSS
+/// font list uses, in the order a list is matched against: the built-in JetBrains Mono,
+/// Cascadia Mono and Consolas from the fonts folder, and `ui-monospace` and `monospace` as
+/// Cascadia Mono, else Consolas, else the built-in font.
+#[cfg(windows)]
+const FAMILIES: [(&str, &str, FontSource); 9] = [
+    (
+        "jetbrains mono",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
+    ("cascadia mono", "Cascadia Mono", CASCADIA_MONO),
+    ("consolas", "Consolas", CONSOLAS),
+    ("ui-monospace", "Cascadia Mono", CASCADIA_MONO),
+    ("ui-monospace", "Consolas", CONSOLAS),
+    (
+        "ui-monospace",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
+    ("monospace", "Cascadia Mono", CASCADIA_MONO),
+    ("monospace", "Consolas", CONSOLAS),
+    (
+        "monospace",
+        "JetBrains Mono",
+        FontSource::Built(&JETBRAINS_MONO),
+    ),
 ];
 
 /// The colours a native view draws with, as the panel's `--terminal-*` tokens give them:
@@ -296,9 +430,9 @@ pub fn font_for(list: &str) -> Result<(&'static str, FontSource), &'static str> 
     if list.len() > FONT_LIST_BYTES_MAX {
         return Err("native_terminal_style_invalid");
     }
-    let present = |source: &FontSource| match source {
-        FontSource::File(path) => Path::new(path).is_file(),
-        FontSource::Built(faces) => !faces.is_empty(),
+    let present = |source: &FontSource| match source.file() {
+        Some(path) => path.is_file(),
+        None => matches!(source, FontSource::Built(faces) if !faces.is_empty()),
     };
     let found = list
         .split(',')
@@ -404,6 +538,7 @@ mod tests {
         assert_eq!(cell_px(menlo, 13.0, 2.0), (15.0, 30.0));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_style_checks_its_size_and_font() {
         let theme = Theme::default();
@@ -462,6 +597,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_first_known_installed_family_is_used() {
         let list = "\"JetBrains Mono\", ui-monospace, \"SF Mono\", Menlo, monospace";

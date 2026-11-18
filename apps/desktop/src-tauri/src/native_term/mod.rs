@@ -1,14 +1,20 @@
 mod codec;
+#[cfg(unix)]
 mod control;
+mod event;
 mod keymap;
 mod pane;
 mod render;
 mod screen;
 mod style;
+#[cfg(target_os = "macos")]
 mod view;
 
+#[cfg(unix)]
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};
+#[cfg(unix)]
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::path::{Component, Path, PathBuf};
 
 /// The longest agent window name a view may ask for, in bytes.
@@ -17,6 +23,7 @@ const NAME_BYTES_MAX: usize = crazyagent::terminal::AGENT_ID_BYTES_MAX;
 /// Whether a socket path names an engine's own tmux server by its shape: absolute, plain
 /// parts, `tmux.sock` in a `terminal` folder, never a default tmux socket folder. Input:
 /// the path. Output: the answer.
+#[cfg(unix)]
 pub fn engine_socket_shape(path: &Path) -> bool {
     let plain = path
         .components()
@@ -32,6 +39,7 @@ pub fn engine_socket_shape(path: &Path) -> bool {
 /// owned by this user, read without following a link, so a sandboxed lead's or teammates'
 /// server is never reached by a plain client. Input: the engine root. Output: the socket,
 /// or a plain code that drops the view to engine-fed output.
+#[cfg(unix)]
 pub fn engine_socket(root: &Path) -> Result<PathBuf, &'static str> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = root.join(FOLDER).join(SOCKET);
@@ -58,6 +66,7 @@ pub fn engine_socket(root: &Path) -> Result<PathBuf, &'static str> {
 /// server can make its client run a command. Inputs: the engine root and a checked window
 /// name. Output: the answer, or a plain code when it cannot be told: only a clean "no such
 /// file" means no server.
+#[cfg(unix)]
 pub fn own_server(root: &Path, name: &str) -> Result<bool, &'static str> {
     assert!(root.is_absolute());
     let agent = crate::bridge::terminal::agent(name).map_err(|_| "native_terminal_name_invalid")?;
@@ -96,6 +105,7 @@ pub fn window_name(name: &str) -> Result<String, &'static str> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn only_an_engine_socket_shape_passes() {
         assert!(engine_socket_shape(Path::new(
@@ -116,6 +126,7 @@ mod tests {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn engine_socket_needs_an_engine_db_and_a_socket() {
         let root = tempfile::tempdir().expect("temp dir");
@@ -142,6 +153,7 @@ mod tests {
         assert_eq!(engine_socket(root), Ok(socket.clone()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_agent_with_its_own_server_socket_is_refused() {
         let root = tempfile::tempdir().expect("temp dir");

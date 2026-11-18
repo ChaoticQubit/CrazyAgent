@@ -3,7 +3,7 @@ pub mod ide;
 pub mod theme;
 mod updates;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 #[expect(
     dead_code,
     reason = "the native views are wired to the engine feed in feat/v243-native-wiring (DEC-203)"
