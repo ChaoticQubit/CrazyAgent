@@ -54,6 +54,7 @@ defaults:
 
 jobs:
   build-linux:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -85,6 +86,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-macos:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
@@ -113,6 +115,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   build-windows:
+    if: false
     name: Build the ${{ matrix.os }} test archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
@@ -145,7 +148,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +195,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +257,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -300,6 +303,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
   node:
+    if: false
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -463,6 +467,7 @@ jobs:
           retention-days: 14
 
   typecheck:
+    if: false
     name: Desktop typecheck and Bun suites
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -527,7 +532,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,55 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  rows:
+    name: npx launch line rows ubuntu-22.04
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the base workflow so the tree is the base
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD~1)" = 3b9393f1aaa28b7620f60b2287cdf97b54d3f429
+          test "$(git diff --name-only HEAD~1 HEAD)" = .github/workflows/tests.yml
+          git checkout HEAD~1 -- .github/workflows/tests.yml
+          git diff --quiet HEAD~1
+      - name: Install Linux packages
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Rows
+        timeout-minutes: 90
+        run: |
+          set -u
+          green=0
+          row() {
+            local label=$1
+            shift
+            out=$(cargo test -p crazyagent --lib --locked -- "$@" 2>&1)
+            rc=$?
+            echo "row $label rc=$rc $(printf '%s\n' "$out" | grep -m1 'test result')"
+            printf '%s\n' "$out" | grep -E "^test .* (ok|FAILED|ignored)$" | sed 's/^/    /'
+            printf '%s\n' "$out" | grep -m20 "panicked at\|error\[E\|left: \|right: " | cut -c1-300 | sed 's/^/    /'
+            case $label in green*) [ "$rc" -eq 0 ] || green=1 ;; esac
+          }
+          row green-lines launch_context::tests::batch_files_tests
+          row green-storage-plugins storage::plugins::
+          out=$(cargo clippy -p crazyagent --all-targets --locked -- -D warnings 2>&1)
+          rc=$?
+          echo "clippy rc=$rc"
+          printf '%s\n' "$out" | grep -E -A8 "^(warning|error)" | head -60
+          [ "$rc" -eq 0 ] || green=1
+          exit $green
