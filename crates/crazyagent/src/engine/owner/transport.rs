@@ -2554,61 +2554,69 @@ async fn serve_admitted(
         }
         Deferred::Agents(a) => {
             let served = agents::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+            within(agents::CONTROL_TIMEOUT, served).await;
         }
         Deferred::Changes(a) => {
             let served = changes::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
+            within(changes::CHANGES_TIMEOUT, served).await;
         }
         Deferred::IdeExtensions(a) => {
             let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+            within(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
         }
         Deferred::Recovery(a) => {
             let served = recovery::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+            within(recovery::RECOVERY_TIMEOUT, served).await;
         }
         Deferred::Ide(a) => {
             let served = ide::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+            within(ide::IDE_TIMEOUT, served).await;
         }
         Deferred::Process(a) => {
             let served = process::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(process::PROPOSE_TIMEOUT, served).await;
+            within(process::PROPOSE_TIMEOUT, served).await;
         }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+            within(ide_tab::IDE_TAB_TIMEOUT, served).await;
         }
         Deferred::Questions(a) => {
             let served = questions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+            within(questions::QUESTIONS_TIMEOUT, served).await;
         }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
+            within(roadmap::ROADMAP_TIMEOUT, served).await;
         }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+            within(cleanup::CLEANUP_TIMEOUT, served).await;
         }
         Deferred::Overview(a) => {
             let served = overview::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
+            within(overview::OVERVIEW_TIMEOUT, served).await;
         }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
+            within(plugins::IMPORT_TIMEOUT, served).await;
         }
         Deferred::Usage(a) => {
             let served = usage::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+            within(usage::USAGE_TIMEOUT, served).await;
         }
         Deferred::HarnessUpdates(a) => {
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
+            within(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
     }
+}
+
+/// Runs one deferred owner request under its own bound, each timed storage job it submits
+/// decided before the bound cuts it, so the request answers that decision itself.
+/// Inputs: the bound and the request. Output: none; the request writes its own reply.
+async fn within<F: std::future::Future>(bound: Duration, served: F) {
+    let cut = Instant::now() + bound;
+    let _ = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, bound, served)).await;
 }
 
 /// One owner request served past its exchange. While it runs it is counted apart from
