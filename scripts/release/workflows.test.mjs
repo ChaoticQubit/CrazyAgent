@@ -590,6 +590,36 @@ test("every Rust test target that needs the staged RCLI host is left out of CI a
   assert(needing > 1, "the check found the tests that need the RCLI host");
 });
 
+/**
+ * Finds the code in one Rust test file that reads `name`: one entry per mention, holding the
+ * test row the mention sits in, or no row when the read counts for the whole target.
+ * Inputs: the file text and the name. Output: the entries, in file order.
+ */
+function readersOf(text, name) {
+  const readers = [];
+  for (const { index } of text.matchAll(new RegExp(name, "g"))) {
+    const before = text.slice(0, index);
+    const fn = [...before.matchAll(/^(?:async )?fn (\w+)\(/gm)].at(-1);
+    readers.push({ row: fn && /#\[(?:tokio::)?test[^\]\n]*\]\s*$/.test(before.slice(0, fn.index)) ? fn[1] : undefined });
+  }
+  return readers;
+}
+
+test("the srt guard credits a read to a test row only when it sits in that row's own unindented fn, and counts readers, not mentions (#499 F1)", () => {
+  const row = "#[test]\nfn a() {\n    let srt = std::env::var_os(\"CRAZYAGENT_SRT\").expect(\"CRAZYAGENT_SRT\");\n}\n";
+  assert.deepEqual(readersOf(row, "CRAZYAGENT_SRT"), [{ row: "a" }], "two mentions in one row are one reader");
+  assert.deepEqual(readersOf("#[tokio::test(flavor = \"multi_thread\")]\nasync fn b() {\n    CRAZYAGENT_SRT;\n}\n", "CRAZYAGENT_SRT"), [{ row: "b" }]);
+  for (const [label, helper] of [
+    ["an impl helper", "struct Fixture;\nimpl Fixture {\n    fn srt() {\n        CRAZYAGENT_SRT;\n    }\n}\n"],
+    ["a pub helper", "pub fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a pub(crate) helper", "pub(crate) fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a const helper", "const fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a row inside a module", "mod inner {\n    #[test]\n    fn c() {\n        CRAZYAGENT_SRT;\n    }\n}\n"],
+  ]) {
+    assert.deepEqual(readersOf(`#[test]\nfn a() {}\n${helper}`, "CRAZYAGENT_SRT"), [{ row: undefined }], `${label} after a row counts for the whole target`);
+  }
+});
+
 test("every Rust test that reads the leader-verified srt path is left out of CI and the test farm, which set no CRAZYAGENT_SRT", async () => {
   const lists = [[await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE"], [await workflow("tests.yml"), "FARM_ENGINE_EXCLUDE"]];
   const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
@@ -597,11 +627,9 @@ test("every Rust test that reads the leader-verified srt path is left out of CI 
   for (const name of (await readdir(folder)).filter((name) => name.endsWith(".rs"))) {
     const text = await readFile(new URL(name, folder), "utf8");
     const target = name.slice(0, -3);
-    for (const { index } of text.matchAll(/CRAZYAGENT_SRT/g)) {
+    for (const reader of readersOf(text, "CRAZYAGENT_SRT")) {
       needing += 1;
-      const before = text.slice(0, index);
-      const fn = [...before.matchAll(/^(?:async )?fn (\w+)\(/gm)].at(-1);
-      const row = fn && /#\[(?:tokio::)?test[^\]\n]*\]\s*$/.test(before.slice(0, fn.index)) ? `${target}/${fn[1]}` : undefined;
+      const row = reader.row === undefined ? undefined : `${target}/${reader.row}`;
       for (const [workflowText, list] of lists) {
         const skipped = excluded(workflowText, list);
         assert(skipped.has(target) || (row !== undefined && skipped.has(row)), `${name} reads CRAZYAGENT_SRT ${row ? `in ${row}` : "outside a test row, so the whole target"} but is not in ${list}`);
