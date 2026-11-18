@@ -952,12 +952,10 @@ pub fn known_code(code: &str) -> Option<&'static str> {
         .map(|(known, _)| *known)
 }
 
-/// The problem a server check records when it ends with `code`. A check of a server whose
-/// program is Windows PowerShell or PowerShell (`powershell` or `pwsh`, any case, with or
-/// without an extension) that ran out of time records `server_check_timeout_powershell`, whose
-/// sentence names PowerShell reading its installed modules as the likely cause
-/// (V243-WIN-PWSH-CONFINED-CHECK). Inputs: the check's code and the server's program. Output:
-/// the code to record.
+/// The problem a server check records when it ends with `code`: a timed-out check of a
+/// PowerShell server (`powershell` or `pwsh`, any case or extension) records
+/// `server_check_timeout_powershell`, whose sentence names module reading as the likely cause.
+/// Inputs: the check's code and the server's program. Output: the code to record.
 pub fn timed_out_problem(code: &'static str, program: &Path) -> &'static str {
     assert!(!code.is_empty());
     assert!(!program.as_os_str().is_empty());
