@@ -435,8 +435,9 @@ impl Child {
     }
 
     /// Takes the child off screen: X11 unmaps it, Wayland places it below the toplevel's
-    /// surface, whose opaque page then covers it (spike run 3: passes on weston and sway).
-    /// Output: none.
+    /// surface, whose opaque page then covers it, and has GTK redraw the page: weston 13
+    /// applies damage only with a new buffer and does not repaint the area a restack below
+    /// an opaque parent uncovers. Output: none.
     pub fn hide(&mut self) {
         let mut pacing = self.pacing.get();
         if pacing.is_gone() {
@@ -452,6 +453,7 @@ impl Child {
                 wayland.subsurface.place_below(&wayland.parent);
                 wayland.parent.commit();
                 flush(&wayland.conn, &self.pacing);
+                self.toplevel.queue_draw();
             }
         }
     }
