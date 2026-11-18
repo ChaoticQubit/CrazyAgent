@@ -928,7 +928,9 @@ impl Storage {
                                     command,
                                 )
                             };
-                            if let (Some(request_id), Ok(_)) = (&logout, &result) {
+                            if let Some(request_id) = &logout
+                                && final_answer(&result)
+                            {
                                 end_logout_intent(intents.as_deref(), request_id);
                             }
                             if let Err(Ok(begun)) = reply.send(result)
@@ -3464,9 +3466,19 @@ fn replay_revoke(
     }
 }
 
-/// Ends the kept sign-out with this operation id once storage recorded it, so the next open
-/// does not record it again. Inputs: the store and the sign-out's operation id. Output:
-/// none; a store that cannot be read is logged and its intent replays as a no-op later.
+/// Whether storage gave a native-auth job a final answer: it ran, or storage refused it by a
+/// name every client shows. Any other error is a storage fault, which the client reads as
+/// outcome unknown, so a kept sign-out stays for the next open. Input: the answer.
+/// Output: the verdict.
+fn final_answer<T>(result: &Result<T, EngineError>) -> bool {
+    result
+        .as_ref()
+        .map_or_else(|refused| owner_auth::public_error(&refused.0), |_| true)
+}
+
+/// Ends the kept sign-out with this operation id once storage gave it a final answer, so the
+/// next open does not sign out for it. Inputs: the store and the sign-out's operation id.
+/// Output: none; a store that cannot be read is logged and its intent replays later.
 fn end_logout_intent(intents: Option<&narrowing::Intents>, request_id: &RequestId) {
     let Some(intents) = intents else {
         return;
