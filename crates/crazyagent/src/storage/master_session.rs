@@ -8307,3 +8307,31 @@ mod schema_tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crazyagent_win_sandbox::private;
+
+    /// W1c D5: the engine database identity on Windows is the W1 file identity, the same on
+    /// each read of one file and different once another file is renamed into its place, so a
+    /// configured master receipt sees a database that was swapped.
+    #[test]
+    fn the_database_identity_names_one_file_and_changes_when_it_is_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let path = data.join("engine.db");
+        let other = data.join("other.db");
+        drop(private::file(&path, true).unwrap());
+        drop(private::file(&other, true).unwrap());
+        let read = |file: &std::path::Path| {
+            let metadata = std::fs::symlink_metadata(file).unwrap();
+            super::database_identity(file, &metadata).unwrap()
+        };
+        let first = read(&path);
+        assert_eq!(read(&path), first);
+        assert_ne!(read(&other), first);
+        std::fs::rename(&other, &path).unwrap();
+        assert_ne!(read(&path), first);
+    }
+}
