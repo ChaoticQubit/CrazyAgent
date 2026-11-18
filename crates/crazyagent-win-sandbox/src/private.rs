@@ -136,10 +136,9 @@ pub fn list(user: &[u8], folder: bool) -> Vec<u8> {
 }
 
 /// The engine stores that carry the full medium label (#524 r3, V244-WIN-STORE-LABEL-NX): a
-/// secret store (account keys,
-/// MCP secrets) and the database folder, the data root, whose files engine.db, its SQLite
-/// side files and the GitHub sign-in are. Every other private folder carries no label, as it
-/// may hold a root granted to an AppContainer.
+/// secret store (account keys, MCP secrets) and the database folder, the data root, whose
+/// files engine.db, its SQLite side files and the GitHub sign-in are. Every other private
+/// folder carries no label, as it may hold a root granted to an AppContainer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Store {
     Secret,
