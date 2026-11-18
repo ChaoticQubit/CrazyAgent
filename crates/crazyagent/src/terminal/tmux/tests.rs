@@ -283,6 +283,101 @@ fn a_full_input_request_reaches_the_pane_whole_and_in_order_across_its_commands(
     assert_eq!(std::fs::read(&received).unwrap(), bytes);
 }
 
+/// DEC-202 T6: the back-to-back route takes only a request of more than one `send-keys` run
+/// and only with its toggle on; with it off every request goes one by one as before.
+#[test]
+fn t6_takes_only_a_request_of_more_than_one_run_and_only_with_its_toggle_on() {
+    for length in [
+        0,
+        1,
+        SEND_KEYS_BYTES_MAX,
+        SEND_KEYS_BYTES_MAX + 1,
+        INPUT_BYTES_MAX,
+    ] {
+        let bytes = vec![b'a'; length];
+        assert_eq!(input_route(&bytes, false), Route::OneByOne);
+        let on = if length > SEND_KEYS_BYTES_MAX {
+            Route::BackToBack
+        } else {
+            Route::OneByOne
+        };
+        assert_eq!(input_route(&bytes, true), on, "{length} bytes");
+    }
+}
+
+/// DEC-202 T6: a full request sent back to back to an agent's window target, not a pane id,
+/// reaches its pane whole and in order, read back from what the pane's app received.
+#[cfg(target_os = "macos")]
+#[test]
+fn t6_a_full_request_sent_back_to_back_reaches_the_window_pane_whole_and_in_order() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path());
+    let control = host.live_control().unwrap();
+    let target = host.agent_target(&control, &agent).unwrap();
+    assert!(!pane_id_valid(&target));
+    let bytes: Vec<u8> = (0..INPUT_BYTES_MAX)
+        .map(|at| b' ' + (at * 7 % 95) as u8)
+        .collect();
+    Tmux::send_back_to_back(&control, &target, &bytes).unwrap();
+    assert_eq!(received_bytes(&received, bytes.len()), bytes);
+}
+
+/// A real tmux server whose one agent pane runs `cat` on a raw terminal, writing what it
+/// receives to a file. Takes the test's home folder. Returns the host, the guard that stops
+/// the server, the agent and the file.
+#[cfg(target_os = "macos")]
+fn raw_cat_pane(home: &Path) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home).expect("tmux is required for this test");
+    let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let ready = home.join("ready");
+    let received = home.join("received");
+    let script = format!(
+        "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+        ready.display(),
+        received.display()
+    );
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script],
+        cwd: home.to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never set its terminal raw"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    (host, server, agent, received)
+}
+
+/// Waits until a file holds at least `length` bytes, for at most ten seconds. Takes the file
+/// and the length. Returns the file's bytes.
+#[cfg(target_os = "macos")]
+fn received_bytes(file: &Path, length: usize) -> Vec<u8> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::metadata(file).map_or(0, |found| found.len()) < length as u64 {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never received every typed byte"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::read(file).unwrap()
+}
+
 #[test]
 fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert_eq!(

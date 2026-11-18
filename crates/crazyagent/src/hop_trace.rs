@@ -17,6 +17,10 @@ pub const T2_ONE_RUN_ENV: &str = "CRAZYAGENT_T2_ONE_RUN";
 /// into the one the engine sends next.
 pub const T5_MERGE_WHEEL_ENV: &str = "CRAZYAGENT_T5_MERGE_WHEEL";
 
+/// The research toggle (DEC-202 T6) that writes the 256-byte `send-keys` runs of one request
+/// back to back under one hold of the control client's input, so their replies overlap.
+pub const T6_INTERLEAVE_ENV: &str = "CRAZYAGENT_T6_INTERLEAVE";
+
 /// The most characters one hop's label carries into a trace line.
 const LABEL_CHARS_MAX: usize = 32;
 

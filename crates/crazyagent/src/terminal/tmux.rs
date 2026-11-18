@@ -840,13 +840,38 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys, one command after another, in order.
-    /// Takes the control client, the target and the bytes. Returns once tmux took them all,
-    /// or `terminal_input_bounds`.
+    /// Types bytes into one tmux target by the route `input_route` picks from the DEC-202
+    /// research toggles, one by one without them. Takes the control client, the target and
+    /// the bytes. Returns once tmux took them all, or `terminal_input_bounds`.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
         }
+        let interleave = crate::hop_trace::toggled(crate::hop_trace::T6_INTERLEAVE_ENV);
+        match input_route(bytes, interleave) {
+            Route::OneByOne => Self::send_one_by_one(control, target, bytes),
+            Route::BackToBack => Self::send_back_to_back(control, target, bytes),
+        }
+    }
+
+    /// Types bytes longer than one run into one tmux target as hex keys (DEC-202 T6, parked
+    /// 6b0a84dc2): a target that is not a pane id is resolved to its pane once, so every run
+    /// reaches that pane, then all the runs are written at once and each answer is awaited
+    /// in order. Takes the control client, the target and the bytes. Returns once tmux took
+    /// them all.
+    fn send_back_to_back(
+        _control: &Control,
+        _target: &str,
+        _bytes: &[u8],
+    ) -> Result<(), HostError> {
+        Err(failure("terminal_input_bounds"))
+    }
+
+    /// Types bytes into one tmux target as hex keys, one command after another, in order, as
+    /// without the research toggles. Takes the control client, the target and at most
+    /// `INPUT_BYTES_MAX` bytes. Returns once tmux took them all.
+    fn send_one_by_one(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(bytes.len() <= INPUT_BYTES_MAX);
         let lines = if crate::hop_trace::toggled(crate::hop_trace::T2_ONE_RUN_ENV) {
             crate::hop_trace::one_run_lines(target, bytes)
         } else {
@@ -2477,6 +2502,23 @@ impl Host for Tmux {
 
 const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
 const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// How `send_bytes` hands one request to tmux (DEC-202 research toggles).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// Each `send-keys` run waits for the previous run's answer, as without the toggles.
+    OneByOne,
+    /// T6: every run written at once, then each answer awaited in order.
+    BackToBack,
+}
+
+/// The route `send_bytes` takes for one request: back to back (DEC-202 T6) when its toggle is
+/// on and the bytes take more than one `send-keys` run, else one by one. Takes at most
+/// `INPUT_BYTES_MAX` bytes and whether T6 is on. Returns the route.
+fn input_route(bytes: &[u8], _interleave: bool) -> Route {
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    Route::OneByOne
+}
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
