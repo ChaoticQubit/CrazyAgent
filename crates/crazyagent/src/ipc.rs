@@ -331,7 +331,7 @@ mod pipes_tests {
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::windows::{
-        bind_with, connect, name_of, publish, read, verify_client, verify_server,
+        bind, bind_with, connect, name_of, publish, read, verify_client, verify_server,
     };
     use crazyagent_win_sandbox::{pipe, private};
     use std::io::Write;
@@ -487,7 +487,7 @@ mod windows_tests {
     async fn a_bind_holds_the_pipe_name_before_it_publishes() {
         let (_temp, root) = private_root();
         let squatted = name_of(&root, "engine.sock", &[3; 16]).unwrap();
-        let squat = pipe::create(&squatted, true, 1).unwrap();
+        let squat = pipe::create(&squatted, true, 2).unwrap();
         let refused = bind_with(&root, "engine.sock", [3; 16], 2).unwrap_err();
         assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
         assert!(entries(&root).is_empty());
@@ -499,13 +499,13 @@ mod windows_tests {
         assert_eq!(again.raw_os_error(), Some(5), "{again}");
     }
 
-    /// DESIGN-0256 D8-D10: a client of this user reaches the published pipe, the client's
-    /// check of the server passes before it writes, the server's check of the client passes,
-    /// bytes go both ways, and each check refuses the end it does not belong to.
+    /// DESIGN-0256 D8-D10: a client of this user reaches the pipe a default bind published,
+    /// the client's check of the server passes before it writes, the server's check of the
+    /// client passes, bytes go both ways, and each check refuses the end it does not belong to.
     #[tokio::test]
     async fn a_bound_pipe_serves_a_client_of_this_user_with_both_checks_passing() {
         let (_temp, root) = private_root();
-        let listener = bind_with(&root, "engine.sock", [5; 16], 2).unwrap();
+        let listener = bind(&root, "engine.sock").unwrap();
         let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
         let (mut client, mut served) = (client.unwrap(), served.unwrap());
         verify_server(&client).unwrap();
@@ -565,7 +565,8 @@ mod windows_tests {
 
     /// D8 (advisor 08:2x): the engine holds a handle on its pipe name at every step, so
     /// through fifty clients back to back on a name capped at two instances a first instance
-    /// create of the name is refused each time, with a client connected and after it left.
+    /// create of the name is refused each time, with a client connected and after it left:
+    /// access denied for a held name, or pipe busy while the cap is still reached.
     #[tokio::test]
     async fn the_pipe_name_is_never_free_while_clients_come_and_go() {
         let (_temp, root) = private_root();
@@ -575,10 +576,10 @@ mod windows_tests {
             let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
             let connected = (client.unwrap(), served.unwrap());
             let squat = pipe::create(&name, true, 2).unwrap_err();
-            assert_eq!(squat.raw_os_error(), Some(5), "{squat}");
+            assert!(matches!(squat.raw_os_error(), Some(5 | 231)), "{squat}");
             drop(connected);
             let squat = pipe::create(&name, true, 2).unwrap_err();
-            assert_eq!(squat.raw_os_error(), Some(5), "{squat}");
+            assert!(matches!(squat.raw_os_error(), Some(5 | 231)), "{squat}");
         }
     }
 
