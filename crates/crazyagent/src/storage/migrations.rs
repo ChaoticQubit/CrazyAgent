@@ -519,7 +519,7 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
 /// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600; on Windows a
-/// database store, so the copies take engine.db's no-read-up label), then keeps it and the
+/// database store, so the copies take engine.db's full medium label), then keeps it and the
 /// newest BACKUPS_KEPT - 1 other backups of this user ([`prune`]). Inputs: the connection,
 /// its path, the settings sources and both versions. Output: the new backup folder.
 fn backup(
@@ -977,9 +977,9 @@ mod windows_tests {
         drop(connection);
     }
 
-    /// V244-WIN-BACKUP-DB-LABEL (leader 06:32, #524 r3 sec LOW): an upgrade backup's engine.db
-    /// copy carries the medium no-read-up label engine.db carries, so a lower integrity
-    /// process of the user can read neither.
+    /// V244-WIN-BACKUP-DB-LABEL (leader 06:32, #524 r3 sec LOW), V244-WIN-STORE-LABEL-NX: an
+    /// upgrade backup's engine.db copy carries the full medium label engine.db carries, so a
+    /// lower integrity process of the user can neither read nor hold either.
     #[test]
     fn a_backup_copy_of_the_database_carries_the_no_read_up_label() {
         let root = tempfile::tempdir().unwrap();
@@ -993,7 +993,7 @@ mod windows_tests {
             .unwrap()
             .label
             .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap());
-        assert_eq!(label, Some((0x2000, 0x3)));
+        assert_eq!(label, Some((0x2000, 0x7)));
         drop((copy, connection));
     }
 }

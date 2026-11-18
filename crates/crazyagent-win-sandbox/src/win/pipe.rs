@@ -5,7 +5,10 @@ use super::{Words, last_error};
 use crate::dacl::{SYSTEM, allowing, label};
 use crate::pipe::{NO_TOKEN, Peer, Pin, Reverted, Served, after_revert};
 use std::io;
-use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle};
+use std::os::windows::io::{
+    AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle,
+};
+use tokio::net::windows::named_pipe::NamedPipeServer;
 use windows_sys::Win32::Foundation::{
     ERROR_NO_TOKEN, ERROR_SUCCESS, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE,
     INVALID_HANDLE_VALUE,
@@ -47,13 +50,11 @@ const LABEL_BYTES_MAX: usize = 256;
 const LABEL_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 16];
 const _: () = assert!(ERROR_NO_TOKEN == NO_TOKEN);
 
-/// Creates one instance of the local named pipe `name` for the engine (DESIGN-0256 D8):
-/// byte mode, overlapped for Tokio, remote clients refused, at most `instances` instances
-/// of the name, and a protected list giving read and write to the user and SYSTEM only,
-/// with the user as owner. With `first` the create fails with access denied when any
-/// instance of the name exists, so a name someone else made first is never joined.
-/// Inputs: the full name under `\\.\pipe\` with one plain part, whether this is the first
-/// instance and the instance cap. Output: the server handle, or the Windows error.
+/// Creates one instance of the local named pipe `name` for the engine (DESIGN-0256 D8): byte
+/// mode, overlapped, remote clients refused, at most `instances` of the name, and a protected
+/// list, owned by the user, giving read and write to the user and SYSTEM only. With `first`,
+/// a name that already exists fails with access denied and is never joined. Inputs: the name
+/// under `\\.\pipe\` (one plain part), first or not, the cap. Output: the handle, or the error.
 pub fn create(name: &str, first: bool, instances: u32) -> io::Result<OwnedHandle> {
     let part = name.strip_prefix(PREFIX).unwrap_or_default();
     if part.is_empty() || name.len() > NAME_MAX || part.contains(['\\', '/', '\0']) {
@@ -112,6 +113,15 @@ pub fn create(name: &str, first: bool, instances: u32) -> io::Result<OwnedHandle
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+/// Creates one instance of an engine pipe as [`create`] does and hands it to Tokio, whose
+/// reactor it joins (DESIGN-0256 D8), so the engine's listener needs no unsafe code. Must
+/// run inside a Tokio runtime. Inputs: as for [`create`]. Output: the server end, or the
+/// Windows error.
+pub fn instance(name: &str, first: bool, instances: u32) -> io::Result<NamedPipeServer> {
+    let created = create(name, first, instances)?;
+    unsafe { NamedPipeServer::from_raw_handle(created.into_raw_handle()) }
 }
 
 /// Reads who is at the client end of a connected engine pipe instance (DESIGN-0140 D9 step

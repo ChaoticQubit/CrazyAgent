@@ -1612,10 +1612,11 @@ async fn a_job_start_is_refused_job_busy_while_a_direct_add_copies() {
     engine.stop().await;
 }
 
-/// An add's own running row, as a resend of its request finds it, does not hold its plan;
-/// another add's running row does, whatever destination it planned.
+/// An add's own running row, as a resend of its request finds it, does not hold its plan,
+/// nor does another add running onto a name apart, as adds run side by side (DEC-197);
+/// another add running onto the same name does.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_add_plans_over_its_own_running_row_but_not_over_another_add() {
+async fn an_add_plans_over_its_own_row_and_beside_an_add_elsewhere_but_not_onto_its_name() {
     let disk = tempfile::tempdir().unwrap();
     let place = disk.path().canonicalize().unwrap();
     let home = place.join("projects");
@@ -1633,15 +1634,18 @@ async fn an_add_plans_over_its_own_running_row_but_not_over_another_add() {
             text(&home.join(name))
         )
     };
-    sql(&database, &running("add-other", "elsewhere"));
+    sql(&database, &running("add-other", "site"));
     assert_eq!(
         owner.apply(add(&source, AddMode::Copy)).await,
         rejected("home_add_in_progress"),
-        "another add runs"
+        "another add runs onto the same name"
     );
     sql(
         &database,
-        "DELETE FROM projects_home_add WHERE request='add-other';",
+        &format!(
+            "UPDATE projects_home_add SET destination='{}' WHERE request='add-other';",
+            text(&home.join("elsewhere"))
+        ),
     );
     owner
         .controller
@@ -1659,7 +1663,7 @@ async fn an_add_plans_over_its_own_running_row_but_not_over_another_add() {
     assert!(
         matches!(&answered, OwnerResponse::Applied { operation }
             if operation.result == OwnerResult::Applied),
-        "{answered:?}"
+        "its own row and an add elsewhere hold nothing: {answered:?}"
     );
     assert_eq!(
         fs::read_to_string(home.join("site/p1/f1.txt")).unwrap(),

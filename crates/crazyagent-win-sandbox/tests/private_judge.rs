@@ -1,7 +1,9 @@
 use crazyagent_win_sandbox::dacl::{
     self, ADMINISTRATORS, ALL_APPLICATION_PACKAGES, OWNER_RIGHTS, SYSTEM, TRUSTED_INSTALLER,
 };
-use crazyagent_win_sandbox::private::{Facts, Store, judge, judge_folder, label_list, list};
+use crazyagent_win_sandbox::private::{
+    Facts, Store, judge, judge_folder, judge_store_before_label, label_list, list,
+};
 
 const USER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
@@ -28,6 +30,8 @@ const OBJECT_ALLOW: u8 = 5;
 const LABEL: u8 = 0x11;
 const NO_WRITE_UP: u32 = 0x1;
 const NO_READ_UP: u32 = 0x2;
+const NO_EXECUTE_UP: u32 = 0x4;
+const FULL_POLICY: u32 = NO_WRITE_UP | NO_READ_UP | NO_EXECUTE_UP;
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
 const INHERITABLE: u8 = 0x03;
@@ -152,21 +156,26 @@ fn a_folder_handing_another_account_access_to_what_is_made_in_it_is_refused() {
     assert_eq!(judge_folder(&facts(Some(list(&USER, true))), &USER), Ok(()));
 }
 
-/// #512 r2 (rv-sec2 F1): a folder whose label entry for what is made in it is below medium,
-/// or lacks no-write-up, hands that label to SQLite's side files, so the folder is refused,
-/// though its own label (none here) is fine; a high inheritable label stays private.
+/// #512 r2 (rv-sec2 F1), V244-WIN-STORE-LABEL-NX (leader 09:14): a folder whose label entry
+/// for what is made in it is below medium, or lacks any of no-write-up, no-read-up and
+/// no-execute-up, hands that label to SQLite's side files, so the folder is refused, though
+/// its own label (none here) is fine; a high inheritable label with the full policy passes.
 #[test]
 fn a_folder_handing_a_low_label_to_what_is_made_in_it_is_refused() {
     let mut object = facts(Some(private_list(&[])));
     let handed = |policy: u32, level: &[u8]| {
         Some(acl(&[(LABEL, INHERITABLE | INHERIT_ONLY, policy, level)]))
     };
-    object.label = handed(NO_WRITE_UP, &LOW);
+    object.label = handed(FULL_POLICY, &LOW);
     assert_eq!(judge(&object, &USER), Ok(()));
     assert!(judge_folder(&object, &USER).is_err());
-    object.label = handed(0, &MEDIUM);
-    assert!(judge_folder(&object, &USER).is_err());
+    for policy in [0, NO_WRITE_UP, NO_WRITE_UP | NO_READ_UP] {
+        object.label = handed(policy, &MEDIUM);
+        assert!(judge_folder(&object, &USER).is_err(), "{policy}");
+    }
     object.label = handed(NO_WRITE_UP, &HIGH);
+    assert!(judge_folder(&object, &USER).is_err());
+    object.label = handed(FULL_POLICY, &HIGH);
     assert_eq!(judge_folder(&object, &USER), Ok(()));
 }
 
@@ -235,17 +244,22 @@ fn trusted_installer_as_owner_and_an_owner_rights_entry_are_private() {
     assert_eq!(judge(&owner_rights, &USER), Ok(()));
 }
 
-/// W1 D1 (rv-sec3 N4): a mandatory label below medium, or one that lets a lower integrity
-/// process write up, is refused; no label, which Windows reads as medium, and a medium or
-/// high label that keeps lower writers out are private.
+/// W1 D1 (rv-sec3 N4), V244-WIN-STORE-LABEL-NX (leader 09:14): a mandatory label below
+/// medium, or one that lets a lower integrity process write, read or execute up, is refused,
+/// as #562 F1 saw such a process hold a file opened for execute only; no label, which
+/// Windows reads as medium, and a medium or high label with the full policy are private.
 #[test]
 fn a_label_that_lets_a_lower_integrity_process_write_is_refused() {
     for (level, policy, private) in [
-        (&LOW, NO_WRITE_UP, false),
+        (&LOW, FULL_POLICY, false),
         (&MEDIUM, 0, false),
         (&HIGH, 0, false),
-        (&MEDIUM, NO_WRITE_UP, true),
-        (&HIGH, NO_WRITE_UP, true),
+        (&MEDIUM, NO_WRITE_UP, false),
+        (&MEDIUM, NO_WRITE_UP | NO_READ_UP, false),
+        (&MEDIUM, NO_WRITE_UP | NO_EXECUTE_UP, false),
+        (&HIGH, NO_WRITE_UP, false),
+        (&MEDIUM, FULL_POLICY, true),
+        (&HIGH, FULL_POLICY, true),
     ] {
         let mut object = facts(Some(private_list(&[])));
         object.label = Some(acl(&[(LABEL, 0, policy, &level[..])]));
@@ -280,13 +294,13 @@ fn the_planned_list_is_private_and_names_only_the_trusted_accounts() {
     }
 }
 
-/// #524 r3 (rv-code4 F2, leader 05:45): only the secret stores carry the medium label with
-/// no-write-up and no-read-up. A secret folder labels itself and all made in it; the database
-/// folder, the data root, labels only the files made directly in it, never itself or a folder
-/// below, which may be a root granted to an AppContainer. Both forms pass the folder judge.
+/// #524 r3 (rv-code4 F2, leader 05:45), V244-WIN-STORE-LABEL-NX: only the stores carry the
+/// medium label with no-write-up, no-read-up and no-execute-up. A secret folder labels itself
+/// and all made in it; the database folder, the data root, labels only the files made directly
+/// in it, never itself or a folder below, which may be a root granted to an AppContainer.
 #[test]
 fn a_store_label_reaches_only_what_the_store_holds() {
-    let both = Ok(Some((0x2000, NO_WRITE_UP | NO_READ_UP)));
+    let both = Ok(Some((0x2000, FULL_POLICY)));
     let mut secret = facts(Some(list(&USER, true)));
     secret.label = Some(label_list(Store::Secret));
     let sacl = secret.label.as_deref().unwrap();
@@ -301,4 +315,69 @@ fn a_store_label_reaches_only_what_the_store_holds() {
     assert_eq!(dacl::label(sacl), Ok(None));
     assert_eq!(dacl::inherited_label(sacl), both);
     assert_eq!(judge_folder(&database, &USER), Ok(()));
+}
+
+/// #568 rv-code F1 (leader 09:19): two mandatory labels that both apply to the object, as an
+/// own label beside one a folder handed down, or that both reach what a folder makes, are
+/// refused, not read as the first, since the reader cannot tell which one Windows enforces.
+/// One own label and one handed-down label on a folder read apart.
+#[test]
+fn a_second_label_entry_is_refused_not_skipped() {
+    let own = (LABEL, 0, FULL_POLICY, &MEDIUM[..]);
+    let inherited = (LABEL, INHERITED, NO_WRITE_UP | NO_READ_UP, &MEDIUM[..]);
+    let two = acl(&[own, inherited]);
+    assert!(dacl::label(&two).is_err());
+    let mut object = facts(Some(private_list(&[])));
+    object.label = Some(two);
+    assert!(judge(&object, &USER).is_err());
+    let handed = acl(&[
+        (LABEL, INHERITABLE, FULL_POLICY, &MEDIUM[..]),
+        (
+            LABEL,
+            OBJECT_INHERIT | INHERIT_ONLY,
+            NO_WRITE_UP,
+            &MEDIUM[..],
+        ),
+    ]);
+    assert!(dacl::inherited_label(&handed).is_err());
+    let mut folder = facts(Some(private_list(&[])));
+    folder.label = Some(handed);
+    assert!(judge_folder(&folder, &USER).is_err());
+    let apart = acl(&[
+        own,
+        (LABEL, INHERITABLE | INHERIT_ONLY, FULL_POLICY, &MEDIUM[..]),
+    ]);
+    let full = Ok(Some((0x2000, FULL_POLICY)));
+    assert_eq!(dacl::label(&apart), full);
+    assert_eq!(dacl::inherited_label(&apart), full);
+}
+
+/// V244-WIN-STORE-LABEL-NX (leader 09:13, earlier installs): before a store folder takes its
+/// full label, a medium one an earlier build gave it, own or handed down, with no-write-up
+/// but not the rest, passes so the open can raise it; a label below medium or without
+/// no-write-up, or a second label entry, is still refused, and the strict judge refuses all.
+#[test]
+fn an_earlier_store_label_passes_only_the_judge_before_the_label() {
+    let files = OBJECT_INHERIT | NO_PROPAGATE | INHERIT_ONLY;
+    for (flags, policy, level, before) in [
+        (INHERITABLE, NO_WRITE_UP | NO_READ_UP, &MEDIUM, true),
+        (files, NO_WRITE_UP | NO_READ_UP, &MEDIUM, true),
+        (INHERITABLE, NO_WRITE_UP, &MEDIUM, true),
+        (INHERITABLE, NO_READ_UP | NO_EXECUTE_UP, &MEDIUM, false),
+        (files, NO_READ_UP | NO_EXECUTE_UP, &MEDIUM, false),
+        (INHERITABLE, FULL_POLICY, &LOW, false),
+        (files, FULL_POLICY, &LOW, false),
+    ] {
+        let mut folder = facts(Some(private_list(&[])));
+        folder.label = Some(acl(&[(LABEL, flags, policy, &level[..])]));
+        let seen = judge_store_before_label(&folder, &USER);
+        assert_eq!(seen.is_ok(), before, "{flags} {policy} {seen:?}");
+        assert!(judge_folder(&folder, &USER).is_err(), "{flags} {policy}");
+    }
+    let mut two = facts(Some(private_list(&[])));
+    two.label = Some(acl(&[
+        (LABEL, INHERITABLE, FULL_POLICY, &MEDIUM[..]),
+        (LABEL, INHERITED | INHERITABLE, NO_WRITE_UP, &MEDIUM[..]),
+    ]));
+    assert!(judge_store_before_label(&two, &USER).is_err());
 }

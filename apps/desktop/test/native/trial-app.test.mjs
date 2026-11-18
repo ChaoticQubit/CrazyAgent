@@ -8,6 +8,8 @@ import { test } from "node:test";
 import { RELAUNCHED, appBundle, command, listener, stopRelaunched } from "./trial-app.mjs";
 import { relaunch } from "./trial-kit.mjs";
 
+const PS_PATH_MAC_ONLY = { skip: process.platform !== "darwin" && "stopRelaunched matches the full program path /bin/ps -o comm= prints, which only macOS gives" };
+
 /** Starts a real process that sleeps until it is stopped. Output: the child and a promise of
  * its exit signal. */
 function sleeper() {
@@ -41,7 +43,7 @@ test("listener names the process that listens on a local port, and none once it 
   assert.throws(() => listener(0), /a TCP port/);
 });
 
-test("stopRelaunched quits the recorded app only while that pid still runs the recorded binary", async (t) => {
+test("stopRelaunched quits the recorded app only while that pid still runs the recorded binary", PS_PATH_MAC_ONLY, async (t) => {
   const evidence = folder();
   t.after(() => rmSync(evidence, { recursive: true, force: true }));
   assert.equal(await stopRelaunched(evidence), null);

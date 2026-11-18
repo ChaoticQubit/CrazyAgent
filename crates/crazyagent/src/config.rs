@@ -775,6 +775,25 @@ fn validate_pool_edit(pool: &AccountPool) -> Result<(), ConfigError> {
 pub const OWNER_BUSY_LINE: &str =
     "CrazyAgent is busy with other requests. Nothing changed; try again in a moment.";
 
+/// The sentence for `owner_queue_not_submitted`: the engine's request queue was full, so the
+/// request was refused before it was queued, nothing changed and a retry is safe.
+pub const OWNER_QUEUE_LINE: &str =
+    "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.";
+
+/// The sentence for `storage_starting_not_submitted`: the request reached the engine before
+/// its database took requests and was not sent on, so nothing changed and a retry is safe.
+pub const STORAGE_STARTING_LINE: &str =
+    "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.";
+
+/// The sentence for `storage_busy_not_submitted`: the request waited behind earlier database
+/// work past its bound and was withdrawn unrun, so nothing changed and a retry is safe.
+pub const STORAGE_BUSY_LINE: &str = "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.";
+
+/// The sentence for `access_change_pending`: a change that narrows access waited past its
+/// bound and stays queued or running. It takes effect unless the engine stops before
+/// storage reaches it, since the queue does not outlive the engine.
+pub const ACCESS_CHANGE_PENDING_LINE: &str = "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.";
+
 /// The sentence for `engine_version_mismatch`: the running engine and this app speak
 /// different versions, read from a version check or from a reply the app could not read.
 pub const ENGINE_VERSION_LINE: &str =
@@ -786,6 +805,10 @@ pub const ENGINE_VERSION_LINE: &str =
 pub fn plain_problem(code: &str) -> Option<&'static str> {
     match code {
         "owner_busy" => Some(OWNER_BUSY_LINE),
+        "owner_queue_not_submitted" => Some(OWNER_QUEUE_LINE),
+        "storage_starting_not_submitted" => Some(STORAGE_STARTING_LINE),
+        "storage_busy_not_submitted" => Some(STORAGE_BUSY_LINE),
+        "access_change_pending" => Some(ACCESS_CHANGE_PENDING_LINE),
         "engine_version_mismatch" => Some(ENGINE_VERSION_LINE),
         "pool_member_limit" => Some("A pool can hold up to 15 accounts"),
         "pool_needs_account" => Some(

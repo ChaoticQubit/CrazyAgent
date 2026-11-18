@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 const PANE_ENV_ROOT: &str = "PANE_ENV_ROOT";
 const PANE_ENV_OUT: &str = "PANE_ENV_OUT";
+const PANE_HOLD: Duration = Duration::from_secs(60);
 const PLANTED_TERMINAL: [(&str, &str); 4] = [
     ("COLORTERM", "planted-colorterm"),
     ("TERM_PROGRAM", "planted-term-program"),
@@ -1577,6 +1578,10 @@ fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keep
     assert!(ended(&mut watching));
 }
 
+/// Writes the pane's environment to the file `PANE_ENV_OUT` names, then stays while that file
+/// is there, at most `PANE_HOLD`, as an agent's harness stays: spawn checks the pane's first
+/// process against the process table, and a process that ends at once can be gone from it
+/// before that check. Input: the environment. Output: the file.
 #[test]
 #[ignore = "run only inside a tmux pane by the pane environment test"]
 fn pane_process_writes_its_environment() {
@@ -1589,6 +1594,10 @@ fn pane_process_writes_its_environment() {
     let partial = out.with_extension("partial");
     std::fs::write(&partial, text).unwrap();
     std::fs::rename(&partial, &out).unwrap();
+    let held = Instant::now();
+    while out.exists() && held.elapsed() < PANE_HOLD {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// One engine root with team agent 1 ready to lead in its own server: its home, its short

@@ -1,5 +1,5 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
-import { bridgeCall, errorMessage, withCode } from "./engine-client";
+import { bridgeCall, errorMessage, STORAGE_COPY, withCode } from "./engine-client";
 import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
@@ -29,9 +29,11 @@ const ACCOUNT_PAGES_MAX = 100;
 const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
+  ...STORAGE_COPY,
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
   engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
+  git_safe_unavailable: "CrazyAgent's engine didn't start: Windows is installed in a folder whose name CrazyAgent can't use to keep git from running other programs, so it runs no git on this computer.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
   engine_sidecar_missing: "This app is missing its built-in engine. Reinstall CrazyAgent.",

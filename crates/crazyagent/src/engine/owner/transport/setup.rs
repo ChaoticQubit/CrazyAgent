@@ -1104,6 +1104,9 @@ mod install_tests {
             self.dir.path().join("engine")
         }
 
+        /// Appends one line to the case's log with a single write of the line and its
+        /// newline, so the lines of two threads never interleave (`writeln!` on a `File`
+        /// writes the text and the newline apart). Input: the line. Output: none.
         fn note(&self, line: &str) {
             use std::io::Write;
             let mut log = std::fs::OpenOptions::new()
@@ -1111,7 +1114,7 @@ mod install_tests {
                 .append(true)
                 .open(self.dir.path().join("log"))
                 .unwrap();
-            writeln!(log, "{line}").unwrap();
+            log.write_all(format!("{line}\n").as_bytes()).unwrap();
         }
 
         fn logged(&self) -> String {

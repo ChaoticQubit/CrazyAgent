@@ -13,6 +13,21 @@ const REPLY_BYTES_MAX: usize = 48 * 1024;
 const LISTING_BYTES_MAX: u64 = 32 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(2);
 const CONFIG_BYTES_MAX: u64 = 1024 * 1024;
+/// The most entries [`redirected`] looks through in one `.git` folder before it refuses it.
+const GIT_ENTRIES_MAX: usize = 100_000;
+/// What [`list`] asks git for: tracked and unignored untracked files on Unix, tracked files
+/// only on Windows (the declined path), so owner git walks no folder an agent made there.
+const LISTED: &[&str] = if cfg!(windows) {
+    &["ls-files", "-z", "--cached"]
+} else {
+    &[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]
+};
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.into())
@@ -31,11 +46,11 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Lists a project's files for `@` tags through [`owner_git`]: the tracked paths and the
-/// untracked ones git does not ignore, relative to the folder and holding the query in any
-/// case, never `.git`, a link or a file reached through one, up to the limit, a 48 KiB reply
-/// or `stop`. Inputs: the absolute folder, the query, the limit and the stop. Output: the paths
-/// in git's order, or `project_files_folder_missing`, `_no_repository` or `_git_failed`.
+/// Lists, for `@` tags through [`owner_git`], files whose path holds the query in any case:
+/// [`LISTED`], tracked and unignored untracked ones on Unix, tracked only on Windows (the
+/// declined path); never `.git`, a link or a file through a link out of the folder. Inputs:
+/// folder, query, limit, stop. Output: paths by the limit, 48 KiB or `stop` (the `.git` walk
+/// first is bounded by entries, not time), or a `project_files_*` code.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
@@ -55,15 +70,7 @@ pub(crate) fn list(
         NoOwnerGit::Unavailable => failure("project_files_git_failed"),
         NoOwnerGit::Absent | NoOwnerGit::Refused => failure("project_files_no_repository"),
     })?;
-    command
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .stdout(Stdio::piped());
+    command.args(LISTED).stdout(Stdio::piped());
     let git_failed = |_| failure("project_files_git_failed");
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(git_failed)?;
     let output = child
@@ -141,7 +148,7 @@ pub(crate) fn owner_git(root: &Path) -> Result<std::process::Command, NoOwnerGit
         .env("GIT_COMMON_DIR", git_root.join(".git"))
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .args(["-c", "core.untrackedCache=false", "-c"])
         .arg(format!("core.excludesFile={}", crate::github::NULL_DEVICE))
         .arg("--git-dir")
@@ -248,15 +255,29 @@ fn git_path(folder: &Path) -> std::path::PathBuf {
 }
 
 /// True when a `.git` folder points git at another place, which Git for Windows would open as
-/// the owner, a share among them: a `commondir` entry of any kind, or an `include` or
-/// `includeIf` section in its config or worktree config, or either file that is a link, over
-/// 1 MiB or unreadable (rv-sec2 #492 F1). Input: the `.git` folder. Output: the answer.
-fn redirected(git_dir: &Path) -> bool {
+/// the owner, a share among them: first a link at any depth or more than [`GIT_ENTRIES_MAX`]
+/// entries ([`linked_within`]), so no later check reads through a link, then a `commondir` or
+/// `objects\info` alternates entry of any kind, or an include in its config or worktree config,
+/// or either file over 1 MiB or unreadable. Input: the `.git` folder. Output: the answer.
+pub(crate) fn redirected(git_dir: &Path) -> bool {
     use std::io::Read;
+    if linked_within(git_dir, GIT_ENTRIES_MAX) {
+        return true;
+    }
+    #[cfg(test)]
+    BEFORE_POINTERS.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step(git_dir);
+        }
+    });
     let absent = |found: std::io::Result<std::fs::Metadata>| {
         found.is_err_and(|problem| problem.kind() == std::io::ErrorKind::NotFound)
     };
+    let info = git_dir.join("objects").join("info");
     !absent(std::fs::symlink_metadata(git_dir.join("commondir")))
+        || ["alternates", "http-alternates"]
+            .iter()
+            .any(|name| !absent(std::fs::symlink_metadata(info.join(name))))
         || ["config", "config.worktree"].iter().any(|name| {
             let file = match crate::platform::open_plain(&git_dir.join(name)) {
                 Ok(file) => file,
@@ -276,7 +297,34 @@ fn redirected(git_dir: &Path) -> bool {
         })
 }
 
-/// A step a test runs inside `owner_git`, given the `.git` folder.
+/// True when a folder holds a link, a junction among them, at any depth, an entry that cannot
+/// be read, or more than `entries_max` entries; no link is followed, and each entry's kind comes
+/// from the listing itself. Inputs: the folder and the bound. Output: the answer.
+fn linked_within(folder: &Path, entries_max: usize) -> bool {
+    let mut folders = vec![folder.to_path_buf()];
+    let mut seen = 0_usize;
+    while let Some(next) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            return true;
+        };
+        for entry in entries {
+            seen += 1;
+            let Ok((kind, path)) = entry.and_then(|entry| Ok((entry.file_type()?, entry.path())))
+            else {
+                return true;
+            };
+            if seen > entries_max || kind.is_symlink() {
+                return true;
+            }
+            if kind.is_dir() {
+                folders.push(path);
+            }
+        }
+    }
+    false
+}
+
+/// A step a test runs inside `owner_git` or [`redirected`], given the `.git` folder.
 #[cfg(test)]
 type Step = Box<dyn Fn(&Path)>;
 
@@ -286,6 +334,10 @@ thread_local! {
     /// starts, with that folder, standing in for an agent that changes it meanwhile. None runs
     /// nothing.
     static AFTER_CHECK: std::cell::RefCell<Option<Step>> =
+        const { std::cell::RefCell::new(None) };
+    /// A step the tests run when [`redirected`] starts its checks that read through `.git`'s
+    /// folders, with that folder, so a row sees whether they ran. None runs nothing.
+    static BEFORE_POINTERS: std::cell::RefCell<Option<Step>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -305,9 +357,10 @@ pub(crate) fn owner_git_runs(work: impl FnOnce()) -> usize {
 }
 
 /// Lists a repository while a step plants a `commondir` after `owner_git` checked the `.git`
-/// folder, naming a common folder whose `info/exclude` hides `notes.txt`. Inputs: a
-/// repository with an untracked `notes.txt` and a new folder for the common one. Output:
-/// what `list` answered.
+/// folder, naming a common folder whose `info/exclude` hides `notes.txt` and whose config
+/// names a repository format git refuses, so a followed `commondir` fails the listing.
+/// Inputs: a repository with an untracked `notes.txt` and a new folder for the common one.
+/// Output: what `list` answered.
 #[cfg(test)]
 fn listed_with_commondir_planted_after_check(
     repo: &Path,
@@ -318,7 +371,7 @@ fn listed_with_commondir_planted_after_check(
     }
     std::fs::write(
         store.join("config"),
-        "[core]\n\trepositoryformatversion = 0\n",
+        "[core]\n\trepositoryformatversion = 99\n",
     )
     .unwrap();
     std::fs::write(store.join("info").join("exclude"), "notes.txt\n").unwrap();
@@ -559,15 +612,14 @@ mod windows_tests {
     }
 
     #[test]
-    fn a_windows_project_lists_its_tracked_and_untracked_files_but_no_ignored_one_or_one_through_a_junction()
-     {
+    fn the_declined_windows_list_names_its_tracked_files_only_and_none_through_a_junction() {
         let place = tempfile::tempdir().unwrap();
         let (repo, home, outside) = (
             place.path().join("repo"),
             place.path().join("home"),
             place.path().join("outside"),
         );
-        for folder in [&repo, &home, &outside, &repo.join("src")] {
+        for folder in [&repo, &home, &outside, &repo.join("src"), &repo.join("out")] {
             fs::create_dir(folder).unwrap();
         }
         fs::write(outside.join("secret.txt"), "secret").unwrap();
@@ -575,21 +627,23 @@ mod windows_tests {
         for (path, text) in [
             ("README.md", "readme"),
             ("src/Lib.rs", "pub fn lib() {}"),
+            ("out/secret.txt", "tracked"),
             ("notes.txt", "untracked"),
             ("debug.log", "ignored"),
             (".gitignore", "*.log\n"),
         ] {
             fs::write(repo.join(path), text).unwrap();
         }
-        git(&home, &repo, &["add", "README.md", "src"]);
+        git(&home, &repo, &["add", "README.md", "src", "out"]);
+        fs::remove_dir_all(repo.join("out")).unwrap();
         junction(&repo.join("out"), &outside);
         let stop = Instant::now() + LISTING_TIME;
         let mut listed = list(&repo, "", FILES_MAX, stop).unwrap();
         listed.sort();
         assert_eq!(
             listed,
-            [".gitignore", "README.md", "notes.txt", "src/Lib.rs"],
-            "tracked and untracked files, no ignored file and nothing through the junction"
+            ["README.md", "src/Lib.rs"],
+            "tracked files only, and no tracked path whose folder became a junction"
         );
         assert_eq!(
             list(&repo, "lib", FILES_MAX, stop).unwrap(),
@@ -616,8 +670,9 @@ mod windows_tests {
     #[test]
     fn a_windows_repository_whose_git_folder_points_elsewhere_is_not_listed() {
         let place = tempfile::tempdir().unwrap();
-        let (repo, _home) = repository(place.path());
+        let (repo, home) = repository(place.path());
         fs::write(repo.join("README.md"), "readme").unwrap();
+        git(&home, &repo, &["add", "README.md"]);
         let (git_dir, stop) = (repo.join(".git"), Instant::now() + LISTING_TIME);
         fs::write(git_dir.join("commondir"), r"\\127.0.0.1\x").unwrap();
         assert_eq!(
@@ -646,24 +701,13 @@ mod windows_tests {
     #[test]
     fn a_windows_commondir_planted_after_the_check_redirects_nothing() {
         let place = tempfile::tempdir().unwrap();
-        let (repo, _home) = repository(place.path());
+        let (repo, home) = repository(place.path());
+        fs::write(repo.join("README.md"), "readme").unwrap();
+        git(&home, &repo, &["add", "README.md"]);
         fs::write(repo.join("notes.txt"), "untracked").unwrap();
         let listed =
             listed_with_commondir_planted_after_check(&repo, &place.path().join("store")).unwrap();
-        assert_eq!(listed, ["notes.txt"]);
-    }
-
-    #[test]
-    fn a_windows_repository_own_excludes_file_is_not_read() {
-        let place = tempfile::tempdir().unwrap();
-        let (repo, home) = repository(place.path());
-        let excludes = place.path().join("excludes");
-        fs::write(&excludes, "notes.txt\n").unwrap();
-        let excludes = excludes.to_string_lossy().into_owned();
-        git(&home, &repo, &["config", "core.excludesFile", &excludes]);
-        fs::write(repo.join("notes.txt"), "untracked").unwrap();
-        let stop = Instant::now() + LISTING_TIME;
-        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["notes.txt"]);
+        assert_eq!(listed, ["README.md"]);
     }
 
     #[test]
@@ -698,5 +742,190 @@ mod windows_tests {
         }
         let stop = Instant::now() + LISTING_TIME;
         assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["empty.txt"]);
+    }
+
+    /// Makes a repository with one commit, packed refs and an index, the `.git` an owner's
+    /// project holds, with an untracked `notes.txt` beside the tracked `README.md`. Input:
+    /// the temp folder. Output: the repository folder.
+    fn committed(place: &Path) -> std::path::PathBuf {
+        let (repo, home) = repository(place);
+        fs::write(repo.join("README.md"), "readme").unwrap();
+        git(&home, &repo, &["add", "README.md"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@example.invalid",
+                "commit",
+                "-q",
+                "--no-gpg-sign",
+                "-m",
+                "start",
+            ],
+        );
+        git(&home, &repo, &["pack-refs", "--all"]);
+        fs::create_dir_all(repo.join(".git").join("info")).unwrap();
+        fs::write(repo.join("notes.txt"), "untracked").unwrap();
+        repo
+    }
+
+    /// Replaces one entry of a `.git` folder with a link to a new place outside it: a
+    /// junction for a folder, which needs no privilege, a file link for anything else,
+    /// which the farm's elevated runner may make. Inputs: the `.git` folder, the entry and
+    /// the outside folder. The entry's `/` become `\`, since `mklink` reads a `/` in a path as
+    /// a switch.
+    fn linked(git_dir: &Path, entry: &str, outside: &Path) {
+        let inside = entry
+            .split('/')
+            .fold(git_dir.to_path_buf(), |at, part| at.join(part));
+        let target = outside.join(entry.replace('/', "-"));
+        if inside.is_dir() {
+            fs::create_dir_all(&target).unwrap();
+            fs::remove_dir_all(&inside).unwrap();
+            junction(&inside, &target);
+        } else {
+            fs::write(&target, "").unwrap();
+            if fs::symlink_metadata(&inside).is_ok() {
+                fs::remove_file(&inside).unwrap();
+            }
+            std::os::windows::fs::symlink_file(&target, &inside)
+                .unwrap_or_else(|problem| panic!("file link {entry}: {problem}"));
+        }
+    }
+
+    /// Asserts `answer` is the refusal a judged `.git` gets, `project_files_no_repository`.
+    /// Inputs: the answer and the planted shape, which names the failure.
+    /// Output: none; any other answer fails the test.
+    fn judged(answer: Result<Vec<String>, EngineError>, shape: &str) {
+        assert!(
+            matches!(&answer, Err(EngineError(code)) if code == "project_files_no_repository"),
+            "{shape}: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_windows_git_folder_with_an_alternates_file_of_any_kind_is_not_listed() {
+        for (name, text) in [
+            ("alternates", "\\\\127.0.0.1\\x\\objects\n"),
+            ("alternates", "C:\\elsewhere\\objects\n"),
+            ("alternates", ""),
+            ("http-alternates", "http://127.0.0.1/x\n"),
+            ("http-alternates", ""),
+        ] {
+            let place = tempfile::tempdir().unwrap();
+            let repo = committed(place.path());
+            let info = repo.join(".git").join("objects").join("info");
+            fs::create_dir_all(&info).unwrap();
+            fs::write(info.join(name), text).unwrap();
+            let stop = Instant::now() + LISTING_TIME;
+            judged(
+                list(&repo, "", FILES_MAX, stop),
+                &format!("{name} {text:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_git_folder_whose_fixed_entry_is_a_link_is_not_listed() {
+        for entry in [
+            "HEAD",
+            "index",
+            "config",
+            "packed-refs",
+            "shallow",
+            "info/exclude",
+            "info/attributes",
+            "info",
+            "objects",
+            "objects/info",
+            "refs",
+        ] {
+            let place = tempfile::tempdir().unwrap();
+            let repo = committed(place.path());
+            let outside = place.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            linked(&repo.join(".git"), entry, &outside);
+            let stop = Instant::now() + LISTING_TIME;
+            judged(list(&repo, "", FILES_MAX, stop), entry);
+        }
+    }
+
+    #[test]
+    fn a_windows_link_deeper_in_the_git_folder_is_not_listed() {
+        for entry in ["refs/heads/side", "objects/pack/pack-0.pack"] {
+            let place = tempfile::tempdir().unwrap();
+            let repo = committed(place.path());
+            let git_dir = repo.join(".git");
+            fs::create_dir_all(git_dir.join(entry).parent().unwrap()).unwrap();
+            let outside = place.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            linked(&git_dir, entry, &outside);
+            let stop = Instant::now() + LISTING_TIME;
+            judged(list(&repo, "", FILES_MAX, stop), entry);
+        }
+    }
+
+    #[test]
+    fn a_plain_windows_git_folder_with_history_passes_the_judge() {
+        let place = tempfile::tempdir().unwrap();
+        let repo = committed(place.path());
+        let stop = Instant::now() + LISTING_TIME;
+        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["README.md"]);
+        assert!(!redirected(&repo.join(".git")));
+    }
+
+    #[test]
+    fn the_declined_windows_list_names_tracked_files_only_and_never_opens_a_nested_git_file() {
+        let place = tempfile::tempdir().unwrap();
+        let repo = committed(place.path());
+        let nested = repo.join("sub");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("x.txt"), "untracked").unwrap();
+        fs::write(nested.join(".git"), "gitdir: \\\\127.0.0.1\\x\\nested\n").unwrap();
+        let stop = Instant::now() + LISTING_TIME;
+        assert_eq!(
+            list(&repo, "", FILES_MAX, stop).unwrap(),
+            ["README.md"],
+            "tracked only: no notes.txt, nothing under sub"
+        );
+        assert_eq!(list(&repo, "read", FILES_MAX, stop).unwrap(), ["README.md"]);
+    }
+
+    #[test]
+    fn the_git_folder_walk_runs_before_any_check_that_reads_through_its_folders() {
+        let place = tempfile::tempdir().unwrap();
+        let repo = committed(place.path());
+        let git_dir = repo.join(".git");
+        let reached = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let seen = std::rc::Rc::clone(&reached);
+        BEFORE_POINTERS.with(|step| {
+            *step.borrow_mut() = Some(Box::new(move |_: &Path| seen.set(seen.get() + 1)));
+        });
+        let plain = redirected(&git_dir);
+        let outside = place.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        linked(&git_dir, "objects", &outside);
+        let linked_objects = redirected(&git_dir);
+        BEFORE_POINTERS.with(|step| *step.borrow_mut() = None);
+        assert!(!plain, "a plain .git passes");
+        assert!(linked_objects, "a linked objects folder is refused");
+        assert_eq!(
+            reached.get(),
+            1,
+            "the pointer checks ran for the plain .git only, never through the linked objects"
+        );
+    }
+
+    #[test]
+    fn the_git_folder_walk_passes_at_its_bound_and_refuses_past_it() {
+        let place = tempfile::tempdir().unwrap();
+        let folder = place.path().join("git");
+        fs::create_dir_all(folder.join("refs").join("heads")).unwrap();
+        fs::write(folder.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(!linked_within(&folder, 3), "three entries, at the bound");
+        assert!(linked_within(&folder, 2), "three entries, past the bound");
     }
 }

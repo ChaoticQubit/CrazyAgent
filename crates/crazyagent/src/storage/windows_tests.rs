@@ -160,14 +160,15 @@ fn own_label(object: &std::fs::File) -> Option<(u32, u32)> {
         .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap())
 }
 
-/// #524 r3 (rv-code4 F2, leader 05:45): on a data folder `Layout::prepare` makes, engine.db
-/// and the side files SQLite makes beside it, and the MCP secrets folder, carry the medium
-/// no-read-up label; the data root itself, its logs and the plugin store carry none, so a
-/// root the engine makes there for an AppContainer starts unlabelled.
+/// #524 r3 (rv-code4 F2, leader 05:45), V244-WIN-STORE-LABEL-NX: on a data folder
+/// `Layout::prepare` makes, engine.db, the side files SQLite makes beside it and the MCP
+/// secrets folder carry the medium label with no-write-up, no-read-up and no-execute-up; the
+/// data root itself, its logs and the plugin store carry none, so a root the engine makes
+/// there for an AppContainer starts unlabelled.
 #[tokio::test]
 async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_label() {
     use super::plugins;
-    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
     let root = tempfile::tempdir().unwrap();
     let layout = crate::paths::Layout::new(root.path().join("data")).unwrap();
     layout.prepare().unwrap();
@@ -180,9 +181,9 @@ async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_labe
     let secrets = plugins::store_folder(&data, &[plugins::SECRETS]).unwrap();
     for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
         let file = private::file(&data.join(name), false).unwrap();
-        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+        assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
     }
-    assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_NO_UP);
+    assert_eq!(own_label(&private::dir(&secrets).unwrap()), MEDIUM_FULL);
     for folder in [data.clone(), layout.logs(), data.join(plugins::STORE)] {
         let held = private::dir(&folder).unwrap();
         assert_eq!(own_label(&held), None, "{}", folder.display());
@@ -190,12 +191,13 @@ async fn only_the_database_files_and_the_secret_stores_carry_the_no_read_up_labe
     drop(storage);
 }
 
-/// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW): a data root the update
-/// channel save made before the first `Layout::prepare` still hands the medium no-read-up
-/// label to engine.db and its side files, as `prepare` labels the root whatever made it.
+/// V244-WIN-SAVE-CHANNEL-ROOT-LABEL (leader 06:32, #524 r3 sec LOW), V244-WIN-STORE-LABEL-NX:
+/// a data root the update channel save made before the first `Layout::prepare` still hands
+/// the full medium label to engine.db and its side files, as `prepare` labels the root
+/// whatever made it.
 #[tokio::test]
 async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
-    const MEDIUM_NO_UP: Option<(u32, u32)> = Some((0x2000, 0x3));
+    const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
     crate::update::save_channel(&data, crate::update::Channel::Dev).unwrap();
@@ -208,7 +210,7 @@ async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
         .unwrap();
     for name in ["engine.db", "engine.db-wal", "engine.db-shm"] {
         let file = private::file(&data.join(name), false).unwrap();
-        assert_eq!(own_label(&file), MEDIUM_NO_UP, "{name}");
+        assert_eq!(own_label(&file), MEDIUM_FULL, "{name}");
     }
     drop(storage);
 }

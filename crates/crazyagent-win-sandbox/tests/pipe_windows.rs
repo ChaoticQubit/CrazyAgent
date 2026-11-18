@@ -20,7 +20,9 @@ use windows_sys::Win32::Security::{
     TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_TYPE, TokenImpersonation,
     TokenIntegrityLevel, TokenPrimary,
 };
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, SECURITY_IDENTIFICATION};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_EXECUTE, FILE_GENERIC_READ, ReadFile, SECURITY_IDENTIFICATION,
+};
 use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, ImpersonateNamedPipeClient};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
@@ -701,4 +703,39 @@ fn a_client_refuses_a_pipe_a_low_integrity_child_serves() {
         unsafe { WaitForSingleObject(child.as_raw_handle(), 30_000) },
         0
     );
+}
+
+/// rv-code #562 F1 (V244-WIN-PIPES-LISTENER-REQS red row, leader 08:53): a lower integrity
+/// process of the user cannot open a secret file, as the D7 pipes file is made, to read it
+/// or with execute access only, either of which held with no sharing would block the next
+/// start's rename; the engine itself opens it both ways.
+#[test]
+fn a_low_integrity_holder_cannot_open_a_secret_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().join("root");
+    drop(crazyagent_win_sandbox::private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    drop(crazyagent_win_sandbox::private::secret_file(&path).unwrap());
+    let open = |access: u32| {
+        OpenOptions::new()
+            .access_mode(access)
+            .share_mode(0)
+            .open(&path)
+    };
+    let low = low_token(TokenImpersonation);
+    for (hold, access) in [("read", FILE_GENERIC_READ), ("execute only", FILE_EXECUTE)] {
+        let engine = open(access);
+        assert!(
+            engine.is_ok(),
+            "the engine opens it for {hold}: {}",
+            opened(&engine)
+        );
+        drop(engine);
+        let lowered = as_principal(&low, || open(access));
+        println!(
+            "a low-il {hold} open of a secret file: {}",
+            opened(&lowered)
+        );
+        assert!(lowered.is_err(), "a low-il process holds it for {hold}");
+    }
 }

@@ -3,11 +3,12 @@ use crate::engine::owner::failure;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[cfg(all(test, unix))]
 mod tests;
 
-const KEYS: usize = 16;
+const KEYS: usize = 17;
 
 /// The git configuration every git the IDE server starts runs with, as `GIT_CONFIG_COUNT`
 /// and numbered `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` variables, which outrank every
@@ -22,47 +23,60 @@ const KEYS: usize = 16;
 /// each agent's `HEAD` in its admin folder, which the IDE cannot write
 /// (IDE-SANDBOX-AGENT-FOLDERS); git skips the reflog step only when both expiry keys are
 /// `never`. Every signing switch is off, so a project that signs every commit or tag still
-/// commits and tags from the IDE, unsigned (INT1-3). The server's environment adds them
-/// after its allowlist.
-pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
-    ("GIT_CONFIG_COUNT", "16"),
-    ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
-    ("GIT_CONFIG_VALUE_0", "all"),
-    ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
-    ("GIT_CONFIG_VALUE_1", "explicit"),
-    ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
-    ("GIT_CONFIG_VALUE_2", "false"),
-    ("GIT_CONFIG_KEY_3", "core.sshCommand"),
-    ("GIT_CONFIG_VALUE_3", "false"),
-    ("GIT_CONFIG_KEY_4", "core.pager"),
-    ("GIT_CONFIG_VALUE_4", "cat"),
-    ("GIT_CONFIG_KEY_5", "credential.helper"),
-    ("GIT_CONFIG_VALUE_5", ""),
-    ("GIT_CONFIG_KEY_6", "gpg.program"),
-    ("GIT_CONFIG_VALUE_6", "false"),
-    ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
-    ("GIT_CONFIG_VALUE_7", "false"),
-    ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
-    ("GIT_CONFIG_VALUE_8", "false"),
-    ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
-    ("GIT_CONFIG_VALUE_9", "never"),
-    ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
-    ("GIT_CONFIG_VALUE_10", "false"),
-    ("GIT_CONFIG_KEY_11", "tag.gpgSign"),
-    ("GIT_CONFIG_VALUE_11", "false"),
-    ("GIT_CONFIG_KEY_12", "tag.forceSignAnnotated"),
-    ("GIT_CONFIG_VALUE_12", "false"),
-    ("GIT_CONFIG_KEY_13", "gc.reflogExpire"),
-    ("GIT_CONFIG_VALUE_13", "never"),
-    ("GIT_CONFIG_KEY_14", "gc.reflogExpireUnreachable"),
-    ("GIT_CONFIG_VALUE_14", "never"),
-    ("GIT_CONFIG_KEY_15", "core.hooksPath"),
-    ("GIT_CONFIG_VALUE_15", "/dev/null"),
-];
+/// commits and tags from the IDE, unsigned (INT1-3), and no log checks a signature. The ssh
+/// command, the signature programs and the hooks folder are the engine's own
+/// [`crate::research::runner::no_program`], never a name a lookup or a planted file supplies.
+/// The server's environment adds them after its allowlist.
+pub fn config_env() -> &'static [(&'static str, &'static str); CONFIG_ENV_LEN] {
+    static ENV: LazyLock<[(&'static str, &'static str); CONFIG_ENV_LEN]> = LazyLock::new(|| {
+        [
+            ("GIT_CONFIG_COUNT", "17"),
+            ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
+            ("GIT_CONFIG_VALUE_0", "all"),
+            ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
+            ("GIT_CONFIG_VALUE_1", "explicit"),
+            ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_2", "false"),
+            ("GIT_CONFIG_KEY_3", "core.sshCommand"),
+            ("GIT_CONFIG_VALUE_3", crate::research::runner::no_program()),
+            ("GIT_CONFIG_KEY_4", "core.pager"),
+            ("GIT_CONFIG_VALUE_4", "cat"),
+            ("GIT_CONFIG_KEY_5", "credential.helper"),
+            ("GIT_CONFIG_VALUE_5", ""),
+            ("GIT_CONFIG_KEY_6", "gpg.program"),
+            ("GIT_CONFIG_VALUE_6", crate::research::runner::no_program()),
+            ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
+            ("GIT_CONFIG_VALUE_7", crate::research::runner::no_program()),
+            ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
+            ("GIT_CONFIG_VALUE_8", crate::research::runner::no_program()),
+            ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
+            ("GIT_CONFIG_VALUE_9", "never"),
+            ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
+            ("GIT_CONFIG_VALUE_10", "false"),
+            ("GIT_CONFIG_KEY_11", "tag.gpgSign"),
+            ("GIT_CONFIG_VALUE_11", "false"),
+            ("GIT_CONFIG_KEY_12", "tag.forceSignAnnotated"),
+            ("GIT_CONFIG_VALUE_12", "false"),
+            ("GIT_CONFIG_KEY_13", "gc.reflogExpire"),
+            ("GIT_CONFIG_VALUE_13", "never"),
+            ("GIT_CONFIG_KEY_14", "gc.reflogExpireUnreachable"),
+            ("GIT_CONFIG_VALUE_14", "never"),
+            ("GIT_CONFIG_KEY_15", "log.showSignature"),
+            ("GIT_CONFIG_VALUE_15", "false"),
+            ("GIT_CONFIG_KEY_16", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_16", crate::research::runner::no_program()),
+        ]
+    });
+    LazyLock::force(&ENV)
+}
+
+/// How many variables [`config_env`] holds: `GIT_CONFIG_COUNT` and a key and a value for
+/// each of the `KEYS` settings.
+pub const CONFIG_ENV_LEN: usize = 1 + 2 * KEYS;
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
-/// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
-const PROJECT_HOOKS_COUNT: &str = "15";
+/// run the project's hooks: every [`config_env`] key but the last, `core.hooksPath`.
+const PROJECT_HOOKS_COUNT: &str = "16";
 
 /// The variable that ends git's search for a repository at the project's agents root
 /// (INT1-1): git in an agent folder, whose `.git` the IDE sandbox cannot read, then finds no
@@ -337,7 +351,7 @@ if [ \"$code\" -ne 0 ]; then\n  exit \"$code\"\nfi\nexit \"$step\"\n"
 /// character, it keeps the PATH's git. With a project folder the owner let run its own hooks,
 /// it first sets `GIT_CONFIG_COUNT` to [`PROJECT_HOOKS_COUNT`] when its physical working
 /// directory is exactly that folder, so git there runs the project's hooks and every other
-/// [`CONFIG_ENV`] key stays forced. With `index`, it ends in [`private_flow`]; a later Full
+/// [`config_env`] key stays forced. With `index`, it ends in [`private_flow`]; a later Full
 /// access server, with no profile, passes none. Inputs: the hooks folder or None, the
 /// absolute git ([`crate::research::runner::sandboxed_git`]) and the project and private
 /// folders or None. Output: the text, or `ide_settings_invalid` for a folder that is not
@@ -347,11 +361,11 @@ pub fn shim_text(
     git: &Path,
     index: Option<(&Path, &Path)>,
 ) -> Result<String, EngineError> {
-    assert_eq!(CONFIG_ENV[0].1.parse::<usize>(), Ok(KEYS));
+    assert_eq!(config_env()[0].1.parse::<usize>(), Ok(KEYS));
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
-        CONFIG_ENV[2 * KEYS - 1],
-        ("GIT_CONFIG_KEY_15", "core.hooksPath")
+        config_env()[2 * KEYS - 1],
+        ("GIT_CONFIG_KEY_16", "core.hooksPath")
     );
     assert!(
         git.is_absolute(),

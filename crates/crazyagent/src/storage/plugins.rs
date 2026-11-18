@@ -266,7 +266,7 @@ fn new_id(prefix: &str) -> Result<String, EngineError> {
 }
 
 /// Creates or opens one folder of the private plugin store as a W1 private folder on Windows
-/// (DESIGN-0256 D1), the MCP secrets folder as a secret store with the no-read-up label
+/// (DESIGN-0256 D1), the MCP secrets folder as a secret store with the full medium label
 /// (#524 r3). Inputs: the folder path and whether it is the secrets folder. Output: Ok,
 /// `plugin_store_unsafe` for a folder W1's check refuses, or `plugin_store_unavailable`.
 #[cfg(windows)]

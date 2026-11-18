@@ -51,7 +51,11 @@ test("a context-mode check of an npx the engine's tool resolver does not find re
 });
 
 test("a context-mode check on a Node.js folder no Windows sandbox may read reads the engine's one sentence", () => {
-  assert.equal(api.plainError("server_node_folder_unreadable"), "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.");
+  assert.equal(api.plainError("server_node_folder_unreadable"), "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.");
+});
+
+test("a context-mode check on a drive root no Windows sandbox may read names the installer's administrator step", () => {
+  assert.equal(api.plainError("server_node_drive_root_unreadable"), "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.");
 });
 
 test("a check of a Windows batch command other than npm's npx.cmd says to point it at the tool's .exe or node.exe", () => {
