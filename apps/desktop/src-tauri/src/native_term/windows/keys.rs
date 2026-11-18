@@ -110,13 +110,19 @@ fn chord(vk: u16, mods: Mods) -> Option<ViewEvent> {
     Some(event)
 }
 
+/// Whether a character is Private Use: the BMP area, where keymap reads Apple's function
+/// keys, or one of the two supplementary planes.
+fn private_use(c: char) -> bool {
+    matches!(c, '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}')
+}
+
 /// The key's own character for a Control or Alt chord: a letter from its VK, so Ctrl+C
 /// still interrupts on a Cyrillic or Greek layout, upper case with Shift; else the
-/// character the key types with Shift alone. Inputs: the VK, Shift and that character.
-/// Output: the character, or none.
+/// character the key types with Shift alone, unless a control or Private Use character.
+/// Inputs: the VK, Shift and that character. Output: the character, or none.
 fn own(vk: u16, shift: bool, bare: Option<char>) -> Option<char> {
     if !(VK_A..=VK_Z).contains(&vk) {
-        return bare.filter(|c| !c.is_control());
+        return bare.filter(|&c| !c.is_control() && !private_use(c));
     }
     let letter = char::from(u8::try_from(vk).ok()?);
     assert!(letter.is_ascii_uppercase());
@@ -132,13 +138,11 @@ fn printable(unit: u16) -> bool {
     unit >= 0x20 && unit != 0x7f
 }
 
-/// What a key-down makes, by the xterm rules of `keymap` with Alt as Meta: a Windows key
-/// chord sends nothing; Alt+F4 and Alt+Space stay the system's; the copy and paste chords,
-/// named keys and Enter, Backspace, Tab and Escape send on the key-down; a Ctrl+Alt key
-/// that types a character is AltGr text and goes to the character path, as does a key with
-/// no Ctrl or Alt; any other Ctrl or Alt chord sends from the key's own character. Inputs:
-/// the VK, the modifiers, the queued character message and the key's Shift-only character.
-/// Output: the event and whether the queued character is dropped.
+/// What a key-down makes, by keymap's xterm rules with Alt as Meta: Win chords send
+/// nothing; Alt+F4, Alt+Space, AltGr text and keys without Ctrl or Alt pass; the rest sends
+/// through `chord`, `named`, `edit` or the key's `own` character. Inputs: the VK, the
+/// modifiers, the queued character message and the key's Shift-only character. Output:
+/// the event and whether the queued character message is dropped.
 pub fn down(vk: u16, mods: Mods, next: Next, bare: Option<char>) -> Down {
     let queued = matches!(next, Next::Char(_));
     let handled = |event: Option<ViewEvent>| Down {
