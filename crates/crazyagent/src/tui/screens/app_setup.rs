@@ -588,6 +588,7 @@ pub struct AppSetup {
     reading: [bool; 10],
     sent: Option<Sent>,
     started: bool,
+    held: bool,
     finished_with_problems: bool,
     ask: Option<Ask>,
     fixing: Option<Dependency>,
@@ -618,6 +619,7 @@ impl AppSetup {
             reading: [false; 10],
             sent: None,
             started: false,
+            held: false,
             finished_with_problems: false,
             ask: None,
             fixing: None,
@@ -833,8 +835,9 @@ impl AppSetup {
         };
         self.setup = Load::Ready(status.clone());
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
+        let mut spoke = false;
         if let Some(name) = self.fixing {
-            self.fixed(name, status, ctx);
+            spoke = self.fixed(name, status, ctx);
             if !self.started {
                 return Flow::Handled;
             }
@@ -848,8 +851,10 @@ impl AppSetup {
         }
         let problems = self.problems();
         if problems == 0 && self.first_run && self.fixing.is_some() {
+            self.held = true;
             return Flow::Handled;
         }
+        let held = std::mem::take(&mut self.held);
         self.started = false;
         if problems == 0 {
             if self.first_run {
@@ -862,6 +867,9 @@ impl AppSetup {
             return Flow::Handled;
         }
         self.finished_with_problems = true;
+        if held && spoke {
+            return Flow::Handled;
+        }
         let items = if problems == 1 { "item" } else { "items" };
         ctx.say(Message::warning(
             &format!("Setup finished, but {problems} {items} did not install."),
@@ -910,17 +918,17 @@ impl AppSetup {
 
     /// Ends a permission fix once a status read shows it finished, its row no longer busy
     /// (DEC-199), and the tool checked again, saying how the tool's row reads now. Inputs: the
-    /// tool, the status read and the context.
-    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) {
+    /// tool, the status read and the context. Output: whether it said the fix's outcome.
+    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) -> bool {
         let Some(row) = status.dependencies.iter().find(|tool| tool.name == name) else {
             self.fixing = None;
-            return;
+            return false;
         };
         if row.busy {
-            return;
+            return false;
         }
         match &row.state {
-            DependencyState::Checking => return,
+            DependencyState::Checking => return false,
             DependencyState::Refused {
                 fix_failed: Some(failed),
                 ..
@@ -941,6 +949,7 @@ impl AppSetup {
             )),
         }
         self.fixing = None;
+        true
     }
 
     /// The first tool found and passed over whose row offers a permission fix and has no
