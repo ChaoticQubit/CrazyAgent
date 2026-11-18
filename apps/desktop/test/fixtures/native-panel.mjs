@@ -14,7 +14,7 @@ import { isMac } from "../../src/ui/index.ts";
 const WEBVIEW = ["desktop_terminal_attach", "desktop_terminal_input", "desktop_terminal_resize", "desktop_terminal_detach"];
 const roots = new Map();
 let probe = null;
-const desk = { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes: [], enabled: true, openFailure: null, copyFailure: null, hold: false, held: [] };
+const desk = { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes: [], enabled: true, openFailure: null, copyFailure: null, promptFailure: null, hold: false, held: [] };
 
 /** Gives the page a working store: the test page is about:blank, whose storage refuses every
  * call, so an in-memory store takes its place. Output: none. */
@@ -44,9 +44,10 @@ async function invoke(command, args) {
     const view = desk.opened;
     desk.views.set(view, { channel: args.events.id, next: 0 });
     if (!desk.hold) return view;
-    return new Promise((resolve) => desk.held.push(() => resolve(view)));
+    return new Promise((resolve, reject) => desk.held.push((thrown) => (thrown === undefined ? resolve(view) : reject(thrown))));
   }
   if (command === "desktop_native_terminal_copy" && desk.copyFailure !== null) throw desk.copyFailure;
+  if (command === "desktop_terminal_prompt" && desk.promptFailure !== null) throw desk.promptFailure;
   if (command === "desktop_team_graph") return { nodes: desk.nodes, edges: [] };
   if (command.startsWith("desktop_native_terminal_") || command === "desktop_terminal_prompt" || WEBVIEW.includes(command)) return null;
   throw { code: "unknown", message: command };
@@ -63,7 +64,7 @@ export async function stage({ enabled = true, nodes = [] } = {}) {
   keepTerminalsOf(() => false);
   keepStorage();
   window.localStorage.clear();
-  Object.assign(desk, { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes, enabled, openFailure: null, copyFailure: null, hold: false, held: [] });
+  Object.assign(desk, { calls: [], callbacks: new Map(), views: new Map(), opened: 0, nodes, enabled, openFailure: null, copyFailure: null, promptFailure: null, hold: false, held: [] });
   window.__TAURI_INTERNALS__ = {
     invoke,
     transformCallback: (callback) => {
@@ -142,18 +143,42 @@ export function event(view, message) {
   entry.next += 1;
 }
 
-/** Answers every held open. Output: how many were held. */
-export function release() {
+/** Answers every held open, with its view id or by throwing a value, and opens later answer
+ * at once again. Input: the value to throw, or nothing to answer the id. Output: how many were
+ * held. */
+export function release(thrown) {
+  desk.hold = false;
   const held = desk.held.splice(0);
-  for (const answer of held) answer();
+  for (const answer of held) answer(thrown);
   return held.length;
 }
 
-/** Makes the next opens or copies fail as the desktop does. Inputs: which call and the value
- * it throws, or null to answer again. Output: none. */
+/** Makes the next opens, copies or prompts fail as the desktop does. Inputs: which call
+ * ("open", "copy" or "prompt") and the value it throws, or null to answer again. Output: none. */
 export function fail(call, thrown) {
   if (call === "open") desk.openFailure = thrown;
-  else desk.copyFailure = thrown;
+  else if (call === "copy") desk.copyFailure = thrown;
+  else desk.promptFailure = thrown;
+}
+
+/** Saves the owner's Terminal input choice, as Settings does. Input: "terminal", "box" or
+ * "both". Output: none. */
+export function input(choice) {
+  window.localStorage.setItem("crazyagent.terminal-input", choice);
+}
+
+/** Types a prompt in a slot's message box and sends it with the Send button. Inputs: the slot
+ * and the text. Output: whether the box and an enabled Send button were there. */
+export async function promptBox(slot, text) {
+  const box = document.querySelector(`#${slot} textarea.tg-composer-input`);
+  if (!box) return false;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, text);
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  await new Promise((done) => setTimeout(done, 50));
+  const send = [...document.querySelectorAll(`#${slot} button`)].find((button) => button.textContent.trim() === "Send");
+  if (!send || send.disabled) return false;
+  send.click();
+  return true;
 }
 
 /** Holds every next open's answer until `release`, as a slow desktop does. Output: none. */
@@ -210,7 +235,7 @@ export function choose(slot, text) {
 }
 
 /** Mounts a slot's panel and brings its new native view live: the open, then the desktop's
- * ready event, then the live note. Inputs: the slot, the node and the panel's other props.
+ * ready event, then the live status line. Inputs: the slot, the node and the panel's other props.
  * Output: the view id, or null when no view opened or it never went live. */
 export async function live(slot, node, props = {}) {
   const before = desk.opened;
@@ -218,7 +243,7 @@ export async function live(slot, node, props = {}) {
   if (!(await until(() => desk.opened === before + 1))) return null;
   const view = desk.opened;
   event(view, { type: "ready", cols: 80, rows: 24 });
-  return await until(() => shown(slot).status.some((line) => line.startsWith("Typing goes straight"))) ? view : null;
+  return await until(() => document.querySelector(`#${slot} .tg-terminal-note [role=status]`) !== null) ? view : null;
 }
 
 /** The calls the page made with a view id since a mark. Inputs: the view and the count of
