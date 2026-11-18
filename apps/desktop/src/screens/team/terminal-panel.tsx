@@ -908,12 +908,11 @@ export function keepTerminalsOf(open: (project: string | null) => boolean): void
 
 let epoch = 0;
 
-/** Loads a remembered terminal hidden, behind the views the owner opened since, when the set
- * has room and the project's team still lists that terminal. A native build loads it as a
- * covered native view, and only at the size its panel last had, so a guessed size never
- * resizes the agent's terminal. Inputs: the entry, the session it
- * was read in, and the project's team graph when the caller already read it, so app start
- * reads each graph once; with none given it is read here. Output: none. */
+/** Loads a remembered terminal hidden, behind the views opened since, when the set has room
+ * and the team still lists it; a native build loads it covered, only at its saved size, so a
+ * guessed size never resizes the agent's terminal. Inputs: the entry, the session it was read
+ * in, and the team graph when the caller already read it (app start reads each graph once).
+ * Output: none. */
 async function preloadView(entry: SavedView, at: number, read: Result<TeamGraph> | null = null): Promise<void> {
   assert(read === null || read.kind === "ok", "a team graph passed in is one that was read");
   const graph = read ?? await loadTeamGraph(entry.key.project);
@@ -975,20 +974,33 @@ export function useKeptTerminalProjects(projects: Loaded<ProjectRow[]>, more: bo
   }, [projects, more]);
 }
 
-/** Everything a terminal panel takes, whatever draws its terminal; `TerminalPanel` says what
- * each one means. */
+/** Everything a terminal panel takes, whatever draws its terminal. Where the owner types (the
+ * terminal, the message box under it, or both) is not a prop: it is the one Terminal input
+ * in Settings, for every agent on every screen. */
 export type PanelProps = {
+  /** The agent's graph node. */
   node: GraphNode;
+  /** Names a harness id for the head. */
   harness?: (id: string) => string;
+  /** Closes the panel; with none there is no Close. */
   onClose?: () => void;
+  /** Stops the agent; with none there is no Stop. */
   onStop?: () => void;
+  /** A console around the panel owns the head. */
   embedded?: boolean;
+  /** A terminal wall tile, whose view goes with the tile. */
   tile?: boolean;
+  /** The one panel a graph click replaces, which says so in its head. */
   swaps?: boolean;
+  /** An ended terminal opens again on its own, cleared, for an agent that restarts in a new pane. */
   follow?: boolean;
+  /** The one-line report of what the agent's harness loaded and invoked, shown in the head. */
   reported?: string;
+  /** The project the view is kept under and a wall window attaches for. */
   projectId?: string;
+  /** Hears the terminal open at its first frame and close, so the live master's wait ends only then. */
   onOpened?: (open: boolean) => void;
+  /** A drafted message the terminal takes once live, as a paste, then marks used. */
   seed?: Seed | null;
 };
 
@@ -996,26 +1008,11 @@ export type PanelProps = {
 export const still = () => () => {};
 const idle = () => IDLE;
 
-/** One agent's live terminal beside the graph: the screen at attach, live output, and every
- * key typed straight into the agent's real terminal, sized to the panel, with a way back to
- * the latest output once scrolled up, and Copy and Copy output on right-click and in its
- * status line, which also says how to select text while the app in the terminal reads the
- * mouse; that selection stays until the owner copies it or clicks. In the main window the
- * view stays loaded and attached after the panel closes, among the two most recently used
- * (DEC-187), so showing it again only moves it back; a wall tile's view detaches with the
- * tile. The agent keeps running either way.
- * Inputs: the graph node, a harness name lookup, the close action when the panel can be
- * closed, the stop action when the agent can be stopped, `embedded` when a console around
- * it owns the head, `tile` for a terminal wall tile, `swaps` for the one panel a graph click
- * replaces, `follow` when an ended terminal opens again on its own, cleared, for an agent
- * that restarts in a new pane, and the one-line report of what the agent's harness loaded and
- * invoked, shown in the head, the project the view is kept under and a wall window attaches
- * for, and what hears the
- * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
- * types (the terminal, the message box under it, or both) is the one Terminal input in
- * Settings, for every agent on every screen. A build that draws terminals natively (macOS,
- * DEC-203) shows the native panel instead, and a desktop whose answer could not be read
- * shows why, never the webview terminal. Input: `PanelProps`. Output: the panel. */
+/** One agent's live terminal beside the graph, in a console or as a wall tile: the head, the
+ * terminal sized to the panel, Copy and Copy output, Jump to latest and the message box, the
+ * view kept after the panel closes among the two most recently used (DEC-187). The webview
+ * terminal on Windows and Linux, the native view on macOS (DEC-203), the plain reason when the
+ * desktop's answer could not be read. Input: `PanelProps`. Output: the panel. */
 export function TerminalPanel(props: PanelProps) {
   const kind = terminalKind();
   if (kind.kind === "native") return <NativeTerminalPanel {...props} />;

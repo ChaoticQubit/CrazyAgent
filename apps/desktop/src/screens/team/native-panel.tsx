@@ -18,9 +18,9 @@ import {
 /** How often a shown view checks its place, beside the resize, scroll and page change triggers. */
 const PLACE_CHECK_MS = 500;
 
-/** Page elements that draw over a terminal: the native view draws above the page, so it is
- * covered while one of them overlaps it. */
-const OVERLAYS = '[role="dialog"],[role="menu"],[role="listbox"],[role="tooltip"],dialog[open],[popover]';
+/** Page elements that draw over a terminal, the app's toast among them: the native view draws
+ * above the page, so it is covered while one of them overlaps it. */
+const OVERLAYS = '[role="dialog"],[role="menu"],[role="listbox"],[role="tooltip"],dialog[open],[popover],.toast';
 
 /** End codes after which the agent may be found again, so a following view opens again. */
 const FOLLOWED = new Set(["terminal_ended", "terminal_unavailable", "terminal_closed"]);
@@ -95,13 +95,11 @@ export function overlayCovers(rect: NativeRect, screen: Element, candidates: Ite
   return false;
 }
 
-/** One agent's native terminal view that outlives its panel (DEC-187, DEC-203): opened once
- * over a panel's screen, or covered for a terminal remembered from the last run. Showing it
- * places it over a panel's screen and uncovers it; hiding covers it with its terminal live;
- * letting it go closes it. While shown it follows the screen's place and is covered while a
- * page overlay overlaps it. An ended view is gone on the desktop: a following view opens a new
- * one after a pause, and Open again does the same at once. Inputs: the key, the agent's label
- * and the size its panel last had, if known. */
+/** One agent's native terminal view that outlives its panel (DEC-187, DEC-203): opened over a
+ * panel's screen, or covered at app start; shown = placed and uncovered, hidden = covered with
+ * its terminal live, let go = closed; covered under page overlays. An ended view is gone: a
+ * following one opens anew after a pause, Open again at once. Inputs: the key, the agent's
+ * label and the whole-pixel size its panel last had, if known. */
 export class NativeView implements Held {
   readonly key: KeptKey;
   readonly id: string;
@@ -268,8 +266,8 @@ export class NativeView implements Held {
     const screen = this.shown ? this.screen : null;
     const covered = screen === null;
     assert(!covered || this.size !== null, "a covered open knows its size");
+    if (screen) this.keepSize(screen);
     const rect = screen ? rectOf(screen) : { x: 0, y: 0, width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
-    if (rect.width >= 1 && rect.height >= 1) this.size = { width: rect.width, height: rect.height };
     const open: Opened = { id: null, ended: false, closed: false, liveAt: null, send: () => false };
     open.send = jobQueue(() => this.stopTyping(open));
     this.open = open;
@@ -334,6 +332,14 @@ export class NativeView implements Held {
     this.set({ view: { kind: "ended", copy: STOPPED_TYPING }, behind: false, mouse: false, menu: null });
   }
 
+  private keepSize(screen: HTMLElement): void {
+    const width = screen.offsetWidth;
+    const height = screen.offsetHeight;
+    if (width < 1 || height < 1 || (this.size?.width === width && this.size.height === height)) return;
+    this.size = { width, height };
+    rememberKeptSize(this);
+  }
+
   private watch(): void {
     this.unwatch();
     const screen = this.screen;
@@ -376,9 +382,8 @@ export class NativeView implements Held {
     if (!empty && spot !== this.placed) {
       this.placed = spot;
       void placeNativeTerminal(id, rect);
-      this.size = { width: rect.width, height: rect.height };
-      rememberKeptSize(this);
     }
+    this.keepSize(screen);
     const covered = empty || overlayCovers(rect, screen, document.querySelectorAll(OVERLAYS));
     if (covered !== this.told) {
       this.told = covered;
@@ -389,11 +394,10 @@ export class NativeView implements Held {
 
 const idle = () => IDLE;
 
-/** One agent's terminal beside the graph on a build that draws terminals natively (DEC-203):
- * the same head, states, status line, menu and message box as the webview panel, over a
- * native view placed on the panel's screen. In the main window the view stays open, covered,
- * after the panel closes, among the two most recently used (DEC-187); a wall tile's view
- * closes with the tile. Input: `PanelProps`, as `TerminalPanel` describes them. Output: the
+/** One agent's terminal on a build that draws terminals natively (DEC-203): the webview
+ * panel's head, states, status line, menu and message box over a native view on its screen.
+ * The main window keeps the view covered after the panel closes, among the two most recently
+ * used (DEC-187); a wall tile's view closes with the tile. Input: `PanelProps`. Output: the
  * panel. */
 export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened }: PanelProps) {
   assert(!(embedded && tile), "a terminal is either embedded in a console or a wall tile, never both");
