@@ -925,6 +925,7 @@ dependencies = [
  "crazyagent",
  "getrandom 0.4.3",
  "glyphon",
+ "gtk",
  "objc2 0.6.5",
  "objc2-app-kit",
  "objc2-foundation 0.3.2",

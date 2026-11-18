@@ -3,6 +3,8 @@ mod codec;
 mod control;
 mod event;
 mod keymap;
+#[cfg(target_os = "linux")]
+mod linux;
 mod pane;
 mod render;
 mod screen;
