@@ -5270,6 +5270,10 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
         ),
         (
+            ContextModeOff::NodeFolderUnreadable,
+            "- context-mode is off for this launch: Windows does not let sandboxed programs read the Node.js folder it runs from, and this Windows user cannot change that, so CrazyAgent did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
+        ),
+        (
             ContextModeOff::NpxNotFound,
             "- context-mode is off for this launch: CrazyAgent did not find the npx it runs on this computer, so it did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
         ),

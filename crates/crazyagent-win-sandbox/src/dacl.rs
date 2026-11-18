@@ -154,13 +154,13 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
     })
 }
 
-/// Whether the boundary refuses a read root before its helper runs: no allow entry of ALL
-/// APPLICATION PACKAGES reads the path itself ([`reads`]), so the helper would add the
-/// container's own entry, and this user cannot change the path's list, so that write fails.
-/// `changeable` is asked only for such a root. Inputs: the path's list and the change probe.
+/// Whether the boundary refuses a read root before its helper runs: neither ALL APPLICATION
+/// PACKAGES nor the container reads the path itself ([`reads`]), so the helper would add the
+/// container's entry, and this user cannot change the list, so that write fails. `changeable`
+/// is asked only for such a root. Inputs: the list, the container SID and the change probe.
 /// Output: true to refuse.
-pub fn read_root_refused(acl: &[u8], changeable: impl FnOnce() -> bool) -> bool {
-    !reads(acl, &ALL_APPLICATION_PACKAGES) && !changeable()
+pub fn read_root_refused(acl: &[u8], container: &[u8], changeable: impl FnOnce() -> bool) -> bool {
+    !reads(acl, &ALL_APPLICATION_PACKAGES) && !reads(acl, container) && !changeable()
 }
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
@@ -802,7 +802,7 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         let unprobed = || -> bool { panic!("a root every package reads was probed") };
-        assert!(!read_root_refused(&packages, unprobed));
+        assert!(!read_root_refused(&packages, &CONTAINER, unprobed));
         let admins_only = acl(&[
             ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
             ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &SYSTEM),
@@ -816,9 +816,23 @@ mod tests {
         let mut malformed = packages.clone();
         malformed[16] = 2;
         for list in [&admins_only, &inherit_only, &malformed] {
-            assert!(read_root_refused(list, || false));
-            assert!(!read_root_refused(list, || true));
+            assert!(read_root_refused(list, &CONTAINER, || false));
+            assert!(!read_root_refused(list, &CONTAINER, || true));
         }
+    }
+
+    /// V244-WIN-NPM r2 F1: a read root the container's own entry already reads is left to the
+    /// helper, which names the root if it still has to write there, so the pre-check neither
+    /// probes nor refuses it; another container's entry does not count.
+    #[test]
+    fn a_read_root_the_container_already_reads_is_left_to_the_helper() {
+        let own = acl(&[
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &CONTAINER),
+        ]);
+        let unprobed = || -> bool { panic!("a root the container reads was probed") };
+        assert!(!read_root_refused(&own, &CONTAINER, unprobed));
+        assert!(read_root_refused(&own, &TEAMMATE, || false));
     }
 
     const TEAMMATE: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];

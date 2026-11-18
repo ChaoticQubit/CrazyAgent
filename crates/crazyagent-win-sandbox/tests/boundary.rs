@@ -560,9 +560,10 @@ fn a_read_root_only_an_administrator_can_open_to_containers_is_refused_by_name()
     let fixture = PathBuf::from(std::env::var("CRAZYAGENT_TEST_UNCHANGEABLE_ROOT").unwrap());
     let programs = PathBuf::from(std::env::var("ProgramFiles").unwrap());
     let case = case("crazyagent.test.unchangeable");
-    assert!(crazyagent_win_sandbox::unreadable_root(&fixture));
-    assert!(!crazyagent_win_sandbox::unreadable_root(&programs));
-    assert!(!crazyagent_win_sandbox::unreadable_root(&case.outside));
+    let refused = |path: &Path| crazyagent_win_sandbox::unreadable_root(path, &case.base.container);
+    assert!(refused(&fixture));
+    assert!(!refused(&programs));
+    assert!(!refused(&case.outside));
     let mut profile = case.base.clone();
     profile.read_roots = vec![plain(&fixture)];
     install(&case, &profile);
@@ -584,6 +585,26 @@ fn a_read_root_only_an_administrator_can_open_to_containers_is_refused_by_name()
         ran(&output)
     );
     assert!(!marker.exists());
+}
+
+/// V244-WIN-NPM r2 F1: the read root of the row above, inside a folder every app container
+/// reads, is not refused when that folder is a read root too, since the helper grants only the
+/// outer one; on its own it is refused. The farm makes its parent readable to every package.
+#[test]
+#[ignore = "needs an administrator-made folder and a standard user (test farm)"]
+fn a_read_root_inside_a_granted_one_is_not_refused_for_itself() {
+    let fixture = PathBuf::from(std::env::var("CRAZYAGENT_TEST_UNCHANGEABLE_ROOT").unwrap());
+    let outer = fixture.parent().unwrap().to_path_buf();
+    let case = case("crazyagent.test.nested");
+    let mut profile = case.base.clone();
+    profile.read_roots = vec![plain(&outer), plain(&fixture)];
+    assert_eq!(crazyagent_win_sandbox::unreadable_read_root(&profile), None);
+    profile.read_roots = vec![plain(&fixture)];
+    let alone = plain(&fixture);
+    assert_eq!(
+        crazyagent_win_sandbox::unreadable_read_root(&profile),
+        Some(alone.as_str())
+    );
 }
 
 #[test]

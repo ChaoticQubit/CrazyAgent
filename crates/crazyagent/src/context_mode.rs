@@ -105,6 +105,7 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextMo
         match after_begin(begin_install(root, bin, version), &folder, &node, version) {
             ForCheck::Run(shared) => return Ok(shared),
             ForCheck::Refused(NODE_TOO_OLD) => ContextModeOff::NodeTooOld,
+            ForCheck::Refused(NODE_FOLDER_UNREADABLE) => ContextModeOff::NodeFolderUnreadable,
             _ if mismatch => ContextModeOff::Mismatch,
             ForCheck::SettingUp | ForCheck::Refused("context_mode_installs_busy") => {
                 ContextModeOff::SettingUp
