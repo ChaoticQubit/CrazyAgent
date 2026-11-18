@@ -2321,14 +2321,25 @@ impl Run {
             request_id: request(name),
             scope: self.scope(restart.config().id).await,
         };
-        let id = restart
+        let id = self.keep(restart, &logout);
+        (logout, id)
+    }
+
+    /// Keeps this sign-out on disk the way the engine keeps one storage has not taken yet,
+    /// for this run's database, whatever its scope says.
+    /// Inputs: the case and the sign-out. Output: its intent's name.
+    fn keep(
+        &self,
+        restart: &Restart,
+        logout: &NativeAuthLogout,
+    ) -> crate::storage::narrowing::IntentId {
+        restart
             .intents()
             .write(&crate::storage::narrowing::Intent {
                 db_instance: self.admission().db_instance,
                 change: crate::storage::narrowing::Change::Logout(logout.clone()),
             })
-            .unwrap();
-        (logout, id)
+            .unwrap()
     }
 }
 
@@ -2445,4 +2456,60 @@ async fn a_drained_sign_out_whose_intent_is_gone_is_refused_and_the_sign_in_stay
     })
     .await
     .expect("the drained sign-out case exceeded 60 seconds");
+}
+
+/// V243-NARROWING-DURABLE r2: a drained sign-out storage refuses by name keeps its intent,
+/// since the owner was told it is pending and never hears that refusal, and the next open
+/// replays it: the profile reads Not signed in and no longer launches.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_sign_out_refused_by_name_keeps_its_intent_and_the_next_open_replays_it() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        let mut scope = first.scope(restart.config().id).await;
+        scope.expected_source_hash = "0".repeat(64);
+        let logout = NativeAuthLogout {
+            request_id: request("restart-logout-drained-refused"),
+            scope,
+        };
+        let id = first.keep(&restart, &logout);
+        let admission = first.admission();
+        let drained = first
+            .handle
+            .engine
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    admission,
+                    crate::engine::owner::native_auth::Command::Logout(logout),
+                    crate::storage::NativeAuthAsk::Drained(id),
+                    reply,
+                )
+            })
+            .await;
+        assert_eq!(
+            drained
+                .map(|begun| begun.reply.fact.action)
+                .map_err(|error| error.0),
+            Err("native_profile_source_conflict".to_owned()),
+            "storage refuses the drained sign-out by name"
+        );
+        assert_eq!(
+            restart.kept(),
+            1,
+            "a drained sign-out the owner never hears refused keeps its intent"
+        );
+        first.stop().await;
+        let second = restart.start().await;
+        assert!(re_proof_ended(&second).await);
+        assert_eq!(restart.kept(), 0, "the next open replays the kept sign-out");
+        assert!(
+            restart.launch().is_err(),
+            "the replayed sign-out keeps the profile from launching"
+        );
+        assert_eq!(second.status().await, AccountStatus::NotSignedIn);
+        second.stop().await;
+    })
+    .await
+    .expect("the refused drained sign-out case exceeded 60 seconds");
 }
