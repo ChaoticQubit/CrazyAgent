@@ -659,10 +659,12 @@ pub(in crate::tui) enum ProjectReply {
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
     RefreshOverview,
-    MoveHome(crate::projects_home::AddMode),
+    MoveRead,
+    MoveHome(crate::projects_home::AddMode, bool),
     DeleteEverything(String),
     GitHubRules,
     TeamChange(Box<crate::team::TeamAction>),
+    ReinstallDismiss,
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -708,6 +710,9 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
     pub confirm_move: bool,
+    pub move_left: Option<crate::projects_home::icloud::SkippedFolders>,
+    pub move_everything: bool,
+    pub move_unread: bool,
     pub removal: Option<crate::team::cleanup::RemovalPreview>,
     pub remove_choice: RemoveChoice,
     remove_everything: bool,
@@ -731,6 +736,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub recovery: ProjectRecovery,
     pub roadmap: StatusLine,
     pub github_notice: bool,
+    pub reinstall: Option<crate::projects_home::reinstall::Offer>,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -764,6 +770,7 @@ impl ProjectScreen {
             recovery: ProjectRecovery::new(project.clone()),
             roadmap: StatusLine::new(project.clone()),
             github_notice: false,
+            reinstall: None,
             sessions: Sessions::default(),
             project,
             name,
@@ -804,6 +811,9 @@ impl ProjectScreen {
             confirm_stop: None,
             confirm_remove: false,
             confirm_move: false,
+            move_left: None,
+            move_everything: false,
+            move_unread: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
             remove_everything: false,
@@ -1918,6 +1928,37 @@ impl ProjectScreen {
         &transcript.messages[skip..]
     }
 
+    /// Says whether `a` hands the reinstall offer's draft to the master's input: an offer is
+    /// kept and the master can take a message, a pool assigned and its transcript read and
+    /// signed in. Takes the screen. Returns the answer.
+    pub fn reinstall_ask(&self) -> bool {
+        self.reinstall.is_some() && self.master_usable()
+    }
+
+    /// Says whether the reinstall offer adds that an account is needed first: the master's
+    /// accounts aren't signed in. Takes the screen. Returns the answer.
+    pub fn reinstall_signed_out(&self) -> bool {
+        self.reinstall.is_some()
+            && self
+                .transcript
+                .as_ref()
+                .is_some_and(|t| matches!(t.status, MasterStatus::NotSignedIn))
+    }
+
+    /// Hands the reinstall offer's drafted message to the master's input and starts typing;
+    /// the offer stays until it is dismissed. Takes the screen. Returns nothing.
+    fn ask_reinstall(&mut self) {
+        let draft = self
+            .reinstall
+            .as_ref()
+            .expect("a only asks while an offer is kept")
+            .draft
+            .clone();
+        let text = console::seeded(self.input.value(), &draft);
+        self.input.set(&text);
+        self.typing = true;
+    }
+
     /// Says whether the master can take a message now.
     /// Takes the screen.
     /// Returns false without a pool or while the master is not ready.
@@ -1991,6 +2032,13 @@ impl ProjectScreen {
             KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
                 ProjectReply::EndConversation
+            }
+            KeyCode::Char('a') if !control && self.reinstall_ask() => {
+                self.ask_reinstall();
+                ProjectReply::Handled
+            }
+            KeyCode::Char('d') if !control && self.reinstall.is_some() => {
+                ProjectReply::ReinstallDismiss
             }
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
@@ -2490,23 +2538,57 @@ impl ProjectScreen {
         }
     }
 
+    /// Takes the folder read for the move ask: the rebuildable folders a move would leave in
+    /// iCloud, empty when there are none or the read failed. Takes the folders.
+    pub fn move_read(&mut self, left: crate::projects_home::icloud::SkippedFolders) {
+        if self.confirm_move {
+            self.move_left = Some(left);
+        }
+    }
+
+    /// Takes a folder read for the move ask that failed: the move then downloads everything, as
+    /// it never leaves folders in iCloud it did not show first (DEC-198, leader 16:30).
+    pub fn move_read_failed(&mut self) {
+        if self.confirm_move {
+            self.move_left = Some(crate::projects_home::icloud::SkippedFolders::default());
+            self.move_unread = true;
+        }
+    }
+
     /// Answers one key in the move ask: m moves the project into the projects home, c copies
-    /// it there, and n or Esc keeps it where it is. Takes the key. Returns the move to send,
-    /// or Handled.
+    /// it there, both only once the folder read landed, Space switches Download everything
+    /// while the read names folders a move leaves in iCloud, and n or Esc keeps it where it is.
+    /// Takes the key. Returns the move to send with the switch, or Handled.
     fn move_key(&mut self, key: KeyEvent) -> ProjectReply {
         use crate::projects_home::AddMode;
         assert!(self.confirm_move);
+        let leaves = self.move_left.as_ref().is_some_and(|left| !left.is_empty());
         let mode = match key.code {
-            KeyCode::Char('m') => AddMode::Move,
-            KeyCode::Char('c') => AddMode::Copy,
             KeyCode::Char('n') | KeyCode::Esc => {
-                self.confirm_move = false;
+                self.close_move();
                 return ProjectReply::Handled;
             }
+            _ if self.move_left.is_none() => return ProjectReply::Handled,
+            KeyCode::Char(' ') if leaves => {
+                self.move_everything = !self.move_everything;
+                return ProjectReply::Handled;
+            }
+            KeyCode::Char('m') => AddMode::Move,
+            KeyCode::Char('c') => AddMode::Copy,
             _ => return ProjectReply::Handled,
         };
+        assert!(leaves || !self.move_everything);
+        let everything = self.move_everything || self.move_unread;
+        self.close_move();
+        ProjectReply::MoveHome(mode, everything)
+    }
+
+    /// Closes the move ask and forgets its folder read and switch.
+    fn close_move(&mut self) {
         self.confirm_move = false;
-        ProjectReply::MoveHome(mode)
+        self.move_left = None;
+        self.move_everything = false;
+        self.move_unread = false;
     }
 
     /// Closes the remove ask and forgets its preview, choice and typed name.
@@ -2520,12 +2602,12 @@ impl ProjectScreen {
     }
 
     /// Shows why the engine refused to start the job that moves this project into the projects
-    /// home or deletes it, as a plain line; a busy refusal names the job that runs, as last read.
-    /// Takes the refusal code and the job read. Returns nothing.
-    pub fn job_refused(&mut self, code: &str, held: Option<&crate::projects_home::job::JobView>) {
+    /// home or deletes it, as a plain line; the job refusals of DEC-197, a full waiting list or
+    /// a folder another job holds, say Home's words. Takes the refusal code. Returns nothing.
+    pub fn job_refused(&mut self, code: &str) {
         assert!(!code.is_empty());
         self.problem = Some(match code {
-            "job_busy" => super::intake_job::busy(held),
+            "job_busy" | "job_same_folder" => super::intake::copy(code),
             code => plain_problem(code),
         });
         assert!(self.problem.is_some());
@@ -2632,12 +2714,12 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('h') if !self.hidden_seers().is_empty() => {
+            KeyCode::Char('R') if !self.hidden_seers().is_empty() => {
                 ProjectReply::TeamChange(Box::new(crate::team::TeamAction::RestartHiddenSeers {
                     project_id: self.project.clone(),
                 }))
             }
-            KeyCode::Char('k') => {
+            KeyCode::Char('k') if self.hidden_offered() => {
                 match &self.hidden_paths {
                     Some(saved) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
@@ -2668,9 +2750,19 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('m') => {
+            KeyCode::Char('M') => {
+                if self.setup.is_none() {
+                    self.problem = Some(match self.setup_missing {
+                        true => plain_problem("project_setup_missing"),
+                        false => "Still loading the project folder. Try again.".into(),
+                    });
+                    return ProjectReply::Handled;
+                }
                 self.confirm_move = true;
-                ProjectReply::Handled
+                self.move_left = None;
+                self.move_everything = false;
+                self.move_unread = false;
+                ProjectReply::MoveRead
             }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('G') => ProjectReply::GitHubRules,
@@ -2752,14 +2844,25 @@ impl ProjectScreen {
             .map(|entry| entry.strategy)
     }
 
+    /// Whether the Settings tab offers hidden folders: until the engine's read says this
+    /// system has none (DEC-194), so the row shows while it loads. Takes the screen.
+    /// Returns the answer.
+    pub fn hidden_offered(&self) -> bool {
+        !self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| saved.unavailable)
+    }
+
     /// The running agents the team graph names as able to open a folder hidden after they
     /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
     /// their labels in graph order, none while nothing is hidden or the graph loads.
     pub fn hidden_seers(&self) -> Vec<&str> {
-        let hides = self
-            .hidden_paths
-            .as_ref()
-            .is_some_and(|saved| !saved.paths.is_empty());
+        let hides = self.hidden_offered()
+            && self
+                .hidden_paths
+                .as_ref()
+                .is_some_and(|saved| !saved.paths.is_empty());
         match self.team.ready() {
             Some(graph) if hides => graph
                 .nodes
@@ -3027,6 +3130,17 @@ impl ProjectScreen {
             self.confirm_move,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        assert!(
+            self.confirm_move
+                || (self.move_left.is_none() && !self.move_everything && !self.move_unread)
+        );
+        assert!(
+            !self.move_unread
+                || self
+                    .move_left
+                    .as_ref()
+                    .is_some_and(crate::projects_home::icloud::SkippedFolders::is_empty)
+        );
         if self.remove_choice == RemoveChoice::Everything {
             assert!(self.confirm_remove);
             assert!(
@@ -3130,6 +3244,14 @@ pub(in crate::tui) fn overview_pending(overview: &crate::project_overview::Overv
     overview.running || waits
 }
 
+/// The plain sentence for a hidden folder refused as not plain, in this system's path form:
+/// a plain drive path on Windows, a path with no quote or backslash elsewhere.
+const HIDDEN_NOT_PLAIN: &str = if cfg!(windows) {
+    "A folder path must be a plain drive path such as C:\\Users\\you\\project\\secrets, with no quotes, / or control characters."
+} else {
+    "A folder path can't hold quotes, backslashes or control characters."
+};
+
 /// Turns an engine rejection code into a plain sentence.
 /// Takes the code.
 /// Returns what happened and what to do; a code with no sentence is named after a retry sentence.
@@ -3205,9 +3327,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "hidden_path_outside_project" => {
             "A hidden folder must sit inside the project. Pick a folder within it."
         }
-        "hidden_path_not_plain" => {
-            "A folder path can't hold quotes, backslashes or control characters."
-        }
+        "hidden_path_not_plain" => HIDDEN_NOT_PLAIN,
         "hidden_path_tracked" => {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
@@ -3228,6 +3348,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "model_access_read_only" => "Pools can't be changed in this setup.",
         "research_job_finished" => "This research already ended.",
         "research_job_not_retryable" => "Only failed or stopped research can run again.",
+        "research_unavailable_here" => {
+            "Research does not run on this computer in this version, so it cannot run again."
+        }
         "planning_busy" => {
             "A roadmap is already being planned for this project. Wait for it to finish."
         }

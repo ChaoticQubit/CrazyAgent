@@ -2,8 +2,8 @@ use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
 use crate::setup::InstallError;
 use base64::Engine;
 use os::{
-    NODE, lock, npm_ready, open_plain, private_folder, run_command, run_quiet, runnable,
-    staging_folder,
+    NODE, lock, lock_shared, npm_ready, open_plain, private_folder, run_command, run_quiet,
+    runnable, staging_folder, try_lock,
 };
 use sha2::{Digest, Sha512};
 use std::ffi::OsStr;
@@ -26,6 +26,8 @@ const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
+const NODE_PROFILE: &str = "node.sb";
+const NODE_CHECK_LOCK: &str = "node-check.lock";
 const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
@@ -230,12 +232,21 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
         .ok_or(InstallError("setup_store_unavailable"))?;
     let prefix = format!("{PACKAGE}@{version}");
     clear(folder)?;
-    remove_staged(parent, &prefix);
+    remove_staged(parent, &prefix, version);
     let staged = staging_folder(parent, &prefix)?;
-    let work = staging_folder(parent, &format!("{prefix}-work"));
+    let work = work_folder(&staged, &prefix);
     let result = work.and_then(|work| {
-        let filled = fill(root, &staged, &work, bin, version, prefix.as_ref())
-            .and_then(|()| checked(&staged, version).map_err(InstallError))
+        let filled = npm_job(&staged, &work)
+            .and_then(|(job, home)| {
+                let filled = fill(root, &staged, &work, bin, version, prefix.as_ref())
+                    .and_then(|()| checked(&staged, version).map_err(InstallError));
+                let released = os::release(&npm_profile(parent, version), &job, &home);
+                filled.and_then(|()| {
+                    released
+                        .then_some(())
+                        .ok_or(InstallError("context_mode_sandbox_unavailable"))
+                })
+            })
             .and_then(|()| {
                 std::fs::rename(&staged, folder)
                     .map_err(|_| InstallError("setup_store_unavailable"))
@@ -346,18 +357,69 @@ fn fixture_program(_: Option<&str>) -> bool {
 }
 
 /// Whether the `node` beside npx runs the shared install: its `--version`, read inside a
-/// boundary in a scratch folder removed after ([`node_command`]), names 22.5 or newer, which
-/// has the built-in SQLite context-mode uses without building a dependency. Inputs: the engine
-/// root and npx's folder. Output: false when it is older, fails or names no version, or
-/// `context_mode_sandbox_unavailable` when no boundary can hold it.
+/// boundary in a scratch folder ([`node_command`]), names 22.5 or newer, which has the
+/// built-in SQLite context-mode uses without building a dependency. After the run the
+/// boundary's container is released ([`os::release`]), named from the scratch folder read
+/// before the run, and the scratch folder is removed, after a refused release too, which is
+/// logged, so a lasting refusal adds no folder per probe. Every probe holds the check lock
+/// shared while it runs; one that finds it free first ends what crashed probes left
+/// ([`end_left_checks`]). Inputs: the engine root and npx's folder. Output: false when it is
+/// older, fails or names no version, or `context_mode_sandbox_unavailable` when no boundary
+/// can hold it.
 fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
-    let scratch = staging_folder(&root.join("setup").join("npm"), NODE_CHECK)?;
+    let parent = root.join("setup").join("npm");
+    private_folder(&parent)?;
+    let checks = parent.join(NODE_CHECK_LOCK);
+    if let Some(_alone) = try_lock(&checks)? {
+        end_left_checks(&parent);
+    }
+    let _probing = lock_shared(&checks)?;
+    let scratch = staging_folder(&parent, NODE_CHECK)?;
+    let Ok(base) = crate::sandbox::canonical(&scratch) else {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(InstallError("setup_store_unavailable"));
+    };
     let supported = node_command(root, &scratch, bin).map(|command| {
         run_command(command, NODE_CHECK_TIME)
             .is_ok_and(|(ok, output)| ok && supported_node(&output))
     });
-    let _ = std::fs::remove_dir_all(&scratch);
+    end_check(&scratch, &base);
     supported
+}
+
+/// Ends one node probe: releases the container named from its canonical scratch folder
+/// ([`os::release`]) and removes the scratch folder, after a refused release too, which is
+/// logged. Inputs: the scratch folder and its canonical path. Output: none.
+fn end_check(scratch: &Path, base: &Path) {
+    let profile = scratch.join(NODE_PROFILE);
+    let _ = os::release(&profile, &base.join("project"), &base.join("home"));
+    let _ = std::fs::remove_dir_all(scratch);
+}
+
+/// Ends every node probe scratch folder in `setup/npm`, called only while the caller holds
+/// the check lock exclusive, so no live probe in any process owns one: each was left by a
+/// probe that crashed before its own end. Input: the `setup/npm` folder. Output: none.
+fn end_left_checks(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let left = format!(".{NODE_CHECK}-");
+    for entry in entries.flatten() {
+        let ours = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&left));
+        if !ours || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let scratch = entry.path();
+        match crate::sandbox::canonical(&scratch) {
+            Ok(base) => end_check(&scratch, &base),
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&scratch);
+            }
+        }
+    }
 }
 
 /// The `node --version` command of npx's folder inside the boundary npm installs in, with no
@@ -391,7 +453,7 @@ fn node_command(
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let profile = scratch.join("node.sb");
+    let profile = scratch.join(NODE_PROFILE);
     let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
     let mut node = std::process::Command::new(bin.join(NODE));
     node.arg("--version").current_dir(&folders[0]);
@@ -559,19 +621,69 @@ fn finish(folder: &Path) {
         .retain(|held| held != folder);
 }
 
-fn remove_staged(parent: &Path, prefix: &str) {
+/// Makes the work folder npm runs in beside its staging folder, named with the staging
+/// folder's random suffix (`.<prefix>-work-<random>`), so a later install can pair a crashed
+/// install's two folders. Inputs: the staging folder and the prefix. Output: the new folder,
+/// never one that exists, or `setup_store_unavailable`.
+fn work_folder(staged: &Path, prefix: &str) -> Result<PathBuf, InstallError> {
+    let unavailable = InstallError("setup_store_unavailable");
+    let random = staged
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|name| name.strip_prefix(&format!(".{prefix}-")))
+        .ok_or(unavailable)?;
+    let work = staged.with_file_name(format!(".{prefix}-work-{random}"));
+    if std::fs::symlink_metadata(&work).is_ok() {
+        return Err(unavailable);
+    }
+    private_folder(&work)?;
+    Ok(work)
+}
+
+/// The canonical job folder and home an install's npm container is named from: the staging
+/// folder and the work folder's `home`. Inputs: the staging and work folders. Output: both,
+/// or `setup_store_unavailable`.
+fn npm_job(staged: &Path, work: &Path) -> Result<(PathBuf, PathBuf), InstallError> {
+    crate::sandbox::canonical(staged)
+        .and_then(|folder| Ok((folder, crate::sandbox::canonical(work)?.join("home"))))
+        .map_err(|_| InstallError("setup_store_unavailable"))
+}
+
+/// Removes the staging and work folders earlier installs of one version left, called under
+/// that version's install lock, so none is live. A staging folder whose paired work folder is
+/// left too first has its container released with the version's profile, which refuses a
+/// pair it does not name. Inputs: the staging folders' parent, the prefix and the version.
+/// Output: none.
+fn remove_staged(parent: &Path, prefix: &str, version: &str) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
     };
     let staged = format!(".{prefix}-");
-    for entry in entries.flatten() {
-        let ours = entry
+    let left: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&staged))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .map(|entry| entry.path())
+        .collect();
+    for folder in &left {
+        let paired = folder
             .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(&staged));
-        if ours && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            let _ = std::fs::remove_dir_all(entry.path());
+            .and_then(OsStr::to_str)
+            .and_then(|name| name.strip_prefix(&staged))
+            .filter(|random| !random.starts_with("work-"))
+            .map(|random| parent.join(format!("{staged}work-{random}")))
+            .filter(|work| left.contains(work));
+        if let Some((job, home)) = paired.and_then(|work| npm_job(folder, &work).ok()) {
+            let _ = os::release(&npm_profile(parent, version), &job, &home);
         }
+    }
+    for folder in left {
+        let _ = std::fs::remove_dir_all(folder);
     }
 }
 
@@ -614,6 +726,12 @@ fn fill(
     checked(staged, version).map_err(InstallError)
 }
 
+/// The boundary profile npm's install step writes beside its staging folders, one per version.
+/// Inputs: the staging folders' parent and the version. Output: its path.
+fn npm_profile(parent: &Path, version: &str) -> PathBuf {
+    parent.join(format!("{PACKAGE}@{version}.sb"))
+}
+
 fn npm_command(
     root: &Path,
     staged: &Path,
@@ -638,11 +756,12 @@ fn npm_command(
         &canonical(&tmp)?,
         os::npm_network(),
     )
+    .map(ProjectSandbox::as_job_folder)
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
-    let profile = parent.join(format!("{PACKAGE}@{version}.sb"));
+    let profile = npm_profile(parent, version);
     os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
 

@@ -1203,14 +1203,18 @@ fn only_linux_refuses_the_graph_build_with_a_plain_line() {
 /// The graph step's installer finds the graphify setup put in `<engine root>/setup/bin`, a
 /// stand-in here, and looks again on each step: once it is gone it finds none. The installer
 /// looks only in that folder, not this Mac's own installs, which come first on the engine's
-/// places, so the row reads the same in any HOME. macOS only: by DEC-094 a Linux host
+/// places, so the row reads the same in any HOME. The stand-in sits under the real temp
+/// folder, not the `/tmp` link: the resolver judges every link on a tool's way (0be8ec608),
+/// and `/tmp` leads into a folder every user can write. macOS only: by DEC-094 a Linux host
 /// installs no graphify (`only_linux_refuses_the_graph_build_with_a_plain_line`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     use crate::setup::Installer;
     use std::os::unix::fs::PermissionsExt;
-    let root = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
     let bin = root.path().join("setup/bin");
     let installer = crate::setup::pinned::PinnedInstaller::with_places(
         root.path(),
@@ -2642,6 +2646,7 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
         tool: "graphify".into(),
         reason: crate::tools::Reason::Refused,
         needs: None,
+        found: None,
         looked: Vec::new(),
         refused: Some(Box::new(crate::tools::Refused {
             file: std::path::PathBuf::from("/h/tool/bin/python3"),
@@ -2670,7 +2675,8 @@ fn a_graph_step_whose_graphify_is_refused_fails_with_the_refused_line() {
 
 /// DS-148 code F1: an engine folder spelled with a code point HFS+ ignores in names, or in
 /// another letter case, stays out of the top-level entries like the plain name, since such
-/// a volume opens it as the engine's own folder.
+/// a volume opens it as the engine's own folder. The folder is then made a repository, so on
+/// a case-insensitive volume `.GIT` holds its working `.git` and git answers for the folder.
 #[test]
 fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
     let dir = rust_repo();
@@ -2683,6 +2689,7 @@ fn evidence_leaves_out_engine_folders_in_any_spelling_the_volume_opens() {
     for name in spelled {
         std::fs::create_dir(dir.path().join(name)).unwrap();
     }
+    git_init(dir.path());
     let evidence = draft::gather(dir.path(), &[]);
     for name in spelled {
         assert!(
@@ -2756,4 +2763,33 @@ fn a_folder_a_pending_project_move_lands_in_is_not_registered() {
         pool: pool(),
     };
     assert_eq!(execute(&tx, &config, &database, &action).unwrap(), usual);
+}
+
+/// V243-FIRMLINK-HOME-REFUSAL r3: a folder that holds the owner's home is refused under the
+/// data volume's names too: the home typed through /System/Volumes/Data, the data volume
+/// itself and /System/Volumes. The check only reads folder metadata, so the real home is
+/// safe to give it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_holding_the_owners_home_is_refused_under_the_data_volume_names() {
+    let runtime = tempfile::tempdir().unwrap();
+    let database = runtime.path().join("engine.db");
+    let home = owner_home().unwrap();
+    let long_home = PathBuf::from(format!("/System/Volumes/Data{}", home.display()));
+    assert!(long_home.is_dir());
+    assert_eq!(
+        project_folder(&long_home, &database),
+        Err("onboarding_path_not_canonical")
+    );
+    for holder in ["/System/Volumes/Data", "/System/Volumes"] {
+        assert_eq!(
+            project_folder(Path::new(holder), &database),
+            Err("onboarding_folder_unsafe"),
+            "{holder}"
+        );
+    }
+    assert_eq!(
+        project_folder(&home, &database),
+        Err("onboarding_folder_unsafe")
+    );
 }

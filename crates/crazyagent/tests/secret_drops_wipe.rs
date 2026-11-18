@@ -53,12 +53,16 @@ fn freed_after(bytes: Vec<u8>, make: impl FnOnce(Vec<u8>)) -> u8 {
     FREED.load(Ordering::SeqCst)
 }
 
+/// One row of [`secret_types_free_only_zeros`]: the secret's bytes and the call that
+/// makes it and lets it go.
+type Case<'a> = (&'a [u8], &'a dyn Fn(Vec<u8>));
+
 /// SECRET-DROP: an account secret and a launch's API key each leave only zeros in the block
 /// they free, whether they were dropped after use or refused when made.
 #[test]
 fn secret_types_free_only_zeros() {
     let text = |bytes: Vec<u8>| String::from_utf8(bytes).unwrap();
-    let cases: [(&[u8], &dyn Fn(Vec<u8>)); 4] = [
+    let cases: [Case<'_>; 4] = [
         (b"account-secret-fixture-4417", &|bytes| {
             drop(AccountSecret::new(bytes).unwrap())
         }),

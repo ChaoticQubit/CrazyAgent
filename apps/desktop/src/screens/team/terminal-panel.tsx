@@ -1,16 +1,19 @@
 import { Channel } from "@tauri-apps/api/core";
 import type { FitAddon } from "@xterm/addon-fit";
+import type { WebglAddon } from "@xterm/addon-webgl";
 import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type Ref } from "react";
 import { attachTerminal, detachTerminal, loadTeamGraph, promptTerminal, resizeTerminal, typeIntoTerminal, type Result } from "../../api";
 import type { GraphNode, TeamGraph, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
-import { afterFirstPaint, readLastProject, readTerminalInput, type Loaded, type ProjectRow } from "../../state";
+import { afterFirstPaint, onTerminalRenderer, readLastProject, readTerminalInput, readTerminalRenderer, type Loaded, type ProjectRow } from "../../state";
 import { Button, Icon, NotReady, StatusBadge, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
+import type { Seed } from "../project/console-model";
 import { nodeRole, nodeRunning, nodeStatus } from "./graph";
 import { HIDDEN_FLUSH_MS, HiddenOutput, KEPT_MAX, KeptSet, keyId, readSaved, resized, shownFirst, writeSaved, type Held, type KeptKey, type SavedView } from "./kept-terminals";
-import { connectingLine, copyKey, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, selectNote, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { autoStartFailed, gpuStartFailed, gpuWanted, probeGpu, rendererChosen } from "./terminal-renderer";
+import { connectingLine, copyKey, drawOnGpu, encodeBinary, encodeTyped, endCopy, followTry, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, readableScreen, seedText, selectNote, settleAfterWrites, terminalEvent, terminalSize, type GpuDrawing } from "./terminal-io";
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
@@ -395,6 +398,7 @@ function parking(): HTMLDivElement {
 
 const views = new Set<KeptView>();
 let themed = false;
+let rendered = false;
 
 /** Repaints every open terminal view in the app's colors once the owner's appearance or the
  * system's changes, since a kept view outlives the panel that read them. Output: none. */
@@ -407,6 +411,18 @@ function followTheme(): void {
   };
   new MutationObserver(apply).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", apply);
+}
+
+/** Follows the owner's Terminal renderer choice once for the window: a new choice forgets a
+ * failed Automatic start and draws every view afresh with it, so open terminals change at
+ * once. Output: none. */
+function followRenderer(): void {
+  if (rendered) return;
+  rendered = true;
+  onTerminalRenderer(() => {
+    rendererChosen();
+    for (const view of views) view.redraw();
+  });
 }
 
 /** One agent terminal view that outlives its panel (DEC-187): an xterm made once in an element
@@ -431,6 +447,9 @@ export class KeptView implements Held {
   private readonly hidden = new HiddenOutput();
   private link: Link | null = null;
   private fit: FitAddon | null = null;
+  private Webgl: (new () => WebglAddon) | null = null;
+  private gpu: GpuDrawing | null = null;
+  private gpuLost = false;
   private size: { width: number; height: number } | null = null;
   private fitted = false;
   private tries = 0;
@@ -451,6 +470,7 @@ export class KeptView implements Held {
     this.host.className = "tg-terminal-host";
     views.add(this);
     followTheme();
+    followRenderer();
     this.park();
     void this.open();
   }
@@ -492,6 +512,8 @@ export class KeptView implements Held {
     this.host.style.width = "";
     this.host.style.height = "";
     screen.appendChild(this.host);
+    this.gpuLost = false;
+    this.draw();
     if (this.state.view.kind === "ended") this.reopen();
     window.cancelAnimationFrame(this.focusFrame);
     this.focusFrame = window.requestAnimationFrame(() => {
@@ -506,7 +528,15 @@ export class KeptView implements Held {
   hide(): void {
     this.shown = false;
     window.cancelAnimationFrame(this.focusFrame);
+    this.releaseGpu();
     if (!this.dropped) this.park();
+  }
+
+  /** Draws the view afresh under a new Terminal renderer choice, a lost GPU context
+   * forgotten. Output: none. */
+  redraw(): void {
+    this.gpuLost = false;
+    this.draw();
   }
 
   /** Scrolls to the latest output and puts the cursor in the terminal. Output: none. */
@@ -537,6 +567,7 @@ export class KeptView implements Held {
     this.link?.release();
     this.link = null;
     this.hidden.take();
+    this.releaseGpu();
     this.release();
     this.terminal = null;
     this.fit = null;
@@ -560,9 +591,10 @@ export class KeptView implements Held {
   }
 
   private async open(): Promise<void> {
-    const [{ Terminal }, { FitAddon }] = await Promise.all([
+    const [{ Terminal }, { FitAddon }, webgl] = await Promise.all([
       import("@xterm/xterm"),
       import("@xterm/addon-fit"),
+      import("@xterm/addon-webgl").catch(() => null),
       import("@xterm/xterm/css/xterm.css"),
     ]);
     if (this.dropped) return;
@@ -571,8 +603,11 @@ export class KeptView implements Held {
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(this.host);
+    readableScreen(this.host, terminal);
     this.terminal = terminal;
     this.fit = fit;
+    this.Webgl = webgl?.WebglAddon ?? null;
+    this.draw();
     const scrolled = followScroll(terminal, (behind) => this.set({ behind }));
     const moused = followMouse(terminal, (mouse) => this.set({ mouse }));
     const selected = keepSelection(terminal, this.host);
@@ -599,6 +634,40 @@ export class KeptView implements Held {
       terminal.dispose();
     };
     this.connect();
+  }
+
+  /** Draws the view on the GPU while it is shown and the owner's Terminal renderer choice
+   * wants the GPU on this machine, and with DOM rows otherwise, so a hidden view holds no GPU
+   * context. A start the GPU refuses counts against Automatic; a lost context keeps DOM rows
+   * until the view is shown again or the choice changes. A new drawing repaints the screen.
+   * Output: none. */
+  private draw(): void {
+    const terminal = this.terminal;
+    if (!terminal || this.dropped) return;
+    const choice = readTerminalRenderer();
+    if (!this.shown || this.gpuLost || this.Webgl === null || !gpuWanted(choice, probeGpu, autoStartFailed())) {
+      this.releaseGpu();
+      return;
+    }
+    if (this.gpu) return;
+    const drawing = drawOnGpu(terminal, this.Webgl, () => {
+      if (this.gpu !== drawing) return;
+      this.gpu = null;
+      this.gpuLost = true;
+    });
+    if (!drawing) {
+      gpuStartFailed(choice);
+      return;
+    }
+    this.gpu = drawing;
+    terminal.refresh(0, terminal.rows - 1);
+  }
+
+  /** Hands the view's drawing back to DOM rows and frees its GPU context. Output: none. */
+  private releaseGpu(): void {
+    const drawing = this.gpu;
+    this.gpu = null;
+    drawing?.release();
   }
 
   private refit(): void {
@@ -854,7 +923,7 @@ const idle = () => IDLE;
  * terminal open at its first frame and close, so the live master's wait ends only then. Where the owner
  * types (the terminal, the message box under it, or both) is the one Terminal input in
  * Settings, for every agent on every screen. Output: the panel. */
-export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened }: {
+export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, embedded = false, tile = false, swaps = false, follow = false, reported, projectId, onOpened, seed = null }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
@@ -866,6 +935,7 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   reported?: string;
   projectId?: string;
   onOpened?: (open: boolean) => void;
+  seed?: Seed | null;
 }) {
   if (embedded && tile) throw new Error("a terminal is either embedded in a console or a wall tile, never both");
   if (embedded && swaps) throw new Error("only a terminal with its own head says it swaps");
@@ -893,6 +963,15 @@ export function TerminalPanel({ node, harness = (id) => id, onClose, onStop, emb
   const open = view.kind === "live";
   useEffect(() => { opened.current?.(open); }, [open]);
   useEffect(() => () => opened.current?.(false), []);
+  const pasted = useRef<number | null>(null);
+  useEffect(() => {
+    const terminal = current.current?.terminal ?? null;
+    if (seed === null || !open || terminal === null || pasted.current === seed.id) return;
+    pasted.current = seed.id;
+    terminal.paste(seedText(seed.text, terminal.modes.bracketedPasteMode));
+    terminal.focus();
+    seed.used();
+  }, [seed, open]);
   const [menu, setMenu] = useState<MenuAt | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 

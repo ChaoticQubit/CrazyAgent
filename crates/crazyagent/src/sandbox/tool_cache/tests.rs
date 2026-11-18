@@ -247,6 +247,64 @@ fn a_changed_uv_primes_again() {
     assert!(runtime.prepare().unwrap().primed);
 }
 
+/// V243-INODE-STAMPS: a uv rewritten in place with its old size and modification time put
+/// back, as `cp -p` over it leaves it, primes again, so the bucket it now makes gets its
+/// marker: only its change time moved. The rewrite repeats until the change time moved,
+/// since Linux may stamp it from a coarse clock.
+#[test]
+fn a_uv_rewritten_in_place_with_its_old_size_and_modification_time_primes_again() {
+    use std::os::unix::fs::MetadataExt;
+    let runtime = Runtime::new("");
+    assert!(runtime.prepare().unwrap().primed);
+    let before = std::fs::metadata(&runtime.uv).unwrap();
+    let script = std::fs::read_to_string(&runtime.uv)
+        .unwrap()
+        .replace("sdists-v10", "sdists-v11");
+    let mut after = before.clone();
+    for _ in 0..1000 {
+        std::fs::write(&runtime.uv, &script).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&runtime.uv)
+            .unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
+        after = std::fs::metadata(&runtime.uv).unwrap();
+        if (after.ctime(), after.ctime_nsec()) != (before.ctime(), before.ctime_nsec()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        (
+            after.dev(),
+            after.ino(),
+            after.len(),
+            after.mtime(),
+            after.mtime_nsec()
+        ),
+        (
+            before.dev(),
+            before.ino(),
+            before.len(),
+            before.mtime(),
+            before.mtime_nsec()
+        ),
+        "the rewrite kept the device, inode, size and modification time"
+    );
+    assert_ne!(
+        (after.ctime(), after.ctime_nsec()),
+        (before.ctime(), before.ctime_nsec()),
+        "the rewrite moved the change time"
+    );
+    let again = runtime.prepare().unwrap();
+    assert!(again.primed, "a uv rewritten in place primes again");
+    assert_eq!(
+        std::fs::read_link(again.root.join(UV).join("sdists-v11").join(MARKER)).unwrap(),
+        Path::new(MARKER_TARGET)
+    );
+}
+
 /// T8: a file, a folder or a link to anything but `/dev/null` at a marker fails closed.
 #[test]
 fn anything_but_a_dev_null_link_at_a_marker_fails_closed() {

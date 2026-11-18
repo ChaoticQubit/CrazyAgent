@@ -11,8 +11,9 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::coord::settings::SubagentMode;
     use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
-    use crazyagent::github::GitHubPublishPlan;
     use crazyagent::engine::owner::NativeAuthMethod;
+    use crazyagent::github::GitHubPublishPlan;
+    use crazyagent::github::GitHubRule;
     use crazyagent::ide::bridge::run_command::RunMode;
     use crazyagent::learning::MarkStep;
     use crazyagent::master_frame_limit::MasterFrameSettings;
@@ -37,6 +38,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::team::TerminalsPerWindow;
     use crazyagent::usage::money::MoneyChoice;
     use crazyagent::usage::spend::SpendChoice;
+    use std::collections::BTreeSet;
     match command {
         "desktop_connect" => {
             let result: Result<_, BridgeError> = async { let mut bridge = lock(state).await?; bridge.connect().await }.await;
@@ -1916,7 +1918,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_approve(&project, lines)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .github_publish_approve(&project, lines)?; call.await }.await;
             routed(result)
         }
         "desktop_github_publish_exclude" => {
@@ -1983,7 +1985,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_publish_prompt_set(&project, answer)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .github_publish_prompt_set(&project, answer)?; call.await }.await;
             routed(result)
         }
         "desktop_github_publish_discard" => {
@@ -2019,8 +2021,9 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
         }
         "desktop_github_rule_defaults_set" => {
             #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
             struct Args {
-                rules: std::collections::BTreeSet<crazyagent::github::GitHubRule>,
+                rules: BTreeSet<GitHubRule>,
             }
             let Args { rules } = match parse(args) {
                 Ok(args) => args,
@@ -2031,6 +2034,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
         }
         "desktop_github_rules" => {
             #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
             struct Args {
                 project: String,
             }
@@ -2043,17 +2047,18 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
         }
         "desktop_github_rule_set" => {
             #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
             struct Args {
                 project: String,
                 repo: String,
-                rule: crazyagent::github::GitHubRule,
+                rule: GitHubRule,
                 on: bool,
             }
             let Args { project, repo, rule, on } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.github_rule_set(&project, repo, rule, on)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .github_rule_set(&project, repo, rule, on)?; call.await }.await;
             routed(result)
         }
         "desktop_clone_repo" => {
@@ -2067,27 +2072,6 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.clone_repo(full_name)?; call.await }.await;
-            routed(result)
-        }
-        "desktop_icloud_download" => {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Args {
-                path: String,
-            }
-            let Args { path } = match parse(args) {
-                Ok(args) => args,
-                Err(invalid) => return invalid,
-            };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_download(path)?; call.await }.await;
-            routed(result)
-        }
-        "desktop_icloud_progress" => {
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_progress()?; call.await }.await;
-            routed(result)
-        }
-        "desktop_icloud_cancel" => {
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.icloud_cancel()?; call.await }.await;
             routed(result)
         }
         "desktop_intake_start" => {
@@ -2133,6 +2117,32 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.intake_dismiss(id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_reinstall_offer" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.reinstall_offer(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_reinstall_dismiss" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.reinstall_dismiss(project_id)?; call.await }.await;
             routed(result)
         }
         "desktop_setup_status" => {

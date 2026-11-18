@@ -1,5 +1,5 @@
 import type { HarnessEntry } from "../../api";
-import type { DependencyState } from "../../engine-client";
+import type { DependencyState, SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { updateCopy, type HarnessVersions } from "../../api-harness-updates";
 
@@ -51,15 +51,16 @@ export type HarnessRow =
   | { kind: "blocked"; line: string };
 
 /** Where an offered harness stands, from the engine's catalog row, versions read and install
- * queue: RCLI always comes with the app; a running or queued install wins; a failed install of a
- * harness still missing shows its result; a found harness the resolver can't run says what it
- * needs; else a fresh install, installed, the install line, or why it can't install. Inputs: the
- * id, its catalog row, its versions read (null while unread) and the queued ids. Output: the row. */
+ * queue: RCLI always comes with the app; a running install wins, and one held behind another
+ * harness's job or queued waits; a failed install of a harness still missing shows its result;
+ * a found harness the resolver can't run says what it needs; else a fresh install, installed,
+ * the install line, or why it can't install. Inputs: the id, its catalog row, its versions read
+ * (null while unread) and the queued ids. Output: the row. */
 export function harnessRow(id: string, entry: HarnessEntry | undefined, versions: HarnessVersions | null, queued: readonly string[]): HarnessRow {
   if (id === "rcli") return { kind: "bundled" };
   if (versions === null) return { kind: "reading" };
-  if (versions.running) return { kind: "installing" };
-  if (queued.includes(id)) return { kind: "waiting" };
+  if (versions.running && !versions.waiting) return { kind: "installing" };
+  if (versions.running || queued.includes(id)) return { kind: "waiting" };
   const present = Boolean(entry?.executable);
   const ended = versions.last;
   if (ended && !ended.ok && !present) return { kind: "failed", reason: updateCopy(ended.code ?? "harness_install_failed") };
@@ -157,6 +158,15 @@ export type NodeOffer = { kind: "none" } | { kind: "offer" } | { kind: "installi
  * resolver found it but it can't run without Node. Input: the versions read. Output: the answer. */
 export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean {
   return reads.some((read) => read !== null && (read.refusal === NEEDS_NODE || read.needs?.program === "node"));
+}
+
+/** Setup's Node row as the Node.js offer reads it: installing while a job on Node runs, the setup
+ * run's step or a lone install, else its own state. Input: setup's status, null while unread.
+ * Output: the state, null without a Node row. */
+export function nodeRow(setup: SetupStatus | null): DependencyState | null {
+  const row = setup?.dependencies.find((item) => item.name === "node");
+  if (!row) return null;
+  return row.busy ? { state: "installing" } : row.state;
 }
 
 /** Tells whether the step reads again for Node while a harness needs it: setup's Node row is still

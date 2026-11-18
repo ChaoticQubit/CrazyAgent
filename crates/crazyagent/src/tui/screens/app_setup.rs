@@ -335,6 +335,15 @@ fn option_rows(
     lines
 }
 
+/// The projects home hint, naming a folder in this system's own home form.
+const HOME_PATH_HINT: &str = if cfg!(target_os = "windows") {
+    "Use a full folder path, such as C:\\Users\\you\\Projects."
+} else if cfg!(target_os = "linux") {
+    "Use a full folder path, such as /home/you/Projects."
+} else {
+    "Use a full folder path, such as /Users/you/Projects."
+};
+
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
 /// request, otherwise the setup, projects home or GitHub sentence for the code,
@@ -345,7 +354,7 @@ pub fn setup_plain(code: &str) -> String {
         "trusted_connection_unavailable" | "controller_disconnected" => {
             "CrazyAgent is not connected to the engine right now."
         }
-        "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        "home_path_invalid" => HOME_PATH_HINT,
         "cleanup_settings_invalid" => {
             "The stored finished agents setting is not one this version knows."
         }
@@ -762,7 +771,7 @@ impl AppSetup {
             Load::Ready(status) => status.running,
             _ => return Flow::Handled,
         };
-        if running || self.started || self.sent.is_some() || self.fixing.is_some() {
+        if running || self.started || self.sent.is_some() {
             ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
@@ -826,7 +835,9 @@ impl AppSetup {
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
         if let Some(name) = self.fixing {
             self.fixed(name, status, ctx);
-            return Flow::Handled;
+            if !self.started {
+                return Flow::Handled;
+            }
         }
         if status.running {
             self.started = true;
@@ -835,8 +846,11 @@ impl AppSetup {
         if !self.started {
             return Flow::Handled;
         }
-        self.started = false;
         let problems = self.problems();
+        if problems == 0 && self.first_run && self.fixing.is_some() {
+            return Flow::Handled;
+        }
+        self.started = false;
         if problems == 0 {
             if self.first_run {
                 return Self::next_step(ctx);
@@ -894,17 +908,17 @@ impl AppSetup {
         }
     }
 
-    /// Ends a permission fix once a status read shows it finished and the tool checked
-    /// again, saying how the tool's row reads now. Inputs: the tool, the status read and the
-    /// context.
+    /// Ends a permission fix once a status read shows it finished, its row no longer busy
+    /// (DEC-199), and the tool checked again, saying how the tool's row reads now. Inputs: the
+    /// tool, the status read and the context.
     fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) {
-        if status.running {
-            return;
-        }
         let Some(row) = status.dependencies.iter().find(|tool| tool.name == name) else {
             self.fixing = None;
             return;
         };
+        if row.busy {
+            return;
+        }
         match &row.state {
             DependencyState::Checking => return,
             DependencyState::Refused {
@@ -929,8 +943,8 @@ impl AppSetup {
         self.fixing = None;
     }
 
-    /// The first tool found and passed over whose row offers a permission fix, with its
-    /// label and the fix. Output: the tool, or none.
+    /// The first tool found and passed over whose row offers a permission fix and has no
+    /// job on it (DEC-199), with its label and the fix. Output: the tool, or none.
     fn fixable(&self) -> Option<(Dependency, String, ToolFix)> {
         let Load::Ready(status) = &self.setup else {
             return None;
@@ -938,6 +952,7 @@ impl AppSetup {
         status
             .dependencies
             .iter()
+            .filter(|tool| !tool.busy)
             .find_map(|tool| match &tool.state {
                 DependencyState::Refused { fix: Some(fix), .. } => {
                     Some((tool.name, tool.label.clone(), fix.clone()))
@@ -2093,7 +2108,14 @@ impl AppSetup {
                     &[TOOL_WIDTH, rest],
                     vec![
                         Line::raw(tool.label.clone()),
-                        status(&tool_word(&tool.state), theme, glyphs),
+                        status(
+                            &tool
+                                .waiting
+                                .as_ref()
+                                .map_or_else(|| tool_word(&tool.state), |_| "Waiting".into()),
+                            theme,
+                            glyphs,
+                        ),
                     ],
                     2,
                     glyphs,
@@ -2101,6 +2123,12 @@ impl AppSetup {
             ]));
             let printable = super::new_project_view::printable;
             let mut details = Vec::new();
+            if let Some(waits) = &tool.waiting {
+                details.push((
+                    format!("Waiting for {} to finish...", printable(waits.clone())),
+                    Role::Muted,
+                ));
+            }
             match &tool.state {
                 DependencyState::Failed { reason } => {
                     details.push((setup_reason(reason), Role::Muted));

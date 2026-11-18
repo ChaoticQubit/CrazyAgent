@@ -398,6 +398,7 @@ fn chosen_and_none_keep_open_only_the_engine_picked_and_tracked_top_level_names(
 /// The closed tops rule comes after the keep-outs, keeps the agent's own folder below the
 /// project folder open, and the sandbox refuses open names out of shape or without the
 /// project folder.
+#[cfg(unix)]
 #[test]
 fn the_closed_tops_rule_keeps_the_own_folder_open_and_refuses_names_out_of_shape() {
     let temp = tempfile::tempdir().unwrap();
@@ -572,7 +573,7 @@ fn an_empty_folder_plans_without_git_and_keeps_later_entries_closed() {
 #[test]
 fn a_wider_choice_is_refused_off_macos() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = crate::sandbox::canonical(temp.path()).unwrap();
     let home = root.join("home");
     let tmp = root.join("tmp");
     let project = root.join("project");
@@ -600,6 +601,7 @@ fn a_wider_choice_is_refused_off_macos() {
 
 /// A launch whose own folder is the project folder itself gets no exemption for it, so the
 /// secret names stay closed there too; only `.git` is exempt.
+#[cfg(unix)]
 #[test]
 fn a_launch_working_in_the_project_folder_itself_keeps_its_secrets_closed() {
     let temp = tempfile::tempdir().unwrap();

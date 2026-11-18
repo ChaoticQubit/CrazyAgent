@@ -21,6 +21,7 @@ const TABLES_MAX: i64 = 1024;
 const FOLDER_BYTES_MAX: usize = 4096;
 
 /// The longest project id the engine takes.
+#[cfg(unix)]
 const ID_BYTES_MAX: usize = 128;
 
 /// The longest id onboarding gives a folder, suffix included, as `project_id_for` does.
@@ -29,6 +30,7 @@ const SLUG_BYTES_MAX: usize = 64;
 /// Creates the removal record: one row per removed project id, with the folder CrazyAgent
 /// recorded for it and whether adding that exact folder again brings the project back.
 /// Input: the engine connection. Output: Ok or the database's failure.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(&format!(
@@ -87,6 +89,7 @@ fn keyed_tables(connection: &Connection) -> Result<Vec<String>, EngineError> {
 /// made before this record existed gives its id out again. Runs once per database, at its
 /// first open, and never fills the record past `REMOVED_MAX`. Input: the engine connection.
 /// Output: how many ids it held, None when an earlier open already ran it.
+#[cfg(unix)]
 pub(crate) fn hold_left(connection: &Connection) -> Result<Option<usize>, EngineError> {
     let tx = connection.unchecked_transaction().map_err(error)?;
     let done: bool = tx

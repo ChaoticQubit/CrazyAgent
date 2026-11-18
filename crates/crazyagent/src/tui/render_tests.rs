@@ -434,7 +434,9 @@ fn home_frame_with_an_intake_job_matches_the_design() {
     ctx.store.projects = Load::Ready(projects());
     ctx.store.pools = Load::Ready(pools());
     ctx.store.accounts = Load::Ready(accounts());
-    ctx.store.intake = Some(JobView {
+    ctx.store.intake = vec![JobView {
+        left: Vec::new(),
+        left_more: None,
         id: crate::protocol::RequestId::new("add-1").unwrap(),
         kind: crate::projects_home::job::JobKind::Add,
         project_id: None,
@@ -446,9 +448,10 @@ fn home_frame_with_an_intake_job_matches_the_design() {
             progress: Progress {
                 total: 3000,
                 done: 12,
+                ..Default::default()
             },
         },
-    });
+    }];
     let mut shell = shell_at(ctx, Place::Home);
     shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
     check("home-job-80", &render(&mut shell, 80, 24), &swapped(&swaps));

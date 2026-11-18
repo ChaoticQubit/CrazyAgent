@@ -17,7 +17,7 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::{Engine, io_error, read_frame, verify_peer};
+use crate::engine::{Engine, io_error, owner_trace as trace, read_frame, verify_peer};
 use crate::model_gateway::{ConnectionState, Observation};
 use crate::platform::FileExt;
 use crate::platform::unix_socket::{UnixListener, UnixStream};
@@ -67,6 +67,8 @@ pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
+mod intake_parallel_tests;
+#[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_diagnostic_tests;
@@ -92,6 +94,7 @@ const SOCKET: &str = "owner.sock";
 const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
+const _: () = assert!(2 * crate::instruction_cleanup::CLEANUPS_MAX <= DEFERRED_MAX);
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -1514,9 +1517,9 @@ impl OwnerServer {
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
-            tasks.clients.spawn(async move {
+            tasks.clients.spawn(trace::connection(async move {
                 serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
-            });
+            }));
         }
     }
 
@@ -2309,7 +2312,7 @@ async fn serve_admitted(
     deadline: Instant,
 ) {
     let body = &frame[4..];
-    let exchange = async {
+    let exchange = trace::ended(async {
         let Some(a) = admission else {
             let request: RunnerRequest =
                 serde_json::from_slice(body).map_err(|_| failure("runner_request_invalid"))?;
@@ -2383,7 +2386,6 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
-            Protocol::Icloud if icloud::deferred(body) => return Ok(Some(Deferred::Icloud(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2395,7 +2397,7 @@ async fn serve_admitted(
         }
         let request: OwnerRequest =
             serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
-        request.validate()?;
+        trace::request(&request).validate()?;
         if projects_home::handles(&request) {
             return Ok(Some(Deferred::ProjectsHome(a, Box::new(request))));
         }
@@ -2471,7 +2473,7 @@ async fn serve_admitted(
                 .map(|()| None);
         }
         if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
-            && projects_home::running(authority, &a, operation_id)
+            && trace::held(projects_home::running(authority, &a, operation_id))
         {
             let reply = projects_home::still_running(engine, authority, auth, &a, operation_id)
                 .await
@@ -2513,7 +2515,7 @@ async fn serve_admitted(
         write_owner_reply(stream, result, id, mutation)
             .await
             .map(|()| None)
-    };
+    });
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
@@ -2590,10 +2592,6 @@ async fn serve_admitted(
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
-        Deferred::Icloud(a) => {
-            let served = icloud::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
-        }
     }
 }
 
@@ -2647,8 +2645,7 @@ struct Tasks {
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
 /// Usage requests, which read and write the usage store, harness version, update and
 /// install requests, which wait for a harness, Homebrew, npm or a vendor's release
-/// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
-/// and Process proposals, which wait for an Edit with AI model run. Each carries the
+/// pointer, and Process proposals, which wait for an Edit with AI model run. Each carries the
 /// admission, and the projects home its validated request; the others read the request
 /// frame.
 enum Deferred {
@@ -2669,7 +2666,6 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
-    Icloud(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2685,7 +2681,7 @@ async fn refuse(
     let Some(reply) = refusal(&auth[..4] == b"CAR1", &frame[4..], code)? else {
         return Ok(());
     };
-    stream.write_all(&reply).await.map_err(io_error)
+    trace::refused(stream, &reply).await.map_err(io_error)
 }
 
 /// Encodes the refusal of one request in the reply shape of its protocol.
@@ -2736,7 +2732,7 @@ async fn write_owner_reply(
     mutation: bool,
 ) -> Result<(), EngineError> {
     let frame = owner_reply_frame(result, id, mutation)?;
-    write_reply(stream, &frame).await
+    trace::reply(write_reply(stream, &frame), "written").await
 }
 
 /// The longest a reply written under the owner barrier waits for its client to read it.

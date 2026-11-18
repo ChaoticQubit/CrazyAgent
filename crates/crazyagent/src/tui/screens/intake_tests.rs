@@ -8,7 +8,7 @@ use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{KeptFile, ProjectSetup, ResearchKind, SetupAction, SetupQuery};
-use crate::projects_home::icloud::Progress;
+use crate::projects_home::icloud::{Progress, Skipped, SkippedFolders, SkippedMore};
 use crate::projects_home::job::{JobKind, JobState, JobSubject, JobView, Phase};
 use crate::projects_home::{AddMode, AddOverride, Measured};
 use crate::protocol::{ProjectId, RequestId};
@@ -232,14 +232,19 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
     }
 }
 
-/// Reads the engine's intake job until it ended, the way the shell's tick reads it, without
-/// the tick's other reads. Takes the shell and the connection. Returns the ended job.
+/// Reads the engine's intake jobs until one ended, the way the shell's tick reads them,
+/// without the tick's other reads. Takes the shell and the connection. Returns the ended job.
 async fn job_ended(shell: &mut Shell, connection: &mut Connection) -> JobView {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let ended = shell.ctx.store.intake.clone();
-        if let Some(job) = ended.filter(|job| !super::intake_job::running(job)) {
-            return job;
+        let ended = shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .find(|job| !super::intake_job::running(job));
+        if let Some(job) = ended {
+            return job.clone();
         }
         assert!(
             Instant::now() < deadline,
@@ -469,7 +474,7 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("README.md"), "shop\n").unwrap();
     let git = |args: &[&str]| {
-        let done = crate::spawn_gate::output(
+        let done = crate::spawn_gate::collected(
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&source)
@@ -541,7 +546,7 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
 }
 
 fn git_in(folder: &Path, args: &[&str]) {
-    let done = crate::spawn_gate::output(
+    let done = crate::spawn_gate::collected(
         std::process::Command::new("git")
             .arg("-C")
             .arg(folder)
@@ -923,7 +928,7 @@ fn answering_a_job_s_soft_refusal_asks_that_question_and_starts_it_with_each_ove
         overrides: vec![AddOverride::Worktrees],
         ..job_for(&typed, AddMode::Move, refused)
     };
-    job_read(&mut shell, Some(waiting.clone()));
+    job_read(&mut shell, vec![waiting.clone()]);
     assert!(shows(&render(&mut shell, 120, 30), "Enter Answer"));
     shell.key(Key::Enter);
     let answer = Place::AnswerAdd {
@@ -2734,12 +2739,26 @@ fn measured(
     placeholders: u64,
     shown: Option<JobState>,
 ) -> (Shell, String) {
+    measured_leaving(user, mode, placeholders, SkippedFolders::default(), shown)
+}
+
+/// As [`measured`], with the size read naming the rebuildable folders an add leaves in iCloud.
+fn measured_leaving(
+    user: &Path,
+    mode: AddMode,
+    placeholders: u64,
+    skipped: SkippedFolders,
+    shown: Option<JobState>,
+) -> (Shell, String) {
     let user = user.canonicalize().unwrap();
     let source = user.join("Desktop").join("shop");
     std::fs::create_dir_all(source.join(".git")).unwrap();
     let typed = source.to_str().unwrap().to_owned();
     let mut ctx = screen_ctx(&user);
-    ctx.store.intake = shown.map(|state| job_for(&typed, mode, state));
+    ctx.store.intake = shown
+        .map(|state| job_for(&typed, mode, state))
+        .into_iter()
+        .collect();
     let screen = open(&Place::AddFolder, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     keys(&mut shell, &format!("{typed}/"));
@@ -2756,6 +2775,7 @@ fn measured(
         Ok(IntakeView::FolderSize(Measured {
             bytes: 10,
             placeholders,
+            skipped,
         })),
     ));
     shell.key(Key::Enter);
@@ -2831,6 +2851,8 @@ fn with_start_id(query: IntakeQuery) -> IntakeQuery {
 
 fn job_for(folder: &str, mode: AddMode, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-2").unwrap(),
         kind: JobKind::Add,
         project_id: None,
@@ -2893,7 +2915,11 @@ fn an_icloud_folder_asks_first_and_download_and_move_starts_the_job_after_the_mo
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "Starting"), "{rows:#?}");
     let downloading = JobState::Downloading {
-        progress: Progress { total: 0, done: 0 },
+        progress: Progress {
+            total: 0,
+            done: 0,
+            ..Default::default()
+        },
     };
     shell.arrive(intake(
         start(&typed, AddMode::Move, Vec::new()),
@@ -2923,6 +2949,116 @@ fn download_and_copy_turns_a_move_into_a_copy_and_starts_it_at_once() {
     let rows = render(&mut shell, 80, 40);
     assert!(shows(&rows, "(*) Copy"), "{rows:#?}");
     assert!(shows(&rows, "Starting"), "{rows:#?}");
+}
+
+/// The rebuildable folders an iCloud size read names: one counted, one only in iCloud.
+fn named(listed: Vec<Skipped>) -> SkippedFolders {
+    SkippedFolders { listed, more: None }
+}
+
+fn left_folders() -> Vec<Skipped> {
+    vec![
+        Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        },
+        Skipped {
+            path: "web/.venv".into(),
+            files: None,
+        },
+    ]
+}
+
+#[test]
+fn the_icloud_question_counts_the_left_folders_it_does_not_name_and_downloads_them_too() {
+    let user = tempfile::tempdir().unwrap();
+    let skipped = SkippedFolders {
+        listed: vec![Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        }],
+        more: Some(SkippedMore {
+            folders: 1968,
+            files: Some(1968),
+        }),
+    };
+    let (mut shell, _typed) = measured_leaving(user.path(), AddMode::Move, 3, skipped, None);
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "and 1968 more folders (1968 files)"),
+        "{rows:#?}"
+    );
+    shell.key(Key::Char(' '));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "59079 files are only in iCloud"), "{rows:#?}");
+}
+
+#[test]
+fn the_icloud_question_names_the_folders_it_leaves_and_space_downloads_everything() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) =
+        measured_leaving(user.path(), AddMode::Move, 3, named(left_folders()), None);
+    let rows = render(&mut shell, 80, 40);
+    for text in [
+        "3 files are only in iCloud; CrazyAgent",
+        "Left in iCloud, as they can be rebuilt:",
+        "node_modules (57108 files)",
+        "web/.venv (files not counted)",
+        "They stay in",
+        "[ ] Download everything (slow)",
+    ] {
+        assert!(shows(&rows, text), "{text} missing: {rows:#?}");
+    }
+    shell.key(Key::Char(' '));
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "[x] Download everything (slow)"), "{rows:#?}");
+    assert!(shows(&rows, "Downloaded too:"), "{rows:#?}");
+    assert!(shows(&rows, "Some files are only in iCloud"), "{rows:#?}");
+    assert!(!shows(&rows, "They stay in"), "{rows:#?}");
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    assert_eq!(
+        started(&mut shell, &typed),
+        [(AddMode::Move, vec![AddOverride::DownloadEverything])]
+    );
+}
+
+#[test]
+fn space_twice_leaves_the_folders_in_icloud_and_sends_no_override() {
+    let user = tempfile::tempdir().unwrap();
+    let (mut shell, typed) =
+        measured_leaving(user.path(), AddMode::Copy, 3, named(left_folders()), None);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    assert_eq!(started(&mut shell, &typed), [(AddMode::Copy, Vec::new())]);
+}
+
+#[test]
+fn a_folder_whose_only_icloud_files_sit_in_left_folders_still_asks_and_offers_move_or_copy() {
+    let user = tempfile::tempdir().unwrap();
+    let only = vec![Skipped {
+        path: "node_modules".into(),
+        files: Some(2),
+    }];
+    let (mut shell, typed) = measured_leaving(user.path(), AddMode::Move, 0, named(only), None);
+    let rows = render(&mut shell, 80, 40);
+    assert!(shows(&rows, "Some of shop stays in iCloud"), "{rows:#?}");
+    assert!(!shows(&rows, "only in iCloud;"), "{rows:#?}");
+    assert!(!shows(&rows, "Download and move"), "{rows:#?}");
+    assert!(shows(&rows, "Enter Move"), "{rows:#?}");
+    shell.key(Key::Char(' '));
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "Download shop from iCloud first?"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "2 files are only in iCloud"), "{rows:#?}");
+    assert!(shows(&rows, "Enter Download and move"), "{rows:#?}");
+    shell.key(Key::Char(' '));
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    assert_eq!(started(&mut shell, &typed), [(AddMode::Move, Vec::new())]);
 }
 
 #[test]
@@ -2983,56 +3119,62 @@ fn a_failed_start_reads_the_job_and_goes_home_only_when_this_folder_is_being_add
         });
         shell.arrive(intake(
             IntakeQuery::JobStatus,
-            Ok(IntakeView::Job(read_job)),
+            Ok(IntakeView::Jobs(read_job.into_iter().collect())),
         ));
         if home {
             assert_eq!(shell.place(), Some(Place::Home), "{read:?}");
             continue;
         }
         assert_eq!(shell.place(), Some(Place::AddFolder), "{before:?} {read:?}");
-        let rows = render(&mut shell, 80, 40);
-        let refusal = "Another job is running. Wait for it to finish on Home.";
+        let rows = render(&mut shell, 120, 40);
+        let refusal = "Several folders are already waiting. Wait for one to finish on Home.";
         assert!(shows(&rows, refusal), "{rows:#?}");
         assert!(job_asks(&mut shell).is_empty(), "{read:?}");
     }
 }
 
-/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job the read after
-/// it finds running, here another project's move, and the page stays for another try.
+/// DEC-197: a start refused `job_same_folder` is never taken for its own lost reply, though
+/// the read after it finds a job for that folder running: the page says the folder is
+/// already being moved or added, and stays for another try.
 #[test]
-fn a_busy_start_names_the_job_the_read_after_it_finds_running() {
+fn a_start_refused_for_the_same_folder_says_so_though_a_job_for_it_runs() {
     let user = tempfile::tempdir().unwrap();
-    let (mut shell, _typed) = measured(user.path(), AddMode::Copy, 0, None);
+    let (mut shell, typed) = measured(user.path(), AddMode::Copy, 0, None);
     let asks: Vec<_> = intake_jobs(&mut shell)
         .iter()
         .map(IntakeJob::query)
         .filter(|query| matches!(query, IntakeQuery::JobStart { .. }))
         .collect();
     let [asked] = <[IntakeQuery; 1]>::try_from(asks).unwrap();
-    shell.arrive(intake(asked, Err("job_busy".into())));
-    assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
-    let running = reading_job(
-        "/Users/mira/Code/reading-list",
-        JobState::Stopping { agents_left: 1 },
+    shell.arrive(intake(asked, Err("job_same_folder".into())));
+    let holding = job_for(
+        &typed,
+        AddMode::Move,
+        JobState::Copying {
+            copied: 1,
+            checked: 0,
+        },
     );
     shell.arrive(intake(
         IntakeQuery::JobStatus,
-        Ok(IntakeView::Job(Some(running))),
+        Ok(IntakeView::Jobs(vec![holding])),
     ));
+    job_asks(&mut shell);
     assert_eq!(shell.place(), Some(Place::AddFolder));
-    let rows = render(&mut shell, 80, 40);
+    let rows = render(&mut shell, 120, 40);
     assert!(
         shows(
             &rows,
-            "Moving reading-list is running. Wait for it to finish on Home."
+            "This folder is already being moved or added. See it on Home."
         ),
         "{rows:#?}"
     );
-    assert!(job_asks(&mut shell).is_empty());
 }
 
 fn shop_job(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-1").unwrap(),
         kind: JobKind::Add,
         project_id: None,
@@ -3063,9 +3205,47 @@ fn past_home_reads(shell: &mut Shell) -> Vec<IntakeQuery> {
         .collect()
 }
 
-fn job_read(shell: &mut Shell, job: Option<JobView>) {
-    shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Job(job))));
+fn job_read(shell: &mut Shell, jobs: Vec<JobView>) {
+    shell.arrive(intake(IntakeQuery::JobStatus, Ok(IntakeView::Jobs(jobs))));
     job_asks(shell);
+}
+
+/// DEC-197: Home lists every intake job as its own card, first and in start order; a
+/// waiting one names the job it waits behind, Enter on the second card stops the second job,
+/// and when that card goes the first job's card is the one picked.
+#[test]
+fn home_lists_every_intake_job_and_enter_on_the_second_card_stops_the_second_job() {
+    let mut ctx = ctx(120, 30);
+    ctx.store.projects = Load::Ready(Vec::new());
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let running = shop_job(JobState::Copying {
+        copied: 4,
+        checked: 0,
+    });
+    let waiting = JobView {
+        id: RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..shop_job(JobState::Waiting {
+            behind: "shop".into(),
+        })
+    };
+    job_read(&mut shell, vec![running.clone(), waiting.clone()]);
+    let rows = render(&mut shell, 120, 30);
+    assert!(shows(&rows, "Moving shop: 4 files copied"), "{rows:#?}");
+    assert!(shows(&rows, "Waiting for shop to finish..."), "{rows:#?}");
+    let badge = format!("{} Waiting", shell.ctx.glyphs.status(Status::Active));
+    assert!(shows(&rows, &badge), "{rows:#?}");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let stop = |job: &JobView| IntakeQuery::JobStop { id: job.id.clone() };
+    assert_eq!(job_asks(&mut shell), [stop(&waiting)]);
+
+    job_read(&mut shell, vec![running.clone()]);
+    let rows = render(&mut shell, 120, 30);
+    assert!(!shows(&rows, "garden"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert_eq!(job_asks(&mut shell), [stop(&running)]);
 }
 
 /// DEC-159 S7: Home lists the engine's intake job first as its own card, even before any
@@ -3081,14 +3261,15 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
         progress: Progress {
             total: 3000,
             done: 12,
+            ..Default::default()
         },
     });
-    job_read(&mut shell, Some(running.clone()));
+    job_read(&mut shell, vec![running.clone()]);
     let rows = render(&mut shell, 120, 30);
     assert!(!shows(&rows, "No projects yet."), "{rows:#?}");
     let badge = format!("{} Downloading", shell.ctx.glyphs.status(Status::Active));
     assert!(shows(&rows, &badge), "{rows:#?}");
-    let line = "Downloading shop from iCloud: 12 of 3000 files";
+    let line = "macOS is downloading shop: 12 of 3000 files";
     assert!(shows(&rows, line), "{rows:#?}");
     assert!(shows(&rows, "Enter stops it."), "{rows:#?}");
     assert!(shows(&rows, "Enter Stop"), "{rows:#?}");
@@ -3107,7 +3288,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
         code: "home_copy_failed".into(),
         phase: Phase::Copying,
     });
-    job_read(&mut shell, Some(failed.clone()));
+    job_read(&mut shell, vec![failed.clone()]);
     let rows = render(&mut shell, 120, 30);
     assert!(
         shows(&rows, "Enter tries again. d dismisses it."),
@@ -3128,7 +3309,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
         (
             Tone::Error,
             "Adding the folder did not start again.",
-            "Another job is running. Wait for it to finish on Home."
+            "Several folders are already waiting. Wait for one to finish on Home."
         )
     );
 
@@ -3139,7 +3320,7 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
     assert_eq!(job_asks(&mut shell), std::slice::from_ref(&dismiss));
     shell.arrive(intake(dismiss, Ok(IntakeView::JobDismissed(true))));
     assert_eq!(job_asks(&mut shell), [IntakeQuery::JobStatus]);
-    job_read(&mut shell, None);
+    job_read(&mut shell, Vec::new());
     let rows = render(&mut shell, 120, 30);
     assert!(shows(&rows, "No projects yet."), "{rows:#?}");
     assert!(!shows(&rows, "shop"), "{rows:#?}");
@@ -3148,6 +3329,8 @@ fn home_shows_the_intake_job_first_and_its_keys_stop_retry_and_dismiss_it() {
 /// A job that moves the registered project `reading` into the projects home, in `state`.
 fn reading_job(source: &str, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("move-1").unwrap(),
         kind: JobKind::MoveProject,
         project_id: Some(ProjectId::new("reading").unwrap()),
@@ -3168,6 +3351,8 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let failed = JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("setup-1").unwrap(),
         kind: JobKind::Setup,
         project_id: Some(ProjectId::new("project-tidepool").unwrap()),
@@ -3180,7 +3365,7 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
             phase: Phase::Building,
         },
     };
-    job_read(&mut shell, Some(failed));
+    job_read(&mut shell, vec![failed]);
     let rows = render(&mut shell, 120, 30);
     assert!(
         shows(&rows, "Tidepool: The project folder could not be created."),
@@ -3207,6 +3392,8 @@ fn home_opens_new_project_for_a_failed_new_project_job_and_starts_nothing() {
 #[test]
 fn a_new_project_copying_its_documents_reads_in_the_desktops_words() {
     let building = |done, total| JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("setup-1").unwrap(),
         kind: JobKind::Setup,
         project_id: Some(ProjectId::new("project-tidepool").unwrap()),
@@ -3245,7 +3432,7 @@ fn home_starts_a_failed_project_move_again_by_its_project_and_says_a_refusal_in_
             phase: Phase::Stopping,
         },
     );
-    job_read(&mut shell, Some(failed));
+    job_read(&mut shell, vec![failed]);
     let rows = render(&mut shell, 120, 30);
     assert!(
         shows(&rows, "reading-list: The project is still working"),
@@ -3267,7 +3454,7 @@ fn home_starts_a_failed_project_move_again_by_its_project_and_says_a_refusal_in_
         (
             Tone::Error,
             "Moving the project did not start again.",
-            "Another job is running. Wait for it to finish on Home."
+            "Several folders are already waiting. Wait for one to finish on Home."
         )
     );
 }
@@ -3294,7 +3481,7 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
         ctx.store.projects = Load::Ready(Vec::new());
         let screen = open(&Place::Home, &mut ctx);
         let mut shell = Shell::with(ctx, screen);
-        job_read(&mut shell, Some(waiting.clone()));
+        job_read(&mut shell, vec![waiting.clone()]);
         shell.key(Key::Enter);
         let answering = Place::AnswerAdd {
             job: waiting.id.clone(),
@@ -3378,6 +3565,8 @@ fn answering_a_project_move_s_soft_refusal_moves_that_project_or_keeps_it_where_
 /// A delete job of the project "notes", whose name labels its card whole.
 fn notes_delete(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("delete-1").unwrap(),
         kind: JobKind::Delete,
         project_id: Some(ProjectId::new("notes").unwrap()),
@@ -3400,7 +3589,7 @@ fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project(
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     let trashing = notes_delete(JobState::Trashing { done: 1, total: 2 });
-    job_read(&mut shell, Some(trashing));
+    job_read(&mut shell, vec![trashing]);
     let rows = render(&mut shell, 120, 30);
     assert!(
         shows(
@@ -3420,7 +3609,7 @@ fn finish_delete_on_home_opens_the_project_s_remove_ask_and_d_keeps_the_project(
         trashed: 1,
         total: 2,
     });
-    job_read(&mut shell, Some(cut.clone()));
+    job_read(&mut shell, vec![cut.clone()]);
     let rows = render(&mut shell, 120, 30);
     let badge = format!("{} Cut short", shell.ctx.glyphs.status(Status::Needs));
     assert!(shows(&rows, &badge), "{rows:#?}");
@@ -3569,13 +3758,13 @@ fn delete_everything_on_the_project_page_starts_the_engine_s_job_and_goes_home()
     .unwrap();
     job_read(
         &mut shell,
-        Some(reading_job(
+        vec![reading_job(
             "/Users/mira/Code/reading-list",
             JobState::Copying {
                 copied: 2,
                 checked: 0,
             },
-        )),
+        )],
     );
     shell.arrive(intake(sent, Err("job_busy".into())));
     let said = shell.ctx.message().expect("a refused start is said");
@@ -3599,11 +3788,11 @@ fn a_delete_that_ended_is_said_and_the_projects_are_read_again() {
     let mut shell = Shell::with(ctx, screen);
     job_read(
         &mut shell,
-        Some(notes_delete(JobState::Trashing { done: 1, total: 2 })),
+        vec![notes_delete(JobState::Trashing { done: 1, total: 2 })],
     );
     shell.arrive(intake(
         IntakeQuery::JobStatus,
-        Ok(IntakeView::Job(Some(notes_delete(JobState::Done)))),
+        Ok(IntakeView::Jobs(vec![notes_delete(JobState::Done)])),
     ));
     let said = shell.ctx.message().expect("the end is said");
     assert_eq!(
@@ -3636,17 +3825,79 @@ fn home_keeps_the_picked_project_when_the_job_card_comes_and_goes() {
     ctx.store.projects = Load::Ready(vec![alpha]);
     let screen = open(&Place::Home, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
-    job_read(&mut shell, None);
+    job_read(&mut shell, Vec::new());
     assert!(shows(&render(&mut shell, 120, 30), "Enter Open"));
     let running = shop_job(JobState::Copying {
         copied: 1,
         checked: 0,
     });
-    job_read(&mut shell, Some(running));
+    job_read(&mut shell, vec![running]);
     let rows = render(&mut shell, 120, 30);
     assert!(shows(&rows, "Enter Open"), "{rows:#?}");
     assert!(!shows(&rows, "Enter Stop"), "{rows:#?}");
-    job_read(&mut shell, None);
+    job_read(&mut shell, Vec::new());
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: ProjectId::new("project-alpha").unwrap(),
+            name: "alpha".into(),
+            tab: ProjectTab::Overview,
+        })
+    );
+}
+
+/// DEC-197: a picked job card follows its job as other jobs' cards come after it or go from
+/// before it, and a picked project stays picked as job cards come and go, so Enter never
+/// acts on another job.
+#[test]
+fn home_keeps_the_picked_job_or_project_as_other_job_cards_come_and_go() {
+    let mut ctx = ctx(120, 30);
+    let alpha = crate::tui::seam::ProjectCard {
+        id: ProjectId::new("project-alpha").unwrap(),
+        name: "alpha".into(),
+        about: String::new(),
+        platforms: Vec::new(),
+        pool: None,
+        pool_id: None,
+        research: Default::default(),
+        created_ms: None,
+        activity: Default::default(),
+    };
+    ctx.store.projects = Load::Ready(vec![alpha]);
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let stop = |job: &JobView| IntakeQuery::JobStop { id: job.id.clone() };
+    let shop = shop_job(JobState::Copying {
+        copied: 1,
+        checked: 0,
+    });
+    let garden = JobView {
+        id: RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..shop_job(JobState::Waiting {
+            behind: "shop".into(),
+        })
+    };
+    job_read(&mut shell, vec![shop.clone()]);
+    shell.key(Key::Home);
+    job_read(&mut shell, vec![shop.clone(), garden.clone()]);
+    shell.key(Key::Enter);
+    assert_eq!(job_asks(&mut shell), [stop(&shop)], "a card after it");
+
+    shell.key(Key::Down);
+    job_read(&mut shell, vec![garden.clone()]);
+    shell.key(Key::Enter);
+    assert_eq!(
+        job_asks(&mut shell),
+        [stop(&garden)],
+        "a card before it went"
+    );
+
+    shell.key(Key::Down);
+    job_read(&mut shell, vec![garden.clone(), shop.clone()]);
+    let rows = render(&mut shell, 120, 30);
+    assert!(shows(&rows, "Enter Open"), "{rows:#?}");
     shell.key(Key::Enter);
     assert_eq!(
         shell.place(),

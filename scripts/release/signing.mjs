@@ -26,15 +26,16 @@ function macos(env, channel) {
 /**
  * Decides how a release build on `os` ("macos", "linux", "windows") for `channel` ("dev",
  * "stable") is signed from `env`. The Tauri updater key is always required. Output: "signed",
- * "unsigned" (dev build without platform signing secrets) or "updater-only" (Linux).
- * A stable build with missing or partial platform secrets is refused.
+ * "unsigned" (a dev build without macOS secrets, or any Windows build without Azure secrets,
+ * DEC-195 Q8) or "updater-only" (Linux). A stable macOS build without its secrets, and a
+ * partial set of either platform's secrets, are refused.
  */
 export function signingStatus({ os, channel, env }) {
   if (channel !== "dev" && channel !== "stable") fail("release_channel_rejected");
   if (!["macos", "linux", "windows"].includes(os)) fail("release_platform_rejected");
   if (!env.TAURI_SIGNING_PRIVATE_KEY && !env.TAURI_SIGNING_PRIVATE_KEY_PATH) fail("release_updater_key_missing");
   if (os === "macos") return macos(env, channel);
-  if (os === "windows") return signingPlan({ ...env, CRAZYAGENT_REQUIRE_SIGNING: channel === "stable" ? "1" : "0" }).mode === "sign" ? "signed" : "unsigned";
+  if (os === "windows") return signingPlan({ ...env, CRAZYAGENT_REQUIRE_SIGNING: "0" }).mode === "sign" ? "signed" : "unsigned";
   return "updater-only";
 }
 

@@ -1,6 +1,6 @@
 use super::{
     AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Placed, Registered, Tally,
-    git_link, in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
+    git_link, in_use, linked_worktree_paths, linked_worktrees, one_spelling, plan_add, refused,
 };
 use crate::engine::EngineError;
 use crate::landing::RepositoryHolds;
@@ -375,9 +375,10 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
         )
         .optional()?;
     Ok(origin.is_some_and(|origin| {
-        let origin = Path::new(&origin);
-        folder.starts_with(origin)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+        let origin = one_spelling(PathBuf::from(origin));
+        folder.starts_with(&origin)
+            || std::fs::canonicalize(folder)
+                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
     }))
 }
 
@@ -399,9 +400,10 @@ pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<
         )
         .optional()?;
     Ok(target.is_some_and(|target| {
-        let target = Path::new(&target);
-        folder.starts_with(target)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(target))
+        let target = one_spelling(PathBuf::from(target));
+        folder.starts_with(&target)
+            || std::fs::canonicalize(folder)
+                .is_ok_and(|real| one_spelling(real).starts_with(&target))
     }))
 }
 
@@ -512,7 +514,8 @@ fn linked_agent_copies(tx: &Transaction<'_>, origin: &Path) -> Result<bool, Engi
 }
 
 /// What the checks of a project move that read nothing inside its folder found: the projects
-/// home, the project's real folder and every other registered project.
+/// home and the project's real folder, both in their stored spelling, which the records of
+/// the move and of the project's work compare as text, and every other registered project.
 struct Checked {
     home: PathBuf,
     real: PathBuf,
@@ -566,7 +569,7 @@ fn checked(
         return Err(refused("project_setup_missing"));
     }
     let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
-    if real.starts_with(&home) {
+    if one_spelling(real.clone()).starts_with(one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
     if real != found.folder {
@@ -631,7 +634,7 @@ pub(crate) fn plan(
         overrides.push(AddOverride::Worktrees);
     }
     let add = plan_add(&home, engine_root, source, asked.mode, &overrides, &others)?;
-    assert_eq!(add.source(), real);
+    assert_eq!(add.source(), one_spelling(real.clone()));
     assert!(add.destination().starts_with(&home));
     if others
         .iter()

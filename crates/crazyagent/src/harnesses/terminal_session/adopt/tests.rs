@@ -894,7 +894,8 @@ fn a_cut_adoption_replay_on_a_pane_without_its_input_prompt_stops_the_turn_befor
 /// prompt. A cut read on such a pane does not take it over idle: a pane with a stopped
 /// process is not waiting, so it gets Escape like a pane with an open turn, its turn settles,
 /// and only then is it taken over. The stand-in shows the prompt, stops a process it started
-/// and records every Escape.
+/// and records every Escape; the row adopts only once that process is stopped and the pane
+/// quiet for `APP_QUIET`, so a slow stand-in never passes for an idle pane.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_cut_adoption_replay_on_a_pane_that_shows_its_prompt_over_a_stopped_process_stops_the_turn_first()
@@ -907,7 +908,17 @@ fn a_cut_adoption_replay_on_a_pane_that_shows_its_prompt_over_a_stopped_process_
     assert!(length > 4 * READ_BYTES_MAX as u64);
     let harness = format!("{IDLE_PROMPT}sleep 600 & kill -STOP $!; {ESCAPE_HARNESS}");
     let record = fixture.spawn(&host, &agent, &harness, &file);
-    std::thread::sleep(Duration::from_secs(5));
+    let quiet = crate::coord::delivery::typing::APP_QUIET;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !crate::team::caller::stopped_under(record.pid)
+        || !matches!(host.quiet(&agent), Ok(Some(drawn)) if drawn >= quiet)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in never stopped its process under a quiet prompt"
+        );
+        std::thread::sleep(POLL);
+    }
     let launched = PaneRecord {
         since_ms: record.since_ms - 60_000,
         ..record

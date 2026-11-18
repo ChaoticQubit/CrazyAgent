@@ -1,5 +1,8 @@
-use super::icloud::{Download, Progress};
-use super::{ADD_OVERRIDES_MAX, AddMode, AddOverride, Tally};
+use super::icloud::{
+    Download, JOB_SKIPPED_LISTED_MAX, Progress, SKIPPED_ENTRY_BYTES_MAX, Skipped, SkippedFolders,
+    SkippedMore,
+};
+use super::{ADD_OVERRIDES_MAX, AddMode, AddOverride, PATH_BYTES_MAX, Tally};
 use crate::engine::EngineError;
 use crate::project_setup::ProjectSetup;
 use crate::protocol::{ProjectId, ProjectSpec, RequestId};
@@ -13,6 +16,37 @@ pub const NEEDS_ANSWER: [&str; 3] = [
     "home_copy_linked_checkout",
     "home_copy_too_large",
 ];
+
+/// The most bytes of the job a waiting job names or of an ended job's code that a client
+/// sees; a longer one is cut at a character boundary, with control characters shown as
+/// spaces, so every job held fits one status reply (#380 N3).
+pub const JOB_TEXT_BYTES_MAX: usize = 128;
+
+/// The most bytes a protocol identity holds, safe ASCII that JSON writes as it is.
+const ID_BYTES_MAX: usize = 128;
+
+/// The most bytes of JSON a view's count of the left folders it does not name takes, with its
+/// field name: two numbers of at most twenty digits and the names around them.
+const LEFT_MORE_BYTES_MAX: usize = 96;
+
+/// The most bytes of JSON one job view naming no left folder takes: its id and project id,
+/// its source and its one state text, the last two written at worst as twice their bytes, the
+/// names, kinds, overrides and numbers around them, and its count of left folders.
+pub const JOB_VIEW_NAMELESS_BYTES_MAX: usize =
+    2 * ID_BYTES_MAX + 2 * PATH_BYTES_MAX + 2 * JOB_TEXT_BYTES_MAX + 256 + LEFT_MORE_BYTES_MAX;
+
+/// The most bytes of JSON one job view takes: the view naming no left folder, and the left
+/// folders it names with the list around them (V243-JOBLIST-FRAME-BOUND).
+pub const JOB_VIEW_BYTES_MAX: usize =
+    JOB_VIEW_NAMELESS_BYTES_MAX + JOB_SKIPPED_LISTED_MAX * SKIPPED_ENTRY_BYTES_MAX + 16;
+
+const _: () = {
+    let mut at = 0;
+    while at < NEEDS_ANSWER.len() {
+        assert!(NEEDS_ANSWER[at].len() <= JOB_TEXT_BYTES_MAX);
+        at += 1;
+    }
+};
 
 /// What a job does: adds an existing folder, moves a registered project kept outside the
 /// projects home into it, deletes a project with its folders (Delete everything), or builds
@@ -66,6 +100,7 @@ impl JobSubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
+    Waiting,
     Downloading,
     Stopping,
     Copying,
@@ -79,10 +114,12 @@ pub enum Phase {
 /// before it counted them; a delete then moves its folders to the Trash in `Trashing`, and
 /// `CutShort` is a delete an engine stop cut short, with how many of its folders reached the
 /// Trash. A New Project reads `Building` with how many of its documents it copied once it
-/// counted them.
+/// counted them. A job waits in `Waiting` for its turn behind the job it names, with no error,
+/// and starts by itself (DEC-197).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobState {
+    Waiting { behind: String },
     Downloading { progress: Progress },
     Stopping { agents_left: u64 },
     Copying { copied: u64, checked: u64 },
@@ -99,8 +136,10 @@ pub enum JobState {
 /// One job as a client sees it: its id, which is the change's request id, its kind, the
 /// project a move, a delete or a New Project takes, the folder (for a delete or a New Project
 /// the project's name, which labels its end line), the mode (a delete reads Move, unused), the soft
-/// refusals it goes past, whether a stop was asked and its state. A client answering a soft
-/// refusal starts again with these overrides and the new one.
+/// refusals it goes past, whether a stop was asked, its state, and the rebuildable folders its
+/// download left in iCloud, which an add leaves out: the first `JOB_SKIPPED_LISTED_MAX` named,
+/// the rest counted, all counted in a status list past its room (`fit_left`). A client
+/// answering a soft refusal starts again with these overrides and the new one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobView {
@@ -112,6 +151,24 @@ pub struct JobView {
     pub overrides: Vec<AddOverride>,
     pub stopping: bool,
     pub state: JobState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<Skipped>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_more: Option<SkippedMore>,
+}
+
+impl JobState {
+    /// Whether a job in this state has ended. Output: the answer.
+    pub fn over(&self) -> bool {
+        matches!(
+            self,
+            Self::Done
+                | Self::Failed { .. }
+                | Self::Cancelled { .. }
+                | Self::NeedsAnswer { .. }
+                | Self::CutShort { .. }
+        )
+    }
 }
 
 impl JobView {
@@ -133,8 +190,53 @@ impl JobView {
     }
 }
 
+/// Keeps a list of job views within `bytes` of JSON, so a status reply of every held job fits
+/// one frame (V243-JOBLIST-FRAME-BOUND): the newest jobs keep their left folders named first,
+/// and a view past the room counts them instead. Inputs: the views in start order and the
+/// most bytes the list may take, at least every view naming none. Output: none.
+pub fn fit_left(views: &mut [JobView], bytes: usize) {
+    let size = |view: &JobView| {
+        serde_json::to_vec(view)
+            .expect("a job view is plain data")
+            .len()
+    };
+    let bare_views: Vec<JobView> = views.iter().map(nameless).collect();
+    let mut taken = views.len() + 2 + bare_views.iter().map(size).sum::<usize>();
+    assert!(taken <= bytes, "every job view fits naming no left folder");
+    for (view, bare) in views.iter_mut().zip(bare_views).rev() {
+        let with_names = taken - size(&bare) + size(view);
+        if with_names <= bytes {
+            taken = with_names;
+        } else {
+            *view = bare;
+        }
+    }
+    assert_eq!(
+        views.len() + 2 + views.iter().map(size).sum::<usize>(),
+        taken
+    );
+    assert!(taken <= bytes);
+}
+
+/// The view with every left folder counted and none named. Input: the view. Output: the
+/// same view with its named folders folded into its count.
+fn nameless(view: &JobView) -> JobView {
+    let left = SkippedFolders {
+        listed: view.left.clone(),
+        more: view.left_more,
+    };
+    let (named, left_more) = left.cut(0);
+    assert!(named.is_empty());
+    JobView {
+        left: named,
+        left_more,
+        ..view.clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Stage {
+    Waiting(String),
     Downloading,
     Copying,
     Ended(JobState),
@@ -320,6 +422,41 @@ impl IntakeJob {
         Arc::clone(&self.tally)
     }
 
+    /// The name Home gives this job in another job's waiting line: the last part of an add's
+    /// or a move's folder, a delete's or a New Project's project name. Output: the name.
+    pub fn label(&self) -> &str {
+        let label = match self.kind {
+            JobKind::Add | JobKind::MoveProject => std::path::Path::new(&self.source)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or(&self.source),
+            JobKind::Delete | JobKind::Setup => &self.source,
+        };
+        assert!(!label.is_empty());
+        label
+    }
+
+    /// Marks a job not yet started as waiting for its turn behind the job named `behind`.
+    /// Input: that job's name.
+    pub fn wait(&self, behind: &str) {
+        assert!(!behind.is_empty());
+        let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            matches!(*stage, Stage::Waiting(_) | Stage::Downloading),
+            "only a job not yet started waits"
+        );
+        *stage = Stage::Waiting(behind.to_owned());
+    }
+
+    /// Ends a job's wait for its turn; a job that never waited stays as it is.
+    pub fn go(&self) {
+        let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*stage, Stage::Waiting(_)) {
+            *stage = Stage::Downloading;
+        }
+        assert!(!matches!(*stage, Stage::Waiting(_)));
+    }
+
     /// Marks the download over and the add started.
     pub fn copying(&self) {
         let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
@@ -350,6 +487,7 @@ impl IntakeJob {
     pub fn end(&self, result: Result<(), EngineError>) {
         let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
         let phase = match *stage {
+            Stage::Waiting(_) => Phase::Waiting,
             Stage::Downloading | Stage::Copying if self.kind == JobKind::Setup => Phase::Building,
             Stage::Downloading => Phase::Downloading,
             Stage::Copying if self.tally.clearing() => Phase::Clearing,
@@ -370,10 +508,14 @@ impl IntakeJob {
         matches!(*stage, Stage::Ended(_))
     }
 
-    /// The job as a client sees it now.
+    /// The job as a client sees it now, within `JOB_VIEW_BYTES_MAX`: a delete's or a New
+    /// Project's name, the job a waiting job names and an ended job's code are shown cut.
     pub fn view(&self) -> JobView {
         let stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
         let state = match &*stage {
+            Stage::Waiting(behind) => JobState::Waiting {
+                behind: shown(behind, JOB_TEXT_BYTES_MAX),
+            },
             Stage::Downloading | Stage::Copying if self.kind == JobKind::Setup => {
                 let (done, total) = self.tally.building();
                 JobState::Building { done, total }
@@ -390,18 +532,31 @@ impl IntakeJob {
                     checked: self.tally.checked(),
                 },
             },
+            Stage::Ended(JobState::Failed { code, phase }) => JobState::Failed {
+                code: shown(code, JOB_TEXT_BYTES_MAX),
+                phase: *phase,
+            },
+            Stage::Ended(JobState::NeedsAnswer { code }) => JobState::NeedsAnswer {
+                code: shown(code, JOB_TEXT_BYTES_MAX),
+            },
             Stage::Ended(state) => state.clone(),
         };
         assert!(!matches!(state, JobState::Stopping { agents_left: 0 }));
+        let (left, left_more) = self.download.skipped().cut(JOB_SKIPPED_LISTED_MAX);
         let view = JobView {
             id: self.id.clone(),
             kind: self.kind,
             project_id: self.project.clone(),
-            source: self.source.clone(),
+            source: match self.kind {
+                JobKind::Add | JobKind::MoveProject => self.source.clone(),
+                JobKind::Delete | JobKind::Setup => shown(&self.source, PATH_BYTES_MAX),
+            },
             mode: self.mode,
             overrides: self.overrides.clone(),
             stopping: self.tally.stopped(),
             state,
+            left,
+            left_more,
         };
         assert!(view.overrides.len() <= ADD_OVERRIDES_MAX);
         assert_eq!(view.kind != JobKind::Add, view.project_id.is_some());
@@ -417,7 +572,8 @@ impl IntakeJob {
             view.kind != JobKind::Setup
                 || matches!(
                     view.state,
-                    JobState::Building { .. }
+                    JobState::Waiting { .. }
+                        | JobState::Building { .. }
                         | JobState::Done
                         | JobState::Failed { .. }
                         | JobState::Cancelled { .. }
@@ -437,7 +593,8 @@ fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobSta
         Err(e) => e.0,
     };
     assert!(!code.is_empty());
-    let cancelled = code == "home_add_cancelled" || (stopped && phase == Phase::Downloading);
+    let cancelled = code == "home_add_cancelled"
+        || (stopped && matches!(phase, Phase::Waiting | Phase::Downloading));
     if cancelled {
         assert!(phase != Phase::Clearing, "clearing never stops");
         assert!(
@@ -450,6 +607,22 @@ fn ended(phase: Phase, stopped: bool, result: Result<(), EngineError>) -> JobSta
         return JobState::NeedsAnswer { code };
     }
     JobState::Failed { code, phase }
+}
+
+/// A job's text as a client sees it: control characters as spaces, cut at a character
+/// boundary to `bytes`, so JSON writes it in at most twice that.
+/// Inputs: the text and its most bytes. Output: the text shown.
+fn shown(text: &str, bytes: usize) -> String {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let shown: String = text[..end]
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    assert!(shown.len() <= bytes);
+    shown
 }
 
 #[cfg(test)]

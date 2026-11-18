@@ -1362,6 +1362,76 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
     );
 }
 
+/// The phrases every hand-off task description holds: the finding, the agent's part, its
+/// acceptance check, and a probe that costs the owner asked for once, else an UNCONFIRMED
+/// cause, the owner's refusal and a first step that reproduces it without what the owner
+/// declined (V243-MASTER-ANALYZE-FIRST, #388 F1, V243-MASTER-PROBE-REFUSAL-CARRY).
+const HAND_OFF_PARTS: [&str; 7] = [
+    "what you found",
+    "this agent's part of your plan",
+    "its acceptance check",
+    "ask the owner once for a small probe",
+    "UNCONFIRMED",
+    "say what the owner declined",
+    "reproducing it without those resources the agent's first step",
+];
+
+/// The spawn tool asks for what the master found and the agent's acceptance check with each
+/// task, so a hand-off carries the diagnosis and its part of the plan, not only an order
+/// (V243-MASTER-ANALYZE-FIRST).
+#[test]
+fn a_spawn_task_carries_the_finding_and_the_acceptance_check() {
+    let task = spec(SPAWN_TOOL)["inputSchema"]["properties"]["task"]["description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for part in HAND_OFF_PARTS {
+        assert!(task.contains(part), "{part}: {task}");
+    }
+}
+
+/// Reads one tool's `task` description from the tools/list of the server a master that is
+/// not live uses. Takes the tool name. Returns the description text.
+fn listed_task(name: &str) -> String {
+    let directory = tempfile::tempdir().unwrap();
+    let list = answer(
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+        &directory.path().join(DROP_FILE),
+        None,
+        &[],
+    )
+    .unwrap();
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let tool = tools
+        .iter()
+        .find(|tool| tool["name"] == name)
+        .unwrap_or_else(|| panic!("{name} is not listed: {tools:?}"));
+    tool["inputSchema"]["properties"]["task"]["description"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A master that is not live hands out work through `delegate`, so its task asks for the
+/// same finding, part of the plan and acceptance check as `spawn` (#388 F1).
+#[test]
+fn a_delegate_task_carries_the_finding_and_the_acceptance_check() {
+    let task = listed_task(TOOL_NAME);
+    for part in HAND_OFF_PARTS {
+        assert!(task.contains(part), "{part}: {task}");
+    }
+}
+
+/// A master that is not live gives a finished sub-agent its next task through `wake`, so
+/// that task asks for the same finding, part of the plan and acceptance check (#388 F1).
+#[test]
+fn a_wake_task_carries_the_finding_and_the_acceptance_check() {
+    let task = listed_task(WAKE_TOOL);
+    for part in HAND_OFF_PARTS {
+        assert!(task.contains(part), "{part}: {task}");
+    }
+}
+
 #[test]
 fn update_work_says_a_reply_answers_a_question_or_work_and_a_note_takes_none() {
     let tool = spec(UPDATE_WORK_TOOL);
