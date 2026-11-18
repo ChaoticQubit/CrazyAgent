@@ -2147,6 +2147,29 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     assert!(launch_tool(&inside, &places).is_err());
 }
 
+/// G1: a shim with no real install found is judged by the resolver's own rule alone, so a
+/// HOME in this user's folder under a sticky shared folder, as under /tmp on Linux, starts
+/// it as given, while a shim in a folder every user can write never starts.
+#[test]
+fn a_shim_under_a_sticky_shared_folder_starts_as_given_by_the_resolver_rule() {
+    let scratch = tempfile::tempdir().unwrap();
+    let shared = scratch.path().canonicalize().unwrap().join("shared");
+    let mine = shared.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let name = "crazyagent-shim-sticky-row";
+    let home = mine.join("home");
+    let shim = home.join(".volta/bin").join(name);
+    stand_in(&shim);
+    let places = crate::tools::Places::new(Vec::new(), Some(home.clone()));
+    assert!(crate::harnesses::is_shim(places.home(), &shim));
+    assert_eq!(launch_tool(&shim, &places).unwrap().entry, shim);
+    std::fs::set_permissions(shim.parent().unwrap(), std::fs::Permissions::from_mode(0o777))
+        .unwrap();
+    assert!(launch_tool(&shim, &places).is_err());
+}
+
 /// rv-sa241 B1 L1: a shim that finds no real install starts as given only when the resolver
 /// would run its file, every link on its way included. A shim that links through a link in a
 /// project, which agents can move, while both its ends sit in owner folders, is refused.
