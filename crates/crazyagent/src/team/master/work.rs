@@ -1111,6 +1111,7 @@ fn unmerged_for_finish(
         .stored
         .project_folder()
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|_| EngineError("changes_workspace_invalid".into()))?;
     let db = crate::landing::open(answering.landing)?;
     let mut unmerged = crate::landing::unlanded_teammates(

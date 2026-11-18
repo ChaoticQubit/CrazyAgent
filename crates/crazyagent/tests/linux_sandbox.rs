@@ -9,6 +9,8 @@ use crazyagent::sandbox::{
     SandboxError, SandboxNetwork, SandboxRemote,
 };
 
+use crazyagent::spawn_gate::Keeper;
+
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
 
 use std::ffi::{OsStr, OsString};
@@ -16,6 +18,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 
 use std::io::{BufRead, BufReader, Read, Write};
+
+use std::os::fd::AsRawFd;
 
 use std::path::{Path, PathBuf};
 
@@ -29,10 +33,25 @@ const HELPER: &str = env!("CARGO_BIN_EXE_crazyagent-landlock");
 /// helper refuses ([`loader_variable`]), such as the `LD_LIBRARY_PATH` cargo sets for
 /// tests (DEC-179 SBX-3 fold, rv-ds241 F2). No input. Output: the command.
 fn helper_command() -> Command {
-    let mut command = Command::new(HELPER);
-    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+    without_loader(Command::new(HELPER))
+}
+
+/// A command that runs with this test's environment less every variable the helper refuses
+/// ([`loader_variable`]), for the helper itself or a shell that starts it (G1). Input: the
+/// command. Output: the same command, each such variable removed.
+fn without_loader(mut command: Command) -> Command {
+    let loaders: Vec<OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| loader_variable(name))
+        .collect();
+    for name in &loaders {
         command.env_remove(name);
     }
+    assert!(loaders.iter().all(|name| {
+        command
+            .get_envs()
+            .any(|(set, value)| set == name.as_os_str() && value.is_none())
+    }));
     command
 }
 
@@ -188,13 +207,14 @@ fn process_state(pid: u32) -> Option<char> {
 /// git step is) starts its program, which the helper became, and that program is killed once
 /// its parent exits, so a git step never outlives the engine that took its lock. A parent id
 /// that is not the helper's parent is refused (exit 3) before the program starts, and
-/// process 1 is never named.
+/// process 1 is never named. The shell that starts the helper runs without the loader
+/// variables the helper refuses, as every other row's helper does (G1).
 #[test]
 fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     let case = case();
     let started = case.tmp.join("started");
     let parent = crazyagent::spawn_gate::status(
-        Command::new("/bin/sh")
+        without_loader(Command::new("/bin/sh"))
             .arg("-c")
             .arg(
                 "\"$0\" --die-with $$ --read / --write \"$1\" -- \
@@ -270,7 +290,7 @@ mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
 ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
 ln "$admin/index" "$away/index" 2>>"$err" && echo linked
 exit 0"#;
-    let output = crazyagent::spawn_gate::output(
+    let output = crazyagent::spawn_gate::collected(
         helper_command()
             .args(["--read", "/", "--write"])
             .arg(&case.tmp)
@@ -2269,7 +2289,8 @@ fn a_nested_agent_neither_signals_nor_lists_a_process_outside_its_own() {
 
 /// A nested agent started with pipes shares no session or terminal with the engine: the
 /// first process, bubblewrap's outer one, leads a group and a session of its own with no
-/// controlling terminal, and the harness, inside the namespace, reads both as 0.
+/// controlling terminal, and the harness, inside the namespace, reads both as 0. Given its
+/// line, the harness ends with 0.
 #[test]
 fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
     let case = case();
@@ -2294,7 +2315,9 @@ fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
         [first.as_str(), first.as_str(), "0"],
         "the first process leads its group and session, with no terminal: {outside:?}"
     );
-    drop(child.stdin.take());
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"done\n").unwrap();
+    drop(input);
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
 }
@@ -2550,7 +2573,7 @@ fn the_helper_refuses_the_variables_that_load_code_in_every_mode() {
     let modes = [nest, vec!["--probe".into()], vec!["--scoped".into()]];
     for mode in &modes {
         for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES", "GCONV_PATH"] {
-            let output = crazyagent::spawn_gate::output(
+            let output = crazyagent::spawn_gate::collected(
                 Command::new(HELPER)
                     .args(mode)
                     .env_clear()
@@ -2685,6 +2708,104 @@ fn the_bridge_leaves_no_descriptor_in_the_harness() {
     assert_eq!(open(&bridged), open(&shared));
 }
 
+/// Lists the descriptors a wrapped `/bin/sh` holds when its starter also hands it `/dev/null`
+/// under that descriptor's own number, not closed on exec, as a parent of the engine leaves
+/// one open. Inputs: the sandbox and the case. Output: the harness's `ls /proc/self/fd`.
+fn listed_with_inherited(sandbox: &dyn Sandbox, case: &Case) -> String {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", "ls /proc/self/fd"])
+        .current_dir(case.project.join("worktrees"));
+    let mut wrapped = sandbox.wrap(&harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let output = crazyagent::spawn_gate::spawn_handing(&mut wrapped, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A guard, V243-LINUX-HARNESS-FD-LEAK: a descriptor the engine inherited and does not close
+/// on exec reaches no harness, plain, nested or bridged, where a GitHub runner's two open
+/// pipes reached every one. The control shows a plain child does inherit it.
+#[test]
+fn a_descriptor_the_engine_inherited_reaches_no_harness() {
+    let case = case();
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let number = inherited.as_raw_fd().to_string();
+    let mut plain = Command::new("/bin/ls");
+    plain
+        .arg("/proc/self/fd")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
+    let control = crazyagent::spawn_gate::spawn_handing(&mut plain, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        String::from_utf8(control.stdout)
+            .unwrap()
+            .lines()
+            .any(|line| line == number),
+        "the control: a plain child inherits descriptor {number}"
+    );
+    let bridged = SandboxNetwork::Only(vec![SandboxRemote::Loopback(18_080)]);
+    let mut sandboxes = vec![pinned(policy(&case, SandboxNetwork::Open))];
+    sandboxes.extend(nested(policy(&case, SandboxNetwork::Open)));
+    sandboxes.extend(nested(policy(&case, bridged)));
+    for sandbox in &sandboxes {
+        assert_eq!(
+            listed_with_inherited(sandbox, &case),
+            "0\n1\n2\n3\n",
+            "{:?}",
+            sandbox.backend()
+        );
+    }
+}
+
+/// A guard, V243-FD-SWEEP-EXIT3-ROW: a helper that cannot list the descriptors it inherited
+/// starts nothing and exits 3 with that reason, shown under bubblewrap with an empty `/proc`.
+/// Skipped where this machine cannot nest.
+#[test]
+fn a_helper_that_cannot_list_its_inherited_descriptors_starts_nothing() {
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let case = case();
+    let ran = case.tmp.join("ran");
+    let (shared, proc) = NEST_ARGS.split_last_chunk::<2>().unwrap();
+    assert_eq!(proc, &["--proc", "/proc"]);
+    let mut nest = Command::new(bwrap);
+    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+        nest.env_remove(name);
+    }
+    let output = crazyagent::spawn_gate::collected(
+        nest.args(shared)
+            .args(["--tmpfs", "/proc", "--", HELPER, "--read", "/", "--write"])
+            .arg(&case.tmp)
+            .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
+            .arg(&ran)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{said}");
+    assert!(
+        said.contains("crazyagent-landlock: inherited descriptors:"),
+        "{said}"
+    );
+    assert!(!ran.exists(), "nothing started without the descriptor list");
+}
+
 /// Tells whether a broker that carries a port runs on this machine, by its arguments.
 /// Input: the port. Output: true when one does.
 fn broker_runs(port: u16) -> bool {
@@ -2726,7 +2847,7 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
 /// `iptables-restore` on the nf_tables backend. No input. Output: true when it has both.
 fn routing_tools() -> bool {
     let slirp = SLIRP_PATHS.iter().all(|path| Path::new(path).is_file());
-    let version = crazyagent::spawn_gate::output(
+    let version = crazyagent::spawn_gate::collected(
         Command::new("/usr/sbin/iptables-restore")
             .arg("--version")
             .stdin(Stdio::null()),
@@ -2817,6 +2938,28 @@ fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_ho
         "any=pong\nother=refused\nloopback=pong\n"
     );
     assert_eq!(bash(&sandbox, &case, &gateway), "gateway=refused\n");
+}
+
+/// V243-LINUX-EGRESS-REJECT: a routed agent's refused connect, to another host's port and to
+/// slirp's gateway, fails at once instead of waiting out its SYN retries, about 127 s each.
+/// The bound covers the whole run, the routed network's start included.
+#[test]
+fn a_refused_connect_from_a_routed_agent_fails_at_once() {
+    let case = case();
+    let other = outward_address();
+    let (any, port) = (pong_everywhere(), pong_everywhere());
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(any)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    for host in [other.to_string(), "10.0.2.2".to_owned()] {
+        let refused =
+            format!("(exec 4<>/dev/tcp/{host}/{port}) 2>/dev/null && echo reached || echo refused");
+        let started = Instant::now();
+        assert_eq!(bash(&sandbox, &case, &refused), "refused\n", "{host}");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(30), "{host}: {took:?}");
+    }
 }
 
 #[test]
@@ -3137,9 +3280,37 @@ fn bubblewrap_starts_for_a_nested_agent_with_no_new_privileges() {
     assert_eq!(held, Some("1"), "{status}");
 }
 
-/// A gate row for a bubblewrap fact taken from memory: `--die-with-parent` must tie the
-/// namespace to bubblewrap's outer process only. Were that outer process tied to the thread
-/// that started it, an agent would end when an engine thread does.
+/// Starts a wrapped `/bin/sh -c script` as [`started`] does, from a thread kept until the
+/// returned keeper drops, as the rcli master host starts its agent. Inputs: the sandbox,
+/// the case and the script, which prints `ready` first. Output: the running first process,
+/// the reader of the rest of its output and its keeper.
+fn kept_started(
+    sandbox: &dyn Sandbox,
+    case: &Case,
+    script: &str,
+) -> (Child, BufReader<ChildStdout>, Keeper) {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", script])
+        .current_dir(case.project.join("worktrees"));
+    let mut command = sandbox.wrap(&harness).unwrap();
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let (mut child, keeper) =
+        crazyagent::spawn_gate::kept(move || crazyagent::spawn_gate::spawn(&mut command)).unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    (child, output, keeper)
+}
+
+/// V243 P6: bubblewrap's outer process, the first process of a nested agent, dies with the
+/// thread that forked it (`--die-with-parent`), so an agent started on an engine thread that
+/// then ends, as a tokio worker does, would end with it. Started through the custody, as the
+/// rcli master host starts its agent, it outlives the thread that asked for it.
 #[test]
 fn a_nested_agent_outlives_the_thread_that_started_it() {
     let case = case();
@@ -3147,9 +3318,9 @@ fn a_nested_agent_outlives_the_thread_that_started_it() {
         return;
     };
     let script = "echo ready; read -r line; echo \"got $line\"";
-    let (mut child, mut output) = std::thread::scope(|scope| {
+    let (mut child, mut output, _keeper) = std::thread::scope(|scope| {
         scope
-            .spawn(|| started(&sandbox, &case, script))
+            .spawn(|| kept_started(&sandbox, &case, script))
             .join()
             .unwrap()
     });
@@ -3163,6 +3334,62 @@ fn a_nested_agent_outlives_the_thread_that_started_it() {
     assert_eq!(line, "got on\n");
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
+}
+
+/// The token a stand-in engine run of [`a_kept_nested_agent_ends_with_the_engine`] finds in
+/// its environment: its agent sleeps for it, so the row finds that agent by command line.
+const KEPT_ENGINE: &str = "CRAZYAGENT_TEST_KEPT_ENGINE";
+
+/// The file a stand-in engine run of [`a_kept_nested_agent_ends_with_the_engine`] writes once
+/// its agent printed `ready`, so bubblewrap runs and has set its death signal by then.
+const KEPT_READY: &str = "CRAZYAGENT_TEST_KEPT_READY";
+
+/// rv-sec3 N1, a guard for the custody: a nested agent started through it still ends with the
+/// engine. The row runs itself again as a stand-in engine that starts the agent so and waits;
+/// once the stand-in is killed, nothing the agent runs is left. It holds with the agent
+/// forked on the calling thread too, and must keep holding with the custody.
+#[test]
+fn a_kept_nested_agent_ends_with_the_engine() {
+    let case = case();
+    let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
+        return;
+    };
+    if let (Ok(token), Some(ready)) = (std::env::var(KEPT_ENGINE), std::env::var_os(KEPT_READY)) {
+        let script = format!("echo ready; exec sleep {token}");
+        let _kept = kept_started(&sandbox, &case, &script);
+        fs::write(ready, "ready").unwrap();
+        std::thread::sleep(Duration::from_secs(60));
+        return;
+    }
+    let token = format!("604.{}", std::process::id());
+    let ready = case.tmp.join("kept-engine-ready");
+    let mut engine = crazyagent::spawn_gate::spawn(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "a_kept_nested_agent_ends_with_the_engine",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(KEPT_ENGINE, &token)
+            .env(KEPT_READY, &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the stand-in engine never started its agent"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(running(&token), "the stand-in's agent is not running");
+    assert_eq!(engine.try_wait().unwrap(), None);
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+    assert!(ended(&token), "the agent outlived the engine that kept it");
 }
 
 /// A gate row for a bubblewrap fact taken from memory: its outer process exits with the
@@ -3235,9 +3462,11 @@ fn told(output: &Output) -> String {
 
 /// Rows about the call supervisor need a kernel that runs it: seccomp user notification
 /// whose wait only a fatal signal cuts (Linux 5.19) and a ptrace scope that lets a parent
-/// read the programs it started. The check itself fails where nothing supervises it.
+/// read the programs it started. The probe runs as the engine runs it, in a new empty folder
+/// only this user may open (G1). The check itself fails where nothing supervises it.
 #[test]
 fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_supervising() {
+    use std::os::unix::fs::PermissionsExt;
     let quiet = |command: &mut Command| {
         let silenced = command
             .stdin(Stdio::null())
@@ -3245,7 +3474,11 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
             .stderr(Stdio::null());
         crazyagent::spawn_gate::status(silenced).unwrap()
     };
-    let probe = quiet(helper_command().arg("--probe-supervisor"));
+    let held = tempfile::tempdir().unwrap();
+    let folder = held.path().canonicalize().unwrap().join("probe");
+    fs::create_dir(&folder).unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+    let probe = quiet(helper_command().arg("--probe-supervisor").arg(&folder));
     assert!(
         probe.success(),
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
@@ -3822,16 +4055,25 @@ fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
 const STORM: &str = "import os, signal
 signal.signal(signal.SIGALRM, lambda number, frame: None)
 signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+def made(name):
+    for _ in range(10000):
+        try:
+            return os.mkdir(name)
+        except InterruptedError:
+            pass
+    raise SystemExit('mkdir interrupted 10000 times: ' + name)
 for number in range(300):
     os.close(os.open('storm-%d' % number, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-    os.mkdir('storm-folder-%d' % number)
+    made('storm-folder-%d' % number)
 signal.setitimer(signal.ITIMER_REAL, 0)
 print('made=' + str(len([name for name in os.listdir('.') if name.startswith('storm-')])))
 ";
 
 /// A signal that lands while the supervisor makes an entry must not run the call twice:
-/// the second run would find the entry the first one made. The trapped call waits for its
-/// answer through every signal but a fatal one.
+/// the second run would find the entry the first one made. One that lands before the
+/// supervisor reads the call withdraws it unrun (EINTR, which Python retries for `open` but
+/// not `mkdir`, so the stand-in retries it); once read, the call waits for its answer through
+/// every signal but a fatal one, so a retry that meets the entry fails the row.
 #[test]
 fn a_signal_storm_runs_no_supervised_call_twice() {
     let case = case();

@@ -27,8 +27,10 @@ pub const PROJECT_POOL_MISSING: &str = "instructions_cleanup_project_pool_missin
 pub const NO_ACCOUNT: &str = "instructions_cleanup_no_account";
 /// Every fitting account in the pool is paused after a limit.
 pub const PAUSED: &str = "instructions_cleanup_paused";
-/// Another cleanup is running in this engine.
+/// Another cleanup of the same text, one project's or the app text, is running in this engine.
 pub const BUSY: &str = "instructions_cleanup_busy";
+/// [`CLEANUPS_MAX`] cleanups already run in this engine.
+pub const FULL: &str = "instructions_cleanup_full";
 /// The saved text is blank, so there is nothing to clean up.
 pub const EMPTY: &str = "instructions_cleanup_empty";
 /// The model run failed.
@@ -62,8 +64,13 @@ pub const WALL_TIME: Duration = Duration::from_secs(5 * 60);
 pub const OUTPUT_TOKENS_MAX: u32 = 16384;
 /// How many accounts one cleanup may try, so a limit on one account fails over (DEC-091).
 pub const TRIES_MAX: u32 = 2;
+/// The most cleanups one engine runs at once. Each holds one of the owner server's few
+/// seats for long requests until it ends, so the cap leaves the other seats to the owner's
+/// other requests (DEC-199).
+pub const CLEANUPS_MAX: usize = 2;
 
 const _: () = assert!(TRIES_MAX >= 1 && TRIES_MAX <= 9);
+const _: () = assert!(CLEANUPS_MAX >= 2);
 const _: () = assert!(TEXT_BYTES_MAX <= 1 << 20);
 
 /// Which instructions file a cleanup rewrites.
@@ -363,8 +370,10 @@ pub fn findings(reply: &str, saved: &str) -> Vec<Finding> {
 }
 
 /// One cleanup to run: the engine's data folder, the two settings files, the installed
-/// harness executables, whose usage it counts as, the pool rule's inputs, the prompt and
-/// the agent name its usage shows under.
+/// harness executables, whose usage it counts as, the pool rule's inputs, the prompt, the
+/// agent name its usage shows under, and whether its caller holds one of the owner server's
+/// seats for long requests while it runs, as Edit with AI does and a publish draft on its
+/// own thread does not; only those count toward [`CLEANUPS_MAX`].
 pub struct Request<'a> {
     pub root: &'a Path,
     pub settings: (&'a Path, &'a Path),
@@ -374,6 +383,7 @@ pub struct Request<'a> {
     pub pool: Option<&'a CredentialRef>,
     pub prompt: &'a str,
     pub agent: &'a str,
+    pub holds_seat: bool,
 }
 
 /// The code an Edit with AI run ends with when its pool's model provider can't be reached,
@@ -392,7 +402,7 @@ fn unreached_code(unreached: &crate::research::runner::Unreached) -> &'static st
 #[cfg(unix)]
 mod run {
     use super::{
-        BUSY, CleanupPool, FAILED, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
+        BUSY, CleanupPool, FAILED, FULL, NO_ACCOUNT, OUTPUT_TOKENS_MAX, PAUSED, POOL_UNKNOWN,
         PROJECT_POOL_MISSING, PROVIDER_UNREACHABLE, Request, TIMED_OUT, TRIES_MAX, UNAVAILABLE,
         WALL_TIME,
     };
@@ -404,6 +414,7 @@ mod run {
     };
     use std::os::unix::fs::DirBuilderExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Mutex, PoisonError};
     use std::time::Instant;
 
@@ -414,22 +425,70 @@ mod run {
     const NAME_PREFIX: &str = "instructions-cleanup-";
     pub(super) const KEPT_RUNS_MAX: usize = 20;
 
-    static RUNNING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static RUNNING: Mutex<Vec<Held>> = Mutex::new(Vec::new());
+    static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
-    /// Holds the one cleanup slot of an engine data folder until dropped.
-    pub(super) struct Slot(PathBuf);
+    /// One held slot: the engine data folder, the text it cleans up (a project's, or none
+    /// for the app text), the stem of its run names and whether its caller holds a seat.
+    #[derive(Clone, PartialEq, Eq)]
+    struct Held {
+        root: PathBuf,
+        text: Option<ProjectId>,
+        stem: String,
+        holds_seat: bool,
+    }
+
+    /// Holds the cleanup slot of one text in an engine data folder until dropped.
+    pub(super) struct Slot(Held);
 
     impl Slot {
-        /// Takes the slot of this engine data folder. Input: the canonical folder. Output:
-        /// the slot, or none while another cleanup holds it.
-        pub(super) fn take(root: &Path) -> Option<Self> {
+        /// Takes the slot of one text in this engine data folder. Inputs: the canonical
+        /// folder, the project or none for the app text, the run's stem from [`run_stem`]
+        /// and whether the caller holds a seat. Output: the slot, `BUSY` while a cleanup of
+        /// the same text runs, or `FULL` for a seat holder while [`super::CLEANUPS_MAX`]
+        /// seat holders run in the folder.
+        pub(super) fn take(
+            root: &Path,
+            text: Option<&ProjectId>,
+            stem: &str,
+            holds_seat: bool,
+        ) -> Result<Self, &'static str> {
+            assert!(stem.starts_with(NAME_PREFIX));
             let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
-            if running.len() >= RUNNING_MAX || running.iter().any(|held| held == root) {
-                return None;
+            if running.len() >= RUNNING_MAX
+                || running
+                    .iter()
+                    .any(|held| held.root == root && held.text.as_ref() == text)
+            {
+                return Err(BUSY);
             }
-            running.push(root.to_path_buf());
+            let seated = running
+                .iter()
+                .filter(|held| held.root == root && held.holds_seat)
+                .count();
+            if holds_seat && seated >= super::CLEANUPS_MAX {
+                return Err(FULL);
+            }
+            let held = Held {
+                root: root.to_path_buf(),
+                text: text.cloned(),
+                stem: stem.to_owned(),
+                holds_seat,
+            };
+            running.push(held.clone());
             assert!(running.len() <= RUNNING_MAX);
-            Some(Self(root.to_path_buf()))
+            Ok(Self(held))
+        }
+
+        /// The stems of the runs whose slots are held in this engine data folder. Input:
+        /// the canonical folder. Output: the stems.
+        pub(super) fn running(root: &Path) -> Vec<String> {
+            let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+            running
+                .iter()
+                .filter(|held| held.root == root)
+                .map(|held| held.stem.clone())
+                .collect()
         }
     }
 
@@ -454,12 +513,12 @@ mod run {
         (metadata.file_type().is_dir() && path.canonicalize().ok()? == path).then_some(path)
     }
 
-    /// Removes the oldest runs' folders so fewer than [`KEPT_RUNS_MAX`] stay before a new
-    /// run. Each folder holds one run's prompt and reply, and the runner refuses a name it
-    /// has used, so names carry their start time and name order is age order. Only plain
-    /// folders this module named are removed; one that cannot be removed stays. Input: the
-    /// runner's agents folder. Output: none.
-    pub(super) fn prune(agents: &Path) {
+    /// Removes the oldest finished runs' folders so fewer than [`KEPT_RUNS_MAX`] stay before
+    /// a new run. Each folder holds one run's prompt and reply, and the runner refuses a name
+    /// it has used, so names carry their start time and name order is age order. Only plain
+    /// folders this module named are removed, never one of a run still running; one that
+    /// cannot be removed stays. Inputs: the runner's agents folder and the running stems.
+    pub(super) fn prune(agents: &Path, running: &[String]) {
         let Ok(entries) = std::fs::read_dir(agents) else {
             return;
         };
@@ -468,6 +527,12 @@ mod run {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .filter_map(|entry| entry.file_name().into_string().ok())
             .filter(|name| name.starts_with(NAME_PREFIX))
+            .filter(|name| {
+                !running.iter().any(|stem| {
+                    name.strip_prefix(stem.as_str())
+                        .is_some_and(|rest| rest.starts_with("-t"))
+                })
+            })
             .collect();
         names.sort_unstable();
         let extra = names.len().saturating_sub(KEPT_RUNS_MAX - 1);
@@ -476,11 +541,20 @@ mod run {
         }
     }
 
-    /// The name of one try's run, unique per start time and try so the runner never sees a
-    /// name twice. Inputs: the cleanup's start in milliseconds and the try. Output: the name.
-    pub(super) fn run_name(started_ms: i64, number: u32) -> String {
-        assert!(started_ms >= 0 && (1..=super::TRIES_MAX).contains(&number));
-        format!("{NAME_PREFIX}{started_ms:013}-t{number}")
+    /// The stem of one cleanup's run names, unique per cleanup so the runner never sees a
+    /// name twice, and in start order. Input: the cleanup's start in milliseconds. Output:
+    /// the stem.
+    pub(super) fn run_stem(started_ms: i64) -> String {
+        assert!(started_ms >= 0);
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        format!("{NAME_PREFIX}{started_ms:013}-{sequence:010}")
+    }
+
+    /// The name of one try's run. Inputs: the cleanup's stem from [`run_stem`] and the try.
+    /// Output: the name.
+    pub(super) fn run_name(stem: &str, number: u32) -> String {
+        assert!(stem.starts_with(NAME_PREFIX) && (1..=super::TRIES_MAX).contains(&number));
+        format!("{stem}-t{number}")
     }
 
     /// Picks the account of one try, passing over a member whose loopback provider refuses
@@ -548,12 +622,17 @@ mod run {
     /// Runs one cleanup: a model with tools off in an empty engine-owned folder, on an
     /// account of the pool the rule allows, at most [`TRIES_MAX`] tries inside
     /// [`WALL_TIME`]. Input: the request. Output: the model's reply text, or the plain code;
-    /// one cleanup runs at a time per engine. Nothing but the runner's own state is written,
-    /// and that keeps fewer than [`KEPT_RUNS_MAX`] earlier runs.
+    /// one cleanup runs at a time per text in an engine. Nothing but the runner's own state
+    /// is written, and that keeps fewer than [`KEPT_RUNS_MAX`] earlier finished runs.
     pub(crate) fn run(request: &Request<'_>) -> Result<String, &'static str> {
         let pool = super::cleanup_pool(request.project, request.pool)?;
-        let root = request.root.canonicalize().map_err(|_| UNAVAILABLE)?;
-        let _slot = Slot::take(&root).ok_or(BUSY)?;
+        let root = request
+            .root
+            .canonicalize()
+            .map(crate::projects_home::one_spelling)
+            .map_err(|_| UNAVAILABLE)?;
+        let stem = run_stem(crate::team::now_ms());
+        let _slot = Slot::take(&root, request.project, &stem, request.holds_seat)?;
         let home = private_folder(root.join(FOLDER)).ok_or(UNAVAILABLE)?;
         let state = private_folder(home.join("state")).ok_or(UNAVAILABLE)?;
         let empty = private_folder(home.join("empty")).ok_or(UNAVAILABLE)?;
@@ -599,9 +678,8 @@ mod run {
         let projects = root.join(crate::project_setup::PROJECTS_DIRECTORY);
         let resolver = SettingsResolver::new(global, project, &projects, &database)
             .map_err(|_| UNAVAILABLE)?;
-        prune(&state.join("agents"));
+        prune(&state.join("agents"), &Slot::running(&root));
         let started = Instant::now();
-        let started_ms = crate::team::now_ms();
         let mut cause = FAILED;
         for number in 1..=TRIES_MAX {
             let left = WALL_TIME.saturating_sub(started.elapsed());
@@ -618,7 +696,7 @@ mod run {
                 eprintln!("{code} try={number} {}", unreached.line());
                 return Err(code);
             }
-            let name = run_name(started_ms, number);
+            let name = run_name(&stem, number);
             let run = ReadOnlyRun {
                 name: &name,
                 agent: request.agent,

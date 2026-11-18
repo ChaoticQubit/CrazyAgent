@@ -1411,6 +1411,7 @@ impl Agents {
             return Err(failure("agent_restart_unavailable"));
         }
         self.queue_restart(id)?;
+        crate::team::runtime::wake_loops();
         self.view(id)
     }
 
@@ -1424,7 +1425,11 @@ impl Agents {
         })
     }
 
+    /// Wakes the team loops that host agents, so the owner's stop or restart set on
+    /// `control` is read at once (DEC-200), then waits until the host has ended the agent or
+    /// `deadline` passes. Inputs: the agent's id, its control and the deadline.
     fn await_host(&self, id: &str, control: &Arc<Control>, deadline: Instant) {
+        crate::team::runtime::wake_loops();
         while Instant::now() < deadline {
             let held = match self.live() {
                 Ok(live) => {

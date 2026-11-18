@@ -477,8 +477,8 @@ fn requeued_reason(cause: Narrowing) -> &'static str {
 
 impl ResearchRunner {
     /// `database` is the job store, `state` an engine-owned directory outside
-    /// every project for sandbox profiles and agent homes, `codex` the
-    /// absolute Codex executable.
+    /// every project, in its one spelling, for sandbox profiles and agent homes,
+    /// `codex` the absolute Codex executable.
     pub fn new(
         database: &Path,
         state: &Path,
@@ -511,7 +511,10 @@ impl ResearchRunner {
         codex: Option<&Path>,
         limits: ResearchLimits,
     ) -> Result<Self, RunError> {
-        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
+        if !state.is_absolute()
+            || !state.is_dir()
+            || crate::projects_home::one_spelling(state.canonicalize()?) != state
+        {
             return Err(RunError::Invalid(
                 "state directory must be canonical".into(),
             ));
@@ -958,8 +961,11 @@ impl ResearchRunner {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
         still_held(jobs, job)?;
-        let root = project.root.canonicalize()?;
-        if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
+        let root = crate::projects_home::one_spelling(project.root.canonicalize()?);
+        if root != crate::projects_home::one_spelling(project.root.to_path_buf())
+            || !root.is_dir()
+            || root.starts_with(&self.state)
+        {
             return Err(RunError::Invalid("project folder must be canonical".into()));
         }
         let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
@@ -1770,8 +1776,11 @@ impl ResearchRunner {
         }
         let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
         let account = &behind;
-        let folder = run.folder.canonicalize()?;
-        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+        let folder = crate::projects_home::one_spelling(run.folder.canonicalize()?);
+        if folder != crate::projects_home::one_spelling(run.folder.to_path_buf())
+            || !folder.is_dir()
+            || folder.starts_with(&self.state)
+        {
             return Err(RunError::Invalid(
                 "read-only folder must be canonical".into(),
             ));
@@ -4668,6 +4677,25 @@ mod tests {
             .unwrap();
     }
 
+    /// V243-FIRMLINK-STATE (#448 r2 LOW): a research state named through
+    /// /System/Volumes/Data is refused, since the folder gates compare it with one-spelled
+    /// roots and its sandbox rules would never match, so a folder inside it would see other
+    /// agents' homes and tmp. The short name of the same folder opens.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_state_named_through_the_data_volume_is_refused() {
+        let root = engine_root();
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", root.state.display()));
+        assert!(matches!(
+            ResearchRunner::without_codex(&root.database, &long, ResearchLimits::default()),
+            Err(RunError::Invalid(reason)) if reason == "state directory must be canonical"
+        ));
+        assert!(
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .is_ok()
+        );
+    }
+
     /// A run that waits for its repository's setup lock longer than the stale limit keeps
     /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
     /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).
@@ -5401,6 +5429,49 @@ mod tests {
             "a plain bind took the port the row named for a down provider"
         );
         assert!(ProviderReach::system().refused_everywhere(&[address]));
+    }
+
+    /// V243-FIRMLINK-LAUNCH-ROOT (rv-sec2 19:24): a read-only run's folder named through the
+    /// data volume passes the canonical-folder gate under its short name, and a folder reached
+    /// through a link is still refused there.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_takes_the_long_name_of_its_folder_but_refuses_a_link() {
+        let root = engine_root();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let linked = root.base.join("linked");
+        std::os::unix::fs::symlink(&folder, &linked).unwrap();
+        let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", folder.display()));
+        assert!(long.is_dir());
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let project = ProjectId::new("alpha").unwrap();
+        let gated = |name: &str, folder: &std::path::Path| {
+            let run = ReadOnlyRun {
+                name,
+                agent: "onboarding",
+                kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+                project: Some(&project),
+                folder,
+                prompt: "Map this repository.",
+                account: &account,
+                wall_time: Duration::from_secs(5),
+                output_tokens: None,
+            };
+            matches!(
+                runner.run_read_only(&run, &|| false),
+                Err(RunError::Invalid(ref text)) if text == "read-only folder must be canonical"
+            )
+        };
+        assert!(!gated("onboard-m-alpha-1", &long));
+        assert!(gated("onboard-m-alpha-2", &linked));
     }
 
     #[test]

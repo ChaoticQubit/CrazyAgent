@@ -67,6 +67,8 @@ pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
+mod intake_parallel_tests;
+#[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
 mod native_auth_dispatch_diagnostic_tests;
@@ -92,6 +94,7 @@ const SOCKET: &str = "owner.sock";
 const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
+const _: () = assert!(2 * crate::instruction_cleanup::CLEANUPS_MAX <= DEFERRED_MAX);
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -1787,20 +1790,22 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let taken = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(deadline, receive)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
     /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
     /// stops waiting first, so what storage commits late still takes effect in memory.
-    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
-    /// outcome-unknown error while storage has not answered in time or went away.
+    /// Inputs: the job and the settle step. Output: the settle step's answer; a not-submitted
+    /// code, with nothing to settle; access_change_pending for a narrowing job; else the owner
+    /// outcome-unknown error when a taken job does not answer in time or storage went away.
     async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -1809,10 +1814,23 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(stored) = receive.await {
+                        let _ = settle(stored);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => return Err(refused),
+        };
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -1821,7 +1839,7 @@ impl Engine {
         });
         tokio::time::timeout(deadline, settled)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -2383,7 +2401,6 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
-            Protocol::Icloud if icloud::deferred(body) => return Ok(Some(Deferred::Icloud(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2590,10 +2607,6 @@ async fn serve_admitted(
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
-        Deferred::Icloud(a) => {
-            let served = icloud::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
-        }
     }
 }
 
@@ -2647,8 +2660,7 @@ struct Tasks {
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
 /// Usage requests, which read and write the usage store, harness version, update and
 /// install requests, which wait for a harness, Homebrew, npm or a vendor's release
-/// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
-/// and Process proposals, which wait for an Edit with AI model run. Each carries the
+/// pointer, and Process proposals, which wait for an Edit with AI model run. Each carries the
 /// admission, and the projects home its validated request; the others read the request
 /// frame.
 enum Deferred {
@@ -2669,7 +2681,6 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
-    Icloud(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2764,19 +2775,19 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = matches!(
-            e.0.as_str(),
-            "owner_busy"
-                | "owner_grant_stale_or_revoked"
-                | "owner_runtime_stale"
-                | "owner_queue_not_submitted"
-                | "operation_identity_conflict"
-                | "master_transaction_rolled_back"
-                | "master_dispatch_stopped"
-                | "master_dispatch_capacity"
-                | "move_project_old_folder_left"
-                | "job_busy"
-        );
+        let known = crate::storage::storage_answer(&e.0)
+            || matches!(
+                e.0.as_str(),
+                "owner_busy"
+                    | "owner_grant_stale_or_revoked"
+                    | "owner_runtime_stale"
+                    | "operation_identity_conflict"
+                    | "master_transaction_rolled_back"
+                    | "master_dispatch_stopped"
+                    | "master_dispatch_capacity"
+                    | "move_project_old_folder_left"
+                    | "job_busy"
+            );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
                 operation_id: id.clone(),

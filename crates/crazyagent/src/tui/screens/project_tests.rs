@@ -4475,19 +4475,182 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     }
 }
 
+/// #383 code F1 r2 (leader 16:30, B): a failed folder read lets m and c go on, says the move
+/// downloads everything, offers no switch, and both moves send Download everything.
+#[test]
+fn a_failed_move_read_says_the_move_downloads_everything_and_sends_it() {
+    use crate::projects_home::AddMode;
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    for (key_char, mode) in [('m', AddMode::Move), ('c', AddMode::Copy)] {
+        assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
+        screen.move_read_failed();
+        let drawn = project_screen(&mut screen, 80, 30, &Look::plain());
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("CrazyAgent couldn't read this folder."),
+            "{shown}"
+        );
+        assert!(shown.contains("rebuildable folders too"), "{shown}");
+        assert!(!shown.contains("Download everything (slow)"), "{shown}");
+        assert!(!drawn.help.iter().any(|(key, _)| *key == "Space"));
+        assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+        assert_eq!(
+            screen.key(key(KeyCode::Char(key_char))),
+            ProjectReply::MoveHome(mode, true)
+        );
+        assert!(!screen.confirm_move);
+    }
+}
+
+/// #383 code F1 r2: in an 80x24 terminal the move ask with left folders keeps its switch, its
+/// buttons and its bottom border inside the screen, folding every folder into the count.
+#[test]
+fn the_move_ask_with_left_folders_fits_an_80_by_24_terminal() {
+    use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders {
+        listed: vec![Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        }],
+        more: Some(SkippedMore {
+            folders: 40,
+            files: None,
+        }),
+    });
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(drawn.rows.len() <= 20, "{}", drawn.rows.len());
+    let lines: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let shown = lines.join("\n");
+    assert!(
+        shown.contains("and 41 more folders (files not counted)"),
+        "{shown}"
+    );
+    assert!(shown.contains("[ ] Download everything (slow)"), "{shown}");
+    let buttons = lines
+        .iter()
+        .position(|line| line.contains("[> Keep it here ]"))
+        .unwrap_or_else(|| panic!("no buttons: {shown}"));
+    let corner = look.glyph("\u{2514}");
+    assert!(
+        lines
+            .get(buttons + 1)
+            .is_some_and(|line| line.contains(corner)),
+        "{shown}"
+    );
+}
+
+/// #383 code F1 (DEC-198): the move ask reads the folder first; until the read lands m and c
+/// wait. It then lists the rebuildable folders a move leaves in iCloud, with the ones only
+/// counted, says where they stay, and Space switches Download everything, which m sends.
+#[test]
+fn the_move_ask_lists_the_folders_a_move_leaves_in_icloud_and_space_downloads_everything() {
+    use crate::projects_home::AddMode;
+    use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
+    let reading = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
+    assert!(reading.contains("Reading the folder..."), "{reading}");
+    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(screen.confirm_move, "no move before the read");
+    screen.move_read(SkippedFolders {
+        listed: vec![
+            Skipped {
+                path: "node_modules".into(),
+                files: Some(57_108),
+            },
+            Skipped {
+                path: "web/.venv".into(),
+                files: None,
+            },
+        ],
+        more: Some(SkippedMore {
+            folders: 1968,
+            files: Some(1968),
+        }),
+    });
+    let shown = text(&project_screen(&mut screen, 80, 40, &Look::plain()).rows);
+    for line in [
+        "Left in iCloud, as they can be rebuilt:",
+        "node_modules (57108 files)",
+        "web/.venv (files not counted)",
+        "and 1968 more folders (1968 files)",
+        "They stay in /private/tmp/ca-notes-cli;",
+        "[ ] Download everything (slow)",
+    ] {
+        assert!(shown.contains(line), "{line} missing: {shown}");
+    }
+    assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+    let shown = text(&project_screen(&mut screen, 80, 40, &Look::plain()).rows);
+    assert!(shown.contains("[x] Download everything (slow)"), "{shown}");
+    assert!(shown.contains("Downloaded too:"), "{shown}");
+    assert_eq!(
+        screen.key(key(KeyCode::Char('m'))),
+        ProjectReply::MoveHome(AddMode::Move, true)
+    );
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('M')));
+    let opened = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
+    assert!(
+        opened.contains("Reading the folder..."),
+        "a new ask reads again: {opened}"
+    );
+    assert!(
+        !screen.move_everything,
+        "a new ask starts with the switch off"
+    );
+}
+
 /// The Settings key M asks before a project moves into the projects home: the ask says the
 /// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
 /// project where it is. A refused start of the move job shows as a plain line (DEC-177).
 #[test]
 fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     use crate::projects_home::AddMode;
+    use crate::projects_home::icloud::SkippedFolders;
     let project = ProjectId::new("kept").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
+    screen.setup_missing = true;
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert!(
+        !screen.confirm_move,
+        "a project with no saved setup has no folder to move"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(plain_problem("project_setup_missing").as_str()),
+        "#383 code F1 r2 (rv-code2 F1): the same sentence as g, not Still loading"
+    );
+    screen.setup_missing = false;
+    screen.problem = None;
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert!(
+        !screen.confirm_move,
+        "no ask before the project folder is known"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the project folder. Try again.")
+    );
+    screen.problem = None;
+    screen.setup = Some(stored(&project));
     let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
     assert!(shown.contains("M Move into CrazyAgent folder"), "{shown}");
-    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
     assert!(screen.confirm_move);
+    screen.move_read(SkippedFolders::default());
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     let shown = text(&drawn.rows);
     assert!(
@@ -4510,22 +4673,25 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(!screen.confirm_move);
     screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
     assert!(!screen.confirm_move);
     screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(
         screen.key(key(KeyCode::Char('m'))),
-        ProjectReply::MoveHome(AddMode::Move)
+        ProjectReply::MoveHome(AddMode::Move, false)
     );
     assert!(!screen.confirm_move);
     screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(
         screen.key(key(KeyCode::Char('c'))),
-        ProjectReply::MoveHome(AddMode::Copy)
+        ProjectReply::MoveHome(AddMode::Copy, false)
     );
     assert!(!screen.confirm_move);
 
-    screen.job_refused("move_project_busy", None);
+    screen.job_refused("move_project_busy");
     assert!(
         screen
             .problem
@@ -4534,42 +4700,29 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.job_refused("move_project_already_home", None);
+    screen.job_refused("move_project_already_home");
     assert_eq!(
         screen.problem.as_deref(),
         Some("This project is already in your projects folder.")
     );
-    screen.job_refused("job_busy", None);
+    screen.job_refused("job_busy");
     assert_eq!(
         screen.problem.as_deref(),
-        Some("Another job is running. Wait for it to finish on Home.")
+        Some("Several folders are already waiting. Wait for one to finish on Home.")
     );
-    let adding = crate::projects_home::job::JobView {
-        id: crate::protocol::RequestId::new("add-1").unwrap(),
-        kind: crate::projects_home::job::JobKind::Add,
-        project_id: None,
-        source: "/Users/mira/Code/shop".into(),
-        mode: crate::projects_home::AddMode::Copy,
-        overrides: Vec::new(),
-        stopping: false,
-        state: crate::projects_home::job::JobState::Copying {
-            copied: 3,
-            checked: 0,
-        },
-    };
-    screen.job_refused("job_busy", Some(&adding));
+    screen.job_refused("job_same_folder");
     assert_eq!(
         screen.problem.as_deref(),
-        Some("Adding shop is running. Wait for it to finish on Home."),
-        "a busy refusal names the job that runs"
+        Some("This folder is already being moved or added. See it on Home."),
+        "a move whose folder a running add holds says so"
     );
-    screen.job_refused("home_add_in_progress", None);
+    screen.job_refused("home_add_in_progress");
     assert_eq!(
         screen.problem.as_deref(),
         Some("A folder is being added to your projects folder. Try again when it finishes."),
         "a move while an add runs says so in plain words"
     );
-    screen.job_refused("home_move_worktrees", None);
+    screen.job_refused("home_move_worktrees");
     assert!(
         screen
             .problem
@@ -5291,4 +5444,196 @@ fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
         );
         screen.apply(&query, Err("trusted_connection_unavailable".into()));
     }
+}
+
+/// A Notes CLI screen on the Conversation tab with pool Main assigned, a stopped master in
+/// the given state and a kept reinstall offer for node_modules and api/.venv. Takes the
+/// master's state. Returns the screen, typing as the tab opens.
+fn reinstall_screen(status: MasterStatus) -> ProjectScreen {
+    let mut screen = ProjectScreen::new(
+        ProjectId::new("notes-cli").unwrap(),
+        "Notes CLI".into(),
+        None,
+    );
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.transcript = Some(Transcript {
+        harness: "RCLI".into(),
+        account: None,
+        tools: true,
+        open: false,
+        status,
+        messages: Vec::new(),
+    });
+    screen.reinstall = Some(crate::projects_home::reinstall::Offer {
+        folders: vec!["node_modules".into(), "api/.venv".into()],
+        more: 0,
+        draft: "Please reinstall them.".into(),
+    });
+    screen.open(Tab::Conversation);
+    screen
+}
+
+/// The drawn rows as one line of words, so a sentence reads whole across its wraps.
+fn words(rows: &[Row]) -> String {
+    text(rows).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// DEC-198 slice 3: a kept reinstall offer reads under the master with its keys after Tab
+/// while typing; out of the input, a puts the drafted message after what the owner typed and
+/// starts typing again, the offer staying, and d asks for the dismiss.
+#[test]
+fn a_kept_reinstall_offer_asks_the_master_with_a_and_dismisses_with_d() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let look = Look::plain();
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains(
+            "node_modules and api/.venv were left out when this project came into your projects \
+             folder, as they can be rebuilt. Press Tab, then a to put the drafted message in \
+             your input, d to dismiss this."
+        ),
+        "{shown}"
+    );
+    screen.input.set("Hi");
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert!(!screen.typing);
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Press a to put the drafted message in your input, d to dismiss this."),
+        "{shown}"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert!(screen.typing);
+    assert_eq!(screen.input.value(), "Hi\n\nPlease reinstall them.");
+    assert!(screen.reinstall.is_some(), "asking keeps the offer");
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('d'))),
+        ProjectReply::ReinstallDismiss
+    );
+}
+
+/// DEC-198 slice 3: while the master's accounts aren't signed in the offer adds that an
+/// account is needed first and takes no a; d still dismisses it.
+#[test]
+fn a_reinstall_offer_while_the_master_is_not_signed_in_says_so_and_takes_no_a() {
+    let mut screen = reinstall_screen(MasterStatus::NotSignedIn);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert!(!screen.typing);
+    let look = Look::plain();
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains(&format!(
+            "as they can be rebuilt. {} Press d to dismiss this.",
+            super::project_view::REINSTALL_SIGN_IN
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("Press a"), "{shown}");
+    assert_ne!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "");
+    assert!(!screen.typing);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('d'))),
+        ProjectReply::ReinstallDismiss
+    );
+}
+
+/// DEC-198 slice 3: the offer's sentence names one folder, two, and three with the rest
+/// counted, as the desktop; the draft goes alone into an empty input and after a blank line
+/// into one the owner typed in.
+#[test]
+fn the_reinstall_line_counts_like_the_desktop_and_the_draft_keeps_typed_text() {
+    let line = |folders: &[&str], more| {
+        super::project_view::reinstall_line(&crate::projects_home::reinstall::Offer {
+            folders: folders.iter().map(|folder| (*folder).to_owned()).collect(),
+            more,
+            draft: String::new(),
+        })
+    };
+    let came = "left out when this project came into your projects folder";
+    assert_eq!(
+        line(&["node_modules"], 0),
+        format!("node_modules was {came}, as it can be rebuilt.")
+    );
+    assert_eq!(
+        line(&["node_modules", "api/.venv"], 0),
+        format!("node_modules and api/.venv were {came}, as they can be rebuilt.")
+    );
+    assert_eq!(
+        line(&["a/node_modules", "b/node_modules", "c/dist"], 4),
+        format!(
+            "a/node_modules, b/node_modules, c/dist and 4 more were {came}, as they can be rebuilt."
+        )
+    );
+    assert_eq!(super::console::seeded("", "Reinstall."), "Reinstall.");
+    assert_eq!(super::console::seeded("  \n", "Reinstall."), "Reinstall.");
+    assert_eq!(
+        super::console::seeded("Hello", "Reinstall."),
+        "Hello\n\nReinstall."
+    );
+}
+
+/// NOTE-1845: a notice naming folders with long paths shows each name by its tail, so on an
+/// 80 by 24 terminal its whole sentence, its keys and the master's input row are drawn; on 80
+/// by 16, where the old notice pushed the input off, it takes at most half the free rows, its
+/// sentence cut short, and the keys and the input stay.
+#[test]
+fn a_long_reinstall_notice_keeps_its_keys_and_the_input_on_a_small_terminal() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let long = |name: &str| format!("{}/{name}", "deep".repeat(60));
+    screen.reinstall = Some(crate::projects_home::reinstall::Offer {
+        folders: vec![long("node_modules"), long("dist"), long(".venv")],
+        more: 4,
+        draft: "Please reinstall them.".into(),
+    });
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    let look = Look::plain();
+    let keys = "Press a to put the drafted message in your input, d to dismiss this.";
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let shown = text(&drawn.rows);
+    let said = words(&drawn.rows);
+    assert!(said.contains("deep/node_modules, "), "{shown}");
+    assert!(
+        said.contains(
+            "deep/.venv and 4 more were left out when this project came into your projects \
+             folder, as they can be rebuilt."
+        ),
+        "{shown}"
+    );
+    assert!(said.contains(keys), "{shown}");
+    assert!(shown.contains("> Message the master"), "{shown}");
+    let drawn = project_screen(&mut screen, 80, 16, &look);
+    let shown = text(&drawn.rows);
+    assert!(words(&drawn.rows).contains(keys), "{shown}");
+    assert!(shown.contains("> Message the master"), "{shown}");
+    assert!(shown.contains("deep"), "{shown}");
+    assert!(!shown.contains("can be rebuilt"), "{shown}");
+}
+
+/// NOTE-1845: when the owner's text and the draft together pass the master's message bound,
+/// a leaves the input as typed and says why, instead of cutting the draft off in the input.
+#[test]
+fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let typed = "x".repeat(8180);
+    screen.input.set(&typed);
+    assert_eq!(screen.input.value(), typed);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), typed);
+    assert!(!screen.typing);
+    assert!(
+        screen
+            .problem
+            .as_deref()
+            .is_some_and(|problem| problem.contains("don't fit in one message")),
+        "{:?}",
+        screen.problem
+    );
 }

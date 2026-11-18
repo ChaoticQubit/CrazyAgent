@@ -1457,3 +1457,29 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
         assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
     }
 }
+
+/// V243-FIRMLINK-SWEEP D2: an account home that is the owner's `~/.codex` is refused whichever
+/// of the two macOS names each side uses, so a home or HOME given through /System/Volumes/Data
+/// still meets the forbidden folders.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_folder_named_through_the_data_volume_is_no_account_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let owner = base.path().canonicalize().unwrap().join("owner");
+    let codex = owner.join(".codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let long =
+        |path: &std::path::Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long(&codex).is_dir());
+    let forbidden = Err("launch_account_home_forbidden".to_owned());
+    for (home, given) in [
+        (codex.clone(), owner.clone()),
+        (long(&codex), owner.clone()),
+        (codex.clone(), long(&owner)),
+    ] {
+        let checked = super::validate_home_for(&home, Some(&given)).map_err(|error| error.0);
+        assert_eq!(checked, forbidden, "home {home:?}, HOME {given:?}");
+    }
+}

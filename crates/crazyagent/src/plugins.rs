@@ -487,6 +487,81 @@ pub(crate) fn context_mode_on<'a>(
     Err(ContextModeOff::NpxNotFound)
 }
 
+/// The spec a harness or a server check runs for one approved server, never through cmd.exe
+/// (V243-WIN-MCP-NPX, #341 sec F1): on Windows a stdio command runs only as a program, as
+/// written and as its real file ([`crate::tools::program_file`]), or as npm's own `npx.cmd`
+/// mapped by its layout ([`npx_spec`]); a batch name that is not there is not found. Inputs:
+/// the engine root and the spec. Output: the spec to run, or the code that leaves it out.
+pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpec, &'static str> {
+    #[cfg(windows)]
+    if let ServerSpec::Stdio { command, args } = &spec {
+        let command = Path::new(command);
+        let found = command.canonicalize();
+        let missing = found
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let real = found.ok();
+        let batch = crate::tools::batch_file(command)
+            || real.as_deref().is_some_and(crate::tools::batch_file);
+        if batch && missing {
+            return Err("server_command_not_found");
+        }
+        if batch {
+            let places = crate::tools::Places::from_environment(Some(root));
+            return npx_spec(command, args, &places);
+        }
+        let program = crate::tools::program_file(command)
+            && real.as_deref().is_none_or(crate::tools::program_file);
+        if !program {
+            return Err("server_batch_file");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = root;
+    Ok(spec)
+}
+
+/// npm's `npx.cmd` as the tool resolver runs it ([`crate::tools::resolve_entry`]), kept only
+/// when the resolver mapped it by npx's layout ([`crate::tools::npx_real`]): `node.exe` with
+/// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
+/// command, its arguments and the places. Output: the spec, `server_command_not_found` for
+/// an npx.cmd the resolver refuses, its cause logged (#341 code F1), or `server_batch_file`.
+#[cfg(windows)]
+fn npx_spec(
+    command: &Path,
+    args: &[String],
+    places: &crate::tools::Places,
+) -> Result<ServerSpec, &'static str> {
+    let other = "server_batch_file";
+    let (node, cli) = crate::tools::npx_real(command).ok_or(other)?;
+    let tool = crate::tools::resolve_entry(command, places).map_err(|missing| {
+        let why = missing.refused.as_ref().map(|refused| &refused.why);
+        eprintln!(
+            "plugin_server_npx_refused reason={:?} refused={why:?}",
+            missing.reason
+        );
+        "server_command_not_found"
+    })?;
+    if tool.program != cli || tool.interpreter().map(|found| &found.program) != Some(&node) {
+        return Err(other);
+    }
+    let plain = |file: &Path| {
+        crate::sandbox::canonical(file)
+            .ok()?
+            .into_os_string()
+            .into_string()
+            .ok()
+    };
+    let mut words = Vec::with_capacity(args.len() + 1);
+    words.push(plain(&cli).ok_or(other)?);
+    words.extend_from_slice(args);
+    assert!(words.len() <= ARGS_MAX + 1);
+    Ok(ServerSpec::Stdio {
+        command: plain(&node).ok_or(other)?,
+        args: words,
+    })
+}
+
 #[cfg(unix)]
 fn npx_program(command: &Path) -> bool {
     command.file_name() == Some("npx".as_ref())
@@ -521,15 +596,18 @@ pub(crate) fn exact_version(version: &str) -> bool {
         })
 }
 
-/// The effective set with each server's secret values already read, ready for a harness
-/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
-/// the default pack's context-mode server was left out, none when it was not, and
-/// `left_out` names each server so left out, whose hooks the launch leaves out too.
+/// The effective set with secret values read, ready for a harness launch; skills as in
+/// `EffectivePlugins`. `context_mode_off` says why context-mode was left out, `batch_files`
+/// names each server left out as no Windows program ([`without_cmd_exe`]), `commands_not_found`
+/// each one whose command was not found or whose npx.cmd was refused, and `left_out` every
+/// server left out, whose hooks the launch leaves out too.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
     pub context_mode_off: Option<ContextModeOff>,
+    pub batch_files: Vec<String>,
+    pub commands_not_found: Vec<String>,
     pub left_out: Vec<String>,
 }
 
@@ -613,9 +691,15 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_limit", "You can add up to 50 MCP servers here."),
     ("server_not_found", "This MCP server was removed."),
+    #[cfg(unix)]
     (
         "server_command_invalid",
         "Enter the full path to the command, starting with /.",
+    ),
+    #[cfg(not(unix))]
+    (
+        "server_command_invalid",
+        "Enter the full path to the command, such as C:\\Program Files\\nodejs\\npx.cmd.",
     ),
     (
         "server_args_invalid",
@@ -662,6 +746,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     ("server_cant_start", "The server can't start."),
     (
+        "server_batch_file",
+        "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
+    ),
+    (
         "server_stored_spec_invalid",
         "This server's command or address holds hidden or control characters, so it can't start. Remove it, then add it again.",
     ),
@@ -682,6 +770,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The server's processes could not be listed after its check. CrazyAgent keeps looking for them and ends them.",
     ),
     ("server_exited", "The server stopped before answering."),
+    (
+        "server_check_timeout_powershell",
+        "The server did not answer within 10 seconds. It runs on PowerShell, so the likely cause is PowerShell reading every module installed on this computer before its first command, which takes longer when many modules are installed.",
+    ),
     (
         "server_check_timeout",
         "The server did not answer within 10 seconds.",
@@ -868,6 +960,28 @@ pub fn known_code(code: &str) -> Option<&'static str> {
         .map(|(known, _)| *known)
 }
 
+/// The problem a server check records when it ends with `code`: a timed-out check of a
+/// PowerShell server (`powershell` or `pwsh`, any case or extension) records
+/// `server_check_timeout_powershell`, whose sentence names module reading as the likely cause.
+/// Inputs: the check's code and the server's program. Output: the code to record.
+pub fn timed_out_problem(code: &'static str, program: &Path) -> &'static str {
+    assert!(!code.is_empty());
+    assert!(!program.as_os_str().is_empty());
+    let text = program.to_string_lossy();
+    let name = text.rsplit(['/', '\\']).next().unwrap_or_default();
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    let powershell = ["powershell", "pwsh"]
+        .iter()
+        .any(|known| stem.eq_ignore_ascii_case(known));
+    let named = "server_check_timeout_powershell";
+    if code == "server_check_timeout" && powershell {
+        assert!(known_code(named).is_some());
+        named
+    } else {
+        code
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1027,6 +1141,55 @@ mod tests {
         }
     }
 
+    /// V243-WIN-PWSH-CONFINED-CHECK: a check of a PowerShell server that ran out of time says
+    /// the server did not answer in time and names PowerShell reading its installed modules as
+    /// the likely cause; any other program, and any other code, keeps its own words.
+    #[test]
+    fn a_powershell_server_that_timed_out_names_its_module_reading_as_the_likely_cause() {
+        let timed_out = "server_check_timeout";
+        let named = "server_check_timeout_powershell";
+        for program in [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\PowerShell\7\PWSH.EXE",
+            "/usr/local/bin/pwsh",
+            "/opt/microsoft/powershell/7/pwsh",
+        ] {
+            let program = Path::new(program);
+            assert_eq!(timed_out_problem(timed_out, program), named, "{program:?}");
+            assert_eq!(timed_out_problem("server_exited", program), "server_exited");
+        }
+        for program in [
+            r"C:\Program Files\nodejs\node.exe",
+            "/usr/local/bin/powershell-helper",
+            "/opt/pwsh/bin/uvx",
+        ] {
+            let program = Path::new(program);
+            assert_eq!(
+                timed_out_problem(timed_out, program),
+                timed_out,
+                "{program:?}"
+            );
+        }
+        assert_eq!(
+            check_problem(timed_out),
+            "The server did not answer within 10 seconds."
+        );
+        assert_eq!(
+            check_problem(named),
+            "The server did not answer within 10 seconds. It runs on PowerShell, so the likely cause is PowerShell reading every module installed on this computer before its first command, which takes longer when many modules are installed."
+        );
+        assert_eq!(known_code(named), Some(named));
+    }
+
+    /// V243-WIN-MCP-NPX: a check of a Windows command that is no program, npm's npx.cmd
+    /// aside, says what to point the command at instead, and the code is known to every client.
+    #[test]
+    fn a_check_of_a_batch_command_says_what_to_point_it_at() {
+        let words = "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.";
+        assert_eq!(check_problem("server_batch_file"), words);
+        assert_eq!(known_code("server_batch_file"), Some("server_batch_file"));
+    }
+
     #[test]
     fn a_check_that_found_no_shared_install_says_why_in_its_own_words() {
         assert_eq!(
@@ -1124,6 +1287,10 @@ mod windows_tests {
             args: vec!["-y".into()],
         };
         assert!(stdio(r"C:\Program Files\nodejs\npx.cmd").validate().is_ok());
+        assert_eq!(
+            plain_problem("server_command_invalid"),
+            Some(r"Enter the full path to the command, such as C:\Program Files\nodejs\npx.cmd.")
+        );
         for command in [
             "/usr/local/bin/npx",
             "npx.cmd",
@@ -1138,5 +1305,84 @@ mod windows_tests {
             let refused = stdio(command).validate().unwrap_err();
             assert_eq!(refused.0, "server_command_invalid", "{command}");
         }
+    }
+
+    /// V243-WIN-MCP-NPX and #341: npm's `npx.cmd`, found by its layout, runs as the `node.exe`
+    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling; one
+    /// the resolver refuses, and a `.cmd` that is not there, npx.cmd included, is not found; any
+    /// other `.cmd` or `.bat`, and a name with no extension or a dotted one with a `.cmd` beside
+    /// it, there or not, is a batch file; a `.exe` spec is unchanged.
+    #[test]
+    fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
+        let folder = tempfile::tempdir().unwrap();
+        let real = crate::sandbox::canonical(folder.path()).unwrap();
+        let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("where.exe");
+        std::fs::copy(&shipped, real.join("node.exe")).unwrap();
+        let bin = real.join("node_modules").join("npm").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
+        for name in ["npx.cmd", "other.cmd", "run.bat", "tool.cmd", "tool.v2.cmd"] {
+            std::fs::write(real.join(name), "@ECHO off\r\n").unwrap();
+        }
+        let places = crate::tools::Places::new(vec![real.clone()], None);
+        let args = vec!["-y".to_owned(), "@scope/server".to_owned()];
+        let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+        let spec = |name: &str| ServerSpec::Stdio {
+            command: text(real.join(name)),
+            args: args.clone(),
+        };
+        let mapped = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(
+            mapped,
+            Ok(ServerSpec::Stdio {
+                command: text(real.join("node.exe")),
+                args: vec![
+                    text(bin.join("npx-cli.js")),
+                    "-y".into(),
+                    "@scope/server".into()
+                ],
+            })
+        );
+        assert!(mapped.unwrap().validate().is_ok());
+        for name in ["other.cmd", "run.bat"] {
+            let refused = npx_spec(&real.join(name), &args, &places);
+            assert_eq!(refused, Err("server_batch_file"), "{name}");
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        for name in ["tool", "tool.v2", "gone", "gone.v2"] {
+            assert!(spec(name).validate().is_ok(), "{name}");
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        std::fs::copy(&shipped, real.join("tool")).unwrap();
+        std::fs::copy(&shipped, real.join("tool.v2")).unwrap();
+        for name in ["tool", "tool.v2"] {
+            assert_eq!(without_cmd_exe(&real, spec(name)), Err("server_batch_file"));
+        }
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.exe")),
+            Ok(spec("gone.exe"))
+        );
+        std::fs::write(bin.join("npx-cli.js"), "#!/usr/bin/env deno\n").unwrap();
+        let refused = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(refused, Err("server_command_not_found"));
+        std::fs::remove_file(real.join("node.exe")).unwrap();
+        let lone = npx_spec(&real.join("npx.cmd"), &args, &places);
+        assert_eq!(lone, Err("server_batch_file"));
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.cmd")),
+            Err("server_command_not_found")
+        );
+        std::fs::remove_file(real.join("npx.cmd")).unwrap();
+        assert_eq!(
+            without_cmd_exe(&real, spec("npx.cmd")),
+            Err("server_command_not_found")
+        );
+        let program = ServerSpec::Stdio {
+            command: text(shipped),
+            args: args.clone(),
+        };
+        assert_eq!(without_cmd_exe(&real, program.clone()), Ok(program));
     }
 }

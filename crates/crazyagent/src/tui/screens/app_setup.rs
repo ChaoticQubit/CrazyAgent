@@ -21,7 +21,7 @@ use crate::setup::{
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::{Hint, Message, draw_lines, hint};
+use crate::tui::frame::{Hint, Message, Tone, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, NOT_READY};
 use crate::tui::text::{
@@ -771,7 +771,7 @@ impl AppSetup {
             Load::Ready(status) => status.running,
             _ => return Flow::Handled,
         };
-        if running || self.started || self.sent.is_some() || self.fixing.is_some() {
+        if running || self.started || self.sent.is_some() {
             ctx.say(Message::warning(&setup_plain("setup_busy"), ""));
             return Flow::Handled;
         }
@@ -833,9 +833,12 @@ impl AppSetup {
         };
         self.setup = Load::Ready(status.clone());
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
+        let mut said = None;
         if let Some(name) = self.fixing {
-            self.fixed(name, status, ctx);
-            return Flow::Handled;
+            said = self.fixed(name, status, ctx);
+            if !self.started {
+                return Flow::Handled;
+            }
         }
         if status.running {
             self.started = true;
@@ -844,24 +847,38 @@ impl AppSetup {
         if !self.started {
             return Flow::Handled;
         }
-        self.started = false;
         let problems = self.problems();
+        if problems == 0 && self.first_run && self.fixing.is_some() {
+            return Flow::Handled;
+        }
+        self.started = false;
         if problems == 0 {
             if self.first_run {
                 return Self::next_step(ctx);
             }
-            ctx.say(Message::success(
-                "Setup finished.",
-                "Everything is installed.",
-            ));
+            if said.is_none() {
+                ctx.say(Message::success(
+                    "Setup finished.",
+                    "Everything is installed.",
+                ));
+            }
             return Flow::Handled;
         }
         self.finished_with_problems = true;
         let items = if problems == 1 { "item" } else { "items" };
-        ctx.say(Message::warning(
-            &format!("Setup finished, but {problems} {items} did not install."),
-            "See the reasons below.",
-        ));
+        ctx.say(match said {
+            Some(fix) => {
+                let rest = format!("{problems} {items} failed.");
+                match fix.tone {
+                    Tone::Error => Message::error(&fix.lead, &rest),
+                    Tone::Success | Tone::Warning => Message::warning(&fix.lead, &rest),
+                }
+            }
+            None => Message::warning(
+                &format!("Setup finished, but {problems} {items} did not install."),
+                "See the reasons below.",
+            ),
+        });
         Flow::Handled
     }
 
@@ -903,43 +920,42 @@ impl AppSetup {
         }
     }
 
-    /// Ends a permission fix once a status read shows it finished and the tool checked
-    /// again, saying how the tool's row reads now. Inputs: the tool, the status read and the
-    /// context.
-    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) {
-        if status.running {
-            return;
-        }
+    /// Ends a permission fix once a status read shows it finished, its row no longer busy
+    /// (DEC-199), and the tool checked again, saying how the tool's row reads now. Inputs: the
+    /// tool, the status read and the context. Output: the fix's outcome it said, or none.
+    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) -> Option<Message> {
         let Some(row) = status.dependencies.iter().find(|tool| tool.name == name) else {
             self.fixing = None;
-            return;
+            return None;
         };
-        match &row.state {
-            DependencyState::Checking => return,
+        if row.busy {
+            return None;
+        }
+        let said = match &row.state {
+            DependencyState::Checking => return None,
             DependencyState::Refused {
                 fix_failed: Some(failed),
                 ..
-            } => ctx.say(Message::error(
-                &super::new_project_view::printable(failed.clone()),
-                "",
-            )),
+            } => Message::error(&super::new_project_view::printable(failed.clone()), ""),
             DependencyState::Refused { .. }
             | DependencyState::Missing { .. }
             | DependencyState::Failed { .. }
-            | DependencyState::Unsupported => ctx.say(Message::warning(
+            | DependencyState::Unsupported => Message::warning(
                 &format!("Permissions changed, but {} is still not used.", row.label),
                 "See the reason below.",
-            )),
-            _ => ctx.say(Message::success(
+            ),
+            _ => Message::success(
                 &format!("Permissions fixed. {} can run now.", row.label),
                 "",
-            )),
-        }
+            ),
+        };
+        ctx.say(said.clone());
         self.fixing = None;
+        Some(said)
     }
 
-    /// The first tool found and passed over whose row offers a permission fix, with its
-    /// label and the fix. Output: the tool, or none.
+    /// The first tool found and passed over whose row offers a permission fix and has no
+    /// job on it (DEC-199), with its label and the fix. Output: the tool, or none.
     fn fixable(&self) -> Option<(Dependency, String, ToolFix)> {
         let Load::Ready(status) = &self.setup else {
             return None;
@@ -947,6 +963,7 @@ impl AppSetup {
         status
             .dependencies
             .iter()
+            .filter(|tool| !tool.busy)
             .find_map(|tool| match &tool.state {
                 DependencyState::Refused { fix: Some(fix), .. } => {
                     Some((tool.name, tool.label.clone(), fix.clone()))
@@ -2102,7 +2119,14 @@ impl AppSetup {
                     &[TOOL_WIDTH, rest],
                     vec![
                         Line::raw(tool.label.clone()),
-                        status(&tool_word(&tool.state), theme, glyphs),
+                        status(
+                            &tool
+                                .waiting
+                                .as_ref()
+                                .map_or_else(|| tool_word(&tool.state), |_| "Waiting".into()),
+                            theme,
+                            glyphs,
+                        ),
                     ],
                     2,
                     glyphs,
@@ -2110,6 +2134,12 @@ impl AppSetup {
             ]));
             let printable = super::new_project_view::printable;
             let mut details = Vec::new();
+            if let Some(waits) = &tool.waiting {
+                details.push((
+                    format!("Waiting for {} to finish...", printable(waits.clone())),
+                    Role::Muted,
+                ));
+            }
             match &tool.state {
                 DependencyState::Failed { reason } => {
                     details.push((setup_reason(reason), Role::Muted));

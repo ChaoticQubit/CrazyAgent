@@ -34,6 +34,7 @@ env:
   FARM_ENGINE_EXCLUDE: >-
     agents_live codex_app_server_live codex_bridge_live launch_context_live
     acceptance_v2_rcli_usage accounts_binary harness_catalog_bundled_rcli
+    worker_engine_boundary qualification_boundary/boundary_denies_escape_and_trusted_writes
     accounts/local_model_discovery_reads_the_real_ollama accounts/an_openai_compatible_account_check_lists_the_real_ollama_models
     harness_launch/live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_groups
     harness_launch/live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_file

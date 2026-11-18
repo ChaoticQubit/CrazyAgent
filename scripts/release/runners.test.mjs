@@ -33,17 +33,18 @@ function steps(workflowText, job) {
   return block(block(workflowText, 0, "jobs").join("\n"), 2, job).join("\n").split(/\n(?= {6}- )/).slice(1);
 }
 
-test("release builds both macOS targets on GitHub's macos-15 and Linux on ubuntu-22.04, with room for a cold build on three cores", async () => {
+test("release builds both macOS targets on GitHub's macos-15, Linux on ubuntu-22.04 and Windows x64 on windows-2022, with room for a cold build on three cores (DEC-195 Q8)", async () => {
   const release = await workflow("release.yml");
   assert.deepEqual(block(release, 0, "on").filter((line) => /^ {2}\S/.test(line)), ["  push:"], "no pull request can start a release");
   const build = block(release, 2, "build");
   const matrix = block(build.join("\n"), 6, "matrix").join("\n");
   const entries = matrix.split(/\n(?= {10}- )/).slice(1);
-  const macos = entries.filter((entry) => entry.includes("os: macos"));
-  assert.deepEqual(macos.map((entry) => entry.match(/target: (\S+)/)[1]).sort(), ["aarch64-apple-darwin", "x86_64-apple-darwin"]);
-  for (const entry of entries) {
-    assert.equal(entry.split("\n")[0], entry.includes("os: macos") ? "          - runner: macos-15" : "          - runner: ubuntu-22.04", entry);
-  }
+  assert.deepEqual(entries.map((entry) => entry.split("\n").map((line) => line.trim().replace(/^- /, ""))), [
+    ["runner: macos-15", "target: aarch64-apple-darwin", "os: macos"],
+    ["runner: macos-15", "target: x86_64-apple-darwin", "os: macos"],
+    ["runner: ubuntu-22.04", "target: x86_64-unknown-linux-gnu", "os: linux"],
+    ["runner: windows-2022", "target: x86_64-pc-windows-msvc", "os: windows"],
+  ]);
   assert(build.includes("    runs-on: ${{ matrix.runner }}"));
   assert(build.includes("    timeout-minutes: 300"));
 });
@@ -111,7 +112,7 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
 
 test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
   const release = await workflow("release.yml");
-  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "BUN_LINUX_X64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
+  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "BUN_LINUX_X64_SHA256", "BUN_WINDOWS_X64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
     assert.match(release, new RegExp(`^ {2}${pin}: [0-9a-f]{64}$`, "m"), pin);
   }
   const all = steps(release, "build");
@@ -127,6 +128,13 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
   assert.match(linux, /\/bun-v\$BUN_VERSION\/bun-linux-x64\.zip"/);
   assert.match(linux, /\n\s+echo "\$BUN_LINUX_X64_SHA256  \$work\/bun\.zip" \| sha256sum -c -\n/, "a downloaded Linux bun that does not match its pin fails the job");
   assert.match(linux, /\n\s+install -m 0755 "\$work\/bun-linux-x64\/bun" "\$work\/bin\/bun"\n/);
+  const windows = all[at(/id: bun-windows\n/)];
+  assert.match(windows, /^ {6}- id: bun-windows\n {8}name: Install pinned x64 bun for Windows\n {8}if: matrix\.os == 'windows'\n/, "every Windows runner runs the pinned x64 bun");
+  assert(windows.includes('\n          [ "$RUNNER_ARCH" = X64 ] || { echo "::error::the Windows release runner must be x64"; exit 1; }\n'), "an ARM64 runner, which would run the x64 bun emulated, is refused");
+  assert.match(windows, /\/bun-v\$BUN_VERSION\/bun-windows-x64\.zip"/);
+  assert.match(windows, /\n\s+echo "\$BUN_WINDOWS_X64_SHA256  \$work\/bun\.zip" \| sha256sum -c -\n/, "a downloaded Windows bun that does not match its pin fails the job");
+  assert.match(windows, /\n\s+install -m 0755 "\$work\/bun-windows-x64\/bun\.exe" "\$work\/bin\/bun\.exe"\n/);
+  assert(windows.includes(`\n          test "$("$work/bin/bun.exe" -e 'console.log(process.arch)')" = x64\n`), "the bun that runs is x64");
   const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
   assert(rust, "the release on the owner's runner installs its own Rust");
   assertPinnedRust(rust, "release");
@@ -140,8 +148,8 @@ test("a release signs with pinned, checksum-checked Node and Rust on the owner's
   assert.match(all[bun], /\n\s+echo "\$BUN_DARWIN_ARM64_SHA256  \$work\/bun\.zip" \| shasum -a 256 -c -\n/, "a downloaded arm64 bun that does not match its pin fails the job");
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
     const index = at(new RegExp(`name: ${name}\n`));
-    assert.equal(all[index].match(/\n\s+BUN_PATH: (.+)\n/)[1], "${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}", name);
-    assert(bun < index && at(/id: bun-x64\n/) < index && at(/id: bun\n/) < index, `${name}: an rcli gets the checksum-checked bun of its runner`);
+    assert.equal(all[index].match(/\n\s+BUN_PATH: (.+)\n/)[1], "${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path || steps.bun-windows.outputs.bun-path }}", name);
+    assert(bun < index && at(/id: bun-x64\n/) < index && at(/id: bun\n/) < index && at(/id: bun-windows\n/) < index, `${name}: an rcli gets the checksum-checked bun of its runner`);
     for (const id of all[index].match(/\bsteps\.([a-z0-9-]+)\.outputs\.bun-path\b/g).map((ref) => ref.split(".")[1])) {
       const source = all[at(new RegExp(`^ {6}- id: ${id}\\n`))];
       assert(source, `${name}: ${id} is a step of this job`);
@@ -353,7 +361,7 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun under 
   assert.match(bun, /"\$RUNNER_TOOL_CACHE\/crazyagent-release\/bun\/\$BUN_VERSION\/x64"/, "the x86_64 bun stays in the release's own tool cache folder");
   assert.match(bun, /\n\s+if ! arch -x86_64 \/usr\/bin\/true 2>\/dev\/null; then\n\s+if \[ "\$RUNNER_ENVIRONMENT" != github-hosted \]; then\n[^\n]+::error::[^\n]+\n\s+exit 1\n\s+fi\n\s+sudo softwareupdate --install-rosetta --agree-to-license\n\s+arch -x86_64 \/usr\/bin\/true\n\s+fi\n/);
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
-    assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
+    assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \|\| steps\.bun-windows\.outputs\.bun-path \}\}/, name);
   }
 });
 
@@ -369,16 +377,37 @@ test("every test farm Linux tmux install first takes group and other write off t
   }
 });
 
-test("both test farm cargo builds turn on the engine's owner-trace feature only where the built tree's engine defines it, so a failed row's captured stderr holds one line per owner exchange and a tree from any other base still builds (leader 02:58, #297 F1; clean_mac_release.rs keeps it out of every release build)", async () => {
+test("every uv the Rust shard action installs puts its folder on the job's PATH, so the rows that run uv find it on macOS as they do on Linux (G1 macOS M1)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const sites = shard.split(/\n(?= {4}- )/).map((step) => `${step}\n`).filter((step) => step.includes('install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"\n'));
+  assert.equal(sites.length, 2, "the Linux uv step and the macOS graphify step");
+  for (const site of sites) {
+    const installed = site.indexOf('install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"\n');
+    assert(site.indexOf('echo "$work/bin" >> "$GITHUB_PATH"\n') > installed, site.split("\n")[0]);
+  }
+});
+
+test("the macOS Rust shard links the graphify it installs into the uv folder on the job's PATH, never the venv's bin, so an engine started by a row finds it where the graph step looks (G1 macOS M3)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const step = shard.split(/\n(?= {4}- )/).map((text) => `${text}\n`).find((text) => text.includes("name: Install pinned graphify for the graph rows\n"));
+  assert(step, "the macOS graphify step");
+  const checked = step.indexOf('"$venv/bin/graphify" --help > /dev/null\n');
+  assert(checked >= 0, "the step runs the graphify it installed");
+  assert(step.indexOf('ln -s "$venv/bin/graphify" "$work/bin/graphify"\n') > checked, "the link names the graphify just checked");
+  assert(step.includes('echo "$work/bin" >> "$GITHUB_PATH"\n'), "the linked folder is on the job's PATH");
+  assert.doesNotMatch(step, /"\$venv\/bin" >> "\$GITHUB_PATH"/, "the venv's python never shadows the runner's");
+});
+
+test("both test farm engine cargo builds turn on the engine's owner-trace feature only where the built tree's engine defines it, so a failed row's captured stderr holds one line per owner exchange and a tree from any other base still builds; the Windows boundary build has no engine and builds without it (leader 02:58, #297 F1; #326 r1 F1; clean_mac_release.rs keeps it out of every release build)", async () => {
   const archive = await readFile(new URL("../../.github/actions/rust-archive/action.yml", import.meta.url), "utf8");
   const parts = archive.split(/\n(?= {4}- )/);
   const check = parts.findIndex((step) => step.startsWith("    - name: Turn on the engine's owner trace where this tree defines it\n"));
   assert(check >= 0 && parts[check].includes("if grep -Eq '^owner-trace[[:space:]]*=' crates/crazyagent/Cargo.toml; then\n          echo \"FARM_ENGINE_FEATURES=crazyagent/owner-trace\" >> \"$GITHUB_ENV\"\n"), "one check reads the built tree's engine manifest");
   const builds = parts.flatMap((step, at) => step.split("\n").filter((line) => /^ +cargo (build|nextest archive) /.test(line)).map((line) => ({ at, line })));
-  assert.equal(builds.length, 2, "the engine binaries and the test archive");
+  assert.deepEqual(builds.map(({ line }) => line.match(/ (-p \S+|--workspace) /)[1]), ["-p crazyagent", "-p crazyagent-win-sandbox", "--workspace"], "the engine binaries, the Windows boundary and the test archive");
   for (const { at, line } of builds) {
     assert(at > check, "after the check");
-    assert(line.includes(' ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline'), line);
+    assert.equal(line.includes(' ${FARM_ENGINE_FEATURES:+--features "$FARM_ENGINE_FEATURES"} --locked --offline'), !line.includes(" -p crazyagent-win-sandbox "), line);
   }
   assert.equal(archive.match(/owner-trace/g).length, 2, "named only by the check");
 });

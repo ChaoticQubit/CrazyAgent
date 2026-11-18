@@ -55,17 +55,22 @@ fn request(id: &str, revision: u64, command: Command) -> WireRequest {
 }
 
 /// Sends one request the way the engine's contract asks a client to: while it answers
-/// outcome_unknown_retry_same_identity (its wait ended and the write may still commit),
-/// the same request goes again, and storage replays a recorded mutation's reply. Gives up
-/// after 30 s. Inputs: the engine and the request. Output: the reply.
+/// outcome_unknown_retry_same_identity (its wait ended and the write may still commit) or
+/// a not-submitted code (nothing ran), the same request goes again, and storage replays a
+/// recorded mutation's reply. Gives up after 30 s. Inputs: the engine and the request.
+/// Output: the reply.
 async fn send(engine: &Engine, request: WireRequest) -> WireReply {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match engine.apply(request.clone()).await {
             Ok(reply) => return reply,
             Err(error)
-                if error.0 == "outcome_unknown_retry_same_identity"
-                    && std::time::Instant::now() < until => {}
+                if matches!(
+                    error.0.as_str(),
+                    "outcome_unknown_retry_same_identity"
+                        | "storage_starting_not_submitted"
+                        | "storage_busy_not_submitted"
+                ) && std::time::Instant::now() < until => {}
             Err(error) => panic!("engine apply failed: {error:?}"),
         }
     }
@@ -1519,6 +1524,10 @@ async fn a_mixed_device_lease_record_is_still_refused() {
     }
 }
 
+/// One change a lease row makes to a lease worktree before the engine opens again, such as
+/// a tracked file removed or an index rewritten. Input: the lease worktree.
+type Damage = dyn Fn(&Path);
+
 /// Makes a Ready lease, lets `change` touch its worktree, stores the lease Uncertain with
 /// `renumber` applied, opens the engine once more, and runs `after` once it is closed.
 /// Inputs: the change and the after check, each given the lease worktree, and the renumber.
@@ -1575,7 +1584,7 @@ async fn a_failed_checkout_stays_uncertain_on_a_plain_and_a_renumbered_volume() 
         |worktree: &Path| std::fs::remove_file(admin_folder(worktree).join("index")).unwrap();
     let locked =
         |worktree: &Path| std::fs::write(admin_folder(worktree).join("index.lock"), "").unwrap();
-    let damages: [(&str, &dyn Fn(&Path)); 4] = [
+    let damages: [(&str, &Damage); 4] = [
         ("missing", &missing),
         ("short", &short),
         ("no index", &unindexed),
@@ -1626,7 +1635,7 @@ async fn an_uncertain_lease_whose_index_has_no_stat_data_is_checked_on_its_conte
         index_from_read_tree(worktree);
         std::fs::remove_file(worktree.join("tracked")).unwrap();
     };
-    let cases: [(&str, &dyn Fn(&Path), LeaseState); 3] = [
+    let cases: [(&str, &Damage, LeaseState); 3] = [
         ("whole", &index_from_read_tree, LeaseState::RecoveryRequired),
         ("same size, other bytes", &altered, LeaseState::Uncertain),
         ("missing", &missing, LeaseState::Uncertain),

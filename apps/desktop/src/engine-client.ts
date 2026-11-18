@@ -3,6 +3,17 @@ import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 import { isWindows } from "./ui/keys";
 
+/** Storage's own answers to a request, one sentence each, the same on every page and in the
+ * terminal: a full queue, a database still starting and a request withdrawn unrun changed
+ * nothing, and an access change waiting its turn still takes effect. Input: none. Output:
+ * the sentence for each code. */
+export const STORAGE_COPY: Record<string, string> = {
+  owner_queue_not_submitted: "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.",
+  storage_starting_not_submitted: "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.",
+  access_change_pending: "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.",
+  storage_busy_not_submitted: "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.",
+};
+
 /** Retries a bridge call the native side refused with "busy" because another call held
  * the bridge; such a refusal happens before any action, so repeating it is safe. Each pause
  * is spread at random so calls refused together do not all retry at the same moment again.
@@ -307,6 +318,7 @@ export function errorMessage(error: unknown): string {
     server_command_not_found: "Can't start: command not found.",
     server_command_not_runnable: "Can't start: this file can't be run.",
     server_cant_start: "The server can't start.",
+    server_batch_file: "This command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent does not start it. Set the command to the tool's .exe, or to node.exe with the tool's script as the first argument.",
     server_exited: "The server stopped before answering.",
     server_check_timeout: "The server did not answer within 10 seconds.",
     server_setting_up: "context-mode is still being set up. Check again in a minute.",
@@ -408,6 +420,7 @@ export function errorMessage(error: unknown): string {
     invalid_baseline_data: "The engine returned a baseline that could not be validated.",
     unexpected_reply: "The engine returned an unexpected response. Refresh before continuing.",
   };
+  if (Object.hasOwn(STORAGE_COPY, code)) return STORAGE_COPY[code];
   return messages[code] ?? withCode("The owner request failed. Refresh before continuing.", code);
 }
 
@@ -1410,15 +1423,33 @@ export interface FoundProject {
   project_id?: string | null;
 }
 
+/** A rebuildable folder (node_modules, .venv, __pycache__, or dist or build a .gitignore names)
+ * that still needs downloading from iCloud, so an add leaves it out: its path below the added
+ * folder and how many files it holds, null when the folder itself is only in iCloud. */
+export interface SkippedFolder {
+  path: string;
+  files: number | null;
+}
+
+/** The rebuildable folders past the ones a reply names: how many, and the files they hold, null
+ * when one of them is only in iCloud itself and cannot be counted. */
+export interface SkippedMore {
+  folders: number;
+  files: number | null;
+}
+
 /** What the native bridge read about a picked folder: its bytes, or null with the size code when
- * it could not be measured, how many of its files are only in iCloud, its GitHub repository, its linked worktrees and their folders, whether
- * the engine lets it move and be copied without an override and which git link a Move breaks,
- * whether it has git, and whether it shares a disk with the projects folder (null when that is
- * unknown). */
+ * it could not be measured, how many of its files are only in iCloud outside the rebuildable
+ * folders an add leaves out, those folders, its GitHub repository, its linked worktrees and their
+ * folders, whether the engine lets it move and be copied without an override and which git link
+ * a Move breaks, whether it has git, and whether it shares a disk with the projects folder (null
+ * when that is unknown). */
 export interface FolderSize {
   bytes: number | null;
   size_problem?: string | null;
   placeholders?: number;
+  skipped?: SkippedFolder[];
+  skipped_more?: SkippedMore;
   github?: string | null;
   worktrees?: number;
   worktree_paths?: string[];
@@ -1434,8 +1465,9 @@ export type GitLink = "none" | "worktrees" | "linked_worktree" | "submodule" | "
 
 export type AddFolderMode = "move" | "copy";
 
-/** A soft refusal of one add that the owner was shown and chose to go past for that add only. */
-export type AddOverride = "worktrees" | "linked_checkout" | "too_large";
+/** A soft refusal of one add that the owner was shown and chose to go past for that add only, or
+ * Download everything, which downloads the rebuildable folders an add otherwise leaves in iCloud. */
+export type AddOverride = "worktrees" | "linked_checkout" | "too_large" | "download_everything";
 
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
@@ -1774,6 +1806,8 @@ export interface Dependency {
   name: DependencyName;
   label: string;
   state: DependencyState;
+  busy?: boolean;
+  waiting?: string;
 }
 
 export type PackEntryKind = "skill" | "mcp_server";
@@ -1823,33 +1857,20 @@ export function foundProjects(): Promise<FoundProject[]> {
   return invoke<FoundProject[]>("desktop_found_projects");
 }
 
-/** How far the running iCloud download has come: the files only in iCloud it found so far and how
- * many of them are on this Mac now. */
+/** How far an intake job's iCloud download has come: the files only in iCloud it found so far and
+ * how many of them are on this Mac now, and their bytes (absent from an older engine). */
 export interface IcloudProgress {
   total: number;
   done: number;
-}
-
-/** Downloads every file of a folder that is only in iCloud and waits until all are on this Mac;
- * the folder itself is not moved. Input: an absolute folder path. Output: how many it downloaded. */
-export function icloudDownload(path: string): Promise<number> {
-  return invoke<number>("desktop_icloud_download", { path });
-}
-
-/** Reads the running iCloud download's progress. Output: the counts, or null when none runs. */
-export function icloudProgress(): Promise<IcloudProgress | null> {
-  return invoke<IcloudProgress | null>("desktop_icloud_progress");
-}
-
-/** Stops the running iCloud download. Output: whether one was running. */
-export function icloudCancel(): Promise<boolean> {
-  return invoke<boolean>("desktop_icloud_cancel");
+  bytes_total?: number;
+  bytes_done?: number;
 }
 
 /** The part of a job that was running when it ended. */
-export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | "trashing" | "building";
+export type IntakePhase = "waiting" | "downloading" | "stopping" | "copying" | "clearing" | "trashing" | "building";
 
-/** What the engine's job is doing, or how it ended. A project move or a delete waits for its
+/** What the engine's job is doing, or how it ended. A job waits its turn behind the job it names
+ * until that one ends (DEC-197). A project move or a delete waits for its
  * agents to stop first; copying counts the files copied, then the files checked; clearing
  * removes a moved folder's old place, or a deleted project's records, and never stops; a delete
  * moves its folders to the Trash in trashing, with no stop once the first one moves, and
@@ -1857,6 +1878,7 @@ export type IntakePhase = "downloading" | "stopping" | "copying" | "clearing" | 
  * Trash; a New Project builds its folder in building, with how many of its documents it copied
  * once it counted them. */
 export type IntakeJobState =
+  | { state: "waiting"; behind: string }
   | { state: "downloading"; progress: IcloudProgress }
   | { state: "stopping"; agents_left: number }
   | { state: "copying"; copied: number; checked: number }
@@ -1874,9 +1896,10 @@ export type IntakeJobState =
  * name in place of the folder (add.2). */
 export type ProjectJobKind = "add" | "move_project" | "delete" | "setup";
 
-/** The engine's one job, which adds a folder or moves a project into the projects folder apart
+/** One of the engine's jobs, which adds a folder or moves a project into the projects folder apart
  * from the window: its id, its kind, the project a move takes, the folder, move or copy, the
- * soft refusals it goes past, whether a stop was asked and its state. */
+ * soft refusals it goes past, whether a stop was asked, its state and the rebuildable folders its
+ * download left in iCloud, which the add left out. */
 export interface IntakeJob {
   id: string;
   kind: ProjectJobKind;
@@ -1886,6 +1909,8 @@ export interface IntakeJob {
   overrides: AddOverride[];
   stopping: boolean;
   state: IntakeJobState;
+  left?: SkippedFolder[];
+  left_more?: SkippedMore;
 }
 
 /** Starts the engine's intake job for a folder, or attaches to the one adding it already.
@@ -1894,9 +1919,10 @@ export function intakeStart(path: string, mode: AddFolderMode, overrides: AddOve
   return invoke<IntakeJob>("desktop_intake_start", { path, mode, overrides });
 }
 
-/** Reads the engine's intake job, running or last ended. Output: the job, or null. */
-export function intakeStatus(): Promise<IntakeJob | null> {
-  return invoke<IntakeJob | null>("desktop_intake_status");
+/** Reads every job the engine holds, running, waiting its turn or ended since the last start
+ * (DEC-197). Output: the jobs in start order. */
+export function intakeStatus(): Promise<IntakeJob[]> {
+  return invoke<IntakeJob[]>("desktop_intake_status");
 }
 
 /** Asks the running intake job to stop between files. Input: its id. Output: whether it ran. */
@@ -1907,6 +1933,25 @@ export function intakeStop(id: string): Promise<boolean> {
 /** Forgets an ended intake job. Input: its id. Output: whether it was forgotten. */
 export function intakeDismiss(id: string): Promise<boolean> {
   return invoke<boolean>("desktop_intake_dismiss", { id });
+}
+
+/** A project's reinstall offer: up to three folders a job left in iCloud as rebuildable, shown
+ * plain, how many more there are, and the message the master gets on Ask. */
+export interface ReinstallOffer {
+  folders: string[];
+  more: number;
+  draft: string;
+}
+
+/** Reads the reinstall offer the engine keeps for a project's folder. Input: the project id.
+ * Output: the offer, or null when there is none. */
+export function reinstallOffer(projectId: string): Promise<ReinstallOffer | null> {
+  return invoke<ReinstallOffer | null>("desktop_reinstall_offer", { projectId });
+}
+
+/** Dismisses a project's reinstall offer. Input: the project id. Output: whether one was. */
+export function reinstallDismiss(projectId: string): Promise<boolean> {
+  return invoke<boolean>("desktop_reinstall_dismiss", { projectId });
 }
 
 /** Measures a folder before Copy and names its GitHub repository, if any.

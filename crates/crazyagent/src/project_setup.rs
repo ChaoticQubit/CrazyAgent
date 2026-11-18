@@ -2885,6 +2885,9 @@ fn remove(
     }
     crate::memory::forget_project(tx, project_id)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
+    if let Some(folder) = folder.as_deref() {
+        crate::storage::reinstall::forget(tx, folder)?;
+    }
     removed::record(
         tx,
         project_id,
@@ -3151,7 +3154,8 @@ impl NewProjectPlan {
 }
 
 /// Records a New Project whose folder the owner transport built, with a first agent
-/// policy that records the toolchains the owner has installed (F26).
+/// policy that records the toolchains the owner has installed (F26), and forgets any
+/// reinstall offer still kept at that path for a folder that is gone (#419 sec F2).
 /// Takes the transaction, configuration, the Create action, the staged result and whether
 /// the request is Create demo, which clears what an earlier demo left first. Returns
 /// Applied once the rows are written, the brief is in place and the folder is moved into
@@ -3197,6 +3201,7 @@ pub(crate) fn record_new(
         &staged.folder,
     )?;
     if outcome == Outcome::Applied {
+        crate::storage::reinstall::forget(tx, &staged.folder)?;
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
         if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
             let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();

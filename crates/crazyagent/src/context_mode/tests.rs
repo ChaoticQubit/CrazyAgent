@@ -70,6 +70,15 @@ impl Case {
         install(&self.root, &self.bin, VERSION)
     }
 
+    /// Writes the engine database every real engine root holds, with the default sandbox
+    /// settings, so a step's Linux boundary reads the owner's choices instead of refusing a
+    /// root with no store. Input: none. Output: none.
+    fn store(&self) {
+        let connection = rusqlite::Connection::open(self.root.join("engine.db")).unwrap();
+        crate::sandbox_settings::initialize(&connection).unwrap();
+        assert!(self.root.join("engine.db").is_file());
+    }
+
     /// Lists the hidden staging and work folders installs left in `setup/npm`.
     fn staged(&self) -> Vec<String> {
         fs::read_dir(self.npm())
@@ -207,6 +216,59 @@ fn a_stale_staging_folder_is_removed_under_the_lock() {
     assert_eq!(case.install().unwrap_err().0, "context_mode_install_failed");
     assert!(!stale.exists());
     assert!(case.staged().is_empty());
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: a node probe that crashed before its release left its
+/// scratch folder; the next probe, with no other probe running, ends it whatever the probe
+/// itself answers.
+#[test]
+fn a_node_probe_removes_the_scratch_a_crashed_probe_left() {
+    let case = case("/usr/bin/false");
+    let left = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    fs::write(left.join(NODE_PROFILE), "from a crashed probe").unwrap();
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(!left.exists(), "the crashed probe's scratch is ended");
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: while another probe holds the check lock, a probe
+/// leaves every scratch folder alone, since it may be that probe's live one; once the lock
+/// is free the next probe ends it.
+#[test]
+fn a_node_probe_leaves_a_scratch_alone_while_another_probe_holds_the_check_lock() {
+    let case = case("/usr/bin/false");
+    let left = staging_folder(&case.npm(), NODE_CHECK).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(case.npm().join("node-check.lock"))
+        .unwrap();
+    held.lock_shared().unwrap();
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(left.is_dir(), "a live probe's scratch is never touched");
+    held.unlock().unwrap();
+    drop(held);
+    let _ = node_supported(&case.root, &case.bin);
+    assert!(!left.exists(), "with the lock free the scratch is ended");
+}
+
+/// V243-WIN-CONTAINER-CRASH-LEFTOVER: an install's work folder carries its staging folder's
+/// random suffix, so a later install can pair the two, and is never one that exists.
+#[test]
+fn an_install_work_folder_is_paired_with_its_staging_folder_by_name() {
+    let case = case("/usr/bin/false");
+    let prefix = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
+    assert_eq!(random.len(), 24);
+    let work = work_folder(&staged, &prefix).unwrap();
+    assert_eq!(work, case.npm().join(format!(".{prefix}-work-{random}")));
+    assert!(work.is_dir());
+    assert_eq!(
+        work_folder(&staged, &prefix),
+        Err(InstallError("setup_store_unavailable"))
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -460,6 +522,7 @@ fn registered(folder: &Path) -> bool {
 #[test]
 fn a_check_inside_the_backoff_after_a_failed_install_gets_the_time_left_and_never_npx() {
     let case = case("/usr/bin/false");
+    case.store();
     fs::write(case.npm().join(FAILED), (now() - 60).to_string()).unwrap();
     match for_check(&case.root, npx_in(&case, VERSION)) {
         ForCheck::Failed(left) => assert!(
@@ -752,6 +815,7 @@ fn only_node_22_5_or_newer_runs_the_shared_install() {
 #[test]
 fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_server() {
     let case = case("/usr/bin/false");
+    case.store();
     node_reports(&case.bin, "v22.4.1");
     assert_eq!(case.install().unwrap_err().0, "context_mode_node_too_old");
     assert_eq!(

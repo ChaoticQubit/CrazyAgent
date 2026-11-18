@@ -40,6 +40,64 @@ fn a_home_move_rechecks_agent_work_under_its_hold_before_the_first_write() {
     );
 }
 
+/// V243-FIRMLINK-HELD-INSIDE (sweep #1, rv-code4 F1): agent work recorded under either name
+/// of the home holds a home move, whichever name the home was saved under and whether the
+/// recorded worktree exists on disk or is gone or not made yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_move_sees_agent_work_recorded_under_either_name_of_the_home() {
+    let long =
+        |path: &Path| std::path::PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let cases = [false, true]
+        .into_iter()
+        .flat_map(|long_home| [false, true].map(|long_record| (long_home, long_record)))
+        .flat_map(|(long_home, long_record)| {
+            [false, true].map(|made| (long_home, long_record, made))
+        });
+    for (long_home, long_record, made) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let worktree = home.join("demo").join("agent-3");
+        std::fs::create_dir_all(&home).unwrap();
+        if made {
+            std::fs::create_dir_all(&worktree).unwrap();
+        }
+        assert!(long(&home).is_dir(), "{}", long(&home).display());
+        let saved = if long_home { long(&home) } else { home.clone() };
+        let recorded = if long_record {
+            long(&worktree)
+        } else {
+            worktree.clone()
+        };
+        let mut connection = Connection::open(base.join("engine.db")).unwrap();
+        initialize_authority_schemas(&connection).unwrap();
+        crate::projects_home::save(&connection, &saved).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"demo\"]')",
+                params![saved.to_str().unwrap(), base.join("next").to_str().unwrap()],
+            )
+            .unwrap();
+        let repository = recorded.parent().unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (3,'demo',?1,?2,?3)",
+                params![
+                    repository.to_str().unwrap(),
+                    recorded.to_str().unwrap(),
+                    recorded.join(".git").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            projects_home::recheck(&mut connection, 7).unwrap(),
+            Err("home_move_agent_work".to_owned()),
+            "home saved long: {long_home}, record long: {long_record}, record made: {made}"
+        );
+    }
+}
+
 /// rv-sec3 S5b F2: a projects home move carries each moved project's GitHub publish job,
 /// named by the project's folder, to the project's folder in the new home, so a recorded
 /// publish is still found there and nothing is left under the old folder.
@@ -728,8 +786,8 @@ fn delete_everything_is_offered_only_on_macos_in_v2() {
 
 /// An add holds the projects home from its plan until its record or settle: the home is not
 /// set or moved elsewhere while a running row exists. An engine start removes the staging an
-/// add cut short left, deletes nothing else, and keeps only the newest end for the owner,
-/// until it is forgotten.
+/// add cut short left, deletes nothing else, and keeps each end for the owner in start order
+/// (DEC-197), until it is forgotten.
 #[test]
 fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     let root = tempfile::tempdir().unwrap();
@@ -768,7 +826,7 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         projects_home::add_settle(&mut connection, Some((&add_1, false))).unwrap(),
         1
     );
-    assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+    assert!(projects_home::add_ended(&connection).unwrap().is_empty());
 
     insert(&connection, "add-2");
     assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 1);
@@ -777,14 +835,21 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
         "a\n"
     );
-    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    let ended = projects_home::add_ended(&connection).unwrap();
+    let [ended] = ended.as_slice() else {
+        panic!("one end: {ended:?}");
+    };
     assert_eq!(ended.request.as_str(), "add-2");
     assert_eq!(ended.ended, "home_add_interrupted");
 
     std::fs::create_dir_all(landed.join("lib")).unwrap();
     insert(&connection, "add-3");
     assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 1);
-    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    let ended = projects_home::add_ended(&connection).unwrap();
+    let [older, ended] = ended.as_slice() else {
+        panic!("both ends: {ended:?}");
+    };
+    assert_eq!(older.request.as_str(), "add-2");
     assert_eq!(ended.request.as_str(), "add-3");
     assert_eq!(ended.ended, "home_move_source_left");
     assert_eq!(
@@ -797,10 +862,113 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(rows, 2, "each end is kept until forgotten");
     let add_3 = RequestId::new("add-3").unwrap();
     projects_home::job_forget(&connection, &add_3).unwrap();
-    assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+    let kept: Vec<_> = projects_home::add_ended(&connection).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].request.as_str(), "add-2");
+}
+
+/// DEC-197: adds onto names apart run side by side, so several running rows can be left.
+/// Settling one leaves the others running and the home held; an engine start ends every
+/// running row, removes each staging, deletes nothing of either folder, and keeps each end
+/// for the owner in start order, the newest three, until it is forgotten.
+#[test]
+fn an_engine_start_ends_every_add_running_side_by_side_and_keeps_each_end() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let names = ["shop", "garden"];
+    for name in names {
+        std::fs::create_dir_all(base.join(name).join("lib")).unwrap();
+        std::fs::write(base.join(name).join("lib/a.txt"), format!("{name}\n")).unwrap();
+    }
+    let staging = [
+        home.join(".crazyagent-adding-00ff00ff00ff00ff"),
+        home.join(".crazyagent-adding-11ee11ee11ee11ee"),
+    ];
+    for folder in &staging {
+        std::fs::create_dir_all(folder.join("lib")).unwrap();
+    }
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str, name: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, 'move')",
+                params![
+                    request,
+                    base.join(name).to_str().unwrap(),
+                    home.join(name).to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    };
+    let running = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    insert(&connection, "add-shop", "shop");
+    insert(&connection, "add-garden", "garden");
+    let shop = RequestId::new("add-shop").unwrap();
+    assert_eq!(
+        projects_home::add_settle(&mut connection, Some((&shop, false))).unwrap(),
+        1
+    );
+    assert_eq!(running(&connection), 1, "garden still runs");
+    let elsewhere = crate::projects_home::HomeAction::SetHome {
+        path: base.join("elsewhere").to_str().unwrap().into(),
+    };
+    let held = {
+        let tx = connection.transaction().unwrap();
+        projects_home::execute(&tx, &base.join("engine.db"), &elsewhere).unwrap()
+    };
+    assert!(
+        format!("{held:?}").contains("home_add_in_progress"),
+        "{held:?}"
+    );
+
+    insert(&connection, "add-shop-2", "shop");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 2);
+    assert_eq!(running(&connection), 0, "every running add ended");
+    for folder in &staging {
+        assert!(!folder.exists(), "{folder:?}");
+    }
+    for name in names {
+        assert_eq!(
+            std::fs::read_to_string(base.join(name).join("lib/a.txt")).unwrap(),
+            format!("{name}\n"),
+            "a start deletes nothing of {name}"
+        );
+    }
+    let ends = |connection: &Connection| -> Vec<String> {
+        let ended = projects_home::add_ended(connection).unwrap();
+        assert!(ended.iter().all(|end| end.ended == "home_add_interrupted"));
+        ended
+            .into_iter()
+            .map(|end| end.request.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(ends(&connection), ["add-garden", "add-shop-2"]);
+
+    insert(&connection, "add-3", "shop");
+    insert(&connection, "add-4", "garden");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 2);
+    assert_eq!(
+        ends(&connection),
+        ["add-shop-2", "add-3", "add-4"],
+        "the oldest end goes past three"
+    );
+    projects_home::job_forget(&connection, &RequestId::new("add-3").unwrap()).unwrap();
+    assert_eq!(ends(&connection), ["add-shop-2", "add-4"]);
 }
 
 /// RV-DS241-198: an add whose folder landed in the projects home but whose record never
@@ -843,9 +1011,8 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
 
     insert(&connection, "add-unlanded", "move");
     assert_eq!(settle(&mut connection, "add-unlanded", true), 1);
-    assert_eq!(
-        projects_home::add_ended(&connection).unwrap(),
-        None,
+    assert!(
+        projects_home::add_ended(&connection).unwrap().is_empty(),
         "an add that landed nothing is forgotten"
     );
 
@@ -854,6 +1021,7 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
     assert_eq!(settle(&mut connection, "add-copied", true), 1);
     let ended = projects_home::add_ended(&connection)
         .unwrap()
+        .pop()
         .expect("a landed add whose record never came was forgotten");
     assert_eq!(
         (ended.request.as_str(), ended.mode, ended.ended.as_str()),
@@ -862,7 +1030,10 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
 
     insert(&connection, "add-moved", "move");
     assert_eq!(settle(&mut connection, "add-moved", true), 1);
-    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    let ended = projects_home::add_ended(&connection)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(
         (ended.request.as_str(), ended.mode, ended.ended.as_str()),
         (
@@ -876,7 +1047,7 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
             row.get(0)
         })
         .unwrap();
-    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(rows, 2, "each end is kept until forgotten");
     assert_eq!(
         std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
         "a\n",
@@ -889,12 +1060,18 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
         0,
         "a recorded or settled add has no running row"
     );
-    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    let kept = projects_home::add_ended(&connection)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(kept.request.as_str(), "add-moved");
 
     insert(&connection, "add-taken", "copy");
     assert_eq!(settle(&mut connection, "add-taken", false), 1);
-    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    let kept = projects_home::add_ended(&connection)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(
         kept.request.as_str(),
         "add-moved",

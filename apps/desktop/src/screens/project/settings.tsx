@@ -5,8 +5,7 @@ import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, restartHiddenSeers, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, startDeleteJob, updateProjectSetup, type HiddenPaths, type HiddenRunKind, type ReadPaths } from "../../api-projects";
 import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntakeJob, IntentReceipt, MessageSettings, SwitchApply, TeamAgent, TeamStatus } from "../../engine-client";
-import { loadIntakeJob } from "../../api-intake";
-import { refusalLine } from "../intake/intake";
+import { intakeCopy } from "../../api-intake";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, HomeCachesChoices, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, networkGap, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select, navigate } from "../../ui";
@@ -242,15 +241,15 @@ export function watchRemoveAsk(projectId: string, onAsk: (choice: RemoveChoice) 
   return () => window.removeEventListener("hashchange", take);
 }
 
-/** Starts the engine's job that deletes a project once its exact name is typed (DEC-177 add.1).
- * Inputs: the project id, the typed name, the start and the job read a busy refusal names the
- * running job from. Output: the started job, or the note the dialog's section shows. */
-export async function deleteStart(id: string, typed: string, start = startDeleteJob,
-  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<{ kind: "started"; job: IntakeJob } | { kind: "refused"; note: string }> {
+/** Starts the engine's job that deletes a project once its exact name is typed (DEC-177 add.1);
+ * it may wait its turn behind other jobs (DEC-197). Inputs: the project id, the typed name and
+ * the start. Output: the started job, or the note the dialog's section shows. */
+export async function deleteStart(id: string, typed: string, start = startDeleteJob): Promise<{ kind: "started"; job: IntakeJob } | { kind: "refused"; note: string }> {
   const result = await start(id, typed);
   if (result.kind === "ok") return { kind: "started", job: result.value };
   if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: deleting a project isn't in this build." };
-  return { kind: "refused", note: await refusalLine(result.code, failureCopy(result), read) };
+  const job = result.code === "job_busy" || result.code === "job_same_folder";
+  return { kind: "refused", note: job ? intakeCopy(result.code) : failureCopy(result) };
 }
 
 /** Settings' Remove project: the section, and its dialog, opened by the button or by a route

@@ -35,6 +35,7 @@ mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
+pub(crate) mod reinstall;
 pub(crate) mod setup;
 pub(crate) mod trash;
 #[cfg(unix)]
@@ -48,6 +49,86 @@ pub(crate) use native_auth::account_check_running;
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
+/// A point the storage worker can be held at by a row: before its receive loop, as a slow
+/// start does, or after it dequeues a claimed job and before it claims it.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Stage {
+    Start,
+    Claim,
+}
+
+#[cfg(all(test, unix))]
+static HELD: (
+    std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>>,
+    std::sync::Condvar,
+) = (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+/// Holds the storage worker of the database at `path` before its receive loop until the
+/// returned guard drops. Input: the path given to `Storage::open`. Output: the guard.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_start(path: &Path) -> StageHold {
+    hold(path, Stage::Start)
+}
+
+/// Holds the storage worker of the database at `path` at the claim of every job it dequeues
+/// until the returned guard drops. Input: the path given to `Storage::open`. Output: the guard.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_claims(path: &Path) -> StageHold {
+    hold(path, Stage::Claim)
+}
+
+/// Puts one hold on the list. Inputs: the database path and the stage.
+/// Output: the guard that lifts it.
+#[cfg(all(test, unix))]
+fn hold(path: &Path, stage: Stage) -> StageHold {
+    let mut held = HELD.0.lock().unwrap();
+    assert!(
+        !held
+            .iter()
+            .any(|other| *other == (path.to_path_buf(), stage))
+    );
+    held.push((path.to_path_buf(), stage));
+    StageHold(path.to_path_buf(), stage)
+}
+
+/// A hold from [`hold_start`] or [`hold_claims`]; dropping it lets that worker go on.
+#[cfg(all(test, unix))]
+pub(crate) struct StageHold(std::path::PathBuf, Stage);
+
+#[cfg(all(test, unix))]
+impl Drop for StageHold {
+    fn drop(&mut self) {
+        let mut held = HELD
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = held.len();
+        held.retain(|other| *other != (self.0.clone(), self.1));
+        assert_eq!(held.len() + 1, before);
+        HELD.1.notify_all();
+    }
+}
+
+/// Waits while a row holds the worker for `path` at `stage`.
+/// Inputs: the database path and the stage. Output: none.
+#[cfg(all(test, unix))]
+fn wait_while_held(path: &Path, stage: Stage) {
+    let mut held = HELD
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while held
+        .iter()
+        .any(|other| *other == (path.to_path_buf(), stage))
+    {
+        held = HELD
+            .1
+            .wait(held)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
@@ -178,7 +259,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
-    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Vec<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
     HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
@@ -210,11 +291,22 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeSetupMarkEnd(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeReinstallKeep(
+        std::path::PathBuf,
+        Option<std::path::PathBuf>,
+        crate::projects_home::reinstall::Kept,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeReinstallRead(
+        ProjectId,
+        oneshot::Sender<Result<Option<crate::projects_home::reinstall::Offer>, EngineError>>,
+    ),
+    HomeReinstallDismiss(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCheck(
         Admission,
         ProjectId,
         crate::projects_home::AddMode,
-        oneshot::Sender<Result<String, EngineError>>,
+        oneshot::Sender<Result<crate::projects_home::MoveCheck, EngineError>>,
     ),
     HomeMovePlan(
         Admission,
@@ -296,6 +388,9 @@ pub(crate) enum Job {
     Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
+    /// A timed job and its claim. The worker runs the job only when it takes the claim
+    /// before the caller withdraws it, so a withdrawn job never runs.
+    Claimed(Box<Job>, Arc<Claim>),
     /// Keeps the storage thread busy until the test sends on, or drops, the paired sender,
     /// so every job queued after it is answered only then, however fast the machine is.
     #[cfg(all(test, unix))]
@@ -306,11 +401,158 @@ pub(crate) enum Job {
     BusyHandler(fn(i32) -> bool, oneshot::Sender<Result<(), EngineError>>),
 }
 
+/// Tells whether a plugin change removes or turns off something an agent could use, or
+/// detaches a secret. Input: the command. Output: the answer.
+fn plugin_narrows_access(command: &plugins::Command) -> bool {
+    use crate::coord::tool_switches::Switch;
+    matches!(
+        command,
+        plugins::Command::RemoveSkill { .. }
+            | plugins::Command::RemoveServer { .. }
+            | plugins::Command::DetachSecret { .. }
+            | plugins::Command::SetSkill { enabled: false, .. }
+            | plugins::Command::SetHook { enabled: false, .. }
+            | plugins::Command::SetServer { enabled: false, .. }
+            | plugins::Command::Switch { on: false, .. }
+            | plugins::Command::SetTool {
+                switch: Switch::Off | Switch::Hidden,
+                ..
+            }
+    )
+}
+
+/// Tells whether an owner mutation may narrow what agents can reach: read and hidden
+/// paths, agent policy, sandbox settings and model access as whole setters, a pack entry
+/// turned off or removed, and a baseline revoked. Input: the mutation. Output: the answer.
+fn mutation_narrows_access(mutation: &OwnerMutation) -> bool {
+    matches!(
+        mutation,
+        OwnerMutation::SetProjectReadPaths { .. }
+            | OwnerMutation::SetProjectHiddenPaths { .. }
+            | OwnerMutation::SetProjectAgentPolicy { .. }
+            | OwnerMutation::SetSandboxSettings { .. }
+            | OwnerMutation::ModelAccess { .. }
+            | OwnerMutation::SetPackEntry { on: false, .. }
+            | OwnerMutation::RemovePackEntry { .. }
+            | OwnerMutation::RevokeBaseline { .. }
+    )
+}
+
 pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
+    admission: Arc<tokio::sync::Semaphore>,
+    receiving: tokio::sync::watch::Receiver<bool>,
+}
+
+const QUEUED: u8 = 0;
+const TAKEN: u8 = 1;
+const WITHDRAWN: u8 = 2;
+
+/// One timed job's place in the queue. It starts queued and is then taken by the worker or
+/// withdrawn by its caller, decided by one compare-and-swap. It holds the job's queue permit
+/// until then and wakes the caller when the worker takes the job.
+pub(crate) struct Claim {
+    state: std::sync::atomic::AtomicU8,
+    permit: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    taken: tokio::sync::Notify,
+}
+
+impl Claim {
+    /// Moves the claim from queued to `to` and frees its queue permit.
+    /// Input: TAKEN or WITHDRAWN. Output: true when this call decided the claim, false when
+    /// the other side already had, so this side backs off.
+    fn decide(&self, to: u8) -> bool {
+        use std::sync::atomic::Ordering;
+        assert!(to == TAKEN || to == WITHDRAWN);
+        let won = self
+            .state
+            .compare_exchange(QUEUED, to, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if won {
+            let permit = self
+                .permit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            assert!(permit.is_some());
+        }
+        won
+    }
+}
+
+/// The answer for an access-narrowing job whose bound ran out: it stays queued or running
+/// and takes effect when storage gets to it, unless the engine stops first.
+pub(crate) const ACCESS_CHANGE_PENDING: &str = "access_change_pending";
+
+/// What `Storage::submit` hands back once the worker took the job: whether the job narrows
+/// access, which decides what a caller answers when its reply timer then runs out.
+pub(crate) struct Taken {
+    narrowing: bool,
+}
+
+impl Taken {
+    /// The answer for a reply that did not come in time. Input: the caller's unknown answer.
+    /// Output: access_change_pending for an access-narrowing job, which runs to its end,
+    /// else the unknown answer.
+    pub(crate) fn lost(&self, unknown: EngineError) -> EngineError {
+        if self.narrowing {
+            error(ACCESS_CHANGE_PENDING)
+        } else {
+            unknown
+        }
+    }
+}
+
+/// Storage's own definite answers to a timed job, which every route of every client passes
+/// through by name: a full queue, a worker still starting and a job withdrawn before the
+/// worker took it mean nothing ran, and access_change_pending means an access-narrowing
+/// change still waits its turn.
+pub const STORAGE_ANSWERS: &[&str] = &[
+    "owner_queue_not_submitted",
+    "storage_starting_not_submitted",
+    "storage_busy_not_submitted",
+    ACCESS_CHANGE_PENDING,
+];
+
+/// Tells whether a code is one of storage's own definite answers, which every client shows
+/// by name. Input: the error code. Output: true for a code in `STORAGE_ANSWERS`.
+pub(crate) fn storage_answer(code: &str) -> bool {
+    STORAGE_ANSWERS.contains(&code)
+}
+
+/// Tells whether a storage refusal means the job never reached the worker, so nothing ran
+/// and the same request can be sent again. Input: the error code. Output: true for a full
+/// queue, a worker still starting, and a job withdrawn before the worker took it.
+pub(crate) fn not_submitted(code: &str) -> bool {
+    storage_answer(code) && code != ACCESS_CHANGE_PENDING
 }
 
 impl Job {
+    /// Tells whether losing this job would leave more access than the owner asked for:
+    /// a revocation, a sign-out or sign-in cancel, an account or secret removal, a replaced
+    /// key storage deletes, a grant narrowed, or an access level that may be lowered. Such a
+    /// job is never withdrawn. Input: the job. Output: the answer.
+    pub(crate) fn narrows_access(&self) -> bool {
+        match self {
+            Self::OwnerControl(_, control, _) => control.decision == OwnerDecision::Revoke,
+            Self::NativeAuth(_, command, _) => matches!(
+                command,
+                owner_auth::Command::Logout(_) | owner_auth::Command::Cancel(_)
+            ),
+            Self::Accounts(_, command, _) => matches!(
+                command,
+                accounts::Command::Remove(_) | accounts::Command::KeyReplaced(..)
+            ),
+            Self::Plugins(command, _) => plugin_narrows_access(command),
+            Self::OwnerApply(_, request, _) => match &request.operation {
+                OwnerOperation::Apply { mutation } => mutation_narrows_access(mutation),
+                _ => false,
+            },
+            Self::Config(..) => true,
+            _ => false,
+        }
+    }
+
     /// Chooses how long a caller waits for this job's reply.
     /// Input: the owner request timeout from settings. Output: that timeout, or at
     /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
@@ -325,6 +567,52 @@ impl Job {
 }
 
 impl Storage {
+    /// Queues one timed job and waits until the worker takes it; only a job that is not
+    /// access-narrowing first waits for the worker to receive. Inputs: the job, the deadline
+    /// for both waits, the refusal for a full queue. Output: `Taken`, so the reply timer starts
+    /// at the take; else storage_starting_not_submitted, storage_busy_not_submitted or `full`
+    /// with nothing run, or access_change_pending for a narrowing job left queued.
+    pub(crate) async fn submit(
+        &self,
+        job: Job,
+        deadline: tokio::time::Instant,
+        full: &str,
+    ) -> Result<Taken, EngineError> {
+        assert!(!matches!(job, Job::Claimed(..)));
+        let narrowing = job.narrows_access();
+        if !narrowing {
+            let mut receiving = self.receiving.clone();
+            match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
+                Err(_) => return Err(error("storage_starting_not_submitted")),
+                Ok(Err(_)) => return Err(error(full)),
+                Ok(Ok(_)) => {}
+            }
+        }
+        let permit = self
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error(full))?;
+        let claim = Arc::new(Claim {
+            state: std::sync::atomic::AtomicU8::new(QUEUED),
+            permit: std::sync::Mutex::new(Some(permit)),
+            taken: tokio::sync::Notify::new(),
+        });
+        self.sender
+            .try_send(Job::Claimed(Box::new(job), claim.clone()))
+            .map_err(|_| error(full))?;
+        let late = tokio::time::timeout_at(deadline, claim.taken.notified())
+            .await
+            .is_err();
+        if late && narrowing {
+            return Err(error(ACCESS_CHANGE_PENDING));
+        }
+        if late && claim.decide(WITHDRAWN) {
+            return Err(error("storage_busy_not_submitted"));
+        }
+        Ok(Taken { narrowing })
+    }
+
     pub(crate) async fn open(
         path: &Path,
         config: EffectiveConfig,
@@ -349,7 +637,11 @@ impl Storage {
         readonly: bool,
         mut sources: Option<settings::SettingsSources>,
     ) -> Result<(Self, EffectiveConfig), EngineError> {
-        let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
+        let capacity = config.settings.queue_capacity;
+        assert!(capacity > 0);
+        let (sender, mut receiver) = mpsc::channel(capacity * 2);
+        let admission = Arc::new(tokio::sync::Semaphore::new(capacity));
+        let (receiving_send, receiving) = tokio::sync::watch::channel(false);
         let delete_files_jobs = (!readonly).then(|| sender.clone());
         let forgotten_jobs = delete_files_jobs.as_ref().map(mpsc::Sender::downgrade);
         let path = path.to_path_buf();
@@ -427,7 +719,22 @@ impl Storage {
                     }
                     home_watch.restart(&connection);
                 }
+                #[cfg(all(test, unix))]
+                wait_while_held(&path, Stage::Start);
+                let _ = receiving_send.send(true);
                 while let Some(job) = receiver.blocking_recv() {
+                    let job = match job {
+                        Job::Claimed(job, claim) => {
+                            #[cfg(all(test, unix))]
+                            wait_while_held(&path, Stage::Claim);
+                            if !claim.decide(TAKEN) {
+                                continue;
+                            }
+                            claim.taken.notify_one();
+                            *job
+                        }
+                        job => job,
+                    };
                     match job {
                         Job::Accounts(admission, command, reply) => {
                             let result = if readonly {
@@ -782,6 +1089,25 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::HomeReinstallKeep(landed, old, kept, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                reinstall::keep(&mut connection, &landed, old.as_deref(), &kept)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeReinstallRead(project, reply) => {
+                            let _ = reply.send(reinstall::offer(&connection, &project));
+                        }
+                        Job::HomeReinstallDismiss(project, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                reinstall::dismiss(&connection, &project)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::HomeProjectMoveCheck(admission, project, mode, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
@@ -989,8 +1315,21 @@ impl Storage {
                                     mutation: OwnerMutation::RemoveProject { .. }
                                 }
                             );
+                            let team = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::Team { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if team
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied)
+                            {
+                                crate::team::runtime::wake_loops();
+                            }
                             let restart = set_home && result.is_ok();
                             let forgotten = forgetting
                                 && result
@@ -1157,12 +1496,20 @@ impl Storage {
                         Job::BusyHandler(handler, reply) => {
                             let _ = reply.send(connection.busy_handler(Some(handler)).map_err(error));
                         }
+                        Job::Claimed(..) => unreachable!("a claimed job wraps one plain job"),
                     }
                 }
             })
             .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
         let config = ready_receive.await.map_err(error)??;
-        Ok((Self { sender }, config))
+        Ok((
+            Self {
+                sender,
+                admission,
+                receiving,
+            },
+            config,
+        ))
     }
 }
 
@@ -3512,6 +3859,54 @@ fn read_owner_page(
 #[cfg(all(test, unix))]
 mod owner_actor_tests {
     use super::*;
+
+    #[test]
+    fn only_a_change_whose_loss_leaves_more_access_is_classed_narrowing() {
+        let secret = plugins::Command::DetachSecret {
+            id: "server".into(),
+            name: "token".into(),
+        };
+        let removed = plugins::Command::RemoveServer {
+            id: "server".into(),
+            version: 1,
+        };
+        let skill_removed = plugins::Command::RemoveSkill {
+            id: "skill".into(),
+            version: 1,
+        };
+        for (on, narrowing) in [(false, true), (true, false)] {
+            let server = plugins::Command::SetServer {
+                id: "server".into(),
+                enabled: on,
+                version: 1,
+            };
+            let skill = plugins::Command::SetSkill {
+                id: "skill".into(),
+                enabled: on,
+                version: 1,
+            };
+            let hook = plugins::Command::SetHook {
+                id: "hook".into(),
+                enabled: on,
+            };
+            let pack = OwnerMutation::SetPackEntry {
+                id: "rust".into(),
+                on,
+                version: 1,
+            };
+            assert_eq!(plugin_narrows_access(&server), narrowing);
+            assert_eq!(plugin_narrows_access(&skill), narrowing);
+            assert_eq!(plugin_narrows_access(&hook), narrowing);
+            assert_eq!(mutation_narrows_access(&pack), narrowing);
+        }
+        assert!(plugin_narrows_access(&secret));
+        assert!(plugin_narrows_access(&removed));
+        assert!(plugin_narrows_access(&skill_removed));
+        assert!(mutation_narrows_access(&OwnerMutation::RemovePackEntry {
+            id: "rust".into(),
+            version: 1,
+        }));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     #[test]

@@ -103,6 +103,24 @@ pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64
     "unknown"
 };
 
+/// The job name a setup run's steps go by in the engine's line of install jobs
+/// ([`crate::harnesses::update::Turns`]); a lone install or fix of one tool goes by its
+/// program name ([`Dependency::program`]).
+pub const SETUP_JOB: &str = "setup";
+
+/// The name a setup job in the engine's line goes by on a screen: the setup run's, or the
+/// tool's label for a lone install or fix. Input: the job's id. Output: the name, none for
+/// a harness job, which screens name from the catalog.
+pub fn job_name(id: &str) -> Option<&'static str> {
+    if id == SETUP_JOB {
+        return Some(SETUP_JOB);
+    }
+    Dependency::ALL
+        .iter()
+        .find(|dep| dep.program() == id)
+        .map(|dep| dep.label())
+}
+
 /// A system tool the app needs: tmux runs agent terminals, uv installs Graphify,
 /// Graphify builds each project's code graph and Node runs the harnesses npm installs.
 /// Setup finds each one or installs it.
@@ -330,13 +348,19 @@ pub enum RefusedTool {
     CommandOnly,
 }
 
-/// One dependency as the setup screen lists it: which tool, its plain name and its state.
+/// One dependency as the setup screen lists it: which tool, its plain name and its state,
+/// whether an install or fix of it runs now (`busy`), and the job that one waits behind,
+/// by name, since the two would change the same folder (`waiting`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyStatus {
     pub name: Dependency,
     pub label: String,
     pub state: DependencyState,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub busy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 /// Where one default-pack entry stands: not installed yet, being installed, installed

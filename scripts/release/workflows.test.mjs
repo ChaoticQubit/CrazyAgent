@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { TARGETS } from "./assets.mjs";
+import { SECRET_NAMES } from "./sign-windows.mjs";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
 
@@ -294,13 +296,70 @@ test("every CI job runs on a GitHub-hosted runner, macOS on macos-15, and no wor
   }
 });
 
-test("the update manifests cover exactly the targets the release matrix builds, and no Windows target ships until its sandbox holds", async () => {
+test("the update manifests cover exactly the targets the release matrix builds, Windows x64 included as a build that ships unsigned until the owner sets the signing secrets (DEC-195 Q8)", async () => {
   const release = await workflow("release.yml");
   const matrix = block(block(release, 2, "build").join("\n"), 6, "matrix").join("\n");
   const built = [...matrix.matchAll(/^ {12}target: (\S+)$/gm)].map((match) => match[1]);
   const manifest = steps(release, "publish").find((step) => step.includes("- name: Write update manifests and checksums"));
   assert.deepEqual(manifest.match(/ --targets (\S+)/)[1].split(","), built);
-  assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]);
+  assert.deepEqual(built, ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]);
+  assert.deepEqual(built, Object.keys(TARGETS), "assets.mjs stages and collects every built target");
+});
+
+const WIN1_ROW = "read_only_paths_refuse_every_change_while_the_project_stays_writable";
+
+test(`no Windows target ships before WIN-1's sandbox redesign is in the tree: while release.yml builds one, crates/crazyagent-win-sandbox/tests/boundary.rs holds the test ${WIN1_ROW}, which refuses an agent's writes under .git\\hooks (DEC-193)`, async () => {
+  const release = await workflow("release.yml");
+  const matrix = block(block(release, 2, "build").join("\n"), 6, "matrix").join("\n");
+  const windows = [...matrix.matchAll(/^ {12}target: (\S+-windows-\S+)$/gm)].map((match) => match[1]);
+  const boundary = join(REPO_ROOT, "crates/crazyagent-win-sandbox/tests/boundary.rs");
+  const rows = existsSync(boundary) ? readFileSync(boundary, "utf8") : "";
+  assert(windows.length === 0 || rows.includes(`\n#[test]\nfn ${WIN1_ROW}() {\n`), `release.yml builds ${windows.join(", ")}, but ${boundary} has no #[test] fn ${WIN1_ROW}: merge WIN-1 (fix/v243-win-sandbox-allow) first`);
+});
+
+test("the Windows signing tools are prepared only with all six Azure secrets: the step sees whether each is set, never its value; none set lets a dev or stable build go on unsigned with a notice, and a partial set fails naming what is missing (DEC-195 Q8)", async () => {
+  assert.doesNotMatch(await workflow("release.yml"), /CRAZYAGENT_REQUIRE_SIGNING/, "no release step makes a stable Windows build require signing while the owner ships it unsigned");
+  const step = await releaseStep("build", "Prepare Windows signing tools");
+  assert.match(step, /^ {6}- name: Prepare Windows signing tools\n {8}if: matrix\.os == 'windows'\n {8}env:\n/);
+  assert.deepEqual([...step.matchAll(/^ +(\S+: )?(\$\{\{.*?\}\})$/gm)].map((match) => `${match[1] ?? ""}${match[2]}`), SECRET_NAMES.map((name) => `${name}_SET: \${{ secrets.${name} != '' }}`), "the step's only expressions say whether each secret is set, never a value");
+  assert.equal(step.match(/\$\{\{/g).length, SECRET_NAMES.length, "no other expression in the step");
+  const body = runBody(step);
+  const run = (channel, set) => {
+    const root = mkdtempSync(join(tmpdir(), "ca-relwf-winsign-"));
+    try {
+      const state = join(root, "state");
+      mkdirSync(state);
+      writeFileSync(join(state, "curl-fails"), "1\n");
+      writeFileSync(join(root, "step.sh"), body);
+      const flags = Object.fromEntries(SECRET_NAMES.map((name) => [`${name}_SET`, String(set.includes(name))]));
+      const result = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: STEP_MS,
+        env: { PATH: `${stepBin()}:/usr/bin:/bin`, HOME: root, FAKE_STATE: state, RUNNER_TEMP: root, CHANNEL: channel, ARTIFACT_SIGNING_CLIENT_VERSION: "0.0.0", ARTIFACT_SIGNING_CLIENT_SHA256: "0".repeat(64), ...flags },
+      });
+      assert.equal(result.error, undefined, `the step ends within ${STEP_MS} ms`);
+      return { status: result.status, stdout: result.stdout, curls: logged(state, "calls").filter((line) => line.startsWith("curl ")) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const missing = (set) => SECRET_NAMES.filter((name) => !set.includes(name)).join(" ");
+  const none = run("dev", []);
+  assert.deepEqual([none.status, none.curls], [0, []], "a dev build with no secret prepares nothing and goes on");
+  assert.match(none.stdout, /^::notice::Windows signing skipped: [^\n]+\n$/);
+  const stable = run("stable", []);
+  assert.deepEqual([stable.status, stable.curls], [0, []], "a stable build with no secret also goes on unsigned");
+  assert.match(stable.stdout, /^::notice::Windows signing skipped: [^\n]+\n$/);
+  for (const channel of ["dev", "stable"]) {
+    const partial = run(channel, ["AZURE_CLIENT_SECRET"]);
+    assert.deepEqual([partial.status, partial.curls], [1, []], `a partial set on ${channel} fails before any download`);
+    assert.match(partial.stdout, new RegExp(`^::error::[^\\n]*: ${missing(["AZURE_CLIENT_SECRET"])} not set[^\\n]*\\n$`));
+  }
+  const all = run("dev", SECRET_NAMES);
+  assert.equal(all.curls.length, 1, "all six set: the step goes on to fetch the signing client");
+  assert.match(all.curls[0], /\/microsoft\.artifactsigning\.client\.0\.0\.0\.nupkg$/);
+  assert.equal(all.status, 22, "the stand-in curl's failure ends it");
 });
 
 test("the Windows CI job is off until v2.2.1: an if that is always false skips it at no cost, its body kept to turn back on", async () => {
@@ -529,6 +588,84 @@ test("every Rust test target that needs the staged RCLI host is left out of CI a
     }
   }
   assert(needing > 1, "the check found the tests that need the RCLI host");
+});
+
+/**
+ * Finds the functions in one Rust test file that read `name`: one entry per function, holding
+ * its test row when it is a plain unindented `fn` or `async fn` under a test attribute, else
+ * no row, so the read counts for the whole target. Inputs: the file text and the name.
+ * Output: the entries, in file order.
+ */
+function readersOf(text, name) {
+  const readers = new Map();
+  for (const { index } of text.matchAll(new RegExp(name, "g"))) {
+    const before = text.slice(0, index);
+    const fn = [...before.matchAll(/^([ \t]*)([^\n]*?)\bfn (\w+)\s*[(<]/gm)].at(-1);
+    const plain = fn !== undefined && fn[1] === "" && (fn[2] === "" || fn[2] === "async ");
+    const row = plain && /#\[(?:tokio::)?test[^\]\n]*\]\s*$/.test(before.slice(0, fn.index)) ? fn[3] : undefined;
+    readers.set(fn === undefined ? -1 : fn.index, { row });
+  }
+  assert(readers.size <= text.split(name).length - 1);
+  return [...readers.values()];
+}
+
+/**
+ * Names the test targets a file under crates/crazyagent/tests/ belongs to: its own target for
+ * a top-level file, else every top-level target that declares the module folder it sits in.
+ * Inputs: the path relative to that folder and the top-level files' texts by target. Output:
+ * the target names.
+ */
+function targetsOf(path, tops) {
+  const parts = path.split(/[\\/]/);
+  if (parts.length === 1) return [path.slice(0, -3)];
+  const module = new RegExp(`^\\s*(?:pub\\s+)?mod ${parts[0]};`, "m");
+  return [...tops].filter(([, text]) => module.test(text)).map(([target]) => target);
+}
+
+test("the srt guard credits a read to a test row only when it sits in that row's own unindented fn, and counts readers, not mentions (#499 F1)", () => {
+  const row = "#[test]\nfn a() {\n    let srt = std::env::var_os(\"CRAZYAGENT_SRT\").expect(\"CRAZYAGENT_SRT\");\n}\n";
+  assert.deepEqual(readersOf(row, "CRAZYAGENT_SRT"), [{ row: "a" }], "two mentions in one row are one reader");
+  assert.deepEqual(readersOf("#[tokio::test(flavor = \"multi_thread\")]\nasync fn b() {\n    CRAZYAGENT_SRT;\n}\n", "CRAZYAGENT_SRT"), [{ row: "b" }]);
+  for (const [label, helper] of [
+    ["an impl helper", "struct Fixture;\nimpl Fixture {\n    fn srt() {\n        CRAZYAGENT_SRT;\n    }\n}\n"],
+    ["a pub helper", "pub fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a pub(crate) helper", "pub(crate) fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a const helper", "const fn srt() {\n    CRAZYAGENT_SRT;\n}\n"],
+    ["a row inside a module", "mod inner {\n    #[test]\n    fn c() {\n        CRAZYAGENT_SRT;\n    }\n}\n"],
+  ]) {
+    assert.deepEqual(readersOf(`#[test]\nfn a() {}\n${helper}`, "CRAZYAGENT_SRT"), [{ row: undefined }], `${label} after a row counts for the whole target`);
+  }
+  const tops = new Map([["e2e_add_existing", "mod e2e_support;\n"], ["onboarding", "#![cfg(unix)]\n\nmod research_support;\n"], ["harness_catalog_owner", "fn a() {}\n"]]);
+  assert.deepEqual(targetsOf("e2e_support/mod.rs", tops), ["e2e_add_existing"], "a support module counts for every target that declares it");
+  assert.deepEqual(targetsOf("research_support/fixtures/mod.rs", tops), ["onboarding"]);
+  assert.deepEqual(targetsOf("harness_catalog_owner.rs", tops), ["harness_catalog_owner"]);
+  assert.deepEqual(targetsOf("orphan/mod.rs", tops), [], "a module no target declares names none, which the guard refuses");
+});
+
+test("every Rust test that reads the leader-verified srt path is left out of CI and the test farm, which set no CRAZYAGENT_SRT", async () => {
+  const lists = [[await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE"], [await workflow("tests.yml"), "FARM_ENGINE_EXCLUDE"]];
+  const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
+  const names = (await readdir(folder, { recursive: true })).filter((name) => name.endsWith(".rs"));
+  const texts = new Map();
+  for (const name of names) texts.set(name, await readFile(new URL(name.replaceAll("\\", "/"), folder), "utf8"));
+  const tops = new Map([...texts].filter(([name]) => !/[\\/]/.test(name)).map(([name, text]) => [name.slice(0, -3), text]));
+  let readers = 0;
+  for (const [name, text] of texts) {
+    const targets = targetsOf(name, tops);
+    for (const reader of readersOf(text, "CRAZYAGENT_SRT")) {
+      readers += 1;
+      assert(targets.length > 0, `${name} reads CRAZYAGENT_SRT in a module no test target declares`);
+      const nested = /[\\/]/.test(name);
+      for (const target of targets) {
+        const row = reader.row === undefined || nested ? undefined : `${target}/${reader.row}`;
+        for (const [workflowText, list] of lists) {
+          const skipped = excluded(workflowText, list);
+          assert(skipped.has(target) || (row !== undefined && skipped.has(row)), `${name} reads CRAZYAGENT_SRT ${row ? `in ${row}` : `outside a test row, so the whole ${target} target`} but is not in ${list}`);
+        }
+      }
+    }
+  }
+  assert(readers >= 2, "the check found both functions that read CRAZYAGENT_SRT, qualification_boundary's row and worker_engine_boundary's");
 });
 
 test("every engine and desktop row or target CI or the test farm leaves out, for all jobs or one, names a real test, so no exclusion goes stale", async () => {
@@ -1411,7 +1548,6 @@ test("on macOS the release build puts the hdiutil retry first on PATH before Tau
     '            export TMPDIR="$RUNNER_TEMP/macos-tmp"',
     '            mkdir -p "$TMPDIR"',
     '            export PATH="$GITHUB_WORKSPACE/scripts/release/hdiutil-retry:$PATH"',
-    '            export PATH="$GITHUB_WORKSPACE/scripts/release/actool-xcode26:$PATH"',
     "          fi",
   ].join("\n");
   assert(build.includes(macos), "the macOS block exports the hdiutil retry folder ahead of PATH");
@@ -1419,47 +1555,6 @@ test("on macOS the release build puts the hdiutil retry first on PATH before Tau
   assert.equal((await workflow("release.yml")).split("\n").filter((line) => line.includes("hdiutil-retry")).length, 1, "only the macOS desktop build uses it");
   assert.deepEqual(readdirSync(HDIUTIL_RETRY), ["hdiutil"], "the folder that sits ahead of /usr/bin while codesign and notarytool run holds nothing but hdiutil");
   assert.notEqual(statSync(join(HDIUTIL_RETRY, "hdiutil")).mode & 0o111, 0, "the hdiutil retry is executable");
-});
-
-const ACTOOL_XCODE26 = fileURLToPath(new URL("./actool-xcode26/", import.meta.url));
-
-test("on macOS only the app icon's actool runs from an Xcode with actool 26 or newer, found and proven before the long compile, while the desktop compile, tmux and rcli keep the default Xcode (DEC-181)", async () => {
-  const release = await workflow("release.yml");
-  const build = steps(release, "build");
-  const index = (name) => build.findIndex((step) => new RegExp(`^\\s*(- )?name: ${name}$`, "m").test(step));
-  const find = index("Find an Xcode whose actool builds the app icon");
-  assert(find > build.findIndex((step) => step.includes("actions/checkout@")), "the shim it runs is checked out first");
-  assert(find < index("Build command line binaries"), "a runner without actool 26 fails before the long compile");
-  const step = build[find];
-  assert.match(step, /^ {8}if: matrix\.os == 'macos'$/m);
-  assert.match(step, /CRAZYAGENT_ACTOOL_XCODE="\$developer" "\$shim" --version --output-format=human-readable-text/, "each Xcode is asked through the shim with Tauri's own version arguments");
-  assert.match(step, /sed -n 's\/\^short-bundle-version: \*\/\/p'/);
-  assert.match(step, /\[ "\$major" -ge 26 \] \|\| continue/);
-  assert.match(step, /resolve\(\) \{ \[ -n "\$1" \] && \(cd "\$1" 2>\/dev\/null && pwd -P\); \}/);
-  assert.match(step, /developer="\$\(resolve "\$candidate"\)" \|\| continue\n\s+case "\$developer" in \*\[Bb\]eta\*\) continue ;; esac/, "a beta Xcode never builds a release icon, even behind a release-named link");
-  assert.match(step, /if \[ "\$developer" = "\$default" \]; then best="\$developer"; best_version="\$version"; break; fi/, "a default Xcode that qualifies is kept");
-  assert.match(step, /echo "::error::no Xcode on this runner has actool 26 or newer;.*\(DEC-181\).*"\n\s+exit 1/);
-  assert.match(step, /echo "CRAZYAGENT_ACTOOL_XCODE=\$best" >> "\$GITHUB_ENV"/);
-  const desktop = build.find((candidate) => candidate.includes("id: desktop"));
-  const macos = desktop.indexOf('          if [ "$PLATFORM" = macos ]; then');
-  const shim = desktop.indexOf('            export PATH="$GITHUB_WORKSPACE/scripts/release/actool-xcode26:$PATH"');
-  assert(macos >= 0 && macos < shim && shim < desktop.indexOf("tauri.js build"), "the shim is first on PATH inside the macOS block, before Tauri runs actool");
-  assert.equal(release.split("\n").filter((line) => line.includes("actool-xcode26")).length, 2, "the actool step and the macOS desktop build are its only users");
-  assert.deepEqual(release.split("\n").filter((line) => /DEVELOPER_DIR|xcode-select (-s|--switch)|sudo xcode-select/.test(line)), [], "no step switches the Xcode the tmux, rcli and desktop compiles use");
-  assert.deepEqual(readdirSync(ACTOOL_XCODE26), ["actool"], "the folder ahead of /usr/bin while codesign and notarytool run holds nothing but actool");
-  assert.notEqual(statSync(join(ACTOOL_XCODE26, "actool")).mode & 0o111, 0, "the actool shim is executable");
-  const empty = mkdtempSync(join(tmpdir(), "ca-relwf-"));
-  try {
-    for (const developer of [undefined, empty]) {
-      const env = { PATH: process.env.PATH };
-      if (developer) env.CRAZYAGENT_ACTOOL_XCODE = developer;
-      const run = spawnSync(join(ACTOOL_XCODE26, "actool"), ["--version"], { env, encoding: "utf8", timeout: SCRIPT_MS });
-      assert.equal(run.status, 1, `the shim refuses ${developer ?? "an unset folder"}`);
-      assert.match(run.stderr, /actool-xcode26: CRAZYAGENT_ACTOOL_XCODE names no Xcode developer folder with actool/);
-    }
-  } finally {
-    rmSync(empty, { recursive: true, force: true });
-  }
 });
 
 test("the hdiutil retry tries a busy hdiutil create three times, removing the half-made image between tries, and passes the last failure through", () => {

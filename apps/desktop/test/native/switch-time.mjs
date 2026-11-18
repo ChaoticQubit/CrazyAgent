@@ -56,9 +56,11 @@ export function inPageFramePeriod(request, done) {
 /** Runs inside the app page and uses nothing outside itself, so `executeAsync` and a Chrome
  * page's evaluate can both carry it. With `click` null it answers `{ shown }` now. Else it
  * checks the target is off the screen, notes the time, clicks the link, and looks on every
- * frame until the target is on screen: a row inside `target.scope` matching `target.rows`
- * that holds `target.text`, passes the browser's visibility check and is the thing a press
- * at its middle would hit, so text kept in the page while its view is hidden never counts.
+ * frame until the target is on screen: a terminal view's element inside `target.scope`
+ * matching `target.rows` whose screen, read from its buffer through the element's
+ * readScreen so it reads the same under every Terminal renderer, holds `target.text`, that
+ * passes the browser's visibility check and is the thing a press at its middle would hit,
+ * so text kept in the page while its view is hidden never counts.
  * Inputs: `{ click, target: { scope, rows, text }, limit_ms }` and the callback. Output, to
  * the callback: `{ ms, frame_ms, frames }`, ms from the click to the first task after the
  * frame that showed the target and to that frame's own callback, null when `limit_ms`
@@ -68,7 +70,7 @@ export function inPageSwitch(request, done) {
   const shown = () => {
     for (const scope of document.querySelectorAll(target.scope)) {
       for (const row of scope.querySelectorAll(target.rows)) {
-        if (!row.textContent.includes(target.text)) continue;
+        if (!(row.readScreen?.() ?? []).join("\n").includes(target.text)) continue;
         if (typeof row.checkVisibility === "function" && !row.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
         const box = row.getBoundingClientRect();
         if (!(box.width > 0 && box.height > 0)) continue;

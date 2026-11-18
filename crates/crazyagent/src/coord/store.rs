@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS coord_messages (
 );
 CREATE INDEX IF NOT EXISTS coord_messages_to ON coord_messages(to_kind, to_agent, receipt);
 CREATE INDEX IF NOT EXISTS coord_messages_project ON coord_messages(project, kind, receipt);
+CREATE INDEX IF NOT EXISTS coord_messages_receipt ON coord_messages(project, receipt, to_kind, to_agent);
 CREATE TABLE IF NOT EXISTS coord_claims (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project TEXT NOT NULL,

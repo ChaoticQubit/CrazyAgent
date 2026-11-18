@@ -35,7 +35,7 @@ window.__TAURI_INTERNALS__ = {
     asked.push(command);
     if (command === "desktop_connect") return { connected: true, pending: false, stuck_sign_in: null };
     if (command === "desktop_found_projects") return found.map((item) => ({ ...item }));
-    if (command === "desktop_intake_status") return job === null ? null : JSON.parse(JSON.stringify(job));
+    if (command === "desktop_intake_status") return job === null ? [] : [JSON.parse(JSON.stringify(job))];
     throw { code: "unknown", message: command };
   },
   transformCallback: () => 0,
@@ -56,7 +56,7 @@ function waiting(id) {
 /** Stands for the app's whole tree under the session: counts each time it renders. */
 function Tree({ session }) {
   renders += 1;
-  return createElement("p", null, `${session.engine} ${session.found.kind} ${session.intake?.id ?? "none"}`);
+  return createElement("p", null, `${session.engine} ${session.found.kind} ${session.intake[0]?.id ?? "none"}`);
 }
 
 /** Holds the real session as the app does. Input: whether Home is shown. Output: the tree. */

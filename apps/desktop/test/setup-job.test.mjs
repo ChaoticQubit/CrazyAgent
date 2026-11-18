@@ -41,14 +41,15 @@ test("a New Project offers Stop while it builds, Try again on New Project once i
   assert.deepEqual(intake.jobActions(setupJob(failed("project_folder_unwritable"))), ["retry", "dismiss"]);
   assert.deepEqual(intake.jobActions(setupJob(cancelled)), ["retry", "dismiss"]);
   assert.equal(intake.jobRunning(setupJob(building(0, 2))), true);
-  assert.equal(intake.intakePollMs(setupJob(building(0, 2))), intake.INTAKE_POLL_MS);
-  assert.equal(intake.busyLine(setupJob(building(1, 2))), `Setting up ${NAME} is running. Wait for it to finish on Home.`);
+  assert.equal(intake.intakePollMs([setupJob(building(0, 2))]), intake.INTAKE_POLL_MS);
+  assert.equal(intake.jobLine(setupJob({ state: "waiting", behind: "shop" })), "Waiting for shop to finish...");
+  assert.deepEqual(intake.jobActions(setupJob({ state: "waiting", behind: "shop" })), ["stop"]);
   assert.equal(intake.retryRoute(setupJob(failed("project_folder_unwritable"))), "/projects/new");
   assert.equal(intake.retryRoute(setupJob(cancelled)), "/projects/new");
   const steps = { add: () => assert.fail("a New Project never starts as an add"), move: () => assert.fail("a New Project never starts as a move") };
   assert.throws(() => intake.restartJob(setupJob(cancelled), [], steps), /New Project/);
-  assert.equal(intake.jobEndLine(setupJob(building(1, 1)), setupJob({ state: "done" })), DONE_LINE);
-  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, setupJob(building(0, 1)), new Set()), [], "a New Project shows in the sidebar once it is a project");
+  assert.deepEqual(intake.jobEnds([setupJob(building(1, 1))], [setupJob({ state: "done" })]).map((ended) => intake.jobLine(ended)), [DONE_LINE]);
+  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, [setupJob(building(0, 1))], new Set()), [], "a New Project shows in the sidebar once it is a project");
 });
 
 test("Home's row draws a New Project as Setting up with Stop, then Set up with Dismiss", () => {
@@ -97,21 +98,25 @@ test("every code a New Project job is refused or ends with has New Project's own
     assert.equal(api.newProjectCopy(code), sentence, code);
     assert.ok(listed.includes(`"${code}",`), `${code} reaches the window by name, never as intake_failed`);
   }
-  assert.equal(api.newProjectCopy({ code: "job_busy" }), "Another job is running. Wait for it to finish on Home.");
+  assert.equal(api.newProjectCopy({ code: "job_busy" }), "Several folders are already waiting. Wait for one to finish on Home.");
 });
 
-test("the wizard reads the job it started from Home's read: running, done with its project, ended with its words, or lost", () => {
-  assert.deepEqual(intake.setupFollow(null, "setup-1"), { kind: "lost" });
-  assert.deepEqual(intake.setupFollow({ ...setupJob({ state: "done" }), id: "setup-0" }, "setup-1"), { kind: "lost" });
+test("the wizard reads the job it started from Home's read of every job: running or waiting, done with its project, ended with its words, or lost", () => {
+  const moving = { id: "move-1", kind: "move_project", project_id: "reading", source: "/Users/mira/Code/reading-list", mode: "move", overrides: [], stopping: false, state: { state: "copying", copied: 2, checked: 0 } };
+  assert.deepEqual(intake.setupFollow([], "setup-1"), { kind: "lost" });
+  assert.deepEqual(intake.setupFollow([{ ...setupJob({ state: "done" }), id: "setup-0" }], "setup-1"), { kind: "lost" });
   const running = setupJob(building(1, 2));
-  assert.deepEqual(intake.setupFollow(running, "setup-1"), { kind: "running", job: running });
-  assert.deepEqual(intake.setupFollow(setupJob({ state: "done" }), "setup-1"), { kind: "done", project: "notes" });
-  assert.deepEqual(intake.setupFollow(setupJob(failed("document_too_large")), "setup-1"), { kind: "ended", words: "Files can be up to 50 MB." });
-  assert.deepEqual(intake.setupFollow(setupJob(cancelled), "setup-1"), { kind: "ended", words: "Setting up the project stopped. Nothing was kept." });
-  assert.throws(() => intake.setupFollow(setupJob({ state: "done" }, { project_id: null }), "setup-1"));
+  assert.deepEqual(intake.setupFollow([moving, running], "setup-1"), { kind: "running", job: running }, "found beside another job");
+  const waiting = setupJob({ state: "waiting", behind: "reading-list" });
+  assert.deepEqual(intake.setupFollow([moving, waiting], "setup-1"), { kind: "running", job: waiting });
+  assert.deepEqual(intake.setupFollow([setupJob({ state: "done" }), moving], "setup-1"), { kind: "done", project: "notes" });
+  assert.deepEqual(intake.setupFollow([setupJob(failed("document_too_large"))], "setup-1"), { kind: "ended", words: "Files can be up to 50 MB." });
+  assert.deepEqual(intake.setupFollow([setupJob(cancelled)], "setup-1"), { kind: "ended", words: "Setting up the project stopped. Nothing was kept." });
+  assert.deepEqual(intake.setupFollow([setupJob({ state: "cancelled", phase: "waiting" })], "setup-1"), { kind: "ended", words: "Setting up the project stopped. Nothing was kept." });
+  assert.throws(() => intake.setupFollow([setupJob({ state: "done" }, { project_id: null })], "setup-1"));
 });
 
-test("Create starts the engine's job; a busy refusal names the running job and any other keeps New Project's words, the answers kept", async () => {
+test("Create starts the engine's job; a busy refusal says several wait and any other keeps New Project's words, the answers kept", async () => {
   const flow = await import("../src/screens/new-project/index.tsx");
   const spec = { name: "Notes", repositories: [] };
   const setup = { pool: null, research: [] };
@@ -120,15 +125,13 @@ test("Create starts the engine's job; a busy refusal names the running job and a
   const start = (...args) => { sent.push(args); return Promise.resolve({ kind: "ok", value: job }); };
   assert.deepEqual(await flow.setupStart(spec, setup, start), { kind: "started", job });
   assert.deepEqual(sent, [[spec, setup]]);
-  const moving = { id: "move-1", kind: "move_project", project_id: "reading", source: "/Users/mira/Code/reading-list", mode: "move", overrides: [], stopping: false, state: { state: "copying", copied: 2, checked: 0 } };
-  const held = () => Promise.resolve({ kind: "ok", value: moving });
   const refused = (code) => () => Promise.resolve({ kind: "error", code, message: "raw" });
   const KEPT = "Couldn't create the project. Your answers are kept.";
-  assert.deepEqual(await flow.setupStart(spec, setup, refused("job_busy"), held),
-    { kind: "refused", note: `${KEPT} Moving reading-list is running. Wait for it to finish on Home.` });
-  assert.deepEqual(await flow.setupStart(spec, setup, refused("home_destination_exists"), held),
+  assert.deepEqual(await flow.setupStart(spec, setup, refused("job_busy")),
+    { kind: "refused", note: `${KEPT} Several folders are already waiting. Wait for one to finish on Home.` });
+  assert.deepEqual(await flow.setupStart(spec, setup, refused("home_destination_exists")),
     { kind: "refused", note: `${KEPT} Your projects folder already has a folder with this name. Choose another project name.` });
-  assert.deepEqual(await flow.setupStart(spec, setup, () => Promise.resolve({ kind: "not_ready" }), held),
+  assert.deepEqual(await flow.setupStart(spec, setup, () => Promise.resolve({ kind: "not_ready" })),
     { kind: "refused", note: "Not ready yet: creating a project with research isn't in this build." });
 });
 
@@ -145,7 +148,7 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.match(read("src-tauri/src/bridge/intake.rs"), /JobSubject::Setup \{\s*project_id,\s*spec,\s*setup,?\s*\}/);
   const wizard = read("src/screens/new-project/index.tsx");
   assert.ok(wizard.includes("await setupStart(request.spec, request.setup)"), "Create starts the engine's job");
-  assert.match(wizard, /start = startSetupJob,/, "the start is the engine's job");
+  assert.match(wizard, /start = startSetupJob\)/, "the start is the engine's job");
   assert.ok(!wizard.includes("setupProject(request.spec"), "Create is no longer a direct change of the window");
   assert.ok(wizard.includes("session?.refreshIntake(result.job)"), "the started job shows on Home at once");
   assert.ok(wizard.includes("session?.followIntake("), "the page owns the end of the job it follows");
@@ -153,7 +156,7 @@ test("New Project starts the engine's job, follows it on the page and runs its f
   assert.ok(wizard.includes("mounted.current"), "the page's publish and opening stop once the owner leaves it");
   const state = read("src/state.ts");
   assert.match(state, /kind === "setup"[^;]*refreshProjects\(\)/, "a New Project that ended reads the projects again");
-  assert.match(state, /result\.value\.id !== followed\.current/, "Home's toast stays quiet for the job the page follows");
+  assert.match(state, /job\.id !== followed\.current/, "Home's toast stays quiet for the job the page follows");
   const client = read("src/engine-client.ts");
   assert.match(client, /export type ProjectJobKind = "add" \| "move_project" \| "delete" \| "setup";/);
   assert.match(client, /\| \{ state: "building"; done: number; total: number \}/);
@@ -170,12 +173,14 @@ test("a setup job New Project dismisses leaves Home at once: the page waits for 
 test("New Project opened again drops the answers of a project its job already made, read from the job or, once the job left Home, from the projects; a page closed during the follow-ups keeps none (rv-code bgjobs-3b F3)", async () => {
   const flow = await import("../src/screens/new-project/index.tsx");
   const started = { id: "setup-1", project: "notes" };
-  assert.deepEqual(flow.reopened(setupJob(building(1, 3)), started, []), { follow: "setup-1", keep: true });
-  assert.deepEqual(flow.reopened(setupJob({ state: "done" }), started, []), { follow: null, keep: false });
-  assert.deepEqual(flow.reopened(setupJob({ state: "failed", code: "home_new_project_failed", phase: "building" }), started, []), { follow: null, keep: true });
-  assert.deepEqual(flow.reopened(null, started, ["notes"]), { follow: null, keep: false }, "dismissed after Done: the project is listed");
-  assert.deepEqual(flow.reopened(setupJob(building(0, 0), { id: "setup-2", project_id: "other" }), started, ["reading", "notes"]), { follow: null, keep: false }, "a later job took the slot");
-  assert.deepEqual(flow.reopened(null, started, ["reading"]), { follow: null, keep: true }, "a lost job with no such project keeps the answers");
+  assert.deepEqual(flow.reopened([setupJob(building(1, 3))], started, []), { follow: "setup-1", keep: true });
+  assert.deepEqual(flow.reopened([setupJob(building(0, 0), { id: "setup-2", project_id: "other" }), setupJob({ state: "waiting", behind: "other" })], started, []),
+    { follow: "setup-1", keep: true }, "waiting behind another New Project");
+  assert.deepEqual(flow.reopened([setupJob({ state: "done" })], started, []), { follow: null, keep: false });
+  assert.deepEqual(flow.reopened([setupJob({ state: "failed", code: "home_new_project_failed", phase: "building" })], started, []), { follow: null, keep: true });
+  assert.deepEqual(flow.reopened([], started, ["notes"]), { follow: null, keep: false }, "dismissed after Done: the project is listed");
+  assert.deepEqual(flow.reopened([setupJob(building(0, 0), { id: "setup-2", project_id: "other" })], started, ["reading", "notes"]), { follow: null, keep: false }, "a later job replaced it");
+  assert.deepEqual(flow.reopened([], started, ["reading"]), { follow: null, keep: true }, "a lost job with no such project keeps the answers");
   const wizard = read("src/screens/new-project/index.tsx");
   const finish = wizard.slice(wizard.indexOf("async function finish("));
   assert.ok(finish.indexOf("kept = null;") >= 0 && finish.indexOf("kept = null;") < finish.indexOf("await carried.outcome"), "a made project keeps no answers before its follow-ups wait");

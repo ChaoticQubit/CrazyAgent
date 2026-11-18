@@ -296,9 +296,10 @@ impl AgentFilesRule {
         } else {
             state.clone()
         };
-        let agents = format!("^{root}{layout}/{}", super::any_case("worktrees"));
+        let agents = format!("{root}{layout}/{}", super::any_case("worktrees"));
         format!(
-            "(deny {operation}\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n(deny file-write-unlink\n  (regex #\"{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n"
+            "(deny {operation}\n  {})\n(deny file-write-unlink\n  (regex #\"^{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n",
+            super::at_or_below(&format!("{agents}/[^/]+"))
         )
     }
 }
@@ -1709,13 +1710,13 @@ mod tests {
             assert_eq!(
                 rule(IdeAgentFiles::NoDeleteOrRename, older_agents),
                 format!(
-                    "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
+                    "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/|$)\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
                 )
             );
             assert_eq!(
                 rule(IdeAgentFiles::ReadOnly, older_agents),
                 format!(
-                    "(deny file-write*\n  (regex #\"{agents}/[^/]+(/.*)?$\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
+                    "(deny file-write*\n  (regex #\"{agents}/[^/]+(/|$)\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
                 )
             );
         }

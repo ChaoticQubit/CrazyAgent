@@ -2764,3 +2764,58 @@ fn a_folder_a_pending_project_move_lands_in_is_not_registered() {
     };
     assert_eq!(execute(&tx, &config, &database, &action).unwrap(), usual);
 }
+
+/// V243-FIRMLINK-HOME-REFUSAL r3: a folder that holds the owner's home is refused under the
+/// data volume's names too: the home typed through /System/Volumes/Data, the data volume
+/// itself and /System/Volumes. The check only reads folder metadata, so the real home is
+/// safe to give it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_folder_holding_the_owners_home_is_refused_under_the_data_volume_names() {
+    let runtime = tempfile::tempdir().unwrap();
+    let database = runtime.path().join("engine.db");
+    let home = owner_home().unwrap();
+    let long_home = PathBuf::from(format!("/System/Volumes/Data{}", home.display()));
+    assert!(long_home.is_dir());
+    assert_eq!(
+        project_folder(&long_home, &database),
+        Err("onboarding_path_not_canonical")
+    );
+    for holder in ["/System/Volumes/Data", "/System/Volumes"] {
+        assert_eq!(
+            project_folder(Path::new(holder), &database),
+            Err("onboarding_folder_unsafe"),
+            "{holder}"
+        );
+    }
+    assert_eq!(
+        project_folder(&home, &database),
+        Err("onboarding_folder_unsafe")
+    );
+}
+
+/// V243-FIRMLINK-LAUNCH-ROOT: a project folder stored under the data volume's long name meets
+/// its hidden folders, which load under the short name, and its graph mark is the one the
+/// graph build writes from the short name, so its overview, mapping and graph keep their
+/// evidence.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_folder_meets_its_short_hidden_folders_and_graph_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", root.display()));
+    assert!(long.is_dir());
+    write_file(&root, "secrets/loader.py", "def load():\n    return 1\n");
+    let private = root.join("private");
+    std::fs::create_dir(&private).unwrap();
+    let hidden = vec![private];
+    assert_eq!(
+        draft::names::below_root(&long, &hidden),
+        Some(vec!["private".to_owned()])
+    );
+    assert!(!draft::kept_out(&root).unwrap().is_empty());
+    assert_eq!(
+        graph::current_mark(&long, &hidden),
+        graph::current_mark(&root, &hidden)
+    );
+}

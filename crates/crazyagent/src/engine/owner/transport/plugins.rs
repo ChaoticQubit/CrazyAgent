@@ -1475,18 +1475,19 @@ async fn start_check(
     Ok(Reply::Server { server: *view })
 }
 
-/// Checks an approved command server inside the boundary agents run it in, running what an
-/// agent launch runs once the default pack's context-mode has its shared install
-/// ([`crate::context_mode::for_check`]). That spec never runs as npx here, nor does one only
-/// shaped like it whose npx the tool resolver does not find: while its install runs, after a
-/// recent failure, without npm beside npx, for a version the pack does not pin or for such an
-/// npx, the check is not run and says why. Its own project, home and temp folders under
-/// `mcp-checks/<id>` in the engine folder, reads of system paths, the command's folder and
-/// that shared install only, open network without binding the owner's ports, and only its
-/// own secrets, under the owner's call supervisor choice on Linux. Inputs: the engine folder,
-/// server id, approved command, arguments, secret values and the configured local model
-/// ports to keep. Output: the tool names, or a plain rejection code, or for a boundary that
-/// cannot hold the check the boundary's own reason ([`crate::plugins::check_refused`]).
+/// Checks an approved command server inside the boundary agents run it in, running what an agent
+/// launch runs once the default pack's context-mode has its shared install
+/// ([`crate::context_mode::for_check`]). That spec never runs as npx here, nor does one only shaped
+/// like it whose npx the tool resolver does not find: while its install runs, after a recent
+/// failure, without npm beside npx, for a version the pack does not pin or for such an npx, or for
+/// a Windows command that is no program, npx.cmd mapped ([`crate::plugins::without_cmd_exe`]), the
+/// check is not run and says why. Its own project, home and temp folders under `mcp-checks/<id>` in
+/// the engine folder, reads of system paths, the command's folder and that shared install only,
+/// open network without binding the owner's ports, and only its own secrets, under the owner's call
+/// supervisor choice on Linux. Inputs: the engine folder, server id, approved command, arguments,
+/// secret values and the configured local model ports to keep. Output: the tool names, or a plain
+/// rejection code, or for a boundary that cannot hold the check the boundary's own reason
+/// ([`crate::plugins::check_refused`]).
 fn boundary_check(
     root: &Path,
     id: &str,
@@ -1529,6 +1530,13 @@ fn boundary_check(
             return Err("server_cant_start".into());
         }
     };
+    if let ServerSpec::Stdio { command, .. } = &launched
+        && std::fs::metadata(command)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Err("server_command_not_found".into());
+    }
+    let launched = crate::plugins::without_cmd_exe(root, launched).map_err(str::to_owned)?;
     let ServerSpec::Stdio { command, args } = &launched else {
         return Err("server_check_command_only".into());
     };
@@ -1587,6 +1595,7 @@ fn boundary_check(
     );
     let profile = check_profile(&checks, id);
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
+        .map(ProjectSandbox::as_job_folder)
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
@@ -1603,7 +1612,8 @@ fn boundary_check(
         process.env(name, check::env_value(value)?);
     }
     assert_eq!(process.get_program(), sandbox.launcher().as_os_str());
-    check::check_command(process, check::CHECK_TIME, sandbox.lineage_check()).map_err(String::from)
+    check::check_command(process, check::CHECK_TIME, sandbox.lineage_check())
+        .map_err(|code| crate::plugins::timed_out_problem(code, program).to_owned())
 }
 
 async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineError> {

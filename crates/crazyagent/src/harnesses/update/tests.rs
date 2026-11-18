@@ -3,6 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod parallel;
+
 struct Machine {
     root: tempfile::TempDir,
 }

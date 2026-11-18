@@ -1144,12 +1144,24 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Refuses a git older than the 2.39 floor before any other git of an agent worktree runs,
+/// so the owner reads which Git to update (V243-WORKTREE-GIT-FLOOR). Input: the
+/// repository. Output: Ok, else `worktree_git_old`, or `changes_git_unsupported` for a
+/// version line that names no version.
+#[cfg(unix)]
+fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
+    let found = crate::landing::version_numbers(git(repository, &["version"])?);
+    crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, GIT_OLD)
+}
+
 fn inspect(repository: &str) -> Result<Admission, EngineError> {
     let path = Path::new(repository);
     canonical(path)?;
     let root = identity(path, true)?;
     let metadata = identity(&path.join(".git"), true)?;
     validate_metadata(path)?;
+    #[cfg(unix)]
+    refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;
     if actual.strip_suffix(b"\n") != Some(repository.as_bytes()) {
@@ -1543,6 +1555,10 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 /// The code of an engine Git command killed at its deadline. It says the machine was
 /// slow, not that the repository broke a rule.
 const GIT_DEADLINE: &str = "git_deadline";
+/// The code of a lease check refused for a git older than the 2.39 floor. It says the
+/// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
+#[cfg(unix)]
+const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
 /// has already held its caller for its whole deadline.
@@ -2747,9 +2763,10 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
 
 /// Settles every stored lease at an engine start. A lease that verifies, Ready,
 /// RecoveryRequired or pinned Uncertain, or a Ready or RecoveryRequired one whose check ran
-/// out of time, becomes RecoveryRequired, checked again before any use; any other lease is
-/// Uncertain. Each failed check is logged. Inputs: the connection, outside any transaction,
-/// and the lease check. Output: success, `lease_capacity` or the storage error.
+/// out of time or met a git older than the floor, becomes RecoveryRequired, checked again
+/// before any use; any other lease is Uncertain. Each failed check is logged. Inputs: the
+/// connection, outside any transaction, and the lease check. Output: success,
+/// `lease_capacity` or the storage error.
 #[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
@@ -2777,7 +2794,7 @@ fn reconcile_with(
             Some(Ok(())) => LeaseState::RecoveryRequired,
             Some(Err((problem, retried))) => {
                 log_failed_check(&record, &problem, retried);
-                if held && problem.0 == GIT_DEADLINE {
+                if held && (problem.0 == GIT_DEADLINE || problem.0 == GIT_OLD) {
                     LeaseState::RecoveryRequired
                 } else {
                     LeaseState::Uncertain
@@ -2790,6 +2807,9 @@ fn reconcile_with(
     assert!(connection.is_autocommit());
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -3826,6 +3846,32 @@ mod tests {
         );
     }
 
+    /// V243-WORKTREE-GIT-FLOOR: on a git older than the 2.39 floor an agent worktree is
+    /// refused with its own code at admission and at every later check, before the
+    /// repository's config is read; the floor itself goes on to the config check.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_worktree_on_a_git_older_than_the_floor_is_refused_before_its_config_is_read() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        let path = repository.to_str().unwrap();
+        let admission = inspect(path).unwrap();
+        crate::landing::shape_git(Some("git version 2.34.1"));
+        assert_eq!(verify(&admission).unwrap_err().0, "worktree_git_old");
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(inspect(path).unwrap_err().0, "worktree_git_old");
+        crate::landing::shape_git(Some("git version 2.39.0"));
+        assert_eq!(
+            inspect(path).unwrap_err().0,
+            "repository_config_refused:core_fsmonitor"
+        );
+        crate::landing::shape_git(None);
+    }
+
     /// The engine's worktree git, asked outright for the signature of an owner commit in any
     /// armor, runs none of the repository's signature programs (RV-DS241-39).
     #[test]
@@ -3903,6 +3949,20 @@ mod tests {
         for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
             assert_eq!(
                 restarted(state.clone(), &[Err("git_deadline")]),
+                (LeaseState::RecoveryRequired, 1),
+                "{state:?}"
+            );
+        }
+    }
+
+    /// V243-WORKTREE-GIT-FLOOR: a lease check at start refused for a git older than the floor
+    /// says nothing about the lease, so a Ready or RecoveryRequired lease waits for recovery,
+    /// checked again once Git is updated, instead of turning Uncertain.
+    #[test]
+    fn a_lease_check_refused_for_an_old_git_at_start_keeps_the_lease_for_recovery() {
+        for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
+            assert_eq!(
+                restarted(state.clone(), &[Err("worktree_git_old")]),
                 (LeaseState::RecoveryRequired, 1),
                 "{state:?}"
             );

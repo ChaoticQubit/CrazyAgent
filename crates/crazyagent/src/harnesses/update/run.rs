@@ -88,18 +88,19 @@ pub(super) fn version_raw(
     run_raw(fixed, home, limit)
 }
 
-/// Runs a harness's version command where [`run_raw`] refuses every tool: started suspended
+/// Runs a harness's version words where [`run_raw`] refuses every tool: started suspended
 /// with no window in a kill-on-close job of its own, so everything it starts ends with the
 /// job once it exits or passes its limit. Only version reads run this way; updates and tool
-/// checks stay refused. Inputs: the command, the home folder and the limit. Output: the exit
-/// and both stream tails, or a refusal code.
+/// checks stay refused. Inputs: the absolute words, the command's search folders, the home
+/// folder and the limit. Output: the exit and both stream tails, or a refusal code.
 #[cfg(windows)]
 pub(super) fn version_raw(
-    fixed: &Fixed,
+    words: &[std::ffi::OsString],
+    search: &[std::path::PathBuf],
     home: &Path,
     limit: Duration,
 ) -> Result<Raw, &'static str> {
-    windows::version_raw(fixed, home, limit)
+    windows::version_raw(words, search, home, limit)
 }
 
 const POLL: Duration = Duration::from_millis(50);
@@ -304,7 +305,9 @@ mod unix {
 #[cfg(windows)]
 mod windows {
     use super::{Raw, SEARCH_MAX, START_FAILED, STREAM_BYTES_MAX, TIMEOUT, Tail, waited};
-    use crate::harnesses::update::{ARGS_MAX, Fixed, TOOL_UNSAFE};
+    use crate::harnesses::update::{ARGS_MAX, TOOL_UNSAFE};
+    use crate::tools::INTERPRETER_DEPTH_MAX;
+    use std::ffi::OsString;
     use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -314,22 +317,26 @@ mod windows {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
 
+    /// The most words a version run starts: an interpreter chain at its depth bound, each
+    /// with its first line's arguments, the script, then the version arguments.
+    const WORDS_MAX: usize = (INTERPRETER_DEPTH_MAX + 1) * (ARGS_MAX + 1) + ARGS_MAX;
+
     /// The child's whole search path: the command's own folders, then the Windows system
-    /// folders. Input: the command. Output: the value, None when a folder cannot be on it.
-    fn search_path(fixed: &Fixed) -> Option<std::ffi::OsString> {
+    /// folders. Input: the folders. Output: the value, None when a folder cannot be on it.
+    fn search_path(search: &[PathBuf]) -> Option<OsString> {
         let root = std::env::var_os("SystemRoot")
             .map_or_else(|| PathBuf::from(SYSTEM_ROOT_DEFAULT), PathBuf::from);
         let system = [root.join("System32"), root];
-        std::env::join_paths(fixed.search.iter().cloned().chain(system)).ok()
+        std::env::join_paths(search.iter().cloned().chain(system)).ok()
     }
 
     /// Builds the child: no shell, the fixed arguments only, the environment a plugin
     /// server check keeps ([`crate::plugins::check::ENV_KEPT`]) with the home as
     /// USERPROFILE and the search path as PATH, no input, no window, started suspended.
-    /// Inputs: the command, the home folder and the search path. Output: the command.
-    fn command(fixed: &Fixed, home: &Path, path: std::ffi::OsString) -> Command {
-        let mut command = Command::new(&fixed.program);
-        command.args(&fixed.args).env_clear();
+    /// Inputs: the words, the home folder and the search path. Output: the command.
+    fn command(words: &[OsString], home: &Path, path: OsString) -> Command {
+        let mut command = Command::new(&words[0]);
+        command.args(&words[1..]).env_clear();
         for name in crate::plugins::check::ENV_KEPT {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -347,18 +354,18 @@ mod windows {
     }
 
     pub(super) fn version_raw(
-        fixed: &Fixed,
+        words: &[OsString],
+        search: &[PathBuf],
         home: &Path,
         limit: Duration,
     ) -> Result<Raw, &'static str> {
-        assert!(fixed.program.is_absolute());
-        assert!(fixed.args.len() <= ARGS_MAX);
-        assert!(fixed.search.len() <= SEARCH_MAX);
-        assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
-        assert!(fixed.prefix.is_none());
-        let path = search_path(fixed).ok_or(TOOL_UNSAFE)?;
+        assert!((1..=WORDS_MAX).contains(&words.len()));
+        assert!(Path::new(&words[0]).is_absolute());
+        assert!(search.len() <= SEARCH_MAX);
+        assert!(search.iter().all(|folder| folder.is_absolute()));
+        let path = search_path(search).ok_or(TOOL_UNSAFE)?;
         let mut child =
-            crate::spawn_gate::spawn(&mut command(fixed, home, path)).map_err(|_| START_FAILED)?;
+            crate::spawn_gate::spawn(&mut command(words, home, path)).map_err(|_| START_FAILED)?;
         let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
             Ok(tree) => tree,
             Err(error) => {
@@ -528,11 +535,7 @@ pub(super) fn read_pointer(
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;
-    use std::path::PathBuf;
-
-    const GRANDCHILD: &str = "$p = Start-Process -FilePath ping.exe -ArgumentList \
-        '-n','120','127.0.0.1' -NoNewWindow -PassThru; Set-Content -LiteralPath grandchild.pid \
-        -Value $p.Id; Start-Sleep -Seconds 120";
+    use std::ffi::OsString;
 
     /// Whether a process id still runs, as `tasklist` lists it. Input: the id. Output: the
     /// answer.
@@ -545,21 +548,21 @@ mod windows_tests {
 
     /// V243-W1-VERSION-READ: a version run that passes its limit ends as timed out, and the
     /// process it started ends with its job, so no child of a harness outlives a version read.
+    /// The version command is the test binary as a grandchild holder
+    /// ([`crate::plugins::check::windows_tests::grandchild_holder`]), asked through a request
+    /// file in the run's home, its working folder, since the run keeps no other environment.
     #[test]
     fn a_version_run_past_its_limit_ends_with_every_process_it_started() {
+        use crate::plugins::check::windows_tests::{HOLDER_REQUEST, grandchild_holder};
         let folder = tempfile::tempdir().unwrap();
         let home = crate::sandbox::canonical(folder.path()).unwrap();
-        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-            .join("System32")
-            .join("WindowsPowerShell")
-            .join("v1.0");
-        let fixed = Fixed {
-            program: shell.join("powershell.exe"),
-            args: vec!["-NoProfile", "-NonInteractive", "-Command", GRANDCHILD],
-            search: vec![shell],
-            prefix: None,
-        };
-        let ran = version_raw(&fixed, &home, Duration::from_secs(20));
+        std::fs::write(home.join(HOLDER_REQUEST), "").unwrap();
+        let (holder, args) = grandchild_holder();
+        let search = [holder.parent().unwrap().to_path_buf()];
+        let words: Vec<OsString> = std::iter::once(holder.into_os_string())
+            .chain(args.map(OsString::from))
+            .collect();
+        let ran = version_raw(&words, &search, &home, Duration::from_secs(20));
         assert_eq!(ran.err(), Some(TIMEOUT));
         let pid: u32 = std::fs::read_to_string(home.join("grandchild.pid"))
             .unwrap()

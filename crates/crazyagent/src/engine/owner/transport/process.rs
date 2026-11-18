@@ -32,6 +32,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "instructions_cleanup_busy",
     "instructions_cleanup_empty",
     "instructions_cleanup_failed",
+    "instructions_cleanup_full",
     "instructions_cleanup_master_harness",
     "instructions_cleanup_no_account",
     "instructions_cleanup_no_network",
@@ -1150,7 +1151,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if PROCESS_CODES.contains(&error.0.as_str()) {
+    if PROCESS_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "process_outcome_unknown".into()
@@ -1226,6 +1227,7 @@ async fn handle(
                     pool: pool.as_ref(),
                     prompt,
                     agent: "instructions-cleanup",
+                    holds_seat: true,
                 })
             })
             .map(Answer::Proposed)

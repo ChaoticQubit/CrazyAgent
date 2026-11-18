@@ -97,6 +97,9 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
             .create(folder)
             .unwrap();
     }
+    let store = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&store).unwrap();
+    drop(store);
     let ran = base.join("npx-ran");
     let npx = bin.join("npx");
     std::fs::write(
@@ -162,6 +165,9 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
             .create(folder)
             .unwrap();
     }
+    let store = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&store).unwrap();
+    drop(store);
     let ran = base.join("npx-ran");
     let npx = bin.join("npx");
     std::fs::write(
@@ -353,6 +359,12 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
         check(&root.join("missing-server.exe")),
         "server_command_not_found"
     );
+    assert_eq!(check(&root.join("npx.cmd")), "server_command_not_found");
+    let shipped = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(&shipped, root.join("tool")).unwrap();
+    assert_eq!(check(&root.join("tool")), "server_batch_file");
     let server = std::env::current_exe().unwrap();
     let helper = server.with_file_name(crate::sandbox::windows::HELPER_NAME);
     let checked = check(&server);
@@ -367,6 +379,22 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
     for name in ["project", "home", "tmp"] {
         assert!(root.join(CHECK_FOLDER).join(ID).join(name).is_dir());
     }
+}
+
+/// The access list icacls prints for `folder`, read through the spawn gate with stdout and
+/// stderr collected, with icacls' inherited mark `(I)` dropped: writing a list re-marks an
+/// explicit entry that matches the parent's as inherited, with or without the boundary (farm
+/// 44113725856), so a taken-back grant leaves the same entries, not the same marks. Input: the
+/// folder. Output: the listing; a failed listing, or one not naming the folder, panics.
+#[cfg(target_os = "windows")]
+fn access_list(folder: &Path) -> String {
+    let mut icacls = std::process::Command::new("icacls");
+    let listed = crate::spawn_gate::collected(icacls.arg(folder)).unwrap();
+    assert!(listed.status.success(), "{listed:?}");
+    let text = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
+    assert!(text.contains(folder.to_str().unwrap()), "{listed:?}");
+    assert!(text.contains("(OI)(CI)"), "{listed:?}");
+    text
 }
 
 /// The read entry a server's check was granted on its program's folder is taken back when the
@@ -385,12 +413,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     std::fs::create_dir_all(&folder).unwrap();
     let server = folder.join("server.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &server).unwrap();
-    let entries = || {
-        let listed =
-            crate::spawn_gate::output(std::process::Command::new("icacls").arg(&folder)).unwrap();
-        assert!(listed.status.success(), "{listed:?}");
-        String::from_utf8_lossy(&listed.stdout).into_owned()
-    };
+    let entries = || access_list(&folder);
     let before = entries();
     let checked = boundary_check(
         &root,
@@ -416,9 +439,16 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     assert_ne!(entries(), before);
     let checks = root.join(CHECK_FOLDER);
     let profile = check_profile(&checks, ID);
-    let name = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile)
-        .unwrap()
-        .container;
+    let loaded = crazyagent_win_sandbox::profile::BoundaryProfile::load(&profile).unwrap();
+    assert!(
+        loaded
+            .guarded
+            .iter()
+            .all(|item| item.guard != crazyagent_win_sandbox::profile::Guard::ReadOnly),
+        "a check folder is a job folder, with no project guards: {:?}",
+        loaded.guarded
+    );
+    let name = loaded.container;
     let container = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
         .join("Packages")
         .join(name);
@@ -444,12 +474,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     let base = crate::sandbox::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     std::fs::create_dir_all(&root).unwrap();
-    let entries = |folder: &std::path::Path| {
-        let listed =
-            crate::spawn_gate::output(std::process::Command::new("icacls").arg(folder)).unwrap();
-        assert!(listed.status.success(), "{listed:?}");
-        String::from_utf8_lossy(&listed.stdout).into_owned()
-    };
+    let entries = access_list;
     let helper = std::env::current_exe()
         .unwrap()
         .with_file_name(crate::sandbox::windows::HELPER_NAME);

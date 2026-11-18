@@ -526,13 +526,16 @@ function accountLabel(connection: ModelConnection): string {
   return "URL";
 }
 
-/** Summarises a pool's accounts by kind, for example "2 ChatGPT, 1 Claude, 1 API key".
+const PLURAL_LABELS: Record<string, string> = { "API key": "API keys", "local model": "local models", URL: "URLs" };
+
+/** Summarises a pool's accounts by kind, for example "2 ChatGPT, 1 Claude, 2 API keys": a
+ * kind counted more than once reads in the plural, a provider name stays as it is.
  * Input: the member connections. Output: the summary. */
 export function poolSummary(members: ModelConnection[]): string {
   if (members.length === 0) return "No accounts";
   const counts = new Map<string, number>();
   for (const member of members) counts.set(accountLabel(member), (counts.get(accountLabel(member)) ?? 0) + 1);
-  return [...counts].map(([label, count]) => `${count} ${label}`).join(", ");
+  return [...counts].map(([label, count]) => `${count} ${count > 1 ? PLURAL_LABELS[label] ?? label : label}`).join(", ");
 }
 
 /** Counts a pool's accounts that can work now: signed in, or set up with a key or URL.

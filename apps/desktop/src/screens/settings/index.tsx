@@ -13,6 +13,7 @@ import { QuittingSettings } from "./quitting";
 import { ProcessSettings } from "../process";
 import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
+import { TerminalSettings } from "./terminal";
 import "../project/projects.css";
 import "./settings.css";
 
@@ -32,7 +33,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "master", label: "Master" },
   ] },
   { title: "App", items: [
-    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" },
+    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "terminal", label: "Terminal" },
   ] },
 ];
 
@@ -88,6 +89,7 @@ export function Settings({ tab, action, account, skill }: { tab: ListedSettingsT
       : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "quit" ? <QuittingSettings />
       : tab === "master" ? <MasterSettings />
+      : tab === "terminal" ? <TerminalSettings />
       : <TeamAlertsSettings />}
   </SettingsFrame>;
 }

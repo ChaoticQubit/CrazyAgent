@@ -13,21 +13,25 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How many entries and folder levels a copy, its check or a size read goes through
-/// before it stops with `home_copy_too_large`.
+/// before it stops with `home_copy_too_large`, and whether an add leaves out rebuildable
+/// folders still only in iCloud ([`super::icloud::left_behind`], DEC-198).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CopyBounds {
     pub entries: u64,
     pub depth: usize,
+    pub skip_rebuildable: bool,
 }
 
 pub const COPY_BOUNDS: CopyBounds = CopyBounds {
     entries: 4_000_000,
     depth: 256,
+    skip_rebuildable: false,
 };
 
 pub const FORCED_COPY_BOUNDS: CopyBounds = CopyBounds {
     entries: 16_000_000,
     depth: 512,
+    skip_rebuildable: false,
 };
 
 const ENTRIES_MAX: u64 = COPY_BOUNDS.entries;
@@ -87,9 +91,33 @@ pub struct Tally {
     documents_done: AtomicU64,
     recording: AtomicBool,
     gate: std::sync::Mutex<()>,
+    landed: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl Tally {
+    /// Records the folder an add or a project move lands in, once its work is planned, so
+    /// the job can keep a reinstall offer there after its record deleted the add row.
+    /// Input: the folder, absolute.
+    pub fn land_at(&self, folder: &Path) {
+        assert!(folder.is_absolute());
+        *self
+            .landed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(folder.to_path_buf());
+    }
+
+    /// The folder the job's work last planned to land in. Output: the folder, or None for
+    /// work that lands nowhere or was never planned.
+    pub fn landed_at(&self) -> Option<PathBuf> {
+        let landed = self
+            .landed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(landed.as_deref().is_none_or(Path::is_absolute));
+        landed
+    }
+
     /// How many of the project's agents a project move waits for before anything moves,
     /// or None when it does not wait. The count is stored before the wait is marked and
     /// never goes back to 0, so a read during a change never sees a wait for none.
@@ -284,7 +312,11 @@ impl AddPlan {
     ) -> Self {
         assert!(source.is_absolute() && destination.is_absolute());
         assert_ne!(source, destination);
-        assert!(bounds == COPY_BOUNDS || bounds == FORCED_COPY_BOUNDS);
+        assert!(
+            [COPY_BOUNDS, FORCED_COPY_BOUNDS]
+                .iter()
+                .any(|known| (known.entries, known.depth) == (bounds.entries, bounds.depth))
+        );
         Self {
             source,
             destination,
@@ -369,7 +401,7 @@ impl AddPlan {
         if fs::symlink_metadata(&self.destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
-        let verified = copy_into(
+        let copied = copy_into(
             &self.source,
             &self.destination,
             Copying::Exact,
@@ -379,7 +411,8 @@ impl AddPlan {
         Ok(Placed::Copied(OldSource {
             source: self.source,
             landed: self.destination,
-            verified,
+            verified: copied.verified,
+            left: copied.left,
             bounds: self.bounds,
         }))
     }
@@ -394,13 +427,15 @@ pub enum Placed {
 }
 
 /// The source of a move that went by copy: the folder, the copy it landed as, what the
-/// check of the copy matched and the bounds of the walk. Clearing it deletes only what the
-/// check matched and what still equals its landed copy.
+/// check of the copy matched, the rebuildable folders the copy left out, which stay, and the
+/// bounds of the walk. Clearing it deletes only what the check matched and what still
+/// equals its landed copy.
 #[derive(Debug)]
 pub struct OldSource {
     source: PathBuf,
     landed: PathBuf,
     verified: Verified,
+    left: Vec<PathBuf>,
     bounds: CopyBounds,
 }
 
@@ -416,8 +451,17 @@ impl OldSource {
     pub fn clear(self) -> Result<(), EngineError> {
         assert!(self.source.is_absolute());
         assert!(self.landed.is_absolute());
-        make_writable(&self.source).map_err(|_| source_left(1))?;
-        remove_verified(&self.source, &self.landed, &self.verified, self.bounds)
+        make_writable_but(&self.source, &self.left).map_err(|_| source_left(1))?;
+        if !self.left.is_empty() {
+            eprintln!("home_move_left_out folders={}", self.left.len());
+        }
+        remove_verified(
+            &self.source,
+            &self.landed,
+            &self.verified,
+            self.bounds,
+            &self.left,
+        )
     }
 }
 
@@ -502,15 +546,15 @@ pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError
 /// matched, and still as it saw them, are removed. Inputs: the source, the destination and
 /// the bounds. Output: as `move_by_copy`.
 fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
-    let verified = copy_into(
+    let copied = copy_into(
         source,
         destination,
         Copying::Exact,
         bounds,
         &Tally::default(),
     )?;
-    make_writable(source).map_err(|_| source_left(1))?;
-    remove_verified(source, destination, &verified, bounds)
+    make_writable_but(source, &copied.left).map_err(|_| source_left(1))?;
+    remove_verified(source, destination, &copied.verified, bounds, &copied.left)
 }
 
 /// The source files and links a move's check found equal in the copy, each under a hash of
@@ -579,14 +623,16 @@ impl Verified {
 /// Deletes the files and links of a moved source that still carry the stamp its check saw
 /// ([`Verified::removable`]), then each folder left empty, deepest first. An entry the
 /// check never saw or that changed since, such as a file iCloud synced in or one rewritten
-/// within the same clock tick, stays with its folders. Inputs: the source, the landed copy,
-/// what the check matched and the bounds. Output: Ok once the source is gone, else
-/// `home_move_source_left`, logged with the count of entries kept.
+/// within the same clock tick, stays with its folders. A rebuildable folder the copy left
+/// out stays whole with the folders holding it, not counted as kept. Inputs: the source,
+/// the landed copy, what the check matched, the bounds and the folders left out. Output: Ok
+/// once the rest is gone, else `home_move_source_left`, logged with the count kept.
 fn remove_verified(
     source: &Path,
     landed: &Path,
     verified: &Verified,
     bounds: CopyBounds,
+    left: &[PathBuf],
 ) -> Result<(), EngineError> {
     assert!(source.is_absolute());
     let mut folders = vec![source.to_path_buf()];
@@ -607,6 +653,9 @@ fn remove_verified(
                 kept += 1;
                 continue;
             };
+            if left.contains(&path) {
+                continue;
+            }
             let Ok(metadata) = fs::symlink_metadata(&path) else {
                 kept += 1;
                 continue;
@@ -624,7 +673,8 @@ fn remove_verified(
         }
     }
     for folder in folders.iter().rev() {
-        if fs::remove_dir(folder).is_err() {
+        let holds_left = left.iter().any(|stays| stays.starts_with(folder));
+        if !holds_left && fs::remove_dir(folder).is_err() {
             kept += 1;
         }
     }
@@ -732,13 +782,21 @@ enum Copying {
     Standalone,
 }
 
+/// What a copy into the home did: the source entries its check found equal, empty for a
+/// Copy, and the rebuildable folders it left out at the source.
+#[derive(Debug, Default)]
+struct Copied {
+    verified: Verified,
+    left: Vec<PathBuf>,
+}
+
 fn copy_into(
     source: &Path,
     destination: &Path,
     how: Copying,
     bounds: CopyBounds,
     tally: &Tally,
-) -> Result<Verified, EngineError> {
+) -> Result<Copied, EngineError> {
     let parent = destination
         .parent()
         .ok_or_else(|| refused("home_copy_failed"))?;
@@ -748,13 +806,26 @@ fn copy_into(
         ".crazyagent-adding-{}",
         token.iter().map(|b| format!("{b:02x}")).collect::<String>()
     ));
+    let left = std::cell::RefCell::new(Vec::new());
+    let look = |path: &Path| fs::symlink_metadata(path);
+    let leave = |path: &Path, kind: fs::FileType| {
+        let out = kind.is_dir()
+            && bounds.skip_rebuildable
+            && fs::symlink_metadata(path).is_ok_and(|metadata| {
+                super::icloud::left_behind(source, path, &metadata, bounds, &look)
+            });
+        if out {
+            left.borrow_mut().push(path.to_path_buf());
+        }
+        out
+    };
     let result = match how {
-        Copying::Exact => copy_entries(source, &staging, &|_, _| false, bounds, tally)
-            .and_then(|()| verify_within(source, &staging, bounds, tally)),
+        Copying::Exact => copy_entries(source, &staging, &leave, bounds, tally)
+            .and_then(|()| verify_within(source, &staging, bounds, tally, &left.borrow())),
         Copying::Standalone => copy_entries(
             source,
             &staging,
-            &|path, kind| left_out(source, path, kind),
+            &|path, kind| left_out(source, path, kind) || leave(path, kind),
             bounds,
             tally,
         )
@@ -765,7 +836,10 @@ fn copy_into(
             return Err(refused("home_destination_exists"));
         }
         fs::rename(&staging, destination)
-            .map(|()| verified)
+            .map(|()| Copied {
+                verified,
+                left: left.take(),
+            })
             .map_err(|e| failed_step("place", &e, "home_copy_failed"))
     });
     if result.is_err() && fs::symlink_metadata(&staging).is_ok() {
@@ -890,6 +964,13 @@ pub fn add_left(source: &Path, destination: &Path, moving: bool) -> &'static str
 /// with no link followed, so a folder swapped for a link is left as it is, never walked
 /// through (DS-INTAKE). Input: the tree's root. Output: Ok, or the I/O error.
 fn make_writable(root: &Path) -> std::io::Result<()> {
+    make_writable_but(root, &[])
+}
+
+/// [`make_writable`] that leaves the given folders and all below them as they are, the
+/// rebuildable folders a move left at its source. Inputs: the tree's root and the folders.
+/// Output: Ok, or the I/O error.
+fn make_writable_but(root: &Path, left: &[PathBuf]) -> std::io::Result<()> {
     writable_folder(root)?;
     let mut stack = vec![PathBuf::new()];
     while let Some(below) = stack.pop() {
@@ -901,6 +982,9 @@ fn make_writable(root: &Path) -> std::io::Result<()> {
             let name = name?;
             #[cfg(all(test, unix))]
             run_step(&BEFORE_WRITABLE_FOLDER);
+            if left.contains(&root.join(&below).join(&name)) {
+                continue;
+            }
             if folder.open_up(&name)? {
                 stack.push(below.join(name));
             }
@@ -1083,17 +1167,19 @@ fn copy_entries(
 /// kinds, permission bits, symlink targets and file bytes; otherwise
 /// `home_copy_unverified`.
 pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
-    verify_within(source, copy, COPY_BOUNDS, &Tally::default()).map(drop)
+    verify_within(source, copy, COPY_BOUNDS, &Tally::default(), &[]).map(drop)
 }
 
-/// `verify_tree` within the given bounds. Inputs: the source, the copy and the bounds.
-/// Output: the source files and links found equal, or the code of `verify_tree`, or
+/// `verify_tree` within the given bounds, passing over the rebuildable folders the copy left
+/// out. Inputs: the source, the copy, the bounds, the tally and those folders. Output: the
+/// source files and links found equal, or the code of `verify_tree`, or
 /// `home_icloud_not_downloaded` for a source entry whose data lives only in iCloud.
 fn verify_within(
     source: &Path,
     copy: &Path,
     bounds: CopyBounds,
     tally: &Tally,
+    skipped: &[PathBuf],
 ) -> Result<Verified, EngineError> {
     let differs = || refused("home_copy_unverified");
     let mut verified = Verified::default();
@@ -1143,7 +1229,8 @@ fn verify_within(
             names.sort();
             Ok(names)
         };
-        let left_names = names(&left)?;
+        let mut left_names = names(&left)?;
+        left_names.retain(|name| !skipped.contains(&left.join(name)));
         if left_names != names(&right)? {
             return Err(differs());
         }
@@ -1192,17 +1279,21 @@ fn same_bytes(
     }
 }
 
-/// What `folder_size` found in a folder: the bytes of its files and how many of its
-/// entries are placeholders whose data lives only in iCloud, counted without listing a
-/// placeholder folder, so a folder inside one counts once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What `folder_size` found in a folder: the bytes of its files, how many of its entries
+/// are placeholders whose data lives only in iCloud, counted without listing a placeholder
+/// folder, so a folder inside one counts once, and the rebuildable folders an add leaves
+/// out because they still need downloading, counted in neither, the first
+/// `SKIPPED_LISTED_MAX` named and the rest counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Measured {
     pub bytes: u64,
     pub placeholders: u64,
+    pub skipped: super::icloud::SkippedFolders,
 }
 
 /// Adds up the bytes of the files in a folder without following links, and counts its
-/// iCloud placeholders; a folder that is a placeholder itself counts as one.
+/// iCloud placeholders; a folder that is a placeholder itself counts as one. A rebuildable
+/// folder an add would leave out is named with its file count instead (DEC-198).
 /// Input: the owner's path text and the time by which to give up. Output: the measure,
 /// `folder_size_unsafe` for `/`, the user's home folder or any folder holding it,
 /// `folder_size_unreadable`, `folder_size_timeout` or `folder_size_too_large` past the
@@ -1222,12 +1313,19 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
         return Ok(Measured {
             bytes: 0,
             placeholders: 1,
+            skipped: super::icloud::SkippedFolders::default(),
         });
     }
+    let look = |path: &Path| fs::symlink_metadata(path);
+    let census_bounds = CopyBounds {
+        skip_rebuildable: true,
+        ..COPY_BOUNDS
+    };
     let mut bytes = 0u64;
     let mut placeholders = 0u64;
+    let mut skipped = super::icloud::SkippedFolders::default();
     let mut entries = 0u64;
-    let mut stack = vec![root];
+    let mut stack = vec![root.clone()];
     while let Some(folder) = stack.pop() {
         let listing = fs::read_dir(&folder).map_err(|_| refused("folder_size_unreadable"))?;
         for entry in listing {
@@ -1239,24 +1337,54 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
                 return Err(refused("folder_size_timeout"));
             }
             let entry = entry.map_err(|_| refused("folder_size_unreadable"))?;
-            let metadata = fs::symlink_metadata(entry.path())
-                .map_err(|_| refused("folder_size_unreadable"))?;
+            let path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| refused("folder_size_unreadable"))?;
             let placeholder = super::icloud::dataless(&metadata);
+            let inner = metadata.is_dir() && !metadata.file_type().is_symlink();
+            if inner && super::icloud::rebuildable(&root, &path, &look) {
+                let held = match placeholder {
+                    true => None,
+                    false => Some(
+                        super::icloud::census(&path, 0, census_bounds, &look).map_err(|e| {
+                            refused(match e.0.as_str() {
+                                "home_copy_too_large" => "folder_size_too_large",
+                                _ => "folder_size_unreadable",
+                            })
+                        })?,
+                    ),
+                };
+                entries = entries.saturating_add(held.map_or(0, |held| held.entries));
+                if entries > ENTRIES_MAX {
+                    return Err(refused("folder_size_too_large"));
+                }
+                match held {
+                    Some(held) if held.placeholders == 0 => {
+                        bytes = bytes.saturating_add(held.bytes)
+                    }
+                    _ => skipped.push(super::icloud::Skipped {
+                        path: super::icloud::shown(&root, &path),
+                        files: held.map(|held| held.files),
+                    }),
+                }
+                continue;
+            }
             if placeholder {
                 placeholders += 1;
             }
-            if metadata.is_dir() && !metadata.file_type().is_symlink() && !placeholder {
-                stack.push(entry.path());
+            if inner && !placeholder {
+                stack.push(path);
             } else if metadata.is_file() {
                 bytes = bytes.saturating_add(metadata.len());
             }
         }
     }
     assert!(entries <= ENTRIES_MAX);
-    assert!(placeholders <= entries);
+    assert!(placeholders + skipped.len() <= entries);
     Ok(Measured {
         bytes,
         placeholders,
+        skipped,
     })
 }
 

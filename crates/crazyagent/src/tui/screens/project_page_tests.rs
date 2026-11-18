@@ -159,12 +159,14 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 Request::Intake(job) => {
                     sent.push(match job.query() {
                         IntakeQuery::JobStart { .. } => "job start",
+                        IntakeQuery::FolderSize { .. } => "folder size",
                         IntakeQuery::JobStatus => "job status",
                         IntakeQuery::JobDismiss { .. } => "job dismiss",
                         IntakeQuery::Found => "found",
                         IntakeQuery::GitHubPublishStart { .. } => "github publish",
                         IntakeQuery::GitHubPublishStatus { .. } => "github publish status",
                         IntakeQuery::GitHubPublishPrompt { .. } => "github publish prompt",
+                        IntakeQuery::ReinstallOffer { .. } => "reinstall offer",
                         _ => "intake",
                     });
                     connection.intake(*job).unwrap();
@@ -761,6 +763,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "pool projects",
             "pending import",
             "uncommitted",
+            "reinstall offer",
             "recovery",
             "setup",
             "team graph",
@@ -769,7 +772,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             "context",
             "memories"
         ],
-        "a project page also reads its instruction files waiting to import, its uncommitted move and its recovery notices"
+        "a project page also reads its instruction files waiting to import, its uncommitted move, its reinstall offer and its recovery notices"
     );
     let shown = render(&mut shell, 80, 24);
     assert!(
@@ -831,6 +834,13 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
             Request::Questions(query) => matches!(
                 **query,
                 QuestionsQuery::Counts | QuestionsQuery::List { .. }
+            ),
+            Request::Intake(job) => matches!(
+                job.query(),
+                IntakeQuery::GitHubPublishStatus { project }
+                    | IntakeQuery::GitHubPublishPrompt { project }
+                    | IntakeQuery::ReinstallOffer { project }
+                    if project == notes
             ),
             other => matches!(
                 other,
@@ -912,6 +922,11 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
     shell.key(Key::ShiftLeft);
     pump(&mut shell, &mut connection).await;
     shell.key(Key::Char('M'));
+    let read = pump(&mut shell, &mut connection).await;
+    assert!(
+        read.contains(&"folder size"),
+        "the ask reads the folder: {read:?}"
+    );
     let shown = render(&mut shell, 120, 30);
     assert!(
         shown.contains("Move Notes CLI into your CrazyAgent folder?"),
@@ -928,14 +943,22 @@ async fn a_project_kept_outside_the_projects_folder_moves_in_as_the_engine_s_job
             "Follow it on Home; you can keep working."
         )
     );
-    assert!(shell.ctx.store.intake.is_some(), "the started job is kept");
+    assert!(
+        !shell.ctx.store.intake.is_empty(),
+        "the started job is kept"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = Vec::new();
     let ended = loop {
-        let ended = shell.ctx.store.intake.clone();
-        if let Some(job) = ended.filter(|job| !super::intake_job::running(job)) {
-            break job;
+        let ended = shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .find(|job| !super::intake_job::running(job));
+        if let Some(job) = ended {
+            break job.clone();
         }
         assert!(
             Instant::now() < deadline,
@@ -1021,8 +1044,8 @@ async fn job_until(
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last = Vec::new();
     loop {
-        if let Some(job) = shell.ctx.store.intake.clone().filter(&check) {
-            return (job, last);
+        if let Some(job) = shell.ctx.store.intake.iter().find(|job| check(job)) {
+            return (job.clone(), last);
         }
         assert!(
             Instant::now() < deadline,
@@ -1047,6 +1070,11 @@ async fn move_from_settings(
     shell.key(Key::ShiftLeft);
     pump(shell, connection).await;
     shell.key(Key::Char('M'));
+    let read = pump(shell, connection).await;
+    assert!(
+        read.contains(&"folder size"),
+        "the ask reads the folder: {read:?}"
+    );
     let shown = render(shell, 120, 30);
     assert!(
         shown.contains(&format!("Move {name} into your CrazyAgent folder?")),
@@ -1146,15 +1174,24 @@ async fn a_project_move_whose_name_is_taken_fails_with_the_reason_and_d_on_home_
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
     assert_eq!(
-        shell.ctx.store.intake.as_ref().map(|job| &job.id),
-        Some(&ended.id),
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        [&ended.id],
         "a terminal started again shows the ended move"
     );
     shell.key(Key::Home);
     shell.key(Key::Char('d'));
     pump(&mut shell, &mut connection).await;
     pump(&mut shell, &mut connection).await;
-    assert_eq!(shell.ctx.store.intake, None, "d forgets the ended move");
+    assert!(
+        shell.ctx.store.intake.is_empty(),
+        "d forgets the ended move"
+    );
 }
 
 /// DEC-177: a project move waits for the project's agents to stop, says how many are left in
@@ -1207,9 +1244,10 @@ async fn a_project_move_waits_for_its_agents_says_how_many_are_left_and_moves_on
     assert_eq!(std::fs::read(target.join("notes.txt")).unwrap(), b"kept\n");
 }
 
-/// DEC-177: one job at a time. While one project's copy runs, another project's move is
-/// refused naming the running move; a start for the running project finds its job; a terminal
-/// started again shows the running move on Home, where Enter stops it with nothing moved.
+/// DEC-177, DEC-197: project moves run one at a time. While one project's copy runs, a start
+/// for the running project finds its job and another project's move waits its turn behind it,
+/// with nothing moved; a terminal started again shows both on Home, where Enter stops the
+/// running move with nothing copied, and the waiting move then starts by itself and lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_terminal_shows_it() {
     let mut engine = Engine::start().await;
@@ -1256,6 +1294,19 @@ async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_ter
         found.id, running.id,
         "a start for the running project finds its job"
     );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let jobs = engine.controller.job_status().await.unwrap();
+        let copying = jobs.iter().any(|job| {
+            job.id == running.id
+                && matches!(job.state, JobState::Copying { copied, .. } if copied > 0)
+        });
+        if copying {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the first move copies: {jobs:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let mut connection = engine.connect();
     let mut shell = project_shell(&reading, "Reading List");
@@ -1263,10 +1314,18 @@ async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_ter
     super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
     let sent = move_from_settings(&mut shell, &mut connection, "Reading List").await;
     assert!(sent.contains(&"job start"), "{sent:?}");
-    let said = shell.ctx.message().expect("the refusal is said");
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(said.lead, "Moving Reading List.");
+    let (queued, _) = job_until(&mut shell, &mut connection, |job| {
+        job.id != running.id && job.kind == JobKind::MoveProject
+    })
+    .await;
     assert_eq!(
-        said.lead,
-        "Moving notes-cli is running. Wait for it to finish on Home."
+        queued.state,
+        JobState::Waiting {
+            behind: "notes-cli".into()
+        },
+        "the second move waits its turn behind the running one"
     );
     assert!(kept.is_dir(), "{kept:?}");
     assert!(!home.join("reading-list").exists());
@@ -1275,17 +1334,27 @@ async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_ter
 
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the running move");
+    let shown: Vec<_> = shell
+        .ctx
+        .store
+        .intake
+        .iter()
+        .map(|job| job.id.clone())
+        .collect();
     assert_eq!(
-        shown.id, running.id,
-        "a terminal started again shows the running move"
+        shown,
+        [running.id.clone(), queued.id.clone()],
+        "a terminal started again shows the running move first, then the waiting one"
     );
     let rows = render(&mut shell, 120, 30);
-    assert!(rows.contains("notes-cli"), "{rows}");
+    assert!(
+        rows.contains("Waiting for notes-cli to finish..."),
+        "{rows}"
+    );
     shell.key(Key::Home);
     shell.key(Key::Enter);
     let (ended, _) = job_until(&mut shell, &mut connection, |job| {
-        !super::intake_job::running(job)
+        job.id == running.id && !super::intake_job::running(job)
     })
     .await;
     assert!(
@@ -1294,6 +1363,17 @@ async fn another_project_s_move_is_refused_naming_the_running_move_and_a_new_ter
     );
     assert!(origin.join("p199").join("f199.txt").is_file());
     assert!(!home.join("notes-cli").exists(), "nothing was copied");
+    let (landed, _) = job_until(&mut shell, &mut connection, |job| {
+        job.id == queued.id && !super::intake_job::running(job)
+    })
+    .await;
+    assert_eq!(
+        landed.state,
+        JobState::Done,
+        "the waiting move starts by itself once the running one ended, and lands"
+    );
+    assert!(home.join("reading-list").is_dir());
+    assert!(!kept.exists(), "a Move leaves nothing at the old folder");
 }
 
 /// DEC-177: a project move with a linked worktree outside it waits for the owner's answer;
@@ -1435,9 +1515,10 @@ async fn delete_entered(shell: &mut Shell, connection: &mut Connection) -> Vec<&
 
 /// DEC-177 add.1: Delete everything on the project page starts the engine's delete job and goes
 /// Home, where it waits for the project's agents with nothing moved; another project's delete
-/// is refused naming it, a terminal started again shows it, and Enter there stops it, keeping
-/// the project and its folder. Runs on macOS only, the one platform that offers Delete
-/// everything (DEC-118).
+/// waits its turn behind it (DEC-197), a terminal started again shows both, Stop on the
+/// waiting one ends it with its folder kept and the running one left, and Enter on the running
+/// one stops it, keeping the project and its folder. Runs on macOS only, the one platform that
+/// offers Delete everything (DEC-118).
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_there_stops_it() {
@@ -1481,10 +1562,19 @@ async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_ther
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
     assert!(sent.contains(&"job start"), "{sent:?}");
-    let said = shell.ctx.message().expect("the refusal is said");
+    let said = shell.ctx.message().expect("the start is said");
+    assert_eq!(said.lead, "Deleting Reading List.");
+    let (queued, _) = job_until(&mut shell, &mut connection, |job| {
+        job.id != waiting.id && job.kind == JobKind::Delete
+    })
+    .await;
+    assert_eq!(queued.source, "Reading List");
     assert_eq!(
-        said.lead,
-        "Deleting Notes CLI is running. Wait for it to finish on Home."
+        queued.state,
+        JobState::Waiting {
+            behind: "Notes CLI".into()
+        },
+        "the second delete waits its turn behind the running one"
     );
     assert!(kept.is_dir(), "{kept:?}");
     drop(shell);
@@ -1492,10 +1582,46 @@ async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_ther
 
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the running delete");
+    let shown: Vec<_> = shell
+        .ctx
+        .store
+        .intake
+        .iter()
+        .map(|job| job.id.clone())
+        .collect();
     assert_eq!(
-        shown.id, waiting.id,
-        "a terminal started again shows the running delete"
+        shown,
+        [waiting.id.clone(), queued.id.clone()],
+        "a terminal started again shows the running delete first, then the waiting one"
+    );
+    let rows = render(&mut shell, 120, 30);
+    assert!(
+        rows.contains("Waiting for Notes CLI to finish..."),
+        "{rows}"
+    );
+    shell.key(Key::Home);
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let (dropped, _) = job_until(&mut shell, &mut connection, |job| {
+        job.id == queued.id && !super::intake_job::running(job)
+    })
+    .await;
+    assert_eq!(
+        dropped.state,
+        JobState::Cancelled {
+            phase: crate::projects_home::job::Phase::Waiting
+        },
+        "{dropped:?}"
+    );
+    assert!(kept.is_dir(), "a stopped waiting delete keeps its folder");
+    assert!(
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .any(|job| job.id == waiting.id && super::intake_job::running(job)),
+        "stopping the waiting delete leaves the running one"
     );
     shell.key(Key::Home);
     shell.key(Key::Enter);
@@ -1743,7 +1869,8 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
         .ctx
         .store
         .intake
-        .clone()
+        .first()
+        .cloned()
         .expect("the delete cut short");
     assert_eq!(cut.kind, JobKind::Delete);
     assert_eq!(
@@ -1785,15 +1912,21 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
     assert_eq!(
-        shell.ctx.store.intake.as_ref().map(|job| &job.id),
-        Some(&cut.id)
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        [&cut.id]
     );
     shell.key(Key::Home);
     shell.key(Key::Char('d'));
     pump(&mut shell, &mut connection).await;
     pump(&mut shell, &mut connection).await;
-    assert_eq!(
-        shell.ctx.store.intake, None,
+    assert!(
+        shell.ctx.store.intake.is_empty(),
         "d keeps the project and forgets the job"
     );
     assert_eq!(
@@ -1807,11 +1940,12 @@ async fn a_delete_cut_short_shows_on_home_after_a_restart_and_d_keeps_the_projec
     assert!(folder.join(".crazyagent").is_dir(), "{folder:?}");
 }
 
-/// DEC-177 step 3c: while another project's move waits for its agents, Create on New project
-/// starts the engine's New Project job, which the held move refuses; the wizard keeps the
-/// draft and says another job runs, nothing is made and the move still waits.
+/// DEC-197: while another project's move waits for its agents, Create on New project starts
+/// the engine's New Project job, which waits its turn behind the move and names it while the
+/// wizard follows it; once the move is stopped the New Project is made, and the move moved
+/// nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
+async fn create_while_a_move_holds_the_job_waits_its_turn_and_is_made_once_the_move_stops() {
     let mut engine = Engine::start().await;
     let (notes, origin) = made_in_first_home(&mut engine, "notes-cli", "Notes CLI", 1).await;
     let next = crate::tui::test_home::projects_home(&mut engine.controller, 2).await;
@@ -1856,39 +1990,46 @@ async fn create_while_a_move_holds_the_job_is_refused_and_keeps_the_draft() {
     assert_eq!(
         sent.iter().filter(|sent| **sent == "job start").count(),
         1,
-        "one start, never sent again after the refusal: {sent:?}"
+        "one start: {sent:?}"
+    );
+    let moving = origin
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .expect("the moved folder's name")
+        .to_owned();
+    let (waiting, _) = job_until(&mut shell, &mut connection, |job| {
+        job.kind == JobKind::Setup
+    })
+    .await;
+    assert_eq!(
+        waiting.state,
+        JobState::Waiting { behind: moving },
+        "{waiting:?}"
     );
     assert_eq!(shell.place(), Some(Place::NewProject));
     let shown = render(&mut shell, 80, 24);
-    assert!(shown.contains("Could not create the project."), "{shown}");
-    assert!(shown.contains("Another job is running."), "{shown}");
-    assert!(!home.join("tidepool").exists(), "nothing was made");
-    assert!(origin.is_dir(), "the move still waits: {origin:?}");
-    go_to(&mut shell, "home");
-    assert_eq!(
-        kept_draft().as_deref(),
-        Some("Tidepool"),
-        "leaving the refused wizard keeps its draft"
-    );
-    drop(shell);
-    drop(connection);
-
-    let mut connection = engine.connect();
-    let mut shell = home_shell(&mut connection).await;
-    let shown = shell.ctx.store.intake.clone().expect("the held move");
-    assert_eq!(shown.id, held.id, "the held move is still the engine's job");
-    assert!(super::intake_job::running(&shown), "{shown:?}");
-    shell.key(Key::Home);
-    shell.key(Key::Enter);
-    let (ended, _) = job_until(&mut shell, &mut connection, |job| {
-        !super::intake_job::running(job)
-    })
-    .await;
+    assert!(!shown.contains("Could not create the project."), "{shown}");
     assert!(
-        matches!(ended.state, JobState::Cancelled { .. }),
-        "the held move still stops: {ended:?}"
+        !home.join("tidepool").exists(),
+        "nothing is made while it waits"
     );
-    assert!(origin.is_dir(), "nothing was moved: {origin:?}");
+
+    assert!(engine.controller.job_stop(held.id.clone()).await.unwrap());
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !home.join("tidepool").is_dir() {
+        assert!(
+            Instant::now() < deadline,
+            "the New Project was never made: {:?}",
+            shell.ctx.store.intake
+        );
+        super::intake::ask(&mut shell.ctx, IntakeQuery::JobStatus);
+        pump(&mut shell, &mut connection).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        origin.is_dir(),
+        "the stopped move moved nothing: {origin:?}"
+    );
 }
 
 /// DEC-177 step 3c: a New Project an engine stop cut short shows on Home after the next start
@@ -1929,7 +2070,8 @@ async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it(
         .ctx
         .store
         .intake
-        .clone()
+        .first()
+        .cloned()
         .expect("the New Project cut short");
     assert_eq!(cut.kind, JobKind::Setup);
     assert_eq!(cut.source, "Cut Short");
@@ -1959,14 +2101,20 @@ async fn a_new_project_cut_short_shows_on_home_after_a_restart_and_d_forgets_it(
     let mut connection = engine.connect();
     let mut shell = home_shell(&mut connection).await;
     assert_eq!(
-        shell.ctx.store.intake.as_ref().map(|job| &job.id),
-        Some(&cut.id)
+        shell
+            .ctx
+            .store
+            .intake
+            .iter()
+            .map(|job| &job.id)
+            .collect::<Vec<_>>(),
+        [&cut.id]
     );
     shell.key(Key::Home);
     shell.key(Key::Char('d'));
     pump(&mut shell, &mut connection).await;
     pump(&mut shell, &mut connection).await;
-    assert_eq!(shell.ctx.store.intake, None, "d forgets the job");
+    assert!(shell.ctx.store.intake.is_empty(), "d forgets the job");
     assert_eq!(
         engine_count(
             &engine,
@@ -3634,6 +3782,8 @@ fn setup_start(sent: &[Request]) -> Option<(RequestId, ProjectId, IntakeQuery)> 
 /// and its state. Returns the view.
 fn tidepool_job(id: &RequestId, project: &ProjectId, state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: id.clone(),
         kind: JobKind::Setup,
         project_id: Some(project.clone()),
@@ -3656,11 +3806,11 @@ fn intake_reply(
     )))
 }
 
-/// A status read that finds this job. Takes the job, or none for no job. Returns the arrival.
-fn job_status(job: Option<JobView>) -> Arrival {
+/// A status read that finds these jobs. Takes the jobs, none for no job. Returns the arrival.
+fn job_status(jobs: Vec<JobView>) -> Arrival {
     intake_reply(
         IntakeQuery::JobStatus,
-        Ok(crate::tui::client::intake::IntakeView::Job(job)),
+        Ok(crate::tui::client::intake::IntakeView::Jobs(jobs)),
     )
 }
 
@@ -3763,11 +3913,11 @@ fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_proje
         "a running job is kept"
     );
 
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(assigns_main(&sent, &project), "{sent:?}");
     assert!(
@@ -3786,7 +3936,7 @@ fn a_done_new_project_job_assigns_its_pool_dismisses_it_once_and_opens_the_proje
         IntakeQuery::JobDismiss { id: id.clone() },
         Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
     ));
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     let sent = drain(&mut shell);
     assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
     assert_eq!(shell.place(), Some(Place::NewProject));
@@ -3835,11 +3985,11 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(
         assigns_main(&sent, &project),
@@ -3851,7 +4001,7 @@ fn a_new_project_job_run_in_the_background_finishes_after_its_page_is_gone() {
         IntakeQuery::JobDismiss { id: id.clone() },
         Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
     ));
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     shell.arrive(Arrival::PoolEdited(Ok(())));
     let sent = drain(&mut shell);
     assert!(
@@ -3894,11 +4044,11 @@ fn a_new_project_run_in_the_background_says_its_github_publish_refusal() {
         start,
         Ok(IntakeView::Job(Some(building(&id, &project)))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     drain(&mut shell);
     shell.arrive(Arrival::PoolEdited(Ok(())));
     let publish: Vec<IntakeQuery> = intake_asks(&drain(&mut shell))
@@ -3939,17 +4089,17 @@ fn made_in_background() -> (Shell, ProjectId, Vec<Request>) {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     drain(&mut shell);
     shell.arrive(intake_reply(
         IntakeQuery::JobDismiss { id: id.clone() },
         Ok(crate::tui::client::intake::IntakeView::JobDismissed(true)),
     ));
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     shell.arrive(Arrival::PoolEdited(Ok(())));
     let sent = drain(&mut shell);
     (shell, project, sent)
@@ -3980,17 +4130,29 @@ fn access_writes(sent: &[Request]) -> Vec<SetupQuery> {
 
 /// DEC-177 add.3 decision 4 (rv-sec2 bgjobs-3b F1): a New Project carried in the background
 /// reads its project's agent policy once it is made and saves the picked access at the
-/// version read; a refused read or save says the project stays Sandboxed.
+/// version read; a refused read or save says the project stays Sandboxed. Where only
+/// Sandboxed runs, as on Linux, the wizard picks Sandboxed, so nothing is read, saved or said.
 #[test]
 fn a_new_project_carried_in_the_background_saves_its_agent_access_or_says_it_stays_sandboxed() {
     use super::project_tests::access_view;
     use crate::engine::owner::OwnerResult;
     use crate::sandbox::policy::AgentAccess;
-    assert!(
-        AgentAccess::NEW_PROJECT.unavailable().is_none(),
-        "the wizard preselects a level it can save"
-    );
     let sandboxed = "The project is made, but its agents stay Sandboxed.";
+    if AgentAccess::NEW_PROJECT.unavailable().is_some() {
+        let (mut shell, _, sent) = made_in_background();
+        assert!(
+            !sent
+                .iter()
+                .any(|request| matches!(request, Request::Setup(SetupQuery::AgentPolicy { .. }))),
+            "a Sandboxed pick reads no agent policy: {sent:?}"
+        );
+        assert!(access_writes(&drain(&mut shell)).is_empty());
+        assert_ne!(
+            shell.ctx.message().map(|message| message.lead.as_str()),
+            Some(sandboxed)
+        );
+        return;
+    }
 
     let (mut shell, project, sent) = made_in_background();
     let read = SetupQuery::AgentPolicy {
@@ -4092,14 +4254,14 @@ fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Failed {
             code: "home_new_project_failed".into(),
             phase: crate::projects_home::job::Phase::Building,
         },
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
     assert!(!assigns_main(&sent, &project), "{sent:?}");
@@ -4122,13 +4284,13 @@ fn a_failed_or_stopped_new_project_job_keeps_the_draft_in_new_project_words() {
             &id, &project,
         )))),
     ));
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Cancelled {
             phase: crate::projects_home::job::Phase::Building,
         },
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert_eq!(dismisses(&sent, &id), 1, "{sent:?}");
     assert!(!assigns_main(&sent, &project), "{sent:?}");
@@ -4167,14 +4329,14 @@ fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_sta
     assert!(!shown.contains("Could not create"), "{shown}");
     assert_eq!(shell.place(), Some(Place::NewProject));
 
-    shell.arrive(job_status(Some(building(&id, &project))));
+    shell.arrive(job_status(vec![building(&id, &project)]));
     let shown = render(&mut shell, 80, 24);
     assert!(!shown.contains("Could not create"), "{shown}");
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(assigns_main(&sent, &project), "{sent:?}");
     assert!(setup_start(&sent).is_none(), "{sent:?}");
@@ -4183,7 +4345,7 @@ fn a_new_project_start_with_no_answer_follows_the_job_a_read_finds_and_never_sta
     let (id, _, start) = setup_start(&sent).expect("Create starts the New Project job");
     shell.arrive(intake_reply(start, Err("project_exists".into())));
     drain(&mut shell);
-    shell.arrive(job_status(None));
+    shell.arrive(job_status(Vec::new()));
     let sent = drain(&mut shell);
     assert!(setup_start(&sent).is_none(), "{sent:?}");
     assert_eq!(dismisses(&sent, &id), 0, "{sent:?}");
@@ -4227,11 +4389,11 @@ fn every_new_project_left_running_reads_each_job_status() {
     shell.arrive(intake_reply(harbor, Err("job_busy".into())));
     drain(&mut shell);
 
-    shell.arrive(job_status(Some(tidepool_job(
+    shell.arrive(job_status(vec![tidepool_job(
         &id,
         &project,
         JobState::Done,
-    ))));
+    )]));
     let sent = drain(&mut shell);
     assert!(assigns_main(&sent, &project), "{sent:?}");
     let said = shell.ctx.message().expect("Harbor's refusal is said");
@@ -8731,4 +8893,60 @@ fn settings_with_jobs_loaded_sends_restart_them_on_capital_r_and_r_still_refresh
             .any(|request| matches!(request, Request::Setup(SetupQuery::TeamChange { .. }))),
         "r restarts nothing: {refresh:?}"
     );
+}
+
+/// DEC-198 slice 3: a project page reads its reinstall offer by the project's id once shown,
+/// draws the offer that arrives under the master and sends d as a dismiss by the same id; a
+/// refused dismiss keeps the offer, and one the engine made clears it.
+#[test]
+fn the_project_page_reads_its_reinstall_offer_and_d_dismisses_it_by_the_project_id() {
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let read = IntakeQuery::ReinstallOffer {
+        project: project.clone(),
+    };
+    let sent = drain(&mut shell);
+    assert!(intake_asks(&sent).contains(&read), "{sent:?}");
+    shell.arrive(intake_reply(
+        read,
+        Ok(IntakeView::Reinstall(Some(
+            crate::projects_home::reinstall::Offer {
+                folders: vec!["node_modules".into()],
+                more: 0,
+                draft: "Please reinstall it.".into(),
+            },
+        ))),
+    ));
+    assert!(render(&mut shell, 120, 30).contains("node_modules was left out"));
+    shell.key(Key::Tab);
+    shell.key(Key::Char('d'));
+    let dismiss = IntakeQuery::ReinstallDismiss {
+        project: project.clone(),
+    };
+    let sent = drain(&mut shell);
+    assert!(intake_asks(&sent).contains(&dismiss), "{sent:?}");
+    shell.arrive(intake_reply(
+        dismiss.clone(),
+        Err("owner_read_failed".into()),
+    ));
+    assert!(
+        render(&mut shell, 120, 30).contains("node_modules was left out"),
+        "a refused dismiss keeps the offer"
+    );
+    shell.key(Key::Char('d'));
+    assert!(intake_asks(&drain(&mut shell)).contains(&dismiss));
+    shell.arrive(intake_reply(
+        dismiss,
+        Ok(IntakeView::ReinstallDismissed(true)),
+    ));
+    assert!(!render(&mut shell, 120, 30).contains("left out"));
 }

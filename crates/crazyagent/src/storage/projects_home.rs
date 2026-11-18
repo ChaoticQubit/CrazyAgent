@@ -274,7 +274,7 @@ pub(super) fn add_plan(
         overrides,
         &guarded(&tx)?,
     )?;
-    if another_add_running(&tx, request)? {
+    if another_add_on(&tx, request, plan.destination())? {
         return Err(error("home_add_in_progress"));
     }
     let mode = match mode {
@@ -294,7 +294,7 @@ pub(super) fn add_plan(
     )
     .map_err(error)?;
     assert!(adding(&tx)?);
-    assert!(!another_add_running(&tx, request)?);
+    assert!(!another_add_on(&tx, request, plan.destination())?);
     tx.commit().map_err(error)?;
     Ok(plan)
 }
@@ -322,7 +322,7 @@ pub(super) fn add_check(
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
     let root = engine_root(path)?;
     let plan = home::check_add(&saved, &root, source, mode, overrides, &guarded(&tx)?)?;
-    if another_add_running(&tx, request)? {
+    if another_add_on(&tx, request, plan.destination())? {
         return Err(error("home_add_in_progress"));
     }
     assert!(plan.destination().starts_with(&saved));
@@ -330,22 +330,42 @@ pub(super) fn add_check(
     tx.rollback().map_err(error)
 }
 
-/// Whether an add other than `request` is running. One add runs at a time: two adds find a
-/// destination free on disk until one lands, an engine start reads each cut add's end from
-/// its destination folder, and names the volume treats as one folder (case, Unicode form)
-/// differ as text. The asking add's own row, as a resend finds it, does not count. Inputs:
-/// the connection and the asking add's request. Output: the answer.
-fn another_add_running(db: &Connection, request: &RequestId) -> Result<bool, EngineError> {
+/// Whether an add other than `request` is running onto a name the volume may not tell apart
+/// from `destination`'s ([`home::names_apart`]). Two such adds would find the destination free
+/// on disk until one lands, and an engine start reads each cut add's end from its destination
+/// folder; adds onto names apart run side by side (DEC-197). The asking add's own row, as a
+/// resend finds it, does not count. Inputs: the connection, the asking add's request and its
+/// destination. Output: the answer.
+fn another_add_on(
+    db: &Connection,
+    request: &RequestId,
+    destination: &Path,
+) -> Result<bool, EngineError> {
     assert!(!request.as_str().is_empty());
-    let running: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects_home_add WHERE ended IS NULL AND request<>?1)",
-            [request.as_str()],
-            |row| row.get(0),
+    let name = destination
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| error("home_record_invalid"))?;
+    let mut statement = db
+        .prepare(
+            "SELECT destination FROM projects_home_add WHERE ended IS NULL AND request<>?1
+             ORDER BY rowid LIMIT ?2",
         )
         .map_err(error)?;
-    assert!(!running || adding(db)?);
-    Ok(running)
+    let running: Vec<String> = statement
+        .query_map(params![request.as_str(), ADDS_MAX as i64], |row| row.get(0))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(running.len() <= ADDS_MAX);
+    let clash = running.iter().any(|other| {
+        let other = Path::new(other)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str);
+        !other.is_some_and(|other| home::names_apart(name, other))
+    });
+    assert!(!clash || adding(db)?);
+    Ok(clash)
 }
 
 /// Whether an add is running: planned, and neither recorded nor settled yet. While one runs
@@ -359,9 +379,13 @@ fn adding(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
-/// The most running adds one engine start reads; planning admits one running add at a time
-/// ([`another_add_running`]), and the bound holds for any other rows the table has.
+/// The most running adds one engine start reads; the engine runs at most
+/// `JOBS_RUNNING_MAX` adds at once, and the bound holds for any other rows the table has.
 const ADDS_MAX: usize = 64;
+
+/// The most ended adds kept for the owner to read: what one engine stop can cut, as the engine
+/// runs at most `JOBS_RUNNING_MAX` (3) adds at once (DEC-197). Past it the oldest end goes.
+const ADD_ENDS_KEPT: usize = 3;
 
 /// How an add a record never reached is settled. With a request (after its exchange
 /// replied, its disk work already settled there) and whether that add placed its folder: a
@@ -371,7 +395,7 @@ const ADDS_MAX: usize = 64;
 /// folder took its destination after the plan (rv-sec2 b9 F1), or whose folder is gone, is
 /// forgotten. With none (engine start, before any add plans, so no staging is live): each
 /// running row gets its staging folders removed and the end its disk shows. Nothing else is
-/// deleted either way, and only the newest ended row is kept for the owner to read. Inputs:
+/// deleted either way, and the newest `ADD_ENDS_KEPT` ended rows are kept for the owner. Inputs:
 /// the connection, and the request with whether its add placed its folder. Output: how many
 /// running rows were settled.
 pub(super) fn add_settle(
@@ -419,7 +443,7 @@ fn restart_adds(tx: &Transaction<'_>) -> Result<usize, EngineError> {
         )
         .map_err(error)?;
     }
-    keep_newest_end(tx)?;
+    keep_newest_ends(tx)?;
     assert!(rows.len() <= ADDS_MAX);
     Ok(rows.len())
 }
@@ -465,17 +489,18 @@ fn settle_add(
             .map_err(error)?,
     };
     assert_eq!(changed, 1, "the running row read above is settled once");
-    keep_newest_end(tx)?;
+    keep_newest_ends(tx)?;
     Ok(changed)
 }
 
-/// Keeps only the newest ended add for the owner to read. Input: the transaction.
-/// Output: Ok.
-fn keep_newest_end(tx: &Transaction<'_>) -> Result<(), EngineError> {
+/// Keeps the newest `ADD_ENDS_KEPT` ended adds for the owner to read, each until it is
+/// forgotten (DEC-197). Input: the transaction. Output: Ok.
+fn keep_newest_ends(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute(
-        "DELETE FROM projects_home_add WHERE ended IS NOT NULL AND rowid <>
-         (SELECT max(rowid) FROM projects_home_add WHERE ended IS NOT NULL)",
-        [],
+        "DELETE FROM projects_home_add WHERE ended IS NOT NULL AND rowid NOT IN
+         (SELECT rowid FROM projects_home_add WHERE ended IS NOT NULL
+          ORDER BY rowid DESC LIMIT ?1)",
+        [ADD_ENDS_KEPT as i64],
     )
     .map_err(error)?;
     Ok(())
@@ -491,31 +516,41 @@ pub(crate) struct AddEnded {
     pub ended: String,
 }
 
-/// The newest add an engine stop cut short and the owner has not dismissed. Input: the
-/// connection. Output: it, or None.
-pub(super) fn add_ended(db: &Connection) -> Result<Option<AddEnded>, EngineError> {
-    let row: Option<(String, String, String, String)> = db
-        .query_row(
+/// The adds an engine stop cut short, or whose record never came, that the owner has not
+/// dismissed, in start order (DEC-197). Input: the connection. Output: at most
+/// `ADD_ENDS_KEPT` of them.
+pub(super) fn add_ended(db: &Connection) -> Result<Vec<AddEnded>, EngineError> {
+    let mut statement = db
+        .prepare(
             "SELECT request, source, mode, ended FROM projects_home_add
-             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+             WHERE ended IS NOT NULL ORDER BY rowid DESC LIMIT ?1",
         )
-        .optional()
         .map_err(error)?;
-    row.map(|(request, source, mode, ended)| {
-        let mode = match mode.as_str() {
-            "move" => AddMode::Move,
-            _ => AddMode::Copy,
-        };
-        Ok(AddEnded {
-            request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
-            source,
-            mode,
-            ended,
+    let rows: Vec<(String, String, String, String)> = statement
+        .query_map([ADD_ENDS_KEPT as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
-    })
-    .transpose()
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let mut ended = rows
+        .into_iter()
+        .map(|(request, source, mode, ended)| {
+            let mode = match mode.as_str() {
+                "move" => AddMode::Move,
+                _ => AddMode::Copy,
+            };
+            Ok(AddEnded {
+                request: RequestId::new(request).map_err(|_| error("home_add_row_invalid"))?,
+                source,
+                mode,
+                ended,
+            })
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    ended.reverse();
+    assert!(ended.len() <= ADD_ENDS_KEPT);
+    Ok(ended)
 }
 
 /// Forgets an ended job the owner dismissed or a new job replaced: an ended add or a project
@@ -1279,17 +1314,17 @@ pub(super) fn project_move_plan(
 
 /// Checks a project move job before it starts, as far as the move can be checked without
 /// reading inside the folder, writing nothing: the owner's admission, a projects home move
-/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), an add
-/// running (`home_add_in_progress`), then what `crate::projects_home::project_move_check`
-/// names. Inputs: the connection, the owner
-/// admission, the project and the mode. Output: the project's real folder as text, or the
-/// refusal code.
+/// or delete under way (`home_move_in_progress`, `home_move_delete_in_progress`), then what
+/// `crate::projects_home::project_move_check` names. An add running or another project move
+/// pending is reported, not refused, so the engine lets the move wait behind its own add and
+/// move jobs (DEC-197). Inputs: the connection, the owner admission, the project and the
+/// mode. Output: what the check found, or the refusal code.
 pub(super) fn project_move_check(
     db: &mut Connection,
     a: &Admission,
     project: &ProjectId,
     mode: AddMode,
-) -> Result<String, EngineError> {
+) -> Result<home::MoveCheck, EngineError> {
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
     if pending_move(&tx)?.is_some() {
@@ -1298,17 +1333,19 @@ pub(super) fn project_move_check(
     if delete_planned(&tx)? {
         return Err(error("home_move_delete_in_progress"));
     }
-    if adding(&tx)? {
-        return Err(error("home_add_in_progress"));
-    }
-    let real = home::project_move_check(&tx, &guarded(&tx)?, project, mode)?;
+    let adding = adding(&tx)?;
+    let (real, moving) = home::project_move_check(&tx, &guarded(&tx)?, project, mode)?;
     let source = real
         .to_str()
         .ok_or_else(|| error("projects_home_path_invalid"))?
         .to_owned();
     tx.rollback().map_err(error)?;
     assert!(!source.is_empty());
-    Ok(source)
+    Ok(home::MoveCheck {
+        source,
+        adding,
+        moving,
+    })
 }
 
 /// Finishes or forgets a pending project move in its own transaction. Input: the
@@ -1318,7 +1355,7 @@ pub(super) fn project_move_check(
 /// finished as `crate::projects_home::finish` does, a Copy never from disk alone; a move
 /// another exchange planned is left alone. A move finished at engine start is kept as the
 /// ended job the next status shows, `done` or `move_project_interrupted`, replacing an
-/// older one, until the owner dismisses it or a new job starts. Output: Ok, or any SQLite
+/// older one, until the owner dismisses it or a start drops it once read. Output: Ok, or any SQLite
 /// failure.
 pub(super) fn project_move_settle(
     db: &mut Connection,
@@ -1512,10 +1549,10 @@ fn agent_work_inside(
     .then_some("home_move_changes_restorable"))
 }
 
-/// Tells whether a table of agent work records holds one with a path inside the home, as
-/// recorded or as the path resolves now. A table the engine has not made yet holds none.
-/// Inputs: the transaction, the home, the table, the query whose every column is a path
-/// and that query's parameters. Output: the answer.
+/// Tells whether a table of agent work records holds a path inside the home under any of its
+/// names (as saved, its one spelling, its data-volume twin), as recorded or as it resolves
+/// now; a table not made yet holds none. Inputs: the transaction, the home, the table, the
+/// query whose every column is a path and its parameters. Output: the answer.
 fn held_inside(
     tx: &Transaction<'_>,
     home: &Path,
@@ -1535,10 +1572,18 @@ fn held_inside(
     if !present {
         return Ok(false);
     }
+    let saved = home.to_path_buf();
+    let home = crate::projects_home::one_spelling(saved.clone());
+    let names = [
+        Some(saved),
+        crate::projects_home::data_twin(&home),
+        Some(home.clone()),
+    ];
     let inside = |text: &str| {
         let path = Path::new(text);
-        path.starts_with(home)
-            || std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(home))
+        names.iter().flatten().any(|name| path.starts_with(name))
+            || std::fs::canonicalize(path)
+                .is_ok_and(|real| crate::projects_home::one_spelling(real).starts_with(&home))
     };
     let mut statement = tx.prepare(query).map_err(error)?;
     let columns = statement.column_count();

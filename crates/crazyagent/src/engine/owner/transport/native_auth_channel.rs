@@ -143,6 +143,16 @@ pub(super) struct NativeAuthHostRegistration {
     disabled: bool,
 }
 
+#[cfg(all(test, unix))]
+impl NativeAuthHostRegistration {
+    /// Whether host registration is frozen, for the owner rows that check a sign-out keeps
+    /// the freeze while its storage job is pending. Output: the flag, read only, so a row
+    /// can never thaw the host through it.
+    pub(super) fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+}
+
 impl NativeAuthHostRegistration {
     /// The Codex and Claude Code executables registered for this engine, for a confined
     /// model run outside a team. Output: the two, none for a harness that is not installed
@@ -1145,10 +1155,32 @@ impl OwnerRuntimeHandle {
                 .map_err(|_| failure("native_auth_recovery_required"))?
                 .frozen = true;
         }
+        let late = {
+            let runtime = self.clone();
+            let admission = admission.clone();
+            move |begun: crate::storage::NativeAuthBegin| async move {
+                let _ = runtime.settle_native_auth(admission, begun).await;
+            }
+        };
         let begun = self
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .native_auth_settled_job(
+                |reply| Job::NativeAuth(admission.clone(), command, reply),
+                late,
+            )
             .await?;
+        self.settle_native_auth(admission, begun).await
+    }
+
+    /// Takes a begun native-auth operation to its next step: its reply shown when it carries
+    /// no work, else its dispatch retained, or finished in storage when the host cannot take
+    /// it. Runs on the owner's answer, and later for a sign-out storage reached after the
+    /// owner's wait. Inputs: the admission and the begun operation. Output: the reply.
+    async fn settle_native_auth(
+        &self,
+        admission: Admission,
+        begun: crate::storage::NativeAuthBegin,
+    ) -> Result<NativeAuthReply, EngineError> {
         match begun.work {
             None => {
                 let mut reply = begun.reply;
@@ -1162,7 +1194,7 @@ impl OwnerRuntimeHandle {
                     .native_auth_job(|reply| Job::NativeAuthFinish(admission, work, reply))
                     .await
                     .map_err(|error| {
-                        if error.0 == "owner_queue_not_submitted" {
+                        if crate::storage::not_submitted(&error.0) {
                             crate::engine::owner::native_auth::outcome_unknown()
                         } else {
                             error
@@ -1694,7 +1726,7 @@ impl Authority {
 /// reply never arrived. False when storage answered with a refusal, which means the
 /// dispatch scope already changed and its durable fence stays in place for recovery.
 fn custody_release_undelivered(error: &EngineError) -> bool {
-    error.0 == "owner_queue_not_submitted"
+    crate::storage::not_submitted(&error.0)
         || *error == crate::engine::owner::native_auth::outcome_unknown()
 }
 

@@ -84,6 +84,28 @@ fn ready(spend_view: SpendView) -> (Spend, Ctx) {
     (spend, ctx)
 }
 
+#[test]
+fn a_usage_read_naming_another_free_resets_source_is_a_source_change() {
+    let with = |source: ResetsSource| {
+        view(
+            SpendSettings {
+                resets_source: source,
+                ..SpendSettings::default()
+            },
+            Vec::new(),
+        )
+    };
+    let mut spend = Spend::new();
+    assert!(
+        !spend.take_view(with(ResetsSource::Off)),
+        "the first read is no change"
+    );
+    assert!(!spend.take_view(with(ResetsSource::Off)));
+    assert!(spend.take_view(with(ResetsSource::AsClaudeCode)));
+    assert!(!spend.take_view(with(ResetsSource::AsClaudeCode)));
+    assert!(spend.take_view(with(ResetsSource::ThroughClaudeCode)));
+}
+
 fn shown(spend: &Spend, ctx: &Ctx) -> String {
     spend
         .lines(ctx, 400)

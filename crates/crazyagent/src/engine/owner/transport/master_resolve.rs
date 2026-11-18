@@ -32,7 +32,9 @@ impl OwnerRuntimeHandle {
         self.ask_master_to_resolve(packet, admission, &project_id, &session_id, id)
             .await
             .map_err(|error| {
-                if super::changes::CHANGES_CODES.contains(&error.0.as_str()) {
+                if super::changes::CHANGES_CODES.contains(&error.0.as_str())
+                    || crate::storage::storage_answer(&error.0)
+                {
                     error
                 } else {
                     failure("changes_outcome_unknown")
