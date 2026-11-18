@@ -335,9 +335,15 @@ pub struct Child {
 
 impl Child {
     /// Makes a child over a host rectangle of a mapped toplevel, shown and owing its first
-    /// frame. Inputs: the toplevel and the rectangle. Output: the child, or
+    /// frame. The page widget is the webview; the child is not clipped to it yet. Inputs: the
+    /// toplevel, the page widget and the rectangle. Output: the child, or
     /// `native_terminal_surface_unavailable`.
-    pub fn new(toplevel: &gtk::Window, rect: Rect) -> Result<Child, &'static str> {
+    pub fn new(
+        toplevel: &gtk::Window,
+        page: &gtk::Widget,
+        rect: Rect,
+    ) -> Result<Child, &'static str> {
+        let _ = page;
         let gdk = toplevel.window().ok_or(UNAVAILABLE)?;
         let scale = toplevel.scale_factor();
         if !gdk.is_viewable() || !(1..=SCALE_MAX).contains(&scale) {
@@ -592,6 +598,12 @@ impl Child {
             )
         };
         (found != 0).then_some((x, y))
+    }
+
+    /// The part of the child's rectangle on screen, in the toplevel's logical pixels. Not
+    /// clipped yet: the whole rectangle. Output: the part.
+    fn part(&self) -> Option<Rect> {
+        Some(self.rect)
     }
 }
 
@@ -992,28 +1004,199 @@ mod tests {
         took
     }
 
-    fn white_toplevel() -> gtk::Window {
+    /// A white toplevel holding a page widget that fills it, mapped. Output: both.
+    fn white_toplevel() -> (gtk::Window, gtk::DrawingArea) {
         gtk::init().expect("a display");
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
         window.set_decorated(false);
         window.set_default_size(640, 480);
-        let css = gtk::CssProvider::new();
-        css.load_from_data(b"window { background-color: #ffffff; }")
-            .expect("page css");
-        let screen = WidgetExt::screen(&window).expect("a screen");
+        add_css(&window, b"window { background-color: #ffffff; }");
+        let page = gtk::DrawingArea::new();
+        window.add(&page);
+        window.show_all();
+        wait_mapped(&window);
+        pump_for(Duration::from_millis(500));
+        (window, page)
+    }
+
+    /// Adds a stylesheet for the toplevel's screen. Inputs: the toplevel and the CSS.
+    fn add_css(window: &gtk::Window, css: &[u8]) {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(css).expect("page css");
+        let screen = WidgetExt::screen(window).expect("a screen");
         gtk::StyleContext::add_provider_for_screen(
             &screen,
-            &css,
+            &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-        window.show_all();
+    }
+
+    /// Runs GTK's events until the toplevel is viewable. Input: the toplevel.
+    fn wait_mapped(window: &gtk::Window) {
         let started = Instant::now();
         while !window.window().is_some_and(|gdk| gdk.is_viewable()) {
             assert!(started.elapsed() < STEP_WAIT, "the toplevel did not map");
             pump_for(Duration::from_millis(10));
         }
+    }
+
+    /// A GPU, a wgpu surface on the child at its size and an empty frame, drawn in a green
+    /// background the farm's screenshots look for. Input: the child. Output: them.
+    fn green_terminal(child: &Child) -> (Shared, Surface, Frame) {
+        let (width, height) = child.size();
+        let (family, source) = font_for("JetBrains Mono").expect("built in");
+        let style = Style {
+            family,
+            source,
+            font_px: 13.0,
+            blink: false,
+            theme: Theme {
+                background: GREEN,
+                ..Theme::default()
+            },
+        };
+        let mut shared = Shared::new(child.scale() as f32, &style).expect("a GPU");
+        let (display, handle) = child.handles();
+        let surface =
+            unsafe { shared.surface_raw(display, handle, width, height) }.expect("a wgpu surface");
+        let frame = Frame {
+            rows: Vec::new(),
+            keys: Vec::new(),
+            fills: Vec::new(),
+            cursor: None,
+        };
+        (shared, surface, frame)
+    }
+
+    /// A blue toplevel the size of the farm's output, and a white 640x480 one transient for it,
+    /// so weston's kiosk shell centres it and sway floats it; X11 runs no window manager, so
+    /// it is moved. The white one holds a page widget at its top left. Input: the page size.
+    /// Output: the blue toplevel, the white one and the page.
+    fn toplevel_over_back(size: (i32, i32)) -> (gtk::Window, gtk::Window, gtk::DrawingArea) {
+        gtk::init().expect("a display");
+        let back = gtk::Window::new(gtk::WindowType::Toplevel);
+        back.set_widget_name("native-back");
+        back.set_decorated(false);
+        back.set_default_size(1280, 800);
+        add_css(
+            &back,
+            b"#native-back { background-color: #0000ff; } #native-row { background-color: #ffffff; }",
+        );
+        back.show_all();
+        wait_mapped(&back);
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_widget_name("native-row");
+        window.set_decorated(false);
+        window.set_default_size(640, 480);
+        window.set_transient_for(Some(&back));
+        window.move_(320, 160);
+        let fixed = gtk::Fixed::new();
+        let page = gtk::DrawingArea::new();
+        page.set_size_request(size.0, size.1);
+        fixed.put(&page, 0, 0);
+        window.add(&fixed);
+        window.show_all();
+        wait_mapped(&window);
         pump_for(Duration::from_millis(500));
-        window
+        (back, window, page)
+    }
+
+    /// Resizes the page widget and runs GTK's layout, so its size-allocate has run. Inputs:
+    /// the page and the new size.
+    fn resize_page(page: &gtk::DrawingArea, size: (i32, i32)) {
+        page.set_size_request(size.0, size.1);
+        pump_until("the page's new allocation", || {
+            (page.allocated_width(), page.allocated_height()) == size
+        });
+        pump_for(Duration::from_millis(200));
+    }
+
+    /// Presents until the child has shown a frame, then lets the compositor show it.
+    /// Inputs: the child and its terminal.
+    fn show_frame(child: &mut Child, shared: &mut Shared, surface: &mut Surface, frame: &Frame) {
+        for _ in 0..3 {
+            wait_ready(child);
+            present(child, shared, surface, frame);
+            child.changed();
+        }
+        pump_for(Duration::from_millis(200));
+    }
+
+    /// Writes a clip step for the farm's screenshot: the step, the child's rectangle and
+    /// the part on screen. Inputs: the step and the child.
+    fn clip_checkpoint(step: &str, child: &Child) {
+        let (x, y, w, h) = child.device_rect();
+        let line = json!({
+            "step": step,
+            "device": [x, y, w, h],
+            "part": child.part().map(|part| [part.x, part.y, part.w, part.h]),
+            "scale": child.scale(),
+        });
+        crate::native_term::linux::rows::checkpoint(step, &line);
+    }
+
+    /// A child placed past the page's right and bottom edges and past the toplevel's,
+    /// over a blue toplevel the farm sees around it: only the part inside the page shows.
+    /// The page then shrinks, shrinks out of the rectangle, and grows back, each through
+    /// its size-allocate with no host call: the part follows, the child stays off screen
+    /// and never presents while no part is left, and comes back owing a frame. Under
+    /// NATIVE_ROW_DIR the farm checks the pixels inside the part, beside it in the toplevel
+    /// and outside the toplevel at each step, before the row checks the part.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
+    fn a_child_shows_only_its_part_inside_the_webview_and_reclips_on_size_allocate() {
+        let (back, window, page) = toplevel_over_back((400, 300));
+        let rect = Rect {
+            x: 300,
+            y: 200,
+            w: 600,
+            h: 400,
+        };
+        let part = |w, h| {
+            Some(Rect {
+                x: 300,
+                y: 200,
+                w,
+                h,
+            })
+        };
+        let mut child = Child::new(&window, page.upcast_ref(), rect).expect("a child surface");
+        let (mut shared, mut surface, frame) = green_terminal(&child);
+        show_frame(&mut child, &mut shared, &mut surface, &frame);
+        clip_checkpoint("cropped", &child);
+        assert_eq!(child.part(), part(100, 100));
+
+        resize_page(&page, (360, 260));
+        clip_checkpoint("reclipped", &child);
+        assert_eq!(child.part(), part(60, 60));
+
+        resize_page(&page, (200, 150));
+        assert_eq!(child.part(), None);
+        child.changed();
+        let none = Instant::now();
+        while none.elapsed() < Duration::from_millis(300) {
+            pump();
+            assert!(
+                !child.ready(),
+                "a child with no part on screen never presents"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        clip_checkpoint("none", &child);
+
+        resize_page(&page, (400, 300));
+        show_frame(&mut child, &mut shared, &mut surface, &frame);
+        clip_checkpoint("back", &child);
+        assert_eq!(child.part(), part(100, 100));
+
+        drop(surface);
+        drop(child);
+        drop(shared);
+        unsafe {
+            window.destroy();
+            back.destroy();
+        }
+        pump_for(Duration::from_millis(100));
     }
 
     /// Places a child over a white toplevel, paces presents on its frame callbacks, hides
@@ -1034,36 +1217,15 @@ mod tests {
                 GOBJECT_CRITICALS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             },
         );
-        let window = white_toplevel();
+        let (window, page) = white_toplevel();
         let placed = Rect {
             x: 100,
             y: 120,
             w: 400,
             h: 240,
         };
-        let mut child = Child::new(&window, placed).expect("a child surface");
-        let (width, height) = child.size();
-        let (family, source) = font_for("JetBrains Mono").expect("built in");
-        let style = Style {
-            family,
-            source,
-            font_px: 13.0,
-            blink: false,
-            theme: Theme {
-                background: GREEN,
-                ..Theme::default()
-            },
-        };
-        let mut shared = Shared::new(child.scale() as f32, &style).expect("a GPU");
-        let (display, handle) = child.handles();
-        let mut surface =
-            unsafe { shared.surface_raw(display, handle, width, height) }.expect("a wgpu surface");
-        let frame = Frame {
-            rows: Vec::new(),
-            keys: Vec::new(),
-            fills: Vec::new(),
-            cursor: None,
-        };
+        let mut child = Child::new(&window, page.upcast_ref(), placed).expect("a child surface");
+        let (mut shared, mut surface, frame) = green_terminal(&child);
 
         let mut presents = Vec::with_capacity(FRAMES);
         let mut waits = Vec::with_capacity(FRAMES);
