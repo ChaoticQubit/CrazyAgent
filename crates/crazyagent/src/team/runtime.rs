@@ -4704,7 +4704,7 @@ impl TeamRuntime {
         let told: BTreeSet<i64> = finished.iter().map(|(agent, _)| *agent).collect();
         let lines: Vec<String> = finished.into_iter().map(|(_, line)| line).collect();
         if !fresh && !told.is_subset(&self.workers[&id].told_finished) {
-            prompt.push_str(&wake_text(&lines, team_tool));
+            prompt.push_str(&wake_text(&lines, team_tool, false));
         }
         if fresh {
             prompt.push_str(&framing(
@@ -11372,7 +11372,7 @@ fn framing(
 ) -> String {
     let brief = master_brief(stored);
     let team = sub_agent_lines(stored, available);
-    let wake = wake_text(finished, team_tool);
+    let wake = wake_text(finished, team_tool, true);
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. The engine reads no task from your reply text.\n",
@@ -11391,12 +11391,12 @@ fn framing(
     )
 }
 
-/// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool
-/// or, without team tools, a `crazyagent-task` block naming it (L6) with what its task
-/// holds (V243-MASTER-WAKE-TEXT-HANDOFF), and which ones it can wake (WK-R5). Input: the
-/// finished sub-agents' lines, newest first, and whether it has the team tools. Output:
-/// the text, or nothing when no sub-agent finished.
-fn wake_text(finished: &[String], team_tool: bool) -> String {
+/// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool or,
+/// without team tools, a `crazyagent-task` block naming it (L6) with what its task holds
+/// (V243-MASTER-WAKE-TEXT-HANDOFF), and which ones it can wake (WK-R5). Inputs: the lines,
+/// newest first, the team tools, and whether a frame's task block above already says what a
+/// task holds. Output: the text, or nothing when no sub-agent finished.
+fn wake_text(finished: &[String], team_tool: bool, in_frame: bool) -> String {
     if finished.is_empty() {
         return String::new();
     }
@@ -11406,10 +11406,14 @@ fn wake_text(finished: &[String], team_tool: bool) -> String {
             tool::WAKE_TOOL
         )
     } else {
+        let task = if in_frame {
+            "Each task holds what a task block holds, as above.".to_owned()
+        } else {
+            format!("Each task: {}", tool::HAND_OFF_TASK)
+        };
         format!(
-            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```\nEach task: {}",
-            tool::BLOCK_FENCE,
-            tool::HAND_OFF_TASK
+            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```\n{task}",
+            tool::BLOCK_FENCE
         )
     };
     format!(

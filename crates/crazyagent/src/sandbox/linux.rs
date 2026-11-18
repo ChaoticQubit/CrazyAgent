@@ -100,12 +100,11 @@ const PROBE_POLL: Duration = Duration::from_millis(20);
 const SET_ID_BITS: u32 = 0o6000;
 /// The group and other write bits: a program anyone but its owner may change is never run.
 const OTHERS_WRITE_BITS: u32 = 0o022;
-/// The bubblewrap arguments a nested agent starts under, before its working folder: user,
-/// process, IPC and host-name namespaces of its own and a fresh `/proc`, with the whole
-/// root bound through, devices too, so the helper's Landlock rules stay the only file
-/// policy. `--die-with-parent` ties the namespace to bubblewrap's outer process, never to
-/// the engine. The network stays shared, but for an agent whose ports are bridged:
-/// [`nest_command`] then adds `--unshare-net` after these.
+/// The bubblewrap arguments a nested agent starts under: its own user, process, IPC and
+/// host-name namespaces and `/proc`, root and devices bound through, so the helper's
+/// Landlock rules stay the only file policy; a bridged or routed agent adds `--unshare-net`
+/// ([`nest_command`]). `--die-with-parent` kills bubblewrap's outer process, which the
+/// helper becomes, and the agent with it, once the engine thread that started it exits.
 pub const NEST_ARGS: [&str; 10] = [
     "--die-with-parent",
     "--unshare-user",

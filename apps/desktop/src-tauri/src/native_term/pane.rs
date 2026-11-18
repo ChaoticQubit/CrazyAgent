@@ -6,7 +6,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
-use crazyagent::terminal::{INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN};
+use crazyagent::terminal::{INPUT_BYTES_MAX, PASTE_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 
 /// The largest pane side accepted, in cells: the engine transport's own bound.
 pub const GRID_MAX: usize = SIZE_MAX as usize;
@@ -34,7 +34,6 @@ pub enum Named {
     PageDown,
     Insert,
     Delete,
-    BackTab,
     F(u8),
 }
 
@@ -64,7 +63,6 @@ pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
         Named::PageDown => tilde(6, mods & CONTROL != 0),
         Named::Insert => tilde(2, false),
         Named::Delete => tilde(3, mods != 0),
-        Named::BackTab => "\x1b[Z".to_owned(),
         Named::F(n @ 1..=4) => {
             let c = char::from(b'P' + n - 1);
             if mods == 0 {
@@ -82,6 +80,27 @@ pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
     assert!(text.len() >= 3);
     assert!(text.starts_with('\x1b'));
     text.into_bytes()
+}
+
+/// Makes each run of carriage returns and line feeds one space, as the xterm panel's seed
+/// does for an app without bracketed paste. Input: the text. Output: the text with no line
+/// break, never longer.
+fn flat_lines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut breaking = false;
+    for c in text.chars() {
+        let line_break = c == '\r' || c == '\n';
+        if line_break && !breaking {
+            out.push(' ');
+        }
+        if !line_break {
+            out.push(c);
+        }
+        breaking = line_break;
+    }
+    assert!(out.len() <= text.len());
+    assert!(!out.contains(['\r', '\n']));
+    out
 }
 
 /// One input to a native view from its host. Cells are column and line on the visible
@@ -131,7 +150,6 @@ pub enum Action {
 /// One native view's mirror of its agent's pane: the terminal fed by the attach and then by
 /// live output, its local selection and scrollback, and whether its own keys go through.
 pub struct Pane {
-    pub view: u64,
     term: Option<Term<VoidListener>>,
     parser: Processor,
     pub dirty: bool,
@@ -140,18 +158,19 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// A mirror with no terminal until its attach comes. Input: the view id. Output: the pane.
-    pub fn new(view: u64) -> Pane {
-        assert!(view > 0);
+    /// A mirror with no terminal until its attach comes, its keys on or off from the start,
+    /// so no input before a later keys call can type. Input: whether its keys go through.
+    /// Output: the pane.
+    pub fn new(keys: bool) -> Pane {
         let pane = Pane {
-            view,
             term: None,
             parser: Processor::new(),
             dirty: false,
             button_down: false,
-            keys: true,
+            keys,
         };
         assert!(!pane.ready());
+        assert_eq!(pane.keys, keys);
         pane
     }
 
@@ -333,6 +352,38 @@ impl Pane {
         self.dirty = true;
         assert_eq!(term.grid().display_offset(), after);
         Action::Local
+    }
+
+    /// Takes a drafted message as the owner's paste, as the xterm panel's console seed does:
+    /// only with keys on, and with each run of line breaks made one space unless the app reads
+    /// pastes bracketed, since a bare line break would press Enter. Input: the text. Output:
+    /// the paste, nothing for empty text, or a plain code.
+    pub fn seed(&mut self, text: &str) -> Result<Action, &'static str> {
+        if !self.ready() {
+            return Err("native_terminal_view_unknown");
+        }
+        if !self.keys {
+            return Err("native_terminal_keys_off");
+        }
+        if text.len() > PASTE_BYTES_MAX {
+            return Err("native_terminal_paste_too_large");
+        }
+        if text.is_empty() {
+            return Ok(Action::Nothing);
+        }
+        let bracketed = self
+            .term
+            .as_ref()
+            .is_some_and(|t| t.mode().contains(TermMode::BRACKETED_PASTE));
+        let text = if bracketed {
+            text.to_owned()
+        } else {
+            flat_lines(text)
+        };
+        self.snap_bottom();
+        assert!(!text.is_empty() && text.len() <= PASTE_BYTES_MAX);
+        assert!(bracketed || !text.contains(['\r', '\n']));
+        Ok(Action::Paste { text })
     }
 
     fn paste(&mut self, text: String) -> Action {

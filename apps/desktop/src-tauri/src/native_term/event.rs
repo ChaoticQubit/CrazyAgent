@@ -10,7 +10,8 @@ pub enum MouseKind {
 
 /// What a native view tells its host, on the main thread, in the order the platform
 /// delivered it. Points are in the view's own coordinates from its top left corner, in
-/// points.
+/// points. `Marked` asks for a redraw: the input method's marked text changed (read it with
+/// `marked_text`).
 #[derive(Debug, PartialEq)]
 pub enum ViewEvent {
     Key(Input),
@@ -35,6 +36,7 @@ pub enum ViewEvent {
     Paste,
     SelectAll,
     Focus(bool),
+    Marked,
 }
 
 /// The host function a view hands its events to, with the view's id.

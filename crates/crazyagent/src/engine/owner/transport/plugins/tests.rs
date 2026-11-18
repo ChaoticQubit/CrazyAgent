@@ -97,6 +97,9 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
             .create(folder)
             .unwrap();
     }
+    let store = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&store).unwrap();
+    drop(store);
     let ran = base.join("npx-ran");
     let npx = bin.join("npx");
     std::fs::write(
@@ -162,6 +165,9 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
             .create(folder)
             .unwrap();
     }
+    let store = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&store).unwrap();
+    drop(store);
     let ran = base.join("npx-ran");
     let npx = bin.join("npx");
     std::fs::write(
