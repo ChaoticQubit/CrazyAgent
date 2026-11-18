@@ -1146,6 +1146,7 @@ type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
 /// Input: the request. Output: the descriptor, or none.
 fn named_descriptor(request: &HelperRequest) -> Option<RawFd> {
     match request {
+        HelperRequest::Slirp { ready, .. } => Some(*ready),
         HelperRequest::Probe { .. }
         | HelperRequest::Run { .. }
         | HelperRequest::Filter { .. }
