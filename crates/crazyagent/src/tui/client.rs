@@ -2478,13 +2478,7 @@ async fn start_engine(
     if started {
         return Ok(());
     }
-    if let Some(code) = crate::research::runner::git_safe_refusal() {
-        return Err(code.into());
-    }
-    if crate::service::backup_failure(layout).is_some() {
-        return Err("engine_backup_failed".into());
-    }
-    Err("engine_start_failed".into())
+    Err(crate::service::start_failure(layout).into())
 }
 
 /// The connection problem the TUI shows when it cannot attach: the plain line for a
