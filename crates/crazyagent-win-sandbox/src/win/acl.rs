@@ -1,5 +1,5 @@
 use super::{BoundaryError, Words, access_list, last_error, wide};
-use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads, reads_tree, without};
+use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads_root, without};
 use crate::plan::{ANCHOR, Access, Ace, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use crate::snapshot::{self, Snapshot};
 use std::io::ErrorKind;
@@ -63,9 +63,10 @@ pub(super) struct Withdrawal {
 /// and every other package narrowed. A granted root must exist and must not be a link or
 /// junction; a guarded path or anchored folder that is missing, a link or a junction gets
 /// nothing, since the plan keeps the entries of the present folder above it. A read root every
-/// container can already read, as with `C:\Program Files`, is left as it is unless it still
-/// holds an entry of the container's own. Inputs: the container SID, the role and the path's
-/// saved snapshot. Output: the step, or the refusal or failed step.
+/// container already reads, a folder down to its files and subfolders as `C:\Program Files`
+/// ([`reads_root`]), is left as it is unless it still holds an entry of the container's own.
+/// Inputs: the container SID, the role and the path's saved snapshot. Output: the step, or
+/// the refusal or failed step.
 pub(super) fn role(
     container: &Words,
     ace: &Ace,
@@ -81,7 +82,7 @@ pub(super) fn role(
     let current = read(&ace.path)?;
     let sid = container.bytes();
     if ace.access == Access::ReadExecute
-        && reads(&current.list, &ALL_APPLICATION_PACKAGES)
+        && reads_root(&current.list, &ALL_APPLICATION_PACKAGES, folder)
         && without(&current.list, &sid)
             .map_err(BoundaryError::Refused)?
             .is_none()
@@ -187,14 +188,14 @@ pub(super) fn present(path: &str) -> bool {
 }
 
 /// Whether the container may read and run `path` through its list as it is now, by allow
-/// entries for ALL APPLICATION PACKAGES or for the container itself: a file itself
-/// ([`reads`]), a folder with what lies below it ([`reads_tree`], rv-code4 #541 F1). Inputs:
-/// the container SID and a plain drive path. Output: the answer, or the failed read naming it.
+/// entries for ALL APPLICATION PACKAGES or for the container itself: a file itself, a folder
+/// with what lies below it ([`reads_root`], rv-code4 #541 F1). Inputs: the container SID and a
+/// plain drive path. Output: the answer, or the failed read naming it.
 pub(super) fn reached(container: &Words, path: &str) -> Result<bool, BoundaryError> {
     let current = read(path)?;
     let folder = std::fs::symlink_metadata(Path::new(path)).is_ok_and(|meta| meta.is_dir());
-    let check: fn(&[u8], &[u8]) -> bool = if folder { reads_tree } else { reads };
-    Ok(check(&current.list, &ALL_APPLICATION_PACKAGES) || check(&current.list, &container.bytes()))
+    Ok(reads_root(&current.list, &ALL_APPLICATION_PACKAGES, folder)
+        || reads_root(&current.list, &container.bytes(), folder))
 }
 
 /// Whether a path is a folder, or None when it is missing, a link or a junction and `optional`
