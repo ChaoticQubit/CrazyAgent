@@ -154,6 +154,26 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
     })
 }
 
+/// Whether the list lets `sid` read and run a folder and what lies below it: the folder itself
+/// ([`reads`]), and its files and its subfolders through allow entries that pass read and run
+/// on to every level, inherit-only or generic ones included, as `C:\Program Files` splits them
+/// (rv-code4 #541 F1). Inputs: the access list bytes and the SID bytes. Output: true when it
+/// does; false for a malformed list.
+pub fn reads_tree(acl: &[u8], sid: &[u8]) -> bool {
+    let passes = |inherit: u8| {
+        entries(acl).is_ok_and(|found| {
+            found.iter().any(|entry| {
+                entry.allows
+                    && entry.sid == sid
+                    && entry.flags & inherit == inherit
+                    && entry.flags & NO_PROPAGATE == 0
+                    && specific(entry.mask) & READ_EXECUTE == READ_EXECUTE
+            })
+        })
+    };
+    reads(acl, sid) && passes(OBJECT_INHERIT) && passes(CONTAINER_INHERIT)
+}
+
 /// Whether the boundary refuses a read root before its helper runs: neither ALL APPLICATION
 /// PACKAGES nor the container reads the path itself ([`reads`]), so the helper would add the
 /// container's entry, and this user cannot change the list, so that write fails. `changeable`
@@ -789,6 +809,43 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(!reads(&denied, &ALL_APPLICATION_PACKAGES));
+    }
+
+    /// rv-code4 #541 F1: a folder is read with what lies below it only when entries for the
+    /// SID also pass read and run on to files and subfolders at every level, split or whole.
+    #[test]
+    fn reads_tree_needs_read_and_run_passed_on_to_files_and_subfolders() {
+        const AAP: [u8; 16] = ALL_APPLICATION_PACKAGES;
+        let program_files = acl(&[
+            ace(ACCESS_ALLOWED, 0x0b, 0xa000_0000, &AAP),
+            ace(ACCESS_ALLOWED, 0x10, READ_EXECUTE, &AAP),
+        ]);
+        assert!(reads_tree(&program_files, &AAP));
+        let inherited = acl(&[ace(ACCESS_ALLOWED, 0x13, READ_EXECUTE, &CONTAINER)]);
+        assert!(reads_tree(&inherited, &CONTAINER));
+        let halves = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x09, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0a, 0x1000_0000, &AAP),
+        ]);
+        assert!(reads_tree(&halves, &AAP));
+        let folder_only = acl(&[ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP)]);
+        assert!(reads(&folder_only, &AAP) && !reads_tree(&folder_only, &AAP));
+        for flags in [0x01, 0x02, 0x07] {
+            let short = acl(&[ace(ACCESS_ALLOWED, flags, READ_EXECUTE, &AAP)]);
+            assert!(!reads_tree(&short, &AAP), "{flags:#04x}");
+        }
+        let other = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0b, READ_EXECUTE, &CONTAINER),
+        ]);
+        assert!(!reads_tree(&other, &AAP));
+        let write_only = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0b, 0x4000_0000, &AAP),
+        ]);
+        assert!(!reads_tree(&write_only, &AAP));
+        assert!(!reads_tree(&program_files[..7], &AAP));
     }
 
     /// A read root is refused before the helper runs only when no app container may read it

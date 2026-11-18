@@ -1,5 +1,5 @@
 use super::{BoundaryError, Words, access_list, last_error, wide};
-use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads, without};
+use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads, reads_tree, without};
 use crate::plan::{ANCHOR, Access, Ace, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use crate::snapshot::{self, Snapshot};
 use std::io::ErrorKind;
@@ -186,12 +186,15 @@ pub(super) fn present(path: &str) -> bool {
         .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
 }
 
-/// Whether the container may read and run `path` through its list as it is now: an allow
-/// entry for ALL APPLICATION PACKAGES or for the container itself ([`reads`]). Inputs: the
-/// container SID and a plain drive path. Output: the answer, or the failed read naming it.
+/// Whether the container may read and run `path` through its list as it is now, by allow
+/// entries for ALL APPLICATION PACKAGES or for the container itself: a file itself
+/// ([`reads`]), a folder with what lies below it ([`reads_tree`], rv-code4 #541 F1). Inputs:
+/// the container SID and a plain drive path. Output: the answer, or the failed read naming it.
 pub(super) fn reached(container: &Words, path: &str) -> Result<bool, BoundaryError> {
     let current = read(path)?;
-    Ok(reads(&current.list, &ALL_APPLICATION_PACKAGES) || reads(&current.list, &container.bytes()))
+    let folder = std::fs::symlink_metadata(Path::new(path)).is_ok_and(|meta| meta.is_dir());
+    let check: fn(&[u8], &[u8]) -> bool = if folder { reads_tree } else { reads };
+    Ok(check(&current.list, &ALL_APPLICATION_PACKAGES) || check(&current.list, &container.bytes()))
 }
 
 /// Whether a path is a folder, or None when it is missing, a link or a junction and `optional`
