@@ -828,17 +828,38 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys, one command after another, in order.
-    /// Takes the control client, the target and the bytes. Returns once tmux took them all,
-    /// or `terminal_input_bounds`.
+    /// Hands bytes to one tmux target: a request `pastes` takes goes through a named tmux
+    /// buffer in one paste, any other is typed as hex keys, one command after another, in
+    /// order. Takes the control client, the target and the bytes. Returns once tmux took them
+    /// all, or `terminal_input_bounds`.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
+        }
+        if pastes(bytes) {
+            return Self::send_pasted(control, target, bytes);
         }
         for line in send_keys_lines(target, bytes) {
             control.run(&line)?;
         }
         Ok(())
+    }
+
+    /// Pastes bytes into one tmux target through a buffer no other paste uses: `set-buffer`
+    /// then `paste-buffer -d -r -S`, written back to back, so the pane gets the bytes
+    /// unchanged in one write and the buffer is deleted; on a failure a best-effort
+    /// `delete-buffer` follows, so the text does not stay on the server. Takes the control
+    /// client, the target and bytes `pastes` takes. Returns once tmux took them all.
+    fn send_pasted(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(pastes(bytes));
+        let buffer = paste_buffer_name();
+        let lines = paste_buffer_lines(target, &buffer, bytes);
+        assert_eq!(lines.len(), COMMANDS_SENT_MAX);
+        let pasted = control.run_all(&lines);
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
     }
 
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
@@ -949,21 +970,37 @@ impl Control {
     }
 
     fn send(&self, line: &str, pending: Pending) -> Result<(), HostError> {
-        assert!(!line.contains('\n') && !line.contains('\r'));
+        self.send_all(vec![(line, pending)])
+    }
+
+    /// Queues each command's pending reply in order and writes all the commands in one write
+    /// under one hold of the client's input, so no other caller's command lands between them.
+    /// Takes the commands with their pendings, at most `COMMANDS_SENT_MAX`. Returns once they
+    /// are written, or the closed client's error.
+    fn send_all(&self, commands: Vec<(&str, Pending)>) -> Result<(), HostError> {
+        assert!(!commands.is_empty());
+        assert!(commands.len() <= COMMANDS_SENT_MAX);
+        assert!(
+            commands
+                .iter()
+                .all(|(line, _)| !line.contains('\n') && !line.contains('\r'))
+        );
         let mut input = self.input.lock().map_err(|_| closed())?;
         let Some(writer) = input.as_mut() else {
             return Err(closed());
         };
+        let mut bytes = Vec::with_capacity(commands.iter().map(|(line, _)| line.len() + 1).sum());
         {
             let mut state = self.state.lock().map_err(|_| closed())?;
             if state.closed {
                 return Err(closed());
             }
-            state.pending.push_back(pending);
+            for (line, pending) in commands {
+                state.pending.push_back(pending);
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+            }
         }
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
         if writer
             .write_all(&bytes)
             .and_then(|()| writer.flush())
@@ -986,6 +1023,27 @@ impl Control {
             }
             Err(RecvTimeoutError::Disconnected) => Err(closed()),
         }
+    }
+
+    /// Runs commands back to back: sends them all at once through `send_all`, then waits for
+    /// each answer in order. Takes the commands. Returns once all succeeded, or the first error.
+    fn run_all(&self, lines: &[String]) -> Result<(), HostError> {
+        assert!(!lines.is_empty());
+        let mut answers = Vec::with_capacity(lines.len());
+        let commands = lines
+            .iter()
+            .map(|line| {
+                let (reply, answer) = sync_channel(1);
+                answers.push(answer);
+                (line.as_str(), Pending::Reply(reply))
+            })
+            .collect();
+        self.send_all(commands)?;
+        assert_eq!(answers.len(), lines.len());
+        for answer in &answers {
+            self.wait(answer)?;
+        }
+        Ok(())
     }
 
     fn run(&self, line: &str) -> Answer {
@@ -2462,7 +2520,7 @@ const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
 /// `INPUT_BYTES_MAX` bytes. Returns the choice.
 fn pastes(bytes: &[u8]) -> bool {
     assert!(bytes.len() <= INPUT_BYTES_MAX);
-    false
+    bytes.len() > SEND_KEYS_BYTES_MAX && !bytes.contains(&0)
 }
 
 /// The `set-option` commands the engine runs on each server it controls, in order: the
@@ -2480,7 +2538,9 @@ fn server_options(confined: bool) -> Vec<String> {
     if confined {
         options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
     }
-    assert!(options.len() >= 5);
+    options.push("set-option -sq set-clipboard external".into());
+    options.push("set-option -sq get-clipboard off".into());
+    assert!(options.len() >= 7);
     assert!(
         options
             .iter()
@@ -2489,12 +2549,49 @@ fn server_options(confined: bool) -> Vec<String> {
     options
 }
 
-/// The two commands that paste bytes into one target through a named tmux buffer. Takes the
-/// target, the buffer name and bytes without a NUL. Returns the commands.
+/// The most commands one `Control::send_all` writes: a paste's `set-buffer` and
+/// `paste-buffer`.
+const COMMANDS_SENT_MAX: usize = 2;
+
+/// The two commands that paste bytes into one target through a named tmux buffer:
+/// `set-buffer` with every byte other than an ASCII letter or digit written as a `\ooo`
+/// octal escape inside double quotes, so tmux's parser decodes each exactly and expands no
+/// `$`, `~` or `#`, then `paste-buffer -d -r -S`, which writes the bytes unchanged, control
+/// bytes and line ends included, and deletes the buffer. No `-p`: the pasted bytes carry
+/// their own bracket marks. Takes the target, the buffer name and bytes without a NUL.
+/// Returns the commands.
 fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
     assert!(!bytes.contains(&0));
-    assert!(!target.is_empty() && !buffer.is_empty());
-    Vec::new()
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let mut set = String::with_capacity(24 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer -b {buffer} -- \"");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() {
+            set.push(char::from(byte));
+        } else {
+            let _ = write!(set, "\\{byte:03o}");
+        }
+    }
+    set.push('"');
+    assert!(set.len() <= "set-buffer -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    vec![
+        set,
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// A tmux buffer name no other paste of this engine uses, `crazyagent-paste-<pid>-<n>`,
+/// plain enough to sit unquoted in a command. Takes nothing. Returns the name.
+fn paste_buffer_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(next < u64::MAX);
+    let name = format!("crazyagent-paste-{}-{next}", std::process::id());
+    assert!(
+        name.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    );
+    name
 }
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
