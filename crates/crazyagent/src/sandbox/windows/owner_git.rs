@@ -149,9 +149,9 @@ impl OwnerGit {
 
     /// Wraps one git command built for the project: the same program, arguments, folder and
     /// variables but `GIT_CONFIG_GLOBAL`, which the boundary sets to the null device for every
-    /// process ([`AGENT_HOME_ENV`]), so the command must name the null device too. The wrapped
-    /// command has default stdio: the caller sets it again. Input: the command. Output: the
-    /// wrapped command, or `Invalid` for another program, global config or starting folder.
+    /// process ([`AGENT_HOME_ENV`]); the command leaves it unset or names the null device. Default
+    /// stdio: the caller sets it again. Input: the command. Output: the wrapped command, or
+    /// `Invalid` for another program, global config (a removal among them) or starting folder.
     pub fn wrap(&self, git: &Command) -> Result<Command, SandboxError> {
         if Path::new(git.get_program()) != self.git {
             return Err(invalid(

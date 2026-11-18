@@ -2893,11 +2893,11 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Marks the project folder as one no agent writes: a folder the engine made for one job of
-    /// its own, a plugin server's check or a context-mode install, or a project only the owner's
-    /// own Windows git runs in. On Windows it holds no project guards, so the boundary leaves it
-    /// writable at its top (DEC-193); Seatbelt and Landlock are unchanged. Input: a sandbox
-    /// confined to no worktree, clone or setup. Output: it, marked.
+    /// Marks the project folder as one only the engine's own process works in under this sandbox:
+    /// a folder it made for one job, a plugin server's check, a context-mode install, or a project
+    /// owner git runs in, which must write `.git` and which plain owner git writes in full anyway.
+    /// On Windows it gets no project guards, its top writable (DEC-193); Seatbelt and Landlock are
+    /// unchanged. Input: a sandbox confined to no worktree, clone or setup. Output: it, marked.
     pub fn as_job_folder(mut self) -> Self {
         assert_eq!(self.confinements(), 0);
         assert!(!self.job_folder);

@@ -26,10 +26,10 @@ const GITIGNORE_BYTES_MAX: u64 = 1 << 20;
 const FINDINGS_MAX: usize = 1000;
 const TREE_ENTRIES_MAX: usize = 2_000_000;
 /// The repository config keys that name a file outside the tree, turned off on every publish
-/// git, so a `.git/config` an agent wrote never has git open a share or another outside file as
-/// the owner: the excludes and attributes files and the mailmap. On Unix too, so an owner's own
-/// repository `core.excludesFile` no longer hides files from the publish scan or commit;
-/// `.gitignore`, `.git/info/exclude` and `.gitattributes` still apply.
+/// git that reads the tree ([`project_git`]), so a `.git/config` an agent wrote never has git
+/// open a share or another outside file as the owner: the excludes and attributes files and the
+/// mailmap. On Unix too, so an owner's own repository `core.excludesFile` no longer hides files
+/// from the publish scan or commit; `.gitignore`, `.git/info/exclude` and `.gitattributes` apply.
 const OUTSIDE_FILES_OFF: [&str; 8] = [
     "-c",
     "core.excludesFile=/dev/null",
