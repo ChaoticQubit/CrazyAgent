@@ -1878,14 +1878,26 @@ impl TeamRuntime {
         self.watch_questions()?;
         self.watch_teammates()?;
         self.sweep()?;
-        if self.follow_due()? {
-            crate::ide::workspace::follow(&self.connection, &self.root)?;
-            self.followed = Some(self.database_mark()?);
-        }
+        self.follow_workspaces(crate::ide::workspace::follow)?;
         self.watch_master_questions()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
         let lanes = self.lanes();
         questions.and(lanes)
+    }
+
+    /// Runs `follow` over the IDE workspaces when [`TeamRuntime::follow_due`] says the
+    /// database moved, then stores the mark it compares; the tick passes
+    /// `crate::ide::workspace::follow`. Takes the runtime and the follow step. Returns the
+    /// first failure; a failed follow keeps the old mark, so the next tick tries again.
+    fn follow_workspaces(
+        &mut self,
+        follow: impl FnOnce(&Connection, &Path) -> Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        if self.follow_due()? {
+            follow(&self.connection, self.root.as_path())?;
+            self.followed = Some(self.database_mark()?);
+        }
+        Ok(())
     }
 
     /// Tells whether the IDE workspaces may need a rewrite: on the first tick and whenever

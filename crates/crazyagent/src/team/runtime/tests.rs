@@ -34802,6 +34802,40 @@ fn ide_workspaces_are_followed_only_after_the_database_changes() {
     runtime.shutdown().unwrap();
 }
 
+/// Idle cost (V243-ENGINE-IDLE-CPU, rv-code2 F1): another connection's commit that lands
+/// while the tick follows the IDE workspaces, after the follow read its rows, keeps the
+/// next tick due, and that tick's follow leaves nothing due again.
+#[test]
+fn a_commit_during_the_workspace_follow_is_followed_on_the_next_tick() {
+    let fixture = Fixture::new(1);
+    let mut runtime = fixture.runtime();
+    let write = "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Seen','answered',1)";
+    runtime.tick().unwrap();
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "an idle tick leaves nothing to follow"
+    );
+    fixture.connection.execute(write, [PROJECT]).unwrap();
+    runtime
+        .follow_workspaces(|db, root| {
+            crate::ide::workspace::follow(db, root)?;
+            fixture.connection.execute(write, [PROJECT]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        runtime.follow_due().unwrap(),
+        "a commit during the follow stays due"
+    );
+    runtime
+        .follow_workspaces(crate::ide::workspace::follow)
+        .unwrap();
+    assert!(!runtime.follow_due().unwrap(), "the next follow caught it");
+    runtime.shutdown().unwrap();
+}
+
 /// Idle cost (V243-ENGINE-IDLE-CPU): with no queued task, dispatch reads none of the
 /// settings only its per-task loop uses (caps, open recovery runs, Reuse idle, Keep warm)
 /// on each tick. A caps table that cannot be read shows it: an idle dispatch succeeds.
