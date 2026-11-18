@@ -248,7 +248,8 @@ impl X11 {
 }
 
 /// A desynced Wayland subsurface of the toplevel's surface, made on GTK's own connection
-/// with its own event queue for the frame callbacks of its presents.
+/// with its own event queue for the frame callbacks of its presents, and whether its first
+/// present has been followed by a commit of the toplevel's surface.
 struct Wayland {
     _gdk: Display,
     display: NonNull<c_void>,
@@ -258,6 +259,7 @@ struct Wayland {
     surface: WlSurface,
     subsurface: WlSubsurface,
     parent: WlSurface,
+    mapped: bool,
 }
 
 impl Wayland {
@@ -516,6 +518,23 @@ impl Child {
         }
     }
 
+    /// Notes that the host's present went out. After the first one on Wayland it commits
+    /// the toplevel's surface once, since a compositor such as weston gives a desynced
+    /// subsurface no place on screen, and so no frame callback, until its parent commits
+    /// after the subsurface's first buffer. Output: none.
+    pub fn presented(&mut self) {
+        let Native::Wayland(wayland) = &mut self.native else {
+            return;
+        };
+        if wayland.mapped || self.pacing.get().is_gone() {
+            return;
+        }
+        wayland.parent.commit();
+        flush(&wayland.conn, &self.pacing);
+        wayland.mapped = true;
+        assert!(self.pacing.get().waiting || self.pacing.get().is_gone());
+    }
+
     /// Notes that the host's draw failed before presenting, so the frame is owed again.
     /// Output: none.
     pub fn not_presented(&mut self) {
@@ -695,6 +714,7 @@ fn wayland_child(
         surface,
         subsurface,
         parent,
+        mapped: false,
     })
 }
 
