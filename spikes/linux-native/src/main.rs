@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::io::Write as _;
@@ -86,21 +86,36 @@ enum Native {
         surface: WlSurface,
         subsurface: WlSubsurface,
         parent: WlSurface,
-        synced: bool,
+        parent_commit: Cell<ParentCommit>,
     },
 }
 
+/// When the probe commits the parent after a present: after every one (a synced subsurface,
+/// whose commit waits for its parent's), once after the first (a desynced one, to see whether
+/// one parent commit unblocks its frames) or never (a plain desynced one).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ParentCommit {
+    Always,
+    First,
+    Never,
+}
+
 impl Native {
-    /// After each present: a synced subsurface's commit waits for its parent's, so the
-    /// parent is committed here; X11 and desynced subsurfaces need nothing. Output: none.
+    /// Commits the parent after a present when SPIKE_SYNC asks for it; X11 needs nothing.
+    /// Output: none.
     fn after_present(&self) {
         if let Native::Wayland {
             conn,
             parent,
-            synced: true,
+            parent_commit,
             ..
         } = self
         {
+            match parent_commit.get() {
+                ParentCommit::Never => return,
+                ParentCommit::First => parent_commit.set(ParentCommit::Never),
+                ParentCommit::Always => {}
+            }
             parent.commit();
             let _ = conn.flush();
         }
@@ -282,13 +297,16 @@ struct Drawn {
 }
 
 /// What the input paths saw: whether input B owns the keys, its IM context, the toplevel's
-/// stamp of each key input A has not drawn yet (one clock for A and B), the time of the key
-/// in progress and B's timings, commits and preedit strings.
+/// stamp of each key input A has not drawn yet (one clock for A and B), the key-presses the
+/// toplevel saw and how many of them IBus sent back, the time of the key in progress and
+/// B's timings, commits and preedit strings.
 #[derive(Default)]
 struct NativeInput {
     on: bool,
     im: Option<gtk::IMMulticontext>,
     stamps: VecDeque<Instant>,
+    presses: u32,
+    resent: u32,
     key_started: Option<Instant>,
     handled_ms: Vec<f64>,
     commit_ms: Vec<f64>,
@@ -485,8 +503,12 @@ fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Resu
     let surface = compositor.create_surface(&handle, ());
     let subsurface = subcompositor.get_subsurface(&surface, &parent, &handle, ());
     subsurface.set_position(origin.0, origin.1);
-    let synced = std::env::var("SPIKE_SYNC").as_deref() != Ok("desync");
-    if !synced {
+    let parent_commit = match std::env::var("SPIKE_SYNC").as_deref() {
+        Ok("desync") => ParentCommit::Never,
+        Ok("desync-first") => ParentCommit::First,
+        _ => ParentCommit::Always,
+    };
+    if parent_commit != ParentCommit::Always {
         subsurface.set_desync();
     }
     let region = compositor.create_region(&handle, ());
@@ -505,7 +527,7 @@ fn wayland_child(gdk: &gtk::gdk::Window, origin: (i32, i32), scale: i32) -> Resu
         surface,
         subsurface,
         parent,
-        synced,
+        parent_commit: Cell::new(parent_commit),
     })
 }
 
@@ -813,9 +835,15 @@ fn wire(toplevel: &gtk::ApplicationWindow, gdk: &gtk::gdk::Window) -> gtk::IMMul
     });
     toplevel.connect_key_press_event(|_, event| {
         let started = Instant::now();
+        let resent = event
+            .state()
+            .contains(gtk::gdk::ModifierType::MODIFIER_RESERVED_25_MASK);
         let (on, im) = NATIVE.with(|cell| {
             let mut input = cell.borrow_mut();
-            if input.on {
+            input.presses += 1;
+            if resent {
+                input.resent += 1;
+            } else if input.on {
                 input.key_started = Some(started);
             } else {
                 if input.stamps.len() >= STAMPS_MAX {
@@ -830,7 +858,11 @@ fn wire(toplevel: &gtk::ApplicationWindow, gdk: &gtk::gdk::Window) -> gtk::IMMul
         }
         let eaten = im.as_ref().is_some_and(|im| im.filter_keypress(event));
         if !eaten && draw_key().is_ok() {
-            NATIVE.with(|cell| cell.borrow_mut().handled_ms.push(ms(started)));
+            NATIVE.with(|cell| {
+                let mut input = cell.borrow_mut();
+                let first = input.key_started.unwrap_or(started);
+                input.handled_ms.push(ms(first));
+            });
         }
         gtk::glib::Propagation::Stop
     });
@@ -862,8 +894,8 @@ fn native_focus(window: WebviewWindow, on: bool, rect: Rect) -> Result<(), Strin
     Ok(())
 }
 
-/// What input B saw since the last report, then clears it. Output: timings, commits and
-/// preedit strings.
+/// What the input paths saw since the last report, then clears it. Output: key-press
+/// counts, timings, commits and preedit strings.
 #[tauri::command]
 fn native_report() -> Value {
     NATIVE.with(|cell| {
@@ -871,6 +903,8 @@ fn native_report() -> Value {
         let reply = json!({
             "im_module": std::env::var("GTK_IM_MODULE").ok(),
             "im_context": input.im.as_ref().map(|im| format!("{:?}", im.context_id())),
+            "presses": input.presses,
+            "resent": input.resent,
             "handled_ms": stats(&mut input.handled_ms),
             "commit_ms": stats(&mut input.commit_ms),
             "commits": input.commits.iter().take(64).collect::<Vec<_>>(),
@@ -880,22 +914,36 @@ fn native_report() -> Value {
         input.commit_ms.clear();
         input.commits.clear();
         input.preedits.clear();
+        input.presses = 0;
+        input.resent = 0;
         input.key_started = None;
         reply
     })
 }
 
-/// The owner's copy: sets CLIPBOARD and PRIMARY from the app. Output: none.
+/// GTK 3's clipboard needs a seat; without one (weston headless) it crashes. Output: none,
+/// or why the clipboard cannot run.
+fn seat_ready() -> Result<(), String> {
+    gtk::gdk::Display::default()
+        .and_then(|display| display.default_seat())
+        .map(|_| ())
+        .ok_or_else(|| "the display has no seat, so GTK's clipboard cannot run".into())
+}
+
+/// The owner's copy: sets CLIPBOARD and PRIMARY from the app. Output: none, or why not.
 #[tauri::command]
-fn clip_set() {
+fn clip_set() -> Result<(), String> {
+    seat_ready()?;
     gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD).set_text(CLIP_TEXT);
     gtk::Clipboard::get(&gtk::gdk::SELECTION_PRIMARY).set_text(PRIMARY_TEXT);
+    Ok(())
 }
 
 /// The owner's paste: reads CLIPBOARD and PRIMARY into the app. Output: both texts and
-/// the time each read took.
+/// the time each read took, or why not.
 #[tauri::command]
-fn clip_read() -> Value {
+fn clip_read() -> Result<Value, String> {
+    seat_ready()?;
     let started = Instant::now();
     let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD)
         .wait_for_text()
@@ -905,7 +953,9 @@ fn clip_read() -> Value {
     let primary = gtk::Clipboard::get(&gtk::gdk::SELECTION_PRIMARY)
         .wait_for_text()
         .map(|text| text.to_string());
-    json!({ "clipboard": clipboard, "clipboard_ms": clipboard_ms, "primary": primary, "primary_ms": ms(started) })
+    Ok(
+        json!({ "clipboard": clipboard, "clipboard_ms": clipboard_ms, "primary": primary, "primary_ms": ms(started) }),
+    )
 }
 
 /// Hands the screen to the farm script: writes ready-<name> in SPIKE_OUT and waits up to

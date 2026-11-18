@@ -39,8 +39,8 @@ const STEPS = {
   async placed() {
     await frameDone();
     await report("placed", { dpr: devicePixelRatio, rect: rect(), placed: await invoke("place", { rect: rect() }) });
-    await report("frames", await invoke("frame_times"));
     await invoke("checkpoint", { name: "placed" });
+    await report("frames", await invoke("frame_times"));
   },
   async moved() {
     byId("host").style.left = "160px";
@@ -74,6 +74,7 @@ const STEPS = {
     const trips = [];
     const draws = [];
     const gtk = [];
+    await invoke("native_report");
     typing.value = "";
     typing.focus();
     const onKey = (event) => {
@@ -88,7 +89,10 @@ const STEPS = {
     await invoke("checkpoint", { name: "type_a" });
     await frameDone();
     typing.removeEventListener("keydown", onKey);
+    const seen = await invoke("native_report");
     await report("type_a", {
+      presses: seen.presses,
+      resent: seen.resent,
       gtk_key_to_frame_ms: quantiles(gtk),
       page_round_trip_ms: quantiles(trips),
       draw_ms: quantiles(draws),
