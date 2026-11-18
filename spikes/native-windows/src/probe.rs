@@ -503,7 +503,7 @@ fn click(css: (f64, f64)) -> u32 {
     };
     let dx = ((point.x - vx) as i64 * 65535 / (vw - 1) as i64) as i32;
     let dy = ((point.y - vy) as i64 * 65535 / (vh - 1) as i64) as i32;
-    let mouse = |flags| INPUT {
+    let mouse = |flags: u32| INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
@@ -884,7 +884,7 @@ fn ime_rows() {
                 read.ptCurrentPos.x, read.ptCurrentPos.y
             ));
         }
-        let mut layouts = [std::ptr::null_mut(); 32];
+        let mut layouts: [HKL; 32] = [std::ptr::null_mut(); 32];
         let count = unsafe { GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()) }
             .max(0) as usize;
         let named: Vec<String> = layouts[..count]
