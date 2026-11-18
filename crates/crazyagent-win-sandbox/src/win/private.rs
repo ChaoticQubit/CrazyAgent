@@ -21,9 +21,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    OPEN_EXISTING, READ_CONTROL, UnlockFileEx,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK,
+    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, UnlockFileEx,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -38,8 +38,9 @@ pub fn user_sid() -> io::Result<Vec<u8>> {
 
 /// Opens the private folder at `path`, creating it first when it is missing with the user
 /// as owner and the protected list of [`list`], so no entry from the folder above is ever on
-/// it. The handle does not share delete, so the folder cannot be renamed while it is held.
-/// Input: the absolute path. Output: the held folder, or why it is not private.
+/// it. The handle lists the folder, so Windows counts it in sharing, and does not share
+/// delete, so the folder cannot be renamed while it is held. Input: the absolute path.
+/// Output: the held folder, or why it is not private.
 pub fn dir(path: &Path) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
@@ -53,7 +54,7 @@ pub fn dir(path: &Path) -> io::Result<File> {
     }
     let folder = open(
         &name,
-        READ_CONTROL | FILE_READ_ATTRIBUTES,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
