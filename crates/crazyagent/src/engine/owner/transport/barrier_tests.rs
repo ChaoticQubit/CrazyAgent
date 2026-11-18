@@ -252,10 +252,7 @@ async fn revoke_settled(owner: &Usage, name: &str) -> OwnerControlReply {
     match runtime.control(control.clone()).await {
         Ok(reply) => reply,
         Err(error) => {
-            assert_eq!(
-                error,
-                failure("owner_outcome_unknown_reconcile_same_identity")
-            );
+            assert_eq!(error, failure("access_change_pending"));
             storage_settled(owner).await;
             runtime.reconcile_control(control).await.unwrap().unwrap()
         }
@@ -429,7 +426,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
                 std::slice::from_ref(&server.id),
                 "the confirmed change is the one storage holds"
             );
-            server.id
+            Some(server.id)
         }
         Err(error) if error.0 == "plugins_outcome_unknown" => {
             assert_eq!(
@@ -437,13 +434,21 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
                 1,
                 "storage kept the change the owner wait could not confirm: {stored:?}"
             );
-            stored[0].clone()
+            Some(stored[0].clone())
+        }
+        Err(error) if error.0 == "storage_busy_not_submitted" => {
+            assert!(
+                stored.is_empty(),
+                "the withdrawn change never reached storage"
+            );
+            None
         }
         Err(error) => panic!("the held change answered {}", error.0),
     };
     match revoked {
         Ok(reply) => assert!(!reply.active),
-        Err(error) if error.0 == "owner_outcome_unknown_reconcile_same_identity" => {
+        Err(error) if error.0 == "access_change_pending" => {
+            storage_settled(&owner).await;
             let reconciled = runtime.reconcile_control(control).await.unwrap();
             assert!(
                 reconciled.is_some_and(|reply| !reply.active),
@@ -453,8 +458,12 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         Err(error) => panic!("the revocation answered {}", error.0),
     }
 
+    let read = match id {
+        Some(id) => owner.client.plugin_server(id).await.map(|_| ()),
+        None => owner.client.plugin_servers(None, 0).await.map(|_| ()),
+    };
     assert!(
-        owner.client.plugin_server(id).await.is_err(),
+        read.is_err(),
         "the revoked client reads no more plugin state"
     );
     owner.stop().await;
@@ -633,8 +642,8 @@ async fn a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once() 
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the revocation outlasts the owner wait"
+        Err(failure("access_change_pending")),
+        "the revocation outlasts the owner wait and stays queued, never withdrawn"
     );
     assert!(
         !admitted(runtime, &owner.client),
@@ -659,7 +668,7 @@ async fn a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_storage_settles() {
+async fn a_lapsed_reactivation_is_withdrawn_and_admits_no_one() {
     let _disk = super::usage_tests::busy_storage().await;
     let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
     let runtime = owner.runtime();
@@ -672,10 +681,9 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the reactivation outlasts the owner wait"
+        Err(failure("storage_busy_not_submitted")),
+        "the reactivation outlasts the owner wait and is withdrawn unrun"
     );
-
     tokio::time::timeout(SWEEP_TIME_MAX, sweep)
         .await
         .unwrap()
@@ -683,14 +691,15 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
         .unwrap();
     assert!(!swept.exists());
     storage_settled(&owner).await;
-    assert!(
-        published(runtime, revoked.owner_epoch + 1).await,
-        "memory follows the reactivation storage committed"
+    assert_eq!(
+        runtime.epoch(OwnerClientKind::Tui).unwrap(),
+        revoked.owner_epoch,
+        "the withdrawn reactivation never reached storage"
     );
-    assert!(tui_registration(runtime).active);
+    assert!(!tui_registration(runtime).active);
     assert!(
-        admitted(runtime, &fresh_client(&owner)),
-        "the reactivated client is admitted once storage settles"
+        !admitted(runtime, &fresh_client(&owner)),
+        "a withdrawn reactivation admits no one"
     );
     owner.stop().await;
 }
@@ -751,8 +760,8 @@ async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot()
         .await;
     assert_eq!(
         reactivated.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the reactivation outlasts the owner wait"
+        Err(failure("storage_busy_not_submitted")),
+        "the reactivation outlasts the owner wait and is withdrawn"
     );
     let lapsed = runtime
         .control(revocation(
@@ -763,17 +772,13 @@ async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot()
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the revocation outlasts the owner wait"
+        Err(failure("access_change_pending")),
+        "the revocation outlasts the owner wait and stays queued"
     );
     assert!(!admitted(runtime, &owner.client));
 
     release.send(()).unwrap();
     storage_settled(&owner).await;
-    assert!(
-        published(runtime, revoked.owner_epoch + 1).await,
-        "memory takes the epoch storage committed"
-    );
     assert!(
         !tui_registration(runtime).active,
         "a reactivation sent before the revocation never reopens the slot"

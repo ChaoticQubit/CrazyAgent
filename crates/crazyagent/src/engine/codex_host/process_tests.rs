@@ -358,28 +358,22 @@ async fn a_codex_host_whose_group_keeps_an_unreaped_process_still_ends_and_relea
 async fn a_codex_host_whose_harness_it_can_never_reap_still_ends_and_releases_the_lease() {
     use crate::engine::master_host_fixture::{MasterFixture, reap_before_the_host};
 
-    for _ in 0..5 {
-        let mut fixture = MasterFixture::new("codex");
-        let mut process = stand_in_host(
-            &mut fixture,
-            "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
-        )
-        .await;
-        if !reap_before_the_host(&fixture.project, || Some(process.pid())) {
-            continue;
-        }
-        let started = Instant::now();
-        while fixture.sign_in("codex-unreaped-next", 3).is_err() {
-            assert!(
-                started.elapsed() < Duration::from_secs(10),
-                "the profile lease was never released"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert!(process.close().await.is_err());
-        return;
+    let mut fixture = MasterFixture::new("codex");
+    let mut process = stand_in_host(
+        &mut fixture,
+        "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
+    )
+    .await;
+    reap_before_the_host(&fixture.project, || Some(process.pid()));
+    let started = Instant::now();
+    while fixture.sign_in("codex-unreaped-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the profile lease was never released"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("the host reaped its harness first on every attempt");
+    assert!(process.close().await.is_err());
 }
 
 #[cfg(unix)]
