@@ -112,8 +112,9 @@ pub(crate) fn dismiss(db: &Connection, project: &ProjectId) -> Result<bool, Engi
     Ok(deleted == 1)
 }
 
-/// Deletes the record at a removed project's folder, inside the removal's transaction.
-/// Inputs: the transaction and the folder. Output: Ok, else `reinstall_offer_unavailable`.
+/// Deletes the record at a folder inside the caller's transaction: a removed project's
+/// folder, or the folder a new project lands in. Inputs: the transaction and the folder.
+/// Output: Ok, else `reinstall_offer_unavailable`.
 pub(crate) fn forget(tx: &Transaction<'_>, folder: &Path) -> Result<(), EngineError> {
     match folder.to_str() {
         Some(folder) if exists(tx)? => delete(tx, folder),

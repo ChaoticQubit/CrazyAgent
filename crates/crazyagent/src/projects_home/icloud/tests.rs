@@ -1307,4 +1307,9 @@ fn past_the_names_a_folder_to_reinstall_takes_the_place_of_a_pycache() {
     };
     assert_eq!(gathered.more, Some(counted));
     assert_eq!(gathered.len(), SKIPPED_LISTED_MAX as u64 + 2);
+    let (shown, _) = gathered.cut(JOB_SKIPPED_LISTED_MAX);
+    assert_eq!(
+        shown[0].path, "web/node_modules",
+        "Home's job line names the folder to reinstall first"
+    );
 }
