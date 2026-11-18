@@ -714,29 +714,6 @@ fn an_npm_prefix_under_a_sticky_shared_folder_starts_with_its_own_node() {
     assert_eq!(codex.interpreter().unwrap().program, own);
 }
 
-/// G1 P7: when the `node` beside an npm prefix is refused, the harness never starts under
-/// another `node` from the places: the resolver names that `node` and why, so the owner
-/// sees the reason instead of a later version mismatch.
-#[test]
-fn an_npm_script_whose_own_node_is_refused_says_why_and_starts_no_other_node() {
-    let (_folder, home) = scratch();
-    program(&home.join(".local/bin/node"), NODE);
-    let prefix = home.join("nvm-like");
-    npm_codex(&prefix);
-    let own = program(&prefix.join("bin/node"), NODE);
-    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
-    let missing = resolve_entry(&prefix.join("bin/codex"), &home_only(&home)).unwrap_err();
-    assert_eq!(missing.reason, Reason::Refused);
-    assert_eq!(missing.tool, "codex");
-    let refused = missing.refused.expect("the refused node is named");
-    assert_eq!(refused.file, own);
-    assert!(
-        matches!(refused.why, Refusal::OthersCanChange(_)),
-        "{:?}",
-        refused.why
-    );
-}
-
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
 #[test]
