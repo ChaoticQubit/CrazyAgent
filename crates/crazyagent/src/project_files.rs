@@ -41,7 +41,8 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
 /// at a 48 KiB reply or at `stop`, answering with the paths found by then. Inputs: the
 /// absolute project folder, the query, the limit and the time to stop. Output: the paths
 /// in git's order, or `project_files_folder_missing`, `project_files_no_repository` or
-/// `project_files_git_failed`.
+/// `project_files_git_failed`. Git is given the `.git` folder as its common folder, so a
+/// `commondir` planted there at any time redirects nothing.
 #[cfg(unix)]
 pub(crate) fn list(
     folder: &Path,
@@ -76,6 +77,7 @@ pub(crate) fn list(
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_COMMON_DIR", &git_dir)
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE)
