@@ -48,7 +48,6 @@ for name in $rows; do
 done
 echo "== the fix at $tip"
 git checkout -q "$code_tip"
-git checkout -q HEAD@{2} -- .github 2>/dev/null || true
 cargo clippy -p crazyagent --all-targets --locked -- -D warnings > "$RUNNER_TEMP/clippy.txt" 2>&1
 code=$?
 tail -3 "$RUNNER_TEMP/clippy.txt"
