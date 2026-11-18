@@ -396,6 +396,27 @@ mod windows_tests {
         );
     }
 
+    /// D7 and #555 N1 in the engine's real root, the database store folder, whose label passes
+    /// to the files made in it: the pipes file still reads back the same and carries the
+    /// medium no-write-up no-read-up label.
+    #[test]
+    fn a_pipes_file_in_the_database_root_reads_back_labelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        drop(private::store_dir(&root, private::Store::Database).unwrap());
+        let published = publish(&root, "engine.sock").unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap(), published);
+        let file = private::read_only(&root.join("pipes")).unwrap();
+        let sacl = private::facts(&file)
+            .unwrap()
+            .label
+            .expect("a labelled pipes file");
+        assert_eq!(
+            crazyagent_win_sandbox::dacl::label(&sacl),
+            Ok(Some((0x2000, 0x3)))
+        );
+    }
+
     /// V244-WIN-PIPES-LISTENER-REQS (rv-code2 #554 N4, leader 08:08): a staged pipes file an
     /// earlier start left behind, private to this user, is swept at the next publish, while a
     /// file of any other name in the root is kept.
