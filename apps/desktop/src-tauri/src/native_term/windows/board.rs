@@ -234,15 +234,23 @@ impl<T> Board<T> {
     /// reads to place the IME. Inputs: the view id and the size. Output: whether the view
     /// is on the board.
     pub fn post_cell(&self, id: u64, cell: (f64, f64)) -> bool {
-        let _ = (id, cell);
-        unimplemented!("H2 red")
+        assert!(cell.0 > 0.0 && cell.1 > 0.0, "a drawn cell has a size");
+        let mut slots = self.lock();
+        let Some(slot) = slots.iter_mut().find(|slot| slot.id == id) else {
+            return false;
+        };
+        slot.cell = Some(cell);
+        assert!(slot.cell.is_some());
+        true
     }
 
     /// A view's cell size in points as the render thread last posted it. Input: the view
     /// id. Output: the size, or none before the view's first surface.
     pub fn cell(&self, id: u64) -> Option<(f64, f64)> {
-        let _ = id;
-        unimplemented!("H2 red")
+        let slots = self.lock();
+        let cell = slots.iter().find(|slot| slot.id == id)?.cell;
+        assert!(cell.is_none_or(|(width, height)| width > 0.0 && height > 0.0));
+        cell
     }
 
     /// The render thread's word that a ready view's swap-chain wait failed: the change stays

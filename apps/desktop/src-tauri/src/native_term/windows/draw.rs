@@ -105,6 +105,7 @@ impl Painter {
                     surface: Some(surface),
                     last: None,
                 });
+                self.post_cell(fresh.id, fresh.geometry.scale_key);
             }
             Err(_) => {
                 failed();
@@ -160,9 +161,27 @@ impl Painter {
         let handle = view.handle;
         let made = self.surface(handle, geometry);
         match made {
-            Ok(surface) => self.views[index].surface = Some(surface),
+            Ok(surface) => {
+                self.views[index].surface = Some(surface);
+                self.post_cell(self.views[index].id, key);
+            }
             Err(_) => failed(),
         }
+    }
+
+    /// Tells the board a view's cell size on its scale's shared state, which the view's
+    /// thread reads to place the IME. Inputs: the view id and its scale key.
+    fn post_cell(&self, id: u64, key: u32) {
+        let held = self
+            .shared
+            .iter()
+            .find(|(shared_key, _)| *shared_key == key);
+        let (_, shared) = held.expect("a made surface has its shared state");
+        let posted = BOARD.post_cell(id, shared.cell_points());
+        assert!(
+            posted,
+            "a drawn view stays on the board until the render side drops it"
+        );
     }
 
     /// Draws one ready view, frame-ready first: geometry, then the swap-chain wait, then

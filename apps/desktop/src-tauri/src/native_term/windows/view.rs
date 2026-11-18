@@ -6,14 +6,23 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RE
 use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows_sys::Win32::UI::Input::Ime::{
+    CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, ImmGetContext,
+    ImmNotifyIME, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
+    NI_COMPOSITIONSTR,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, GetKeyboardLayout, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU,
+    VK_PROCESSKEY, VK_RWIN, VK_SHIFT,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    GetWindowRect, HWND_TOP, IDC_IBEAM, LoadCursorW, MA_ACTIVATE, RegisterClassExW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
-    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_NOPARENTNOTIFY,
+    GetWindowRect, HWND_TOP, IDC_IBEAM, LoadCursorW, MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW,
+    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_CHAR, WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
 };
 
 use super::super::event::{Sink, ViewEvent};
@@ -21,6 +30,7 @@ use super::super::screen::Frame;
 use super::super::style::Style;
 use super::board::Geometry;
 use super::draw::{self, BOARD, DROP_WAIT};
+use super::keys::{self, Mods, Next, Typed};
 use super::place::{self, SCALE_KEYS};
 
 /// The plain code for a parent window no child view can be made in.
@@ -28,6 +38,10 @@ const UNAVAILABLE: &str = "native_terminal_surface_unavailable";
 
 /// The scale key a view uses while its window's DPI cannot be read.
 const KEY_DEFAULT: u32 = *SCALE_KEYS.start();
+
+/// ToUnicodeEx's flag that leaves the keyboard state, a pending dead key included, as it
+/// was (Windows 10 1607 and later), so reading a chord's character never eats a dead key.
+const KEEP_KEYBOARD_STATE: u32 = 0x4;
 
 static CLASS: OnceLock<Option<Vec<u16>>> = OnceLock::new();
 
@@ -89,6 +103,10 @@ struct Inner {
     key: Cell<u32>,
     placed: Cell<Option<Geometry>>,
     shown: Cell<bool>,
+    focused: Cell<bool>,
+    swallow: Cell<bool>,
+    held: Cell<Option<u16>>,
+    cursor: Cell<Option<(usize, usize)>>,
     alive: Cell<bool>,
 }
 
@@ -144,6 +162,10 @@ impl View {
             key: Cell::new(key),
             placed: Cell::new(None),
             shown: Cell::new(false),
+            focused: Cell::new(false),
+            swallow: Cell::new(false),
+            held: Cell::new(None),
+            cursor: Cell::new(None),
             alive: Cell::new(true),
         });
         let geometry = Geometry {
@@ -184,9 +206,14 @@ impl View {
         unsafe { SetFocus(self.hwnd) };
     }
 
-    /// Hands the render thread the view's newest screen. Input: the frame. Output: whether
-    /// a live view took it.
+    /// Hands the render thread the view's newest screen, keeping its cursor cell for the
+    /// IME. Input: the frame. Output: whether a live view took it.
     pub fn feed(&self, frame: Frame) -> bool {
+        let cursor = frame
+            .cursor
+            .as_ref()
+            .map(|cursor| (cursor.row, cursor.column));
+        self.inner.cursor.set(cursor);
         BOARD.post_frame(self.inner.id, frame)
     }
 }
@@ -195,8 +222,15 @@ impl Inner {
     fn hide(&self, hwnd: HWND) {
         unsafe { ShowWindow(hwnd, SW_HIDE) };
         if self.shown.replace(false) {
+            cancel_composition(hwnd);
             BOARD.post_shown(self.id, false);
         }
+    }
+
+    /// Whether keys and text reach the sink: the view is live, shown, uncovered and holds
+    /// keyboard focus.
+    fn active(&self) -> bool {
+        self.alive.get() && self.shown.get() && !self.covered.get() && self.focused.get()
     }
 
     /// The webview's origin in the parent's client area, in device pixels: zero with no
@@ -267,6 +301,174 @@ impl Inner {
     }
 }
 
+impl Inner {
+    /// A key-down on an active view sends the key's event by `keys::down` and marks the
+    /// character message queued behind it to be dropped when the key sent on the key-down;
+    /// a key the IME takes, or an inactive view's, goes to the default procedure. Inputs:
+    /// the message. Output: its result.
+    fn key_down(&self, hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        self.swallow.set(false);
+        let vk = u16::try_from(wparam).ok().filter(|&vk| vk != VK_PROCESSKEY);
+        let Some(vk) = vk.filter(|_| self.active()) else {
+            return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+        };
+        let mods = held_mods();
+        let chord = mods.control || mods.alt;
+        let bare = chord
+            .then(|| shift_only_char(vk, lparam, mods.shift))
+            .flatten();
+        let down = keys::down(vk, mods, queued(hwnd), bare);
+        self.swallow.set(down.swallow);
+        match down.event {
+            Some(event) => (self.sink)(self.id, event),
+            None if down.swallow => {}
+            None => return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        }
+        0
+    }
+
+    /// A character message: dropped when its key-down sent already; a system character
+    /// (Alt+Space) goes to the default procedure; on an active view one character, a
+    /// surrogate pair joined, goes to the sink as text. Inputs: the message. Output: its
+    /// result.
+    fn character(&self, hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if self.swallow.replace(false) {
+            return 0;
+        }
+        if message == WM_SYSCHAR {
+            return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+        }
+        let held = self.held.take();
+        let unit = u16::try_from(wparam).ok().filter(|_| self.active());
+        let Some(unit) = unit else {
+            return 0;
+        };
+        match keys::typed(unit, held) {
+            Typed::Text(input) => (self.sink)(self.id, ViewEvent::Key(input)),
+            Typed::Held(high) => self.held.set(Some(high)),
+            Typed::Dropped => {}
+        }
+        0
+    }
+
+    /// Puts the IME's composition window at the view's cursor cell and keeps its candidate
+    /// list clear of that cell, from the cell size the render thread posted; with no
+    /// cursor, cell or input context the IME keeps its own placement.
+    fn place_ime(&self, hwnd: HWND) {
+        let cell = BOARD.cell(self.id);
+        let spot = self.cursor.get().zip(cell);
+        let spot = spot.and_then(|(cursor, cell)| place::ime_spot(cursor, cell, self.key.get()));
+        let Some(spot) = spot else {
+            return;
+        };
+        let context = unsafe { ImmGetContext(hwnd) };
+        if context.is_null() {
+            return;
+        }
+        let point = POINT {
+            x: spot.point.0,
+            y: spot.point.1,
+        };
+        assert_eq!(
+            spot.point,
+            (spot.cell.0, spot.cell.1),
+            "the point is the cell's corner"
+        );
+        let composition = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: point,
+            rcArea: RECT::default(),
+        };
+        let (left, top, right, bottom) = spot.cell;
+        let candidate = CANDIDATEFORM {
+            dwIndex: 0,
+            dwStyle: CFS_EXCLUDE,
+            ptCurrentPos: point,
+            rcArea: RECT {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        };
+        unsafe { ImmSetCompositionWindow(context, &composition) };
+        unsafe { ImmSetCandidateWindow(context, &candidate) };
+        unsafe { ImmReleaseContext(hwnd, context) };
+    }
+
+    /// Focus leaves the view: keys stop, any composition is cancelled and the host hears.
+    fn lose_focus(&self, hwnd: HWND) {
+        self.focused.set(false);
+        self.swallow.set(false);
+        self.held.set(None);
+        cancel_composition(hwnd);
+        (self.sink)(self.id, ViewEvent::Focus(false));
+    }
+}
+
+/// The modifier keys held now, as the key message's own thread state reads them.
+fn held_mods() -> Mods {
+    let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
+    Mods {
+        shift: down(VK_SHIFT),
+        control: down(VK_CONTROL),
+        alt: down(VK_MENU),
+        win: down(VK_LWIN) || down(VK_RWIN),
+    }
+}
+
+/// The character message TranslateMessage queued behind the key-down being handled, read
+/// without removing it. Input: the view's window. Output: what is queued.
+fn queued(hwnd: HWND) -> Next {
+    let mut message = MSG::default();
+    let found = unsafe { PeekMessageW(&mut message, hwnd, WM_CHAR, WM_SYSDEADCHAR, PM_NOREMOVE) };
+    if found == 0 {
+        return Next::Nothing;
+    }
+    match message.message {
+        WM_CHAR | WM_SYSCHAR => u16::try_from(message.wParam).map_or(Next::Nothing, Next::Char),
+        WM_DEADCHAR | WM_SYSDEADCHAR => Next::Dead,
+        _ => Next::Nothing,
+    }
+}
+
+/// The character a key types on the thread's layout with Shift alone, or nothing, for a
+/// Ctrl or Alt chord's own character; the keyboard state is left as it was. Inputs: the VK,
+/// the key message's lparam (its scan code) and Shift. Output: the character, or none.
+fn shift_only_char(vk: u16, lparam: LPARAM, shift: bool) -> Option<char> {
+    let mut state = [0u8; 256];
+    state[usize::from(VK_SHIFT)] = if shift { 0x80 } else { 0 };
+    let scan = u32::try_from((lparam >> 16) & 0xff).ok()?;
+    let mut buffer = [0u16; 4];
+    let layout = unsafe { GetKeyboardLayout(0) };
+    let written = unsafe {
+        ToUnicodeEx(
+            u32::from(vk),
+            scan,
+            state.as_ptr(),
+            buffer.as_mut_ptr(),
+            4,
+            KEEP_KEYBOARD_STATE,
+            layout,
+        )
+    };
+    if written != 1 {
+        return None;
+    }
+    char::from_u32(u32::from(buffer[0]))
+}
+
+/// Cancels the IME composition on a view that hides or loses focus, so no commit lands
+/// after it. Input: the view's window.
+fn cancel_composition(hwnd: HWND) {
+    let context = unsafe { ImmGetContext(hwnd) };
+    if context.is_null() {
+        return;
+    }
+    unsafe { ImmNotifyIME(context, NI_COMPOSITIONSTR, CPS_CANCEL, 0) };
+    unsafe { ImmReleaseContext(hwnd, context) };
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -284,12 +486,19 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_SETFOCUS => {
+            inner.focused.set(true);
             (inner.sink)(inner.id, ViewEvent::Focus(true));
             0
         }
         WM_KILLFOCUS => {
-            (inner.sink)(inner.id, ViewEvent::Focus(false));
+            inner.lose_focus(hwnd);
             0
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => inner.key_down(hwnd, message, wparam, lparam),
+        WM_CHAR | WM_SYSCHAR => inner.character(hwnd, message, wparam, lparam),
+        WM_IME_STARTCOMPOSITION => {
+            inner.place_ime(hwnd);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_ERASEBKGND => 1,
         WM_PAINT => {

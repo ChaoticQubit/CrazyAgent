@@ -140,8 +140,45 @@ fn printable(unit: u16) -> bool {
 /// the VK, the modifiers, the queued character message and the key's Shift-only character.
 /// Output: the event and whether the queued character is dropped.
 pub fn down(vk: u16, mods: Mods, next: Next, bare: Option<char>) -> Down {
-    let _ = (vk, mods, next, bare);
-    unimplemented!("H2 red")
+    let queued = matches!(next, Next::Char(_));
+    let handled = |event: Option<ViewEvent>| Down {
+        event,
+        swallow: queued,
+    };
+    let pass = Down {
+        event: None,
+        swallow: false,
+    };
+    if mods.win {
+        return handled(None);
+    }
+    if mods.alt && !mods.control && matches!(vk, VK_F4 | VK_SPACE) {
+        return pass;
+    }
+    if let Some(event) = chord(vk, mods) {
+        return handled(Some(event));
+    }
+    if let Some(key) = named(vk, mods) {
+        return handled(keymap::named_input(key, &press("", mods)).map(ViewEvent::Key));
+    }
+    if let Some(chars) = edit(vk) {
+        return handled(keymap::key_input(&press(chars, mods)).map(ViewEvent::Key));
+    }
+    let altgr = mods.control && mods.alt && matches!(next, Next::Char(unit) if printable(unit));
+    if altgr || !(mods.control || mods.alt) {
+        return pass;
+    }
+    let Some(own) = own(vk, mods.shift, bare) else {
+        return pass;
+    };
+    let mut buffer = [0; 4];
+    let chars = own.encode_utf8(&mut buffer);
+    let down = handled(keymap::key_input(&press(chars, mods)).map(ViewEvent::Key));
+    assert!(!matches!(
+        down.event,
+        Some(ViewEvent::Key(Input::Key { .. }))
+    ));
+    down
 }
 
 /// What a character message types: one character as its UTF-8 bytes, a surrogate pair
@@ -149,8 +186,26 @@ pub fn down(vk: u16, mods: Mods, next: Next, bare: Option<char>) -> Down {
 /// nothing. Inputs: the UTF-16 unit and the high surrogate held from the last message.
 /// Output: the text, the unit to hold, or nothing.
 pub fn typed(unit: u16, held: Option<u16>) -> Typed {
-    let _ = (unit, held);
-    unimplemented!("H2 red")
+    if (0xD800..=0xDBFF).contains(&unit) {
+        return Typed::Held(unit);
+    }
+    let low = (0xDC00..=0xDFFF).contains(&unit);
+    let pair = [held.unwrap_or_default(), unit];
+    let units = match (low, held) {
+        (true, Some(_)) => &pair[..],
+        (true, None) => return Typed::Dropped,
+        (false, _) => &pair[1..],
+    };
+    let Some(Ok(typed)) = char::decode_utf16(units.iter().copied()).next() else {
+        return Typed::Dropped;
+    };
+    if typed.is_control() && !matches!(typed, '\r' | '\t' | '\u{1b}') {
+        return Typed::Dropped;
+    }
+    let mut buffer = [0; 4];
+    let bytes = typed.encode_utf8(&mut buffer).as_bytes().to_vec();
+    assert!(!bytes.is_empty() && bytes.len() <= 4);
+    Typed::Text(Input::Text(bytes))
 }
 
 #[cfg(test)]

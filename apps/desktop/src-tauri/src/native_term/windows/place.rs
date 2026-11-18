@@ -97,8 +97,30 @@ pub struct Spot {
 /// cell size in points and the scale key. Output: the spot, or none for a cell that is not
 /// finite and positive or a spot past `RECT_MAX`.
 pub fn ime_spot(cursor: (usize, usize), cell_points: (f64, f64), key: u32) -> Option<Spot> {
-    let _ = (cursor, cell_points, key);
-    unimplemented!("H2 red")
+    assert!(
+        SCALE_KEYS.contains(&key),
+        "a scale key of 100 to 400, got {key}"
+    );
+    let (width, height) = cell_points;
+    let sized = width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0;
+    if !sized {
+        return None;
+    }
+    let scale = f64::from(key) / 100.0;
+    let edge = |cells: usize, size: f64| {
+        let px = (cells as f64 * size * scale).round();
+        (px <= f64::from(RECT_MAX)).then_some(px as i32)
+    };
+    let (row, column) = cursor;
+    let (left, top) = (edge(column, width)?, edge(row, height)?);
+    let right = edge(column.saturating_add(1), width)?.max(left + 1);
+    let bottom = edge(row.saturating_add(1), height)?.max(top + 1);
+    let spot = Spot {
+        point: (left, top),
+        cell: (left, top, right, bottom),
+    };
+    assert!(spot.cell.2 > spot.cell.0 && spot.cell.3 > spot.cell.1);
+    Some(spot)
 }
 
 #[cfg(test)]
