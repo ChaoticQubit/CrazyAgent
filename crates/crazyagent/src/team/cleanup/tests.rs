@@ -2579,7 +2579,8 @@ fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own()
 /// V243-CLEANUP-OPEN-UP-FOLDER-PROOF (#571 sec F1): a folder an agent shut, swapped for a
 /// hard link to the owner's read-only file while Clean up opens it up, never makes that
 /// file writable: swapped before the folder check the file keeps its mode, and swapped just
-/// after it, the worst case, the file gains no write bit.
+/// after it, the worst case, the file gains no write bit. The link is made before the file is
+/// read-only, since a macOS 15 runner refused that link with EACCES; the swap renames it in.
 #[cfg(target_os = "macos")]
 #[test]
 fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable() {
@@ -2595,16 +2596,18 @@ fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_w
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let owner = root.join("owner");
+        let linked = root.join("linked");
         write(&owner, b"the owner's\n");
+        std::fs::hard_link(&owner, &linked).unwrap();
         std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o400)).unwrap();
         let agent = root.join("agent");
         let shut = agent.join("shut");
         write(&shut.join("inner"), b"left by a session\n");
         std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let (moved, aside, linked) = (shut.clone(), agent.join("aside"), owner.clone());
+        let (moved, aside) = (shut.clone(), agent.join("aside"));
         let swap: Box<dyn FnOnce()> = Box::new(move || {
             std::fs::rename(&moved, &aside).unwrap();
-            std::fs::hard_link(&linked, &moved).unwrap();
+            std::fs::rename(&linked, &moved).unwrap();
         });
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"shut".to_owned(), swap)));
         let _ = remove_agent_tree(&agent);
