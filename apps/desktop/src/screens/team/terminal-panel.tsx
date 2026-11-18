@@ -295,8 +295,9 @@ const SHIFT_DRAG_PX = 4;
 
 /** Off a Mac, a Shift press on the normal screen with nothing selected waits: moved
  * `SHIFT_DRAG_PX` it goes to xterm without Shift, so the drag selects from the press (G1 N3);
- * released first it goes on as it was, so xterm extends from the last click. Inputs: the
- * terminal, the element around its screen and whether this is a Mac. Output: the subscription. */
+ * released first it goes on as it was, so xterm extends from the last click; a move with the
+ * button up, its release lost, drops it. Inputs: the terminal, the element around its screen
+ * and whether this is a Mac. Output: the subscription. */
 export function shiftDragSelects(terminal: Terminal, screen: HTMLElement, mac: boolean = isMac()): IDisposable {
   const page = screen.ownerDocument;
   let held: { target: EventTarget; x: number; y: number; init: MouseEventInit } | null = null;
@@ -320,7 +321,11 @@ export function shiftDragSelects(terminal: Terminal, screen: HTMLElement, mac: b
     };
   };
   const move = (event: MouseEvent) => {
-    if (held === null || (event.buttons & 1) === 0) return;
+    if (held === null) return;
+    if ((event.buttons & 1) === 0) {
+      held = null;
+      return;
+    }
     if (Math.hypot(event.clientX - held.x, event.clientY - held.y) >= SHIFT_DRAG_PX) handOn(false);
   };
   const up = (event: MouseEvent) => {
