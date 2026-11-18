@@ -55,6 +55,7 @@ defaults:
 jobs:
   build-linux:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -86,6 +87,7 @@ jobs:
 
   build-macos:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 330
     strategy:
@@ -114,6 +116,7 @@ jobs:
 
   build-windows:
     name: Build the ${{ matrix.os }} test archive
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
     strategy:
@@ -145,7 +148,7 @@ jobs:
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-linux
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -192,7 +195,7 @@ jobs:
   rust-macos:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-macos
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -254,7 +257,7 @@ jobs:
   rust-windows:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
     needs: build-windows
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -301,6 +304,7 @@ jobs:
 
   node:
     name: Node ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
+    if: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     strategy:
@@ -464,6 +468,7 @@ jobs:
 
   typecheck:
     name: Desktop typecheck and Bun suites
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
@@ -527,7 +532,7 @@ jobs:
   report:
     name: Test farm report
     needs: [build-linux, build-macos, build-windows, rust-linux, rust-macos, rust-windows, node, typecheck]
-    if: ${{ !cancelled() }}
+    if: false
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -552,3 +557,125 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/junit"
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  rows:
+    name: slice C r2 engine and desktop feed rows macos-15
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put back the base workflow so the tree is the base
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 39d6b92d058d739d2ddc8c2c77bd8b4700743980 HEAD
+          test "$(git diff --name-only 39d6b92d058d739d2ddc8c2c77bd8b4700743980 HEAD)" = .github/workflows/tests.yml
+          git checkout 39d6b92d058d739d2ddc8c2c77bd8b4700743980 -- .github/workflows/tests.yml
+          git diff --quiet 39d6b92d058d739d2ddc8c2c77bd8b4700743980
+      - name: Install tmux on macOS
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux $TMUX_VERSION"
+      - name: Select Xcode 26.3, whose git the engine runs
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
+          version="$("$git" --version)"
+          echo "engine git $git: $version"
+          IFS=. read -r major minor _ <<< "${version#git version }"
+          (( major > 2 || (major == 2 && minor >= 40) )) || { echo "::error::the engine's landing needs git 2.40 or newer and xcrun finds $version"; exit 1; }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build desktop frontend
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+      - name: Rows
+        timeout-minutes: 200
+        run: |
+          set -u +e +o pipefail
+          export CARGO_BUILD_JOBS=2
+          bad=0
+          row() {
+            local label=$1 package=$2
+            shift 2
+            out=$(cargo test -p "$package" --lib --locked -- "$@" 2>&1)
+            rc=$?
+            echo "row $label rc=$rc $(printf '%s\n' "$out" | grep -m1 'test result')"
+            printf '%s\n' "$out" | grep -E "^test .* (ok|FAILED|ignored)$" | sed 's/^/    /'
+            printf '%s\n' "$out" | grep -m20 "panicked at\|error\[E\|left: \|right: " | cut -c1-300 | sed 's/^/    /'
+            case $label in
+              green*) [ "$rc" -eq 0 ] || bad=1 ;;
+              red*) printf '%s\n' "$out" | grep -q 'test result: FAILED' || bad=1 ;;
+            esac
+          }
+          perl -pi -e 's/(\x27\\r\x27\)) \|\| !character\.is_control\(\)/$1 || true/' crates/crazyagent/src/terminal.rs
+          perl -ni -e 'print unless /assert!\(!keys\.contains\(\x27\\x1b/' crates/crazyagent/src/terminal.rs
+          perl -pi -e 's/paste-buffer -d -p -r -S/paste-buffer -d -r -S/g' crates/crazyagent/src/terminal/tmux.rs
+          perl -pi -e 's/if pane != target && window != target \{/if false {/' crates/crazyagent/src/terminal/tmux.rs
+          perl -pi -e 's/let keys = paste_keys\(text\);/let keys = text.as_bytes().to_vec();/' apps/desktop/src-tauri/src/bridge/feed.rs
+          perl -ni -e 'print unless /^\s+self\.end\(view\);$/' apps/desktop/src-tauri/src/bridge/feed.rs
+          perl -pi -e 's/\(self\.live\.get\(&view\) == Some\(&fed\.token\)\)/self.live.contains_key(&view)/' apps/desktop/src-tauri/src/bridge/feed.rs
+          perl -pi -e 's/if !window_admits\(label, &project\) \{/if false {/' apps/desktop/src-tauri/src/bridge/terminal.rs
+          git diff --numstat
+          test "$(git diff --numstat | tr '\t' ' ')" = "$(printf '2 3 apps/desktop/src-tauri/src/bridge/feed.rs\n1 1 apps/desktop/src-tauri/src/bridge/terminal.rs\n1 2 crates/crazyagent/src/terminal.rs\n3 3 crates/crazyagent/src/terminal/tmux.rs')" || bad=1
+          row red-filter crazyagent an_owner_paste_keeps_only_tab_and_enter_of_the_control_characters paste_chunks_reach_the_host_once_after_the_last_filtered
+          row red-bracket crazyagent an_owner_paste_is_set_in_appended_pieces_then_pasted_once_with_p an_owner_paste_is_bracketed_once_only_when_the_pane_asked
+          row red-gone-window crazyagent a_gone_window_reads_as_unknown_not_as_the_current_pane
+          row red-paste crazyagent-desktop a_native_paste_keeps_what_the_page_paste_keeps
+          row red-overflow crazyagent-desktop a_paste_larger_than_the_free_queue_is_refused_whole_and_ends_the_view
+          row red-token crazyagent-desktop an_event_of_a_closed_open_never_reaches_the_view_opened_again_in_another_window
+          row red-gate crazyagent-desktop the_shared_gate_refuses_a_wall_window_another_projects_agent
+          git checkout -- crates apps
+          git diff --quiet 39d6b92d058d739d2ddc8c2c77bd8b4700743980 || bad=1
+          out=$(cargo test -p crazyagent-desktop --tests --no-run --locked 2>&1)
+          rc=$?
+          echo "row green-desktop-test-targets-build rc=$rc"
+          printf '%s\n' "$out" | grep -m20 "error\[E\|^error" | cut -c1-300 | sed 's/^/    /'
+          [ "$rc" -eq 0 ] || bad=1
+          out=$(cargo test -p crazyagent-desktop --test terminal_bridge --locked 2>&1)
+          rc=$?
+          echo "row green-terminal-bridge rc=$rc $(printf '%s\n' "$out" | grep -m1 'test result')"
+          printf '%s\n' "$out" | grep -E "^test .* (ok|FAILED|ignored)$|panicked at|left: |right: " | cut -c1-300 | sed 's/^/    /'
+          [ "$rc" -eq 0 ] || bad=1
+          row green-new crazyagent an_owner_paste paste_chunks_reach_the_host a_paste_out_of_bounds an_open_paste_takes an_input_only_view a_gone_window_reads
+          row green-transport-terminal crazyagent engine::owner::transport::terminal
+          row green-terminal crazyagent terminal::tests
+          row green-tmux crazyagent terminal::tmux
+          row green-kept crazyagent terminal::kept
+          row green-ide-bridge crazyagent ide::bridge::terminal
+          row green-delivery crazyagent coord::delivery
+          row green-master crazyagent team::master
+          row green-terminal-session crazyagent harnesses::terminal_session
+          row green-runtime-live crazyagent a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed
+          row green-desktop-feed crazyagent-desktop bridge::feed
+          row green-desktop-terminal crazyagent-desktop bridge::terminal
+          cargo clippy -p crazyagent -p crazyagent-desktop --all-targets --locked -- -D warnings > "$RUNNER_TEMP/clippy.txt" 2>&1
+          rc=$?
+          echo "row green-clippy rc=$rc"
+          grep -m30 -E '^(warning|error)' "$RUNNER_TEMP/clippy.txt" | sed 's/^/    /'
+          [ "$rc" -eq 0 ] || bad=1
+          exit $bad
