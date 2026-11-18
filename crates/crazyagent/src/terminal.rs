@@ -49,7 +49,7 @@ pub const PROMPT_BYTES_MAX: usize = 4096;
 /// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
 /// most a native view copies.
 pub const PASTE_BYTES_MAX: usize = 1 << 20;
-const _: () = assert!(PASTE_BYTES_MAX % INPUT_BYTES_MAX == 0);
+const _: () = assert!(PASTE_BYTES_MAX.is_multiple_of(INPUT_BYTES_MAX));
 pub const CHUNK_BYTES_MAX: usize = 8192;
 pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
