@@ -402,16 +402,25 @@ mod tests {
         );
     }
 
+    /// Raw blocks another app could set. Windows ends a CF_UNICODETEXT block that has no
+    /// NUL by putting one in place of its last unit (farm probe run 44380957547, both
+    /// images: "abc" reads back "ab", one unit reads back NUL), so the read must give a
+    /// prefix of what was set, within the block, and the scan still never passes the cap.
     fn bounds_raw_blocks(clip: &Clip) {
         let text = u32::from(CF_UNICODETEXT);
         raw(text, &units("abc"));
         let held = text_block_units();
         let read = clip.read().expect("a block with no NUL still reads");
-        assert!(read.starts_with("abc"), "{read:?}");
+        assert!(
+            matches!(read.as_str(), "ab" | "abc"),
+            "{read:?} is \"abc\" or its NUL-ended prefix"
+        );
         assert!(
             read.encode_utf16().count() <= held,
             "{read:?} within {held} units"
         );
+        raw(text, &units("a"));
+        assert!(matches!(clip.read().as_deref(), None | Some("a")));
         raw(text, &vec![u16::from(b'x'); READ_UNITS_MAX + 8]);
         assert_eq!(clip.read(), None);
         let mut euros = vec![0x20AC; COPY_BYTES_MAX / 3 + 1];
@@ -421,7 +430,7 @@ mod tests {
         raw(text, &[0xD800, u16::from(b'a'), 0]);
         assert_eq!(clip.read().as_deref(), Some("\u{FFFD}a"));
         println!(
-            "h4 row: a block with no NUL read as a prefix within its {held} units, \
+            "h4 row: a block with no NUL read {read:?} within its {held} units, \
              over-cap blocks refused, a lone surrogate read as U+FFFD"
         );
     }
