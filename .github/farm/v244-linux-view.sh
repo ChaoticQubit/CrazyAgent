@@ -16,19 +16,14 @@ mkdir -p "$root"
 pkg=(-p crazyagent-desktop --locked)
 log() { printf '%s\n' "$*" | tee -a "$out"; }
 
-display_row=native_term::linux::view::tests::a_focused_view_takes_keys_and_commits_after_the_page_had_them
-red1_rows=(
+red_rows=(
   native_term::linux::view::tests::the_terminal_chords_copy_paste_and_select_all
   native_term::linux::view::tests::other_chords_stay_keys
   native_term::linux::view::tests::a_commit_is_one_text_input_within_its_bound
   native_term::linux::view::tests::keys_go_to_the_view_only_with_native_and_toplevel_focus_and_no_cover
   native_term::linux::view::tests::a_cover_drops_native_focus_until_the_page_gives_it_back
-  "$display_row"
 )
-red2_rows=(
-  native_term::linux::view::tests::a_commit_lands_only_while_the_view_is_active
-)
-red_rows=("${red1_rows[@]:0:5}" "${red2_rows[@]}")
+display_row=native_term::linux::view::tests::a_focused_view_takes_keys_and_commits_after_the_page_had_them
 kept_rows=(
   native_term::linux::surface::tests::a_host_rect_is_finite_bounded_and_at_least_one_pixel
   native_term::linux::surface::tests::device_pixels_scale_the_logical_rect
@@ -50,39 +45,27 @@ ignored_rows=(
 
 mkdir -p apps/desktop/dist
 [ -f apps/desktop/dist/index.html ] || printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
-log "os $os red $RED1_SHA and $RED2_SHA green $GREEN_SHA $(rustc -V)"
+log "os $os red $RED_SHA green $GREEN_SHA $(rustc -V)"
 log "$(sway --version 2>&1 | head -1); $(ibus version 2>&1 | head -1); wtype $(command -v wtype > /dev/null && echo present || echo missing); xdotool $(xdotool version 2>&1 | head -1)"
 
+git checkout -q --detach "$RED_SHA"
+log "== red $RED_SHA: build the lib rows"
+cargo test "${pkg[@]}" --lib --no-run > "$RUNNER_TEMP/red-build.txt" 2>&1
+red_built=$?
+tail -n 40 "$RUNNER_TEMP/red-build.txt" >> "$out"
+grep -E '^error(\[E[0-9]+\])?:' "$RUNNER_TEMP/red-build.txt" | sort | uniq -c | head -20 | tee -a "$out"
+: > "$RUNNER_TEMP/red-list.txt"
+if [ "$red_built" = 0 ]; then
+  cargo test "${pkg[@]}" --lib -- --list --include-ignored > "$RUNNER_TEMP/red-list.txt" 2>&1
+fi
 red_present=0
-red_total=0
-red_builds=()
-red_check() {
-  local sha=$1
-  shift
-  git checkout -q --detach "$sha"
-  log "== red $sha: build the lib rows"
-  cargo test "${pkg[@]}" --lib --no-run > "$RUNNER_TEMP/red-build-$sha.txt" 2>&1
-  local built=$?
-  red_builds+=("$sha $built")
-  tail -n 40 "$RUNNER_TEMP/red-build-$sha.txt" >> "$out"
-  grep -E '^error(\[E[0-9]+\])?:' "$RUNNER_TEMP/red-build-$sha.txt" | sort | uniq -c | head -20 | tee -a "$out"
-  : > "$RUNNER_TEMP/red-list.txt"
-  if [ "$built" = 0 ]; then
-    cargo test "${pkg[@]}" --lib -- --list --include-ignored > "$RUNNER_TEMP/red-list.txt" 2>&1
+for row in "${red_rows[@]}" "$display_row"; do
+  if grep -qx "$row: test" "$RUNNER_TEMP/red-list.txt"; then
+    red_present=$((red_present + 1))
+    log "red row already present: $row"
   fi
-  local row present=0
-  for row in "$@"; do
-    red_total=$((red_total + 1))
-    if grep -qx "$row: test" "$RUNNER_TEMP/red-list.txt"; then
-      present=$((present + 1))
-      log "red row already present: $row"
-    fi
-  done
-  red_present=$((red_present + present))
-  log "red $sha: build exit $built, its red rows present $present of $#"
-}
-red_check "$RED1_SHA" "${red1_rows[@]}"
-red_check "$RED2_SHA" "${red2_rows[@]}"
+done
+log "red: build exit $red_built, red rows present $red_present of $((${#red_rows[@]} + 1))"
 git checkout -q --detach "$GREEN_SHA"
 
 log "== green $GREEN_SHA: lib build"
@@ -127,7 +110,15 @@ fi
 log "ibus ready $ibus_ready, latn-pre engines $(grep -c 'm17n:t:latn-pre' "$root/ibus-engines.txt" 2> /dev/null)"
 
 display_pid=""
+holder_pid=""
 load_pids=()
+
+sway_keyboards() {
+  local sock
+  sock=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock 2> /dev/null | head -1)
+  [ -n "$sock" ] || { echo "no sway ipc socket"; return; }
+  SWAYSOCK=$sock timeout 5 swaymsg -t get_inputs -r 2> /dev/null | jq -r '[.[] | select(.type == "keyboard")] | length'
+}
 cell=""
 
 start_x11() {
@@ -154,6 +145,11 @@ start_sway() {
     socket=$(ls "$XDG_RUNTIME_DIR" 2> /dev/null | grep -E '^wayland-[0-9]+$' | head -1)
     if [ -n "$socket" ]; then
       export WAYLAND_DISPLAY=$socket
+      log "  $cell sway keyboards before the holder: $(sway_keyboards)"
+      wtype -s 3600000 -k Shift_L > "$root/holder-$cell.log" 2>&1 &
+      holder_pid=$!
+      sleep 1
+      log "  $cell sway keyboards with the holder: $(sway_keyboards)"
       return 0
     fi
     sleep 0.1
@@ -162,6 +158,8 @@ start_sway() {
 }
 
 stop_display() {
+  [ -n "$holder_pid" ] && kill "$holder_pid" 2> /dev/null
+  holder_pid=""
   [ -n "$display_pid" ] && kill "$display_pid" 2> /dev/null
   wait "$display_pid" 2> /dev/null
   display_pid=""
@@ -205,7 +203,7 @@ type_keys() {
   else
     local args=()
     for name in "$@"; do args+=(-k "$name"); done
-    timeout 30 wtype -d 80 "${args[@]}"
+    timeout 30 wtype -s 300 -d 80 "${args[@]}"
   fi
 }
 
@@ -225,28 +223,6 @@ compose() {
   log "  $cell $step engine: set exit $set_rc, before typing $before, after typing $after"
 }
 
-preedit() {
-  local kind=$1 step=$2 text=$3 set_rc before after
-  timeout 5 ibus engine m17n:t:latn-pre > /dev/null 2>&1
-  set_rc=$?
-  for _ in $(seq 1 25); do
-    before=$(timeout 2 ibus engine 2>&1)
-    [ "$before" = m17n:t:latn-pre ] && break
-    sleep 0.2
-  done
-  type_text "$kind" "$text"
-  sleep 1
-  after=$(timeout 2 ibus engine 2>&1)
-  log "  $cell $step engine left open: set exit $set_rc, before typing $before, after typing $after"
-}
-
-plain() {
-  local kind=$1 text=$2
-  type_text "$kind" "$text"
-  sleep 0.5
-  timeout 5 ibus engine xkb:us::eng > /dev/null 2>&1
-}
-
 wait_step() {
   local file=$1 pid=$2
   for _ in $(seq 1 1200); do
@@ -257,7 +233,7 @@ wait_step() {
   return 1
 }
 
-steps=(page native page-ime native-ime native-preedit covered close-preedit closed)
+steps=(page native page-ime native-ime covered)
 cells=()
 cell_rows=()
 row_ok=0
@@ -286,6 +262,7 @@ run_cell() {
     fi
     reached=$((reached + 1))
     last=$step
+    [ "$kind" = sway ] && log "  $cell at $step sway keyboards: $(sway_keyboards)"
     case "$step" in
       page)
         focus_window "$kind"
@@ -297,9 +274,7 @@ run_cell() {
         ;;
       page-ime) compose "$kind" "$step" "'e" ;;
       native-ime) compose "$kind" "$step" "'a" ;;
-      native-preedit | close-preedit) preedit "$kind" "$step" "'" ;;
-      covered) plain "$kind" z ;;
-      closed) plain "$kind" y ;;
+      covered) type_text "$kind" z ;;
     esac
     : > "$dir/go-$step"
   done
@@ -338,8 +313,8 @@ red_ok=1
 [ "$red_present" = 0 ] && red_ok=0
 {
   printf '| %s | exit |\n| --- | --- |\n' "$os"
-  printf '| red builds (fail: the rows name linux::view items before they exist) | %s |\n' "${red_builds[*]}"
-  printf '| red rows present at their red tips (want 0) | %s of %s |\n' "$red_present" "$red_total"
+  printf '| red build (fails: the rows name linux::view items before they exist) | %s |\n' "$red_built"
+  printf '| red rows present at red tip (want 0) | %s of %s |\n' "$red_present" "$((${#red_rows[@]} + 1))"
   printf '| green lib build | %s |\n| green lib rows build | %s |\n' "$lib_built" "$rows_built"
   printf '| native_term rows | %s, %s passed |\n' "$rows_rc" "$passed"
   printf '| named rows ok, none failed, display rows ignored (0 = yes) | %s |\n' "$want"
