@@ -42,10 +42,11 @@ fn unsubmitted<T>(answer: &Result<T, EngineError>) -> bool {
 impl OwnerRuntimeHandle {
     /// Keeps one narrowing change on disk before its job is submitted, so a lost job is
     /// applied later. Input: the change. Output: the intent's name, or none when it could not
-    /// be kept, which is logged; the change is then answered as before this store existed.
+    /// be kept or no store exists (a read-only engine, a platform with no store), which is
+    /// logged; the change is then answered as before this store existed.
     pub(super) async fn keep_narrowing(&self, change: Change) -> Option<IntentId> {
         let Some(intents) = self.engine.storage.intents.clone() else {
-            eprintln!("narrowing_intent_unwritten cause=readonly");
+            eprintln!("narrowing_intent_unwritten cause=no_store");
             return None;
         };
         let intent = Intent {
