@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>linux-native-spike</title>
+<style>
+html, body { margin: 0; background: #ffffff; font: 14px sans-serif; }
+#host { position: absolute; left: 100px; top: 120px; width: 400px; height: 240px; background: #ff00ff; }
+#pop { position: absolute; left: 300px; top: 200px; width: 200px; height: 100px; background: #ffff00; display: none; }
+#typing { position: absolute; left: 600px; top: 120px; width: 200px; height: 40px; }
+#mirror { position: absolute; left: 600px; top: 200px; width: 300px; }
+</style>
+</head>
+<body>
+<div id="host"></div>
+<div id="pop"></div>
+<textarea id="typing" aria-label="Terminal input"></textarea>
+<div id="mirror" role="log" aria-label="Terminal">crazyagent mirror line one</div>
+<script>
+const invoke = (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args ?? {});
+const byId = (id) => document.getElementById(id);
+const frameDone = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+const rect = () => {
+  const box = byId("host").getBoundingClientRect();
+  return { x: box.left, y: box.top, w: box.width, h: box.height };
+};
+const report = (row, value) => invoke("page_report", { row, value });
+const quantiles = (samples) => {
+  const sorted = [...samples].sort((left, right) => left - right);
+  const at = (share) => sorted[Math.min(sorted.length, Math.max(1, Math.ceil(share * sorted.length))) - 1];
+  return sorted.length ? { n: sorted.length, p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] } : { n: 0 };
+};
+const STEPS = {
+  async plain() {
+    await report("plain", await invoke("plain"));
+  },
+  async placed() {
+    await frameDone();
+    await report("placed", { dpr: devicePixelRatio, rect: rect(), placed: await invoke("place", { rect: rect() }) });
+    await report("frames", await invoke("frame_times"));
+    await invoke("checkpoint", { name: "placed" });
+  },
+  async moved() {
+    byId("host").style.left = "160px";
+    byId("host").style.width = "360px";
+    await frameDone();
+    await report("moved", { rect: rect(), placed: await invoke("place", { rect: rect() }) });
+    await invoke("checkpoint", { name: "moved" });
+  },
+  async hidden() {
+    byId("pop").style.display = "block";
+    await frameDone();
+    const started = performance.now();
+    const hideMs = await invoke("hide");
+    await report("hidden", { round_trip_ms: performance.now() - started, hide_ms: hideMs });
+    await frameDone();
+    await invoke("checkpoint", { name: "hidden" });
+    byId("pop").style.display = "none";
+    await report("shown", { show_ms: await invoke("show") });
+  },
+  async type_a() {
+    const typing = byId("typing");
+    const trips = [];
+    const draws = [];
+    typing.value = "";
+    typing.focus();
+    const onKey = (event) => {
+      const started = performance.now();
+      invoke("key", { text: event.key.slice(0, 16) }).then((drawMs) => {
+        trips.push(performance.now() - started);
+        draws.push(drawMs);
+      });
+    };
+    typing.addEventListener("keydown", onKey);
+    await invoke("checkpoint", { name: "type_a" });
+    await frameDone();
+    typing.removeEventListener("keydown", onKey);
+    await report("type_a", { key_to_present_ms: quantiles(trips), draw_ms: quantiles(draws), typed: typing.value.length });
+  },
+  async type_b() {
+    await invoke("native_focus", { on: true, rect: rect() });
+    await invoke("checkpoint", { name: "type_b" });
+    await invoke("native_focus", { on: false, rect: rect() });
+    await report("type_b", await invoke("native_report"));
+  },
+  async ime_a() {
+    const typing = byId("typing");
+    const events = [];
+    typing.value = "";
+    typing.focus();
+    const log = (event) => events.push([event.type, event.data ?? null]);
+    for (const kind of ["compositionstart", "compositionupdate", "compositionend"]) typing.addEventListener(kind, log);
+    await invoke("checkpoint", { name: "ime_a" });
+    await report("ime_a", { events: events.slice(0, 40), value: typing.value });
+  },
+  async ime_b() {
+    await invoke("native_focus", { on: true, rect: rect() });
+    await invoke("checkpoint", { name: "ime_b" });
+    await invoke("native_focus", { on: false, rect: rect() });
+    await report("ime_b", await invoke("native_report"));
+  },
+  async clip() {
+    await invoke("clip_set");
+    await invoke("checkpoint", { name: "clip_out" });
+    await report("clip_in", await invoke("clip_read"));
+  },
+  async a11y() {
+    await invoke("checkpoint", { name: "a11y" });
+  },
+};
+(async () => {
+  const { steps } = await invoke("config");
+  for (const step of steps) {
+    try {
+      if (!STEPS[step]) throw new Error(`no step ${step}`);
+      await STEPS[step]();
+    } catch (error) {
+      await report("error", { step, error: String(error) });
+    }
+  }
+  await invoke("done");
+})();
+</script>
+</body>
+</html>
