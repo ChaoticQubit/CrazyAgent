@@ -3776,6 +3776,7 @@ fn publish_rcli_profile(
             .ok_or_else(|| error("master_runtime_directory_missing"))?,
     );
     let database_metadata = std::fs::symlink_metadata(&database_path).map_err(error)?;
+    let identity = database_identity(&database_path, &database_metadata)?;
     proof.at_revision = Cursor::new(owner_revision(tx)?);
     let record = ConfiguredRegistration {
         proof: proof.clone(),
@@ -3786,7 +3787,7 @@ fn publish_rcli_profile(
         global_source,
         project_source,
         database_path,
-        database_identity: database_identity(&database_path, &database_metadata)?,
+        database_identity: identity,
     };
     validate_registration(tx, &session, &record)?;
     let inserted = tx
