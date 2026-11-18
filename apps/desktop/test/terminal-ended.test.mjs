@@ -30,10 +30,15 @@ test("a team pane whose lead's teammates' server ended says so when its attach i
 test("a native view's end codes each say why in plain words, never the generic line, and name the cause only, since a following view reconnects by itself (V243-NATIVE-INPUT E5, #509 F2)", () => {
   const copy = {
     native_terminal_input_overflow: "More typing was waiting than this terminal could take, so the view closed.",
-    native_terminal_gpu: "This Mac couldn't draw the terminal, so the view closed.",
     terminal_closed: "The connection to this terminal closed.",
     owner_grant_stale_or_revoked: "This app's access to the engine changed, so the view closed.",
   };
   assert.equal(io.endCopy("not_a_code"), "This terminal closed.");
   for (const [code, line] of Object.entries(copy)) assert.equal(io.endCopy(code), line, code);
+});
+
+test("a native view the GPU stopped drawing says so and that a restart brings it back, since the code is final and a lost GPU device stays lost until CrazyAgent restarts (V243-NATIVE-PRESENT-FATAL, leader 11:04)", () => {
+  const line = io.endCopy("native_terminal_gpu");
+  assert.equal(line, "The GPU stopped drawing this terminal, so the view closed. Restart CrazyAgent to bring it back.");
+  assert.notEqual(line, io.endCopy("not_a_code"));
 });

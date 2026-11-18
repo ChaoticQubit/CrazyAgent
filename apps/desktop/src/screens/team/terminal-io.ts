@@ -401,7 +401,7 @@ const END_COPY: Record<string, string> = {
   terminal_closed: "The connection to this terminal closed.",
   owner_grant_stale_or_revoked: "This app's access to the engine changed, so the view closed.",
   native_terminal_input_overflow: "More typing was waiting than this terminal could take, so the view closed.",
-  native_terminal_gpu: "This Mac couldn't draw the terminal, so the view closed.",
+  native_terminal_gpu: "The GPU stopped drawing this terminal, so the view closed. Restart CrazyAgent to bring it back.",
   exited: "The agent's app exited.",
 };
 
