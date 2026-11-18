@@ -1,4 +1,5 @@
 mod board;
+mod clip;
 mod draw;
 mod keys;
 mod place;
