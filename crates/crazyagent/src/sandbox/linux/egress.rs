@@ -1508,17 +1508,22 @@ mod tests {
     fn slirp_connects_to_no_unix_socket() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("tmux.sock");
-        let _server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(
+            crate::socket_address::address(&path).unwrap(),
+            path,
+            "the socket is reached at its own path, so no file opens on the way"
+        );
+        let _server = crate::spawn_gate::bind_unix_std(&path).unwrap();
         assert!(
-            std::os::unix::net::UnixStream::connect(&path).is_ok(),
+            crate::spawn_gate::connect_unix_std(&path).is_ok(),
             "the control: it connects unconfined"
         );
         let child = std::process::id();
         let (opened, connected, pair, udp) = std::thread::spawn(move || {
             let opened = confine_slirp(child);
-            let connected = std::os::unix::net::UnixStream::connect(&path);
-            let pair = std::os::unix::net::UnixStream::pair();
-            let udp = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0));
+            let connected = crate::spawn_gate::connect_unix_std(&path);
+            let pair = crate::spawn_gate::unix_pair_std();
+            let udp = crate::spawn_gate::bind_udp_std((std::net::Ipv4Addr::LOCALHOST, 0));
             (opened, connected, pair, udp)
         })
         .join()
