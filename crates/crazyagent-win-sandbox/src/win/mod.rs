@@ -6,6 +6,7 @@ mod launch;
 mod listeners;
 mod name;
 mod owner;
+pub(crate) mod private;
 mod record;
 mod tree;
 

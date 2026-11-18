@@ -4,6 +4,7 @@
 pub mod dacl;
 pub mod grants;
 pub mod plan;
+pub mod private;
 pub mod profile;
 pub mod quote;
 pub mod request;
